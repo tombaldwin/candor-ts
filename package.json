@@ -1,0 +1,11 @@
+{
+  "name": "candor-ts",
+  "version": "0.0.1",
+  "description": "Minimal TypeScript implementation slice of candor-spec 0.3 — the derivability proof",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@types/node": "^25.9.2",
+    "typescript": "^6.0.3"
+  }
+}
