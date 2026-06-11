@@ -1,5 +1,7 @@
 # candor-ts — the derivability proof
 
+<p align="center"><img src="https://raw.githubusercontent.com/tombaldwin/candor/main/assets/beaky.svg" alt="Beaky, the candor canary" width="180"></p>
+
 A **minimal TypeScript implementation slice** of [candor-spec](../candor-spec) 0.3, written **from the
 spec documents alone** (SPEC.md, SEMANTICS.md, CLASSIFIER.md) to answer one question executably:
 
