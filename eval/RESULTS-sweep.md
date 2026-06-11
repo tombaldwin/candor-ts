@@ -68,10 +68,26 @@ sitting in a retry cycle).
   edge there would be a guess. The §4 contract held; the callgraph cannot soundly include what the
   type system has erased.
 
+## The framework-app modality (added after the sweep) — the ORM-tier hole
+
+Scanning a real **application** (a TypeORM/NestJS realworld app, 34 files) — a modality the
+library sweep never touched — found the next hole in minutes: a database-heavy app read **zero
+`Db`** (20 Unknown-only entries), because every data access resolves into the `typeorm` package,
+which κ didn't know — invisible, not even `Unknown` (the curated-classifier caveat doing exactly
+what it documents, on the most common app shape in the ecosystem). The JVM engine learned this
+same lesson as "read Spring's declarations".
+
+Fixed same-day with a **verb-precise ORM tier** (typeorm / @prisma/client / mongoose / sequelize /
+drizzle-orm — execution verbs only, builders stay pure; plus @nestjs/axios → Net). Post-fix the
+same app reads **45 functions carrying `Db`**, the service layer named exactly
+(`ArticleService.findAll` …), and **20 controller methods inherit `Db` transitively** — the
+layered-architecture visibility a policy gate needs (`deny Db controller` is now a meaningful TS
+rule).
+
 ## Honest bounds
 
-- N=12 repos, one ecosystem slice (popular small/medium libraries, Sindre-heavy); no monorepos, no
-  framework apps (Next/Nest), no `allowJs`.
+- N=12 library repos + one framework app (post-sweep); one ecosystem slice — no monorepos, no
+  Next/front-end apps, no `allowJs`.
 - "Effectful" counts include `Unknown`-only entries; given finding 3, raw counts overstate the
   *classified* effect surface on callback-heavy repos.
 - One scan per repo at one commit; no cross-version stability claim.

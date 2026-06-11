@@ -104,6 +104,24 @@ function kappa(moduleName, member) {
   if (/^(fs-extra|graceful-fs|rimraf|glob|chokidar)$/.test(moduleName)) return "Fs";
   if (/^dotenv$/.test(moduleName)) return "Env";
   if (/^(winston|pino|bunyan|npmlog)$/.test(moduleName)) return "Log";
+  // The ORM tier — VERB-PRECISE (the CLASSIFIER discipline: tag the execution boundary, not
+  // builders; `createQueryBuilder` is pure, its `getMany`/`execute` is the I/O). Found on the
+  // first framework-APP scan: a TypeORM/Nest application — Db-heavy by construction — read zero
+  // Db because the ORM resolved into an unlisted package (the JVM's Spring-Data lesson, replayed).
+  if (/^(typeorm|@nestjs\/typeorm)$/.test(moduleName)
+      && /^(find|save|remove|softRemove|recover|insert|update|upsert|delete|restore|count|exist|sum|average|minimum|maximum|query|clear|increment|decrement|getMany|getOne|getOneOrFail|getRawMany|getRawOne|getCount|getExists|execute|stream|transaction)/.test(member))
+    return "Db";
+  if (/^@prisma\/client$/.test(moduleName)
+      && /^(\$?(queryRaw|executeRaw|transaction)|find(Many|Unique|First)|create|createMany|update|updateMany|upsert|delete|deleteMany|aggregate|count|groupBy)/.test(member))
+    return "Db";
+  if (/^mongoose$/.test(moduleName)
+      && /^(find|save|create|insertMany|updateOne|updateMany|replaceOne|deleteOne|deleteMany|aggregate|countDocuments|estimatedDocumentCount|distinct|exec|bulkWrite)/.test(member))
+    return "Db";
+  if (/^(sequelize|drizzle-orm)$/.test(moduleName)
+      && /^(find|create|update|destroy|upsert|count|max|min|sum|query|select|insert|delete|execute|transaction)/.test(member))
+    return "Db";
+  // Nest's HttpService wraps axios — the request verbs are Net.
+  if (/^@nestjs\/axios$/.test(moduleName) && /^(get|post|put|patch|delete|head|request)$/.test(member)) return "Net";
   return null;
 }
 
