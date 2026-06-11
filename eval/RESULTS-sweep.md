@@ -126,10 +126,29 @@ verified live in both directions) — and a 12-item friction list. The substanti
    per-impl. Known remaining: TypeORM `@Entity('user')` decorator names don't feed `tables` yet
    (the JVM's declarative move, queued).
 
+## Round 4: the bigger probes — Next.js and a monorepo
+
+**Next.js (shadcn/taxonomy, Next 13 + Prisma, 125 files):** path aliases (`@/*`) and `.tsx` resolve
+fine; scan 1.8s. The crop: a Prisma-backed app read **zero `Db`** — twice over. Prisma's client is
+GENERATED (`--ignore-scripts` installs skip `prisma generate`; the scanner now warns loudly, like
+the node_modules case), and the generated client lives at `node_modules/.prisma/client`, whose
+package segment is `.prisma`, not `@prisma/client` (κ fixed). Post-fix: **13 `Db` functions, and
+they are exactly the right ones** — the route handlers themselves (`route.GET/POST/PATCH/DELETE`)
+plus the subscription/access-check helpers. Known gap surfaced: route-handler exports are runtime
+entry points (the `entryPoint` flag is still unimplemented engine-wide).
+
+**Monorepo (trpc, npm workspaces):** per-package scanning just works (server: 240 fns/83 files,
+~1s; the framework's generic/middleware style reads honestly Unknown-heavy with `Net` on its HTTP
+layer). The measured gap: **zero cross-package edges** — the client package's calls into
+`@trpc/server` resolve into the workspace symlink, an unlisted external package, invisible. This is
+the cross-package report-inheritance gap (the Rust `CANDOR_DEPS`/hash mechanism, spec §2) — already
+on the Status list, now with a number attached. It is the TS engine's biggest remaining structural
+gap for real codebases.
+
 ## Honest bounds
 
-- N=12 library repos + one framework app (post-sweep); one ecosystem slice — no monorepos, no
-  Next/front-end apps, no `allowJs`.
+- N=12 library repos + one Nest app + one Next app + one monorepo; no `allowJs`, no
+  multi-tsconfig composite projects.
 - "Effectful" counts include `Unknown`-only entries; given finding 3, raw counts overstate the
   *classified* effect surface on callback-heavy repos.
 - One scan per repo at one commit; no cross-version stability claim.

@@ -98,6 +98,14 @@ fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: true });
                       "Run `npm install` in the target first.");
     } catch {}
   }
+  // Prisma's client types are GENERATED — a project with the prisma dependency but no generated
+  // client resolves every db.* call to nothing (found on the first Next.js probe: a Prisma-backed
+  // app read zero Db until `prisma generate` ran).
+  if (fs.existsSync(path.join(rootDir, "node_modules", "@prisma", "client"))
+      && !fs.existsSync(path.join(rootDir, "node_modules", ".prisma", "client"))) {
+    console.error("candor-ts: WARNING — @prisma/client is installed but its client is not generated; " +
+                  "db calls will not resolve. Run `npx prisma generate` in the target first.");
+  }
 }
 const program = ts.createProgram(fileNames, compilerOptions);
 const checker = program.getTypeChecker();
@@ -131,7 +139,7 @@ function kappa(moduleName, member) {
   if (/^(typeorm|@nestjs\/typeorm)$/.test(moduleName)
       && /^(find|save|remove|softRemove|recover|insert|update|upsert|delete|restore|count|exist|sum|average|minimum|maximum|query|clear|increment|decrement|getMany|getOne|getOneOrFail|getRawMany|getRawOne|getCount|getExists|execute|stream|transaction)/.test(member))
     return "Db";
-  if (/^@prisma\/client$/.test(moduleName)
+  if (/^(@prisma\/client|\.prisma|\.prisma\/client)$/.test(moduleName)
       && /^(\$?(queryRaw|executeRaw|transaction)|find(Many|Unique|First)|create|createMany|update|updateMany|upsert|delete|deleteMany|aggregate|count|groupBy)/.test(member))
     return "Db";
   if (/^mongoose$/.test(moduleName)
