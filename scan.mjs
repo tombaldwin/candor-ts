@@ -208,6 +208,11 @@ function tablesInSql(sql) {
 // qualifies by the file's basename (`Cases.union_a`).
 const fns = new Map();           // qualified name -> { direct, edges, hosts, tables, cmds, paths, loc }
 const nodeName = new WeakMap();  // declaration node -> qualified name
+// ORM table declarations: `@Entity("user")` on a class maps that class to its table — the JVM's
+// read-the-declarations move (TypeORM tables live in decorators, not SQL strings, so the `tables`
+// surface couldn't fire on the most common TS app shape). LITERAL decorator arg only; a no-arg
+// `@Entity()` (naming-strategy-dependent) contributes nothing — never a guess.
+const entityTables = new Map();    // ClassDeclaration node -> table name
 function moduleOf(sf) {
   const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?tsx?$/, "");
   return rel.split(path.sep).join(".");
@@ -248,6 +253,12 @@ for (const sf of sources) {
     // The ClassDeclaration itself maps to the ctor unit, so `new C()` with an implicit ctor edges
     // there, and C passed AS A VALUE resolves as a callback target.
     if (ts.isClassDeclaration(node) && node.name) {
+      for (const dec of ts.getDecorators?.(node) ?? []) {
+        const e = dec.expression;
+        if (ts.isCallExpression(e) && e.expression.getText() === "Entity"
+            && e.arguments.length > 0 && ts.isStringLiteralLike(e.arguments[0]))
+          entityTables.set(node, e.arguments[0].text);
+      }
       const ctorQual = `${mod}.${node.name.text}.constructor`;
       if (!fns.has(ctorQual)) {
         const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
@@ -374,6 +385,16 @@ function visitCalls(node) {
           if (eff === "Db") {
             const lit = firstStringLiteral(node);
             for (const t of lit ? tablesInSql(lit) : []) rec.tables.add(t);
+            // ORM route: `this.userRepository.find(…)` — the receiver's `Repository<UserEntity>`
+            // type argument names the entity; its `@Entity("user")` decorator names the table.
+            if (ts.isPropertyAccessExpression(node.expression)) {
+              const rt = checker.getTypeAtLocation(node.expression.expression);
+              for (const ta of checker.getTypeArguments?.(rt) ?? rt?.typeArguments ?? []) {
+                const d = ta?.symbol?.declarations?.[0];
+                const tbl = d && entityTables.get(d);
+                if (tbl) rec.tables.add(tbl);
+              }
+            }
           }
           if (eff === "Exec") {
             const lit = firstStringLiteral(node);

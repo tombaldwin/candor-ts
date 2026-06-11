@@ -198,5 +198,27 @@ export function parsed(): Date { return new Date("2020-01-01"); }`,
   check("missing node_modules warns LOUDLY", r.stderr.includes("WARNING") && r.stderr.includes("npm install"));
 }
 
+// ── 10. @Entity decorator names feed the tables surface (the TypeORM declarative move) ──────────
+{
+  const d = project({
+    "node_modules/typeorm/index.d.ts": `export declare function Entity(name?: string): ClassDecorator;
+export declare class Repository<T> { find(): Promise<T[]>; save(e: T): Promise<T>; }`,
+    "node_modules/typeorm/package.json": `{"name":"typeorm","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/typeorm/index.js": ``,
+    "tsconfig.json": `{"compilerOptions":{"strict":true,"experimentalDecorators":true},"include":["src"]}`,
+    "src/svc.ts": `import { Entity, Repository } from "typeorm";
+@Entity("user")
+export class UserEntity { name = ""; }
+export class Svc {
+  constructor(private repo: Repository<UserEntity>) {}
+  list(): Promise<UserEntity[]> { return this.repo.find(); }
+}`,
+  });
+  const { report } = scan(d);
+  const e = entry(report, "src.svc.Svc.list");
+  check("ORM call classifies Db with the decorator's table",
+        e?.inferred.includes("Db") && e?.tables?.includes("user"), JSON.stringify(e));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -40,10 +40,13 @@ allow Net in billing api.stripe.com   # billing talks ONLY to Stripe
 forbid domain -> infra                # the domain layer must not depend on infra
 ```
 
-The report carries the four **literal surfaces** where a string literal makes them decidable —
-`hosts` at `Net` calls, `tables` (SQL table positions, mirroring the Rust/JVM extractors exactly)
-at `Db` calls, `cmds` at `Exec`, path-shaped `paths` at `Fs` — never from a runtime-computed value,
-propagated transitively, enforced by the `allow` rules above.
+The report carries the four **literal surfaces** where a declaration makes them decidable —
+`hosts` at `Net` calls, `tables` at `Db` calls (SQL table positions, mirroring the Rust/JVM
+extractors exactly, **plus TypeORM's `@Entity("user")` declarations** read through the receiver's
+`Repository<T>` type argument), `cmds` at `Exec`, path-shaped `paths` at `Fs` — never from a
+runtime-computed value, propagated transitively, enforced by the `allow` rules above. On a real
+Nest app this makes table-level policy live: `allow Db in article.service article comments` flags
+the service reaching `user` and `follows`.
 
 **The classifier** is curated (the same under-report-and-say-so posture as the other engines): the
 Node builtins (`fs`, `net`/`http`/`tls`, `child_process`, `node:sqlite`, `process.env`, the clock)
