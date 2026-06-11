@@ -132,5 +132,49 @@ export function boot(): Handler { return new Handler(); }`,
         JSON.stringify(cg));
 }
 
+// ── 7. callback_named: all-named call sites resolve; an opaque one keeps Unknown ─────────────────
+{
+  const d = project({
+    "src/cb.ts": `import * as fsm from "node:fs";
+export function effectful(): void { fsm.readFileSync("/x"); }
+export function pureFn(n: number): number { return n; }
+function invoke(cb: () => void): void { cb(); }
+export function a(): void { invoke(effectful); }
+export function b(): void { invoke(effectful); }
+function invokeOpaque(cb: () => void): void { cb(); }
+export function c(f: () => void): void { invokeOpaque(f); }`,
+  });
+  const { report, cg } = scan(d);
+  check("all-named callback resolves to targets (no false Unknown)",
+        cg["src.cb.invoke"]?.includes("src.cb.effectful")
+        && entry(report, "src.cb.invoke")?.inferred.includes("Fs")
+        && entry(report, "src.cb.invoke")?.unresolved === false,
+        JSON.stringify(entry(report, "src.cb.invoke")));
+  check("an opaque call site keeps the honest Unknown",
+        entry(report, "src.cb.invokeOpaque")?.unresolved === true);
+}
+
+// ── 8. field initializers attribute to the constructor (the silent-pure hole) ────────────────────
+{
+  const d = project({
+    "src/f.ts": `import * as fsm from "node:fs";
+export class Config {
+  data = fsm.readFileSync("/etc/cfg");
+  constructor(public name: string) {}
+}
+export class Implicit { data = fsm.rmSync("/x"); }
+export function load(): Config { return new Config("x"); }
+export function make(): Implicit { return new Implicit(); }`,
+  });
+  const { report } = scan(d);
+  check("field-init effects land on the explicit ctor",
+        entry(report, "src.f.Config.constructor")?.inferred.includes("Fs"));
+  check("caller inherits them precisely (no false Unknown)",
+        entry(report, "src.f.load")?.inferred.includes("Fs") && entry(report, "src.f.load")?.unresolved === false);
+  check("implicit ctor synthesized; `new` edges to it",
+        entry(report, "src.f.make")?.inferred.includes("Fs") && entry(report, "src.f.make")?.unresolved === false,
+        JSON.stringify(entry(report, "src.f.make")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

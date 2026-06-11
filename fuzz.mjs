@@ -40,7 +40,7 @@ const SINKS = {
 // Edge forms: how fn i reaches fn i+1 (or the sink). `unknown: true` forms must read Unknown
 // instead of (or in addition to) the effect.
 const FORMS = ["direct", "arrow_const", "method", "closure", "callback_recv", "any_call",
-               "class_prop_arrow", "ctor"];
+               "class_prop_arrow", "ctor", "field_init"];
 
 function genProject(seed) {
   const r = rng(seed);
@@ -93,6 +93,12 @@ function genProject(seed) {
         // the effect is wired in a CONSTRUCTOR body; `new` must edge to it
         bodies[i] = `class C${i} { constructor() { ${callExpr(callee)}; } }\n` +
                     `export const ${me} = (): void => { void new C${i}(); };`;
+        break;
+      case "field_init":
+        // the silent-pure hole: a FIELD INITIALIZER runs at construction; its effects belong to
+        // the (possibly implicit) constructor. The innocent explicit ctor variant alternates in.
+        bodies[i] = `class F${i} { x = (() => { ${callExpr(callee)}; return 1; })(); ${i % 2 ? "constructor() {}" : ""} }\n` +
+                    `export const ${me} = (): void => { void new F${i}(); };`;
         break;
       case "any_call":
         // the callee laundered through `any` → unresolvable → Unknown required for `me`;

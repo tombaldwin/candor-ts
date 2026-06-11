@@ -84,6 +84,24 @@ same app reads **45 functions carrying `Db`**, the service layer named exactly
 layered-architecture visibility a policy gate needs (`deny Db controller` is now a meaningful TS
 rule).
 
+## Round 2 (same day): two more findings from pulling the zod thread
+
+1. **`callback_named` ported** (the precision lever finding 3 named): a function invoking a callback
+   PARAMETER now resolves to the named targets when every visible call site passes one — with the
+   type-landing and identifier paths unified through one deferral (the engine's redundant Unknown
+   defenses had made the first attempt a no-op: the same per-mechanism lesson as the fuzzer teeth).
+   rimraf: 44 → 30 unresolved, 7 false Unknown-only entries left the report.
+2. **A true silent-pure soundness hole — field initializers** — found by diagnosing why zod didn't
+   move: `class C { data = fs.readFileSync(…) }` with an innocent explicit constructor produced an
+   EMPTY report — the initializer runs at construction but attributed to nothing. Fixed with the
+   JVM's model: every named class gets a `Class.constructor` unit (synthesized when implicit),
+   field-initializer calls attribute there, `new C()` edges there even with an implicit ctor, and a
+   class passed AS A VALUE resolves as a callback target. Fuzzer form `field_init` locks it.
+   zod's count *rose* 489 → 501 after the fix — previously-lost field-init surface becoming
+   visible, the right direction.
+3. **zod itself is the honest residual**: its `$constructor`-factory style launders construction
+   through function values — genuinely dynamic, correctly `Unknown`. Not every flood is a bug.
+
 ## Honest bounds
 
 - N=12 library repos + one framework app (post-sweep); one ecosystem slice — no monorepos, no

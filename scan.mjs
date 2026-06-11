@@ -221,6 +221,22 @@ function localName(node) {
 for (const sf of sources) {
   const mod = moduleOf(sf);
   (function collect(node) {
+    // Every NAMED class gets a `Class.constructor` unit (synthesized when the ctor is implicit):
+    // FIELD INITIALIZERS execute at construction (the JVM model — field inits belong to the ctor),
+    // so their call sites need a unit to attribute to; without one, `class C { x = fs.readFileSync(…) }`
+    // with an innocent explicit ctor was a SILENT-PURE hole (found chasing zod's Unknown profile).
+    // The ClassDeclaration itself maps to the ctor unit, so `new C()` with an implicit ctor edges
+    // there, and C passed AS A VALUE resolves as a callback target.
+    if (ts.isClassDeclaration(node) && node.name) {
+      const ctorQual = `${mod}.${node.name.text}.constructor`;
+      if (!fns.has(ctorQual)) {
+        const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
+        fns.set(ctorQual, { direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
+                            cmds: new Set(), paths: new Set(),
+                            loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
+      }
+      nodeName.set(node, ctorQual);
+    }
     const n = localName(node);
     if (n) {
       const qual = `${mod}.${n}`;
@@ -235,6 +251,14 @@ for (const sf of sources) {
     ts.forEachChild(node, collect);
   })(sf);
 }
+
+// callback-flow bookkeeping (the Rust engine's callback_named move, ported): for every call that
+// edges to a LOCAL unit, record what each argument position received — a NAMED local unit (a
+// resolvable callback target), or an opaque value (an inline closure stays attributed to the
+// passer; a variable/property could be anything). A function that invokes a callback PARAMETER
+// then resolves to the named targets IF every call site passed one — else honest Unknown.
+const callbackArgs = new Map();    // calleeName -> Map(argIndex -> {targets:Set, opaque:boolean})
+const paramInvokes = new Map();    // fnName -> Set(paramIndex) — this fn calls its own parameter
 
 // nearest enclosing analyzed function (closures attribute to it — SEMANTICS §2)
 function enclosing(node) {
@@ -254,19 +278,55 @@ function visitCalls(node) {
       const sig = checker.getResolvedSignature(node);
       const decl = sig && sig.declaration;
       if (!decl) {
-        rec.direct.add("Unknown"); // unresolvable call → Unknown, never silent-pure (SPEC §4)
+        // `new C()` on a class with an IMPLICIT constructor resolves to no declaration — edge to
+        // the class's (synthesized) ctor unit via the class identifier before concluding Unknown.
+        let edged = false;
+        if (ts.isNewExpression(node) && node.expression && ts.isIdentifier(node.expression)) {
+          const csym = checker.getSymbolAtLocation(node.expression);
+          const cd = csym && (csym.valueDeclaration ?? csym.declarations?.[0]);
+          const t = cd && nodeName.get(cd);
+          if (t) { rec.edges.add(t); edged = true; }
+        }
+        if (!edged) rec.direct.add("Unknown"); // unresolvable call → Unknown, never silent-pure (SPEC §4)
       } else {
         const mod = declModule(decl);
         if (mod === "<local>") {
           const targetName = nodeName.get(decl);
           if (targetName) {
             rec.edges.add(targetName); // (EDGE) — cross-FILE edges resolve the same way
+            // record what each argument position received (callback-flow, see callbackArgs)
+            (node.arguments ?? []).forEach((a, i) => {
+              const slot = (callbackArgs.get(targetName) ?? callbackArgs.set(targetName, new Map()).get(targetName));
+              const cell = slot.get(i) ?? { targets: new Set(), opaque: false };
+              if (ts.isIdentifier(a)) {
+                const asym = checker.getSymbolAtLocation(a);
+                const ad = asym && asym.valueDeclaration;
+                const t = ad && nodeName.get(ad);
+                if (t) cell.targets.add(t);
+                else cell.opaque = true;
+              } else if (ts.isArrowFunction(a) || ts.isFunctionExpression(a)) {
+                cell.opaque = true; // inline closure: body attributed to the PASSER; opaque to the callee
+              } else {
+                cell.opaque = true;
+              }
+              slot.set(i, cell);
+            });
           } else if (!ts.isArrowFunction(decl) && !ts.isFunctionExpression(decl)) {
             // Resolution landed on a TYPE (a function-type annotation, a method/property signature),
-            // not a body: the concrete callable is genuinely indeterminate — a callback value, a
-            // DI-wired field. (UNKNOWN), never silent-pure (SPEC §4). An arrow/fn-expression is fine:
-            // its body is visible and already walked lexically (closure attribution, SEMANTICS §2).
-            rec.direct.add("Unknown");
+            // not a body. If that type belongs to a PARAMETER of a unit, defer to callback-flow
+            // resolution (pass 2b) — all-named call sites resolve it; otherwise (a field, a
+            // signature, a parameter of an un-collected function) the concrete callable is
+            // genuinely indeterminate: (UNKNOWN), never silent-pure (SPEC §4). An arrow/fn-
+            // expression is fine: its body is visible and already walked lexically (SEMANTICS §2).
+            let p = decl;
+            while (p && !ts.isParameter(p) && p !== p.parent) p = p.parent;
+            const ownerUnit = p && ts.isParameter(p) && p.parent && nodeName.get(p.parent);
+            if (ownerUnit) {
+              const idx = p.parent.parameters.indexOf(p);
+              (paramInvokes.get(ownerUnit) ?? paramInvokes.set(ownerUnit, new Set()).get(ownerUnit)).add(idx);
+            } else {
+              rec.direct.add("Unknown");
+            }
           }
         } else if (mod === "<es-lib>") {
           // conventionally-pure ES surface (Array/String/Math/…) — except the clock (SPEC §1)
@@ -299,12 +359,20 @@ function visitCalls(node) {
           // unmatched external = (OPAQUE): contributes nothing — the curated-κ caveat C1
         }
       }
-      // the callee EXPRESSION being a plain identifier of function-typed parameter/field → (UNKNOWN)
+      // the callee EXPRESSION being a plain identifier of function-typed parameter/field:
+      // a PARAMETER defers to callback-flow resolution (below) — if every call site of this
+      // function passes a NAMED local unit, the invocation resolves to those targets; otherwise
+      // (or for fields/signatures) it is (UNKNOWN), never silent-pure (SPEC §4).
       if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
         const sym = checker.getSymbolAtLocation(node.expression);
         const d = sym && sym.valueDeclaration;
-        if (d && (ts.isParameter(d) || ts.isPropertyDeclaration(d) || ts.isPropertySignature(d)))
+        if (d && ts.isParameter(d) && d.parent && nodeName.get(d.parent)) {
+          const idx = d.parent.parameters.indexOf(d);
+          const owner2 = nodeName.get(d.parent);
+          (paramInvokes.get(owner2) ?? paramInvokes.set(owner2, new Set()).get(owner2)).add(idx);
+        } else if (d && (ts.isParameter(d) || ts.isPropertyDeclaration(d) || ts.isPropertySignature(d))) {
           rec.direct.add("Unknown"); // a callback value — genuinely indeterminate (SPEC §4)
+        }
       }
     }
   }
@@ -316,6 +384,24 @@ function visitCalls(node) {
   ts.forEachChild(node, visitCalls);
 }
 for (const sf of sources) visitCalls(sf);
+
+// ---- pass 2b: callback-flow resolution (the callback_named move) ----------------------------------
+// A fn invoking its parameter i resolves to the named targets IF this project shows call sites and
+// EVERY one passed a named local unit at i. Any opaque arg — or NO visible call site (the fn may be
+// exported; outside callers can pass anything) — keeps the honest Unknown.
+for (const [fnName, idxs] of paramInvokes) {
+  const rec = fns.get(fnName);
+  if (!rec) continue;
+  const slots = callbackArgs.get(fnName);
+  for (const idx of idxs) {
+    const cell = slots?.get(idx);
+    if (cell && !cell.opaque && cell.targets.size > 0) {
+      for (const t of cell.targets) rec.edges.add(t);
+    } else {
+      rec.direct.add("Unknown");
+    }
+  }
+}
 
 // ---- pass 3: the least fixpoint (SEMANTICS §5a), effects + the literal surfaces -------------------
 const inferred = new Map([...fns.keys()].map((k) => [k, new Set(fns.get(k).direct)]));
