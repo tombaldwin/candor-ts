@@ -60,11 +60,13 @@ sitting in a retry cycle).
   forms `class_prop_arrow` + `ctor` lock them; zod's Unknown rate fell 65%→51% as a side effect).
 - **Post-fix re-measure:** the blast radius reads **20**, recovering both fixed misses AND
   surfacing two real callers *both* methods had missed (`_sendBody`, `_writeBodyInChunks`, reachable
-  only through the previously-invisible `_onBodyError`). **One miss remains open**: a
-  `_beforeError` call inside a closure handed to the cacheable-request machinery
-  (`core/index.ts:1882`) — its *effects* entry honestly reads `[Net, Unknown]` (the trust contract
-  held on the effect axis) but the callgraph edge is dropped; documented as a known limitation
-  pending triage.
+  only through the previously-invisible `_onBodyError`). **The third miss is root-caused as
+  correct behavior, not a bug**: the receiver at `core/index.ts:1841` is destructured from an
+  `as any` cast (`const {gotRequest} = requestOptions as any`), so `gotRequest._beforeError(…)` is
+  a call on an `any`-typed value — statically unresolvable by construction, the documented
+  any-laundering case. The entry honestly reads `unresolved: true` with `Unknown` in its set; an
+  edge there would be a guess. The §4 contract held; the callgraph cannot soundly include what the
+  type system has erased.
 
 ## Honest bounds
 
