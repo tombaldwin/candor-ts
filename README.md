@@ -25,12 +25,14 @@ node query.mjs where    out Fs 1             # {effect, directly, inherited}
 node query.mjs callers  out transitive_leaf 1  # {of, direct, transitive} — the blast radius
 node query.mjs map      out 1                # {module: {effects, functions}}
 node query.mjs whatif   out leaf Net policy  # pre-edit gate verdict (exit 1 on violation)
+node query.mjs diff     out baseline 1       # {changes:[{fn,gained,lost}]} — exit 1 on a gained effect
 node query.mjs parsepolicy policy            # the canonical §6.2 dump the conformance suite diffs
 ```
 
 The scanner also captures the SPEC §2 **literal surfaces** where a string literal makes them
 decidable — `hosts` at a classified `Net` call, `tables` (table-position identifiers, mirroring the
-Rust/JVM extractors exactly) at a classified `Db` call (`node:sqlite`, pg, sqlite3, mysql2) — never
+Rust/JVM extractors exactly) at a classified `Db` call (`node:sqlite`, pg, sqlite3, mysql2),
+`cmds` at `Exec` and path-shaped `paths` at `Fs` — never
 from a runtime-computed value, propagated transitively like effects, gated by `allow Net`/`allow Db`.
 
 These run live in the spec's conformance CI as the **third engine in three differentials**: the

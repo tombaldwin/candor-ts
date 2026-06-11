@@ -109,7 +109,7 @@ function collect(node) {
   const n = fnName(node);
   if (n) {
     const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
-    fns.set(n, { node, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(), loc: `${srcPath}:${line + 1}:${character + 1}` });
+    fns.set(n, { node, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(), cmds: new Set(), paths: new Set(), loc: `${srcPath}:${line + 1}:${character + 1}` });
   }
   ts.forEachChild(node, collect);
 }
@@ -169,6 +169,14 @@ function visitCalls(node) {
             const lit = firstStringLiteral(node);
             for (const t of lit ? tablesInSql(lit) : []) rec.tables.add(t);
           }
+          if (eff === "Exec") {
+            const lit = firstStringLiteral(node);
+            if (lit) rec.cmds.add(lit.trim().split(/\s+/)[0]); // the program of a command line
+          }
+          if (eff === "Fs") {
+            const lit = firstStringLiteral(node);
+            if (lit && /[\/\\]|^[.~]/.test(lit)) rec.paths.add(lit); // path-shaped literals only
+          }
           // unmatched external = (OPAQUE): contributes nothing — the curated-κ caveat C1
         }
       }
@@ -204,7 +212,7 @@ while (changed) {
 }
 
 // literal surfaces propagate along the same edges as effects (SEMANTICS §5)
-for (const m of ["hosts", "tables"]) {
+for (const m of ["hosts", "tables", "cmds", "paths"]) {
   let moved = true;
   while (moved) {
     moved = false;
@@ -232,6 +240,8 @@ for (const [name, rec] of fns) {
   };
   if (inf.includes("Net") && rec.hosts.size) entry.hosts = [...rec.hosts].sort();
   if (inf.includes("Db") && rec.tables.size) entry.tables = [...rec.tables].sort();
+  if (inf.includes("Exec") && rec.cmds.size) entry.cmds = [...rec.cmds].sort();
+  if (inf.includes("Fs") && rec.paths.size) entry.paths = [...rec.paths].sort();
   functions.push(entry);
 }
 const envelope = { candor: { version: "candor-ts-0.0.1", toolchain: `node-${process.versions.node}`, spec: "0.3" }, functions };

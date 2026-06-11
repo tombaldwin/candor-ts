@@ -159,6 +159,23 @@ switch (cmd) {
       .map(([k, v]) => [k, { effects: [...v.effects].sort(), functions: v.functions }])));
     break;
   }
+  case "diff": {
+    // per-function effect delta vs a baseline: {changes: [{fn, gained, lost}]} — the envelope shape
+    // the conformance suite pins (diff-vs-self must be {changes: []}).
+    const [curPrefix, basePrefix] = args;
+    const cur = new Map(loadReport(curPrefix).map((e) => [e.fn, new Set(e.inferred)]));
+    const base = new Map(loadReport(basePrefix).map((e) => [e.fn, new Set(e.inferred)]));
+    const changes = [];
+    for (const fn of new Set([...cur.keys(), ...base.keys()])) {
+      const c = cur.get(fn) ?? new Set(), b = base.get(fn) ?? new Set();
+      const gained = [...c].filter((e) => !b.has(e)).sort();
+      const lost = [...b].filter((e) => !c.has(e)).sort();
+      if (gained.length || lost.length) changes.push({ fn, gained, lost });
+    }
+    changes.sort((a, b) => a.fn.localeCompare(b.fn));
+    emit({ changes });
+    process.exit(changes.some((c) => c.gained.length) ? 1 : 0);
+  }
   case "whatif": {
     const [prefix, target, eff, maybePolicy] = args;
     const cg = loadCallgraph(prefix);
