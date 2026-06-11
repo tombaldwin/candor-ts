@@ -1,0 +1,28 @@
+name: ci
+
+# The product's own gate: behavioral tests + the §7.13 soundness fuzzer (teeth-verified locally;
+# CI keeps it red-on-regression). Cross-engine conformance runs in candor-spec's CI, not here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-and-fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-fund --no-audit
+      - name: Behavioral tests
+        run: node test.mjs
+      - name: Soundness fuzzer (25 seeds)
+        run: node fuzz.mjs 25
+      - name: Effect-set oracle (the 20 shared cases)
+        run: |
+          git clone --depth 1 https://github.com/tombaldwin/candor-spec /tmp/spec
+          node scan.mjs Cases.ts /tmp/out
+          node check.mjs /tmp/out.json /tmp/spec/conformance/expected.json
