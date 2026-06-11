@@ -235,9 +235,16 @@ function tablesInSql(sql) {
     "returning","as","inner","outer","left","right","cross","lateral","natural","union","all",
     "distinct","case","when","null","default","skip","nowait","of","from","join","into","update",
     "delete","insert"]);
-  const toks = sql.toLowerCase().replace(/[(),;]/g, " ").trim().split(/\s+/);
+  // `,` survives as its OWN token: it lets `FROM t1, t2` continue the table list without
+  // fabricating from other comma-ridden positions (column lists, ON clauses).
+  const toks = sql.toLowerCase().replace(/[();]/g, " ").replace(/,/g, " , ").trim().split(/\s+/);
   if (!toks.length || !stmt.has(toks[0])) return [];
   const out = [];
+  const ident = (raw) => {
+    const t = raw.replace(/^["'`]+|["'`]+$/g, "");
+    if (!t || stop.has(t) || !/^[a-z_][a-z0-9_.$"`]*$/.test(t)) return null;
+    return t.replace(/["`]/g, "");
+  };
   for (let i = 0; i < toks.length; i++) {
     const tablePos = ["from","join","into","table"].includes(toks[i])
       || ((toks[i] === "update" || toks[i] === "truncate") && i === 0);
@@ -245,10 +252,19 @@ function tablesInSql(sql) {
     let j = i + 1;
     while (j < toks.length && skip.has(toks[j])) j++;
     if (j >= toks.length) continue;
-    const t = toks[j].replace(/^["'`]+|["'`]+$/g, "");
-    if (!t || stop.has(t) || !/^[a-z_][a-z0-9_.$"`]*$/.test(t)) continue;
-    const clean = t.replace(/["`]/g, "");
-    if (!out.includes(clean)) out.push(clean);
+    const first = ident(toks[j]);
+    if (first === null) continue;
+    if (!out.includes(first)) out.push(first);
+    // Comma-ADJACENT continuation only: `FROM t1, t2, t3` takes all three, while an alias breaks
+    // the chain (`FROM t1 a, t2` keeps just t1 — an under-report, never a guess: skipping an alias
+    // to chase the comma would fabricate tables out of `INSERT INTO t (a, b)`'s column list, whose
+    // parens are spaces by the time we tokenize).
+    while (j + 2 < toks.length && toks[j + 1] === ",") {
+      const more = ident(toks[j + 2]);
+      if (more === null) break;
+      if (!out.includes(more)) out.push(more);
+      j += 2;
+    }
   }
   return out;
 }
