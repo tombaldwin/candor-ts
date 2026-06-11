@@ -303,6 +303,7 @@ const nodeName = new WeakMap();  // declaration node -> qualified name
 // surface couldn't fire on the most common TS app shape). LITERAL decorator arg only; a no-arg
 // `@Entity()` (naming-strategy-dependent) contributes nothing — never a guess.
 const entityTables = new Map();    // ClassDeclaration node -> table name
+const interfaceImpls = new Map();  // InterfaceDeclaration node -> implementing ClassDeclarations (CHA universe)
 function moduleOf(sf) {
   const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?[tj]sx?$/, "");
   return rel.split(path.sep).join(".");
@@ -348,6 +349,20 @@ for (const sf of sources) {
         if (ts.isCallExpression(e) && e.expression.getText() === "Entity"
             && e.arguments.length > 0 && ts.isStringLiteralLike(e.arguments[0]))
           entityTables.set(node, e.arguments[0].text);
+      }
+      // The interface-CHA universe (the Rust engine's local-trait move): `class PgStore
+      // implements Store` is the edge a `store.save()` dispatch on the INTERFACE type resolves
+      // through. Local interfaces only — flagging the lib.dom/lib.es surfaces would flood.
+      for (const h of node.heritageClauses ?? []) {
+        if (h.token !== ts.SyntaxKind.ImplementsKeyword) continue;
+        for (const t of h.types) {
+          const idecl = realDecl(checker.getSymbolAtLocation(t.expression));
+          if (idecl && ts.isInterfaceDeclaration(idecl)
+              && projectFiles.has(path.resolve(idecl.getSourceFile().fileName))) {
+            if (!interfaceImpls.has(idecl)) interfaceImpls.set(idecl, []);
+            interfaceImpls.get(idecl).push(node);
+          }
+        }
       }
       const ctorQual = `${mod}.${node.name.text}.constructor`;
       if (!fns.has(ctorQual)) {
@@ -490,9 +505,29 @@ function visitCalls(node) {
               const idx = p.parent.parameters.indexOf(p);
               (paramInvokes.get(ownerUnit) ?? paramInvokes.set(ownerUnit, new Set()).get(ownerUnit)).add(idx);
             } else {
-              rec.direct.add("Unknown");
-              const tn = decl.parent?.name?.getText?.() ?? decl.name?.getText?.() ?? "type";
-              rec.why.add(`dispatch:${tn}`); // resolution landed on a type, not a body
+              // Interface-CHA (the Rust engine's local-trait move, the JVM's bounded-CHA bound):
+              // a method signature on a LOCAL interface resolves to the local implementing
+              // classes' members when the dispatch is narrow (≤12 implementors) — `store.save()`
+              // on an injected `Store` edges to `PgStore.save`. No implementor in sight, or too
+              // many: honest Unknown, exactly as before.
+              let edged = false;
+              if (ts.isMethodSignature(decl) && decl.parent && ts.isInterfaceDeclaration(decl.parent)) {
+                const impls = interfaceImpls.get(decl.parent) ?? [];
+                if (impls.length > 0 && impls.length <= 12) {
+                  const member = decl.name?.getText?.();
+                  for (const cls of impls) {
+                    const m = (cls.members ?? []).find((x) =>
+                      (ts.isMethodDeclaration(x) || ts.isPropertyDeclaration(x)) && x.name?.getText?.() === member);
+                    const t = m && nodeName.get(m);
+                    if (t) { rec.edges.add(t); edged = true; }
+                  }
+                }
+              }
+              if (!edged) {
+                rec.direct.add("Unknown");
+                const tn = decl.parent?.name?.getText?.() ?? decl.name?.getText?.() ?? "type";
+                rec.why.add(`dispatch:${tn}`); // resolution landed on a type, not a body
+              }
             }
           }
         } else if (mod === "<es-lib>") {

@@ -40,7 +40,7 @@ const SINKS = {
 // Edge forms: how fn i reaches fn i+1 (or the sink). `unknown: true` forms must read Unknown
 // instead of (or in addition to) the effect.
 const FORMS = ["direct", "arrow_const", "method", "closure", "callback_recv", "any_call",
-               "class_prop_arrow", "ctor", "field_init"];
+               "class_prop_arrow", "ctor", "field_init", "iface_dispatch"];
 
 function genProject(seed) {
   const r = rng(seed);
@@ -99,6 +99,15 @@ function genProject(seed) {
         // the (possibly implicit) constructor. The innocent explicit ctor variant alternates in.
         bodies[i] = `class F${i} { x = (() => { ${callExpr(callee)}; return 1; })(); ${i % 2 ? "constructor() {}" : ""} }\n` +
                     `export const ${me} = (): void => { void new F${i}(); };`;
+        break;
+      case "iface_dispatch":
+        // interface-CHA: the call goes through an INTERFACE-typed parameter; the local
+        // implementing class's method is the real body. Was a documented Unknown; the CHA
+        // resolution must now carry the effect through (and the impl method itself reports it).
+        bodies[i] = `interface I${i} { go(): void; }\n` +
+                    `class Impl${i} implements I${i} { go(): void { ${callExpr(callee)}; } }\n` +
+                    `function via${i}(x: I${i}): void { x.go(); }\n` +
+                    `export function ${me}(): void { via${i}(new Impl${i}()); }`;
         break;
       case "any_call":
         // the callee laundered through `any` → unresolvable → Unknown required for `me`;

@@ -83,7 +83,10 @@ want-JSON flag.
 - **DI-style code reads `Unknown` a lot, honestly**: a function-typed parameter or field being
   called is genuinely indeterminate (rimraf's injected-fs style yields many `Unknown`s — that's the
   §4 contract, not noise). When every visible call site passes a *named* function, the callback
-  resolves instead.
+  resolves instead. And a method call on a **local-interface-typed value** (`store.save()` where
+  `class PgStore implements Store`) resolves to the local implementors when the dispatch is narrow
+  (≤12 classes) — the layered-DI pattern carries its real effects; only an interface with no
+  visible implementor still reads `Unknown` (`dispatch:<Type>`).
 - **`unknownWhy` names each direct Unknown's origin** (`call:jwt.sign`, `callback:param#0`,
   `dispatch:<Type>`) — triage starts at the named site. Inheritors carry `Unknown` with no why;
   follow the callgraph down to the root.

@@ -350,5 +350,30 @@ export function go(): string { fsm.readFileSync("/x"); chunk("ab"); return pad("
         !/lodash/.test(r.stderr) && !/node:fs/.test(r.stderr), r.stderr);
 }
 
+// ── interface-CHA: a LOCAL interface dispatch resolves to its implementors (the Rust move) ────────
+{
+  const d = project({
+    "src/store.ts": `import * as fsm from "node:fs";
+export interface Store { save(q: string): void; }
+export class FsStore implements Store {
+  save(q: string): void { fsm.writeFileSync("/data/q", q); }
+}
+export interface Sink { flush(): void; }`,
+    "src/app.ts": `import { Store, Sink } from "./store.js";
+export function handle(store: Store): void { store.save("x"); }
+export function orphan(k: Sink): void { k.flush(); }`,
+  });
+  const { report, cg } = scan(d);
+  check("interface dispatch edges to the local implementor and carries the CONCRETE effect",
+        cg["src.app.handle"]?.includes("src.store.FsStore.save")
+        && entry(report, "src.app.handle")?.inferred.includes("Fs")
+        && !entry(report, "src.app.handle")?.inferred.includes("Unknown"),
+        JSON.stringify({ cg: cg["src.app.handle"], e: entry(report, "src.app.handle") }));
+  check("an interface with NO implementor stays honest Unknown (dispatch:<Type>)",
+        entry(report, "src.app.orphan")?.inferred.includes("Unknown")
+        && entry(report, "src.app.orphan")?.unknownWhy?.includes("dispatch:Sink"),
+        JSON.stringify(entry(report, "src.app.orphan")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
