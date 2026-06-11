@@ -34,9 +34,12 @@ export function parsePolicy(text) {
       if (values.length === 0) { warn("allow names no values"); continue; }
       allow.push({ effect: t[1], scope, values: values.sort(), raw: line });
     } else if (t[0] === "forbid") {
-      const m = line.match(/^forbid\s+(\S+)\s*->\s*(\S+)$/);
-      if (!m) { warn("malformed forbid (expected `forbid A -> B`)"); continue; }
-      forbid.push({ from: m[1], to: m[2], raw: line });
+      // Token-wise like the Rust/JVM parsers: the arrow must be its own whitespace-separated token
+      // (`a->b` glued is malformed), and tokens past `b` are ignored. A regex here once accepted and
+      // rejected DIFFERENT lines than the other engines — the one thing a shared gate must not do.
+      const [a, arrow, b] = [t[1] ?? "", t[2] ?? "", t[3] ?? ""];
+      if (!a || arrow !== "->" || !b) { warn("malformed forbid (want `forbid <scope> -> <scope>`)"); continue; }
+      forbid.push({ from: a, to: b, raw: line });
     } else {
       warn("unknown rule kind");
     }
