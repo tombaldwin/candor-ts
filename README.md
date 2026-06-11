@@ -14,6 +14,29 @@ attribution.
 
 The candor family in five minutes: [candor.poly.io](https://candor.poly.io).
 
+## Beyond the proof slice: the query surface + the policy grammar
+
+`query.mjs` adds the SPEC §3.1 read-only queries and the §6.2 policy grammar over scan.mjs's report:
+
+```sh
+node scan.mjs Cases.ts out
+node query.mjs show     out act 1            # match ladder: exact > segment-suffix > substring
+node query.mjs where    out Fs 1             # {effect, directly, inherited}
+node query.mjs callers  out transitive_leaf 1  # {of, direct, transitive} — the blast radius
+node query.mjs map      out 1                # {module: {effects, functions}}
+node query.mjs whatif   out leaf Net policy  # pre-edit gate verdict (exit 1 on violation)
+node query.mjs parsepolicy policy            # the canonical §6.2 dump the conformance suite diffs
+```
+
+These run live in the spec's conformance CI as the **third engine in three differentials**: the
+effect-set oracle (Part 6), the policy-DSL grammar battery (Part 4 — including `allow Db` tables),
+and the query-shape/match-ladder checks (Part 5).
+
+**Provenance, honestly:** `scan.mjs` was written from the spec documents alone — the clean-room
+derivability proof, and that claim is frozen there. `query.mjs` came later, implemented from the
+same spec text but by an author who had by then read the reference engines; its ongoing guarantee
+is the conformance differential, not clean-room provenance.
+
 ```sh
 npm install
 node scan.mjs Cases.ts out
