@@ -28,6 +28,11 @@ node query.mjs whatif   out leaf Net policy  # pre-edit gate verdict (exit 1 on 
 node query.mjs parsepolicy policy            # the canonical §6.2 dump the conformance suite diffs
 ```
 
+The scanner also captures the SPEC §2 **literal surfaces** where a string literal makes them
+decidable — `hosts` at a classified `Net` call, `tables` (table-position identifiers, mirroring the
+Rust/JVM extractors exactly) at a classified `Db` call (`node:sqlite`, pg, sqlite3, mysql2) — never
+from a runtime-computed value, propagated transitively like effects, gated by `allow Net`/`allow Db`.
+
 These run live in the spec's conformance CI as the **third engine in three differentials**: the
 effect-set oracle (Part 6), the policy-DSL grammar battery (Part 4 — including `allow Db` tables),
 and the query-shape/match-ladder checks (Part 5).

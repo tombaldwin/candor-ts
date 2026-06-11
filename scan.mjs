@@ -39,7 +39,52 @@ function kappa(moduleName, member) {
   if (/^(node:)?http s?$/.test(moduleName) || /^(node:)?https?$/.test(moduleName)) return "Net";
   if (/^(node:)?child_process$/.test(moduleName)) return "Exec";
   if (/^(node:)?dgram$/.test(moduleName)) return "Net";
+  if (/^(node:)?sqlite$/.test(moduleName) || /^(pg|sqlite3|better-sqlite3|mysql2?)$/.test(moduleName)) return "Db";
   return null;
+}
+
+// ---- the literal surfaces (SPEC §2 hosts/cmds/paths/tables): the statically-decidable subset -----
+// Read ONLY from string literals at a classified call — informative, never complete, never inferred.
+function firstStringLiteral(node) {
+  for (const a of node.arguments ?? []) {
+    if (ts.isStringLiteralLike(a)) return a.text;
+  }
+  return null;
+}
+// host[:port] from an address/URL literal; non-address strings yield nothing (never fabricate).
+function hostLiteral(s) {
+  const m = s.match(/^[a-z][a-z0-9+.-]*:\/\/([^/]+)/i);   // scheme://host[:port]/…
+  if (m) return m[1].replace(/^.*@/, "");
+  if (/^[a-z0-9._-]+(:\d+)?$/i.test(s) && s.includes(".")) return s; // bare host[.tld][:port]
+  return null;
+}
+// Table-position identifiers in a SQL string literal (SPEC §2 `tables`). Mirrors the Rust
+// tables_in_sql exactly: must open with a statement keyword; FROM/JOIN/INTO anywhere,
+// statement-leading UPDATE/TRUNCATE, TABLE (skipping ONLY/IF NOT EXISTS); a FOR UPDATE locking
+// clause yields nothing. Conservative in the fabrication direction.
+function tablesInSql(sql) {
+  const stmt = new Set(["select","insert","update","delete","create","drop","alter","truncate","merge","replace","with"]);
+  const skip = new Set(["only","if","not","exists","table"]);
+  const stop = new Set(["select","set","where","values","on","using","group","order","by","limit",
+    "returning","as","inner","outer","left","right","cross","lateral","natural","union","all",
+    "distinct","case","when","null","default","skip","nowait","of","from","join","into","update",
+    "delete","insert"]);
+  const toks = sql.toLowerCase().replace(/[(),;]/g, " ").trim().split(/\s+/);
+  if (!toks.length || !stmt.has(toks[0])) return [];
+  const out = [];
+  for (let i = 0; i < toks.length; i++) {
+    const tablePos = ["from","join","into","table"].includes(toks[i])
+      || ((toks[i] === "update" || toks[i] === "truncate") && i === 0);
+    if (!tablePos) continue;
+    let j = i + 1;
+    while (j < toks.length && skip.has(toks[j])) j++;
+    if (j >= toks.length) continue;
+    const t = toks[j].replace(/^["'`]+|["'`]+$/g, "");
+    if (!t || stop.has(t) || !/^[a-z_][a-z0-9_.$"`]*$/.test(t)) continue;
+    const clean = t.replace(/["`]/g, "");
+    if (!out.includes(clean)) out.push(clean);
+  }
+  return out;
 }
 
 // The module specifier a declaration came from ("node:fs" via @types/node fs.d.ts → "fs").
@@ -53,7 +98,7 @@ function declModule(decl) {
 }
 
 // ---- pass 1: collect the analyzed functions (named fns + class methods; SEMANTICS §2's F) --------
-const fns = new Map(); // name -> { node, direct:Set, edges:Set, unresolved:boolean, loc }
+const fns = new Map(); // name -> { node, direct:Set, edges:Set, hosts:Set, tables:Set, loc }
 function fnName(node) {
   if (ts.isFunctionDeclaration(node) && node.name) return node.name.text;
   if (ts.isMethodDeclaration(node) && ts.isClassDeclaration(node.parent) && node.parent.name)
@@ -64,7 +109,7 @@ function collect(node) {
   const n = fnName(node);
   if (n) {
     const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
-    fns.set(n, { node, direct: new Set(), edges: new Set(), loc: `${srcPath}:${line + 1}:${character + 1}` });
+    fns.set(n, { node, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(), loc: `${srcPath}:${line + 1}:${character + 1}` });
   }
   ts.forEachChild(node, collect);
 }
@@ -113,6 +158,17 @@ function visitCalls(node) {
           const member = decl.name ? decl.name.getText() : "";
           const eff = kappa(mod, member); // (CLASSIFY)
           if (eff) rec.direct.add(eff);
+          // the literal surfaces, read only at a CLASSIFIED call (SPEC §2): the Net host or the
+          // Db tables a string-literal argument names; a runtime-computed value yields nothing.
+          if (eff === "Net") {
+            const lit = firstStringLiteral(node);
+            const h = lit && hostLiteral(lit);
+            if (h) rec.hosts.add(h);
+          }
+          if (eff === "Db") {
+            const lit = firstStringLiteral(node);
+            for (const t of lit ? tablesInSql(lit) : []) rec.tables.add(t);
+          }
           // unmatched external = (OPAQUE): contributes nothing — the curated-κ caveat C1
         }
       }
@@ -147,12 +203,24 @@ while (changed) {
   }
 }
 
+// literal surfaces propagate along the same edges as effects (SEMANTICS §5)
+for (const m of ["hosts", "tables"]) {
+  let moved = true;
+  while (moved) {
+    moved = false;
+    for (const [, rec] of fns)
+      for (const callee of rec.edges)
+        for (const v of fns.get(callee)?.[m] ?? [])
+          if (!rec[m].has(v)) { rec[m].add(v); moved = true; }
+  }
+}
+
 // ---- emit: the §2 envelope (effect-free items omitted) + the §2.2 sidecar (EVERY fn a key) --------
 const functions = [];
 for (const [name, rec] of fns) {
   const inf = [...inferred.get(name)].sort();
   if (inf.length === 0) continue;
-  functions.push({
+  const entry = {
     fn: name,
     loc: rec.loc,
     inferred: inf,
@@ -161,7 +229,10 @@ for (const [name, rec] of fns) {
     undeclared: [],
     overdeclared: [],
     unresolved: inf.includes("Unknown"),
-  });
+  };
+  if (inf.includes("Net") && rec.hosts.size) entry.hosts = [...rec.hosts].sort();
+  if (inf.includes("Db") && rec.tables.size) entry.tables = [...rec.tables].sort();
+  functions.push(entry);
 }
 const envelope = { candor: { version: "candor-ts-0.0.1", toolchain: `node-${process.versions.node}`, spec: "0.3" }, functions };
 fs.writeFileSync(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
