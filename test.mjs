@@ -328,5 +328,27 @@ export function boot(): Loader { return new Loader(); }`,
         JSON.stringify(cg));
 }
 
+// ── κ-coverage ledger: an unlisted npm package the code calls is NAMED in the receipt ─────────────
+{
+  const stub = (name, member) => ({
+    [`node_modules/${name}/package.json`]: `{"name":"${name}","version":"0.0.0","main":"index.js","types":"index.d.ts"}`,
+    [`node_modules/${name}/index.d.ts`]: `export declare function ${member}(s: string): string;`,
+    [`node_modules/${name}/index.js`]: `module.exports.${member} = (s) => s;`,
+  });
+  const d = project({
+    ...stub("leftpad", "pad"),     // unlisted — must be DISCLOSED
+    ...stub("lodash", "chunk"),    // KAPPA_PURE — reviewed, must NOT be disclosed
+    "src/a.ts": `import { pad } from "leftpad";
+import { chunk } from "lodash";
+import * as fsm from "node:fs";
+export function go(): string { fsm.readFileSync("/x"); chunk("ab"); return pad("hi"); }`,
+  });
+  const { r } = scan(d);
+  check("κ ledger names an unlisted package in the receipt",
+        /κ doesn't know 1 package/.test(r.stderr) && /leftpad \(1 call\)/.test(r.stderr), r.stderr);
+  check("κ ledger stays quiet about reviewed-pure and curated packages",
+        !/lodash/.test(r.stderr) && !/node:fs/.test(r.stderr), r.stderr);
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

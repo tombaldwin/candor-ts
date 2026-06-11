@@ -158,42 +158,64 @@ const sources = program.getSourceFiles().filter((f) => projectFiles.has(path.res
 // ---- κ — the curated classifier (CLASSIFIER §2: the dispatch/execution boundary, not builders) ----
 // Node builtins + a curated npm tier (the same under-report-and-say-so posture as the crate table:
 // an unlisted package contributes nothing — never a guess).
-function kappa(moduleName, member) {
-  if (/^(node:)?fs(\/promises)?$/.test(moduleName)) return "Fs";
-  if (/^(node:)?(net|dgram|tls|http2?|https)$/.test(moduleName)) return "Net";
-  if (/^(node:)?child_process$/.test(moduleName)) return "Exec";
-  if (/^(node:)?sqlite$/.test(moduleName)) return "Db";
+// One rules TABLE, two readers: kappa() classifies a call; kappaKnows() answers "is this package
+// curated at all?" for the coverage ledger (a κ-known package whose given call is pure — a TypeORM
+// builder — is covered, not a blind spot). A single source so the two can never drift.
+// [module-name regex, member regex (null = any member), effect]
+const KAPPA_RULES = [
+  [/^(node:)?fs(\/promises)?$/, null, "Fs"],
+  [/^(node:)?(net|dgram|tls|http2?|https)$/, null, "Net"],
+  [/^(node:)?child_process$/, null, "Exec"],
+  [/^(node:)?sqlite$/, null, "Db"],
   // the curated npm tier
-  if (/^(axios|got|node-fetch|undici|ws|socket\.io(-client)?|nodemailer)$/.test(moduleName)) return "Net";
-  if (/^(pg|mysql2?|mongodb|ioredis|redis|sqlite3|better-sqlite3|knex)$/.test(moduleName)) return "Db";
-  if (/^(execa|cross-spawn|shelljs)$/.test(moduleName)) return "Exec";
-  if (/^(fs-extra|graceful-fs|rimraf|glob|chokidar)$/.test(moduleName)) return "Fs";
-  if (/^dotenv$/.test(moduleName)) return "Env";
-  if (/^(winston|pino|bunyan|npmlog)$/.test(moduleName)) return "Log";
+  [/^(axios|got|node-fetch|undici|ws|socket\.io(-client)?|nodemailer)$/, null, "Net"],
+  [/^(pg|mysql2?|mongodb|ioredis|redis|sqlite3|better-sqlite3|knex)$/, null, "Db"],
+  [/^(execa|cross-spawn|shelljs)$/, null, "Exec"],
+  [/^(fs-extra|graceful-fs|rimraf|glob|chokidar)$/, null, "Fs"],
+  [/^dotenv$/, null, "Env"],
+  [/^(winston|pino|bunyan|npmlog)$/, null, "Log"],
   // entropy: node:crypto's random surface + the password-hashing libs (salted -> Rand). Found by
   // the CTA dogfood on a Nest app: argon2.hash came out SILENTLY PURE (the curated-kappa caveat
   // landing on exactly the call a security review cares about).
-  if (/^(node:)?crypto$/.test(moduleName) && /^random/.test(member)) return "Rand";
-  if (/^(argon2|bcrypt|bcryptjs)$/.test(moduleName)) return "Rand";
+  [/^(node:)?crypto$/, /^random/, "Rand"],
+  [/^(argon2|bcrypt|bcryptjs)$/, null, "Rand"],
   // The ORM tier — VERB-PRECISE (the CLASSIFIER discipline: tag the execution boundary, not
   // builders; `createQueryBuilder` is pure, its `getMany`/`execute` is the I/O). Found on the
   // first framework-APP scan: a TypeORM/Nest application — Db-heavy by construction — read zero
   // Db because the ORM resolved into an unlisted package (the JVM's Spring-Data lesson, replayed).
-  if (/^(typeorm|@nestjs\/typeorm)$/.test(moduleName)
-      && /^(find|save|remove|softRemove|recover|insert|update|upsert|delete|restore|count|exist|sum|average|minimum|maximum|query|clear|increment|decrement|getMany|getOne|getOneOrFail|getRawMany|getRawOne|getCount|getExists|execute|stream|transaction)/.test(member))
-    return "Db";
-  if (/^(@prisma\/client|\.prisma|\.prisma\/client)$/.test(moduleName)
-      && /^(\$?(queryRaw|executeRaw|transaction)|find(Many|Unique|First)|create|createMany|update|updateMany|upsert|delete|deleteMany|aggregate|count|groupBy)/.test(member))
-    return "Db";
-  if (/^mongoose$/.test(moduleName)
-      && /^(find|save|create|insertMany|updateOne|updateMany|replaceOne|deleteOne|deleteMany|aggregate|countDocuments|estimatedDocumentCount|distinct|exec|bulkWrite)/.test(member))
-    return "Db";
-  if (/^(sequelize|drizzle-orm)$/.test(moduleName)
-      && /^(find|create|update|destroy|upsert|count|max|min|sum|query|select|insert|delete|execute|transaction)/.test(member))
-    return "Db";
+  [/^(typeorm|@nestjs\/typeorm)$/,
+   /^(find|save|remove|softRemove|recover|insert|update|upsert|delete|restore|count|exist|sum|average|minimum|maximum|query|clear|increment|decrement|getMany|getOne|getOneOrFail|getRawMany|getRawOne|getCount|getExists|execute|stream|transaction)/,
+   "Db"],
+  [/^(@prisma\/client|\.prisma|\.prisma\/client)$/,
+   /^(\$?(queryRaw|executeRaw|transaction)|find(Many|Unique|First)|create|createMany|update|updateMany|upsert|delete|deleteMany|aggregate|count|groupBy)/,
+   "Db"],
+  [/^mongoose$/,
+   /^(find|save|create|insertMany|updateOne|updateMany|replaceOne|deleteOne|deleteMany|aggregate|countDocuments|estimatedDocumentCount|distinct|exec|bulkWrite)/,
+   "Db"],
+  [/^(sequelize|drizzle-orm)$/,
+   /^(find|create|update|destroy|upsert|count|max|min|sum|query|select|insert|delete|execute|transaction)/,
+   "Db"],
   // Nest's HttpService wraps axios — the request verbs are Net.
-  if (/^@nestjs\/axios$/.test(moduleName) && /^(get|post|put|patch|delete|head|request)$/.test(member)) return "Net";
+  [/^@nestjs\/axios$/, /^(get|post|put|patch|delete|head|request)$/, "Net"],
+];
+function kappa(moduleName, member) {
+  for (const [mre, vre, eff] of KAPPA_RULES) {
+    if (mre.test(moduleName) && (!vre || vre.test(member))) return eff;
+  }
   return null;
+}
+// Packages REVIEWED and ratified effect-free at the call boundary (decorator/metadata plumbing,
+// pure computation, operator algebras whose side effects live in visible user callbacks). This is
+// the ledger's triage outlet: an unlisted package either earns KAPPA_RULES entries or lands here —
+// never silently. NOT for anything that mints entropy (uuid), reads clocks, or signs with RSA-PSS
+// (jsonwebtoken stays unlisted on purpose).
+const KAPPA_PURE = new Set([
+  "@nestjs/common", "@nestjs/core", "@nestjs/swagger", "@nestjs/platform-express",
+  "class-validator", "class-transformer", "reflect-metadata",
+  "rxjs", "zod", "lodash", "ramda", "date-fns",
+]);
+function kappaKnows(moduleName) {
+  return KAPPA_PURE.has(moduleName) || KAPPA_RULES.some(([mre]) => mre.test(moduleName));
 }
 
 // The module a declaration came from: a project file → "<local>", @types/node → the builtin name,
@@ -274,6 +296,7 @@ function tablesInSql(sql) {
 // segment-scope rules apply naturally: `deny Net db` matches the db module). A single-file scan
 // qualifies by the file's basename (`Cases.union_a`).
 const fns = new Map();           // qualified name -> { direct, edges, hosts, tables, cmds, paths, loc }
+const unlistedSeen = new Map();  // the κ-coverage ledger: unlisted npm package -> call-site count
 const nodeName = new WeakMap();  // declaration node -> qualified name
 // ORM table declarations: `@Entity("user")` on a class maps that class to its table — the JVM's
 // read-the-declarations move (TypeORM tables live in decorators, not SQL strings, so the `tables`
@@ -519,6 +542,7 @@ function visitCalls(node) {
           }
           // CANDOR_DEPS: an unclassified call into a package with a loaded sibling report inherits
           // that function's recorded transitive effects (+ literal surfaces) by `hash`.
+          let inheritedFromDep = false;
           if (!eff && crossDeps.size > 0 && !mod.startsWith("<")) {
             let localTail = decl.name ? decl.name.getText() : null;
             const owner3 = decl.parent && decl.parent.name ? decl.parent.name.getText() : null;
@@ -526,6 +550,7 @@ function visitCalls(node) {
               localTail = `${owner3}.${localTail}`;
             const hit = localTail && crossDeps.get(`${mod}#${localTail}`);
             if (hit) {
+              inheritedFromDep = true;
               for (const x of hit.inferred) rec.direct.add(x);
               for (const v of hit.hosts) rec.hosts.add(v);
               for (const v of hit.cmds) rec.cmds.add(v);
@@ -533,7 +558,19 @@ function visitCalls(node) {
               for (const v of hit.tables) rec.tables.add(v);
             }
           }
-          // unmatched external = (OPAQUE): contributes nothing — the curated-κ caveat C1
+          // unmatched external = (OPAQUE): contributes nothing — the curated-κ caveat C1. The
+          // κ-coverage LEDGER makes the caveat per-scan evidence instead of a doc footnote: count
+          // every npm package the code demonstrably calls that κ doesn't know and no sibling
+          // report covers (the argon2 lesson — the blind spot landed on exactly the call a
+          // security review cared about). Builtins are excluded: κ's builtin coverage is the
+          // bounded frontier, and an unlisted builtin (path, util) is known-pure, not blind.
+          if (!eff && !inheritedFromDep && !mod.startsWith("<") && !kappaKnows(mod)) {
+            const file = decl.getSourceFile().fileName;
+            if (/node_modules\//.test(file) && !/node_modules\/(@types\/node|typescript)\//.test(file)) {
+              const pkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
+              unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
+            }
+          }
         }
       }
       // the callee EXPRESSION being a plain identifier of function-typed parameter/field:
@@ -635,6 +672,13 @@ const cg = {};
 for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
 fs.writeFileSync(`${outPrefix}.callgraph.json`, JSON.stringify(cg, null, 1));
 console.error(`candor-ts: wrote ${functions.length} effectful functions (${fns.size} analyzed, ${sources.length} files) to ${outPrefix}.json`);
+if (unlistedSeen.size > 0) {
+  const top = [...unlistedSeen.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const shown = top.slice(0, 8).map(([p, n]) => `${p} (${n} call${n === 1 ? "" : "s"})`).join(", ");
+  const more = top.length > 8 ? ` + ${top.length - 8} more` : "";
+  console.error(`candor-ts: κ doesn't know ${top.length} package${top.length === 1 ? "" : "s"} this code calls into — `
+    + `effects through ${top.length === 1 ? "it are" : "them are"} INVISIBLE (not Unknown): ${shown}${more}`);
+}
 
 // ---- the standing §6.2 gate (--policy / CANDOR_POLICY) --------------------------------------------
 if (policyPath) {

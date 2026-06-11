@@ -75,8 +75,10 @@ want-JSON flag.
   own unit (`src.x.helper`) — effects still propagate to the enclosing caller through the edge.
 - **The classifier is curated** (node builtins + a small npm tier: axios/got/node-fetch/undici/ws,
   pg/mysql2/mongodb/redis/knex, execa/cross-spawn, fs-extra/rimraf/glob, dotenv, winston/pino).
-  An unlisted package contributes nothing — an effect through it is invisible, not `Unknown`; check
-  the κ table in scan.mjs before concluding "no effect".
+  An unlisted package contributes nothing — an effect through it is invisible, not `Unknown`. The
+  scanner **names these per scan**: the receipt's `κ doesn't know N packages…` line lists every npm
+  package the code demonstrably calls that κ neither classifies nor has reviewed-pure — read it
+  before concluding "no effect" through anything it names.
 - **`process.env.X` reads are `Env`** (a property read, not a call); `Date.now()` is `Clock`.
 - **DI-style code reads `Unknown` a lot, honestly**: a function-typed parameter or field being
   called is genuinely indeterminate (rimraf's injected-fs style yields many `Unknown`s — that's the
@@ -106,6 +108,7 @@ body), the set may be incomplete: read the source for *that* function before rel
 conclude a function is pure while it is marked unresolved. The literal surfaces (`hosts`/`tables`/
 `cmds`/`paths`) are the decidable subset only — absence is never a claim of absence. **And the
 curated-κ caveat cuts the other way:** a call into an npm package κ doesn't know contributes
-NOTHING — invisible, not `Unknown` (check the κ table in scan.mjs before concluding "no effect"
-through an unfamiliar library; this is the documented weaker edge of the never-silently-pure
-promise, same as every candor engine's curated classifier).
+NOTHING — invisible, not `Unknown`. The scan's receipt now DISCLOSES these by name (`κ doesn't
+know N packages…`), so the blind spots are per-scan evidence, not a doc footnote: never conclude
+"no effect" through a package that line names (the documented weaker edge of the
+never-silently-pure promise, same as every candor engine's curated classifier).
