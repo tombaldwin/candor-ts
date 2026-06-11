@@ -375,5 +375,37 @@ export function orphan(k: Sink): void { k.flush(); }`,
         JSON.stringify(entry(report, "src.app.orphan")));
 }
 
+// ── 11b. the CJS dist chain: a require()-style dep scanned with --allow-js chains the same way ────
+{
+  // the DEPENDENCY ships CJS: exports via assignment, not declarations (the jsonwebtoken shape).
+  const dep = project({
+    "package.json": `{"name": "old-school"}`,
+    "sign.js": `const fs = require("node:fs");
+module.exports = function (payload) { return fs.readFileSync("/key") + payload; };`,
+    "index.js": `module.exports = { sign: require("./sign"), tag: (s) => s };`,
+  });
+  const depScan = scan(dep, "--allow-js");
+  const signFn = entry(depScan.report, "sign.sign");
+  check("a `module.exports = function` is a UNIT, named by its file, with the chainable hash",
+        signFn?.inferred.includes("Fs") && signFn?.hash === "old-school#sign",
+        JSON.stringify(depScan.report?.functions));
+
+  // the CONSUMER sees only typings; CANDOR_DEPS carries the dist-JS scan across the boundary.
+  const app = project({
+    "package.json": `{"name": "shop2", "dependencies": {"old-school": "1.0.0"}}`,
+    "node_modules/old-school/package.json": `{"name":"old-school","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/old-school/index.d.ts": `export declare function sign(p: string): string;`,
+    "node_modules/old-school/index.js": ``,
+    "src/use.ts": `import { sign } from "old-school";
+export function stamp(): string { return sign("x"); }`,
+  });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), app],
+            { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(dep, ".candor", "report.json") } });
+  const rep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  check("the consumer inherits a CJS dep's effects through the chain",
+        entry(rep, "src.use.stamp")?.inferred.includes("Fs"),
+        JSON.stringify(rep.functions));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

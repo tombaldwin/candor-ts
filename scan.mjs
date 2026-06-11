@@ -332,6 +332,29 @@ function localName(node) {
   // invisible — same dogfood.
   if (ts.isConstructorDeclaration(node) && ts.isClassDeclaration(node.parent) && node.parent.name)
     return `${node.parent.name.text}.constructor`;
+  // CJS export units (--allow-js, the npm half of report chaining): dist JS exports through
+  // assignment, not declarations, so `module.exports = function …` / `exports.foo = …` /
+  // `module.exports = { sign: fn }` were not units at all — a dep scan of jsonwebtoken yielded 4
+  // shallow fns with the package's whole API invisible. The unit name mirrors what a CONSUMER's
+  // resolution lands on: the fn's own name, the exported property, or the file's basename (the
+  // `require('./sign')` shape).
+  if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+    const p = node.parent;
+    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.right === node) {
+      const lhs = p.left.getText().replace(/\s+/g, "");
+      if (lhs === "module.exports")
+        return (ts.isFunctionExpression(node) && node.name?.text)
+          || path.basename(node.getSourceFile().fileName).replace(/\.[mc]?jsx?$/, "");
+      const m = lhs.match(/^(?:module\.)?exports\.([A-Za-z_$][\w$]*)$/);
+      if (m) return m[1];
+    }
+    if (ts.isPropertyAssignment(p) && p.initializer === node && ts.isObjectLiteralExpression(p.parent)) {
+      const g = p.parent.parent;
+      if (ts.isBinaryExpression(g) && g.operatorToken.kind === ts.SyntaxKind.EqualsToken
+          && g.right === p.parent && g.left.getText().replace(/\s+/g, "") === "module.exports")
+        return p.name.getText();
+    }
+  }
   return null;
 }
 for (const sf of sources) {
@@ -583,7 +606,9 @@ function visitCalls(node) {
             const owner3 = decl.parent && decl.parent.name ? decl.parent.name.getText() : null;
             if (localTail && owner3 && (ts.isMethodSignature(decl) || ts.isMethodDeclaration(decl) || ts.isPropertySignature(decl)))
               localTail = `${owner3}.${localTail}`;
-            const hit = localTail && crossDeps.get(`${mod}#${localTail}`);
+            // A typed consumer resolves into `@types/<pkg>`; the dep's report hashes under `<pkg>`.
+            const depMod = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
+            const hit = localTail && crossDeps.get(`${depMod}#${localTail}`);
             if (hit) {
               inheritedFromDep = true;
               for (const x of hit.inferred) rec.direct.add(x);
