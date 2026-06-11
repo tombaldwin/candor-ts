@@ -31,10 +31,11 @@ if (argv.length === 0) {
   process.exit(2);
 }
 const target = argv[0];
-let outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null;
+let outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, allowJs = false;
 for (let i = 1; i < argv.length; i++) {
   if (argv[i] === "--out") outPrefix = argv[++i];
   else if (argv[i] === "--policy") policyPath = argv[++i];
+  else if (argv[i] === "--allow-js") allowJs = true;
   else if (!argv[i].startsWith("--") && !outPrefix) outPrefix = argv[i]; // legacy positional prefix
 }
 
@@ -66,7 +67,7 @@ if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
 } else {
   rootDir = path.resolve(target);
   const tsconfig = path.join(rootDir, "tsconfig.json");
-  if (fs.existsSync(tsconfig)) {
+  if (fs.existsSync(tsconfig) && !allowJs) {
     fileNames = fromTsconfig(tsconfig, rootDir);
   } else {
     fileNames = [];
@@ -76,6 +77,7 @@ if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
         if (isTestPath(path.relative(rootDir, p))) continue;
         if (ent.isDirectory()) walk(p);
         else if (/\.[mc]?tsx?$/.test(ent.name) && !ent.name.endsWith(".d.ts")) fileNames.push(p);
+        else if (allowJs && /\.[mc]?jsx?$/.test(ent.name) && !/\.min\.js$/.test(ent.name)) fileNames.push(p);
       }
     })(rootDir);
   }
@@ -147,6 +149,7 @@ const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:
   }
 }
 
+if (allowJs) { compilerOptions.allowJs = true; compilerOptions.checkJs = false; }
 const program = ts.createProgram(fileNames, compilerOptions);
 const checker = program.getTypeChecker();
 const projectFiles = new Set(fileNames.map((f) => path.resolve(f)));
@@ -262,7 +265,7 @@ const nodeName = new WeakMap();  // declaration node -> qualified name
 // `@Entity()` (naming-strategy-dependent) contributes nothing — never a guess.
 const entityTables = new Map();    // ClassDeclaration node -> table name
 function moduleOf(sf) {
-  const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?tsx?$/, "");
+  const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?[tj]sx?$/, "");
   return rel.split(path.sep).join(".");
 }
 function localName(node) {
@@ -312,6 +315,7 @@ for (const sf of sources) {
         const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
         fns.set(ctorQual, { local: `${node.name.text}.constructor`, direct: new Set(), edges: new Set(),
                             hosts: new Set(), tables: new Set(), cmds: new Set(), paths: new Set(),
+                            why: new Set(), entry: false,
                             loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
       }
       nodeName.set(node, ctorQual);
@@ -321,7 +325,7 @@ for (const sf of sources) {
       const qual = `${mod}.${n}`;
       const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
       fns.set(qual, { local: n, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
-                      cmds: new Set(), paths: new Set(),
+                      cmds: new Set(), paths: new Set(), why: new Set(), entry: false,
                       loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
       nodeName.set(node, qual);
       if ((ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)) && node.initializer)
@@ -338,6 +342,43 @@ for (const sf of sources) {
 // then resolves to the named targets IF every call site passed one — else honest Unknown.
 const callbackArgs = new Map();    // calleeName -> Map(argIndex -> {targets:Set, opaque:boolean})
 const paramInvokes = new Map();    // fnName -> Set(paramIndex) — this fn calls its own parameter
+
+// ── entry points (SPEC §2 `entryPoint`): runtime-invoked roots the framework calls — their
+// effects are never orphaned even with no in-project caller. Two populations for now:
+// Nest HTTP handler decorators, and Next.js route-handler/middleware exports.
+const HTTP_DECORATORS = new Set(["Get", "Post", "Put", "Patch", "Delete", "All", "Head", "Options"]);
+const HTTP_EXPORTS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
+for (const sf of sources) {
+  const base = path.basename(sf.fileName).replace(/\.[mc]?[tj]sx?$/, "");
+  (function mark(node) {
+    const qual = nodeName.get(node);
+    if (qual) {
+      const rec = fns.get(qual);
+      // Nest: a method carrying @Get()/@Post()/… is invoked by the framework router.
+      for (const dec of ts.getDecorators?.(node) ?? []) {
+        const e = dec.expression;
+        const dn = ts.isCallExpression(e) ? e.expression.getText() : e.getText();
+        if (HTTP_DECORATORS.has(dn)) rec.entry = true;
+      }
+      // Next: app-router route handlers (exported GET/POST/… in a `route` file) and middleware.
+      const leaf = rec.local.split(".").pop();
+      if (base === "route" && HTTP_EXPORTS.has(leaf)) rec.entry = true;
+      if (base === "middleware" && leaf === "middleware") rec.entry = true;
+    }
+    ts.forEachChild(node, mark);
+  })(sf);
+}
+
+// Resolve a use-site symbol through its IMPORT ALIAS to the real declaration: at `new X()` /
+// `f(callback)` the symbol is the ImportSpecifier, not the class/function it names — without this,
+// imported classes never edged to their ctor units and imported callback targets read opaque.
+function realDecl(sym) {
+  if (!sym) return undefined;
+  if (sym.flags & ts.SymbolFlags.Alias) {
+    try { sym = checker.getAliasedSymbol(sym); } catch {}
+  }
+  return sym.valueDeclaration ?? sym.declarations?.[0];
+}
 
 // nearest enclosing analyzed function (closures attribute to it — SEMANTICS §2)
 function enclosing(node) {
@@ -359,14 +400,22 @@ function visitCalls(node) {
       if (!decl) {
         // `new C()` on a class with an IMPLICIT constructor resolves to no declaration — edge to
         // the class's (synthesized) ctor unit via the class identifier before concluding Unknown.
-        let edged = false;
+        let edged = false, externalClass = false;
         if (ts.isNewExpression(node) && node.expression && ts.isIdentifier(node.expression)) {
-          const csym = checker.getSymbolAtLocation(node.expression);
-          const cd = csym && (csym.valueDeclaration ?? csym.declarations?.[0]);
+          const cd = realDecl(checker.getSymbolAtLocation(node.expression));
           const t = cd && nodeName.get(cd);
           if (t) { rec.edges.add(t); edged = true; }
+          // `new ExternalClass()` with an implicit ctor: same posture as an explicit external ctor
+          // the classifier doesn't know — OPAQUE (contributes nothing), not Unknown. Consistency:
+          // whether a library declares its ctor must not change the verdict.
+          else if (cd && ts.isClassDeclaration(cd) && !projectFiles.has(path.resolve(cd.getSourceFile().fileName)))
+            externalClass = true;
         }
-        if (!edged) rec.direct.add("Unknown"); // unresolvable call → Unknown, never silent-pure (SPEC §4)
+        if (!edged && !externalClass) {
+          rec.direct.add("Unknown"); // unresolvable call → Unknown, never silent-pure (SPEC §4)
+          const callee = (node.expression?.getText?.() ?? "?").replace(/\s+/g, "").slice(0, 60);
+          rec.why.add(`call:${callee}`); // an `any`-typed/indeterminate callee — named, so triage starts here
+        }
       } else {
         const mod = declModule(decl);
         if (mod === "<local>") {
@@ -378,9 +427,7 @@ function visitCalls(node) {
               const slot = (callbackArgs.get(targetName) ?? callbackArgs.set(targetName, new Map()).get(targetName));
               const cell = slot.get(i) ?? { targets: new Set(), opaque: false };
               if (ts.isIdentifier(a)) {
-                const asym = checker.getSymbolAtLocation(a);
-                const ad = asym && asym.valueDeclaration;
-                const t = ad && nodeName.get(ad);
+                const t = (() => { const d2 = realDecl(checker.getSymbolAtLocation(a)); return d2 && nodeName.get(d2); })();
                 if (t) cell.targets.add(t);
                 else cell.opaque = true;
               } else if (ts.isArrowFunction(a) || ts.isFunctionExpression(a)) {
@@ -405,6 +452,8 @@ function visitCalls(node) {
               (paramInvokes.get(ownerUnit) ?? paramInvokes.set(ownerUnit, new Set()).get(ownerUnit)).add(idx);
             } else {
               rec.direct.add("Unknown");
+              const tn = decl.parent?.name?.getText?.() ?? decl.name?.getText?.() ?? "type";
+              rec.why.add(`dispatch:${tn}`); // resolution landed on a type, not a body
             }
           }
         } else if (mod === "<es-lib>") {
@@ -484,6 +533,7 @@ function visitCalls(node) {
           (paramInvokes.get(owner2) ?? paramInvokes.set(owner2, new Set()).get(owner2)).add(idx);
         } else if (d && (ts.isParameter(d) || ts.isPropertyDeclaration(d) || ts.isPropertySignature(d))) {
           rec.direct.add("Unknown"); // a callback value — genuinely indeterminate (SPEC §4)
+          rec.why.add(`callback:${node.expression.getText()}`);
         }
       }
     }
@@ -511,6 +561,7 @@ for (const [fnName, idxs] of paramInvokes) {
       for (const t of cell.targets) rec.edges.add(t);
     } else {
       rec.direct.add("Unknown");
+      rec.why.add(`callback:param#${idx}`); // an opaque (or externally-callable) callback parameter
     }
   }
 }
@@ -542,7 +593,7 @@ for (const m of ["hosts", "tables", "cmds", "paths"]) {
 const functions = [];
 for (const [name, rec] of fns) {
   const inf = [...inferred.get(name)].sort();
-  if (inf.length === 0) continue;
+  if (inf.length === 0 && !rec.entry) continue; // entry points stay visible even when pure
   const entry = {
     fn: name,
     loc: rec.loc,
@@ -558,6 +609,8 @@ for (const [name, rec] of fns) {
   if (inf.includes("Db") && rec.tables.size) entry.tables = [...rec.tables].sort();
   if (inf.includes("Exec") && rec.cmds.size) entry.cmds = [...rec.cmds].sort();
   if (inf.includes("Fs") && rec.paths.size) entry.paths = [...rec.paths].sort();
+  if (rec.direct.has("Unknown") && rec.why.size) entry.unknownWhy = [...rec.why].sort();
+  if (rec.entry) entry.entryPoint = true;
   functions.push(entry);
 }
 const envelope = { candor: { version: "candor-ts-0.1.0", toolchain: `node-${process.versions.node}`, spec: "0.3" }, functions };

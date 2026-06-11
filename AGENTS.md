@@ -17,6 +17,7 @@ git clone --depth 1 https://github.com/tombaldwin/candor-ts /tmp/candor-ts 2>/de
 ( cd /tmp/candor-ts && npm install --no-fund --no-audit )
 
 node /tmp/candor-ts/scan.mjs <project-dir>     # tsconfig.json honored; tests/node_modules excluded
+node /tmp/candor-ts/scan.mjs <dir> --allow-js  # also analyze .js/.mjs sources (walks the tree)
 ```
 
 This writes `<project-dir>/.candor/report.json` and `.candor/report.callgraph.json` (override
@@ -52,6 +53,7 @@ Q callers  $P <fn-query> 1          # the BLAST RADIUS: {of, direct, transitive}
 Q map      $P 1                     # {module: {effects, functions}}
 Q whatif   $P <fn> <Effect> [policy]  # pre-edit gate verdict (exit 1 if it would violate)
 Q diff     $P <baseline-prefix> 1   # per-function effect delta (exit 1 on a gained effect)
+Q reachable $P 1                    # what the app DOES at runtime: effects over the entry points
 Q parsepolicy <policy-file>         # the canonical §6.2 parse (what the gate will enforce)
 ```
 
@@ -78,7 +80,14 @@ want-JSON flag.
 - **`process.env.X` reads are `Env`** (a property read, not a call); `Date.now()` is `Clock`.
 - **DI-style code reads `Unknown` a lot, honestly**: a function-typed parameter or field being
   called is genuinely indeterminate (rimraf's injected-fs style yields many `Unknown`s — that's the
-  §4 contract, not noise).
+  §4 contract, not noise). When every visible call site passes a *named* function, the callback
+  resolves instead.
+- **`unknownWhy` names each direct Unknown's origin** (`call:jwt.sign`, `callback:param#0`,
+  `dispatch:<Type>`) — triage starts at the named site. Inheritors carry `Unknown` with no why;
+  follow the callgraph down to the root.
+- **`entryPoint: true` marks runtime-invoked roots** (Nest `@Get/@Post/…` handler methods, Next
+  `route.ts` HTTP exports and `middleware`) — their effects are never orphaned; `reachable` unions
+  over them. Pure entry points stay visible in the report.
 
 A worked policy (§6.2 — one rule per line, `#` comments):
 

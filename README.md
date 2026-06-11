@@ -103,7 +103,7 @@ read the Rust source".
 Young product (0.1.x): the analysis core, the gate, and the query surface are real,
 behaviorally tested (`node test.mjs`), **soundness-fuzzed with verified teeth** (`node fuzz.mjs` —
 spec §7.13: generated effect chains through every encoded call form, any silent-pure = red), and
-conformance-held. The npm classifier tier is small;
-entry-point detection and `unknownWhy` origins are not built yet. Cross-package report inheritance
-IS in (`CANDOR_DEPS`, joined by the spec §2 `hash`, version-trusted per §2.1). Not yet on npm —
-run from the clone.
+conformance-held. The npm classifier tier is
+deliberately curated and will keep growing case-by-case. Entry points (Nest/Next populations),
+`unknownWhy` origins, `reachable`, cross-package inheritance (`CANDOR_DEPS` + the spec §2 `hash`,
+version-trusted per §2.1), and `--allow-js` are all in. Not yet on npm — run from the clone.

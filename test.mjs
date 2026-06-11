@@ -266,5 +266,67 @@ export function buy(): void { charge(100); }`,
         buy3?.inferred.includes("Unknown") && !buy3?.inferred.includes("Net"), JSON.stringify(buy3));
 }
 
+// ── 12. entry points + reachable + unknownWhy + allow-js + import-alias edges ────────────────────
+{
+  const d = project({
+    "tsconfig.json": `{"compilerOptions":{"strict":true,"experimentalDecorators":true},"include":["src","app"]}`,
+    "src/deco.d.ts": `declare global { function __noop(): void; }
+export declare function Get(path?: string): MethodDecorator;`,
+    "src/ctl.ts": `import { Get } from "./deco.js";
+import { DatabaseSync } from "node:sqlite";
+export class Ctl {
+  @Get("/x") list(db: DatabaseSync): void { db.exec("SELECT 1 FROM t"); }
+  @Get("/pure") ping(): string { return "pong"; }
+}`,
+    "app/x/route.ts": `import * as netm from "node:net";
+export function GET(): void { netm.connect(443, "api.x.com"); }`,
+  });
+  const { report, prefix } = scan(d);
+  check("Nest-style @Get marks an entry point", entry(report, "src.ctl.Ctl.list")?.entryPoint === true);
+  check("a PURE entry point stays visible", entry(report, "src.ctl.Ctl.ping")?.entryPoint === true,
+        JSON.stringify(report.functions.map((e) => e.fn)));
+  check("a Next route handler is an entry point", entry(report, "app.x.route.GET")?.entryPoint === true);
+  const reach = JSON.parse(spawnSync("node", [path.join(HERE, "query.mjs"), "reachable", prefix, "1"],
+                                     { encoding: "utf8" }).stdout);
+  check("reachable unions effects over entry points (rust-shaped JSON)",
+        reach.entryPoints === 3 && reach.effects?.Db?.count === 1 && reach.effects?.Net?.count === 1,
+        JSON.stringify(reach));
+}
+{
+  const d = project({
+    "src/u.ts": `export function launder(x: unknown): void { (x as any)(); }
+export function recv(cb: () => void, other: string): void { cb(); }`,
+  });
+  const { report } = scan(d);
+  check("unknownWhy names the unresolvable callee", 
+        entry(report, "src.u.launder")?.unknownWhy?.some((w) => w.startsWith("call:")),
+        JSON.stringify(entry(report, "src.u.launder")));
+  check("unknownWhy names the opaque callback param",
+        entry(report, "src.u.recv")?.unknownWhy?.includes("callback:param#0"),
+        JSON.stringify(entry(report, "src.u.recv")));
+}
+{
+  const d = project({
+    "src/x.js": `import * as fsm from "node:fs";
+export function jsRead() { return fsm.readFileSync("/x"); }`,
+  });
+  const { report } = scan(d, "--allow-js");
+  check("--allow-js analyzes JS sources", entry(report, "src.x.jsRead")?.inferred.includes("Fs"),
+        JSON.stringify(report?.functions));
+}
+{
+  const d = project({
+    "src/e.ts": `import * as fsm from "node:fs";
+export class Loader { cfg = fsm.readFileSync("/cfg"); }`,
+    "src/m.ts": `import { Loader } from "./e.js";
+export function boot(): Loader { return new Loader(); }`,
+  });
+  const { report, cg } = scan(d);
+  check("an IMPORTED class's `new` edges through the alias to its ctor",
+        cg["src.m.boot"]?.includes("src.e.Loader.constructor")
+        && entry(report, "src.m.boot")?.inferred.includes("Fs") && !entry(report, "src.m.boot")?.unresolved,
+        JSON.stringify(cg));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

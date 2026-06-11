@@ -121,6 +121,19 @@ switch (cmd) {
     emit({ changes });
     process.exit(changes.some((c) => c.gained.length) ? 1 : 0);
   }
+  case "reachable": {
+    // what the app DOES at runtime: effects unioned over the entry points (SPEC §3.1; same JSON
+    // shape as the Rust engine: {entryPoints, effects: {Eff: {count, via}}}).
+    const [prefix] = args;
+    const fns = loadReport(prefix);
+    const roots = fns.filter((e) => e.entryPoint);
+    const byEff = {};
+    for (const e of roots) for (const x of e.inferred) (byEff[x] ??= []).push(e.fn);
+    emit({ entryPoints: roots.length,
+           effects: Object.fromEntries(Object.entries(byEff).sort()
+             .map(([k, v]) => [k, { count: v.length, via: v.sort() }])) });
+    break;
+  }
   case "whatif": {
     const [prefix, target, eff, maybePolicy] = args;
     const cg = loadCallgraph(prefix);
