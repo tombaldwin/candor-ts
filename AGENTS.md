@@ -1,0 +1,78 @@
+# Using candor-ts (instructions for an AI coding agent)
+
+You are working in a TypeScript project. **candor-ts** tells you, for every function, which side
+effects it can reach — network, filesystem, database, subprocess, env, clock — *including effects
+inherited transitively through any chain of calls across files*. Use it instead of tracing call
+chains by hand. The language-agnostic consumption contract is
+[candor-spec/AGENTS.md](https://github.com/tombaldwin/candor-spec/blob/main/AGENTS.md); this file is
+the TypeScript-specific production + query surface.
+
+## Produce a report
+
+Not yet on npm — run from a clone (needs node ≥ 20):
+
+```sh
+git clone --depth 1 https://github.com/tombaldwin/candor-ts /tmp/candor-ts 2>/dev/null \
+  || (cd /tmp/candor-ts && git pull -q)
+( cd /tmp/candor-ts && npm install --no-fund --no-audit )
+
+node /tmp/candor-ts/scan.mjs <project-dir>     # tsconfig.json honored; tests/node_modules excluded
+```
+
+This writes `<project-dir>/.candor/report.json` and `.callgraph.json` (override with
+`--out <prefix>`). Add `--policy <file>` (or set `CANDOR_POLICY`) to enforce a §6.2 policy over the
+scan: exit 1 on violation, exit 2 LOUDLY if the policy file is unreadable.
+
+**Report shape:** entries live in `.functions[]`, keyed **`fn`** — module-qualified, `.`-separated
+(`src.db.save` for `save()` in `src/db.ts`; class methods are `src.api.Client.send`) — with
+`inferred` (the full transitive set) / `direct` / `unresolved` / optional `hosts`/`cmds`/`paths`/
+`tables` (the literal surfaces). **Only effectful-or-unresolved functions appear in the report;
+pure functions are omitted** — a function present in the callgraph sidecar but absent from
+`.functions[]` is pure (as far as the engine resolved). In *neither* file = never analyzed
+(a test file? an unexported arrow inside an object literal?) — conclude nothing.
+
+## Query it (same names/shapes as the Rust and JVM engines — candor-spec §3.1)
+
+```sh
+Q="node /tmp/candor-ts/query.mjs"; P=".candor/report"
+$Q show     $P <fn-query> 1          # a function's effects (+ hosts/tables when visible)
+$Q where    $P <Effect>   1          # {effect, directly, inherited}
+$Q callers  $P <fn-query> 1          # the BLAST RADIUS: {of, direct, transitive} — works for pure fns
+$Q map      $P 1                     # {module: {effects, functions}}
+$Q whatif   $P <fn> <Effect> [policy]  # pre-edit gate verdict (exit 1 if it would violate)
+$Q diff     $P <baseline-prefix> 1   # per-function effect delta (exit 1 on a gained effect)
+$Q parsepolicy <policy-file>         # the canonical §6.2 parse (what the gate will enforce)
+```
+
+Name queries resolve exact > segment-suffix (`db.save` matches `src.db.save`, never
+`src.db.save_all`) > substring — the same ladder as the other engines. The trailing `1` is the
+want-JSON flag.
+
+- **Blast radius of editing a function** → `callers <fn>` (NOT its `inferred`, which is what the
+  function itself does). Works pre-edit for a still-pure function.
+- **Decide BEFORE you edit** → `whatif <fn> <Effect> [policy]` — every transitive caller gains the
+  effect, crossed with the policy.
+- **After you change code** → `diff` against a baseline report; a gained `Net`/`Db`/`Exec`/`Fs` you
+  didn't intend is a regression in your change.
+
+## TypeScript-specific things to know
+
+- **Arrow-const functions are first-class**: `export const f = async () => …` is analyzed and named
+  like a declaration; calls to it are edges. An arrow assigned inside a function body becomes its
+  own unit (`src.x.helper`) — effects still propagate to the enclosing caller through the edge.
+- **The classifier is curated** (node builtins + a small npm tier: axios/got/node-fetch/undici/ws,
+  pg/mysql2/mongodb/redis/knex, execa/cross-spawn, fs-extra/rimraf/glob, dotenv, winston/pino).
+  An unlisted package contributes nothing — an effect through it is invisible, not `Unknown`; check
+  the κ table in scan.mjs before concluding "no effect".
+- **`process.env.X` reads are `Env`** (a property read, not a call); `Date.now()` is `Clock`.
+- **DI-style code reads `Unknown` a lot, honestly**: a function-typed parameter or field being
+  called is genuinely indeterminate (rimraf's injected-fs style yields many `Unknown`s — that's the
+  §4 contract, not noise).
+
+## The trust rule — do not skip this
+
+`inferred` is authoritative for what candor-ts resolved. When `unresolved` is true (or `Unknown` is
+present — a callback value, an `any`-typed callee, resolution landing on a type rather than a
+body), the set may be incomplete: read the source for *that* function before relying on it. Never
+conclude a function is pure while it is marked unresolved. The literal surfaces (`hosts`/`tables`/
+`cmds`/`paths`) are the decidable subset only — absence is never a claim of absence.
