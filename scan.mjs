@@ -82,6 +82,12 @@ if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
 }
 if (fileNames.length === 0) { console.error(`candor-ts: no TypeScript sources under ${target}`); process.exit(2); }
 if (!outPrefix) outPrefix = path.join(rootDir, ".candor", "report");
+// The scanned package's name — the first half of the cross-package join key (SPEC §2 `hash`).
+let pkgName = path.basename(rootDir);
+try {
+  const pj = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
+  if (pj.name) pkgName = pj.name;
+} catch {}
 fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: true });
 
 // A target with declared dependencies but no node_modules resolves almost nothing — the scan
@@ -107,6 +113,40 @@ fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: true });
                   "db calls will not resolve. Run `npx prisma generate` in the target first.");
   }
 }
+// CANDOR_DEPS (SPEC §2): sibling/dependency reports whose effects a call into that package
+// inherits — the cross-package join the workspace probe measured as missing (trpc client → server:
+// zero edges). The key is the report's `hash` (`package#LocalName` — derivable from BOTH a source
+// scan and a .d.ts resolution). Version-aware trust (§2.1): a report from a DIFFERENT engine
+// version is downgraded to Unknown rather than silently trusted. Duplicate hashes (two same-named
+// exports in one package) UNION — a sound over-approximation, documented.
+const ENGINE_VERSION = "candor-ts-0.1.0";
+const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:[], tables:[]}
+{
+  const spec = process.env.CANDOR_DEPS ?? "";
+  const files = [];
+  for (const tok of spec.split(/[\s:,]+/).filter(Boolean)) {
+    try {
+      if (fs.statSync(tok).isDirectory())
+        for (const f of fs.readdirSync(tok)) if (f.endsWith(".json") && !f.endsWith(".callgraph.json")) files.push(path.join(tok, f));
+      if (fs.statSync(tok).isFile()) files.push(tok);
+    } catch { console.error(`candor-ts: CANDOR_DEPS entry unreadable, skipped: ${tok}`); }
+  }
+  for (const f of files) {
+    try {
+      const d = JSON.parse(fs.readFileSync(f, "utf8"));
+      const stale = (d.candor?.version ?? ENGINE_VERSION) !== ENGINE_VERSION;
+      for (const e of d.functions ?? []) {
+        if (!e.hash) continue;
+        const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), hosts: [], cmds: [], paths: [], tables: [] };
+        for (const x of stale ? ["Unknown"] : e.inferred ?? []) cell.inferred.add(x);
+        if (!stale) for (const m of ["hosts", "cmds", "paths", "tables"])
+          for (const v of e[m] ?? []) if (!cell[m].includes(v)) cell[m].push(v);
+        crossDeps.set(e.hash, cell);
+      }
+    } catch { console.error(`candor-ts: CANDOR_DEPS report unparsable, skipped: ${f}`); }
+  }
+}
+
 const program = ts.createProgram(fileNames, compilerOptions);
 const checker = program.getTypeChecker();
 const projectFiles = new Set(fileNames.map((f) => path.resolve(f)));
@@ -270,8 +310,8 @@ for (const sf of sources) {
       const ctorQual = `${mod}.${node.name.text}.constructor`;
       if (!fns.has(ctorQual)) {
         const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
-        fns.set(ctorQual, { direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
-                            cmds: new Set(), paths: new Set(),
+        fns.set(ctorQual, { local: `${node.name.text}.constructor`, direct: new Set(), edges: new Set(),
+                            hosts: new Set(), tables: new Set(), cmds: new Set(), paths: new Set(),
                             loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
       }
       nodeName.set(node, ctorQual);
@@ -280,7 +320,7 @@ for (const sf of sources) {
     if (n) {
       const qual = `${mod}.${n}`;
       const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
-      fns.set(qual, { direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
+      fns.set(qual, { local: n, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
                       cmds: new Set(), paths: new Set(),
                       loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
       nodeName.set(node, qual);
@@ -412,6 +452,22 @@ function visitCalls(node) {
             const lit = firstStringLiteral(node);
             if (lit && /[\/\\]|^[.~]/.test(lit)) rec.paths.add(lit); // path-shaped literals only
           }
+          // CANDOR_DEPS: an unclassified call into a package with a loaded sibling report inherits
+          // that function's recorded transitive effects (+ literal surfaces) by `hash`.
+          if (!eff && crossDeps.size > 0 && !mod.startsWith("<")) {
+            let localTail = decl.name ? decl.name.getText() : null;
+            const owner3 = decl.parent && decl.parent.name ? decl.parent.name.getText() : null;
+            if (localTail && owner3 && (ts.isMethodSignature(decl) || ts.isMethodDeclaration(decl) || ts.isPropertySignature(decl)))
+              localTail = `${owner3}.${localTail}`;
+            const hit = localTail && crossDeps.get(`${mod}#${localTail}`);
+            if (hit) {
+              for (const x of hit.inferred) rec.direct.add(x);
+              for (const v of hit.hosts) rec.hosts.add(v);
+              for (const v of hit.cmds) rec.cmds.add(v);
+              for (const v of hit.paths) rec.paths.add(v);
+              for (const v of hit.tables) rec.tables.add(v);
+            }
+          }
           // unmatched external = (OPAQUE): contributes nothing — the curated-κ caveat C1
         }
       }
@@ -490,6 +546,7 @@ for (const [name, rec] of fns) {
   const entry = {
     fn: name,
     loc: rec.loc,
+    hash: `${pkgName}#${rec.local}`, // SPEC §2: the cross-package join key (package + local tail)
     inferred: inf,
     direct: [...rec.direct].sort(),
     declared: [],

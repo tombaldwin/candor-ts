@@ -35,6 +35,13 @@ pure functions are omitted** — a function present in the callgraph sidecar but
 `.functions[]` is pure (as far as the engine resolved). In *neither* file = never analyzed
 (a test file? an unexported arrow inside an object literal?) — conclude nothing.
 
+**Multi-package (monorepos / private deps):** point `CANDOR_DEPS` at the dependencies' reports
+(a path list, or a directory of `*.json`); an unclassified call into a package with a loaded
+report inherits that function's recorded transitive effects and literal surfaces, joined by the
+report's `hash` (`package#LocalName`). A report produced by a different candor-ts version is
+downgraded to `Unknown` rather than silently trusted (spec §2.1). Caveat: a type-only boundary
+(`import type` …, the tRPC style) has no runtime calls to inherit through — nothing to join.
+
 ## Query it (same names/shapes as the Rust and JVM engines — candor-spec §3.1)
 
 ```sh

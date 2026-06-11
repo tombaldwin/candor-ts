@@ -220,5 +220,51 @@ export class Svc {
         e?.inferred.includes("Db") && e?.tables?.includes("user"), JSON.stringify(e));
 }
 
+// ── 11. cross-package inheritance (CANDOR_DEPS, spec §2 hash) ─────────────────────────────────────
+{
+  // the DEPENDENCY, scanned from source — its report carries hashes (pkg#LocalName)
+  const dep = project({
+    "package.json": `{"name": "billing-lib"}`,
+    "src/pay.ts": `import * as netm from "node:net";
+export function charge(amount: number): void { netm.connect(443, "api.stripe.com"); }`,
+  });
+  const depScan = scan(dep);
+  check("producer emits the spec §2 hash",
+        entry(depScan.report, "src.pay.charge")?.hash === "billing-lib#charge",
+        JSON.stringify(entry(depScan.report, "src.pay.charge")));
+
+  // the CONSUMER: imports billing-lib via node_modules (a d.ts — the dependency's source is not here)
+  const app = project({
+    "package.json": `{"name": "shop", "dependencies": {"billing-lib": "1.0.0"}}`,
+    "node_modules/billing-lib/package.json": `{"name":"billing-lib","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/billing-lib/index.d.ts": `export declare function charge(amount: number): void;`,
+    "node_modules/billing-lib/index.js": ``,
+    "src/checkout.ts": `import { charge } from "billing-lib";
+export function buy(): void { charge(100); }`,
+  });
+  const r1 = spawnSync("node", [path.join(HERE, "scan.mjs"), app], { encoding: "utf8" });
+  const rep1 = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  check("without CANDOR_DEPS the cross-package call is invisible",
+        entry(rep1, "src.checkout.buy") == null, JSON.stringify(rep1.functions));
+  const r2 = spawnSync("node", [path.join(HERE, "scan.mjs"), app],
+                       { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(dep, ".candor", "report.json") } });
+  const rep2 = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  const buy = entry(rep2, "src.checkout.buy");
+  check("with CANDOR_DEPS the consumer inherits the dep's effects + hosts",
+        buy?.inferred.includes("Net") && buy?.hosts?.includes("api.stripe.com"), JSON.stringify(buy));
+
+  // version trust (§2.1): a report from a different engine version downgrades to Unknown
+  const stale = JSON.parse(fs.readFileSync(path.join(dep, ".candor", "report.json"), "utf8"));
+  stale.candor.version = "candor-ts-0.0.0-other";
+  const stalePath = path.join(dep, "stale.json");
+  fs.writeFileSync(stalePath, JSON.stringify(stale));
+  spawnSync("node", [path.join(HERE, "scan.mjs"), app],
+            { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: stalePath } });
+  const rep3 = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  const buy3 = entry(rep3, "src.checkout.buy");
+  check("a different-version dep report downgrades to Unknown (never silently trusted)",
+        buy3?.inferred.includes("Unknown") && !buy3?.inferred.includes("Net"), JSON.stringify(buy3));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

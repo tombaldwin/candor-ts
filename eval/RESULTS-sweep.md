@@ -140,10 +140,15 @@ entry points (the `entryPoint` flag is still unimplemented engine-wide).
 **Monorepo (trpc, npm workspaces):** per-package scanning just works (server: 240 fns/83 files,
 ~1s; the framework's generic/middleware style reads honestly Unknown-heavy with `Net` on its HTTP
 layer). The measured gap: **zero cross-package edges** — the client package's calls into
-`@trpc/server` resolve into the workspace symlink, an unlisted external package, invisible. This is
-the cross-package report-inheritance gap (the Rust `CANDOR_DEPS`/hash mechanism, spec §2) — already
-on the Status list, now with a number attached. It is the TS engine's biggest remaining structural
-gap for real codebases.
+`@trpc/server` resolve into the workspace symlink, an unlisted external package, invisible. This was
+the cross-package report-inheritance gap (the Rust `CANDOR_DEPS`/hash mechanism, spec §2) — **built
+the same day**: producers emit `hash` (`package#LocalName`, derivable from both a source scan and a
+.d.ts resolution), consumers load sibling reports via `CANDOR_DEPS` and inherit effects + literal
+surfaces, different-version reports downgrade to `Unknown` (§2.1). Verified by a controlled
+behavioral fixture (dep scanned from source; consumer importing only its .d.ts; with/without/
+stale-version all asserted). The honest re-read of the tRPC number: its client→server boundary is
+almost entirely `import type` — type-flow, not call-flow — so there was little to inherit *there by
+design*; the mechanism matters for monorepos whose packages call each other at runtime.
 
 ## Honest bounds
 
