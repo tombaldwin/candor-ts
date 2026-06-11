@@ -27,8 +27,12 @@ a function in my message, use that. State your choice.
 STEP 2 — MANUAL TRACE (commit before looking at any tool output). From source alone, answer:
 "Which functions in this project would be affected if <target> changed its behavior — i.e. every
 TRANSITIVE caller, across all files?" Work as you normally would (grep, read). Write the complete
-list to /tmp/candor-manual.txt — one function per line, named the way the callgraph keys them:
-module-qualified with "." segments (src.db.save for save() in src/db.ts). Also note roughly how
+list to ./candor-manual-<target>.txt in the repo root (NOT a fixed /tmp name — repeated runs must
+not cross-contaminate) — one function per line, named the way the callgraph keys them:
+module-qualified with "." segments (src.db.save for save() in src/db.ts; class members
+src.api.Client.send, constructors src.api.Client.constructor; a NESTED named function is keyed flat
+under its module, while an anonymous arrow — including one wrapped in a cast — folds into its
+enclosing function). Also note roughly how
 many file-reads/searches it took you.
 
 STEP 3 — Run candor-ts:
@@ -40,7 +44,9 @@ It writes .candor/report.json (per-function transitive effects) and .candor/repo
 
 STEP 4 — Compute the tool's answer from the callgraph sidecar (plain JSON — no magic): write a
 ~10-line script that loads the callgraph, builds the reverse edge map, and BFS's from the target to
-collect every transitive caller. Save to /tmp/candor-tool.txt.
+collect every transitive caller. Save to ./candor-tool-<target>.txt. (Note .candor/report.json's `functions` is an ARRAY of
+{fn, inferred, …} entries; the callgraph sidecar is a keyed map — don't index the report like a
+map.)
 
 STEP 5 — Diff and VERIFY. Compare the two lists.
 - For each function candor found that your manual trace MISSED: reconstruct the call chain from the

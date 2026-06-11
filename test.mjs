@@ -110,5 +110,27 @@ export function harness(): void { fsm.rmSync("/danger"); }`,
         JSON.stringify(report.functions.map((e) => e.fn)));
 }
 
+// ── 6. class arrow-properties + constructors are units (the got dogfood holes) ───────────────────
+{
+  const d = project({
+    "src/h.ts": `import * as fsm from "node:fs";
+export class Handler {
+  private readonly onError = (): void => { fsm.rmSync("/tmp/x"); };
+  constructor() { fsm.readFileSync("/cfg"); }
+  fire(): void { this.onError(); }
+}
+export function boot(): Handler { return new Handler(); }`,
+  });
+  const { report, cg } = scan(d);
+  check("class arrow-property is a unit with its effects",
+        entry(report, "src.h.Handler.onError")?.inferred.includes("Fs"),
+        JSON.stringify(report.functions.map((e) => e.fn)));
+  check("calling an arrow-property edges to it", cg["src.h.Handler.fire"]?.includes("src.h.Handler.onError"));
+  check("constructor is a unit; `new` edges to it",
+        cg["src.h.boot"]?.includes("src.h.Handler.constructor")
+        && entry(report, "src.h.boot")?.inferred.includes("Fs"),
+        JSON.stringify(cg));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

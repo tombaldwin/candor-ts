@@ -185,6 +185,19 @@ function localName(node) {
   if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
       && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer)))
     return node.name.text;
+  // CLASS ARROW-PROPERTY methods (`private readonly onError = (e) => …`) — the event-handler idiom.
+  // Without this they were not units AT ALL: no callgraph key (a §2.2 violation), body never walked
+  // (a silent-pure hole — worse than Unknown), found by the PROVE-IT dogfood on got, where the
+  // request pipeline's error handlers live in exactly this form.
+  if (ts.isPropertyDeclaration(node) && ts.isClassDeclaration(node.parent) && node.parent.name
+      && node.initializer
+      && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer)))
+    return `${node.parent.name.text}.${node.name.getText()}`;
+  // Constructors are units too (`new X()` edges to `X.constructor`): a constructor that wires
+  // effectful state (got's Request reassigns this.flush to an effectful closure in its ctor) was
+  // invisible — same dogfood.
+  if (ts.isConstructorDeclaration(node) && ts.isClassDeclaration(node.parent) && node.parent.name)
+    return `${node.parent.name.text}.constructor`;
   return null;
 }
 for (const sf of sources) {
@@ -198,7 +211,8 @@ for (const sf of sources) {
                       cmds: new Set(), paths: new Set(),
                       loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
       nodeName.set(node, qual);
-      if (ts.isVariableDeclaration(node) && node.initializer) nodeName.set(node.initializer, qual);
+      if ((ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)) && node.initializer)
+        nodeName.set(node.initializer, qual);
     }
     ts.forEachChild(node, collect);
   })(sf);
