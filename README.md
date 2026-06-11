@@ -10,6 +10,8 @@ spec documents alone** (SPEC.md, SEMANTICS.md, CLASSIFIER.md) to answer one ques
 contract, closure attribution, transitive propagation/recursion, method receivers, and scheduler
 attribution.
 
+The candor family in five minutes: [candor.poly.io](https://candor.poly.io).
+
 ```sh
 npm install
 node scan.mjs Cases.ts out
