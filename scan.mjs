@@ -1,49 +1,126 @@
 #!/usr/bin/env node
 /**
- * candor-ts — a minimal TypeScript implementation slice of candor-spec 0.3.
+ * candor-ts — the TypeScript implementation of candor-spec 0.3.
  *
- * Built ONLY from the spec (SPEC.md + SEMANTICS.md + CLASSIFIER.md) as the derivability proof:
- * resolve each call via the TypeScript compiler API (CLASSIFIER §1: resolve, don't pattern-match),
- * classify resolved external targets by a curated κ (§3 classifier; the I/O boundary), record local
- * edges, propagate to the least fixpoint (SEMANTICS §5), mark unresolvable calls Unknown (SPEC §4 —
- * an `any`-typed callee or a function-valued parameter/field IS the "could not resolve" case), and
- * emit the §2 report envelope + the §2.2 call-graph sidecar (every analyzed function a key).
+ * Origin (kept honest): this engine began as the clean-room derivability proof — a single-file
+ * slice written from SPEC.md/SEMANTICS.md/CLASSIFIER.md alone, frozen as that claim in git history
+ * (`a29b152`). Product growth since (multi-file projects, the literal surfaces, the policy gate)
+ * is spec-implemented but post-hoc; its guarantee is the cross-engine conformance suite.
  *
- * Usage: node scan.mjs <file.ts> <out-prefix>
- *   writes <out-prefix>.json (report) and <out-prefix>.callgraph.json
+ * Resolve each call via the TypeScript compiler API (CLASSIFIER §1: resolve, don't pattern-match),
+ * classify resolved external targets by the curated κ (§3; the I/O boundary), record local edges,
+ * propagate to the least fixpoint (SEMANTICS §5), mark unresolvable calls Unknown (SPEC §4 — an
+ * `any`-typed callee or a function-valued parameter/field IS the "could not resolve" case), and
+ * emit the §2 report envelope + the §2.2 call-graph sidecar (every analyzed function a key). With
+ * --policy (or CANDOR_POLICY), evaluate the §6.2 gate (AS-EFF-006/008/009) over the result: exit 1
+ * on violation, exit 2 LOUDLY on an unreadable policy.
+ *
+ * Usage: node scan.mjs <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>]
+ *        node scan.mjs <file.ts> <out-prefix>                  (legacy positional form)
+ *   writes <prefix>.json (report) and <prefix>.callgraph.json
  */
 import ts from "typescript";
 import fs from "node:fs";
+import path from "node:path";
+import { parsePolicy, evaluatePolicy } from "./policy.mjs";
 
-const [, , srcPath, outPrefix] = process.argv;
-if (!srcPath || !outPrefix) {
-  console.error("usage: node scan.mjs <file.ts> <out-prefix>");
+// ---- args ----------------------------------------------------------------------------------------
+const argv = process.argv.slice(2);
+if (argv.length === 0) {
+  console.error("usage: node scan.mjs <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>]");
   process.exit(2);
 }
+const target = argv[0];
+let outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null;
+for (let i = 1; i < argv.length; i++) {
+  if (argv[i] === "--out") outPrefix = argv[++i];
+  else if (argv[i] === "--policy") policyPath = argv[++i];
+  else if (!argv[i].startsWith("--") && !outPrefix) outPrefix = argv[i]; // legacy positional prefix
+}
 
-const program = ts.createProgram([srcPath], {
+// ---- project discovery (a dir, a single file, or a tsconfig) --------------------------------------
+function isTestPath(p) {
+  return /(^|\/)(node_modules|__tests__|tests?|spec)(\/|$)/.test(p) || /\.(test|spec)\.[mc]?tsx?$/.test(p);
+}
+let rootDir, fileNames, compilerOptions = {
   target: ts.ScriptTarget.ES2022,
   module: ts.ModuleKind.NodeNext,
   moduleResolution: ts.ModuleResolutionKind.NodeNext,
   types: ["node"],
   strict: true,
-});
-const checker = program.getTypeChecker();
-const sf = program.getSourceFile(srcPath);
+};
+function fromTsconfig(cfgPath, baseDir) {
+  const cfg = ts.readConfigFile(cfgPath, ts.sys.readFile);
+  const parsed = ts.parseJsonConfigFileContent(cfg.config ?? {}, ts.sys, baseDir);
+  compilerOptions = { ...parsed.options, types: parsed.options.types ?? ["node"] };
+  return parsed.fileNames.filter((f) => !isTestPath(path.relative(baseDir, f)));
+}
+const stat = fs.existsSync(target) ? fs.statSync(target) : null;
+if (!stat) { console.error(`candor-ts: no such path: ${target}`); process.exit(2); }
+if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
+  rootDir = path.dirname(path.resolve(target));
+  fileNames = fromTsconfig(path.resolve(target), rootDir);
+} else if (stat.isFile()) {
+  rootDir = path.dirname(path.resolve(target));
+  fileNames = [path.resolve(target)];
+} else {
+  rootDir = path.resolve(target);
+  const tsconfig = path.join(rootDir, "tsconfig.json");
+  if (fs.existsSync(tsconfig)) {
+    fileNames = fromTsconfig(tsconfig, rootDir);
+  } else {
+    fileNames = [];
+    (function walk(d) {
+      for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, ent.name);
+        if (isTestPath(path.relative(rootDir, p))) continue;
+        if (ent.isDirectory()) walk(p);
+        else if (/\.[mc]?tsx?$/.test(ent.name) && !ent.name.endsWith(".d.ts")) fileNames.push(p);
+      }
+    })(rootDir);
+  }
+}
+if (fileNames.length === 0) { console.error(`candor-ts: no TypeScript sources under ${target}`); process.exit(2); }
+if (!outPrefix) outPrefix = path.join(rootDir, ".candor", "report");
+fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: true });
 
-// κ — the curated classifier (CLASSIFIER §2: tag the dispatch/execution boundary, not builders).
-// Keyed on the resolved declaration's module + member name. Std-only core for the conformance scope.
+const program = ts.createProgram(fileNames, compilerOptions);
+const checker = program.getTypeChecker();
+const projectFiles = new Set(fileNames.map((f) => path.resolve(f)));
+const sources = program.getSourceFiles().filter((f) => projectFiles.has(path.resolve(f.fileName)));
+
+// ---- κ — the curated classifier (CLASSIFIER §2: the dispatch/execution boundary, not builders) ----
+// Node builtins + a curated npm tier (the same under-report-and-say-so posture as the crate table:
+// an unlisted package contributes nothing — never a guess).
 function kappa(moduleName, member) {
   if (/^(node:)?fs(\/promises)?$/.test(moduleName)) return "Fs";
-  if (/^(node:)?net$/.test(moduleName)) return "Net";
-  if (/^(node:)?http s?$/.test(moduleName) || /^(node:)?https?$/.test(moduleName)) return "Net";
+  if (/^(node:)?(net|dgram|tls|http2?|https)$/.test(moduleName)) return "Net";
   if (/^(node:)?child_process$/.test(moduleName)) return "Exec";
-  if (/^(node:)?dgram$/.test(moduleName)) return "Net";
-  if (/^(node:)?sqlite$/.test(moduleName) || /^(pg|sqlite3|better-sqlite3|mysql2?)$/.test(moduleName)) return "Db";
+  if (/^(node:)?sqlite$/.test(moduleName)) return "Db";
+  // the curated npm tier
+  if (/^(axios|got|node-fetch|undici|ws|socket\.io(-client)?|nodemailer)$/.test(moduleName)) return "Net";
+  if (/^(pg|mysql2?|mongodb|ioredis|redis|sqlite3|better-sqlite3|knex)$/.test(moduleName)) return "Db";
+  if (/^(execa|cross-spawn|shelljs)$/.test(moduleName)) return "Exec";
+  if (/^(fs-extra|graceful-fs|rimraf|glob|chokidar)$/.test(moduleName)) return "Fs";
+  if (/^dotenv$/.test(moduleName)) return "Env";
+  if (/^(winston|pino|bunyan|npmlog)$/.test(moduleName)) return "Log";
   return null;
 }
 
-// ---- the literal surfaces (SPEC §2 hosts/cmds/paths/tables): the statically-decidable subset -----
+// The module a declaration came from: a project file → "<local>", @types/node → the builtin name,
+// node_modules/<pkg> → the package name, the ES lib → "<es-lib>".
+function declModule(decl) {
+  const f = path.resolve(decl.getSourceFile().fileName);
+  if (projectFiles.has(f)) return "<local>";
+  let m = f.match(/@types\/node\/(\w+?)\.d\.ts$/);
+  if (m) return m[1];
+  if (/typescript\/lib\/lib\..*\.d\.ts$/.test(f)) return "<es-lib>";
+  m = f.match(/node_modules\/(@[^/]+\/[^/]+|[^/]+)\//);
+  if (m) return m[1];
+  return f;
+}
+
+// ---- the literal surfaces (SPEC §2 hosts/cmds/paths/tables): the statically-decidable subset ------
 // Read ONLY from string literals at a classified call — informative, never complete, never inferred.
 function firstStringLiteral(node) {
   for (const a of node.arguments ?? []) {
@@ -87,44 +164,56 @@ function tablesInSql(sql) {
   return out;
 }
 
-// The module specifier a declaration came from ("node:fs" via @types/node fs.d.ts → "fs").
-function declModule(decl) {
-  const f = decl.getSourceFile().fileName;
-  const m = f.match(/@types\/node\/(\w+?)\.d\.ts$/);
-  if (m) return m[1];
-  const amb = decl.getSourceFile().fileName.match(/typescript\/lib\/lib\..*\.d\.ts$/);
-  if (amb) return "<es-lib>";
-  return f === sf.fileName ? "<local>" : f;
+// ---- pass 1: collect the analyzed functions across the project (SEMANTICS §2's F) -----------------
+// Names are MODULE-QUALIFIED (`src.db.save` for save() in src/db.ts; separators → "." so the §6.2
+// segment-scope rules apply naturally: `deny Net db` matches the db module). A single-file scan
+// qualifies by the file's basename (`Cases.union_a`).
+const fns = new Map();           // qualified name -> { direct, edges, hosts, tables, cmds, paths, loc }
+const nodeName = new WeakMap();  // declaration node -> qualified name
+function moduleOf(sf) {
+  const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?tsx?$/, "");
+  return rel.split(path.sep).join(".");
 }
-
-// ---- pass 1: collect the analyzed functions (named fns + class methods; SEMANTICS §2's F) --------
-const fns = new Map(); // name -> { node, direct:Set, edges:Set, hosts:Set, tables:Set, loc }
-function fnName(node) {
+function localName(node) {
   if (ts.isFunctionDeclaration(node) && node.name) return node.name.text;
   if (ts.isMethodDeclaration(node) && ts.isClassDeclaration(node.parent) && node.parent.name)
     return `${node.parent.name.text}.${node.name.getText()}`;
+  // `const f = (…) => …` / `const f = function (…) {…}` at any binding site — the dominant style in
+  // real TS (rimraf's whole API is arrow consts; the first dogfood analyzed 0 of 50 files without
+  // this). The VARIABLE name is the function's name; nodeName is ALSO set on the initializer so a
+  // resolved call (whose sig.declaration is the arrow itself) finds the same qualified name.
+  if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+      && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer)))
+    return node.name.text;
   return null;
 }
-function collect(node) {
-  const n = fnName(node);
-  if (n) {
-    const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
-    fns.set(n, { node, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(), cmds: new Set(), paths: new Set(), loc: `${srcPath}:${line + 1}:${character + 1}` });
-  }
-  ts.forEachChild(node, collect);
+for (const sf of sources) {
+  const mod = moduleOf(sf);
+  (function collect(node) {
+    const n = localName(node);
+    if (n) {
+      const qual = `${mod}.${n}`;
+      const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
+      fns.set(qual, { direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
+                      cmds: new Set(), paths: new Set(),
+                      loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
+      nodeName.set(node, qual);
+      if (ts.isVariableDeclaration(node) && node.initializer) nodeName.set(node.initializer, qual);
+    }
+    ts.forEachChild(node, collect);
+  })(sf);
 }
-collect(sf);
 
 // nearest enclosing analyzed function (closures attribute to it — SEMANTICS §2)
 function enclosing(node) {
   for (let p = node; p; p = p.parent) {
-    const n = fnName(p);
-    if (n && fns.has(n)) return n;
+    const n = nodeName.get(p);
+    if (n) return n;
   }
   return null;
 }
 
-// ---- pass 2: per call site, the (CLASSIFY)/(EDGE)/(UNKNOWN) resolution of SEMANTICS §4 -----------
+// ---- pass 2: per call site, the (CLASSIFY)/(EDGE)/(UNKNOWN) resolution of SEMANTICS §4 ------------
 function visitCalls(node) {
   if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
     const owner = enclosing(node);
@@ -133,14 +222,13 @@ function visitCalls(node) {
       const sig = checker.getResolvedSignature(node);
       const decl = sig && sig.declaration;
       if (!decl) {
-        // unresolvable call → Unknown, never silent-pure (SPEC §4)
-        rec.direct.add("Unknown");
+        rec.direct.add("Unknown"); // unresolvable call → Unknown, never silent-pure (SPEC §4)
       } else {
         const mod = declModule(decl);
         if (mod === "<local>") {
-          const target = fnName(decl);
-          if (target && fns.has(target)) {
-            rec.edges.add(target); // (EDGE)
+          const targetName = nodeName.get(decl);
+          if (targetName) {
+            rec.edges.add(targetName); // (EDGE) — cross-FILE edges resolve the same way
           } else if (!ts.isArrowFunction(decl) && !ts.isFunctionExpression(decl)) {
             // Resolution landed on a TYPE (a function-type annotation, a method/property signature),
             // not a body: the concrete callable is genuinely indeterminate — a callback value, a
@@ -158,8 +246,7 @@ function visitCalls(node) {
           const member = decl.name ? decl.name.getText() : "";
           const eff = kappa(mod, member); // (CLASSIFY)
           if (eff) rec.direct.add(eff);
-          // the literal surfaces, read only at a CLASSIFIED call (SPEC §2): the Net host or the
-          // Db tables a string-literal argument names; a runtime-computed value yields nothing.
+          // the literal surfaces, read only at a CLASSIFIED call (SPEC §2)
           if (eff === "Net") {
             const lit = firstStringLiteral(node);
             const h = lit && hostLiteral(lit);
@@ -196,9 +283,9 @@ function visitCalls(node) {
   }
   ts.forEachChild(node, visitCalls);
 }
-visitCalls(sf);
+for (const sf of sources) visitCalls(sf);
 
-// ---- pass 3: the least fixpoint (SEMANTICS §5a) ---------------------------------------------------
+// ---- pass 3: the least fixpoint (SEMANTICS §5a), effects + the literal surfaces -------------------
 const inferred = new Map([...fns.keys()].map((k) => [k, new Set(fns.get(k).direct)]));
 let changed = true;
 while (changed) {
@@ -210,8 +297,6 @@ while (changed) {
         if (!mine.has(e)) { mine.add(e); changed = true; }
   }
 }
-
-// literal surfaces propagate along the same edges as effects (SEMANTICS §5)
 for (const m of ["hosts", "tables", "cmds", "paths"]) {
   let moved = true;
   while (moved) {
@@ -244,9 +329,28 @@ for (const [name, rec] of fns) {
   if (inf.includes("Fs") && rec.paths.size) entry.paths = [...rec.paths].sort();
   functions.push(entry);
 }
-const envelope = { candor: { version: "candor-ts-0.0.1", toolchain: `node-${process.versions.node}`, spec: "0.3" }, functions };
+const envelope = { candor: { version: "candor-ts-0.1.0", toolchain: `node-${process.versions.node}`, spec: "0.3" }, functions };
 fs.writeFileSync(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
 const cg = {};
 for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
 fs.writeFileSync(`${outPrefix}.callgraph.json`, JSON.stringify(cg, null, 1));
-console.error(`candor-ts: wrote ${functions.length} effectful functions to ${outPrefix}.json`);
+console.error(`candor-ts: wrote ${functions.length} effectful functions (${fns.size} analyzed, ${sources.length} files) to ${outPrefix}.json`);
+
+// ---- the standing §6.2 gate (--policy / CANDOR_POLICY) --------------------------------------------
+if (policyPath) {
+  let text;
+  try {
+    text = fs.readFileSync(policyPath, "utf8");
+  } catch {
+    // a set-but-unreadable policy must be LOUD — silently passing would let a violation ship
+    console.error(`candor-ts: policy ${policyPath} could not be read; gate NOT enforced`);
+    process.exit(2);
+  }
+  const v = evaluatePolicy(parsePolicy(text), functions, cg);
+  for (const line of v) console.log(line);
+  if (v.length) {
+    console.error(`candor-ts: ${v.length} policy violation(s)`);
+    process.exit(1);
+  }
+  console.error("candor-ts: policy ✓");
+}

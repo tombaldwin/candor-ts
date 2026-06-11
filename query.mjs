@@ -18,62 +18,7 @@
  */
 import fs from "node:fs";
 
-const EFFECTS = ["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard"];
-const ALLOW_EFFECTS = new Set(["Net", "Exec", "Fs", "Db"]); // the four literal surfaces (§6.2)
-
-// ---- the §6.2 policy grammar (deny/pure/allow/forbid; # comments; malformed lines warned) --------
-export function parsePolicy(text) {
-  const deny = [], allow = [], forbid = [];
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.split("#")[0].trim();
-    if (!line) continue;
-    const t = line.split(/\s+/);
-    const warn = (why) => console.error(`candor: ignoring policy rule (${why}): ${line}`);
-    if (t[0] === "deny") {
-      // tokens that name an effect (or Unknown) join the forbidden set; the FIRST non-effect token
-      // is the scope and ENDS the rule. A deny naming no effect is dropped (it is NOT a pure rule).
-      const effects = [];
-      let scope = "";
-      for (const tok of t.slice(1)) {
-        if (EFFECTS.includes(tok) || tok === "Unknown") effects.push(tok);
-        else { scope = tok; break; }
-      }
-      if (effects.length === 0) { warn("deny names no known effect"); continue; }
-      deny.push({ effects: effects.sort(), scope });
-    } else if (t[0] === "pure") {
-      deny.push({ effects: [], scope: t[1] ?? "" }); // pure = deny-everything (empty set)
-    } else if (t[0] === "allow") {
-      if (t.length < 3) { warn("allow names no values"); continue; }
-      if (!ALLOW_EFFECTS.has(t[1])) { warn("allow supports only Net hosts / Exec commands / Fs paths / Db tables"); continue; }
-      let scope = "", vi = 2;
-      if (t[2] === "in") { scope = t[3] ?? ""; vi = 4; }
-      const values = t.slice(vi);
-      if (values.length === 0) { warn("allow names no values"); continue; }
-      allow.push({ effect: t[1], scope, values: values.sort() });
-    } else if (t[0] === "forbid") {
-      // forbid A -> B
-      const m = line.match(/^forbid\s+(\S+)\s*->\s*(\S+)$/);
-      if (!m) { warn("malformed forbid (expected `forbid A -> B`)"); continue; }
-      forbid.push({ from: m[1], to: m[2] });
-    } else {
-      warn("unknown rule kind");
-    }
-  }
-  return { deny, allow, forbid };
-}
-
-// ---- the §6.2 scope match: by NAME SEGMENT (over "."), last segment a prefix ----------------------
-export function scopeMatches(name, scope) {
-  const segs = name.split(".");
-  const parts = scope.split(".");
-  if (parts.length === 0 || parts.length > segs.length) return false;
-  const last = parts[parts.length - 1], init = parts.slice(0, -1);
-  outer: for (let i = 0; i + parts.length <= segs.length; i++) {
-    for (let k = 0; k < init.length; k++) if (segs[i + k] !== init[k]) continue outer;
-    if (segs[i + parts.length - 1].startsWith(last)) return true;
-  }
-  return false;
-}
+import { parsePolicy, scopeMatches } from "./policy.mjs";
 
 // ---- the §3.1 match ladder: exact > segment-suffix > substring ------------------------------------
 function matchTier(name, q) {
@@ -150,7 +95,7 @@ switch (cmd) {
     const fns = loadReport(prefix);
     const mods = {};
     for (const e of fns) {
-      const mod = e.fn.includes(".") ? e.fn.split(".")[0] : "(root)";
+      const mod = e.fn.includes(".") ? e.fn.split(".").slice(0, -1).join(".") : "(root)";
       const m = (mods[mod] ??= { effects: new Set(), functions: 0 });
       for (const x of e.inferred) m.effects.add(x);
       m.functions += 1;

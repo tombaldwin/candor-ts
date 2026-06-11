@@ -1,11 +1,18 @@
 {
   "name": "candor-ts",
-  "version": "0.0.1",
-  "description": "Minimal TypeScript implementation slice of candor-spec 0.3 — the derivability proof",
+  "version": "0.1.0",
+  "description": "candor for TypeScript \u2014 per-function side effects, transitively, with a policy gate (candor-spec 0.3)",
   "type": "module",
   "private": true,
   "dependencies": {
     "@types/node": "^25.9.2",
     "typescript": "^6.0.3"
+  },
+  "bin": {
+    "candor-ts": "./scan.mjs",
+    "candor-ts-query": "./query.mjs"
+  },
+  "scripts": {
+    "test": "node test.mjs"
   }
 }
