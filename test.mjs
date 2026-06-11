@@ -176,5 +176,27 @@ export function make(): Implicit { return new Implicit(); }`,
         JSON.stringify(entry(report, "src.f.make")));
 }
 
+// ── 9. ambient builtins + crypto tier + the missing-deps warning (CTA dogfood) ───────────────────
+{
+  const d = project({
+    "src/a.ts": `export function slugish(): number { return Math.random(); }
+export function stamp(): Date { return new Date(); }
+export function parsed(): Date { return new Date("2020-01-01"); }`,
+  });
+  const { report } = scan(d);
+  check("Math.random -> Rand", entry(report, "src.a.slugish")?.inferred.includes("Rand"));
+  check("new Date() -> Clock", entry(report, "src.a.stamp")?.inferred.includes("Clock"));
+  check("new Date(string) is parsing, not Clock", entry(report, "src.a.parsed") == null,
+        JSON.stringify(entry(report, "src.a.parsed")));
+}
+{
+  const d = project({
+    "package.json": `{"dependencies": {"left-pad": "1.0.0"}}`,
+    "src/x.ts": `export function f(): number { return 1; }`,
+  });
+  const { r } = scan(d);
+  check("missing node_modules warns LOUDLY", r.stderr.includes("WARNING") && r.stderr.includes("npm install"));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

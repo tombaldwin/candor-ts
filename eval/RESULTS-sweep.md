@@ -102,6 +102,30 @@ rule).
 3. **zod itself is the honest residual**: its `$constructor`-factory style launders construction
    through function values — genuinely dynamic, correctly `Unknown`. Not every flood is a bug.
 
+## Round 3: the CTA dogfood (the stranger's route) — two soundness finds + the UX one
+
+A fresh agent given only the umbrella one-liner on a fresh clone of the Nest app produced a correct,
+layered effect map (services own all 24 direct-Db functions; controllers/middleware inherit; gate
+verified live in both directions) — and a 12-item friction list. The substantive finds, all fixed:
+
+1. **Ambient builtins were unclassified**: `Math.random()` (a slugifier's entropy) and `new Date()`
+   (a JWT issuer's timestamps) contributed nothing — `updateTimestamp` was omitted as pure. Now
+   `Rand`/`Clock` (no-arg `new Date()` only; `new Date("2020-…")` is parsing and stays pure).
+2. **argon2 came out silently pure** — `hashPassword` absent from the report, `findOne` reading a
+   confident `[Db]` past an `argon2.verify`. The curated-κ caveat landing on exactly the call a
+   security review cares about. κ gains the entropy tier (argon2/bcrypt/bcryptjs, node:crypto's
+   random surface); both now read `Rand`. The caveat itself is now stated in AGENTS.md's trust
+   section (it was only in the README) — the weaker edge of "never silently pure" must be visible
+   where agents read.
+3. **The missing-node_modules scan silently produced an all-Unknown report** the agent initially
+   accepted ("wrote 62 effectful functions", 100% Unknown). The scanner now warns loudly, and
+   AGENTS.md says install the target's deps first.
+4. Doc fixes from the rest of the list: the `$Q` shorthand was bash-only (now a function, works in
+   zsh); the report-shape wording implied a map (it's an array of `fn`-keyed entries); the sidecar
+   filename was wrong; a worked policy block added; the umbrella's min-version rule now reads
+   per-impl. Known remaining: TypeORM `@Entity('user')` decorator names don't feed `tables` yet
+   (the JVM's declarative move, queued).
+
 ## Honest bounds
 
 - N=12 library repos + one framework app (post-sweep); one ecosystem slice — no monorepos, no

@@ -84,6 +84,21 @@ if (fileNames.length === 0) { console.error(`candor-ts: no TypeScript sources un
 if (!outPrefix) outPrefix = path.join(rootDir, ".candor", "report");
 fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: true });
 
+// A target with declared dependencies but no node_modules resolves almost nothing — the scan
+// would "succeed" with a near-total-Unknown report a fresh user could ship (CTA-dogfood finding).
+// Warn LOUDLY; the report is still written (it is sound), but the cause must be visible.
+{
+  const pkg = path.join(rootDir, "package.json");
+  if (fs.existsSync(pkg) && !fs.existsSync(path.join(rootDir, "node_modules"))) {
+    try {
+      const deps = JSON.parse(fs.readFileSync(pkg, "utf8")).dependencies ?? {};
+      if (Object.keys(deps).length > 0)
+        console.error("candor-ts: WARNING — the target declares dependencies but has no node_modules; " +
+                      "imports will not resolve and most functions will read Unknown. " +
+                      "Run `npm install` in the target first.");
+    } catch {}
+  }
+}
 const program = ts.createProgram(fileNames, compilerOptions);
 const checker = program.getTypeChecker();
 const projectFiles = new Set(fileNames.map((f) => path.resolve(f)));
@@ -104,6 +119,11 @@ function kappa(moduleName, member) {
   if (/^(fs-extra|graceful-fs|rimraf|glob|chokidar)$/.test(moduleName)) return "Fs";
   if (/^dotenv$/.test(moduleName)) return "Env";
   if (/^(winston|pino|bunyan|npmlog)$/.test(moduleName)) return "Log";
+  // entropy: node:crypto's random surface + the password-hashing libs (salted -> Rand). Found by
+  // the CTA dogfood on a Nest app: argon2.hash came out SILENTLY PURE (the curated-kappa caveat
+  // landing on exactly the call a security review cares about).
+  if (/^(node:)?crypto$/.test(moduleName) && /^random/.test(member)) return "Rand";
+  if (/^(argon2|bcrypt|bcryptjs)$/.test(moduleName)) return "Rand";
   // The ORM tier — VERB-PRECISE (the CLASSIFIER discipline: tag the execution boundary, not
   // builders; `createQueryBuilder` is pure, its `getMany`/`execute` is the I/O). Found on the
   // first framework-APP scan: a TypeORM/Nest application — Db-heavy by construction — read zero
@@ -329,10 +349,17 @@ function visitCalls(node) {
             }
           }
         } else if (mod === "<es-lib>") {
-          // conventionally-pure ES surface (Array/String/Math/…) — except the clock (SPEC §1)
+          // conventionally-pure ES surface (Array/String/…) — except the clock and entropy (SPEC §1).
+          // `new Date()` (no args) captures the current time -> Clock; `Math.random()` -> Rand
+          // (both missed on the first real-app dogfood: a JWT issuer's timestamps and a slugifier's
+          // entropy were invisible).
           const name = decl.name ? decl.name.getText() : "";
           const parent = decl.parent && decl.parent.name ? decl.parent.name.getText() : "";
           if ((parent === "DateConstructor" && name === "now") || (parent === "Performance" && name === "now"))
+            rec.direct.add("Clock");
+          if (parent === "Math" && name === "random") rec.direct.add("Rand");
+          if (ts.isNewExpression(node) && (node.arguments ?? []).length === 0
+              && checker.getTypeAtLocation(node.expression)?.symbol?.name === "DateConstructor")
             rec.direct.add("Clock");
         } else {
           const member = decl.name ? decl.name.getText() : "";

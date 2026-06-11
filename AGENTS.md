@@ -19,11 +19,15 @@ git clone --depth 1 https://github.com/tombaldwin/candor-ts /tmp/candor-ts 2>/de
 node /tmp/candor-ts/scan.mjs <project-dir>     # tsconfig.json honored; tests/node_modules excluded
 ```
 
-This writes `<project-dir>/.candor/report.json` and `.callgraph.json` (override with
-`--out <prefix>`). Add `--policy <file>` (or set `CANDOR_POLICY`) to enforce a §6.2 policy over the
+This writes `<project-dir>/.candor/report.json` and `.candor/report.callgraph.json` (override
+with `--out <prefix>`). **Install the TARGET's dependencies first** (`npm install` in the project)
+— without node_modules, imports don't resolve and most functions honestly read `Unknown` (the
+scanner warns loudly). Add `--policy <file>` (or set `CANDOR_POLICY`) to enforce a §6.2 policy over the
 scan: exit 1 on violation, exit 2 LOUDLY if the policy file is unreadable.
 
-**Report shape:** entries live in `.functions[]`, keyed **`fn`** — module-qualified, `.`-separated
+**Report shape:** the file is `{ "candor": {version, toolchain, spec}, "functions": [...] }`;
+`functions` is an **array** of entries (not a map — don't index it by name), each carrying **`fn`**
+— module-qualified, `.`-separated
 (`src.db.save` for `save()` in `src/db.ts`; class methods are `src.api.Client.send`) — with
 `inferred` (the full transitive set) / `direct` / `unresolved` / optional `hosts`/`cmds`/`paths`/
 `tables` (the literal surfaces). **Only effectful-or-unresolved functions appear in the report;
@@ -34,14 +38,14 @@ pure functions are omitted** — a function present in the callgraph sidecar but
 ## Query it (same names/shapes as the Rust and JVM engines — candor-spec §3.1)
 
 ```sh
-Q="node /tmp/candor-ts/query.mjs"; P=".candor/report"
-$Q show     $P <fn-query> 1          # a function's effects (+ hosts/tables when visible)
-$Q where    $P <Effect>   1          # {effect, directly, inherited}
-$Q callers  $P <fn-query> 1          # the BLAST RADIUS: {of, direct, transitive} — works for pure fns
-$Q map      $P 1                     # {module: {effects, functions}}
-$Q whatif   $P <fn> <Effect> [policy]  # pre-edit gate verdict (exit 1 if it would violate)
-$Q diff     $P <baseline-prefix> 1   # per-function effect delta (exit 1 on a gained effect)
-$Q parsepolicy <policy-file>         # the canonical §6.2 parse (what the gate will enforce)
+Q() { node /tmp/candor-ts/query.mjs "$@"; }; P=".candor/report"   # a function — works in bash AND zsh
+Q show     $P <fn-query> 1          # a function's effects (+ hosts/tables when visible)
+Q where    $P <Effect>   1          # {effect, directly, inherited}
+Q callers  $P <fn-query> 1          # the BLAST RADIUS: {of, direct, transitive} — works for pure fns
+Q map      $P 1                     # {module: {effects, functions}}
+Q whatif   $P <fn> <Effect> [policy]  # pre-edit gate verdict (exit 1 if it would violate)
+Q diff     $P <baseline-prefix> 1   # per-function effect delta (exit 1 on a gained effect)
+Q parsepolicy <policy-file>         # the canonical §6.2 parse (what the gate will enforce)
 ```
 
 Name queries resolve exact > segment-suffix (`db.save` matches `src.db.save`, never
@@ -69,10 +73,23 @@ want-JSON flag.
   called is genuinely indeterminate (rimraf's injected-fs style yields many `Unknown`s — that's the
   §4 contract, not noise).
 
+A worked policy (§6.2 — one rule per line, `#` comments):
+
+```text
+deny Net domain                       # the domain module reaches no network, transitively
+pure  parse
+allow Db in db  orders ledger.*       # the db module touches ONLY these tables
+forbid domain -> infra
+```
+
 ## The trust rule — do not skip this
 
 `inferred` is authoritative for what candor-ts resolved. When `unresolved` is true (or `Unknown` is
 present — a callback value, an `any`-typed callee, resolution landing on a type rather than a
 body), the set may be incomplete: read the source for *that* function before relying on it. Never
 conclude a function is pure while it is marked unresolved. The literal surfaces (`hosts`/`tables`/
-`cmds`/`paths`) are the decidable subset only — absence is never a claim of absence.
+`cmds`/`paths`) are the decidable subset only — absence is never a claim of absence. **And the
+curated-κ caveat cuts the other way:** a call into an npm package κ doesn't know contributes
+NOTHING — invisible, not `Unknown` (check the κ table in scan.mjs before concluding "no effect"
+through an unfamiliar library; this is the documented weaker edge of the never-silently-pure
+promise, same as every candor engine's curated classifier).
