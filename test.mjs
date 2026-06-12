@@ -389,6 +389,8 @@ module.exports = function (payload) { return fs.readFileSync("/key") + payload; 
   check("a `module.exports = function` is a UNIT, named by its file, with the chainable hash",
         signFn?.inferred.includes("Fs") && signFn?.hash === "old-school#sign",
         JSON.stringify(depScan.report?.functions));
+  check("a CJS export unit carries unitKind 'export' (spec 0.5 draft); TS fns omit the field",
+        signFn?.unitKind === "export", JSON.stringify(signFn));
 
   // the CONSUMER sees only typings; CANDOR_DEPS carries the dist-JS scan across the boundary.
   const app = project({

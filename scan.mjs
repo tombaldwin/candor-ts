@@ -367,6 +367,8 @@ function moduleOf(sf) {
   const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?[tj]sx?$/, "");
   return rel.split(path.sep).join(".");
 }
+const cjsLocal = new Set(); // CJS export-surface units (spec 0.5 draft unitKind: "export")
+const markCjs = (v) => { if (v) cjsLocal.add(v); return v; };
 function localName(node) {
   if (ts.isFunctionDeclaration(node) && node.name) return node.name.text;
   if (ts.isMethodDeclaration(node) && ts.isClassDeclaration(node.parent) && node.parent.name)
@@ -402,10 +404,10 @@ function localName(node) {
     if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.right === node) {
       const lhs = p.left.getText().replace(/\s+/g, "");
       if (lhs === "module.exports")
-        return (ts.isFunctionExpression(node) && node.name?.text)
-          || path.basename(node.getSourceFile().fileName).replace(/\.[mc]?jsx?$/, "");
+        return markCjs((ts.isFunctionExpression(node) && node.name?.text)
+          || path.basename(node.getSourceFile().fileName).replace(/\.[mc]?jsx?$/, ""));
       const m = lhs.match(/^(?:module\.)?exports\.([A-Za-z_$][\w$]*)$/);
-      if (m) return m[1];
+      if (m) return markCjs(m[1]);
     }
     if (ts.isPropertyAssignment(p) && p.initializer === node && ts.isObjectLiteralExpression(p.parent)) {
       const g = p.parent.parent;
@@ -413,7 +415,7 @@ function localName(node) {
           && g.right === p.parent && g.left.getText().replace(/\s+/g, "") === "module.exports")
         // .text, not getText(): a string-literal key keeps its quotes under getText, minting a
         // hash like pkg#"sign" the consumer's pkg#sign join can never hit (/code-review).
-        return p.name.text ?? p.name.getText();
+        return markCjs(p.name.text ?? p.name.getText());
     }
   }
   return null;
@@ -810,6 +812,7 @@ for (const [name, rec] of fns) {
   if (inf.includes("Fs") && rec.paths.size) entry.paths = [...rec.paths].sort();
   if (rec.direct.has("Unknown") && rec.why.size) entry.unknownWhy = [...rec.why].sort();
   if (rec.entry) entry.entryPoint = true;
+  if (cjsLocal.has(rec.local)) entry.unitKind = "export"; // spec 0.5 draft, informative
   functions.push(entry);
 }
 // `package` names what this report COVERS — a consumer chaining it registers coverage even when
