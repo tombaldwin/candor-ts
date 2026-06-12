@@ -123,6 +123,11 @@ fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: true });
 // exports in one package) UNION — a sound over-approximation, documented.
 const ENGINE_VERSION = "candor-ts-0.1.0";
 const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:[], tables:[]}
+// Packages a loaded sibling report COVERS — exempt from the κ ledger even when a call joins no
+// entry (reports omit pure functions: the silence is the purity claim, SPEC §2 rule 3 — the
+// serde_json rule the Rust/JVM engines already carry; /code-review found TS missing it). Fed from
+// the envelope's `package` field (works for an all-pure EMPTY report) and from entry hash prefixes.
+const depCoveredPkgs = new Set();
 {
   const spec = process.env.CANDOR_DEPS ?? "";
   const files = [];
@@ -136,9 +141,14 @@ const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:
   for (const f of files) {
     try {
       const d = JSON.parse(fs.readFileSync(f, "utf8"));
-      const stale = (d.candor?.version ?? ENGINE_VERSION) !== ENGINE_VERSION;
+      // A report whose version can't be VERIFIED is not trusted (§2.1) — a missing header is as
+      // untrustworthy as a mismatched one (the Rust engine's rule; the engines split on this).
+      const stale = d.candor?.version !== ENGINE_VERSION;
+      if (typeof d.package === "string" && d.package) depCoveredPkgs.add(d.package);
       for (const e of d.functions ?? []) {
         if (!e.hash) continue;
+        const hashPkg = e.hash.split("#")[0];
+        if (hashPkg) depCoveredPkgs.add(hashPkg);
         const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), hosts: [], cmds: [], paths: [], tables: [] };
         for (const x of stale ? ["Unknown"] : e.inferred ?? []) cell.inferred.add(x);
         if (!stale) for (const m of ["hosts", "cmds", "paths", "tables"])
@@ -352,7 +362,9 @@ function localName(node) {
       const g = p.parent.parent;
       if (ts.isBinaryExpression(g) && g.operatorToken.kind === ts.SyntaxKind.EqualsToken
           && g.right === p.parent && g.left.getText().replace(/\s+/g, "") === "module.exports")
-        return p.name.getText();
+        // .text, not getText(): a string-literal key keeps its quotes under getText, minting a
+        // hash like pkg#"sign" the consumer's pkg#sign join can never hit (/code-review).
+        return p.name.text ?? p.name.getText();
     }
   }
   return null;
@@ -379,11 +391,17 @@ for (const sf of sources) {
       for (const h of node.heritageClauses ?? []) {
         if (h.token !== ts.SyntaxKind.ImplementsKeyword) continue;
         for (const t of h.types) {
-          const idecl = realDecl(checker.getSymbolAtLocation(t.expression));
-          if (idecl && ts.isInterfaceDeclaration(idecl)
-              && projectFiles.has(path.resolve(idecl.getSourceFile().fileName))) {
-            if (!interfaceImpls.has(idecl)) interfaceImpls.set(idecl, []);
-            interfaceImpls.get(idecl).push(node);
+          // Register under EVERY declaration of the interface symbol: a merged interface (two
+          // `interface Store` blocks / module augmentation) resolves a method to whichever block
+          // declares it, and keying only declarations[0] silently missed the others (/code-review).
+          const sym = checker.getSymbolAtLocation(t.expression);
+          const target = sym && sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
+          for (const idecl of target?.declarations ?? []) {
+            if (ts.isInterfaceDeclaration(idecl)
+                && projectFiles.has(path.resolve(idecl.getSourceFile().fileName))) {
+              if (!interfaceImpls.has(idecl)) interfaceImpls.set(idecl, []);
+              interfaceImpls.get(idecl).push(node);
+            }
           }
         }
       }
@@ -533,17 +551,27 @@ function visitCalls(node) {
               // classes' members when the dispatch is narrow (≤12 implementors) — `store.save()`
               // on an injected `Store` edges to `PgStore.save`. No implementor in sight, or too
               // many: honest Unknown, exactly as before.
+              // Soundness rule (/code-review): the dispatch suppresses Unknown only when EVERY
+              // implementor contributed an edge — an implementor whose member is inherited from a
+              // base class (or otherwise not a unit) is genuinely unresolved here, and edging the
+              // others while staying silent about it would drop its effects (a §4 regression: the
+              // pre-CHA code always read Unknown at this site).
               let edged = false;
               if (ts.isMethodSignature(decl) && decl.parent && ts.isInterfaceDeclaration(decl.parent)) {
                 const impls = interfaceImpls.get(decl.parent) ?? [];
                 if (impls.length > 0 && impls.length <= 12) {
                   const member = decl.name?.getText?.();
+                  let allResolved = true;
+                  const targets = [];
                   for (const cls of impls) {
                     const m = (cls.members ?? []).find((x) =>
                       (ts.isMethodDeclaration(x) || ts.isPropertyDeclaration(x)) && x.name?.getText?.() === member);
                     const t = m && nodeName.get(m);
-                    if (t) { rec.edges.add(t); edged = true; }
+                    if (t) targets.push(t);
+                    else allResolved = false;
                   }
+                  for (const t of targets) rec.edges.add(t);
+                  edged = targets.length > 0 && allResolved;
                 }
               }
               if (!edged) {
@@ -608,7 +636,12 @@ function visitCalls(node) {
               localTail = `${owner3}.${localTail}`;
             // A typed consumer resolves into `@types/<pkg>`; the dep's report hashes under `<pkg>`.
             const depMod = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
-            const hit = localTail && crossDeps.get(`${depMod}#${localTail}`);
+            // Owner-prefixed first (Owner.member), bare member as the fallback: a CJS dist scan
+            // hashes units under the bare export name, while interface/object-shaped typings (the
+            // common @types style) resolve the consumer's call to Owner.member — without the
+            // fallback exactly the typed-consumer shape the chain targets never joined.
+            const hit = localTail && (crossDeps.get(`${depMod}#${localTail}`)
+              ?? (decl.name ? crossDeps.get(`${depMod}#${decl.name.getText()}`) : undefined));
             if (hit) {
               inheritedFromDep = true;
               for (const x of hit.inferred) rec.direct.add(x);
@@ -624,10 +657,14 @@ function visitCalls(node) {
           // report covers (the argon2 lesson — the blind spot landed on exactly the call a
           // security review cared about). Builtins are excluded: κ's builtin coverage is the
           // bounded frontier, and an unlisted builtin (path, util) is known-pure, not blind.
-          if (!eff && !inheritedFromDep && !mod.startsWith("<") && !kappaKnows(mod)) {
+          if (!eff && !inheritedFromDep && !mod.startsWith("<")) {
+            // The REAL package name first: a typed consumer of an untyped package resolves into
+            // @types/<pkg>, and κ's tables/review lists hold the real name (/code-review: lodash
+            // via @types/lodash was falsely disclosed — kappaKnows saw the unstripped name).
+            const pkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
             const file = decl.getSourceFile().fileName;
-            if (/node_modules\//.test(file) && !/node_modules\/(@types\/node|typescript)\//.test(file)) {
-              const pkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
+            if (!kappaKnows(pkg) && !depCoveredPkgs.has(pkg)
+                && /node_modules\//.test(file) && !/node_modules\/(@types\/node|typescript)\//.test(file)) {
               unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
             }
           }
@@ -726,7 +763,10 @@ for (const [name, rec] of fns) {
   if (rec.entry) entry.entryPoint = true;
   functions.push(entry);
 }
-const envelope = { candor: { version: "candor-ts-0.1.0", toolchain: `node-${process.versions.node}`, spec: "0.3" }, functions };
+// `package` names what this report COVERS — a consumer chaining it registers coverage even when
+// `functions` is empty (an all-pure package's report is its purity claim, SPEC §2 rule 3).
+const envelope = { candor: { version: "candor-ts-0.1.0", toolchain: `node-${process.versions.node}`, spec: "0.3" },
+                   package: pkgName, functions };
 fs.writeFileSync(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
 const cg = {};
 for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();

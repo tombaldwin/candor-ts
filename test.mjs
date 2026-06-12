@@ -407,5 +407,107 @@ export function stamp(): string { return sign("x"); }`,
         JSON.stringify(rep.functions));
 }
 
+// ── /code-review fixes: ledger coverage, @types, CHA soundness, CJS join shapes ──────────────────
+{
+  // (a) chained coverage: a package with a loaded sibling report leaves the ledger even when the
+  // called fn is PURE (omitted from the report) — and an all-pure EMPTY report counts via `package`.
+  const dep = project({
+    "package.json": `{"name": "pure-utils"}`,
+    "src/u.ts": `export function pad(s: string): string { return s + " "; }`,
+  });
+  scan(dep); // all-pure: zero entries, but the envelope carries package: pure-utils
+  const app = project({
+    "package.json": `{"name": "app3", "dependencies": {"pure-utils": "1.0.0"}}`,
+    "node_modules/pure-utils/package.json": `{"name":"pure-utils","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/pure-utils/index.d.ts": `export declare function pad(s: string): string;`,
+    "node_modules/pure-utils/index.js": ``,
+    "src/a.ts": `import { pad } from "pure-utils";
+import * as fsm from "node:fs";
+export function go(): string { fsm.readFileSync("/x"); return pad("hi"); }`,
+  });
+  const r = spawnSync("node", [path.join(HERE, "scan.mjs"), app],
+                      { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(dep, ".candor", "report.json") } });
+  check("an all-pure dep's EMPTY report covers its package (no ledger entry)",
+        !/pure-utils/.test(r.stderr), r.stderr);
+}
+{
+  // (b) @types: a KAPPA_PURE package typed via DefinitelyTyped is NOT disclosed
+  const d = project({
+    "node_modules/lodash/package.json": `{"name":"lodash","main":"index.js"}`,
+    "node_modules/lodash/index.js": `module.exports.chunk = (s) => s;`,
+    "node_modules/@types/lodash/package.json": `{"name":"@types/lodash","types":"index.d.ts"}`,
+    "node_modules/@types/lodash/index.d.ts": `export declare function chunk(s: string): string;`,
+    "src/a.ts": `import { chunk } from "lodash";
+import * as fsm from "node:fs";
+export function go(): string { fsm.readFileSync("/x"); return chunk("ab"); }`,
+  });
+  const { r } = scan(d);
+  check("a reviewed-pure package typed via @types stays out of the ledger",
+        !/lodash/.test(r.stderr), r.stderr);
+}
+{
+  // (c) CHA soundness: an implementor whose member is INHERITED keeps the Unknown (no silent drop)
+  const d = project({
+    "src/s.ts": `import * as fsm from "node:fs";
+export interface Store { save(q: string): void; }
+export class Base { save(q: string): void { fsm.writeFileSync("/d", q); } }
+export class PgStore extends Base implements Store {}
+export class MemStore implements Store { save(q: string): void { /* pure */ } }`,
+    "src/a.ts": `import { Store } from "./s.js";
+export function handle(store: Store): void { store.save("x"); }`,
+  });
+  const { report } = scan(d);
+  const h = entry(report, "src.a.handle");
+  check("a partially-resolved interface dispatch keeps honest Unknown",
+        h?.inferred.includes("Unknown"), JSON.stringify(h));
+}
+{
+  // (d) merged interface declarations: the impl registers under BOTH blocks
+  const d = project({
+    "src/s.ts": `import * as fsm from "node:fs";
+export interface Store { save(q: string): void; }
+export interface Store { flush(): void; }
+export class FsStore implements Store {
+  save(q: string): void { fsm.writeFileSync("/d", q); }
+  flush(): void { fsm.writeFileSync("/d", ""); }
+}`,
+    "src/a.ts": `import { Store } from "./s.js";
+export function fin(store: Store): void { store.flush(); }`,
+  });
+  const { report, cg } = scan(d);
+  check("a merged interface's second block still CHA-resolves",
+        cg["src.a.fin"]?.includes("src.s.FsStore.flush")
+        && entry(report, "src.a.fin")?.inferred.includes("Fs")
+        && !entry(report, "src.a.fin")?.inferred.includes("Unknown"),
+        JSON.stringify({ cg: cg["src.a.fin"], e: entry(report, "src.a.fin") }));
+}
+{
+  // (e) CJS join shapes: interface-shaped typings (Owner.member) + quoted export keys both join
+  const dep = project({
+    "package.json": `{"name": "legacy-sign"}`,
+    "index.js": `const fs = require("node:fs");
+module.exports = { "sign": function (p) { return fs.readFileSync("/k") + p; } };`,
+  });
+  const depScan = scan(dep, "--allow-js");
+  check("a QUOTED export key hashes clean (pkg#sign, not pkg#\"sign\")",
+        entry(depScan.report, "index.sign")?.hash === "legacy-sign#sign",
+        JSON.stringify(depScan.report?.functions));
+  const app = project({
+    "package.json": `{"name": "app4", "dependencies": {"legacy-sign": "1.0.0"}}`,
+    "node_modules/legacy-sign/package.json": `{"name":"legacy-sign","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/legacy-sign/index.d.ts": `export interface Signer { sign(p: string): string; }
+declare const s: Signer;
+export = s;`,
+    "node_modules/legacy-sign/index.js": ``,
+    "src/u.ts": `import s = require("legacy-sign");
+export function stamp(): string { return s.sign("x"); }`,
+  });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), app],
+            { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(dep, ".candor", "report.json") } });
+  const rep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  check("interface-shaped typings join via the bare-member fallback",
+        entry(rep, "src.u.stamp")?.inferred.includes("Fs"), JSON.stringify(rep.functions));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
