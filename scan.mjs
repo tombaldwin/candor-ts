@@ -121,7 +121,7 @@ fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: true });
 // scan and a .d.ts resolution). Version-aware trust (§2.1): a report from a DIFFERENT engine
 // version is downgraded to Unknown rather than silently trusted. Duplicate hashes (two same-named
 // exports in one package) UNION — a sound over-approximation, documented.
-const ENGINE_VERSION = "candor-ts-0.1.0";
+const ENGINE_VERSION = "candor-ts-0.4.0";
 const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:[], tables:[]}
 // Packages a loaded sibling report COVERS — exempt from the κ ledger even when a call joins no
 // entry (reports omit pure functions: the silence is the purity claim, SPEC §2 rule 3 — the
@@ -765,7 +765,7 @@ for (const [name, rec] of fns) {
 }
 // `package` names what this report COVERS — a consumer chaining it registers coverage even when
 // `functions` is empty (an all-pure package's report is its purity claim, SPEC §2 rule 3).
-const envelope = { candor: { version: "candor-ts-0.1.0", toolchain: `node-${process.versions.node}`, spec: "0.4" },
+const envelope = { candor: { version: "candor-ts-0.4.0", toolchain: `node-${process.versions.node}`, spec: "0.4" },
                    package: pkgName, functions };
 fs.writeFileSync(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
 const cg = {};
