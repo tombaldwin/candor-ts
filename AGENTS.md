@@ -7,7 +7,9 @@ chains by hand.
 
 > **This document ships inside the package.** `npx -y candor-ts --agents` prints the contract for
 > the *installed* version — always prefer that over a vendored or fetched copy, which can describe
-> a different candor-ts than the one you are running. The language-agnostic consumption contract is
+> a different candor-ts than the one you are running.
+
+The language-agnostic consumption contract is
 [candor-spec/AGENTS.md](https://github.com/tombaldwin/candor-spec/blob/main/AGENTS.md); this file is
 the TypeScript-specific production + query surface.
 
@@ -35,6 +37,9 @@ scan: exit 1 on violation, exit 2 LOUDLY if the policy file is unreadable.
 pure functions are omitted** — a function present in the callgraph sidecar but absent from
 `.functions[]` is pure (as far as the engine resolved). In *neither* file = never analyzed
 (a test file? an unexported arrow inside an object literal?) — conclude nothing.
+
+A dist-CJS export unit (a `module.exports` surface scanned with `--allow-js`) carries
+`unitKind: "export"` (spec 0.5 draft, informative); ordinary functions omit the field.
 
 **Multi-package (monorepos / private deps):** point `CANDOR_DEPS` at the dependencies' reports
 (a path list, or a directory of `*.json`); an unclassified call into a package with a loaded
