@@ -9,15 +9,11 @@ the TypeScript-specific production + query surface.
 
 ## Produce a report
 
-Not yet on npm — run from a clone (needs node ≥ 20):
+On npm (needs node ≥ 20):
 
 ```sh
-git clone --depth 1 https://github.com/tombaldwin/candor-ts /tmp/candor-ts 2>/dev/null \
-  || (cd /tmp/candor-ts && git pull -q)
-( cd /tmp/candor-ts && npm install --no-fund --no-audit )
-
-node /tmp/candor-ts/scan.mjs <project-dir>     # tsconfig.json honored; tests/node_modules excluded
-node /tmp/candor-ts/scan.mjs <dir> --allow-js  # also analyze .js/.mjs sources (walks the tree)
+npx -y candor-ts <project-dir>          # tsconfig.json honored; tests/node_modules excluded
+npx -y candor-ts <dir> --allow-js       # also analyze .js/.mjs sources (walks the tree)
 ```
 
 This writes `<project-dir>/.candor/report.json` and `.candor/report.callgraph.json` (override
@@ -46,7 +42,7 @@ downgraded to `Unknown` rather than silently trusted (spec §2.1). Caveat: a typ
 ## Query it (same names/shapes as the Rust and JVM engines — candor-spec §3.1)
 
 ```sh
-Q() { node /tmp/candor-ts/query.mjs "$@"; }; P=".candor/report"   # a function — works in bash AND zsh
+Q() { npx -y candor-ts-query "$@"; }; P=".candor/report"   # a function — works in bash AND zsh
 Q show     $P <fn-query> 1          # a function's effects (+ hosts/tables when visible)
 Q where    $P <Effect>   1          # {effect, directly, inherited}
 Q callers  $P <fn-query> 1          # the BLAST RADIUS: {of, direct, transitive} — works for pure fns

@@ -1,9 +1,8 @@
 {
   "name": "candor-ts",
-  "version": "0.4.0",
-  "description": "candor for TypeScript \u2014 per-function side effects, transitively, with a policy gate (candor-spec 0.3)",
+  "version": "0.4.1",
+  "description": "candor for TypeScript — per-function side effects, transitively, with a policy gate (candor-spec 0.4)",
   "type": "module",
-  "private": true,
   "dependencies": {
     "@types/node": "^25.9.2",
     "typescript": "^6.0.3"
@@ -14,5 +13,32 @@
   },
   "scripts": {
     "test": "node test.mjs"
-  }
+  },
+  "license": "(MIT OR Apache-2.0)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tombaldwin/candor-ts.git"
+  },
+  "homepage": "https://candor.poly.io",
+  "keywords": [
+    "effects",
+    "static-analysis",
+    "side-effects",
+    "call-graph",
+    "policy",
+    "candor"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "scan.mjs",
+    "query.mjs",
+    "policy.mjs",
+    "README.md",
+    "AGENTS.md",
+    "PROVE-IT.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ]
 }

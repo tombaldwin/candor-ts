@@ -106,4 +106,4 @@ spec §7.13: generated effect chains through every encoded call form, any silent
 conformance-held. The npm classifier tier is
 deliberately curated and will keep growing case-by-case. Entry points (Nest/Next populations),
 `unknownWhy` origins, `reachable`, cross-package inheritance (`CANDOR_DEPS` + the spec §2 `hash`,
-version-trusted per §2.1), and `--allow-js` are all in. Not yet on npm — run from the clone.
+version-trusted per §2.1), and `--allow-js` are all in. On npm: `npx -y candor-ts <dir>`.

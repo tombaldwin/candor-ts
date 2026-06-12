@@ -22,7 +22,10 @@
 import ts from "typescript";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { parsePolicy, evaluatePolicy } from "./policy.mjs";
+
+const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 // ---- args ----------------------------------------------------------------------------------------
 const argv = process.argv.slice(2);
@@ -83,6 +86,16 @@ if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
   }
 }
 if (fileNames.length === 0) { console.error(`candor-ts: no TypeScript sources under ${target}`); process.exit(2); }
+// Builtin typings FALLBACK: the engine ships @types/node as its own dependency, so a target that
+// hasn't installed it still resolves node:fs/node:net/… (found by the first npx-distribution
+// probe: a bare fixture read Unknown for fs.readFileSync because nothing supplied the builtin
+// types). The TARGET's own @types win when present.
+if (!compilerOptions.typeRoots) {
+  compilerOptions.typeRoots = [
+    path.join(rootDir, "node_modules", "@types"),
+    path.join(ENGINE_DIR, "node_modules", "@types"),
+  ];
+}
 if (!outPrefix) outPrefix = path.join(rootDir, ".candor", "report");
 // The scanned package's name — the first half of the cross-package join key (SPEC §2 `hash`).
 let pkgName = path.basename(rootDir);
@@ -121,7 +134,7 @@ fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: true });
 // scan and a .d.ts resolution). Version-aware trust (§2.1): a report from a DIFFERENT engine
 // version is downgraded to Unknown rather than silently trusted. Duplicate hashes (two same-named
 // exports in one package) UNION — a sound over-approximation, documented.
-const ENGINE_VERSION = "candor-ts-0.4.0";
+const ENGINE_VERSION = "candor-ts-0.4.1";
 const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:[], tables:[]}
 // Packages a loaded sibling report COVERS — exempt from the κ ledger even when a call joins no
 // entry (reports omit pure functions: the silence is the purity claim, SPEC §2 rule 3 — the
@@ -765,7 +778,7 @@ for (const [name, rec] of fns) {
 }
 // `package` names what this report COVERS — a consumer chaining it registers coverage even when
 // `functions` is empty (an all-pure package's report is its purity claim, SPEC §2 rule 3).
-const envelope = { candor: { version: "candor-ts-0.4.0", toolchain: `node-${process.versions.node}`, spec: "0.4" },
+const envelope = { candor: { version: "candor-ts-0.4.1", toolchain: `node-${process.versions.node}`, spec: "0.4" },
                    package: pkgName, functions };
 fs.writeFileSync(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
 const cg = {};

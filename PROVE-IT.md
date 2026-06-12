@@ -36,9 +36,7 @@ enclosing function). Also note roughly how
 many file-reads/searches it took you.
 
 STEP 3 — Run candor-ts:
-  git clone --depth 1 https://github.com/tombaldwin/candor-ts /tmp/candor-ts
-  (cd /tmp/candor-ts && npm install --no-fund --no-audit)
-  node /tmp/candor-ts/scan.mjs .
+  npx -y candor-ts .
 It writes .candor/report.json (per-function transitive effects) and .candor/report.callgraph.json
 (every analyzed function's direct callees, pure ones included).
 
