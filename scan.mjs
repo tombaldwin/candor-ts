@@ -54,10 +54,17 @@ let rootDir, fileNames, compilerOptions = {
   types: ["node"],
   strict: true,
 };
+// The scanner CLASSIFIES through the builtin typings, so `node` always rides in `types` — a
+// project's `types: []` (legitimate for its own build) would blind the effect analysis itself.
+function withNodeTypes(options) {
+  const t = options.types && options.types.length ? options.types : [];
+  return { ...options, types: [...new Set([...t, "node"])] };
+}
+
 function fromTsconfig(cfgPath, baseDir) {
   const cfg = ts.readConfigFile(cfgPath, ts.sys.readFile);
   const parsed = ts.parseJsonConfigFileContent(cfg.config ?? {}, ts.sys, baseDir);
-  compilerOptions = { ...parsed.options, types: parsed.options.types ?? ["node"] };
+  compilerOptions = withNodeTypes(parsed.options);
   let names = parsed.fileNames;
   // SOLUTION-STYLE configs (`files: [], references: [...]` — hono, most monorepo roots) list no
   // sources themselves; follow the references one level and union their file lists (skipping
@@ -69,7 +76,7 @@ function fromTsconfig(cfgPath, baseDir) {
       if (!fs.existsSync(refPath) || isTestPath(path.relative(baseDir, refPath))) continue;
       const sub = ts.readConfigFile(refPath, ts.sys.readFile);
       const subParsed = ts.parseJsonConfigFileContent(sub.config ?? {}, ts.sys, path.dirname(refPath));
-      if (names.length === 0) compilerOptions = { ...subParsed.options, types: subParsed.options.types ?? ["node"] };
+      if (names.length === 0) compilerOptions = withNodeTypes(subParsed.options);
       names = names.concat(subParsed.fileNames);
     }
     names = [...new Set(names)];
