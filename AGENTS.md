@@ -3,7 +3,11 @@
 You are working in a TypeScript project. **candor-ts** tells you, for every function, which side
 effects it can reach — network, filesystem, database, subprocess, env, clock — *including effects
 inherited transitively through any chain of calls across files*. Use it instead of tracing call
-chains by hand. The language-agnostic consumption contract is
+chains by hand.
+
+> **This document ships inside the package.** `npx -y candor-ts --agents` prints the contract for
+> the *installed* version — always prefer that over a vendored or fetched copy, which can describe
+> a different candor-ts than the one you are running. The language-agnostic consumption contract is
 [candor-spec/AGENTS.md](https://github.com/tombaldwin/candor-spec/blob/main/AGENTS.md); this file is
 the TypeScript-specific production + query surface.
 

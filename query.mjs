@@ -43,6 +43,17 @@ const emit = (v) => console.log(JSON.stringify(v, null, 1));
 
 const [, , cmd, ...args] = process.argv;
 switch (cmd) {
+  case "--agents":
+  case "agents": {
+    // The agent contract for THE INSTALLED VERSION — ships in the npm tarball, cannot drift.
+    const { dirname: qDirname, join: qJoin } = await import("node:path");
+    const { fileURLToPath: qFile } = await import("node:url");
+    const dir = qDirname(qFile(import.meta.url));
+    const semver = JSON.parse(fs.readFileSync(qJoin(dir, "package.json"), "utf8")).version;
+    console.log(`<!-- candor-ts ${semver} · the agent contract for this installed version -->`);
+    process.stdout.write(fs.readFileSync(qJoin(dir, "AGENTS.md"), "utf8"));
+    break;
+  }
   case "parsepolicy": {
     emit(parsePolicy(fs.readFileSync(args[0], "utf8")));
     break;

@@ -522,5 +522,17 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
         entry(report, "src.a.r")?.inferred.includes("Fs"), JSON.stringify(report?.functions));
 }
 
+// ── --agents: the self-describing engine (the contract ships in the tarball) ──────────────────────
+{
+  const doc = fs.readFileSync(path.join(HERE, "AGENTS.md"), "utf8");
+  const pkg = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"));
+  for (const bin of ["scan.mjs", "query.mjs"]) {
+    const out = execFileSync(process.execPath, [path.join(HERE, bin), "--agents"], { encoding: "utf8" });
+    check(`--agents (${bin}) prints the version header + the exact installed contract`,
+          out.startsWith(`<!-- candor-ts ${pkg.version}`) && out.endsWith(doc), out.slice(0, 120));
+  }
+  check("the npm tarball ships AGENTS.md (files allowlist)", pkg.files.includes("AGENTS.md"));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

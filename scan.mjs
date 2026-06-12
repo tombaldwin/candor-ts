@@ -30,8 +30,16 @@ const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 // ---- args ----------------------------------------------------------------------------------------
 const argv = process.argv.slice(2);
+if (argv[0] === "--agents") {
+  // The agent contract for THE INSTALLED VERSION — AGENTS.md ships in the npm tarball, so doc
+  // and engine cannot drift (the spec §2.1 version-trust rule applied to documentation).
+  const semver = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
+  console.log(`<!-- candor-ts ${semver} · the agent contract for this installed version -->`);
+  process.stdout.write(fs.readFileSync(path.join(ENGINE_DIR, "AGENTS.md"), "utf8"));
+  process.exit(0);
+}
 if (argv.length === 0) {
-  console.error("usage: node scan.mjs <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>]");
+  console.error("usage: node scan.mjs <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>] [--agents]");
   process.exit(2);
 }
 const target = argv[0];
