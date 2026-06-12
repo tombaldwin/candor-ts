@@ -30,7 +30,7 @@ const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 // ---- args ----------------------------------------------------------------------------------------
 const argv = process.argv.slice(2);
-if (argv[0] === "--agents") {
+if (argv.includes("--agents")) {
   // The agent contract for THE INSTALLED VERSION — AGENTS.md ships in the npm tarball, so doc
   // and engine cannot drift (the spec §2.1 version-trust rule applied to documentation).
   const semver = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
@@ -48,7 +48,17 @@ for (let i = 1; i < argv.length; i++) {
   if (argv[i] === "--out") outPrefix = argv[++i];
   else if (argv[i] === "--policy") policyPath = argv[++i];
   else if (argv[i] === "--allow-js") allowJs = true;
-  else if (!argv[i].startsWith("--") && !outPrefix) outPrefix = argv[i]; // legacy positional prefix
+  else if (argv[i].startsWith("--")) {
+    // An unknown flag must FAIL, not be silently ignored: a typo'd --policy drops the gate; an
+    // agent following a newer doc against an older binary deserves a loud "upgrade me" signal.
+    console.error(`candor-ts: unknown flag ${argv[i]} (usage: candor-ts <dir> [--out <prefix>] [--policy <file>] [--allow-js] [--agents])`);
+    process.exit(2);
+  }
+  else if (!outPrefix) outPrefix = argv[i]; // legacy positional prefix
+}
+if (target.startsWith("--")) {
+  console.error(`candor-ts: unknown flag ${target} (see usage)`);
+  process.exit(2);
 }
 
 // ---- project discovery (a dir, a single file, or a tsconfig) --------------------------------------
