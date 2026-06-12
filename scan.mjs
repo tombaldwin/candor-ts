@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * candor-ts — the TypeScript implementation of candor-spec 0.3.
+ * candor-ts — the TypeScript implementation of candor-spec 0.4.
  *
  * Origin (kept honest): this engine began as the clean-room derivability proof — a single-file
  * slice written from SPEC.md/SEMANTICS.md/CLASSIFIER.md alone, frozen as that claim in git history
@@ -765,7 +765,7 @@ for (const [name, rec] of fns) {
 }
 // `package` names what this report COVERS — a consumer chaining it registers coverage even when
 // `functions` is empty (an all-pure package's report is its purity claim, SPEC §2 rule 3).
-const envelope = { candor: { version: "candor-ts-0.1.0", toolchain: `node-${process.versions.node}`, spec: "0.3" },
+const envelope = { candor: { version: "candor-ts-0.1.0", toolchain: `node-${process.versions.node}`, spec: "0.4" },
                    package: pkgName, functions };
 fs.writeFileSync(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
 const cg = {};
