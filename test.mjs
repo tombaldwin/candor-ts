@@ -509,5 +509,18 @@ export function stamp(): string { return s.sign("x"); }`,
         entry(rep, "src.u.stamp")?.inferred.includes("Fs"), JSON.stringify(rep.functions));
 }
 
+// ── solution-style tsconfig (files: [] + references) — the hono shape ─────────────────────────────
+{
+  const d = project({
+    "tsconfig.json": `{"files": [], "references": [{"path": "./tsconfig.build.json"}]}`,
+    "tsconfig.build.json": `{"compilerOptions": {"target": "es2022", "moduleResolution": "bundler", "module": "esnext", "types": []}, "include": ["src/**/*.ts"]}`,
+    "src/a.ts": `import * as fsm from "node:fs";
+export function r(): Buffer { return fsm.readFileSync("/x"); }`,
+  });
+  const { report } = scan(d);
+  check("a solution-style tsconfig follows its references (the hono shape)",
+        entry(report, "src.a.r")?.inferred.includes("Fs"), JSON.stringify(report?.functions));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -58,7 +58,23 @@ function fromTsconfig(cfgPath, baseDir) {
   const cfg = ts.readConfigFile(cfgPath, ts.sys.readFile);
   const parsed = ts.parseJsonConfigFileContent(cfg.config ?? {}, ts.sys, baseDir);
   compilerOptions = { ...parsed.options, types: parsed.options.types ?? ["node"] };
-  return parsed.fileNames.filter((f) => !isTestPath(path.relative(baseDir, f)));
+  let names = parsed.fileNames;
+  // SOLUTION-STYLE configs (`files: [], references: [...]` — hono, most monorepo roots) list no
+  // sources themselves; follow the references one level and union their file lists (skipping
+  // test/bench configs by the same path rule). Found by the published-package probe: hono read
+  // "no TypeScript sources".
+  if (names.length === 0 && (parsed.projectReferences ?? []).length > 0) {
+    for (const ref of parsed.projectReferences) {
+      const refPath = ts.resolveProjectReferencePath(ref);
+      if (!fs.existsSync(refPath) || isTestPath(path.relative(baseDir, refPath))) continue;
+      const sub = ts.readConfigFile(refPath, ts.sys.readFile);
+      const subParsed = ts.parseJsonConfigFileContent(sub.config ?? {}, ts.sys, path.dirname(refPath));
+      if (names.length === 0) compilerOptions = { ...subParsed.options, types: subParsed.options.types ?? ["node"] };
+      names = names.concat(subParsed.fileNames);
+    }
+    names = [...new Set(names)];
+  }
+  return names.filter((f) => !isTestPath(path.relative(baseDir, f)));
 }
 const stat = fs.existsSync(target) ? fs.statSync(target) : null;
 if (!stat) { console.error(`candor-ts: no such path: ${target}`); process.exit(2); }
@@ -139,7 +155,7 @@ fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: true });
 // scan and a .d.ts resolution). Version-aware trust (§2.1): a report from a DIFFERENT engine
 // version is downgraded to Unknown rather than silently trusted. Duplicate hashes (two same-named
 // exports in one package) UNION — a sound over-approximation, documented.
-const ENGINE_VERSION = "candor-ts-0.4.2";
+const ENGINE_VERSION = "candor-ts-0.4.3";
 const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:[], tables:[]}
 // Packages a loaded sibling report COVERS — exempt from the κ ledger even when a call joins no
 // entry (reports omit pure functions: the silence is the purity claim, SPEC §2 rule 3 — the
@@ -783,7 +799,7 @@ for (const [name, rec] of fns) {
 }
 // `package` names what this report COVERS — a consumer chaining it registers coverage even when
 // `functions` is empty (an all-pure package's report is its purity claim, SPEC §2 rule 3).
-const envelope = { candor: { version: "candor-ts-0.4.2", toolchain: `node-${process.versions.node}`, spec: "0.4" },
+const envelope = { candor: { version: "candor-ts-0.4.3", toolchain: `node-${process.versions.node}`, spec: "0.4" },
                    package: pkgName, functions };
 fs.writeFileSync(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
 const cg = {};
