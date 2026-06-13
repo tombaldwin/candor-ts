@@ -20,6 +20,7 @@ import fs from "node:fs";
 
 import { parsePolicy, scopeMatches } from "./policy.mjs";
 import { printAgents } from "./contract.mjs";
+import { impact as coreImpact, path as corePath } from "./query-core.mjs";
 
 // ---- the §3.1 match ladder: exact > segment-suffix > substring ------------------------------------
 function matchTier(name, q) {
@@ -137,6 +138,18 @@ switch (cmd) {
     emit({ entryPoints: roots.length,
            effects: Object.fromEntries(Object.entries(byEff).sort()
              .map(([k, v]) => [k, { count: v.length, via: v.sort() }])) });
+    break;
+  }
+  case "impact": {
+    // blast radius (backward dual of reachable) — reuses the shared query-core, the same logic the
+    // MCP server serves. SPEC §3.1: {fn, affectedCount, affected, entryPoints:[{fn,inferred}]}.
+    const [prefix, q] = args;
+    emit(coreImpact(loadReport(prefix), loadCallgraph(prefix), q));
+    break;
+  }
+  case "path": {
+    const [prefix, fn, eff] = args;
+    emit(corePath(loadReport(prefix), loadCallgraph(prefix), fn, eff));
     break;
   }
   case "whatif": {

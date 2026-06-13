@@ -108,6 +108,7 @@ export function reachable(fns) {
 export function impact(fns, cg, q) {
   const targets = matches(Object.keys(cg), q);
   const rev = reverseGraph(cg);
+  const idx = indexFns(fns);
   const effectful = new Set(fns.map((e) => e.fn)); // the report lists only effect-carrying units
   const entrySet = new Set(fns.filter((e) => e.entryPoint).map((e) => e.fn));
   const reached = new Set();
@@ -116,9 +117,13 @@ export function impact(fns, cg, q) {
     const n = queue.pop();
     for (const c of rev.get(n) ?? []) if (!reached.has(c) && !targets.includes(c)) { reached.add(c); queue.push(c); }
   }
+  const tgt = targets[0];
   const affected = [...reached].filter((n) => effectful.has(n)).sort();
-  const entryPoints = [...reached].filter((n) => entrySet.has(n)).sort();
-  return { fn: targets.length === 1 ? targets[0] : q, affectedCount: affected.length, entryPoints, affected };
+  const rootNames = [];
+  if (idx.get(tgt)?.entryPoint) rootNames.push(tgt); // the target itself, if a runtime root
+  rootNames.push(...[...reached].filter((n) => entrySet.has(n)).sort());
+  const entryPoints = rootNames.map((n) => ({ fn: n, inferred: idx.get(n)?.inferred ?? [] }));
+  return { fn: tgt ?? q, affectedCount: affected.length, affected, entryPoints };
 }
 
 // path: the FORWARD provenance — a shortest BFS over the calls graph from `fn` to the nearest unit
