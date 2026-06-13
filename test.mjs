@@ -534,6 +534,33 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
           out.startsWith(`<!-- candor-ts ${pkg.version}`) && out.endsWith(doc), out.slice(0, 120));
   }
   check("the npm tarball ships AGENTS.md (files allowlist)", pkg.files.includes("AGENTS.md"));
+  // --agents must NOT fire when it is the VALUE of --out (a scripted gate `--out $PREFIX` where
+  // $PREFIX expanded to --agents) — that exits 0 having scanned nothing.
+  const asValue = spawnSync("node", [path.join(HERE, "scan.mjs"), ".", "--out", "--agents"], { encoding: "utf8" });
+  check("--agents as the VALUE of --out fails (not a print-and-exit hijack)",
+        asValue.status === 2 && !asValue.stdout.includes("Using candor-ts"), asValue.stdout.slice(0, 80));
+  // a KNOWN flag given BEFORE the target must not produce a lying "unknown flag" error.
+  const flagFirst = spawnSync("node", [path.join(HERE, "scan.mjs"), "--allow-js", "/nonexistent-xyz"], { encoding: "utf8" });
+  check("a known flag before the target is accepted (no lying 'unknown flag')",
+        !(flagFirst.stderr || "").includes("unknown flag --allow-js"), flagFirst.stderr?.slice(0, 100));
+  // ONE version source: the envelope version equals the --agents banner version (package.json).
+  const banner = execFileSync(process.execPath, [path.join(HERE, "scan.mjs"), "--agents"], { encoding: "utf8" }).split("\n")[0];
+  check("envelope version is single-sourced from package.json (no drift vs the banner)",
+        banner.includes(`candor-ts ${pkg.version}`), banner);
+}
+
+// unitKind 'export' is PER-UNIT: a same-named ordinary TS function in another file is not mislabeled
+{
+  const d = project({
+    "package.json": `{"name": "mix"}`,
+    "dist/util.js": `const fs = require("node:fs");\nmodule.exports.sign = function () { return fs.readFileSync("/k"); };`,
+    "src/crypto.ts": `export function sign(): number { return Date.now(); }`,
+  });
+  const { report } = scan(d, "--allow-js");
+  const tsSign = report.functions.find((e) => e.fn === "src.crypto.sign");
+  const jsSign = report.functions.find((e) => e.unitKind === "export");
+  check("the CJS export is tagged unitKind:export, the same-named TS function is NOT",
+        jsSign && tsSign && tsSign.unitKind === undefined, JSON.stringify({ tsSign, jsSign }));
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);

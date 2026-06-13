@@ -29,37 +29,37 @@ import { parsePolicy, evaluatePolicy } from "./policy.mjs";
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 // ---- args ----------------------------------------------------------------------------------------
+// ONE pass: the first non-flag is the target; value-taking flags consume the next arg and FAIL on a
+// missing/flag-shaped value; an unknown flag fails; flags may precede the target. `--agents` is a
+// flag (a print-and-exit MODE) — it must NOT fire when it is the VALUE of --out/--policy, which the
+// value-consuming skip handles, nor produce a "lying unknown flag" error for a real flag given first.
+const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>] [--allow-js] [--agents]";
 const argv = process.argv.slice(2);
-if (argv.includes("--agents")) {
-  // The agent contract for THE INSTALLED VERSION — AGENTS.md ships in the npm tarball, so doc
-  // and engine cannot drift (the spec §2.1 version-trust rule applied to documentation).
+let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, allowJs = false, wantAgents = false;
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === "--agents") wantAgents = true;
+  else if (a === "--allow-js") allowJs = true;
+  else if (a === "--out" || a === "--policy") {
+    const v = argv[i + 1];
+    if (v === undefined || v.startsWith("--")) { console.error(`candor-ts: ${a} requires a value (${usage})`); process.exit(2); }
+    if (a === "--out") outPrefix = v; else policyPath = v;
+    i++;
+  }
+  else if (a.startsWith("--")) { console.error(`candor-ts: unknown flag ${a} (${usage})`); process.exit(2); }
+  else if (target === null) target = a;
+  else if (outPrefix === null) outPrefix = a; // legacy positional prefix
+  else { console.error(`candor-ts: unexpected extra argument ${a} (${usage})`); process.exit(2); }
+}
+if (wantAgents) {
+  // The agent contract for THE INSTALLED VERSION — AGENTS.md ships in the npm tarball, so doc and
+  // engine cannot drift (the spec §2.1 version-trust rule applied to documentation).
   const semver = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
   console.log(`<!-- candor-ts ${semver} · the agent contract for this installed version -->`);
   process.stdout.write(fs.readFileSync(path.join(ENGINE_DIR, "AGENTS.md"), "utf8"));
   process.exit(0);
 }
-if (argv.length === 0) {
-  console.error("usage: node scan.mjs <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>] [--agents]");
-  process.exit(2);
-}
-const target = argv[0];
-let outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, allowJs = false;
-for (let i = 1; i < argv.length; i++) {
-  if (argv[i] === "--out") outPrefix = argv[++i];
-  else if (argv[i] === "--policy") policyPath = argv[++i];
-  else if (argv[i] === "--allow-js") allowJs = true;
-  else if (argv[i].startsWith("--")) {
-    // An unknown flag must FAIL, not be silently ignored: a typo'd --policy drops the gate; an
-    // agent following a newer doc against an older binary deserves a loud "upgrade me" signal.
-    console.error(`candor-ts: unknown flag ${argv[i]} (usage: candor-ts <dir> [--out <prefix>] [--policy <file>] [--allow-js] [--agents])`);
-    process.exit(2);
-  }
-  else if (!outPrefix) outPrefix = argv[i]; // legacy positional prefix
-}
-if (target.startsWith("--")) {
-  console.error(`candor-ts: unknown flag ${target} (see usage)`);
-  process.exit(2);
-}
+if (target === null) { console.error(usage); process.exit(2); }
 
 // ---- project discovery (a dir, a single file, or a tsconfig) --------------------------------------
 function isTestPath(p) {
@@ -180,7 +180,10 @@ fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: true });
 // scan and a .d.ts resolution). Version-aware trust (§2.1): a report from a DIFFERENT engine
 // version is downgraded to Unknown rather than silently trusted. Duplicate hashes (two same-named
 // exports in one package) UNION — a sound over-approximation, documented.
-const ENGINE_VERSION = "candor-ts-0.4.3";
+// ONE version source: package.json. A second hardcoded literal (the envelope's, the --agents
+// banner's) that drifted from this would make the engine distrust its OWN reports at the §2.1
+// staleness check (`d.candor?.version !== ENGINE_VERSION`), silently downgrading every chained dep.
+const ENGINE_VERSION = `candor-ts-${JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version}`;
 const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:[], tables:[]}
 // Packages a loaded sibling report COVERS — exempt from the κ ledger even when a call joins no
 // entry (reports omit pure functions: the silence is the purity claim, SPEC §2 rule 3 — the
@@ -377,9 +380,13 @@ function moduleOf(sf) {
   const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?[tj]sx?$/, "");
   return rel.split(path.sep).join(".");
 }
-const cjsLocal = new Set(); // CJS export-surface units (spec 0.5 draft unitKind: "export")
-const markCjs = (v) => { if (v) cjsLocal.add(v); return v; };
+// `_lastCjs` is set by markCjs when localName() returns a CJS export-surface name, read right after
+// the call to tag THAT unit (spec 0.5 draft unitKind: "export"). Keyed to the unit, not a project-
+// wide name set — a same-named ordinary TS function in another file must NOT be mislabeled.
+let _lastCjs = false;
+const markCjs = (v) => { if (v) _lastCjs = true; return v; };
 function localName(node) {
+  _lastCjs = false;
   if (ts.isFunctionDeclaration(node) && node.name) return node.name.text;
   if (ts.isMethodDeclaration(node) && ts.isClassDeclaration(node.parent) && node.parent.name)
     return `${node.parent.name.text}.${node.name.getText()}`;
@@ -477,11 +484,12 @@ for (const sf of sources) {
       nodeName.set(node, ctorQual);
     }
     const n = localName(node);
+    const isCjsExport = _lastCjs; // captured immediately: localName set it for THIS node only
     if (n) {
       const qual = `${mod}.${n}`;
       const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
       fns.set(qual, { local: n, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
-                      cmds: new Set(), paths: new Set(), why: new Set(), entry: false,
+                      cmds: new Set(), paths: new Set(), why: new Set(), entry: false, isCjsExport,
                       loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
       nodeName.set(node, qual);
       if ((ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)) && node.initializer)
@@ -822,12 +830,12 @@ for (const [name, rec] of fns) {
   if (inf.includes("Fs") && rec.paths.size) entry.paths = [...rec.paths].sort();
   if (rec.direct.has("Unknown") && rec.why.size) entry.unknownWhy = [...rec.why].sort();
   if (rec.entry) entry.entryPoint = true;
-  if (cjsLocal.has(rec.local)) entry.unitKind = "export"; // spec 0.5 draft, informative
+  if (rec.isCjsExport) entry.unitKind = "export"; // spec 0.5 draft, informative — per-unit, not by name
   functions.push(entry);
 }
 // `package` names what this report COVERS — a consumer chaining it registers coverage even when
 // `functions` is empty (an all-pure package's report is its purity claim, SPEC §2 rule 3).
-const envelope = { candor: { version: "candor-ts-0.4.3", toolchain: `node-${process.versions.node}`, spec: "0.4" },
+const envelope = { candor: { version: ENGINE_VERSION, toolchain: `node-${process.versions.node}`, spec: "0.4" },
                    package: pkgName, functions };
 fs.writeFileSync(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
 const cg = {};
