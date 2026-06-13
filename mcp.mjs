@@ -32,8 +32,11 @@ function hasReport(p) {
   if (fs.existsSync(`${p}.json`)) return true;
   const base = nodePath.basename(p);
   try {
+    // SAME predicate (Q.isReport) the loader uses — a prefix whose only sibling is `.encountered-*` /
+    // `.calibrated.json` must NOT pass here, else loadReport finds zero functions and the tool returns an
+    // authoritative-empty result instead of "no report" (a silent under-report — review find).
     return fs.readdirSync(nodePath.dirname(p) || ".").some((f) =>
-      f.startsWith(base + ".") && f.endsWith(".json") && !f.endsWith(".callgraph.json"));
+      f.startsWith(base + ".") && f.endsWith(".json") && Q.isReport(f));
   } catch { return false; }
 }
 function resolvePrefix(args) {
@@ -154,6 +157,10 @@ process.stdin.on("data", (chunk) => {
     if (!line) continue;
     let msg;
     try { msg = JSON.parse(line); } catch { continue; } // ignore unparseable frames
+    // A JSON-RPC frame is a (non-null, non-array) object. `null`, a bare primitive, or a batch array
+    // would crash `handle`'s destructure — and the catch's own `msg.id` deref re-threw OUTSIDE the
+    // handler, killing the whole server (and the agent's session) on a single `null\n` line (review find).
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) continue;
     try { handle(msg); } catch (e) { if (msg.id !== undefined) error(msg.id, -32603, e.message); }
   }
 });

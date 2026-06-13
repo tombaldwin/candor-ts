@@ -22,30 +22,54 @@ function siblings(prefix, predicate) {
       .map((f) => nodePath.join(dir, f));
   } catch { return []; }
 }
-const isReport = (f) => !f.endsWith(".callgraph.json") && !f.includes(".encountered-") && !f.endsWith(".calibrated.json");
+// A sibling filename that is a real REPORT (not a callgraph sidecar, an encountered-crate ledger, or a
+// calibrated-coverage sidecar). Exported so `hasReport` (the MCP existence check) uses the SAME predicate
+// as the loader — else a prefix whose only sibling is `.encountered-*`/`.calibrated.json` passes the
+// existence check but loads ZERO functions → an authoritative-empty result (silent under-report; review find).
+export const isReport = (f) => !f.endsWith(".callgraph.json") && !f.includes(".encountered-") && !f.endsWith(".calibrated.json");
 
 // Defend the queries against a partial/old-engine/hand-edited report: the §2 required fields are
-// defaulted so a missing `inferred`/`direct`/`calls` tolerates (returns []) instead of throwing — the
-// §2 forward-compatibility posture applied to the consumer. A conformant report is unchanged.
-function normFn(e) { return { ...e, inferred: e.inferred ?? [], direct: e.direct ?? [], calls: e.calls ?? [] }; }
+// defaulted, and a WRONG-TYPE field is coerced — a non-array `inferred` (e.g. the string "Net") must
+// NOT survive, or `new Set("Net")` iterates characters into {N,e,t} (a fabricated effect set). Array
+// only when actually an array; else []. The §2 forward-compatibility posture applied to the consumer.
+function normFn(e) {
+  const arr = (v) => (Array.isArray(v) ? v : []);
+  return { ...e, inferred: arr(e.inferred), direct: arr(e.direct), calls: arr(e.calls) };
+}
+
+// Normalize a parsed report's `functions` into clean entries. A non-array `functions`, or an entry that
+// isn't an object with a STRING `fn`, is DISCLOSED and dropped — it would otherwise crash a query
+// (`map()` deref on a fn-less entry) or fabricate a junk entity (a primitive normalized into `{0:'t',…}`).
+// The never-crash / never-fabricate posture for malformed input from any engine's report.
+function normFns(parsed, source) {
+  const raw = parsed && typeof parsed === "object" && parsed.functions !== undefined ? parsed.functions : parsed;
+  if (!Array.isArray(raw)) {
+    console.error(`candor-ts: report ${source} has no functions array — OMITTED from this query (malformed report)`);
+    return [];
+  }
+  const out = [];
+  for (const e of raw) {
+    if (e && typeof e === "object" && typeof e.fn === "string") out.push(normFn(e));
+    else console.error(`candor-ts: report ${source} has a malformed entry (no string \`fn\`) — skipped`);
+  }
+  return out;
+}
 
 export function loadReport(prefix) {
   if (fs.existsSync(`${prefix}.json`)) {
-    const d = JSON.parse(fs.readFileSync(`${prefix}.json`, "utf8"));
-    return (d.functions ?? d).map(normFn);
+    // The PRIMARY report parse must DISCLOSE-and-tolerate like the sibling path — a bare JSON.parse here
+    // threw an uncaught stack trace on the CLI for a corrupt `<prefix>.json` (asymmetric with siblings).
+    try { return normFns(JSON.parse(fs.readFileSync(`${prefix}.json`, "utf8")), `${prefix}.json`); }
+    catch { console.error(`candor-ts: report ${prefix}.json failed to parse — OMITTED (corrupt or mid-write); re-run the scan`); return []; }
   }
   // No exact <prefix>.json — merge the multi-report siblings (the Rust/workspace form).
   const fns = [];
   for (const f of siblings(prefix, isReport)) {
-    // DISCLOSE a malformed sibling — never silently drop it. A report that won't parse would otherwise
-    // make all its functions vanish from the merged view, so a query reads "no effect" for functions
-    // that have effects (a silent under-report, against candor's never-silently-pure promise). Warn so
-    // the blind spot is visible (the κ-ledger ethos); still tolerate it so one bad file doesn't kill the
-    // whole merged query. (Atomic writes mean a mid-rescan read no longer triggers this — only real corruption.)
-    try { fns.push(...(JSON.parse(fs.readFileSync(f, "utf8")).functions ?? [])); }
+    // DISCLOSE a malformed sibling — never silently drop it (a vanished report reads as "no effect").
+    try { fns.push(...normFns(JSON.parse(fs.readFileSync(f, "utf8")), f)); }
     catch { console.error(`candor-ts: report ${f} failed to parse — its functions are OMITTED from this query (corrupt or mid-write); re-run the scan`); }
   }
-  return fns.map(normFn);
+  return fns;
 }
 export function loadCallgraph(prefix) {
   const norm = (cg) => Object.fromEntries(Object.entries(cg).map(([k, v]) => [k, Array.isArray(v) ? v : []]));
@@ -199,9 +223,23 @@ export function path(fns, cg, fnQ, eff) {
 
 // diff: the per-unit effect delta between two reports (cur vs base) — {changes:[{fn, gained, lost}]}.
 // The same shape query.mjs emits; the watcher uses it to tell an agent what its edit changed.
+// Effects keyed by fn name, UNIONED across rows that share a name. A plain `new Map(fns.map(...))`
+// keeps only the LAST same-named row — so when the multi-report loader merges workspace members that
+// share a short fn name, one member's effects silently vanish from diff/gains → a SUPPLY-CHAIN MISS
+// (gains fails to flag a gained Net). Unioning is the safe direction (never drops an effect).
+function effectsByFn(fns) {
+  const m = new Map();
+  for (const e of fns) {
+    const s = m.get(e.fn) ?? new Set();
+    for (const x of (Array.isArray(e.inferred) ? e.inferred : [])) s.add(x);  // a string "Net" would iter chars
+    m.set(e.fn, s);
+  }
+  return m;
+}
+
 export function diff(curFns, baseFns) {
-  const cur = new Map(curFns.map((e) => [e.fn, new Set(e.inferred)]));
-  const base = new Map(baseFns.map((e) => [e.fn, new Set(e.inferred)]));
+  const cur = effectsByFn(curFns);
+  const base = effectsByFn(baseFns);
   const changes = [];
   for (const fn of new Set([...cur.keys(), ...base.keys()])) {
     const c = cur.get(fn) ?? new Set(), b = base.get(fn) ?? new Set();

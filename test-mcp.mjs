@@ -69,6 +69,17 @@ ok("cross-engine loader: the callgraph sidecars merge too",
    "a::f" in Q.loadCallgraph(`${M}/r`) && "b::g" in Q.loadCallgraph(`${M}/r`));
 fs.rmSync(M, { recursive: true, force: true });
 
+// REGRESSION: diff/gains must UNION effects across same-named rows, not last-wins. Two merged workspace
+// members with a shared short fn name (the multi-report loader produces both) collapsed to the last,
+// so gains MISSED a gained effect (a supply-chain false negative — the dangerous direction).
+const curDup = [{ fn: "init", inferred: ["Net"] }, { fn: "init", inferred: ["Exec"] }];
+const baseDup = [{ fn: "init", inferred: [] }];
+ok("gains: same-named rows UNION (a supply-chain alarm never drops a gained effect)",
+   eq(Q.gains(curDup, baseDup).gained, ["Exec", "Net"]), JSON.stringify(Q.gains(curDup, baseDup)));
+// a non-array inferred (e.g. the string "Net") must NOT iterate into {N,e,t} (fabricated effects)
+ok("loader: a non-array `inferred` is coerced to [], not iterated into characters",
+   eq(Q.gains([{ fn: "x", inferred: "Net" }], [{ fn: "x", inferred: [] }]).gained, []));
+
 // ---- cross-check the shared queries against the canonical query.mjs (no drift) --------------------
 function cli(args) { return JSON.parse(execFileSync("node", [`${HERE}/query.mjs`, ...args], { encoding: "utf8" })); }
 ok("query-core where == query.mjs where (canonical, conformance-verified)",
@@ -120,6 +131,33 @@ ok("mcp: a no-match query is a tool-level error (isError), not a crash",
    byId[5]?.result?.isError === true);
 ok("mcp: a missing required arg (fn) is a clear error, not a silently-empty result",
    byId[6]?.result?.isError === true && /missing required argument/.test(byId[6].result.content[0].text));
+
+// REGRESSION: a malformed frame that parses to a non-object (`null`, a bare primitive, a batch array)
+// must NOT crash the server — `null\n` killed it (handle(null) destructured; the catch re-derefed
+// msg.id on null → threw OUTSIDE the handler → process exit → the agent's whole session died).
+async function rawSession(lines) {
+  return new Promise((resolve) => {
+    const srv = spawn("node", [`${HERE}/mcp.mjs`], { env: { ...process.env, CANDOR_REPORT: P } });
+    let out = "", responses = [];
+    srv.stdout.on("data", (d) => {
+      out += d; let nl;
+      while ((nl = out.indexOf("\n")) >= 0) {
+        const line = out.slice(0, nl).trim(); out = out.slice(nl + 1);
+        if (line) responses.push(JSON.parse(line));
+        if (responses.length >= 2) { srv.stdin.end(); resolve(responses); }
+      }
+    });
+    for (const l of lines) srv.stdin.write(l + "\n");
+  });
+}
+const afterNull = await rawSession([
+  JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+  "null",                  // the crash trigger
+  "false", "[1,2,3]",      // other non-object frames
+  JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" }),
+]);
+ok("mcp: a `null`/primitive/array frame does NOT crash the server (it still answers the next request)",
+   afterNull.some((r) => r.id === 2 && r.result !== undefined), JSON.stringify(afterNull));
 
 fs.rmSync(W, { recursive: true, force: true });
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);

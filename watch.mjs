@@ -117,7 +117,10 @@ async function main() {
     const delta = formatDelta(Q.diff(readReportSafe(out), before).changes);
     console.error(`candor-ts-watch: re-scanned (${changed.length} changed: ${names}) in ${r.ms}ms`
                   + (delta ? ` — Δ ${delta}` : " — no effect change"));
-  }, interval).unref?.();
+  }, interval);
+  // NO .unref() — the interval is the ONLY thing keeping the process alive; unref'ing it made Node exit
+  // ~0.6s after the startup scan, so the watcher did ONE scan and died while printing "Watching…" (the
+  // whole feature was silently broken, and test-watch.mjs only tests the helpers, never the live loop).
 }
 
 if (path.resolve(process.argv[1] || "") === path.resolve(fileURLToPath(import.meta.url))) main();

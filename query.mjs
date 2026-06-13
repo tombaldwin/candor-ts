@@ -20,27 +20,12 @@ import fs from "node:fs";
 
 import { parsePolicy, scopeMatches } from "./policy.mjs";
 import { printAgents } from "./contract.mjs";
-import { impact as coreImpact, path as corePath, gains as coreGains } from "./query-core.mjs";
-
-// ---- the §3.1 match ladder: exact > segment-suffix > substring ------------------------------------
-function matchTier(name, q) {
-  if (name === q) return 3;
-  if (name.endsWith(q) && /[.$]$/.test(name.slice(0, name.length - q.length))) return 2;
-  if (name.includes(q)) return 1;
-  return 0;
-}
-function matches(names, q) {
-  const best = Math.max(0, ...names.map((n) => matchTier(n, q)));
-  return best === 0 ? [] : names.filter((n) => matchTier(n, q) >= best);
-}
-
-function loadReport(prefix) {
-  const d = JSON.parse(fs.readFileSync(`${prefix}.json`, "utf8"));
-  return d.functions ?? d;
-}
-function loadCallgraph(prefix) {
-  return JSON.parse(fs.readFileSync(`${prefix}.callgraph.json`, "utf8"));
-}
+// ONE source of truth for loading + name-matching — query.mjs kept DRIFTED local copies that didn't
+// merge sibling reports, didn't tolerate a corrupt report (bare JSON.parse → uncaught crash), and used
+// a `matchTier` missing `#` (so the SAME query resolved differently between `impact` and `callers` on a
+// JVM `Type#method` report). Importing the shared functions removes all three divergences (review find).
+import { impact as coreImpact, path as corePath, gains as coreGains,
+         loadReport, loadCallgraph, matches } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
 
 const [, , cmd, ...args] = process.argv;

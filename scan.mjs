@@ -310,7 +310,18 @@ const _manifestCache = new Map();
 function packageManifestEffects(file) {
   const m = file && file.match(/^(.*\/node_modules\/(?:@[^/]+\/[^/]+|[^/]+))\//);
   if (!m) return null;
-  const dir = m[1];
+  let dir = m[1];
+  // A manifest read from an `@types/<pkg>` directory is a TRUST-BOUNDARY HOLE: the @types stub is a
+  // type-only package published by DefinitelyTyped/anyone — NOT the effect-owning package. Honoring its
+  // `candorEffects` let an attacker's `@types/realpkg` declare `[]` to SILENCE the real realpkg's effects
+  // AND its κ-ledger disclosure (defeating the spec's "a missing manifest is visible via κ" safety net).
+  // Redirect to the REAL package's own dir, whose author controls it (`@types/babel__core` → `@babel/core`,
+  // `@types/foo` → `foo`); if that has no manifest, it stays an honest κ-ledger blind spot, never silenced.
+  const at = dir.match(/^(.*\/node_modules\/)@types\/([^/]+)$/);
+  if (at) {
+    const real = at[2].includes("__") ? "@" + at[2].replace("__", "/") : at[2];
+    dir = at[1] + real;
+  }
   if (_manifestCache.has(dir)) return _manifestCache.get(dir);
   let result = null;
   try {
