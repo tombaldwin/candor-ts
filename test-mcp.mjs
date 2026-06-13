@@ -45,6 +45,20 @@ const w = Q.where(fns, "Net");
 ok("where: leaf is a direct Net source; mid/handler inherit it",
    eq(w.directly, ["app.leaf"]) && eq(w.inherited, ["app.handler", "app.mid"]), JSON.stringify(w));
 
+// cross-engine loader: a multi-report prefix (<prefix>.<crate>.scan.json, the candor-scan/Rust form)
+// merges every sibling — so the MCP server serves a report from ANY engine, not just candor-ts's.
+const M = fs.mkdtempSync("/tmp/candor-multi-");
+fs.writeFileSync(`${M}/r.a.scan.json`, JSON.stringify({ functions: [{ fn: "a::f", inferred: ["Net"], direct: ["Net"], calls: [] }] }));
+fs.writeFileSync(`${M}/r.b.scan.json`, JSON.stringify({ functions: [{ fn: "b::g", inferred: ["Fs"], direct: ["Fs"], calls: [] }] }));
+fs.writeFileSync(`${M}/r.a.scan.callgraph.json`, JSON.stringify({ "a::f": [] }));
+fs.writeFileSync(`${M}/r.b.scan.callgraph.json`, JSON.stringify({ "b::g": [] }));
+const merged = Q.loadReport(`${M}/r`);
+ok("cross-engine loader: a multi-report prefix merges every sibling (Rust/workspace form)",
+   merged.length === 2 && merged.some((e) => e.fn === "a::f") && merged.some((e) => e.fn === "b::g"));
+ok("cross-engine loader: the callgraph sidecars merge too",
+   "a::f" in Q.loadCallgraph(`${M}/r`) && "b::g" in Q.loadCallgraph(`${M}/r`));
+fs.rmSync(M, { recursive: true, force: true });
+
 // ---- cross-check the shared queries against the canonical query.mjs (no drift) --------------------
 function cli(args) { return JSON.parse(execFileSync("node", [`${HERE}/query.mjs`, ...args], { encoding: "utf8" })); }
 ok("query-core where == query.mjs where (canonical, conformance-verified)",

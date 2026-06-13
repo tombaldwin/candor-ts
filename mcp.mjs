@@ -17,6 +17,7 @@
  */
 import fs from "node:fs";
 import { createRequire } from "node:module";
+import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
 import { parsePolicy, scopeMatches } from "./policy.mjs";
 
@@ -24,10 +25,21 @@ const VERSION = createRequire(import.meta.url)("./package.json").version; // sin
 
 const DEFAULT_PREFIX = process.env.CANDOR_REPORT || process.argv[2] || null;
 
+// A report exists at the prefix if there's an exact `<prefix>.json` (candor-ts) OR a sibling
+// `<prefix>.<crate>.scan.json` (the candor-scan/Rust multi-report form) — the loaders read both, so
+// the MCP server serves a report from ANY engine, not just candor-ts's.
+function hasReport(p) {
+  if (fs.existsSync(`${p}.json`)) return true;
+  const base = nodePath.basename(p);
+  try {
+    return fs.readdirSync(nodePath.dirname(p) || ".").some((f) =>
+      f.startsWith(base + ".") && f.endsWith(".json") && !f.endsWith(".callgraph.json"));
+  } catch { return false; }
+}
 function resolvePrefix(args) {
   const p = args?.report || DEFAULT_PREFIX;
   if (!p) throw new Error("no report prefix: pass `report`, set $CANDOR_REPORT, or give one as the CLI arg");
-  if (!fs.existsSync(`${p}.json`)) throw new Error(`no report at \`${p}.json\` — run a candor scan first`);
+  if (!hasReport(p)) throw new Error(`no report at \`${p}\` (.json or .<crate>.scan.json) — run a candor scan first`);
   return p;
 }
 

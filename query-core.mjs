@@ -9,13 +9,40 @@
  * object name->callees) and RETURNS a plain object — no I/O, no process exit. The caller emits.
  */
 import fs from "node:fs";
+import nodePath from "node:path";
+
+// Sibling report/callgraph files of a multi-report prefix (candor-scan writes <prefix>.<crate>.scan.json,
+// one per workspace member) — so the loaders read ANY engine's output, not just candor-ts's <prefix>.json.
+// This is the cross-engine premise: an agent queries a report from any language identically.
+function siblings(prefix, predicate) {
+  const dir = nodePath.dirname(prefix) || ".";
+  const base = nodePath.basename(prefix);
+  try {
+    return fs.readdirSync(dir).filter((f) => f.startsWith(base + ".") && f.endsWith(".json") && predicate(f))
+      .map((f) => nodePath.join(dir, f));
+  } catch { return []; }
+}
+const isReport = (f) => !f.endsWith(".callgraph.json") && !f.includes(".encountered-") && !f.endsWith(".calibrated.json");
 
 export function loadReport(prefix) {
-  const d = JSON.parse(fs.readFileSync(`${prefix}.json`, "utf8"));
-  return d.functions ?? d;
+  if (fs.existsSync(`${prefix}.json`)) {
+    const d = JSON.parse(fs.readFileSync(`${prefix}.json`, "utf8"));
+    return d.functions ?? d;
+  }
+  // No exact <prefix>.json — merge the multi-report siblings (the Rust/workspace form).
+  const fns = [];
+  for (const f of siblings(prefix, isReport)) {
+    try { fns.push(...(JSON.parse(fs.readFileSync(f, "utf8")).functions ?? [])); } catch { /* skip */ }
+  }
+  return fns;
 }
 export function loadCallgraph(prefix) {
-  return JSON.parse(fs.readFileSync(`${prefix}.callgraph.json`, "utf8"));
+  if (fs.existsSync(`${prefix}.callgraph.json`)) return JSON.parse(fs.readFileSync(`${prefix}.callgraph.json`, "utf8"));
+  const cg = {};
+  for (const f of siblings(prefix, (x) => x.endsWith(".callgraph.json"))) {
+    try { Object.assign(cg, JSON.parse(fs.readFileSync(f, "utf8"))); } catch { /* skip */ }
+  }
+  return cg;
 }
 
 // ---- the §3.1 match ladder: exact > segment-suffix > substring ------------------------------------
