@@ -120,6 +120,11 @@ function handle(msg) {
     if (!t) return error(id, -32602, `unknown tool: ${params?.name}`);
     try {
       const args = params.arguments || {};
+      // Enforce the tool's declared required args server-side — a missing `fn` must be a clear error,
+      // not a silently-empty result (a defensive server doesn't trust the client to validate).
+      const missing = (t.schema.required || []).filter((k) => args[k] === undefined || args[k] === "");
+      if (missing.length)
+        return result(id, { content: [{ type: "text", text: `candor: missing required argument(s): ${missing.join(", ")}` }], isError: true });
       const prefix = resolvePrefix(args);
       // A tool that targets a `fn` gets a clear "not found" rather than a silently-empty result —
       // an agent must distinguish "no such function" from "found, nothing calls it".

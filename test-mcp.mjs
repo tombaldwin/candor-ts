@@ -92,6 +92,7 @@ const replies = await mcpSession([
   { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "candor_impact", arguments: { fn: "leaf" } } },
   { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "candor_where", arguments: { effect: "Net" } } },
   { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "candor_impact", arguments: { fn: "nope" } } },
+  { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "candor_impact", arguments: {} } },
 ]);
 const byId = Object.fromEntries(replies.map((r) => [r.id, r]));
 
@@ -107,6 +108,8 @@ const whereCall = JSON.parse(byId[4].result.content[0].text);
 ok("mcp: tools/call candor_where returns the effect surface", eq(whereCall.directly, ["app.leaf"]));
 ok("mcp: a no-match query is a tool-level error (isError), not a crash",
    byId[5]?.result?.isError === true);
+ok("mcp: a missing required arg (fn) is a clear error, not a silently-empty result",
+   byId[6]?.result?.isError === true && /missing required argument/.test(byId[6].result.content[0].text));
 
 fs.rmSync(W, { recursive: true, force: true });
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
