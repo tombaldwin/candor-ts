@@ -157,6 +157,22 @@ export function path(fns, cg, fnQ, eff) {
   };
 }
 
+// diff: the per-unit effect delta between two reports (cur vs base) — {changes:[{fn, gained, lost}]}.
+// The same shape query.mjs emits; the watcher uses it to tell an agent what its edit changed.
+export function diff(curFns, baseFns) {
+  const cur = new Map(curFns.map((e) => [e.fn, new Set(e.inferred)]));
+  const base = new Map(baseFns.map((e) => [e.fn, new Set(e.inferred)]));
+  const changes = [];
+  for (const fn of new Set([...cur.keys(), ...base.keys()])) {
+    const c = cur.get(fn) ?? new Set(), b = base.get(fn) ?? new Set();
+    const gained = [...c].filter((e) => !b.has(e)).sort();
+    const lost = [...b].filter((e) => !c.has(e)).sort();
+    if (gained.length || lost.length) changes.push({ fn, gained, lost });
+  }
+  changes.sort((a, b) => a.fn.localeCompare(b.fn));
+  return { changes };
+}
+
 // whatif: hypothetically add `eff` to `target` and report the blast radius + any policy violations.
 // `policyParsed` is an already-parsed policy object (or null); kept I/O-free for the core.
 export function whatif(cg, target, eff, policyParsed, scopeMatches) {

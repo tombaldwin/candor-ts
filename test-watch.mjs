@@ -25,6 +25,7 @@ const first = W.scanOnce(D, OUT);
 ok("scanOnce: produces a report", first.ok && fs.existsSync(`${OUT}.json`));
 // initially f is pure → omitted from the report (no effect)
 ok("report: the pure function carries no Net yet", !Q.where(Q.loadReport(OUT), "Net").directly.includes("app.f"));
+const beforeRpt = W.readReportSafe(OUT); // snapshot for the edit-delta below
 
 // the agent edits f to shell out to the network
 fs.writeFileSync(`${D}/app.ts`, `import * as http from "node:http";\nexport function f(): void { http.get("http://x"); }\n`);
@@ -37,6 +38,13 @@ const second = W.scanOnce(D, OUT);
 ok("scanOnce: the re-scan succeeds", second.ok);
 ok("report is FRESH: f now reads Net after the edit (the live agent-loop payoff)",
    Q.where(Q.loadReport(OUT), "Net").directly.includes("app.f"), JSON.stringify(Q.where(Q.loadReport(OUT), "Net")));
+
+// the EDIT-DELTA: the watcher tells the agent WHAT its edit did, not just that the report is fresh
+const delta = Q.diff(W.readReportSafe(OUT), beforeRpt);
+ok("edit-delta: the diff shows f gained Net (what the edit DID)",
+   delta.changes.some((c) => c.fn.endsWith("f") && c.gained.includes("Net")), JSON.stringify(delta));
+ok("formatDelta: renders the gain for the agent (e.g. 'f +Net')",
+   W.formatDelta(delta.changes).includes("+Net"), W.formatDelta(delta.changes));
 // and an editing-an-unrelated-marker write triggers NO source change (the gate)
 fs.writeFileSync(`${D}/note.md`, `still not a source — touched\n`);
 ok("the freshness gate: a non-source write is not a tracked change",

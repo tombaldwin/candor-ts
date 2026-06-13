@@ -83,9 +83,12 @@ candor-ts-watch ./src --out .candor/report   # re-scans only when a tracked sour
 
 It tracks the project's sources by content hash and re-scans on a real change (a no-op save or an
 unrelated write does nothing), writing the same prefix the MCP server reads. So: **agent edits →
-watcher refreshes the report → agent asks `candor_impact` and gets the post-edit answer.** v1 runs a
-full (sound) scan per change; the deeper optimisation — re-analysing only the changed file's subgraph
-— is the next step (the content-hash gate is its first increment).
+watcher refreshes the report → agent asks `candor_impact` and gets the post-edit answer.** And it
+reports the **edit-delta** — not just that the report is fresh but *what the edit did* to the effect
+surface (`re-scanned (1 changed: app.ts) — Δ f +Net`), so the agent learns the consequence of its
+own change. v1 runs a full (sound) scan per change; the deeper *perf* optimisation — re-analysing
+only the changed file's subgraph instead of the whole project — is the staged next step (the
+content-hash gate is its first increment).
 
 ## Trust contract (spec §4)
 

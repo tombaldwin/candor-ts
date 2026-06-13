@@ -19,6 +19,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import * as Q from "./query-core.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = /\.[mc]?[jt]sx?$/;            // .ts/.tsx/.mts/.cts/.js/.jsx — what candor-ts analyses
@@ -65,6 +66,24 @@ export function scanOnce(target, out) {
 
 function rel(f, target) { return path.relative(fs.statSync(target).isFile() ? path.dirname(target) : target, f) || f; }
 
+// The report from disk, or [] if there isn't one yet (the first scan has nothing to diff against).
+export function readReportSafe(out) {
+  try { return Q.loadReport(out); } catch { return []; }
+}
+
+// One-line summary of what an edit changed — the agent-loop payoff: not just "the report is fresh"
+// but "your edit added Net to f". Built on the same diff the CLI emits. "" when nothing's effects moved.
+export function formatDelta(changes) {
+  const leaf = (n) => n.split("::").pop().split(".").pop();
+  const parts = changes.slice(0, 4).map((c) => {
+    const g = c.gained.length ? `+${c.gained.join("/")}` : "";
+    const l = c.lost.length ? `-${c.lost.join("/")}` : "";
+    return `${leaf(c.fn)} ${[g, l].filter(Boolean).join(" ")}`.trim();
+  });
+  if (changes.length > 4) parts.push(`+${changes.length - 4} more`);
+  return parts.join("; ");
+}
+
 async function main() {
   const args = process.argv.slice(2);
   let target = null, out = null, interval = 400;
@@ -87,10 +106,17 @@ async function main() {
     const changed = changedFiles(prev, cur);
     if (!changed.length) return; // the freshness gate: nothing relevant changed, do nothing
     prev = cur;
+    const before = readReportSafe(out); // the prior report, before this re-scan overwrites it
     const r = scanOnce(target, out);
     const names = changed.slice(0, 4).map((f) => rel(f, target)).join(", ") + (changed.length > 4 ? `, +${changed.length - 4}` : "");
-    console.error(r.ok ? `candor-ts-watch: re-scanned (${changed.length} changed: ${names}) in ${r.ms}ms`
-                       : `candor-ts-watch: scan FAILED after a change in ${names}: ${r.stderr?.trim()}`);
+    if (!r.ok) {
+      console.error(`candor-ts-watch: scan FAILED after a change in ${names}: ${r.stderr?.trim()}`);
+      return;
+    }
+    // The edit-delta: what the change DID to the effect surface (the agent-loop payoff).
+    const delta = formatDelta(Q.diff(readReportSafe(out), before).changes);
+    console.error(`candor-ts-watch: re-scanned (${changed.length} changed: ${names}) in ${r.ms}ms`
+                  + (delta ? ` — Δ ${delta}` : " — no effect change"));
   }, interval).unref?.();
 }
 
