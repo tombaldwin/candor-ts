@@ -305,6 +305,21 @@ function firstStringLiteral(node) {
   }
   return null;
 }
+// Refine the Exec cliff (spec §4 ⟨0.5⟩): the effects a literal, statically-known subprocess head
+// implies, matched by basename. ADDED to a caller that already carries Exec (a subprocess is still
+// spawned — Exec is never dropped); an unrecognised head returns [] and keeps the bare cliff (never
+// guess). A candor engine reads Fs/Env only — spec §7 item 12 (the analyzer self-boundary) guarantees
+// it, so that case is spec-supplied. Only UNAMBIGUOUS single-effect tools belong here: a multi-modal
+// head (git status local vs git push Net; rsync local vs remote; make/npm run project code) would
+// fabricate the effect for its common case. The reference engines share this table verbatim.
+function commandHeadEffects(cmd) {
+  const base = cmd.trim().split(/\s+/)[0].split(/[/\\]/).pop();
+  if (["curl", "wget", "http", "ssh", "scp"].includes(base)) return ["Net"];
+  if (["psql", "mysql", "sqlite3", "mongosh", "redis-cli"].includes(base)) return ["Db"];
+  if (["candor", "candor-run.sh", "candor-scan", "candor-query", "candor-java",
+       "candor-classify", "candor-report", "cargo-candor"].includes(base)) return ["Env", "Fs"];
+  return [];
+}
 // host[:port] from an address/URL literal; non-address strings yield nothing (never fabricate).
 function hostLiteral(s) {
   const m = s.match(/^[a-z][a-z0-9+.-]*:\/\/([^/]+)/i);   // scheme://host[:port]/…
@@ -683,7 +698,11 @@ function visitCalls(node) {
           }
           if (eff === "Exec") {
             const lit = firstStringLiteral(node);
-            if (lit) rec.cmds.add(lit.trim().split(/\s+/)[0]); // the program of a command line
+            if (lit) {
+              rec.cmds.add(lit.trim().split(/\s+/)[0]); // the program of a command line
+              // a known literal head refines the cliff (curl→Net, candor→Fs/Env); Exec stays
+              for (const e of commandHeadEffects(lit)) rec.direct.add(e);
+            }
           }
           if (eff === "Fs") {
             const lit = firstStringLiteral(node);

@@ -8,6 +8,8 @@ import * as cp from "node:child_process";
 export function fs_read(): void { try { fsm.readFileSync("/tmp/x"); } catch {} }
 export function net_connect(): void { try { netm.connect(1, "h"); } catch {} }
 export function exec_spawn(): void { try { cp.spawn("x"); } catch {} }
+// Exec-cliff refinement (spec §4 ⟨0.5⟩): a known literal head adds its effect; all engines must agree.
+export function exec_curl(): void { try { cp.spawn("curl"); } catch {} }
 export function env_read(): void { void process.env.X; }
 export function clock_now(): void { void Date.now(); }
 
