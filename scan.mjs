@@ -314,8 +314,8 @@ function firstStringLiteral(node) {
 // fabricate the effect for its common case. The reference engines share this table verbatim.
 function commandHeadEffects(cmd) {
   const base = cmd.trim().split(/\s+/)[0].split(/[/\\]/).pop();
-  if (["curl", "wget", "http", "ssh", "scp"].includes(base)) return ["Net"];
-  if (["psql", "mysql", "sqlite3", "mongosh", "redis-cli"].includes(base)) return ["Db"];
+  if (["curl", "wget", "http", "ssh", "scp", "sftp", "ftp", "telnet"].includes(base)) return ["Net"];
+  if (["psql", "mysql", "sqlite3", "mongosh", "mongo", "redis-cli", "cqlsh", "influx"].includes(base)) return ["Db"];
   if (["candor", "candor-run.sh", "candor-scan", "candor-query", "candor-java",
        "candor-classify", "candor-report", "cargo-candor"].includes(base)) return ["Env", "Fs"];
   return [];
