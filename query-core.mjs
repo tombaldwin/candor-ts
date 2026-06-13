@@ -24,25 +24,31 @@ function siblings(prefix, predicate) {
 }
 const isReport = (f) => !f.endsWith(".callgraph.json") && !f.includes(".encountered-") && !f.endsWith(".calibrated.json");
 
+// Defend the queries against a partial/old-engine/hand-edited report: the §2 required fields are
+// defaulted so a missing `inferred`/`direct`/`calls` tolerates (returns []) instead of throwing — the
+// §2 forward-compatibility posture applied to the consumer. A conformant report is unchanged.
+function normFn(e) { return { ...e, inferred: e.inferred ?? [], direct: e.direct ?? [], calls: e.calls ?? [] }; }
+
 export function loadReport(prefix) {
   if (fs.existsSync(`${prefix}.json`)) {
     const d = JSON.parse(fs.readFileSync(`${prefix}.json`, "utf8"));
-    return d.functions ?? d;
+    return (d.functions ?? d).map(normFn);
   }
   // No exact <prefix>.json — merge the multi-report siblings (the Rust/workspace form).
   const fns = [];
   for (const f of siblings(prefix, isReport)) {
     try { fns.push(...(JSON.parse(fs.readFileSync(f, "utf8")).functions ?? [])); } catch { /* skip */ }
   }
-  return fns;
+  return fns.map(normFn);
 }
 export function loadCallgraph(prefix) {
-  if (fs.existsSync(`${prefix}.callgraph.json`)) return JSON.parse(fs.readFileSync(`${prefix}.callgraph.json`, "utf8"));
+  const norm = (cg) => Object.fromEntries(Object.entries(cg).map(([k, v]) => [k, Array.isArray(v) ? v : []]));
+  if (fs.existsSync(`${prefix}.callgraph.json`)) return norm(JSON.parse(fs.readFileSync(`${prefix}.callgraph.json`, "utf8")));
   const cg = {};
   for (const f of siblings(prefix, (x) => x.endsWith(".callgraph.json"))) {
     try { Object.assign(cg, JSON.parse(fs.readFileSync(f, "utf8"))); } catch { /* skip */ }
   }
-  return cg;
+  return norm(cg);
 }
 
 // ---- the §3.1 match ladder: exact > segment-suffix > substring ------------------------------------

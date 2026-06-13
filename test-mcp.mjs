@@ -45,6 +45,16 @@ const w = Q.where(fns, "Net");
 ok("where: leaf is a direct Net source; mid/handler inherit it",
    eq(w.directly, ["app.leaf"]) && eq(w.inherited, ["app.handler", "app.mid"]), JSON.stringify(w));
 
+// defensive: a partial/malformed report (entries missing §2 required fields) must TOLERATE, not throw
+const B = fs.mkdtempSync("/tmp/candor-bad-");
+fs.writeFileSync(`${B}/r.json`, JSON.stringify({ functions: [{ fn: "a" }, { fn: "b", inferred: ["Net"] }] }));
+fs.writeFileSync(`${B}/r.callgraph.json`, JSON.stringify({ a: null, b: ["a"] }));
+const bf = Q.loadReport(`${B}/r`), bcg = Q.loadCallgraph(`${B}/r`);
+let threw = false;
+try { Q.where(bf, "Net"); Q.map(bf); Q.reachable(bf); Q.impact(bf, bcg, "a"); Q.callers(bcg, "b"); } catch { threw = true; }
+ok("query-core tolerates a malformed report (missing inferred/direct/calls) without throwing", !threw);
+fs.rmSync(B, { recursive: true, force: true });
+
 // cross-engine loader: a multi-report prefix (<prefix>.<crate>.scan.json, the candor-scan/Rust form)
 // merges every sibling — so the MCP server serves a report from ANY engine, not just candor-ts's.
 const M = fs.mkdtempSync("/tmp/candor-multi-");
