@@ -37,7 +37,13 @@ export function loadReport(prefix) {
   // No exact <prefix>.json — merge the multi-report siblings (the Rust/workspace form).
   const fns = [];
   for (const f of siblings(prefix, isReport)) {
-    try { fns.push(...(JSON.parse(fs.readFileSync(f, "utf8")).functions ?? [])); } catch { /* skip */ }
+    // DISCLOSE a malformed sibling — never silently drop it. A report that won't parse would otherwise
+    // make all its functions vanish from the merged view, so a query reads "no effect" for functions
+    // that have effects (a silent under-report, against candor's never-silently-pure promise). Warn so
+    // the blind spot is visible (the κ-ledger ethos); still tolerate it so one bad file doesn't kill the
+    // whole merged query. (Atomic writes mean a mid-rescan read no longer triggers this — only real corruption.)
+    try { fns.push(...(JSON.parse(fs.readFileSync(f, "utf8")).functions ?? [])); }
+    catch { console.error(`candor-ts: report ${f} failed to parse — its functions are OMITTED from this query (corrupt or mid-write); re-run the scan`); }
   }
   return fns.map(normFn);
 }
@@ -46,7 +52,8 @@ export function loadCallgraph(prefix) {
   if (fs.existsSync(`${prefix}.callgraph.json`)) return norm(JSON.parse(fs.readFileSync(`${prefix}.callgraph.json`, "utf8")));
   const cg = {};
   for (const f of siblings(prefix, (x) => x.endsWith(".callgraph.json"))) {
-    try { Object.assign(cg, JSON.parse(fs.readFileSync(f, "utf8"))); } catch { /* skip */ }
+    try { Object.assign(cg, JSON.parse(fs.readFileSync(f, "utf8"))); }
+    catch { console.error(`candor-ts: callgraph ${f} failed to parse — its edges are OMITTED from this query (corrupt or mid-write); re-run the scan`); }
   }
   return norm(cg);
 }

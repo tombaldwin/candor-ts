@@ -886,10 +886,15 @@ for (const [name, rec] of fns) {
 // `functions` is empty (an all-pure package's report is its purity claim, SPEC §2 rule 3).
 const envelope = { candor: { version: ENGINE_VERSION, toolchain: `node-${process.versions.node}`, spec: "0.4" },
                    package: pkgName, functions };
-fs.writeFileSync(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
 const cg = {};
 for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
-fs.writeFileSync(`${outPrefix}.callgraph.json`, JSON.stringify(cg, null, 1));
+// Write ATOMICALLY (temp + rename): a concurrent reader — the MCP server or another `query` while
+// `candor-ts-watch` re-scans (the recommended agent setup runs both) — must never observe a
+// half-written report. An in-place writeFileSync leaves a truncation window where JSON.parse throws;
+// rename(2) is atomic within a filesystem, so a reader sees either the old report or the new one whole.
+const writeAtomic = (file, text) => { const tmp = `${file}.${process.pid}.tmp`; fs.writeFileSync(tmp, text); fs.renameSync(tmp, file); };
+writeAtomic(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
+writeAtomic(`${outPrefix}.callgraph.json`, JSON.stringify(cg, null, 1));
 console.error(`candor-ts: wrote ${functions.length} effectful functions (${fns.size} analyzed, ${sources.length} files) to ${outPrefix}.json`);
 if (unlistedSeen.size > 0) {
   const top = [...unlistedSeen.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));

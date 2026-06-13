@@ -588,5 +588,39 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
         /candorEffects must be an array/.test(r4.stderr), r4.stderr);
 }
 
+// ── concurrency: the report is written ATOMICALLY (no mid-write truncation window) ────────────────
+// The recommended agent setup runs candor-ts-watch (re-scans on edit) alongside the MCP server /
+// query (reads the report). An in-place write would let a reader observe a half-written file and
+// throw on JSON.parse; an atomic temp+rename guarantees old-or-new-whole. We assert the rename
+// discipline by its observable side effect: the scan leaves NO `.tmp` turds and writes valid JSON.
+{
+  const d = project({ "app.ts": `import * as fsm from "node:fs";\nexport function f(): void { fsm.readFileSync("/x"); }` });
+  const { prefix } = scan(d);
+  const leftovers = fs.readdirSync(path.dirname(prefix)).filter((n) => n.includes(".tmp"));
+  check("atomic write: scan leaves no .tmp leftovers (temp file was renamed into place)",
+        leftovers.length === 0, leftovers.join());
+  // the written report is parseable as a whole (the post-rename invariant a concurrent reader relies on)
+  let parsed = true; try { JSON.parse(fs.readFileSync(`${prefix}.json`, "utf8")); JSON.parse(fs.readFileSync(`${prefix}.callgraph.json`, "utf8")); } catch { parsed = false; }
+  check("atomic write: the written report and callgraph are whole, valid JSON", parsed);
+}
+
+// ── a corrupt SIBLING report is DISCLOSED, not silently dropped (never-silently-pure) ─────────────
+// loadReport merges sibling reports (the Rust/workspace form). A malformed sibling must WARN and be
+// omitted loudly — silently skipping it would make its effectful functions read as "no effect".
+{
+  const Q = await import("./query-core.mjs");
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-corrupt-"));
+  // two siblings under one prefix: one valid (effectful), one truncated mid-object
+  fs.writeFileSync(path.join(d, "rep.good.scan.json"), JSON.stringify({ candor: { version: "x" }, functions: [{ fn: "g.net", inferred: ["Net"], direct: ["Net"] }] }));
+  fs.writeFileSync(path.join(d, "rep.bad.scan.json"), `{ "candor": { "version": "x" }, "functions": [ { "fn": "b.`);
+  const errs = [];
+  const orig = console.error; console.error = (m) => errs.push(String(m));
+  let fns; try { fns = Q.loadReport(path.join(d, "rep")); } finally { console.error = orig; }
+  check("corrupt sibling: the VALID sibling's functions still load (one bad file doesn't kill the query)",
+        fns.some((e) => e.fn === "g.net"), JSON.stringify(fns));
+  check("corrupt sibling: the malformed report is DISCLOSED on stderr, not silently dropped",
+        errs.some((m) => /failed to parse/.test(m) && /rep\.bad\.scan\.json/.test(m)), errs.join("\n"));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
