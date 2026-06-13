@@ -10,6 +10,9 @@ export function net_connect(): void { try { netm.connect(1, "h"); } catch {} }
 export function exec_spawn(): void { try { cp.spawn("x"); } catch {} }
 // Exec-cliff refinement (spec §4 ⟨0.5⟩): a known literal head adds its effect; all engines must agree.
 export function exec_curl(): void { try { cp.spawn("curl"); } catch {} }
+// Exec-refinement reads the HEAD (argv[0]) only: a dynamic program with a literal ARGUMENT keeps the
+// bare cliff — "curl" in the args array must NOT fabricate Net (spec §4 ⟨0.5⟩: the head is argv[0]).
+export function exec_dyn_head(tool: string): void { try { cp.spawn(tool, ["curl"]); } catch {} }
 export function env_read(): void { void process.env.X; }
 export function clock_now(): void { void Date.now(); }
 
