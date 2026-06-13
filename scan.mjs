@@ -346,6 +346,19 @@ function firstStringLiteral(node) {
   }
   return null;
 }
+
+// The literal PROGRAM head a subprocess call NAMES — argv[0] specifically, never a later argument.
+// Unlike firstStringLiteral (the first literal ANYWHERE in the args), this refuses to refine when
+// the program (arg0) is a runtime value but a trailing arg is a literal whose basename hits the head
+// table: `spawn(toolVar, "curl")` must NOT fabricate Net — the literal is an argument, not the
+// program (spec §4 ⟨0.5⟩: the head is argv[0]). Mirrors candor-java programHeadLiteral and the Rust
+// is_cmd_naming_method gate. Returns null when arg0 is not a static string literal — the safe
+// direction. Used ONLY for the effect refinement, never to widen it; the cosmetic `cmds` surface
+// keeps firstStringLiteral.
+function programHeadLiteral(node) {
+  const a0 = (node.arguments ?? [])[0];
+  return a0 && ts.isStringLiteralLike(a0) ? a0.text : null;
+}
 // Refine the Exec cliff (spec §4 ⟨0.5⟩): the effects a literal, statically-known subprocess head
 // implies, matched by basename. ADDED to a caller that already carries Exec (a subprocess is still
 // spawned — Exec is never dropped); an unrecognised head returns [] and keeps the bare cliff (never
@@ -739,11 +752,12 @@ function visitCalls(node) {
           }
           if (eff === "Exec") {
             const lit = firstStringLiteral(node);
-            if (lit) {
-              rec.cmds.add(lit.trim().split(/\s+/)[0]); // the program of a command line
-              // a known literal head refines the cliff (curl→Net, candor→Fs/Env); Exec stays
-              for (const e of commandHeadEffects(lit)) rec.direct.add(e);
-            }
+            if (lit) rec.cmds.add(lit.trim().split(/\s+/)[0]); // cosmetic cmds surface (any literal)
+            // a known literal head refines the cliff (curl→Net, candor→Fs/Env); Exec stays. The head
+            // MUST be argv[0] (programHeadLiteral), NOT any literal arg: `spawn(toolVar, "curl")`
+            // names no static program, so its trailing literal must not fabricate Net (spec §4).
+            const head = programHeadLiteral(node);
+            if (head) for (const e of commandHeadEffects(head)) rec.direct.add(e);
           }
           if (eff === "Fs") {
             const lit = firstStringLiteral(node);

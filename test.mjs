@@ -588,6 +588,24 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
         /candorEffects must be an array/.test(r4.stderr), r4.stderr);
 }
 
+// ── Exec-cliff refinement (SPEC §4 ⟨0.5⟩): the head is argv[0]; a literal ARGUMENT must not refine ─
+{
+  const d = project({ "cmd.ts":
+      `import { spawn, execSync } from "child_process";\n` +
+      `export function litProg(): void { execSync("curl http://x"); }\n` +       // legit: curl IS argv[0]
+      `export function litArr(): void { spawn("psql", ["-c", "q"]); }\n` +        // legit: psql is argv[0]
+      `export function varHead(tool: string): void { spawn(tool, "curl"); }\n` }); // trap: dynamic program
+  const { report } = scan(d);
+  check("Exec-refine: a literal program head (argv[0]) refines the cliff (curl → Net)",
+        entry(report, "cmd.litProg")?.inferred.includes("Net"), JSON.stringify(entry(report, "cmd.litProg")));
+  check("Exec-refine: a literal head as element 0 of the args array refines (psql → Db)",
+        entry(report, "cmd.litArr")?.inferred.includes("Db"), JSON.stringify(entry(report, "cmd.litArr")));
+  // the trap: program is a runtime variable, "curl" is a trailing ARGUMENT — must NOT fabricate Net
+  check("Exec-refine: a dynamic program with a trailing 'curl' literal does NOT fabricate Net (argv[0] gate)",
+        entry(report, "cmd.varHead")?.inferred.includes("Exec") && !entry(report, "cmd.varHead")?.inferred.includes("Net"),
+        JSON.stringify(entry(report, "cmd.varHead")));
+}
+
 // ── concurrency: the report is written ATOMICALLY (no mid-write truncation window) ────────────────
 // The recommended agent setup runs candor-ts-watch (re-scans on edit) alongside the MCP server /
 // query (reads the report). An in-place write would let a reader observe a half-written file and
