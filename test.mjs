@@ -578,6 +578,14 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
   const { report: rep2, r: r2 } = scan(project(pkg(["net"])));
   check("effect manifest: a typo'd effect name voids the declaration (f stays pure) and warns",
         !entry(rep2, "app.f") && /candorEffects has an invalid effect/.test(r2.stderr), r2.stderr);
+  // candorEffects: [] is an explicit "declared pure" — covered, NOT a κ blind spot
+  const { r: r3 } = scan(project(pkg([])));
+  check("effect manifest: candorEffects:[] is declared-pure (covered), not a blind spot",
+        !/doesn't know[^\n]*mylib/.test(r3.stderr), r3.stderr);
+  // a non-array candorEffects is malformed → warned and ignored, never silently
+  const { r: r4 } = scan(project({ ...pkg([]), "node_modules/mylib/package.json": JSON.stringify({ name: "mylib", version: "1.0.0", types: "index.d.ts", main: "index.js", candorEffects: "Net" }) }));
+  check("effect manifest: a non-array candorEffects is warned and ignored (not silent)",
+        /candorEffects must be an array/.test(r4.stderr), r4.stderr);
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);

@@ -304,22 +304,27 @@ function declModule(decl) {
 // must never silently narrow a surface. Cached per package. `file` is the resolved declaration source.
 const EFFECT_VOCAB = new Set(["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard"]);
 const _manifestCache = new Map();
+// Returns the declared effect array (possibly EMPTY — `[]` is an explicit "declared pure", covered, not
+// a blind spot), or `null` for no/invalid declaration (still a blind spot). A name outside §1 voids the
+// declaration loudly; a non-array `candorEffects` is malformed and warned.
 function packageManifestEffects(file) {
   const m = file && file.match(/^(.*\/node_modules\/(?:@[^/]+\/[^/]+|[^/]+))\//);
-  if (!m) return [];
+  if (!m) return null;
   const dir = m[1];
   if (_manifestCache.has(dir)) return _manifestCache.get(dir);
-  let effs = [];
+  let result = null;
   try {
     const d = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")).candorEffects;
     if (Array.isArray(d)) {
       const bad = d.filter((e) => !EFFECT_VOCAB.has(e));
       if (bad.length) console.error(`candor-ts: ${path.basename(dir)} candorEffects has an invalid effect '${bad[0]}' — declaration voided (SPEC §1)`);
-      else effs = d;
+      else result = d; // a valid declaration, including [] = declared pure
+    } else if (d !== undefined) {
+      console.error(`candor-ts: ${path.basename(dir)} candorEffects must be an array of §1 effect names — ignored`);
     }
   } catch { /* no/unreadable manifest → undeclared */ }
-  _manifestCache.set(dir, effs);
-  return effs;
+  _manifestCache.set(dir, result);
+  return result;
 }
 
 // ---- the literal surfaces (SPEC §2 hosts/cmds/paths/tables): the statically-decidable subset ------
@@ -774,8 +779,8 @@ function visitCalls(node) {
             // at the declared-not-verified tier — its effects are attributed and it is NOT a blind
             // spot. Otherwise the κ ledger names it (an uncurated dependency the review must read).
             const declared = packageManifestEffects(file);
-            if (declared.length) {
-              for (const e of declared) rec.direct.add(e);
+            if (declared !== null) {
+              for (const e of declared) rec.direct.add(e); // [] = declared pure: covered, adds nothing
             } else if (!kappaKnows(pkg) && !depCoveredPkgs.has(pkg)
                 && /node_modules\//.test(file) && !/node_modules\/(@types\/node|typescript)\//.test(file)) {
               unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
