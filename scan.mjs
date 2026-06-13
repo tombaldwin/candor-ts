@@ -25,6 +25,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { parsePolicy, evaluatePolicy } from "./policy.mjs";
+import { printAgents } from "./contract.mjs";
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -51,14 +52,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (outPrefix === null) outPrefix = a; // legacy positional prefix
   else { console.error(`candor-ts: unexpected extra argument ${a} (${usage})`); process.exit(2); }
 }
-if (wantAgents) {
-  // The agent contract for THE INSTALLED VERSION — AGENTS.md ships in the npm tarball, so doc and
-  // engine cannot drift (the spec §2.1 version-trust rule applied to documentation).
-  const semver = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
-  console.log(`<!-- candor-ts ${semver} · the agent contract for this installed version -->`);
-  process.stdout.write(fs.readFileSync(path.join(ENGINE_DIR, "AGENTS.md"), "utf8"));
-  process.exit(0);
-}
+if (wantAgents) { printAgents(); process.exit(0); }
 if (target === null) { console.error(usage); process.exit(2); }
 
 // ---- project discovery (a dir, a single file, or a tsconfig) --------------------------------------
