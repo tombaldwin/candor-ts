@@ -10,10 +10,11 @@
   "bin": {
     "candor-ts": "./scan.mjs",
     "candor-ts-query": "./query.mjs",
-    "candor-ts-mcp": "./mcp.mjs"
+    "candor-ts-mcp": "./mcp.mjs",
+    "candor-ts-watch": "./watch.mjs"
   },
   "scripts": {
-    "test": "node test.mjs && node test-mcp.mjs"
+    "test": "node test.mjs && node test-mcp.mjs && node test-watch.mjs"
   },
   "license": "(MIT OR Apache-2.0)",
   "repository": {
@@ -43,6 +44,7 @@
     "LICENSE-MIT",
     "LICENSE-APACHE",
     "query-core.mjs",
-    "mcp.mjs"
+    "mcp.mjs",
+    "watch.mjs"
   ]
 }

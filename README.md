@@ -74,6 +74,19 @@ prefix (else `$CANDOR_REPORT`). The server is **query-only** — it never scans 
 self-boundary, spec §7.12: an agent or a hook produces the report; the server reads it, Fs only). The
 query logic is the shared `query-core.mjs`, the same answers the CLI gives.
 
+**The live loop** — `candor-ts-watch` keeps the report fresh as the agent edits, so the answers are
+about the *current* code, not a stale snapshot:
+
+```sh
+candor-ts-watch ./src --out .candor/report   # re-scans only when a tracked source actually changes
+```
+
+It tracks the project's sources by content hash and re-scans on a real change (a no-op save or an
+unrelated write does nothing), writing the same prefix the MCP server reads. So: **agent edits →
+watcher refreshes the report → agent asks `candor_impact` and gets the post-edit answer.** v1 runs a
+full (sound) scan per change; the deeper optimisation — re-analysing only the changed file's subgraph
+— is the next step (the content-hash gate is its first increment).
+
 ## Trust contract (spec §4)
 
 Anything candor-ts can't resolve is `Unknown`, never silently pure: a function-valued parameter or
