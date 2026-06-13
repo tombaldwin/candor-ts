@@ -94,6 +94,13 @@ content-hash gate is its first increment).
 
 Anything candor-ts can't resolve is `Unknown`, never silently pure: a function-valued parameter or
 field being called, an `any`-typed callee, resolution landing on a type rather than a body.
+
+An **uncurated dependency** can opt out of `Unknown`/silent-pure by **declaring its effects** in its
+`package.json` — `"candorEffects": ["Net"]` (spec §5.1, the effect manifest). candor-ts reads it as
+the declared-not-verified tier: the package's calls classify to the declared set, and it stops being
+a κ-ledger blind spot. A name outside the §1 vocabulary voids the declaration loudly (a typo must not
+silently narrow a surface). And `candor-ts-query gains <cur> <base>` flags the **supply-chain**
+delta — the effects a surface *gained* between two reports.
 Real-world consequence, measured on [rimraf](https://github.com/isaacs/rimraf) (50 files, 55
 functions analyzed): its DI-style fs injection means many functions honestly read `Unknown` —
 that's the contract working, not noise. The report says "can reach", never "does"; an absent

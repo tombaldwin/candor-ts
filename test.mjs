@@ -563,5 +563,22 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
         jsSign && tsSign && tsSign.unitKind === undefined, JSON.stringify({ tsSign, jsSign }));
 }
 
+// ── effect manifest (SPEC §5.1): a package's package.json candorEffects is the declared tier ──────
+{
+  const pkg = (effects) => ({
+    "app.ts": `import { send } from "mylib";\nexport function f(): void { send(); }`,
+    "node_modules/mylib/package.json": JSON.stringify({ name: "mylib", version: "1.0.0", types: "index.d.ts", main: "index.js", candorEffects: effects }),
+    "node_modules/mylib/index.d.ts": `export declare function send(): void;`,
+    "node_modules/mylib/index.js": `module.exports={send(){}};`,
+  });
+  const { report } = scan(project(pkg(["Net"])));
+  check("effect manifest: a declared candorEffects classifies the otherwise-uncurated package (Net)",
+        entry(report, "app.f")?.inferred.includes("Net"), JSON.stringify(report?.functions));
+  // a typo'd effect name VOIDS the declaration loudly — never silently narrow on garbage (SPEC §5.1)
+  const { report: rep2, r: r2 } = scan(project(pkg(["net"])));
+  check("effect manifest: a typo'd effect name voids the declaration (f stays pure) and warns",
+        !entry(rep2, "app.f") && /candorEffects has an invalid effect/.test(r2.stderr), r2.stderr);
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

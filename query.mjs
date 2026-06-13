@@ -20,7 +20,7 @@ import fs from "node:fs";
 
 import { parsePolicy, scopeMatches } from "./policy.mjs";
 import { printAgents } from "./contract.mjs";
-import { impact as coreImpact, path as corePath } from "./query-core.mjs";
+import { impact as coreImpact, path as corePath, gains as coreGains } from "./query-core.mjs";
 
 // ---- the §3.1 match ladder: exact > segment-suffix > substring ------------------------------------
 function matchTier(name, q) {
@@ -145,6 +145,13 @@ switch (cmd) {
     // MCP server serves. SPEC §3.1: {fn, affectedCount, affected, entryPoints:[{fn,inferred}]}.
     const [prefix, q] = args;
     emit(coreImpact(loadReport(prefix), loadCallgraph(prefix), q));
+    break;
+  }
+  case "gains": {
+    // the supply-chain alarm (SPEC §5.1): {gained:[Effect], byFunction:[{fn,effect}]} — what the
+    // surface gained between two reports (base → cur), the cross-engine machine-readable form.
+    const [curPrefix, basePrefix] = args;
+    emit(coreGains(loadReport(curPrefix), loadReport(basePrefix)));
     break;
   }
   case "path": {

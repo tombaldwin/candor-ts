@@ -173,6 +173,17 @@ export function diff(curFns, baseFns) {
   return { changes };
 }
 
+// gains: the package-level SUPPLY-CHAIN alarm (spec §5.1) — the UNION of effects the surface gained
+// between two reports (base → cur), with per-function detail. A dependency that grows a Net/Exec reach
+// between releases. Same shape as candor-query's `gains --json`. Built on diff so it can't drift.
+export function gains(curFns, baseFns) {
+  const gained = new Set(), byFunction = [];
+  for (const c of diff(curFns, baseFns).changes) {
+    for (const e of c.gained) { gained.add(e); byFunction.push({ fn: c.fn, effect: e }); }
+  }
+  return { gained: [...gained].sort(), byFunction };
+}
+
 // whatif: hypothetically add `eff` to `target` and report the blast radius + any policy violations.
 // `policyParsed` is an already-parsed policy object (or null); kept I/O-free for the core.
 export function whatif(cg, target, eff, policyParsed, scopeMatches) {

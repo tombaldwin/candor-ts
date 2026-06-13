@@ -297,6 +297,31 @@ function declModule(decl) {
   return f;
 }
 
+// SPEC §5.1 — the effect manifest. An uncurated package MAY declare its effect surface in its
+// package.json (`"candorEffects": ["Net"]`), read as the declared-not-verified tier: it kills the
+// silent pure/blind-spot the package would otherwise carry, exactly like a cap type (and unlike
+// candor's own analysis, which is checked). A name outside §1 VOIDS the declaration loudly — a typo
+// must never silently narrow a surface. Cached per package. `file` is the resolved declaration source.
+const EFFECT_VOCAB = new Set(["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard"]);
+const _manifestCache = new Map();
+function packageManifestEffects(file) {
+  const m = file && file.match(/^(.*\/node_modules\/(?:@[^/]+\/[^/]+|[^/]+))\//);
+  if (!m) return [];
+  const dir = m[1];
+  if (_manifestCache.has(dir)) return _manifestCache.get(dir);
+  let effs = [];
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")).candorEffects;
+    if (Array.isArray(d)) {
+      const bad = d.filter((e) => !EFFECT_VOCAB.has(e));
+      if (bad.length) console.error(`candor-ts: ${path.basename(dir)} candorEffects has an invalid effect '${bad[0]}' — declaration voided (SPEC §1)`);
+      else effs = d;
+    }
+  } catch { /* no/unreadable manifest → undeclared */ }
+  _manifestCache.set(dir, effs);
+  return effs;
+}
+
 // ---- the literal surfaces (SPEC §2 hosts/cmds/paths/tables): the statically-decidable subset ------
 // Read ONLY from string literals at a classified call — informative, never complete, never inferred.
 function firstStringLiteral(node) {
@@ -745,7 +770,13 @@ function visitCalls(node) {
             // via @types/lodash was falsely disclosed — kappaKnows saw the unstripped name).
             const pkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
             const file = decl.getSourceFile().fileName;
-            if (!kappaKnows(pkg) && !depCoveredPkgs.has(pkg)
+            // SPEC §5.1: a package that DECLARES its effects (candorEffects in package.json) is read
+            // at the declared-not-verified tier — its effects are attributed and it is NOT a blind
+            // spot. Otherwise the κ ledger names it (an uncurated dependency the review must read).
+            const declared = packageManifestEffects(file);
+            if (declared.length) {
+              for (const e of declared) rec.direct.add(e);
+            } else if (!kappaKnows(pkg) && !depCoveredPkgs.has(pkg)
                 && /node_modules\//.test(file) && !/node_modules\/(@types\/node|typescript)\//.test(file)) {
               unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
             }
