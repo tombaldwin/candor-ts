@@ -54,20 +54,28 @@ downgraded to `Unknown` rather than silently trusted (spec §2.1). Caveat: a typ
 Q() { npx -y candor-ts-query "$@"; }; P=".candor/report"   # a function — works in bash AND zsh
 Q show     $P <fn-query> 1          # a function's effects (+ hosts/tables when visible)
 Q where    $P <Effect>   1          # {effect, directly, inherited}
-Q callers  $P <fn-query> 1          # the BLAST RADIUS: {of, direct, transitive} — works for pure fns
+Q impact   $P <fn-query>            # THE BLAST RADIUS: {fn, affectedCount, affected, entryPoints}
+Q callers  $P <fn-query> 1          # the lower-level form: {of, direct, transitive} — works for pure fns
+Q path     $P <fn> <Effect>         # how a fn reaches an effect: the chain to the nearest source
 Q map      $P 1                     # {module: {effects, functions}}
 Q whatif   $P <fn> <Effect> [policy]  # pre-edit gate verdict (exit 1 if it would violate)
 Q diff     $P <baseline-prefix> 1   # per-function effect delta (exit 1 on a gained effect)
+Q gains    $P <baseline-prefix>     # supply-chain alarm: {gained, byFunction} — effects a surface grew
 Q reachable $P 1                    # what the app DOES at runtime: effects over the entry points
 Q parsepolicy <policy-file>         # the canonical §6.2 parse (what the gate will enforce)
 ```
+
+And as an MCP server, so an agent pulls these as tools instead of shelling out:
+`CANDOR_REPORT=$P npx -y candor-ts-mcp` (tools `candor_impact`/`candor_reachable`/`candor_where`/…).
+`npx -y candor-ts-watch <dir>` keeps the report fresh as you edit (and reports the edit-delta).
 
 Name queries resolve exact > segment-suffix (`db.save` matches `src.db.save`, never
 `src.db.save_all`) > substring — the same ladder as the other engines. The trailing `1` is the
 want-JSON flag.
 
-- **Blast radius of editing a function** → `callers <fn>` (NOT its `inferred`, which is what the
-  function itself does). Works pre-edit for a still-pure function.
+- **Blast radius of editing a function** → `impact <fn>` (the `affected` list + downstream
+  `entryPoints`; NOT its `inferred`, which is what the function itself does). Works pre-edit for a
+  still-pure function. `callers <fn>` is the lower-level raw-callers form.
 - **Decide BEFORE you edit** → `whatif <fn> <Effect> [policy]` — every transitive caller gains the
   effect, crossed with the policy.
 - **After you change code** → `diff` against a baseline report; a gained `Net`/`Db`/`Exec`/`Fs` you
@@ -119,4 +127,7 @@ curated-κ caveat cuts the other way:** a call into an npm package κ doesn't kn
 NOTHING — invisible, not `Unknown`. The scan's receipt now DISCLOSES these by name (`κ doesn't
 know N packages…`), so the blind spots are per-scan evidence, not a doc footnote: never conclude
 "no effect" through a package that line names (the documented weaker edge of the
-never-silently-pure promise, same as every candor engine's curated classifier).
+never-silently-pure promise, same as every candor engine's curated classifier). An uncurated
+dependency can opt out of that blind spot by declaring `"candorEffects": ["Net", …]` in its
+`package.json` (the §5.1 effect manifest, read declared-not-verified) — its calls then classify to
+the declared set instead of contributing nothing.
