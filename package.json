@@ -1,7 +1,7 @@
 {
   "name": "candor-ts",
-  "version": "0.4.7",
-  "description": "candor for TypeScript — per-function side effects, transitively, with a policy gate (candor-spec 0.4)",
+  "version": "0.4.8",
+  "description": "candor for TypeScript \u2014 per-function side effects, transitively, with a policy gate (candor-spec 0.4)",
   "type": "module",
   "dependencies": {
     "@types/node": "^25.9.2",
@@ -9,10 +9,11 @@
   },
   "bin": {
     "candor-ts": "./scan.mjs",
-    "candor-ts-query": "./query.mjs"
+    "candor-ts-query": "./query.mjs",
+    "candor-ts-mcp": "./mcp.mjs"
   },
   "scripts": {
-    "test": "node test.mjs"
+    "test": "node test.mjs && node test-mcp.mjs"
   },
   "license": "(MIT OR Apache-2.0)",
   "repository": {
@@ -40,6 +41,8 @@
     "AGENTS.md",
     "PROVE-IT.md",
     "LICENSE-MIT",
-    "LICENSE-APACHE"
+    "LICENSE-APACHE",
+    "query-core.mjs",
+    "mcp.mjs"
   ]
 }

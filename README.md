@@ -54,6 +54,26 @@ plus a small npm tier (axios/got/node-fetch/undici/ws, pg/mysql2/mongodb/redis/k
 execa/cross-spawn, fs-extra/rimraf/glob, dotenv, winston/pino). An unlisted package contributes
 nothing — candor never guesses an effect.
 
+## MCP server — candor as agent ground truth
+
+`candor-ts-mcp` exposes the read-only queries as an [MCP](https://modelcontextprotocol.io) server, so
+a coding agent can ask **"if I change this, what's the runtime blast radius?"** or **"what reaches the
+network?"** and get deterministic ground truth from a precomputed report — instead of burning tokens
+tracing the call graph by hand (the measured ~700–2000× token win on blast-radius questions).
+
+```jsonc
+// in an MCP client config — point it at a report you've already scanned
+{ "command": "npx", "args": ["-y", "candor-ts-mcp"],
+  "env": { "CANDOR_REPORT": ".candor/report.myPkg.scan" } }
+```
+
+Tools: `candor_impact` (backward blast radius), `candor_reachable` (what runs at runtime),
+`candor_where` (effect surface), `candor_path` (how an effect is reached), `candor_callers`,
+`candor_show`, `candor_map`, `candor_whatif` (pre-edit gate check). Each takes an optional `report`
+prefix (else `$CANDOR_REPORT`). The server is **query-only** — it never scans (the analyzer
+self-boundary, spec §7.12: an agent or a hook produces the report; the server reads it, Fs only). The
+query logic is the shared `query-core.mjs`, the same answers the CLI gives.
+
 ## Trust contract (spec §4)
 
 Anything candor-ts can't resolve is `Unknown`, never silently pure: a function-valued parameter or
