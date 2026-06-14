@@ -242,7 +242,14 @@ const KAPPA_RULES = [
   // so an unlisted effectful function can never under-report; only proven-inert construction is freed.
   // (The pure CONSTANTS http.STATUS_CODES/METHODS/maxHeaderSize and the https.globalAgent accessor are
   // property reads, not calls — they never reach κ and are already pure.)
-  [/^(node:)?(net|dgram|tls|http2?|https)$/, /^(?!new$)/, "Net"],
+  // Also exempt node:net's PURE STRING VALIDATORS isIP/isIPv4/isIPv6: they parse a string and return
+  // 0/4/6 (or a boolean) with no socket, no fd, no syscall — pure functions. The whole-module Net rule
+  // once fabricated Net onto them; a real-world sweep on node-fetch caught it (its trustworthy URL
+  // predicates isOriginPotentiallyTrustworthy/isUrlPotentiallyTrustworthy call isIP() and inherited a
+  // FABRICATED Net — the cardinal sin — purely from this classification, with no local Net edge). Only
+  // these three named validators are freed; every genuine verb (connect/createConnection/createServer…)
+  // stays Net (the matcher excludes ONLY new + the three validators, nothing else).
+  [/^(node:)?(net|dgram|tls|http2?|https)$/, /^(?!(new|isIP|isIPv4|isIPv6)$)/, "Net"],
   [/^(node:)?child_process$/, null, "Exec"],
   [/^(node:)?sqlite$/, null, "Db"],
   // the curated npm tier

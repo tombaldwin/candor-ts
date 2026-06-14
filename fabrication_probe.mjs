@@ -58,6 +58,13 @@ const CASES = [
     pure: [
       [`const x = new net.Socket(); void x;`, "inert socket object — no fd, no connect until .connect()"],
       [`const x = new net.Server(); void x;`, "inert server object — binds nothing until .listen()"],
+      // The pure VALIDATORS: isIP/isIPv4/isIPv6 parse a string and return 0/4/6 (or a bool) — no socket,
+      // no fd, no syscall. The whole-module Net rule once FABRICATED Net here (caught by a node-fetch
+      // sweep: its trustworthy URL predicates call isIP and inherited a phantom Net). These three controls
+      // are the missing assertions that let the hole ship silently — they pin the validators pure.
+      [`const x = net.isIP("1.2.3.4"); void x;`, "pure string validator — returns 0/4/6, no socket/fd/syscall"],
+      [`const x = net.isIPv4("1.2.3.4"); void x;`, "pure string validator — returns a boolean, no I/O"],
+      [`const x = net.isIPv6("::1"); void x;`, "pure string validator — returns a boolean, no I/O"],
     ],
     ctrl: [
       [`const x = net.connect(80, "h"); void x;`, "opens a TCP connection (connect syscall)"],

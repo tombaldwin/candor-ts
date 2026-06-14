@@ -656,6 +656,12 @@ import * as tls from "node:tls";
 export function pureAgent(): void { const x = new http.Agent(); void x; }
 export function pureHttpServer(): void { const x = new http.Server(); void x; }
 export function pureSocket(): void { const x = new net.Socket(); void x; }
+// PURE — the string VALIDATORS: net.isIP/isIPv4/isIPv6 parse a string and return 0/4/6 (or a bool);
+// no socket, no fd, no syscall. The whole-module Net rule once fabricated Net here (a node-fetch sweep
+// caught it: trustworthy URL predicates call isIP and inherited a phantom Net — the cardinal sin):
+export function pureIsIP(): void { const x = net.isIP("1.2.3.4"); void x; }
+export function pureIsIPv4(): void { const x = net.isIPv4("1.2.3.4"); void x; }
+export function pureIsIPv6(): void { const x = net.isIPv6("::1"); void x; }
 // EFFECTFUL — the request/connect/listen surface + I/O verbs (must keep Net):
 export function effRequest(): void { const x = http.request("http://h/"); void x; }
 export function effGet(): void { const x = http.get("http://h/"); void x; }
@@ -679,6 +685,13 @@ export function effClientRequest(): void { const x = new http.ClientRequest("htt
         JSON.stringify(entry(report, "src.n.pureHttpServer")));
   check("net-cluster: new net.Socket() is PURE (no fd until .connect())", isPure("src.n.pureSocket"),
         JSON.stringify(entry(report, "src.n.pureSocket")));
+  // the pure VALIDATORS — net.isIP/isIPv4/isIPv6 are string parsers, NOT I/O (the node-fetch fabrication)
+  check("net-cluster: net.isIP() is PURE (string validator, no socket/fd/syscall)", isPure("src.n.pureIsIP"),
+        JSON.stringify(entry(report, "src.n.pureIsIP")));
+  check("net-cluster: net.isIPv4() is PURE (string validator, no I/O)", isPure("src.n.pureIsIPv4"),
+        JSON.stringify(entry(report, "src.n.pureIsIPv4")));
+  check("net-cluster: net.isIPv6() is PURE (string validator, no I/O)", isPure("src.n.pureIsIPv6"),
+        JSON.stringify(entry(report, "src.n.pureIsIPv6")));
   // effectful direction — no lost control
   check("net-cluster: http.request() reports Net", isNet("src.n.effRequest"), JSON.stringify(entry(report, "src.n.effRequest")));
   check("net-cluster: http.get() reports Net", isNet("src.n.effGet"), JSON.stringify(entry(report, "src.n.effGet")));
