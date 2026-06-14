@@ -635,6 +635,24 @@ function enclosing(node) {
   return null;
 }
 
+// True when a receiver expression's chain ROOTS at process.stdout/stderr/stdin — including method chains
+// (`process.stdin.on("data",f).on("end",g)`, `process.stdout.write(x).on(...)`). The std streams are typed
+// tty.ReadStream/WriteStream which EXTEND net.Socket, so `.on`/`.write`/`.end` resolve to net.Socket members
+// and the whole-module Net rule paints them — but console fd 0/1/2 I/O is not Net (§1 has no Console effect).
+// `net.Socket.on`/`.write` return the stream (`this`), so a chained call's receiver is still the std stream;
+// the exact-string check missed it (the receiver is the inner CallExpression). Walk the chain to its head.
+function rootsAtStdStream(expr) {
+  let e = expr;
+  for (;;) {
+    if (!e) return false;
+    const t = e.getText().replace(/\s+/g, "");
+    if (t === "process.stdout" || t === "process.stderr" || t === "process.stdin") return true;
+    if (ts.isCallExpression(e) || ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)
+        || ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e)) { e = e.expression; continue; }
+    return false;
+  }
+}
+
 // ---- pass 2: per call site, the (CLASSIFY)/(EDGE)/(UNKNOWN) resolution of SEMANTICS §4 ------------
 function visitCalls(node) {
   if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
@@ -774,11 +792,9 @@ function visitCalls(node) {
           // (a real `net.Socket` you constructed and `.write()` to still classifies Net — only the three
           // std streams are freed). Real-world sweep: nanoid/commander(×43)/bunyan/pino fabricated Net
           // purely from a `process.stdout.write` — the cardinal sin.
-          if (eff && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))) {
-            const recvText = node.expression.expression.getText().replace(/\s+/g, "");
-            if (recvText === "process.stdout" || recvText === "process.stderr" || recvText === "process.stdin")
-              eff = null;
-          }
+          if (eff && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))
+              && rootsAtStdStream(node.expression.expression))
+            eff = null;
           if (eff) rec.direct.add(eff);
           // the literal surfaces, read only at a CLASSIFIED call (SPEC §2)
           if (eff === "Net") {

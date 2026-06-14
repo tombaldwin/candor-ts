@@ -87,9 +87,14 @@ const CASES = [
       [`process.stdout.write("x");`, "console write to fd 1 — TTY I/O, not network"],
       [`process.stderr.write("x");`, "console write to fd 2 — TTY I/O, not network"],
       [`const x = process.stdout.write("x"); void x;`, "stdout write result — still pure console I/O"],
+      // CHAINED calls: `.on`/`.write` return the stream, so the chain's receiver is still the std stream.
+      // The exact-string suppression missed this (terser's `process.stdin.on().on()` fabricated Net).
+      [`process.stdin.on("data", (_c) => {});`, "stdin .on — console input listener, not a socket"],
+      [`process.stdin.on("data", (_c) => {}).on("end", () => {});`, "CHAINED .on().on() on stdin — still console I/O"],
     ],
     ctrl: [
       [`{r}.write("x");`, "write to a REAL constructed socket — genuine network egress"],
+      [`{r}.on("data", (_d) => {});`, "a REAL socket .on — genuine network listener"],
     ],
     effect: "Net",
   },
