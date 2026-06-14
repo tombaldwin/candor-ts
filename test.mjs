@@ -640,5 +640,50 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
         errs.some((m) => /failed to parse/.test(m) && /rep\.bad\.scan\.json/.test(m)), errs.join("\n"));
 }
 
+// ── node-builtin net cluster: inert CONSTRUCTION is pure, the request/connect/listen surface is Net ─
+// The κ rule for net/http/https/tls/http2 was once whole-module (`[regex, null, "Net"]`), painting
+// Net onto provably-pure members: `new http.Agent()` is a connection-pool CONFIG object (no I/O until
+// a request uses it), `new http.Server()`/`new net.Socket()` open nothing until `.listen()`/`.connect()`.
+// That is FABRICATION — candor's cardinal sin. The rule is now member-aware: construction (token "new")
+// is pure; every function/verb member keeps Net (so an unlisted effectful call never under-reports).
+// Both directions pinned here (the standalone fabrication_probe.mjs is the broader generative guard).
+{
+  const d = project({
+    "src/n.ts": `import * as http from "node:http";
+import * as net from "node:net";
+import * as tls from "node:tls";
+// PURE — inert construction (config/connection-pool/socket objects; no fd, no syscall):
+export function pureAgent(): void { const x = new http.Agent(); void x; }
+export function pureHttpServer(): void { const x = new http.Server(); void x; }
+export function pureSocket(): void { const x = new net.Socket(); void x; }
+// EFFECTFUL — the request/connect/listen surface + I/O verbs (must keep Net):
+export function effRequest(): void { const x = http.request("http://h/"); void x; }
+export function effGet(): void { const x = http.get("http://h/"); void x; }
+export function effNetConnect(): void { const x = net.connect(80, "h"); void x; }
+export function effCreateServer(): void { const x = net.createServer(); void x; }
+export function effTlsConnect(): void { const x = tls.connect(443, "h"); void x; }
+export function effSocketConnect(s: net.Socket): void { const x = s.connect(80, "h"); void x; }
+export function effServerListen(srv: http.Server): void { const x = srv.listen(80); void x; }`,
+  });
+  const { report } = scan(d);
+  const isPure = (fn) => !entry(report, fn) || (entry(report, fn).inferred ?? []).length === 0;
+  const isNet = (fn) => entry(report, fn)?.inferred.includes("Net");
+  // pure direction — no fabrication
+  check("net-cluster: new http.Agent() is PURE (inert config object, no I/O)", isPure("src.n.pureAgent"),
+        JSON.stringify(entry(report, "src.n.pureAgent")));
+  check("net-cluster: new http.Server() is PURE (listens to nothing until .listen())", isPure("src.n.pureHttpServer"),
+        JSON.stringify(entry(report, "src.n.pureHttpServer")));
+  check("net-cluster: new net.Socket() is PURE (no fd until .connect())", isPure("src.n.pureSocket"),
+        JSON.stringify(entry(report, "src.n.pureSocket")));
+  // effectful direction — no lost control
+  check("net-cluster: http.request() reports Net", isNet("src.n.effRequest"), JSON.stringify(entry(report, "src.n.effRequest")));
+  check("net-cluster: http.get() reports Net", isNet("src.n.effGet"), JSON.stringify(entry(report, "src.n.effGet")));
+  check("net-cluster: net.connect() reports Net", isNet("src.n.effNetConnect"), JSON.stringify(entry(report, "src.n.effNetConnect")));
+  check("net-cluster: net.createServer() reports Net", isNet("src.n.effCreateServer"), JSON.stringify(entry(report, "src.n.effCreateServer")));
+  check("net-cluster: tls.connect() reports Net", isNet("src.n.effTlsConnect"), JSON.stringify(entry(report, "src.n.effTlsConnect")));
+  check("net-cluster: socket.connect() (I/O verb) reports Net", isNet("src.n.effSocketConnect"), JSON.stringify(entry(report, "src.n.effSocketConnect")));
+  check("net-cluster: server.listen() (I/O verb) reports Net", isNet("src.n.effServerListen"), JSON.stringify(entry(report, "src.n.effServerListen")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

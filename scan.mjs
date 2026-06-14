@@ -228,9 +228,21 @@ const sources = program.getSourceFiles().filter((f) => projectFiles.has(path.res
 // curated at all?" for the coverage ledger (a κ-known package whose given call is pure — a TypeORM
 // builder — is covered, not a blind spot). A single source so the two can never drift.
 // [module-name regex, member regex (null = any member), effect]
+// The member token a rule matches against is the resolved declaration's name, EXCEPT a constructor
+// call (`new X()`), whose synthesized token is "new" (its decl `name` is empty — see CLASSIFY). This
+// lets a rule keep the effect on the module's function/verb surface while exempting inert CONSTRUCTION.
 const KAPPA_RULES = [
   [/^(node:)?fs(\/promises)?$/, null, "Fs"],
-  [/^(node:)?(net|dgram|tls|http2?|https)$/, null, "Net"],
+  // The net cluster (net/dgram/tls/http/http2/https) is I/O on its FUNCTION/verb surface
+  // (request/get/connect/createConnection/createServer/createSocket/listen…), but inert on
+  // CONSTRUCTION: `new http.Agent()` is a connection-pool config object, `new http.Server()` /
+  // `new net.Socket()` open nothing until a later `.listen()`/`.connect()`/request uses them — no
+  // syscall, no fd. So Net for every member EXCEPT a constructor (token "new"); construction is pure.
+  // Conservative by the cardinal rule: any NON-constructor member — listed verb or not — keeps Net,
+  // so an unlisted effectful function can never under-report; only proven-inert construction is freed.
+  // (The pure CONSTANTS http.STATUS_CODES/METHODS/maxHeaderSize and the https.globalAgent accessor are
+  // property reads, not calls — they never reach κ and are already pure.)
+  [/^(node:)?(net|dgram|tls|http2?|https)$/, /^(?!new$)/, "Net"],
   [/^(node:)?child_process$/, null, "Exec"],
   [/^(node:)?sqlite$/, null, "Db"],
   // the curated npm tier
@@ -727,7 +739,11 @@ function visitCalls(node) {
               && checker.getTypeAtLocation(node.expression)?.symbol?.name === "DateConstructor")
             rec.direct.add("Clock");
         } else {
-          const member = decl.name ? decl.name.getText() : "";
+          // The member token κ matches: the resolved declaration's name, EXCEPT a `new X()` call,
+          // whose declaration is a Constructor (empty name) — synthesize "new" so a rule can exempt
+          // inert construction from its module-wide effect (the net cluster: `new http.Agent()` etc.).
+          const member = ts.isConstructorDeclaration(decl) || ts.isNewExpression(node)
+            ? "new" : (decl.name ? decl.name.getText() : "");
           const eff = kappa(mod, member); // (CLASSIFY)
           if (eff) rec.direct.add(eff);
           // the literal surfaces, read only at a CLASSIFIED call (SPEC §2)
