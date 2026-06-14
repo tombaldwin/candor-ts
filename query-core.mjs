@@ -72,8 +72,19 @@ export function loadReport(prefix) {
   return fns;
 }
 export function loadCallgraph(prefix) {
-  const norm = (cg) => Object.fromEntries(Object.entries(cg).map(([k, v]) => [k, Array.isArray(v) ? v : []]));
-  if (fs.existsSync(`${prefix}.callgraph.json`)) return norm(JSON.parse(fs.readFileSync(`${prefix}.callgraph.json`, "utf8")));
+  // A `null`/non-object parse (a `null` callgraph, an array, a number) must NOT reach Object.entries —
+  // it throws "Cannot convert null to object". Coerce anything but a plain object to {} (an empty
+  // graph), the never-crash direction.
+  const norm = (cg) => (cg && typeof cg === "object" && !Array.isArray(cg))
+    ? Object.fromEntries(Object.entries(cg).map(([k, v]) => [k, Array.isArray(v) ? v : []]))
+    : {};
+  if (fs.existsSync(`${prefix}.callgraph.json`)) {
+    // The PRIMARY callgraph parse must DISCLOSE-and-tolerate like the sibling path below and like
+    // loadReport — a bare JSON.parse here threw an uncaught stack trace on the CLI for a corrupt or
+    // `null` `<prefix>.callgraph.json` (asymmetric with siblings). Tolerate (empty graph) + disclose.
+    try { return norm(JSON.parse(fs.readFileSync(`${prefix}.callgraph.json`, "utf8"))); }
+    catch { console.error(`candor-ts: callgraph ${prefix}.callgraph.json failed to parse — its edges are OMITTED from this query (corrupt or mid-write); re-run the scan`); return {}; }
+  }
   const cg = {};
   for (const f of siblings(prefix, (x) => x.endsWith(".callgraph.json"))) {
     try { Object.assign(cg, JSON.parse(fs.readFileSync(f, "utf8"))); }

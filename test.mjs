@@ -663,7 +663,11 @@ export function effNetConnect(): void { const x = net.connect(80, "h"); void x; 
 export function effCreateServer(): void { const x = net.createServer(); void x; }
 export function effTlsConnect(): void { const x = tls.connect(443, "h"); void x; }
 export function effSocketConnect(s: net.Socket): void { const x = s.connect(80, "h"); void x; }
-export function effServerListen(srv: http.Server): void { const x = srv.listen(80); void x; }`,
+export function effServerListen(srv: http.Server): void { const x = srv.listen(80); void x; }
+// CONNECTING constructor — NOT inert: new http.ClientRequest(url) performs the network I/O on
+// construction (it is what http.request() returns and dispatches). The blanket new-exemption once
+// converted this real Net source into pure (a cardinal-sin under-report); it must keep Net.
+export function effClientRequest(): void { const x = new http.ClientRequest("http://h/"); void x; }`,
   });
   const { report } = scan(d);
   const isPure = (fn) => !entry(report, fn) || (entry(report, fn).inferred ?? []).length === 0;
@@ -683,6 +687,41 @@ export function effServerListen(srv: http.Server): void { const x = srv.listen(8
   check("net-cluster: tls.connect() reports Net", isNet("src.n.effTlsConnect"), JSON.stringify(entry(report, "src.n.effTlsConnect")));
   check("net-cluster: socket.connect() (I/O verb) reports Net", isNet("src.n.effSocketConnect"), JSON.stringify(entry(report, "src.n.effSocketConnect")));
   check("net-cluster: server.listen() (I/O verb) reports Net", isNet("src.n.effServerListen"), JSON.stringify(entry(report, "src.n.effServerListen")));
+  // the connecting-ctor control: the regression that motivated the connecting-ctor carve-out — and
+  // that the inert ctors above MUST stay pure alongside it (the fix removes the bug, not the feature).
+  check("net-cluster: new http.ClientRequest() (CONNECTING ctor) reports Net (not freed by the new-exemption)",
+        isNet("src.n.effClientRequest"), JSON.stringify(entry(report, "src.n.effClientRequest")));
+}
+
+// ── a corrupt/null PRIMARY callgraph is DISCLOSED+tolerated, never an uncaught crash ───────────────
+// loadCallgraph once parsed the primary `<prefix>.callgraph.json` with a bare JSON.parse and an
+// unguarded Object.entries (asymmetric with loadReport's primary path and with its OWN sibling-merge
+// path below). A corrupt or `null` primary callgraph threw an uncaught SyntaxError / "Cannot convert
+// null to object" — the CLI died with a raw stack trace. The loader must disclose a corrupt graph on
+// stderr (κ-ledger ethos) and return an empty graph rather than crash; a `null`/non-object parse
+// must never reach Object.entries.
+{
+  const Q = await import("./query-core.mjs");
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-cgcorrupt-"));
+  // corrupt (truncated) primary callgraph
+  fs.writeFileSync(path.join(d, "rep.callgraph.json"), `{ "a.f": [ "a.g`);
+  let errs = [], cg, threw = false;
+  let orig = console.error; console.error = (m) => errs.push(String(m));
+  try { cg = Q.loadCallgraph(path.join(d, "rep")); } catch { threw = true; } finally { console.error = orig; }
+  check("corrupt primary callgraph: loadCallgraph does NOT crash (returns a graph)", !threw && cg && typeof cg === "object", String(threw));
+  check("corrupt primary callgraph: an empty graph is returned (tolerated, not partial junk)", cg && Object.keys(cg).length === 0, JSON.stringify(cg));
+  check("corrupt primary callgraph: the corruption is DISCLOSED on stderr (κ-ledger ethos)",
+        errs.some((m) => /failed to parse/.test(m) && /rep\.callgraph\.json/.test(m)), errs.join("\n"));
+  // a `null` primary callgraph parses fine but must NOT reach Object.entries
+  fs.writeFileSync(path.join(d, "rep.callgraph.json"), `null`);
+  errs = []; threw = false; orig = console.error; console.error = (m) => errs.push(String(m));
+  try { cg = Q.loadCallgraph(path.join(d, "rep")); } catch { threw = true; } finally { console.error = orig; }
+  check("null primary callgraph: loadCallgraph does NOT crash on Object.entries(null)", !threw && cg && Object.keys(cg).length === 0, String(threw));
+  // a VALID primary callgraph still loads identically (the fix must not break the happy path)
+  fs.writeFileSync(path.join(d, "rep.callgraph.json"), JSON.stringify({ "a.f": ["a.g"], "a.g": [] }));
+  const good = Q.loadCallgraph(path.join(d, "rep"));
+  check("valid primary callgraph: loads identically (edges preserved, non-array values normalized)",
+        JSON.stringify(good) === JSON.stringify({ "a.f": ["a.g"], "a.g": [] }), JSON.stringify(good));
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);

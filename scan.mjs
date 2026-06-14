@@ -742,8 +742,23 @@ function visitCalls(node) {
           // The member token κ matches: the resolved declaration's name, EXCEPT a `new X()` call,
           // whose declaration is a Constructor (empty name) — synthesize "new" so a rule can exempt
           // inert construction from its module-wide effect (the net cluster: `new http.Agent()` etc.).
-          const member = ts.isConstructorDeclaration(decl) || ts.isNewExpression(node)
-            ? "new" : (decl.name ? decl.name.getText() : "");
+          // BUT a CONNECTING constructor is NOT inert: `new http.ClientRequest(url)` performs the
+          // network I/O on construction (it is what `http.request()` returns and dispatches), so the
+          // blanket `new`-exemption would convert a real Net source into pure (a cardinal-sin under-
+          // report). For such a ctor we synthesize the CLASS name instead of "new", so the net-cluster
+          // rule's `/^(?!new$)/` matcher keeps the effect. The set is the net cluster's documented
+          // public connecting ctors; http2 connects via `connect()` (a function, not a ctor) so it
+          // needs no entry here. Inert ctors (Agent/Server/Socket/TLSSocket/Http2Server*/message shells)
+          // still synthesize "new" and stay pure.
+          const CONNECTING_CTORS = new Set(["ClientRequest"]);
+          const ctorClassName = ts.isNewExpression(node)
+            ? (ts.isConstructorDeclaration(decl) ? decl.parent?.name?.getText?.()
+               : (decl.name ? decl.name.getText() : ""))
+            : "";
+          const isConstruction = ts.isConstructorDeclaration(decl) || ts.isNewExpression(node);
+          const member = isConstruction
+            ? (CONNECTING_CTORS.has(ctorClassName) ? ctorClassName : "new")
+            : (decl.name ? decl.name.getText() : "");
           const eff = kappa(mod, member); // (CLASSIFY)
           if (eff) rec.direct.add(eff);
           // the literal surfaces, read only at a CLASSIFIED call (SPEC §2)

@@ -82,6 +82,11 @@ const CASES = [
       [`const x = http.request("http://h/"); void x;`, "dispatches an HTTP request over the network"],
       [`const x = http.get("http://h/"); void x;`, "dispatches an HTTP GET over the network"],
       [`const x = {r}.listen(80); void x;`, "binds + listens on the port — the listen syscall"],
+      // The CONNECTING-CTOR control: unlike Agent/Server, `new http.ClientRequest(url)` performs the
+      // network I/O ON CONSTRUCTION (it is what http.request() returns and dispatches). The probe
+      // once had ONLY inert-ctor PURE cases here, so the blanket `new`-exemption that converted this
+      // real Net source into pure regressed SILENTLY. This control pins that a connecting ctor stays Net.
+      [`const x = new http.ClientRequest("http://h/"); void x;`, "performs the HTTP request on construction (what http.request() returns)"],
     ],
     effect: "Net",
   },
