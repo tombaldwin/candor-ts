@@ -827,7 +827,7 @@ function visitCalls(node) {
           }
           if (eff === "Fs") {
             const lit = firstStringLiteral(node);
-            if (lit && /[\/\\]|^[.~]/.test(lit)) rec.paths.add(lit); // path-shaped literals only
+            if (lit && /[/\\]|^[.~]/.test(lit)) rec.paths.add(lit); // path-shaped literals only
           }
           // CANDOR_DEPS: an unclassified call into a package with a loaded sibling report inherits
           // that function's recorded transitive effects (+ literal surfaces) by `hash`.

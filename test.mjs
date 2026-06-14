@@ -263,11 +263,11 @@ export function charge(amount: number): void { netm.connect(443, "api.stripe.com
     "src/checkout.ts": `import { charge } from "billing-lib";
 export function buy(): void { charge(100); }`,
   });
-  const r1 = spawnSync("node", [path.join(HERE, "scan.mjs"), app], { encoding: "utf8" });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), app], { encoding: "utf8" });
   const rep1 = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
   check("without CANDOR_DEPS the cross-package call is invisible",
         entry(rep1, "src.checkout.buy") == null, JSON.stringify(rep1.functions));
-  const r2 = spawnSync("node", [path.join(HERE, "scan.mjs"), app],
+  spawnSync("node", [path.join(HERE, "scan.mjs"), app],
                        { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(dep, ".candor", "report.json") } });
   const rep2 = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
   const buy = entry(rep2, "src.checkout.buy");

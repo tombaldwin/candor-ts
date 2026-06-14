@@ -48,7 +48,6 @@ function genProject(seed) {
   const sink = pick(r, Object.keys(SINKS));
   const multiFile = r() < 0.5;
   const forms = [];
-  const decls = [];   // per-fn source (in one file) or per-file sources
   const files = {};
   const expectUnknown = new Set(); // fns whose form makes Unknown the required marker
 

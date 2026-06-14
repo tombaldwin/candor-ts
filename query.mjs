@@ -105,6 +105,7 @@ switch (cmd) {
     changes.sort((a, b) => a.fn.localeCompare(b.fn));
     emit({ changes });
     process.exit(changes.some((c) => c.gained.length) ? 1 : 0);
+    break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }
   case "reachable": {
     // what the app DOES at runtime: effects unioned over the entry points (SPEC §3.1; same JSON
@@ -168,6 +169,7 @@ switch (cmd) {
     }
     emit({ of: targets, effect: eff, affected: [...affected].sort(), violations, ok: violations.length === 0 });
     process.exit(violations.length ? 1 : 0);
+    break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }
   default:
     console.error("usage: node query.mjs <parsepolicy|show|where|callers|map|whatif> …");
