@@ -766,7 +766,19 @@ function visitCalls(node) {
           const member = isConstruction
             ? (CONNECTING_CTORS.has(ctorClassName) ? ctorClassName : "new")
             : (decl.name ? decl.name.getText() : "");
-          const eff = kappa(mod, member); // (CLASSIFY)
+          let eff = kappa(mod, member); // (CLASSIFY)
+          // process.stdout/stderr/stdin are typed `tty.WriteStream`, which EXTENDS `net.Socket`, so a
+          // `.write()`/`.end()` on them resolves to `net.Socket.write` and the whole-module Net rule
+          // paints it Net. But a console write to fd 0/1/2 is TTY/console I/O, NOT network — there is no
+          // "Console" effect in §1, so it must be PURE. Suppress the fabricated effect for these receivers
+          // (a real `net.Socket` you constructed and `.write()` to still classifies Net — only the three
+          // std streams are freed). Real-world sweep: nanoid/commander(×43)/bunyan/pino fabricated Net
+          // purely from a `process.stdout.write` — the cardinal sin.
+          if (eff && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))) {
+            const recvText = node.expression.expression.getText().replace(/\s+/g, "");
+            if (recvText === "process.stdout" || recvText === "process.stderr" || recvText === "process.stdin")
+              eff = null;
+          }
           if (eff) rec.direct.add(eff);
           // the literal surfaces, read only at a CLASSIFIED call (SPEC §2)
           if (eff === "Net") {

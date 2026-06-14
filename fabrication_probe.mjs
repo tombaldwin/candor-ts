@@ -74,6 +74,25 @@ const CASES = [
     ],
     effect: "Net",
   },
+  // ── process.stdout/stderr/stdin: typed `tty.WriteStream` which EXTENDS `net.Socket`, so `.write()`
+  //    resolves to `net.Socket.write` and the whole-module Net rule FABRICATED Net (a node-pkg sweep
+  //    caught nanoid/commander/bunyan/pino over-claiming Net purely from a console write). A console
+  //    write to fd 0/1/2 is NOT network — no §1 effect — so it MUST be pure. The ctrl proves a REAL
+  //    net.Socket.write still classifies Net (only the three std streams are freed). ──
+  {
+    id: "process-streams",
+    imports: [`import * as net from "node:net";`],
+    recv: "s: net.Socket",
+    pure: [
+      [`process.stdout.write("x");`, "console write to fd 1 — TTY I/O, not network"],
+      [`process.stderr.write("x");`, "console write to fd 2 — TTY I/O, not network"],
+      [`const x = process.stdout.write("x"); void x;`, "stdout write result — still pure console I/O"],
+    ],
+    ctrl: [
+      [`{r}.write("x");`, "write to a REAL constructed socket — genuine network egress"],
+    ],
+    effect: "Net",
+  },
   // ── http: request/get issue the HTTP request; new Agent()/new Server() are inert config objects.
   //         (STATUS_CODES/METHODS/maxHeaderSize/globalAgent are property READS — pure, never reach κ;
   //         this case proves construction, the only callable that fabricated.) ──
