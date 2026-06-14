@@ -25,6 +25,7 @@ import { printAgents } from "./contract.mjs";
 // a `matchTier` missing `#` (so the SAME query resolved differently between `impact` and `callers` on a
 // JVM `Type#method` report). Importing the shared functions removes all three divergences (review find).
 import { impact as coreImpact, path as corePath, gains as coreGains,
+         show as coreShow,
          loadReport, loadCallgraph, matches } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
 
@@ -39,18 +40,11 @@ switch (cmd) {
     break;
   }
   case "show": {
+    // Was a hand-copy of query-core's show that had DRIFTED — it read the wrong Fs key (`e.fs`, never
+    // written; the paths silently vanished) and dropped Exec `cmds` entirely. Call the shared show so
+    // the CLI and the MCP `candor_show` are one implementation that cannot diverge again.
     const [prefix, q] = args;
-    const fns = loadReport(prefix);
-    const hit = new Set(matches(fns.map((e) => e.fn), q));
-    const out = fns.filter((e) => hit.has(e.fn)).map((e) => {
-      const o = { fn: e.fn, inferred: e.inferred, direct: e.direct };
-      if (e.fs?.length) o.fs = e.fs;
-      if (e.hosts?.length) o.hosts = e.hosts;
-      if (e.tables?.length) o.tables = e.tables;
-      o.unresolved = e.unresolved;
-      return o;
-    });
-    emit(out);
+    emit(coreShow(loadReport(prefix), q));
     break;
   }
   case "where": {

@@ -124,7 +124,11 @@ export function show(fns, q) {
   const hit = new Set(matches(fns.map((e) => e.fn), q));
   return fns.filter((e) => hit.has(e.fn)).map((e) => {
     const o = { fn: e.fn, inferred: e.inferred, direct: e.direct };
-    if (e.fs?.length) o.fs = e.fs;
+    // Literal Fs paths live under the report's `paths` key (scan emits `entry.paths`), NOT `fs` — the
+    // old `e.fs` read a field this engine never writes, so `show`/`candor_show` silently dropped every
+    // file path (the MCP tool's own doc promises "hosts/cmds/paths/tables"). Surface it as `paths`, the
+    // report's key, mirroring hosts/cmds/tables below.
+    if (e.paths?.length) o.paths = e.paths;
     if (e.hosts?.length) o.hosts = e.hosts;
     if (e.cmds?.length) o.cmds = e.cmds;
     if (e.tables?.length) o.tables = e.tables;

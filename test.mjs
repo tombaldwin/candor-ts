@@ -11,6 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { show, loadReport } from "./query-core.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let pass = 0, fail = 0;
@@ -64,6 +65,26 @@ export const wrap = () => readIt("y");`,
   check("calls RESOLVE to an arrow const (edge, not Unknown)",
         cg["src.a.wrap"]?.includes("src.a.readIt"), JSON.stringify(cg));
   check("path literal captured", entry(report, "src.a.readIt")?.paths?.includes("/etc/app/x"));
+}
+
+// ── 2b. `show` SURFACES the literal Fs paths + Exec cmds (the regression that shipped) ─────────────
+// scan writes the surface under report keys `paths`/`cmds`; `show` once read a nonexistent `e.fs`, so
+// it silently dropped every file path even though the MCP `candor_show` doc promises "paths". The CLI
+// had its own drifted copy that ALSO dropped `cmds`. One shared show now feeds both; assert it surfaces.
+{
+  const d = project({
+    "src/io.ts": `import * as fsm from "node:fs";
+import { execSync } from "node:child_process";
+export function readCfg() { return fsm.readFileSync("/etc/app/config.json"); }
+export function runIt() { return execSync("ls -la"); }`,
+  });
+  const { prefix } = scan(d);
+  const fns = loadReport(prefix);
+  const rc = show(fns, "readCfg")[0];
+  const ri = show(fns, "runIt")[0];
+  check("show surfaces Fs paths under `paths` (not the dead `fs` key)",
+        rc?.paths?.includes("/etc/app/config.json") && rc?.fs === undefined, JSON.stringify(rc));
+  check("show surfaces Exec cmds", ri?.cmds?.includes("ls"), JSON.stringify(ri));
 }
 
 // ── 3. the standing gate: deny + allow + forbid, exit codes ───────────────────────────────────────
