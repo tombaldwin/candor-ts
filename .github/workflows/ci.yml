@@ -17,10 +17,11 @@ jobs:
         with:
           node-version: '22'
       - run: npm install --no-fund --no-audit
-      - name: Behavioral tests
-        run: node test.mjs
-      - name: Soundness fuzzer (25 seeds)
-        run: node fuzz.mjs 25
+      # `npm test` runs the whole battery: behavioral (test/mcp/watch) + the fabrication probe + the
+      # §7.13 soundness fuzzer. Driving it through the script keeps CI in lockstep with `npm test` so a
+      # gate added locally can't be silently missing here (the probe + mcp/watch suites used to be).
+      - name: Full test battery (behavioral + probe + fuzzer)
+        run: npm test
       - name: Effect-set oracle (the 20 shared cases)
         run: |
           git clone --depth 1 https://github.com/tombaldwin/candor-spec /tmp/spec

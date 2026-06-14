@@ -14,7 +14,9 @@
     "candor-ts-watch": "./watch.mjs"
   },
   "scripts": {
-    "test": "node test.mjs && node test-mcp.mjs && node test-watch.mjs"
+    "test": "node test.mjs && node test-mcp.mjs && node test-watch.mjs && npm run test:probe && npm run test:fuzz",
+    "test:probe": "node fabrication_probe.mjs",
+    "test:fuzz": "node fuzz.mjs"
   },
   "license": "(MIT OR Apache-2.0)",
   "repository": {
