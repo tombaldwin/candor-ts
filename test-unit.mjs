@@ -21,6 +21,9 @@ import {
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
 } from "./policy.mjs";
+import {
+  isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
+} from "./scan-core.mjs";
 
 // ── query-core: the §3.1 match ladder (exact > segment-suffix > substring) ────────────────────────
 test("matches: exact beats substring cousins", () => {
@@ -228,4 +231,54 @@ test("literalAllowed: dispatches to the per-effect matcher", () => {
   assert.equal(literalAllowed("Exec", "/bin/sh", ["sh"]), true);
   assert.equal(literalAllowed("Db", "public.orders", ["public.*"]), true);
   assert.equal(literalAllowed("Net", "evil.com", ["good.com"]), false);
+});
+
+// ── scan-core: the κ classifier (the cardinal-sin surface) ────────────────────────────────────────
+test("kappa: classifies the curated module/verb surface", () => {
+  assert.equal(kappa("fs", "readFileSync"), "Fs");
+  assert.equal(kappa("node:fs", "writeFile"), "Fs");
+  assert.equal(kappa("net", "connect"), "Net");
+  assert.equal(kappa("child_process", "exec"), "Exec");
+  assert.equal(kappa("pg", "query"), "Db");
+  assert.equal(kappa("crypto", "randomBytes"), "Rand");
+});
+test("kappa: the precision carve-outs (never fabricate)", () => {
+  assert.equal(kappa("net", "isIP"), null);          // a pure string validator, not Net (the node-fetch fab)
+  assert.equal(kappa("net", "new"), null);           // construction is inert
+  assert.equal(kappa("typeorm", "createQueryBuilder"), null); // a builder, not the I/O verb
+  assert.equal(kappa("crypto", "createHash"), null); // not the random surface
+  assert.equal(kappa("some-unlisted-pkg", "go"), null);
+});
+test("kappaKnows: curated-or-ratified-pure, else unknown", () => {
+  assert.equal(kappaKnows("fs"), true);     // a KAPPA_RULES module
+  assert.equal(kappaKnows("rxjs"), true);   // a ratified-pure module
+  assert.equal(kappaKnows("totally-random-pkg"), false);
+});
+
+// ── scan-core: the literal extractors (shared verbatim with the other engines) ────────────────────
+test("commandHeadEffects: unambiguous tools only, by basename", () => {
+  assert.deepEqual(commandHeadEffects("curl -X POST"), ["Net"]);
+  assert.deepEqual(commandHeadEffects("/usr/bin/psql"), ["Db"]);
+  assert.deepEqual(commandHeadEffects("candor-scan"), ["Env", "Fs"]);
+  assert.deepEqual(commandHeadEffects("git push"), []); // multi-modal → no fabrication
+});
+test("hostLiteral: host[:port] from a URL/address, else null", () => {
+  assert.equal(hostLiteral("https://api.example.com/v1"), "api.example.com");
+  assert.equal(hostLiteral("https://user@host.com:8080/x"), "host.com:8080"); // userinfo stripped
+  assert.equal(hostLiteral("example.com:443"), "example.com:443");
+  assert.equal(hostLiteral("localhost"), null);   // no dot → not an address literal
+  assert.equal(hostLiteral("hello world"), null);
+});
+test("tablesInSql: SPEC §2 table extraction (comma chain, alias guard)", () => {
+  assert.deepEqual(tablesInSql("SELECT id FROM users WHERE x = 1"), ["users"]);
+  assert.deepEqual(tablesInSql("SELECT a FROM t1, t2 WHERE x = 1"), ["t1", "t2"]);
+  assert.deepEqual(tablesInSql("SELECT a FROM t1 a1, t2"), ["t1"]); // alias breaks the chain
+  assert.deepEqual(tablesInSql("INSERT INTO audit_log (a) VALUES (1)"), ["audit_log"]);
+  assert.deepEqual(tablesInSql("hello world from nowhere"), []); // not SQL
+});
+test("isTestPath: test/spec/node_modules are not production sources", () => {
+  assert.equal(isTestPath("src/foo.test.ts"), true);
+  assert.equal(isTestPath("node_modules/x/index.ts"), true);
+  assert.equal(isTestPath("tests/helper.ts"), true);
+  assert.equal(isTestPath("src/app.ts"), false);
 });

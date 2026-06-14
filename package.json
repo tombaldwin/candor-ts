@@ -48,6 +48,7 @@
     "LICENSE-MIT",
     "LICENSE-APACHE",
     "query-core.mjs",
+    "scan-core.mjs",
     "mcp.mjs",
     "watch.mjs"
   ],
