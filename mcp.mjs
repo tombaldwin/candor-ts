@@ -137,7 +137,9 @@ function handle(msg) {
           return result(id, { content: [{ type: "text", text: `candor: no function matching \`${args.fn}\` in this report` }], isError: true });
       }
       const out = t.run(args, prefix);
-      return result(id, { content: [{ type: "text", text: JSON.stringify(out, null, 1) }] });
+      // Minified, not pretty-printed: the consumer is an AGENT (it parses the JSON), so the indentation
+      // was ~25-30% of every result's tokens for no benefit. The CLI keeps its human-readable shapes.
+      return result(id, { content: [{ type: "text", text: JSON.stringify(out) }] });
     } catch (e) {
       // A tool-level failure is reported in the result (isError), not as a protocol error.
       return result(id, { content: [{ type: "text", text: `candor: ${e.message}` }], isError: true });
