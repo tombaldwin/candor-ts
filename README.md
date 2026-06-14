@@ -150,3 +150,21 @@ conformance-held. The npm classifier tier is
 deliberately curated and will keep growing case-by-case. Entry points (Nest/Next populations),
 `unknownWhy` origins, `reachable`, cross-package inheritance (`CANDOR_DEPS` + the spec §2 `hash`,
 version-trusted per §2.1), and `--allow-js` are all in. On npm: `npx -y candor-ts <dir>`.
+
+## Development
+
+No build step — the engine runs on Node directly.
+
+```sh
+npm install
+npm test            # the full CI gate: lint + unit (node:test) + behavioural + MCP + watch + the
+                    # fabrication probe + the §7.13 soundness fuzzer
+npm run test:unit   # just the native unit tests — the query algebra + policy DSL + the scan-core
+                    # classifier/literal leaves (query-core / policy / scan-core)
+npm run lint        # eslint (the recommended ruleset; the CI lint gate)
+node scan.mjs <dir | file.ts | tsconfig.json> --out .candor/report   # scan a project
+```
+
+The pure cores are factored into importable modules — `query-core.mjs` (the §3.1 queries),
+`policy.mjs` (the §6.2 DSL + literal matchers), and `scan-core.mjs` (the κ classifier + the SQL/
+command/host extractors) — so they're unit-tested directly; the TS-compiler-driven walk stays in `scan.mjs`.
