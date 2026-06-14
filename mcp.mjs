@@ -48,11 +48,33 @@ function resolvePrefix(args) {
 
 // ---- the tools: name -> {description, schema, run} ------------------------------------------------
 const reportArg = { report: { type: "string", description: "report prefix (optional; defaults to $CANDOR_REPORT)" } };
+
+// Bound a blast-radius/caller LIST for the agent transport: on a large repo a single fn can have
+// hundreds-to-thousands of transitive callers, an unbounded multi-thousand-token answer. The agent's
+// question ("how big is the blast radius / where does it surface") is answered by the COUNT + the entry
+// points + the top names — so cap the list to MCP_LIST_CAP, keep the exact count, and flag truncation.
+// The full list stays available from the CLI / `--json` (the spec-pinned §3.1 shape is UNCHANGED — this
+// only shapes the MCP result for its token-sensitive transport). Small results are returned verbatim.
+const MCP_LIST_CAP = 50;
+function capImpact(r) {
+  if (!Array.isArray(r.affected) || r.affected.length <= MCP_LIST_CAP) return r; // affectedCount is the full count
+  return { ...r, affected: r.affected.slice(0, MCP_LIST_CAP), affectedTruncated: true };
+}
+function capCallers(r) {
+  const d = r.direct ?? [], t = r.transitive ?? [];
+  if (d.length <= MCP_LIST_CAP && t.length <= MCP_LIST_CAP) return r;
+  return {
+    of: r.of,
+    directCount: d.length, direct: d.slice(0, MCP_LIST_CAP),
+    transitiveCount: t.length, transitive: t.slice(0, MCP_LIST_CAP),
+    truncated: true,
+  };
+}
 const TOOLS = {
   candor_impact: {
     description: "Backward blast radius: every effectful function that transitively calls `fn`, and which runtime entry points are downstream. Answers 'if I change this, what surfaces at runtime?' — the cheapest possible alternative to tracing callers by hand.",
     schema: { type: "object", properties: { fn: { type: "string", description: "the function/unit to assess" }, ...reportArg }, required: ["fn"] },
-    run: (a, p) => Q.impact(Q.loadReport(p), Q.loadCallgraph(p), a.fn),
+    run: (a, p) => capImpact(Q.impact(Q.loadReport(p), Q.loadCallgraph(p), a.fn)),
   },
   candor_where: {
     description: "Which functions perform a given effect (e.g. Net, Db, Exec, Fs) — `directly` vs `inherited` via a callee. The effect-surface map.",
@@ -72,7 +94,7 @@ const TOOLS = {
   candor_callers: {
     description: "Who calls `fn` — direct (one hop) and transitive callers over the effect-relevant call graph.",
     schema: { type: "object", properties: { fn: { type: "string" }, ...reportArg }, required: ["fn"] },
-    run: (a, p) => Q.callers(Q.loadCallgraph(p), a.fn),
+    run: (a, p) => capCallers(Q.callers(Q.loadCallgraph(p), a.fn)),
   },
   candor_show: {
     description: "A function's effects (inferred = transitive, direct = own body) plus its literal surfaces (hosts/cmds/paths/tables) when present.",
