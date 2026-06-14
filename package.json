@@ -15,7 +15,8 @@
   },
   "scripts": {
     "lint": "eslint *.mjs",
-    "test": "npm run lint && node test.mjs && node test-mcp.mjs && node test-watch.mjs && npm run test:probe && npm run test:fuzz",
+    "test": "npm run lint && node --test test-unit.mjs && node test.mjs && node test-mcp.mjs && node test-watch.mjs && npm run test:probe && npm run test:fuzz",
+    "test:unit": "node --test test-unit.mjs",
     "test:probe": "node fabrication_probe.mjs",
     "test:fuzz": "node fuzz.mjs"
   },
