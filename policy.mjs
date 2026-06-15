@@ -7,12 +7,17 @@
 export const EFFECTS = ["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard"];
 const ALLOW_EFFECTS = new Set(["Net", "Exec", "Fs", "Db"]); // the four literal surfaces
 
+// The §6.2 token separator: ASCII whitespace ONLY (space/tab/LF/VT/FF/CR). JS `\s`/`String.trim` strip
+// Unicode spaces (NBSP, ideographic, …) that Java drops — a gateless-green cross-engine divergence
+// (adversarial DSL review). A non-ASCII space stays part of its token → the rule is malformed, dropped.
+const ASCII_WS = /[ \t\n\v\f\r]+/;
+const ASCII_WS_TRIM = /^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g;
 export function parsePolicy(text) {
   const deny = [], allow = [], forbid = [];
   for (const rawLine of text.split("\n")) {
-    const line = rawLine.split("#")[0].trim();
+    const line = rawLine.split("#")[0].replace(ASCII_WS_TRIM, "");
     if (!line) continue;
-    const t = line.split(/\s+/);
+    const t = line.split(ASCII_WS);
     const warn = (why) => console.error(`candor: ignoring policy rule (${why}): ${line}`);
     if (t[0] === "deny") {
       const effects = [];
