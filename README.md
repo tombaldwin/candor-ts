@@ -20,6 +20,9 @@ node scan.mjs <project-dir>                 # tsconfig.json honored; tests exclu
                                             #   <dir>/.candor/report.json + .callgraph.json
 node scan.mjs . --policy .candor/policy     # the §6.2 gate: exit 1 on violation, 2 if unreadable
 
+node scan.mjs --version                     # installed build + spec contract (offline), + upgrade line
+node scan.mjs --check-update                # one 4s GET to npm; says if a newer candor-ts is published
+
 node query.mjs show     .candor/report db.save 1   # a function's effects (match ladder)
 node query.mjs where    .candor/report Net 1       # direct sources vs inheritors
 node query.mjs callers  .candor/report db.save 1   # the blast radius (transitive callers)

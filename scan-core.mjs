@@ -108,6 +108,21 @@ export function commandHeadEffects(cmd) {
        "candor-classify", "candor-report", "cargo-candor"].includes(base)) return ["Env", "Fs"];
   return [];
 }
+// Numeric semver-tuple compare: is `a` strictly greater than `b`? Split on '.', compare each
+// component as an integer (a missing component reads as 0), so 0.5.0 > 0.4.9 and 0.10.0 > 0.9.0.
+// Used by --check-update to decide whether the registry's latest is newer than the installed build;
+// a pure leaf so it can be unit-tested without touching the network. Non-numeric components read as 0
+// (never throw): the registry contract is a clean semver, and we degrade quietly on anything else.
+export function versionGt(a, b) {
+  const pa = String(a).split("."), pb = String(b).split(".");
+  const n = Math.max(pa.length, pb.length);
+  for (let i = 0; i < n; i++) {
+    const x = parseInt(pa[i] ?? "0", 10) || 0;
+    const y = parseInt(pb[i] ?? "0", 10) || 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
 // host[:port] from an address/URL literal; non-address strings yield nothing (never fabricate).
 export function hostLiteral(s) {
   const m = s.match(/^[a-z][a-z0-9+.-]*:\/\/([^/]+)/i);   // scheme://host[:port]/…

@@ -26,16 +26,64 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { parsePolicy, evaluatePolicy } from "./policy.mjs";
 import { printAgents } from "./contract.mjs";
-import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql } from "./scan-core.mjs";
+import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql, versionGt } from "./scan-core.mjs";
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+// The single version + spec sources, read once. PKG_VERSION is the bare semver from package.json
+// (e.g. "0.5.0"); ENGINE_VERSION (below) prefixes it for the report envelope's `version` field, and
+// `--version`/`--check-update` print the bare form. SPEC_VERSION is the spec contract this build
+// speaks — the SAME literal stamped into the envelope's `spec` field, so the doc lines and the report
+// can never drift. Reused, never re-littered.
+const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
+const SPEC_VERSION = "0.5";
+
+// --version / --check-update: print-and-exit MODES, handled before the main arg walk so they never
+// depend on a target. --version is fully OFFLINE; --check-update is the ONLY arm that touches the
+// network (a single 4s GET) and degrades to a one-line stderr notice on ANY failure, still exit 0.
+if (process.argv.includes("--version")) {
+  console.log(`candor-ts ${PKG_VERSION} (spec ${SPEC_VERSION})`);
+  console.log("upgrade: npm install -g candor-ts@latest");
+  process.exit(0);
+}
+if (process.argv.includes("--check-update")) {
+  console.log(`candor-ts ${PKG_VERSION} (spec ${SPEC_VERSION})`);
+  const latest = await fetchLatestVersion();
+  if (latest === null) {
+    console.error("candor-ts: could not reach registry.npmjs.org to check for updates");
+  } else if (versionGt(latest, PKG_VERSION)) {
+    console.log(`candor-ts ${PKG_VERSION} -> ${latest} available`);
+    console.log("run: npm install -g candor-ts@latest");
+  } else {
+    console.log(`up to date (latest is ${latest})`);
+  }
+  process.exit(0);
+}
+
+// One 4s-capped GET to the npm registry for candor-ts's latest published version. Returns the
+// `.version` string, or null on ANY failure (no network, timeout, non-2xx, unparseable JSON) — never
+// throws, never hangs. The AbortController fires after 4000ms; the finally clears the timer either way.
+async function fetchLatestVersion() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4000);
+  try {
+    const res = await fetch("https://registry.npmjs.org/candor-ts/latest", { signal: ctrl.signal });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return typeof body?.version === "string" ? body.version : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // ---- args ----------------------------------------------------------------------------------------
 // ONE pass: the first non-flag is the target; value-taking flags consume the next arg and FAIL on a
 // missing/flag-shaped value; an unknown flag fails; flags may precede the target. `--agents` is a
 // flag (a print-and-exit MODE) — it must NOT fire when it is the VALUE of --out/--policy, which the
 // value-consuming skip handles, nor produce a "lying unknown flag" error for a real flag given first.
-const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>] [--allow-js] [--agents]";
+const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>] [--allow-js] [--agents] [--version] [--check-update]";
 const argv = process.argv.slice(2);
 let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, allowJs = false, wantAgents = false;
 for (let i = 0; i < argv.length; i++) {
@@ -175,7 +223,7 @@ fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: true });
 // ONE version source: package.json. A second hardcoded literal (the envelope's, the --agents
 // banner's) that drifted from this would make the engine distrust its OWN reports at the §2.1
 // staleness check (`d.candor?.version !== ENGINE_VERSION`), silently downgrading every chained dep.
-const ENGINE_VERSION = `candor-ts-${JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version}`;
+const ENGINE_VERSION = `candor-ts-${PKG_VERSION}`;
 const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:[], tables:[]}
 // Packages a loaded sibling report COVERS — exempt from the κ ledger even when a call joins no
 // entry (reports omit pure functions: the silence is the purity claim, SPEC §2 rule 3 — the
@@ -822,7 +870,7 @@ for (const [name, rec] of fns) {
 }
 // `package` names what this report COVERS — a consumer chaining it registers coverage even when
 // `functions` is empty (an all-pure package's report is its purity claim, SPEC §2 rule 3).
-const envelope = { candor: { version: ENGINE_VERSION, toolchain: `node-${process.versions.node}`, spec: "0.5" },
+const envelope = { candor: { version: ENGINE_VERSION, toolchain: `node-${process.versions.node}`, spec: SPEC_VERSION },
                    package: pkgName, functions };
 const cg = {};
 for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
