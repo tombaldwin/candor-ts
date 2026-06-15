@@ -1,0 +1,33 @@
+name: publish
+
+# Trusted publishing to npm via GitHub Actions OIDC — no stored NPM_TOKEN. A `v*` tag (or a manual
+# dispatch) publishes the current package.json version with signed provenance. The version is NOT
+# bumped here: tag a commit whose package.json already carries the release version (the lockstep cut).
+# One-time setup on npmjs.com: candor-ts → Settings → Trusted Publisher → GitHub Actions,
+# repo `tombaldwin/candor-ts`, workflow `publish.yml`.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # OIDC — this is what authenticates the publish; no secret is stored
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      # Trusted publishing (OIDC) requires npm >= 11.5.1; Node 22 ships npm 10.x.
+      - run: npm install -g npm@latest
+      - run: npm install --no-fund --no-audit
+      # Gate: the same full battery as ci.yml — behavioral + fabrication probe + §7.13 fuzzer.
+      # A broken build must not reach npm.
+      - name: Full test battery (behavioral + probe + fuzzer)
+        run: npm test
+      - name: Publish to npm (provenance via OIDC)
+        run: npm publish --provenance --access public
