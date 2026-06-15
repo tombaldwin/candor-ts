@@ -542,6 +542,60 @@ function rootsAtStdStream(expr) {
   }
 }
 
+// ---- the implicit/desugared-call surface (the silent-pure holes the AST walk misses) -------------
+// CLASSIFIER §1 says resolve, don't pattern-match — but the walk only sees CallExpression/
+// NewExpression (+ accessor access). Effects reached through a DESUGARED call (a `for-of` lowering to
+// `it[Symbol.iterator]().next()`, a `using` to `r[Symbol.dispose]()`, a tagged template to `tag(...)`)
+// were invisible: reported concrete-PURE (omitted), not even Unknown. We model the desugaring exactly
+// as the spec demands — resolve the implicit target via the compiler API and edge to it when LOCAL.
+// A resolved-but-unseen target follows the existing external/κ posture (OPAQUE + ledger), and a
+// BUILT-IN iterator/disposer (es-lib/@types/node — a plain array's iterator, a stdlib disposable)
+// resolves to a non-local declaration and edges nothing, so it correctly stays pure.
+
+// The member symbol for a WELL-KNOWN symbol (`Symbol.iterator`, `Symbol.dispose`, …) on a type. The
+// checker mangles these to an escaped name `__@iterator@<globalId>`; match by the `__@<name>@` prefix
+// (the trailing id is the unique Symbol's identity, not part of the name). `prefixes` is tried in
+// order so a sync site prefers the sync method and an async site its async twin (falling back to sync).
+function wellKnownSymbolMember(type, prefixes) {
+  if (!type || !type.getProperties) return null;
+  for (const p of type.getProperties()) {
+    const n = p.getName();
+    for (const pre of prefixes) if (n === pre || n.startsWith(pre + "@")) return p;
+  }
+  return null;
+}
+function declOfSym(sym) { return sym && (sym.valueDeclaration ?? sym.declarations?.[0]); }
+const declIsLocal = (decl) => decl && projectFiles.has(path.resolve(decl.getSourceFile().fileName));
+
+// The LOCAL units an ITERATION over `expr` implicitly calls: the iterable's `[Symbol.iterator]` (or
+// `[Symbol.asyncIterator]` for `for await`) method AND the produced iterator's `next()`. The generator
+// case rolls `next`'s body into the iterator-method unit (lexical attribution), and the self-iterator
+// case (`[Symbol.iterator]() { return this }` + a separate effectful `next()`) needs the `next` edge —
+// so we edge to BOTH whenever each is a LOCAL unit. A built-in iterable (plain array/string/Map: the
+// es-lib/@types iterator) resolves non-local → no edge → stays pure (the precision invariant).
+function iterationTargets(expr, isAsync) {
+  const t = checker.getTypeAtLocation(expr);
+  const iterPrefixes = isAsync ? ["__@asyncIterator", "__@iterator"] : ["__@iterator"];
+  const iterDecl = declOfSym(wellKnownSymbolMember(t, iterPrefixes));
+  if (!iterDecl) return [];
+  const out = [];
+  if (declIsLocal(iterDecl)) out.push(iterDecl);
+  // the iterator's next(): the return type of the [Symbol.iterator] method
+  try {
+    const sig = checker.getSignatureFromDeclaration(iterDecl);
+    const ret = sig && checker.getReturnTypeOfSignature(sig);
+    const nextDecl = declOfSym(ret && ret.getProperties().find((p) => p.getName() === "next"));
+    if (nextDecl && declIsLocal(nextDecl) && !out.includes(nextDecl)) out.push(nextDecl);
+  } catch { /* unresolved iterator shape — the iterator-method edge already covers the common case */ }
+  return out;
+}
+// Edge `rec` to each LOCAL desugared target that is a minted unit. Local-only by design: an external
+// iterable/disposer is OPAQUE (the curated-κ caveat — same as an unmatched external call), never a
+// fabricated edge; the existing call machinery + κ ledger already cover any EXPLICIT calls into it.
+function edgeToTargets(rec, decls) {
+  for (const d of decls) { const t = nodeName.get(d); if (t) rec.edges.add(t); }
+}
+
 // ---- pass 2: per call site, the (CLASSIFY)/(EDGE)/(UNKNOWN) resolution of SEMANTICS §4 ------------
 function visitCalls(node) {
   if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
@@ -818,6 +872,56 @@ function visitCalls(node) {
           rec.why.add(`accessor:${an}.${node.name?.getText?.() ?? node.argumentExpression?.getText?.() ?? "?"}`);
         }
       }
+    }
+  }
+  // ITERATION desugaring (HIGH): `for (const x of bag)`, `for await (…)`, `[...bag]`, `const [a]=bag`,
+  // `Array.from(bag)` all lower to `bag[Symbol.iterator]().next()`. Edge the enclosing fn to the
+  // iterable's local `[Symbol.iterator]`/`[Symbol.asyncIterator]` method (and the produced iterator's
+  // local `next`). A built-in iterable (array/string/Map) resolves non-local → no edge → stays pure.
+  {
+    let iterExpr = null, iterAsync = false;
+    if (ts.isForOfStatement(node)) { iterExpr = node.expression; iterAsync = !!node.awaitModifier; }
+    else if (ts.isSpreadElement(node)) iterExpr = node.expression; // [...bag] / f(...bag)
+    else if (ts.isSpreadAssignment(node)) iterExpr = node.expression; // {...bag} — object spread is NOT
+    // iteration (it copies own enumerable props, no [Symbol.iterator]); wellKnownSymbolMember simply
+    // finds none and edges nothing. Listed for clarity; the resolution self-guards.
+    else if (ts.isVariableDeclaration(node) && ts.isArrayBindingPattern(node.name) && node.initializer)
+      iterExpr = node.initializer; // const [a] = bag
+    else if (ts.isCallExpression(node) && node.arguments?.[0]
+             && node.expression.getText() === "Array.from")
+      iterExpr = node.arguments[0]; // Array.from(bag) — the iterable form (arg0 is iterated)
+    if (iterExpr) {
+      const owner = enclosing(node);
+      if (owner) edgeToTargets(fns.get(owner), iterationTargets(iterExpr, iterAsync));
+    }
+  }
+  // `using r = expr` / `await using r = expr` (MED): the scope-exit guarantees `r[Symbol.dispose]()` /
+  // `r[Symbol.asyncDispose]()`. Edge the enclosing fn to the resolved LOCAL dispose method.
+  if (ts.isVariableStatement(node)) {
+    const fl = node.declarationList.flags;
+    const isUsing = (fl & ts.NodeFlags.Using) || (fl & ts.NodeFlags.AwaitUsing);
+    if (isUsing) {
+      const isAwait = !!(fl & ts.NodeFlags.AwaitUsing);
+      const prefixes = isAwait ? ["__@asyncDispose", "__@dispose"] : ["__@dispose"];
+      const owner = enclosing(node);
+      for (const d of node.declarationList.declarations) {
+        if (!d.initializer || !owner) continue;
+        const t = checker.getTypeAtLocation(d.initializer);
+        const disposeDecl = declOfSym(wellKnownSymbolMember(t, prefixes));
+        if (disposeDecl && declIsLocal(disposeDecl)) edgeToTargets(fns.get(owner), [disposeDecl]);
+      }
+    }
+  }
+  // TAGGED TEMPLATE (LOW): `` tag`…` `` calls `tag(strings, ...subs)`. getResolvedSignature resolves
+  // the TaggedTemplateExpression to the tag fn cleanly — a node form the CallExpression walk never
+  // visits. Edge to the tag when LOCAL; a built-in/external tag (`String.raw`) resolves non-local and
+  // edges nothing (pure), matching the external-call posture.
+  if (ts.isTaggedTemplateExpression(node)) {
+    const owner = enclosing(node);
+    if (owner) {
+      const sig = checker.getResolvedSignature(node);
+      const decl = sig && sig.declaration;
+      if (decl && declIsLocal(decl)) edgeToTargets(fns.get(owner), [decl]);
     }
   }
   ts.forEachChild(node, visitCalls);

@@ -41,7 +41,8 @@ const SINKS = {
 // instead of (or in addition to) the effect.
 const FORMS = ["direct", "arrow_const", "method", "closure", "callback_recv", "any_call",
                "class_prop_arrow", "ctor", "field_init", "iface_dispatch",
-               "getter_access", "setter_access"];
+               "getter_access", "setter_access",
+               "iter_forof", "using_dispose", "tagged_template"];
 
 function genProject(seed) {
   const r = rng(seed);
@@ -122,6 +123,26 @@ function genProject(seed) {
         // on an injected instance. Pre-fix `me` was OMITTED (silent pure).
         bodies[i] = `class S${i} { set val(_v: number) { ${callExpr(callee)}; } }\n` +
                     `export function ${me}(s: S${i}): void { s.val = 1; }`;
+        break;
+      case "iter_forof":
+        // the desugared-ITERATION hole: a `for-of` over an INJECTED custom iterable lowers to
+        // `bag[Symbol.iterator]().next()`. The generator method's body reaches the next callee; the
+        // walk never saw the implicit call, so `me` was OMITTED (silent pure). The injected-param
+        // instance keeps the effect off any locally-visible ctor — the consumer is the only carrier.
+        bodies[i] = `class Bag${i} { *[Symbol.iterator](): Generator<number> { ${callExpr(callee)}; yield 1; } }\n` +
+                    `export function ${me}(bag: Bag${i}): void { for (const x of bag) { void x; } }`;
+        break;
+      case "using_dispose":
+        // the `using` hole: `using h = r` GUARANTEES `r[Symbol.dispose]()` at scope exit. The dispose
+        // body reaches the next callee through an implicit call the walk missed → `me` was OMITTED.
+        bodies[i] = `class Res${i} { [Symbol.dispose](): void { ${callExpr(callee)}; } }\n` +
+                    `export function ${me}(r: Res${i}): void { using h = r; void h; }`;
+        break;
+      case "tagged_template":
+        // the tagged-template hole: `` tag`…` `` calls the tag fn, a node form the CallExpression walk
+        // never visited → `me` was OMITTED. The tag is a LOCAL fn reaching the next callee.
+        bodies[i] = `function tag${i}(s: TemplateStringsArray, ...v: number[]): string { ${callExpr(callee)}; return s.join(""); }\n` +
+                    `export function ${me}(): string { return tag${i}\`a \${1} b\`; }`;
         break;
       case "any_call":
         // the callee laundered through `any` → unresolvable → Unknown required for `me`;
