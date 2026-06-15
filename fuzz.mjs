@@ -217,8 +217,46 @@ function runSeed(seed) {
   return bad;
 }
 
+// PRECISION guard for the class-override CHA: the override fan-out must be scoped to the RECEIVER's
+// static-type subtree. A SIBLING subclass's effectful override is type-impossible on a path whose
+// receiver is statically a NON-overriding sibling, so it must NOT contaminate that path (over-
+// reporting on an unreachable receiver — fabrication-adjacent). This is a STANDALONE differential
+// (not chain-shaped, since the chain harness requires every fn to carry the effect): one base, one
+// EFFECTFUL override (Dog), one PURE sibling (Cat). We assert, in one project:
+//   viaBase(a: Animal)   -> Fs       (SOUNDNESS — Dog ∈ Animal-subtree; the override edge is kept)
+//   noOverride(c: Cat)   -> PURE     (PRECISION — Dog ∉ Cat-subtree; the sibling override is dropped)
+// If the fan-out regressed to ALL overrides, noOverride would wrongly read Fs and this fails.
+function runOverrideSiblingPrecision() {
+  const bad = [];
+  const src = `import * as fsm from "node:fs";
+class Animal { speak(): void {} }
+class Dog extends Animal { speak(): void { fsm.readFileSync("/tmp/x"); } }
+class Cat extends Animal {}
+export function viaBase(a: Animal): void { a.speak(); }
+export function noOverride(c: Cat): void { c.speak(); }
+`;
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-fuzz-sib-"));
+  fs.mkdirSync(path.join(d, "src"), { recursive: true });
+  fs.writeFileSync(path.join(d, "src", "sib.ts"), src);
+  const res = spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8" });
+  const rp = path.join(d, ".candor", "report.json");
+  if (!fs.existsSync(rp)) {
+    bad.push(`override-sibling: scan produced no report: ${res.stderr?.slice(0, 200)}`);
+  } else {
+    const by = new Map(JSON.parse(fs.readFileSync(rp, "utf8")).functions.map((e) => [e.fn.split(".").pop(), e]));
+    const via = by.get("viaBase");
+    if (!via || !via.inferred.includes("Fs")) // SOUNDNESS: base-typed receiver MUST keep the override effect
+      bad.push(`override-sibling: viaBase lost the override effect (expected Fs): ${via ? via.inferred : "OMITTED"}`);
+    if (by.has("noOverride")) // PRECISION: a non-overriding subclass receiver must NOT get the sibling's effect
+      bad.push(`override-sibling: noOverride contaminated by sibling override (expected PURE): ${by.get("noOverride").inferred}`);
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+  return bad;
+}
+
 const N = Number(process.argv[2] ?? 25);
 let fails = [];
+fails = fails.concat(runOverrideSiblingPrecision());
 for (let seed = 1; seed <= N; seed++) fails = fails.concat(runSeed(seed));
 for (const b of fails) console.log(`  ${b}`);
 const failedSeeds = new Set(fails.map((f) => f.split(":")[0]));

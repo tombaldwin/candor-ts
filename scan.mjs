@@ -323,6 +323,32 @@ const nodeName = new WeakMap();  // declaration node -> qualified name
 const entityTables = new Map();    // ClassDeclaration node -> table name
 const interfaceImpls = new Map();  // InterfaceDeclaration node -> implementing ClassDeclarations (CHA universe)
 const classOverrides = new Map();  // base-method MemberDeclaration node -> overriding subclass member nodes (class-CHA)
+// Resolve `extends X` to X's LOCAL ClassDeclaration (through an import alias), or null. Module-level
+// so both the class-CHA INDEX (below) and the dispatch site's RECEIVER-SUBTREE scoping share one
+// definition of the local inheritance edge.
+function localBaseClassOf(cls) {
+  for (const h of cls.heritageClauses ?? []) {
+    if (h.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    const t = h.types?.[0];
+    if (!t) continue;
+    let sym = checker.getSymbolAtLocation(t.expression);
+    if (sym && sym.flags & ts.SymbolFlags.Alias) { try { sym = checker.getAliasedSymbol(sym); } catch { /* keep */ } }
+    const bd = (sym?.declarations ?? []).find((d) => ts.isClassDeclaration(d));
+    if (bd && projectFiles.has(path.resolve(bd.getSourceFile().fileName))) return bd;
+  }
+  return null;
+}
+// Is `cls` in the subtree rooted at `root` (i.e. cls === root, or cls transitively `extends` root
+// through LOCAL classes)? Used to scope a base-member override fan-out to the RECEIVER's static type
+// — a sibling subclass's override lives OUTSIDE this subtree and must not contaminate the verdict.
+function classInSubtree(cls, root) {
+  let cur = cls, guard = 0;
+  while (cur && guard++ < 64) {
+    if (cur === root) return true;
+    cur = localBaseClassOf(cur);
+  }
+  return false;
+}
 function moduleOf(sf) {
   const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?[tj]sx?$/, "");
   return rel.split(path.sep).join(".");
@@ -467,19 +493,7 @@ for (const sf of sources) {
 {
   const memberName = (m) => (ts.isMethodDeclaration(m) || ts.isGetAccessorDeclaration(m)
     || ts.isSetAccessorDeclaration(m) || ts.isPropertyDeclaration(m)) && m.name?.getText?.();
-  // Resolve `extends X` to X's LOCAL ClassDeclaration (through an import alias), or null.
-  const baseClassOf = (cls) => {
-    for (const h of cls.heritageClauses ?? []) {
-      if (h.token !== ts.SyntaxKind.ExtendsKeyword) continue;
-      const t = h.types?.[0];
-      if (!t) continue;
-      let sym = checker.getSymbolAtLocation(t.expression);
-      if (sym && sym.flags & ts.SymbolFlags.Alias) { try { sym = checker.getAliasedSymbol(sym); } catch { /* keep */ } }
-      const bd = (sym?.declarations ?? []).find((d) => ts.isClassDeclaration(d));
-      if (bd && projectFiles.has(path.resolve(bd.getSourceFile().fileName))) return bd;
-    }
-    return null;
-  };
+  const baseClassOf = localBaseClassOf;
   for (const sf of sources) {
     (function scan(node) {
       if (ts.isClassDeclaration(node)) {
@@ -697,24 +711,48 @@ function visitCalls(node) {
             // receiver already resolved to the leaf (`new Dog()` -> Dog.speak, no overrides) so this is
             // inert there — no double-count. A base method NO subclass overrides has no entry: today's
             // behavior (just the base) is preserved exactly.
-            const overrides = classOverrides.get(decl);
-            if (overrides && overrides.length > 0) {
-              if (overrides.length <= 12) {
-                let allResolved = true;
-                const oTargets = [];
-                for (const om of overrides) {
-                  const ot = nodeName.get(om);
-                  if (ot) oTargets.push(ot);
-                  else allResolved = false;
-                }
-                for (const ot of oTargets) rec.edges.add(ot);
-                if (!allResolved) {
-                  rec.direct.add("Unknown");
+            const allOverrides = classOverrides.get(decl);
+            if (allOverrides && allOverrides.length > 0) {
+              // PRECISION: scope the fan-out to the RECEIVER's static-type subtree. A base-member
+              // dispatch on a receiver statically typed as subclass `Cat` can only ever bind to a
+              // `Cat`-subtree body — a SIBLING `Dog.speak` override is type-impossible on this path,
+              // so propagating its effect over-reports on an unreachable receiver (fabrication-
+              // adjacent). When we can pin the receiver's static class (a property/element access
+              // whose receiver-expression type is a LOCAL class), keep only overrides whose owning
+              // class lies in that class's subtree; `viaBase(a: Animal)` keeps Dog (Dog ∈ Animal-
+              // subtree, the soundness edge), `noOverride(c: Cat)` drops Dog (Dog ∉ Cat-subtree) and
+              // stays pure. SOUNDNESS-PRESERVING FALLBACK: if the receiver's static class can't be
+              // pinned to a LOCAL class (no property access, a union/interface/`any` receiver, an
+              // external/unresolved type), we do NOT narrow — the full override set is kept, exactly
+              // the pre-precision behavior, so we never silently drop an effect we can't rule out.
+              let overrides = allOverrides;
+              const recvExpr = (ts.isPropertyAccessExpression(node.expression)
+                || ts.isElementAccessExpression(node.expression)) ? node.expression.expression : null;
+              if (recvExpr) {
+                const rt = checker.getTypeAtLocation(recvExpr);
+                const rootClass = (rt?.symbol?.declarations ?? []).find((d) =>
+                  ts.isClassDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+                if (rootClass) overrides = allOverrides.filter((om) =>
+                  ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass));
+              }
+              if (overrides.length > 0) {
+                if (overrides.length <= 12) {
+                  let allResolved = true;
+                  const oTargets = [];
+                  for (const om of overrides) {
+                    const ot = nodeName.get(om);
+                    if (ot) oTargets.push(ot);
+                    else allResolved = false;
+                  }
+                  for (const ot of oTargets) rec.edges.add(ot);
+                  if (!allResolved) {
+                    rec.direct.add("Unknown");
+                    rec.why.add(`override:${decl.name?.getText?.() ?? "member"}`);
+                  }
+                } else {
+                  rec.direct.add("Unknown"); // override family too wide to enumerate soundly
                   rec.why.add(`override:${decl.name?.getText?.() ?? "member"}`);
                 }
-              } else {
-                rec.direct.add("Unknown"); // override family too wide to enumerate soundly
-                rec.why.add(`override:${decl.name?.getText?.() ?? "member"}`);
               }
             }
             // record what each argument position received (callback-flow, see callbackArgs)
