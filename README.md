@@ -30,6 +30,8 @@ node query.mjs whatif   .candor/report db.save Net policy  # pre-edit gate verdi
 node query.mjs diff     .candor/report baseline 1  # per-function effect delta (exit 1 on a gain)
 ```
 
+**Staying current:** check your installed version and upgrade — [candor/AGENTS.md §2a](https://github.com/tombaldwin/candor/blob/main/AGENTS.md#2a-staying-current--check-the-version-upgrade). `npx -y candor-ts --version` prints the build, the spec, and the upgrade one-liner (offline; candor never phones home).
+
 Function names are module-qualified with `.` segments (`src.db.save`), so policy scopes read
 naturally:
 
