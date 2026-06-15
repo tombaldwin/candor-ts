@@ -125,7 +125,7 @@ every push to the spec.
 | A call resolving to a *type* (function-typed field/param) → `Unknown`, never silent-pure | SPEC §4 |
 | Unmatched external calls contribute nothing (curated-κ caveat) | SEMANTICS §8 C1 |
 | The literal surfaces `hosts`/`cmds`/`paths`/`tables`, literal-read only | SPEC §2 |
-| `{ candor: { version, toolchain, spec: "0.4" }, functions }` envelope; pure fns omitted | SPEC §2/§2.1 |
+| `{ candor: { version, toolchain, spec: "0.5" }, functions }` envelope; pure fns omitted | SPEC §2/§2.1 |
 | Call-graph sidecar with **every** analyzed function a key | SPEC §2.2 |
 | The gate: AS-EFF-006 / 008 / 009, loud on an unreadable policy | SPEC §6.2 |
 
