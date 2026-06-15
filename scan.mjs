@@ -336,6 +336,14 @@ function localName(node) {
   if (ts.isFunctionDeclaration(node) && node.name) return node.name.text;
   if (ts.isMethodDeclaration(node) && ts.isClassDeclaration(node.parent) && node.parent.name)
     return `${node.parent.name.text}.${node.name.getText()}`;
+  // GET/SET ACCESSORS are units too — a property read/assignment that resolves to one edges here, so
+  // an accessor body that does I/O classifies normally instead of being a SILENT-PURE hole (and its
+  // effect is no longer misattributed to the enclosing class's synthesized ctor, which `enclosing()`
+  // would otherwise pick as the nearest unit). get/set are DISTINCT units (a class may have both for
+  // one name): `Class.get raw` / `Class.set raw`, mirroring how the checker keeps them apart.
+  if ((ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node))
+      && ts.isClassDeclaration(node.parent) && node.parent.name)
+    return `${node.parent.name.text}.${ts.isGetAccessorDeclaration(node) ? "get" : "set"} ${node.name.getText()}`;
   // `const f = (…) => …` / `const f = function (…) {…}` at any binding site — the dominant style in
   // real TS (rimraf's whole API is arrow consts; the first dogfood analyzed 0 of 50 files without
   // this). The VARIABLE name is the function's name; nodeName is ALSO set on the initializer so a
@@ -488,6 +496,23 @@ function realDecl(sym) {
     try { sym = checker.getAliasedSymbol(sym); } catch {}
   }
   return sym.valueDeclaration ?? sym.declarations?.[0];
+}
+
+// Accessor resolution (the silent-pure-accessor fix): a property READ (`x.raw`) or property
+// ASSIGNMENT target (`x.path = v`) may resolve to a getter/setter whose body performs effects. We
+// resolve the property-name symbol to its declarations and look for an accessor of the matching
+// kind (get for a read, set for an assignment LHS). Returns { decl, local } where `local` is true
+// when the accessor's declaration lives in a project file (a UNIT we minted; edge to it). A resolved
+// accessor we CAN'T see (external/typed-only declaration) returns local:false so the caller follows
+// the existing Unknown/curated-κ posture — never silent-pure for a resolved-but-unseen accessor.
+function accessorAt(propNode, kind /* "get" | "set" */) {
+  const sym = checker.getSymbolAtLocation(propNode.name ?? propNode);
+  if (!sym) return null;
+  const want = kind === "get" ? ts.isGetAccessorDeclaration : ts.isSetAccessorDeclaration;
+  // A symbol is an accessor only if its declarations include an accessor of the wanted kind.
+  const decl = (sym.declarations ?? []).find((d) => want(d));
+  if (!decl) return null;
+  return { decl, local: projectFiles.has(path.resolve(decl.getSourceFile().fileName)) };
 }
 
 // nearest enclosing analyzed function (closures attribute to it — SEMANTICS §2)
@@ -765,6 +790,35 @@ function visitCalls(node) {
   if (ts.isPropertyAccessExpression(node) && node.expression.getText() === "process.env") {
     const owner = enclosing(node);
     if (owner) fns.get(owner).direct.add("Env");
+  }
+  // GET/SET ACCESSOR access (the silent-pure-accessor fix): a property read that resolves to a
+  // getter, or a property assignment whose target resolves to a setter, is effectively a call into
+  // the accessor body — model it as a call EDGE so the accessor's effects propagate (like a method
+  // call), never silently pure. A resolved-but-UNSEEN accessor (external declaration) reads Unknown,
+  // following the same posture as an unresolvable call (SPEC §4).
+  if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+    // Is this property access the TARGET of an assignment (`x.prop = v`)? If so it's a setter site;
+    // otherwise it's a read (getter) site. (`x.prop += v` is both a read and a write, but the read
+    // side is the produced value — model it as a setter target only when it is the bare LHS of `=`.)
+    const p = node.parent;
+    const isAssignTarget = p && ts.isBinaryExpression(p) && p.left === node
+      && p.operatorToken.kind === ts.SyntaxKind.EqualsToken;
+    const hit = isAssignTarget ? accessorAt(node, "set") : accessorAt(node, "get");
+    if (hit) {
+      const owner = enclosing(node);
+      if (owner) {
+        const rec = fns.get(owner);
+        const t = nodeName.get(hit.decl);
+        if (hit.local && t) {
+          rec.edges.add(t); // (EDGE) into the accessor unit — effects propagate
+        } else {
+          // resolved to an accessor whose body we can't see → Unknown, never silent-pure (SPEC §4)
+          rec.direct.add("Unknown");
+          const an = hit.decl.parent?.name?.getText?.() ?? "?";
+          rec.why.add(`accessor:${an}.${node.name?.getText?.() ?? node.argumentExpression?.getText?.() ?? "?"}`);
+        }
+      }
+    }
   }
   ts.forEachChild(node, visitCalls);
 }

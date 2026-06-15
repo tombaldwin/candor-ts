@@ -40,7 +40,8 @@ const SINKS = {
 // Edge forms: how fn i reaches fn i+1 (or the sink). `unknown: true` forms must read Unknown
 // instead of (or in addition to) the effect.
 const FORMS = ["direct", "arrow_const", "method", "closure", "callback_recv", "any_call",
-               "class_prop_arrow", "ctor", "field_init", "iface_dispatch"];
+               "class_prop_arrow", "ctor", "field_init", "iface_dispatch",
+               "getter_access", "setter_access"];
 
 function genProject(seed) {
   const r = rng(seed);
@@ -107,6 +108,20 @@ function genProject(seed) {
                     `class Impl${i} implements I${i} { go(): void { ${callExpr(callee)}; } }\n` +
                     `function via${i}(x: I${i}): void { x.go(); }\n` +
                     `export function ${me}(): void { via${i}(new Impl${i}()); }`;
+        break;
+      case "getter_access":
+        // the silent-pure ACCESSOR hole: a GETTER body reaches the next callee, reached via a
+        // PROPERTY READ on an INJECTED instance (the common case — getter's class is passed in, not
+        // `new`'d in the same fn, so the effect can't leak to a locally-visible ctor). Pre-fix `me`
+        // was OMITTED (silent pure) and the effect was misattributed to G${i}'s constructor.
+        bodies[i] = `class G${i} { get val(): number { ${callExpr(callee)}; return 1; } }\n` +
+                    `export function ${me}(g: G${i}): number { return g.val; }`;
+        break;
+      case "setter_access":
+        // the setter twin: a SETTER body reaches the next callee, reached via a PROPERTY ASSIGNMENT
+        // on an injected instance. Pre-fix `me` was OMITTED (silent pure).
+        bodies[i] = `class S${i} { set val(_v: number) { ${callExpr(callee)}; } }\n` +
+                    `export function ${me}(s: S${i}): void { s.val = 1; }`;
         break;
       case "any_call":
         // the callee laundered through `any` → unresolvable → Unknown required for `me`;
