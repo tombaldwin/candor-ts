@@ -322,6 +322,7 @@ const nodeName = new WeakMap();  // declaration node -> qualified name
 // `@Entity()` (naming-strategy-dependent) contributes nothing — never a guess.
 const entityTables = new Map();    // ClassDeclaration node -> table name
 const interfaceImpls = new Map();  // InterfaceDeclaration node -> implementing ClassDeclarations (CHA universe)
+const classOverrides = new Map();  // base-method MemberDeclaration node -> overriding subclass member nodes (class-CHA)
 function moduleOf(sf) {
   const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?[tj]sx?$/, "");
   return rel.split(path.sep).join(".");
@@ -451,6 +452,63 @@ for (const sf of sources) {
     }
     ts.forEachChild(node, collect);
   })(sf);
+}
+
+// Class-CHA universe (the override half of the Rust engine's local-trait / bounded-CHA move): a
+// method call on a BASE-class-typed receiver resolves statically to the base method, but a SUBCLASS
+// may override it with an effectful body — `class Dog extends Animal { speak(){ fs.readFileSync() } }`.
+// Without fanning out to the override, `a.speak()` on an `Animal`-typed `a` comes back concrete-PURE
+// (a silent-pure soundness hole, strictly worse than Unknown). We index, for every LOCAL base-class
+// member, the overriding members in its LOCAL subclasses (walking the full `extends` chain so a
+// grand-subclass override is attributed to the right ancestor declaration). The dispatch site (below)
+// edges to the base PLUS these overrides, bounded by the same ≤12 family limit the interface path
+// uses, with the same allResolved honesty gate. Local subclasses only (an external base/override
+// surface stays OPAQUE, never fabricated). Mirrors interfaceImpls' merged-decl posture.
+{
+  const memberName = (m) => (ts.isMethodDeclaration(m) || ts.isGetAccessorDeclaration(m)
+    || ts.isSetAccessorDeclaration(m) || ts.isPropertyDeclaration(m)) && m.name?.getText?.();
+  // Resolve `extends X` to X's LOCAL ClassDeclaration (through an import alias), or null.
+  const baseClassOf = (cls) => {
+    for (const h of cls.heritageClauses ?? []) {
+      if (h.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+      const t = h.types?.[0];
+      if (!t) continue;
+      let sym = checker.getSymbolAtLocation(t.expression);
+      if (sym && sym.flags & ts.SymbolFlags.Alias) { try { sym = checker.getAliasedSymbol(sym); } catch { /* keep */ } }
+      const bd = (sym?.declarations ?? []).find((d) => ts.isClassDeclaration(d));
+      if (bd && projectFiles.has(path.resolve(bd.getSourceFile().fileName))) return bd;
+    }
+    return null;
+  };
+  for (const sf of sources) {
+    (function scan(node) {
+      if (ts.isClassDeclaration(node)) {
+        for (const m of node.members ?? []) {
+          const name = memberName(m);
+          if (!name) continue;
+          // Walk the base chain; register this subclass member as an override of the NEAREST
+          // ancestor member of the same name (one edge per (name) — TS forbids two declarations of
+          // one accessor-kind/method on a class, so the first match up the chain is the override
+          // target). Stop after the first ancestor declares the name: that is the unit a base-typed
+          // dispatch lands on; higher ancestors are reached transitively via their own override edges.
+          let base = baseClassOf(node), guard = 0;
+          while (base && guard++ < 64) {
+            const ancestor = (base.members ?? []).find((x) => memberName(x) === name
+              && (ts.isMethodDeclaration(x) === ts.isMethodDeclaration(m))
+              && (ts.isGetAccessorDeclaration(x) === ts.isGetAccessorDeclaration(m))
+              && (ts.isSetAccessorDeclaration(x) === ts.isSetAccessorDeclaration(m)));
+            if (ancestor) {
+              if (!classOverrides.has(ancestor)) classOverrides.set(ancestor, []);
+              classOverrides.get(ancestor).push(m);
+              break;
+            }
+            base = baseClassOf(base);
+          }
+        }
+      }
+      ts.forEachChild(node, scan);
+    })(sf);
+  }
 }
 
 // callback-flow bookkeeping (the Rust engine's callback_named move, ported): for every call that
@@ -629,6 +687,36 @@ function visitCalls(node) {
           const targetName = nodeName.get(decl);
           if (targetName) {
             rec.edges.add(targetName); // (EDGE) — cross-FILE edges resolve the same way
+            // Class-CHA fan-out: resolution landed on a base-class member that LOCAL subclasses
+            // override. A base-typed receiver (`a: Animal`, or a branch-merged `Animal|Dog`) could be
+            // any subclass at runtime, so the override bodies' effects must propagate — else the caller
+            // reads concrete-PURE while a `Dog.speak` does I/O (the silent-pure base-dispatch hole). We
+            // edge to the overrides too, bounded by the same ≤12 family limit the interface path uses,
+            // with the same honesty gate: if any override isn't a resolvable unit (not minted), or the
+            // family is too large, fall to Unknown rather than silently dropping it. A monomorphic
+            // receiver already resolved to the leaf (`new Dog()` -> Dog.speak, no overrides) so this is
+            // inert there — no double-count. A base method NO subclass overrides has no entry: today's
+            // behavior (just the base) is preserved exactly.
+            const overrides = classOverrides.get(decl);
+            if (overrides && overrides.length > 0) {
+              if (overrides.length <= 12) {
+                let allResolved = true;
+                const oTargets = [];
+                for (const om of overrides) {
+                  const ot = nodeName.get(om);
+                  if (ot) oTargets.push(ot);
+                  else allResolved = false;
+                }
+                for (const ot of oTargets) rec.edges.add(ot);
+                if (!allResolved) {
+                  rec.direct.add("Unknown");
+                  rec.why.add(`override:${decl.name?.getText?.() ?? "member"}`);
+                }
+              } else {
+                rec.direct.add("Unknown"); // override family too wide to enumerate soundly
+                rec.why.add(`override:${decl.name?.getText?.() ?? "member"}`);
+              }
+            }
             // record what each argument position received (callback-flow, see callbackArgs)
             (node.arguments ?? []).forEach((a, i) => {
               const slot = (callbackArgs.get(targetName) ?? callbackArgs.set(targetName, new Map()).get(targetName));

@@ -42,7 +42,7 @@ const SINKS = {
 const FORMS = ["direct", "arrow_const", "method", "closure", "callback_recv", "any_call",
                "class_prop_arrow", "ctor", "field_init", "iface_dispatch",
                "getter_access", "setter_access",
-               "iter_forof", "using_dispose", "tagged_template"];
+               "iter_forof", "using_dispose", "tagged_template", "class_override"];
 
 function genProject(seed) {
   const r = rng(seed);
@@ -143,6 +143,19 @@ function genProject(seed) {
         // never visited → `me` was OMITTED. The tag is a LOCAL fn reaching the next callee.
         bodies[i] = `function tag${i}(s: TemplateStringsArray, ...v: number[]): string { ${callExpr(callee)}; return s.join(""); }\n` +
                     `export function ${me}(): string { return tag${i}\`a \${1} b\`; }`;
+        break;
+      case "class_override":
+        // class-CHA: a SUBCLASS overrides a PURE base method with an effectful body, and the call
+        // goes through a BASE-class-typed receiver (a param, OR a branch-merged base|sub local — both
+        // resolve statically to the base). The base method is empty, so the ONLY path to the effect is
+        // the override fan-out; pre-fix `me` came back concrete-PURE (the silent-pure base-dispatch
+        // hole). The override method itself (Sub${i}.act) reports the effect; `me` must read
+        // effect-or-Unknown. Two receiver shapes alternate (param vs. branch-merged) to exercise both.
+        bodies[i] = `class Base${i} { act(): void {} }\n` +
+                    `class Sub${i} extends Base${i} { act(): void { ${callExpr(callee)}; } }\n` +
+                    (i % 2
+                      ? `export function ${me}(b: Base${i}): void { b.act(); }`
+                      : `export function ${me}(flag: boolean): void { const b: Base${i} = flag ? new Base${i}() : new Sub${i}(); b.act(); }`);
         break;
       case "any_call":
         // the callee laundered through `any` → unresolvable → Unknown required for `me`;
