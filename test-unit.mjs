@@ -194,6 +194,11 @@ test("parsePolicy: comments stripped, blank lines + malformed rules dropped", ()
   const p = parsePolicy("deny Fs   # trailing comment\n\n  \ndeny\ngarbage line\nUnknown");
   assert.deepEqual(p.deny, [{ effects: ["Fs"], scope: "", raw: "deny Fs" }]); // bare `deny`, `garbage`, `Unknown` all dropped
 });
+test("parsePolicy: dedups repeated tokens (a set, matching rust/java)", () => {
+  // ts kept `deny Net Net` → [Net,Net] while rust/java dedup — a canonical-form divergence (adversarial review)
+  assert.deepEqual(parsePolicy("deny Net Net").deny[0].effects, ["Net"]);
+  assert.deepEqual(parsePolicy("allow Net api api").allow[0].values, ["api"]);
+});
 test("EFFECTS: the §1 vocabulary", () => {
   assert.ok(EFFECTS.includes("Net") && EFFECTS.includes("Clipboard") && EFFECTS.length === 10);
 });

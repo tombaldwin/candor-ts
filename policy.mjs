@@ -22,7 +22,7 @@ export function parsePolicy(text) {
         else { scope = tok; break; }
       }
       if (effects.length === 0) { warn("deny names no known effect"); continue; }
-      deny.push({ effects: effects.sort(), scope, raw: line });
+      deny.push({ effects: [...new Set(effects)].sort(), scope, raw: line }); // dedup: a set, like rust/java
     } else if (t[0] === "pure") {
       deny.push({ effects: [], scope: t[1] ?? "", raw: line });
     } else if (t[0] === "allow") {
@@ -32,7 +32,7 @@ export function parsePolicy(text) {
       if (t[2] === "in") { scope = t[3] ?? ""; vi = 4; }
       const values = t.slice(vi);
       if (values.length === 0) { warn("allow names no values"); continue; }
-      allow.push({ effect: t[1], scope, values: values.sort(), raw: line });
+      allow.push({ effect: t[1], scope, values: [...new Set(values)].sort(), raw: line }); // dedup (set)
     } else if (t[0] === "forbid") {
       // Token-wise like the Rust/JVM parsers: the arrow must be its own whitespace-separated token
       // (`a->b` glued is malformed), and tokens past `b` are ignored. A regex here once accepted and
