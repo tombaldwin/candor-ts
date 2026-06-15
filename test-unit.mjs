@@ -22,7 +22,7 @@ import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
 } from "./policy.mjs";
 import {
-  isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql, versionGt,
+  isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
 } from "./scan-core.mjs";
 
 // ── query-core: the §3.1 match ladder (exact > segment-suffix > substring) ────────────────────────
@@ -286,43 +286,4 @@ test("isTestPath: test/spec/node_modules are not production sources", () => {
   assert.equal(isTestPath("node_modules/x/index.ts"), true);
   assert.equal(isTestPath("tests/helper.ts"), true);
   assert.equal(isTestPath("src/app.ts"), false);
-});
-
-// ── scan-core: the --check-update semver compare (numeric, per component) ──────────────────────────
-test("versionGt: numeric semver-tuple compare, per component", () => {
-  assert.equal(versionGt("0.5.0", "0.5.0"), false);   // equal → not newer
-  assert.equal(versionGt("0.5.1", "0.5.0"), true);    // patch newer
-  assert.equal(versionGt("0.6.0", "0.5.9"), true);    // minor newer beats a higher patch
-  assert.equal(versionGt("0.5.0", "0.5.1"), false);   // older
-  assert.equal(versionGt("0.10.0", "0.9.0"), true);   // numeric, not lexical (10 > 9)
-  assert.equal(versionGt("1.0.0", "0.99.99"), true);  // major dominates
-});
-
-// --check-update is the only network arm, and its contract is "never hang, never throw, always exit
-// 0, always print line 1". Drive it via a subprocess with the network forced to fail fast (a bogus
-// HTTPS proxy the fetch can't connect through) so we exercise the real AbortController/try-catch
-// degrade arm offline — it must print the one-line stderr notice and still exit 0.
-test("--check-update degrades to a stderr notice and exit 0 when the registry is unreachable", async () => {
-  const { execFileSync } = await import("node:child_process");
-  let out = "", stderr = "", code = 0;
-  try {
-    out = execFileSync(process.execPath, ["scan.mjs", "--check-update"], {
-      cwd: path.dirname(new URL(import.meta.url).pathname),
-      // Route the registry GET through a closed local port → connection refused → fetch rejects.
-      env: { ...process.env, HTTPS_PROXY: "http://127.0.0.1:1", https_proxy: "http://127.0.0.1:1" },
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  } catch (e) {
-    out = e.stdout ?? "";
-    stderr = e.stderr ?? "";
-    code = e.status ?? 0;
-  }
-  assert.equal(code, 0); // never a non-zero exit, even with no registry
-  assert.match(out, /^candor-ts \d+\.\d+\.\d+ \(spec \d+\.\d+\)/); // line 1 always printed
-  // Either it reached npm (up to date / available) OR it degraded to the stderr notice — never a throw.
-  assert.ok(
-    /could not reach registry\.npmjs\.org/.test(stderr) || /up to date|available/.test(out),
-    `unexpected output\nstdout:${out}\nstderr:${stderr}`,
-  );
 });

@@ -9,11 +9,11 @@ chains by hand.
 > the *installed* version — always prefer that over a vendored or fetched copy, which can describe
 > a different candor-ts than the one you are running.
 
-> **Staying current.** `candor-ts --version` prints the installed build and the spec contract it
-> speaks (offline). `candor-ts --check-update` does one 4-second GET to npm and tells you whether a
-> newer candor-ts is published (`run: npm install -g candor-ts@latest`) — run it if you suspect the
-> installed engine is stale. Both exit 0; `--check-update` degrades to a one-line notice if npm is
-> unreachable and never hangs. Every other command is fully offline.
+> **Staying current is your job, not candor's.** candor never phones home — it audits and denies the
+> Net effect, so it will not reach the network to check itself. `candor-ts --version` prints the
+> installed build, the spec contract it speaks, and the upgrade line (`npm install -g
+> candor-ts@latest`) — fully offline. You have the network: read the installed version here, compare
+> it against npm, and upgrade if it is stale. Every command is offline.
 
 The language-agnostic consumption contract is
 [candor-spec/AGENTS.md](https://github.com/tombaldwin/candor-spec/blob/main/AGENTS.md); this file is
