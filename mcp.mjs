@@ -45,6 +45,20 @@ function resolvePrefix(args) {
   if (!hasReport(p)) throw new Error(`no report at \`${p}\` (.json or .<crate>.scan.json) — run a candor scan first`);
   return p;
 }
+// Truncate a caller-supplied value echoed back in an error (a multi-MB `fn` would otherwise be reflected
+// verbatim — token/memory amplification over the agent transport, the opposite of the list-cap thrift).
+const clip = (s, n = 120) => { s = String(s); return s.length > n ? s.slice(0, n) + "…" : s; };
+// Read a caller-supplied policy file CONFINED to the report's directory tree. The MCP surface is
+// report-query-only (spec §7.12); an arbitrary `policy` path (/etc/passwd, ~/.aws/credentials) whose
+// parsed deny-rule scopes are reflected back in violations[].rule is an arbitrary-file-read exfiltration
+// channel — tie the policy to the project it gates.
+function confinedPolicyRead(policyPath, prefix) {
+  const root = nodePath.resolve(nodePath.dirname(prefix));
+  const abs = nodePath.resolve(policyPath);
+  if (abs !== root && !abs.startsWith(root + nodePath.sep))
+    throw new Error(`policy must be within the report's directory (${root}) — refusing to read \`${clip(policyPath)}\``);
+  return fs.readFileSync(abs, "utf8");
+}
 
 // ---- the tools: name -> {description, schema, run} ------------------------------------------------
 const reportArg = { report: { type: "string", description: "report prefix (optional; defaults to $CANDOR_REPORT)" } };
@@ -110,9 +124,9 @@ const TOOLS = {
     description: "Hypothetically add `effect` to `fn` and report the blast radius; with `policy`, also the deny-rule violations it would cause. Pre-edit gate check.",
     schema: { type: "object", properties: { fn: { type: "string" }, effect: { type: "string" }, policy: { type: "string", description: "path to a CANDOR_POLICY file (optional)" }, ...reportArg }, required: ["fn", "effect"] },
     run: (a, p) => {
-      const pol = a.policy && fs.existsSync(a.policy) ? parsePolicy(fs.readFileSync(a.policy, "utf8")) : null;
+      const pol = a.policy && fs.existsSync(a.policy) ? parsePolicy(confinedPolicyRead(a.policy, p)) : null;
       const r = Q.whatif(Q.loadCallgraph(p), a.fn, a.effect, pol, scopeMatches);
-      if (r === null) throw new Error(`no function matching \`${a.fn}\` in the call graph`);
+      if (r === null) throw new Error(`no function matching \`${clip(a.fn)}\` in the call graph`);
       return r;
     },
   },
@@ -156,7 +170,7 @@ function handle(msg) {
       if (args.fn !== undefined) {
         const names = [...new Set([...Object.keys(Q.loadCallgraph(prefix)), ...Q.loadReport(prefix).map((e) => e.fn)])];
         if (Q.matches(names, args.fn).length === 0)
-          return result(id, { content: [{ type: "text", text: `candor: no function matching \`${args.fn}\` in this report` }], isError: true });
+          return result(id, { content: [{ type: "text", text: `candor: no function matching \`${clip(args.fn)}\` in this report` }], isError: true });
       }
       const out = t.run(args, prefix);
       // Minified, not pretty-printed: the consumer is an AGENT (it parses the JSON), so the indentation
