@@ -49,6 +49,13 @@ export const KAPPA_RULES = [
   [/^(node:)?dns(\/promises)?$/,
    /^(?!(new|getServers|setServers|getDefaultResultOrder|setDefaultResultOrder)$)/, "Net"],
   [/^(node:)?child_process$/, null, "Exec"],
+  // node:worker_threads — `postMessage` crosses a thread boundary (the canonical Node worker IPC);
+  // `receiveMessageOnPort` reads it. Covers `worker.postMessage`, `parentPort.postMessage`, and a
+  // `MessagePort`'s `.postMessage` (all typed from this module). `new Worker(...)` spawns the thread but
+  // construction is inert here (like the net-cluster ctors) — the message verbs are the IPC boundary.
+  [/^(node:)?worker_threads$/, /^(postMessage|receiveMessageOnPort)$/, "Ipc"],
+  // node:cluster — `fork()` spawns a worker PROCESS and wires its IPC channel.
+  [/^(node:)?cluster$/, /^fork$/, "Ipc"],
   [/^(node:)?sqlite$/, null, "Db"],
   // the curated npm tier
   [/^(axios|got|node-fetch|undici|ws|socket\.io(-client)?|nodemailer)$/, null, "Net"],

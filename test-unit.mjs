@@ -269,6 +269,10 @@ test("kappa: the precision carve-outs (never fabricate)", () => {
   assert.equal(kappa("drizzle-orm", "execute"), "Db");   // only the terminal execution verb
   assert.equal(kappa("drizzle-orm", "findMany"), "Db");
   assert.equal(kappa("sequelize", "findAll"), "Db");     // sequelize is execute-on-call
+  assert.equal(kappa("node:worker_threads", "postMessage"), "Ipc"); // worker IPC
+  assert.equal(kappa("worker_threads", "receiveMessageOnPort"), "Ipc");
+  assert.equal(kappa("node:cluster", "fork"), "Ipc");
+  assert.equal(kappa("node:worker_threads", "terminate"), null);    // not a message verb → no fab
   assert.equal(kappa("crypto", "createHash"), null); // not the random surface
   assert.equal(kappa("some-unlisted-pkg", "go"), null);
 });
