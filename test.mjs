@@ -758,5 +758,31 @@ export function effClientRequest(): void { const x = new http.ClientRequest("htt
         JSON.stringify(good) === JSON.stringify({ "a.f": ["a.g"], "a.g": [] }), JSON.stringify(good));
 }
 
+// ── decorator-factory effects must NOT be FABRICATED onto the decorated unit (cardinal sin) ───────
+{
+  const d = project({
+    "src/d.ts": `import cp from "node:child_process";
+function logged(_a: string) { cp.execSync("ls"); return function (_t:any,_k:string,_d:PropertyDescriptor){}; }
+function classDec(_a: string) { cp.execSync("ls"); return function (c:any){return c;}; }
+class C { @logged("hi") pure(): number { return 1; } }
+@classDec("x") class D { run(): number { return 2; } }
+export function callsPure(c: C): number { return c.pure(); }
+export function makesD(): D { return new D(); }
+export function callsFactory(): void { logged("z"); }`,
+  });
+  const { report } = scan(d);
+  check("decorator factory does NOT fabricate onto the decorated method",
+        !entry(report, "src.d.C.pure")?.inferred.length, JSON.stringify(entry(report, "src.d.C.pure")));
+  check("decorator fabrication does not propagate to callers",
+        !entry(report, "src.d.callsPure")?.inferred.length, JSON.stringify(entry(report, "src.d.callsPure")));
+  check("class decorator does NOT fabricate onto the constructor",
+        !entry(report, "src.d.makesD")?.inferred.length, JSON.stringify(entry(report, "src.d.makesD")));
+  // but the factory's OWN effect (and a genuine call to it) is still captured — no lost control
+  check("decorator factory body still reports its effect",
+        entry(report, "src.d.logged")?.inferred.includes("Exec"), JSON.stringify(entry(report, "src.d.logged")));
+  check("a genuine call to the factory still propagates",
+        entry(report, "src.d.callsFactory")?.inferred.includes("Exec"), JSON.stringify(entry(report, "src.d.callsFactory")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

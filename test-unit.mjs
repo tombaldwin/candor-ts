@@ -246,6 +246,11 @@ test("kappa: classifies the curated module/verb surface", () => {
   assert.equal(kappa("dns", "resolve"), "Net");       // DNS resolution is network I/O
   assert.equal(kappa("node:dns", "lookup"), "Net");
   assert.equal(kappa("node:dns/promises", "resolve4"), "Net");
+  assert.equal(kappa("fs/promises", "readFile"), "Fs");       // the modern Fs API (subpath module)
+  assert.equal(kappa("node:fs/promises", "writeFile"), "Fs");
+  assert.equal(kappa("crypto", "getRandomValues"), "Rand");   // Web-Crypto CSPRNG, not `random`-prefixed
+  assert.equal(kappa("os", "userInfo"), "Env");               // OS user identity
+  assert.equal(kappa("node:os", "hostname"), "Env");          // machine name
   assert.equal(kappa("child_process", "exec"), "Exec");
   assert.equal(kappa("pg", "query"), "Db");
   assert.equal(kappa("crypto", "randomBytes"), "Rand");
@@ -255,6 +260,8 @@ test("kappa: the precision carve-outs (never fabricate)", () => {
   assert.equal(kappa("net", "new"), null);           // construction is inert
   assert.equal(kappa("dns", "getServers"), null);    // in-process config read, no network (no fab)
   assert.equal(kappa("dns", "setServers"), null);    // config write, no network
+  assert.equal(kappa("os", "platform"), null);       // inert host introspection, not Env (no fab)
+  assert.equal(kappa("crypto", "createHash"), null); // not the entropy surface
   assert.equal(kappa("node:dns", "new"), null);      // `new dns.Resolver()` is inert
   assert.equal(kappa("typeorm", "createQueryBuilder"), null); // a builder, not the I/O verb
   assert.equal(kappa("crypto", "createHash"), null); // not the random surface

@@ -242,7 +242,12 @@ const sources = program.getSourceFiles().filter((f) => projectFiles.has(path.res
 function declModule(decl) {
   const f = path.resolve(decl.getSourceFile().fileName);
   if (projectFiles.has(f)) return "<local>";
-  let m = f.match(/@types\/node\/(\w+?)\.d\.ts$/);
+  // `(.+?)` not `(\w+?)`: a SUBPATH typing (`@types/node/fs/promises.d.ts`, `dns/promises.d.ts`) carries
+  // a `/` that `\w` can't cross, so the module collapsed to `@types/node` (via the node_modules branch
+  // below) and the `fs(\/promises)?` / `dns(\/promises)?` κ rules — written to cover exactly these — could
+  // never fire (`fs/promises` is the dominant modern Node FS API: a silent-pure under-report). Keep the
+  // slash so the module reads `fs/promises`, which the rules match.
+  let m = f.match(/@types\/node\/(.+?)\.d\.ts$/);
   if (m) return m[1];
   if (/typescript\/lib\/lib\..*\.d\.ts$/.test(f)) return "<es-lib>";
   m = f.match(/node_modules\/(@[^/]+\/[^/]+|[^/]+)\//);
@@ -617,9 +622,30 @@ function recordAccessorHit(owner, hit, label) {
   }
 }
 
+// Object PROPERTY-ENUMERATION (`{...obj}`, `const {...rest} = obj`, `Object.assign(t, obj)`): copying an
+// object's own enumerable props INVOKES each source getter — the whole-object analog of `obj.prop`,
+// invisible to the property-access arm (no PropertyAccess node per key). Edge `owner` to every LOCAL
+// getter on the source type. A rest/spread can't name one key, so ALL getters are enumerated (sound
+// over-approximation); a plain prop resolves to no accessor and adds nothing (no fabrication).
+function enumerateGetters(owner, type) {
+  if (!owner || !type || !type.getProperties) return;
+  for (const p of type.getProperties()) {
+    const hit = accessorFromSym(p, "get");
+    if (hit) recordAccessorHit(owner, hit, p.getName());
+  }
+}
+
 // nearest enclosing analyzed function (closures attribute to it — SEMANTICS §2)
 function enclosing(node) {
   for (let p = node; p; p = p.parent) {
+    // A call/effect lexically inside a DECORATOR (`@factory(arg)`) runs at class-DEFINITION time, NOT in
+    // the decorated declaration's body. The parent chain of a decorator's expression is
+    // CallExpression → Decorator → MethodDeclaration/ClassDeclaration/Parameter, so `enclosing` otherwise
+    // lands on the decorated unit and FABRICATES the factory's effects onto that method/class/param and
+    // every transitive caller (a cardinal sin — @Entity/@Injectable factories that touch I/O would
+    // poison every decorated handler). Stop at the Decorator: the factory's own effects live in its own
+    // function unit; the application site attributes to nothing (load-time, like a no-arg decorator).
+    if (ts.isDecorator(p)) return null;
     const n = nodeName.get(p);
     if (n) return n;
   }
@@ -727,6 +753,22 @@ function visitCalls(node) {
         }
       } else {
         const mod = declModule(decl);
+        // A LOCAL function/method passed BY REFERENCE to a NON-LOCAL (opaque) callee — `xs.map(loadFree)`,
+        // `arr.forEach(this.m)`, `setTimeout(handler)`, `external(cb)` — may be INVOKED by that callee, so
+        // its effects are reachable here. The precise callback-flow below only resolves a LOCAL callee's
+        // params; a non-local HOF dropped the reference entirely (a silent-pure hole — confirmed for
+        // `map`/`forEach`/`reduce`). Edge to the referenced unit: the sound over-approximation, matching
+        // the Rust engine's fn-as-value edge. An inline closure is already charged lexically; a non-fn
+        // argument resolves to no minted unit (`nodeName` miss) and adds nothing — no fabrication. Gated
+        // on a non-local callee so a local callee that merely STORES (never invokes) keeps its precision.
+        if (mod !== "<local>") {
+          for (const a of node.arguments ?? []) {
+            if (!ts.isIdentifier(a) && !ts.isPropertyAccessExpression(a)) continue;
+            const d2 = realDecl(checker.getSymbolAtLocation(a));
+            const t = d2 && nodeName.get(d2);
+            if (t) rec.edges.add(t);
+          }
+        }
         if (mod === "<local>") {
           const targetName = nodeName.get(decl);
           if (targetName) {
@@ -1001,6 +1043,34 @@ function visitCalls(node) {
     const owner = enclosing(node);
     if (owner) fns.get(owner).direct.add("Env");
   }
+  // Runtime GLOBALS reached as CALLS with no import for the κ resolver to classify: `process.hrtime()`/
+  // `.hrtime.bigint()` is a monotonic clock read (Clock); `process.send(...)` is the child↔parent IPC
+  // channel (Ipc); the global `fetch(...)` is the standard modern HTTP client (Net). Matched on the
+  // callee — `process.*` by exact text (mirroring the process.env match), `fetch` by identifier whose
+  // symbol is NOT a local declaration (so a project's own `fetch` shadow never fabricates Net).
+  if (ts.isCallExpression(node)) {
+    const callee = node.expression;
+    const ctext = callee.getText().replace(/\s+/g, "");
+    let geff = null;
+    if (ctext === "process.hrtime" || ctext === "process.hrtime.bigint") geff = "Clock";
+    else if (ctext === "process.send") geff = "Ipc";
+    else if (ts.isIdentifier(callee) && callee.text === "fetch"
+             && !(checker.getSymbolAtLocation(callee)?.declarations ?? [])
+                  .some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName))))
+      geff = "Net";
+    if (geff) {
+      const owner = enclosing(node);
+      if (owner) fns.get(owner).direct.add(geff);
+    }
+    // Object.assign(target, ...sources) copies each SOURCE's own enumerable props → invokes their
+    // getters (the object-spread twin). Enumerate the sources' local getters.
+    if (callee.getText().replace(/\s+/g, "") === "Object.assign") {
+      const owner = enclosing(node);
+      for (const src of (node.arguments ?? []).slice(1)) {
+        enumerateGetters(owner, checker.getTypeAtLocation(src));
+      }
+    }
+  }
   // GET/SET ACCESSOR access (the silent-pure-accessor fix): a property read that resolves to a
   // getter, or a property assignment whose target resolves to a setter, is effectively a call into
   // the accessor body — model it as a call EDGE so the accessor's effects propagate (like a method
@@ -1034,7 +1104,8 @@ function visitCalls(node) {
     if (owner) {
       const recvType = checker.getTypeAtLocation(node.initializer);
       for (const el of node.name.elements) {
-        if (el.dotDotDotToken) continue; // `...rest` collects the remaining props, not one getter
+        if (el.dotDotDotToken) { enumerateGetters(owner, recvType); continue; } // `...rest` copies every
+        // remaining prop → invokes every (remaining) getter; enumerate all (the bound ones double-handle).
         const key = el.propertyName ?? el.name; // `{prop}` shorthand, or `{prop: alias}`
         const keyName = ts.isIdentifier(key) ? key.text
           : ts.isStringLiteralLike(key) ? key.text : null;
@@ -1052,9 +1123,12 @@ function visitCalls(node) {
     let iterExpr = null, iterAsync = false;
     if (ts.isForOfStatement(node)) { iterExpr = node.expression; iterAsync = !!node.awaitModifier; }
     else if (ts.isSpreadElement(node)) iterExpr = node.expression; // [...bag] / f(...bag)
-    else if (ts.isSpreadAssignment(node)) iterExpr = node.expression; // {...bag} — object spread is NOT
-    // iteration (it copies own enumerable props, no [Symbol.iterator]); wellKnownSymbolMember simply
-    // finds none and edges nothing. Listed for clarity; the resolution self-guards.
+    else if (ts.isSpreadAssignment(node)) {
+      iterExpr = node.expression; // {...bag} — object spread is NOT iteration (copies own enumerable
+      // props, no [Symbol.iterator]); wellKnownSymbolMember finds none and edges nothing for iteration.
+      // But the copy DOES invoke each source getter — enumerate them (the silent-pure object-spread hole).
+      enumerateGetters(enclosing(node), checker.getTypeAtLocation(node.expression));
+    }
     else if (ts.isVariableDeclaration(node) && ts.isArrayBindingPattern(node.name) && node.initializer)
       iterExpr = node.initializer; // const [a] = bag
     else if (ts.isCallExpression(node) && node.arguments?.[0]

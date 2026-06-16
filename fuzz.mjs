@@ -42,6 +42,7 @@ const SINKS = {
 const FORMS = ["direct", "arrow_const", "method", "closure", "callback_recv", "any_call",
                "class_prop_arrow", "ctor", "field_init", "iface_dispatch",
                "getter_access", "setter_access", "elem_getter_access", "destr_getter_access",
+               "hof_ref", "obj_spread",
                "iter_forof", "using_dispose", "tagged_template", "class_override"];
 
 function genProject(seed) {
@@ -123,6 +124,19 @@ function genProject(seed) {
         // on an injected instance. Pre-fix `me` was OMITTED (silent pure).
         bodies[i] = `class S${i} { set val(_v: number) { ${callExpr(callee)}; } }\n` +
                     `export function ${me}(s: S${i}): void { s.val = 1; }`;
+        break;
+      case "hof_ref":
+        // the higher-order-function-REFERENCE hole: a local fn passed BY NAME to a non-local HOF
+        // (`xs.map(loadFn)`) is invoked by it, but the reference was dropped (only inline closures were
+        // walked) → `me` was OMITTED (silent pure). The injected param keeps the effect off any ctor.
+        bodies[i] = `function ref${i}(_x: number): number { ${callExpr(callee)}; return 1; }\n` +
+                    `export function ${me}(xs: number[]): number[] { return xs.map(ref${i}); }`;
+        break;
+      case "obj_spread":
+        // the object-SPREAD-getter hole: `{ ...o }` copies own enumerable props, INVOKING each getter,
+        // but spread was treated as iteration (no [Symbol.iterator]) so the getter body went silent-pure.
+        bodies[i] = `class Sp${i} { get v(): number { ${callExpr(callee)}; return 1; } }\n` +
+                    `export function ${me}(o: Sp${i}): object { return { ...o }; }`;
         break;
       case "elem_getter_access":
         // the ELEMENT-ACCESS twin of getter_access: a getter reached via `g["val"]` rather than `g.val`.
