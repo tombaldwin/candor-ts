@@ -784,5 +784,25 @@ export function callsFactory(): void { logged("z"); }`,
         entry(report, "src.d.callsFactory")?.inferred.includes("Exec"), JSON.stringify(entry(report, "src.d.callsFactory")));
 }
 
+// a fn-reference passed to a STORE/compare/log sink (not an invoking HOF) must NOT fabricate its effect
+{
+  const d = project({
+    "src/h.ts": `import { readFileSync } from "node:fs";
+function eff(): string { return readFileSync("/h", "utf8"); }
+const reg = new Map<string, Function>();
+export function stores() { reg.set("a", eff); }
+export function includesIt(a: Function[]) { return a.includes(eff); }
+export function logs() { console.log(eff); }
+export function invokesMap(xs: number[]) { return xs.map(eff); }`,
+  });
+  const { report } = scan(d);
+  check("HOF-ref: a fn stored (not invoked) does NOT fabricate its effect",
+        !entry(report, "src.h.stores")?.inferred.length, JSON.stringify(entry(report, "src.h.stores")));
+  check("HOF-ref: a fn passed to includes/log does NOT fabricate",
+        !entry(report, "src.h.includesIt")?.inferred.length && !entry(report, "src.h.logs")?.inferred.length);
+  check("HOF-ref: a fn passed to an INVOKING HOF (map) still propagates",
+        entry(report, "src.h.invokesMap")?.inferred.includes("Fs"));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

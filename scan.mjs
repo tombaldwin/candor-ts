@@ -724,6 +724,17 @@ function edgeToTargets(rec, decls) {
   for (const d of decls) { const t = nodeName.get(d); if (t) rec.edges.add(t); }
 }
 
+// Callee names that INVOKE a function/method argument (so a fn-reference passed to one is reachable
+// through it). Array/iterable HOFs, the timer/microtask schedulers, and Promise continuations. A
+// STORE/compare/log sink (`set`/`push`/`add`/`includes`/`indexOf`/`concat`/`log`/`stringify`/…) is
+// deliberately ABSENT — edging there would fabricate the fn's effects on a pure path (the cardinal sin).
+const HOF_INVOKERS = new Set([
+  "map", "forEach", "filter", "reduce", "reduceRight", "find", "findIndex", "findLast", "findLastIndex",
+  "some", "every", "flatMap", "sort", "group", "groupBy", "partition", "mapValues", "flatMapDeep",
+  "setTimeout", "setInterval", "setImmediate", "queueMicrotask", "requestAnimationFrame", "requestIdleCallback",
+  "then", "catch", "finally", "nextTick",
+]);
+
 // ---- pass 2: per call site, the (CLASSIFY)/(EDGE)/(UNKNOWN) resolution of SEMANTICS §4 ------------
 function visitCalls(node) {
   if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
@@ -761,7 +772,15 @@ function visitCalls(node) {
         // the Rust engine's fn-as-value edge. An inline closure is already charged lexically; a non-fn
         // argument resolves to no minted unit (`nodeName` miss) and adds nothing — no fabrication. Gated
         // on a non-local callee so a local callee that merely STORES (never invokes) keeps its precision.
-        if (mod !== "<local>") {
+        // ONLY a callee that actually INVOKES its fn argument makes the reference reachable here. The
+        // earlier version edged for ANY non-local callee — fabricating the fn's effects onto a pure path
+        // (the cardinal sin) for STORE/compare/log sinks that never call it (`map.set(k, fn)`,
+        // `arr.push(fn)`, `arr.includes(fn)`, `console.log(fn)`, `[fn]`). Gate on a known INVOKING HOF by
+        // callee name; a custom non-local HOF that invokes its arg is an honest under-report (sound),
+        // never a fabrication. (A LOCAL callee keeps its precise callback-flow below.)
+        const calleeName = ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text
+          : ts.isIdentifier(node.expression) ? node.expression.text : null;
+        if (mod !== "<local>" && calleeName && HOF_INVOKERS.has(calleeName)) {
           for (const a of node.arguments ?? []) {
             if (!ts.isIdentifier(a) && !ts.isPropertyAccessExpression(a)) continue;
             const d2 = realDecl(checker.getSymbolAtLocation(a));
