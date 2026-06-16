@@ -788,6 +788,27 @@ function visitCalls(node) {
             if (t) rec.edges.add(t);
           }
         }
+        // `fn.call(thisArg, …)` / `fn.apply(thisArg, args)` INVOKE the receiver function reference, and
+        // `Reflect.apply(fn, …)` / `Reflect.construct(Ctor, …)` invoke their FIRST ARGUMENT. The resolved
+        // signature lands on the es-lib `CallableFunction.call/apply` / `Reflect.apply` member, so the
+        // function actually invoked (the receiver, or arg0) was never followed → the caller read
+        // silent-pure (HIGH: a common reflective-invoke shape). Edge to the referenced unit, mirroring the
+        // HOF-ref arm: a pure ref edges to a pure unit (no fabrication); a non-fn receiver/arg resolves to
+        // no minted unit (`nodeName` miss) and adds nothing; an unresolvable ref stays opaque/Unknown.
+        if (ts.isPropertyAccessExpression(node.expression)) {
+          const m = node.expression.name.text;
+          const recv = node.expression.expression;
+          const recvText = recv.getText().replace(/\s+/g, "");
+          let invokedRef = null;
+          if ((m === "call" || m === "apply") && recvText !== "Reflect") invokedRef = recv;
+          else if (recvText === "Reflect" && (m === "apply" || m === "construct"))
+            invokedRef = (node.arguments ?? [])[0] ?? null;
+          if (invokedRef && (ts.isIdentifier(invokedRef) || ts.isPropertyAccessExpression(invokedRef))) {
+            const d2 = realDecl(checker.getSymbolAtLocation(invokedRef));
+            const t = d2 && nodeName.get(d2);
+            if (t) rec.edges.add(t);
+          }
+        }
         if (mod === "<local>") {
           const targetName = nodeName.get(decl);
           if (targetName) {
@@ -933,6 +954,19 @@ function visitCalls(node) {
           if (ts.isNewExpression(node) && (node.arguments ?? []).length === 0
               && checker.getTypeAtLocation(node.expression)?.symbol?.name === "DateConstructor")
             rec.direct.add("Clock");
+          // Browser/runtime NETWORK globals declared in lib.dom — no importable module for the κ table to
+          // key on, so they read SILENT-PURE. `XMLHttpRequest.send`/`.open` issue the HTTP request; the
+          // `EventSource`/`WebSocket` constructors open a connection on construction. Net. (Found by a
+          // Net-deep sweep. The npm `ws` package is already κ-covered; this is the bare browser global.)
+          if (parent === "XMLHttpRequest" && (name === "send" || name === "open")) rec.direct.add("Net");
+          // `new EventSource(url)` / `new WebSocket(url)`: the constructor is declared on an anonymous
+          // `declare var` object type (symbol `__type`, no usable parent name), but reaching the es-lib
+          // branch already proves the ctor resolved to lib.dom (not a project class shadowing the name),
+          // so the constructed identifier is the real browser global.
+          if (ts.isNewExpression(node)) {
+            const ctorName = node.expression.getText();
+            if (ctorName === "EventSource" || ctorName === "WebSocket") rec.direct.add("Net");
+          }
         } else {
           // The member token κ matches: the resolved declaration's name, EXCEPT a `new X()` call,
           // whose declaration is a Constructor (empty name) — synthesize "new" so a rule can exempt
@@ -1086,6 +1120,11 @@ function visitCalls(node) {
     else if (ts.isIdentifier(callee) && callee.text === "fetch"
              && !(checker.getSymbolAtLocation(callee)?.declarations ?? [])
                   .some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName))))
+      geff = "Net";
+    // the fully-qualified global fetch — `globalThis.fetch`/`window.fetch`/`self.fetch` — is a
+    // PropertyAccess callee the bare-identifier guard above misses, so it read silent-pure. Mirror the
+    // `eval` global-qualifier handling (a runtime global a project would not shadow).
+    else if (ctext === "globalThis.fetch" || ctext === "window.fetch" || ctext === "self.fetch")
       geff = "Net";
     if (geff) {
       const owner = enclosing(node);

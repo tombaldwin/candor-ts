@@ -39,13 +39,18 @@ const SINKS = {
   // `eval(code)` runs an arbitrary code string — a code-execution sink that can perform ANY effect, so the
   // sound marker is Unknown (it resolved to a benign es-lib member and read SILENT-PURE before the fix).
   eval: { import: ``, stmt: `void eval("1");`, eff: "Unknown" },
+  // browser/runtime NETWORK globals declared in lib.dom (no importable module for κ to key on) — each
+  // read SILENT-PURE before the Net-deep fix: the qualified global fetch, XMLHttpRequest, EventSource.
+  gfetch: { import: ``, stmt: `void globalThis.fetch("http://h");`, eff: "Net" },
+  xhr:    { import: ``, stmt: `const x = new XMLHttpRequest(); x.open("GET", "/"); x.send();`, eff: "Net" },
+  sse:    { import: ``, stmt: `void new EventSource("/x");`, eff: "Net" },
 };
 // Edge forms: how fn i reaches fn i+1 (or the sink). `unknown: true` forms must read Unknown
 // instead of (or in addition to) the effect.
 const FORMS = ["direct", "arrow_const", "method", "closure", "callback_recv", "any_call",
                "class_prop_arrow", "ctor", "field_init", "iface_dispatch",
                "getter_access", "setter_access", "elem_getter_access", "destr_getter_access",
-               "hof_ref", "obj_spread",
+               "hof_ref", "obj_spread", "fn_call", "fn_apply", "reflect_apply",
                "iter_forof", "using_dispose", "tagged_template", "class_override"];
 
 function genProject(seed) {
@@ -71,6 +76,18 @@ function genProject(seed) {
     switch (form) {
       case "direct":
         bodies[i] = `export function ${me}(): void { ${callExpr(callee)}; }`;
+        break;
+      case "fn_call":
+        // `callee.call(thisArg)` invokes callee through Function.prototype.call — the receiver IS the
+        // invoked reference (was silent-pure: the es-lib CallableFunction.call resolved, callee dropped).
+        bodies[i] = `export function ${me}(): void { ${callee}.call(null); }`;
+        break;
+      case "fn_apply":
+        bodies[i] = `export function ${me}(): void { ${callee}.apply(null, []); }`;
+        break;
+      case "reflect_apply":
+        // `Reflect.apply(callee, …)` invokes its FIRST ARGUMENT.
+        bodies[i] = `export function ${me}(): void { Reflect.apply(${callee}, null, []); }`;
         break;
       case "arrow_const":
         bodies[i] = `export const ${me} = (): void => { ${callExpr(callee)}; };`;
