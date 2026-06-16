@@ -917,6 +917,16 @@ function visitCalls(node) {
           // entropy were invisible).
           const name = decl.name ? decl.name.getText() : "";
           const parent = decl.parent && decl.parent.name ? decl.parent.name.getText() : "";
+          // `eval(code)` executes an arbitrary code string — it can perform ANY effect, so it is genuinely
+          // Unknown (the same posture as `new Function(s)`, which already reads Unknown via the no-decl
+          // path). The es-lib declares `eval` as a top-level ambient function (parent is the global/source
+          // file, no type name), and `globalThis.eval`/`window.eval`/`self.eval` all resolve to the same
+          // `eval` declaration — so keying on the resolved name catches every access form. Without this it
+          // resolved to a benign es-lib member and read SILENT-PURE (a code-execution sink reported pure).
+          if (name === "eval" && parent !== "Math" && parent !== "JSON") {
+            rec.direct.add("Unknown");
+            rec.why.add("call:eval");
+          }
           if ((parent === "DateConstructor" && name === "now") || (parent === "Performance" && name === "now"))
             rec.direct.add("Clock");
           if (parent === "Math" && name === "random") rec.direct.add("Rand");

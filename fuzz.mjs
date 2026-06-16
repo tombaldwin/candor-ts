@@ -36,6 +36,9 @@ const SINKS = {
   net:  { import: `import * as netm from "node:net";`, stmt: `netm.connect(9, "127.0.0.1");`, eff: "Net" },
   exec: { import: `import * as cp from "node:child_process";`, stmt: `try { cp.execSync("true"); } catch {}`, eff: "Exec" },
   env:  { import: ``, stmt: `void process.env.CANDOR_FUZZ;`, eff: "Env" },
+  // `eval(code)` runs an arbitrary code string — a code-execution sink that can perform ANY effect, so the
+  // sound marker is Unknown (it resolved to a benign es-lib member and read SILENT-PURE before the fix).
+  eval: { import: ``, stmt: `void eval("1");`, eff: "Unknown" },
 };
 // Edge forms: how fn i reaches fn i+1 (or the sink). `unknown: true` forms must read Unknown
 // instead of (or in addition to) the effect.
