@@ -79,9 +79,17 @@ export const KAPPA_RULES = [
   [/^mongoose$/,
    /^(find|save|create|insertMany|updateOne|updateMany|replaceOne|deleteOne|deleteMany|aggregate|countDocuments|estimatedDocumentCount|distinct|exec|bulkWrite)/,
    "Db"],
-  [/^(sequelize|drizzle-orm)$/,
-   /^(find|create|update|destroy|upsert|count|max|min|sum|query|select|insert|delete|execute|transaction)/,
+  // Sequelize is EXECUTE-ON-CALL: `Model.findAll()/create()/update()/destroy()` issue the query and
+  // return a promise — so its verbs are the I/O boundary.
+  [/^sequelize$/,
+   /^(find|create|update|destroy|upsert|count|max|min|sum|increment|decrement|reload|save|query|transaction)/,
    "Db"],
+  // Drizzle is a BUILDER: `db.select().from().where()` / `db.insert().values()` / `db.update().set()` /
+  // `db.delete().where()` issue NOTHING until a terminal `.execute()`/await/`.all()`/`.get()`/`.run()` (or
+  // the relational `db.query.x.findMany/findFirst`). Listing select/insert/update/delete as Db fabricated
+  // the effect onto a pure builder chain (the typeorm rule's `createQueryBuilder` discipline, violated).
+  // VERB-PRECISE: only the terminal execution verbs; the builder heads under-report (sound) until executed.
+  [/^drizzle-orm$/, /^(execute|transaction|findMany|findFirst|all|get|run)$/, "Db"],
   // Nest's HttpService wraps axios — the request verbs are Net.
   [/^@nestjs\/axios$/, /^(get|post|put|patch|delete|head|request)$/, "Net"],
 ];

@@ -264,6 +264,11 @@ test("kappa: the precision carve-outs (never fabricate)", () => {
   assert.equal(kappa("crypto", "createHash"), null); // not the entropy surface
   assert.equal(kappa("node:dns", "new"), null);      // `new dns.Resolver()` is inert
   assert.equal(kappa("typeorm", "createQueryBuilder"), null); // a builder, not the I/O verb
+  assert.equal(kappa("drizzle-orm", "select"), null);    // drizzle select/insert/... are BUILDERS (no fab)
+  assert.equal(kappa("drizzle-orm", "insert"), null);
+  assert.equal(kappa("drizzle-orm", "execute"), "Db");   // only the terminal execution verb
+  assert.equal(kappa("drizzle-orm", "findMany"), "Db");
+  assert.equal(kappa("sequelize", "findAll"), "Db");     // sequelize is execute-on-call
   assert.equal(kappa("crypto", "createHash"), null); // not the random surface
   assert.equal(kappa("some-unlisted-pkg", "go"), null);
 });
