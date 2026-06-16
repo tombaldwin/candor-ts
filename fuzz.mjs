@@ -41,7 +41,7 @@ const SINKS = {
 // instead of (or in addition to) the effect.
 const FORMS = ["direct", "arrow_const", "method", "closure", "callback_recv", "any_call",
                "class_prop_arrow", "ctor", "field_init", "iface_dispatch",
-               "getter_access", "setter_access",
+               "getter_access", "setter_access", "elem_getter_access", "destr_getter_access",
                "iter_forof", "using_dispose", "tagged_template", "class_override"];
 
 function genProject(seed) {
@@ -123,6 +123,20 @@ function genProject(seed) {
         // on an injected instance. Pre-fix `me` was OMITTED (silent pure).
         bodies[i] = `class S${i} { set val(_v: number) { ${callExpr(callee)}; } }\n` +
                     `export function ${me}(s: S${i}): void { s.val = 1; }`;
+        break;
+      case "elem_getter_access":
+        // the ELEMENT-ACCESS twin of getter_access: a getter reached via `g["val"]` rather than `g.val`.
+        // The element-access expr carries no `.name`, so the accessor resolver (keyed on `.name`) missed
+        // it and `me` was OMITTED (silent pure) — a desugar hole distinct from dot access.
+        bodies[i] = `class Ge${i} { get val(): number { ${callExpr(callee)}; return 1; } }\n` +
+                    `export function ${me}(g: Ge${i}): number { return g["val"]; }`;
+        break;
+      case "destr_getter_access":
+        // the OBJECT-DESTRUCTURING twin: `const { val } = g` is a property READ that invokes the getter,
+        // but it is a BindingElement (no PropertyAccess/ElementAccess node), so the property-access arm
+        // never saw it and `me` was OMITTED (silent pure).
+        bodies[i] = `class Gd${i} { get val(): number { ${callExpr(callee)}; return 1; } }\n` +
+                    `export function ${me}(g: Gd${i}): number { const { val } = g; return val; }`;
         break;
       case "iter_forof":
         // the desugared-ITERATION hole: a `for-of` over an INJECTED custom iterable lowers to

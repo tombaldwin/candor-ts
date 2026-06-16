@@ -40,6 +40,14 @@ export const KAPPA_RULES = [
   // these three named validators are freed; every genuine verb (connect/createConnection/createServer…)
   // stays Net (the matcher excludes ONLY new + the three validators, nothing else).
   [/^(node:)?(net|dgram|tls|http2?|https)$/, /^(?!(new|isIP|isIPv4|isIPv6)$)/, "Net"],
+  // node:dns — name resolution is NETWORK I/O (lookup/lookupService hit the OS resolver; resolve*/
+  // reverse query DNS servers directly). Was unclassified, so a `dns.resolve(...)` read silently pure.
+  // Same construction-and-pure-accessor carve-out as the net cluster: `new dns.Resolver()` ("new") is
+  // inert, and the SERVER-CONFIG accessors getServers/setServers/get|setDefaultResultOrder touch no
+  // network (in-process config) — classifying them Net would FABRICATE the cardinal sin. Every genuine
+  // resolver verb (lookup/resolve4/resolveMx/reverse/…) stays Net. Covers node:dns/promises too.
+  [/^(node:)?dns(\/promises)?$/,
+   /^(?!(new|getServers|setServers|getDefaultResultOrder|setDefaultResultOrder)$)/, "Net"],
   [/^(node:)?child_process$/, null, "Exec"],
   [/^(node:)?sqlite$/, null, "Db"],
   // the curated npm tier

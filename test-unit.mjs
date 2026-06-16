@@ -243,6 +243,9 @@ test("kappa: classifies the curated module/verb surface", () => {
   assert.equal(kappa("fs", "readFileSync"), "Fs");
   assert.equal(kappa("node:fs", "writeFile"), "Fs");
   assert.equal(kappa("net", "connect"), "Net");
+  assert.equal(kappa("dns", "resolve"), "Net");       // DNS resolution is network I/O
+  assert.equal(kappa("node:dns", "lookup"), "Net");
+  assert.equal(kappa("node:dns/promises", "resolve4"), "Net");
   assert.equal(kappa("child_process", "exec"), "Exec");
   assert.equal(kappa("pg", "query"), "Db");
   assert.equal(kappa("crypto", "randomBytes"), "Rand");
@@ -250,6 +253,9 @@ test("kappa: classifies the curated module/verb surface", () => {
 test("kappa: the precision carve-outs (never fabricate)", () => {
   assert.equal(kappa("net", "isIP"), null);          // a pure string validator, not Net (the node-fetch fab)
   assert.equal(kappa("net", "new"), null);           // construction is inert
+  assert.equal(kappa("dns", "getServers"), null);    // in-process config read, no network (no fab)
+  assert.equal(kappa("dns", "setServers"), null);    // config write, no network
+  assert.equal(kappa("node:dns", "new"), null);      // `new dns.Resolver()` is inert
   assert.equal(kappa("typeorm", "createQueryBuilder"), null); // a builder, not the I/O verb
   assert.equal(kappa("crypto", "createHash"), null); // not the random surface
   assert.equal(kappa("some-unlisted-pkg", "go"), null);

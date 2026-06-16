@@ -577,14 +577,44 @@ function realDecl(sym) {
 // when the accessor's declaration lives in a project file (a UNIT we minted; edge to it). A resolved
 // accessor we CAN'T see (external/typed-only declaration) returns local:false so the caller follows
 // the existing Unknown/curated-κ posture — never silent-pure for a resolved-but-unseen accessor.
-function accessorAt(propNode, kind /* "get" | "set" */) {
-  const sym = checker.getSymbolAtLocation(propNode.name ?? propNode);
+// A property SYMBOL → its accessor declaration of the wanted kind (or null). `local` is true when that
+// declaration lives in a project file (a unit we minted; edge to it). Shared by every property-read
+// shape: dot access, element access, and object destructuring.
+function accessorFromSym(sym, kind /* "get" | "set" */) {
   if (!sym) return null;
   const want = kind === "get" ? ts.isGetAccessorDeclaration : ts.isSetAccessorDeclaration;
   // A symbol is an accessor only if its declarations include an accessor of the wanted kind.
   const decl = (sym.declarations ?? []).find((d) => want(d));
   if (!decl) return null;
   return { decl, local: projectFiles.has(path.resolve(decl.getSourceFile().fileName)) };
+}
+function accessorAt(propNode, kind /* "get" | "set" */) {
+  let sym;
+  if (ts.isElementAccessExpression(propNode)) {
+    // `c["prop"]` carries no `.name`; resolve the LITERAL key as a property on the receiver's type.
+    // A dynamic key (`c[k]`) can't be pinned to one property — leave it unresolved (the existing
+    // dynamic-access posture stands; resolving it would guess, never fabricate here).
+    const arg = propNode.argumentExpression;
+    sym = arg && ts.isStringLiteralLike(arg)
+      ? checker.getTypeAtLocation(propNode.expression)?.getProperty?.(arg.text)
+      : null;
+  } else {
+    sym = checker.getSymbolAtLocation(propNode.name ?? propNode);
+  }
+  return accessorFromSym(sym, kind);
+}
+// Record a resolved accessor HIT (read or write) as an edge from `owner`: into the accessor UNIT when
+// it's a local declaration we minted; otherwise Unknown (a resolved-but-unseen accessor body — never
+// silent-pure, SPEC §4). `label` tags the §-why disclosure.
+function recordAccessorHit(owner, hit, label) {
+  const rec = fns.get(owner);
+  const t = nodeName.get(hit.decl);
+  if (hit.local && t) {
+    rec.edges.add(t); // (EDGE) into the accessor unit — effects propagate
+  } else {
+    rec.direct.add("Unknown");
+    rec.why.add(`accessor:${label}`);
+  }
 }
 
 // nearest enclosing analyzed function (closures attribute to it — SEMANTICS §2)
@@ -987,16 +1017,30 @@ function visitCalls(node) {
     if (hit) {
       const owner = enclosing(node);
       if (owner) {
-        const rec = fns.get(owner);
-        const t = nodeName.get(hit.decl);
-        if (hit.local && t) {
-          rec.edges.add(t); // (EDGE) into the accessor unit — effects propagate
-        } else {
-          // resolved to an accessor whose body we can't see → Unknown, never silent-pure (SPEC §4)
-          rec.direct.add("Unknown");
-          const an = hit.decl.parent?.name?.getText?.() ?? "?";
-          rec.why.add(`accessor:${an}.${node.name?.getText?.() ?? node.argumentExpression?.getText?.() ?? "?"}`);
-        }
+        const an = hit.decl.parent?.name?.getText?.() ?? "?";
+        const pn = node.name?.getText?.() ?? node.argumentExpression?.getText?.() ?? "?";
+        recordAccessorHit(owner, hit, `${an}.${pn}`);
+      }
+    }
+  }
+  // OBJECT-DESTRUCTURING getter read (`const { prop } = obj`): each bound property is a READ that may
+  // resolve to a getter whose body does I/O — the binding-pattern analog of `obj.prop`, invisible to
+  // the property-access arm above because there is no PropertyAccess/ElementAccess node. (ARRAY
+  // destructuring is ITERATION, handled below; object destructuring copies named own/inherited props,
+  // invoking each getter.) Resolve every bound key as a property on the initializer's type; a rest
+  // element / computed key can't be pinned to one accessor, so it's skipped (no fabrication).
+  if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer) {
+    const owner = enclosing(node);
+    if (owner) {
+      const recvType = checker.getTypeAtLocation(node.initializer);
+      for (const el of node.name.elements) {
+        if (el.dotDotDotToken) continue; // `...rest` collects the remaining props, not one getter
+        const key = el.propertyName ?? el.name; // `{prop}` shorthand, or `{prop: alias}`
+        const keyName = ts.isIdentifier(key) ? key.text
+          : ts.isStringLiteralLike(key) ? key.text : null;
+        if (keyName === null) continue; // computed key (`{[k]: v}`) — unresolvable to one property
+        const hit = accessorFromSym(recvType?.getProperty?.(keyName), "get");
+        if (hit) recordAccessorHit(owner, hit, keyName);
       }
     }
   }
