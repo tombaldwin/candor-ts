@@ -464,7 +464,7 @@ for (const sf of sources) {
         const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
         fns.set(ctorQual, { local: `${node.name.text}.constructor`, direct: new Set(), edges: new Set(),
                             hosts: new Set(), tables: new Set(), cmds: new Set(), paths: new Set(),
-                            why: new Set(), entry: false,
+                            blind: new Set(), why: new Set(), entry: false,
                             loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
       }
       nodeName.set(node, ctorQual);
@@ -475,7 +475,7 @@ for (const sf of sources) {
       const qual = `${mod}.${n}`;
       const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
       fns.set(qual, { local: n, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
-                      cmds: new Set(), paths: new Set(), why: new Set(), entry: false, isCjsExport,
+                      cmds: new Set(), paths: new Set(), blind: new Set(), why: new Set(), entry: false, isCjsExport,
                       loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
       nodeName.set(node, qual);
       if ((ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)) && node.initializer)
@@ -1079,6 +1079,11 @@ function visitCalls(node) {
             } else if (!kappaKnows(pkg) && !depCoveredPkgs.has(pkg)
                 && /node_modules\//.test(file) && !/node_modules\/(@types\/node|typescript)\//.test(file)) {
               unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
+              // Per-fn HONESTY: this fn calls into a genuinely-blind package (κ-unknown, not dep-covered).
+              // Recorded per fn, propagated transitively, emitted as `invisible` — so `inferred` is never an
+              // unqualified completeness claim. This branch already IS the global-blind condition, so no
+              // post-filter is needed (κ either knows a package or it doesn't).
+              rec.blind.add(pkg);
             }
           }
         }
@@ -1271,7 +1276,7 @@ while (changed) {
         if (!mine.has(e)) { mine.add(e); changed = true; }
   }
 }
-for (const m of ["hosts", "tables", "cmds", "paths"]) {
+for (const m of ["hosts", "tables", "cmds", "paths", "blind"]) {
   let moved = true;
   while (moved) {
     moved = false;
@@ -1286,7 +1291,9 @@ for (const m of ["hosts", "tables", "cmds", "paths"]) {
 const functions = [];
 for (const [name, rec] of fns) {
   const inf = [...inferred.get(name)].sort();
-  if (inf.length === 0 && !rec.entry) continue; // entry points stay visible even when pure
+  // entry points stay visible even when pure; a BLIND fn stays too, so the honesty disclosure survives
+  // on exactly the `inferred: []` fns that need it.
+  if (inf.length === 0 && !rec.entry && rec.blind.size === 0) continue;
   const entry = {
     fn: name,
     loc: rec.loc,
@@ -1303,6 +1310,9 @@ for (const [name, rec] of fns) {
   if (inf.includes("Exec") && rec.cmds.size) entry.cmds = [...rec.cmds].sort();
   if (inf.includes("Fs") && rec.paths.size) entry.paths = [...rec.paths].sort();
   if (rec.direct.has("Unknown") && rec.why.size) entry.unknownWhy = [...rec.why].sort();
+  // HONESTY: the npm packages this fn transitively reaches that κ couldn't see through — effects through
+  // them are NOT in `inferred`, so it is a LOWER BOUND when this is non-empty. Omitted when none.
+  if (rec.blind.size) entry.invisible = [...rec.blind].sort();
   if (rec.entry) entry.entryPoint = true;
   if (rec.isCjsExport) entry.unitKind = "export"; // spec 0.5 draft, informative — per-unit, not by name
   functions.push(entry);

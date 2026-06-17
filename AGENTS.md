@@ -144,7 +144,10 @@ curated-κ caveat cuts the other way:** a call into an npm package κ doesn't kn
 NOTHING — invisible, not `Unknown`. The scan's receipt now DISCLOSES these by name (`κ doesn't
 know N packages…`), so the blind spots are per-scan evidence, not a doc footnote: never conclude
 "no effect" through a package that line names (the documented weaker edge of the
-never-silently-pure promise, same as every candor engine's curated classifier). An uncurated
+never-silently-pure promise, same as every candor engine's curated classifier). Each function ALSO
+carries an `invisible` list — the κ-unknown packages it (transitively) reaches — so `inferred` is
+never an unqualified claim PER FUNCTION: `inferred: []` with a non-empty `invisible` means "pure as
+far as candor could see, but it could not see through these" (a LOWER bound), not "pure". An uncurated
 dependency can opt out of that blind spot by declaring `"candorEffects": ["Net", …]` in its
 `package.json` (the §5.1 effect manifest, read declared-not-verified) — its calls then classify to
 the declared set instead of contributing nothing.

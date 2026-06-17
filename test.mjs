@@ -265,8 +265,12 @@ export function buy(): void { charge(100); }`,
   });
   spawnSync("node", [path.join(HERE, "scan.mjs"), app], { encoding: "utf8" });
   const rep1 = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
-  check("without CANDOR_DEPS the cross-package call is invisible",
-        entry(rep1, "src.checkout.buy") == null, JSON.stringify(rep1.functions));
+  const buy1 = entry(rep1, "src.checkout.buy");
+  // Without CANDOR_DEPS billing-lib's effects are invisible — but now DISCLOSED per-fn (not silently pure):
+  // the fn is kept with `invisible:["billing-lib"]` and an empty `inferred` (a LOWER bound), not omitted.
+  check("without CANDOR_DEPS the cross-package call is DISCLOSED as invisible (not silently pure)",
+        buy1 != null && buy1.inferred.length === 0 && buy1.invisible?.includes("billing-lib"),
+        JSON.stringify(rep1.functions));
   spawnSync("node", [path.join(HERE, "scan.mjs"), app],
                        { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(dep, ".candor", "report.json") } });
   const rep2 = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
@@ -597,8 +601,12 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
         entry(report, "app.f")?.inferred.includes("Net"), JSON.stringify(report?.functions));
   // a typo'd effect name VOIDS the declaration loudly — never silently narrow on garbage (SPEC §5.1)
   const { report: rep2, r: r2 } = scan(project(pkg(["net"])));
-  check("effect manifest: a typo'd effect name voids the declaration (f stays pure) and warns",
-        !entry(rep2, "app.f") && /candorEffects has an invalid effect/.test(r2.stderr), r2.stderr);
+  // the voided declaration makes mylib a blind spot: f stays pure (send not classified) but is now
+  // DISCLOSED with `invisible:["mylib"]` (not silently omitted), and the warning still fires.
+  const fVoid = entry(rep2, "app.f");
+  check("effect manifest: a typo'd effect name voids the declaration (f pure + mylib disclosed invisible) and warns",
+        fVoid?.inferred.length === 0 && fVoid?.invisible?.includes("mylib")
+          && /candorEffects has an invalid effect/.test(r2.stderr), r2.stderr);
   // candorEffects: [] is an explicit "declared pure" — covered, NOT a κ blind spot
   const { r: r3 } = scan(project(pkg([])));
   check("effect manifest: candorEffects:[] is declared-pure (covered), not a blind spot",
