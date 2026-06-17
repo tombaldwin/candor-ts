@@ -67,6 +67,26 @@ export const wrap = () => readIt("y");`,
   check("path literal captured", entry(report, "src.a.readIt")?.paths?.includes("/etc/app/x"));
 }
 
+// ── 2c. a FUNCTION-SCOPED local fn sharing a module unit's name must NOT fabricate (collision fix) ──
+// `const persist = arrow` at module scope + a same-named PURE local `const persist` inside another fn
+// minted the SAME `mod.persist` key; the second `fns.set` clobbered the first, and the checker-resolved
+// LOCAL edge then read the module unit's Fs off the shared entry — FABRICATED onto a pure caller. Found
+// by the cross-engine review of candor-rust's qself/macro phantom-edge class (same class, different repo).
+{
+  const d = project({
+    "src/a.ts": `import * as fsm from "node:fs";
+export const persist = (msg: string): void => { fsm.writeFileSync("/tmp/x", msg); };
+export function handler(): void {
+  const persist = (n: number) => n * 2;
+  persist(10);
+}`,
+  });
+  const { report } = scan(d);
+  check("module-level effectful unit still reports its effect", entry(report, "src.a.persist")?.inferred.includes("Fs"));
+  check("a same-named function-scoped local does NOT fabricate onto a pure caller (handler stays pure)",
+        entry(report, "src.a.handler") === undefined, JSON.stringify(report.functions));
+}
+
 // ── 2b. `show` SURFACES the literal Fs paths + Exec cmds (the regression that shipped) ─────────────
 // scan writes the surface under report keys `paths`/`cmds`; `show` once read a nonexistent `e.fs`, so
 // it silently dropped every file path even though the MCP `candor_show` doc promises "paths". The CLI

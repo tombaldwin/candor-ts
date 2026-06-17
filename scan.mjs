@@ -442,6 +442,19 @@ function localName(node) {
   }
   return null;
 }
+// True when `node` is lexically inside a FUNCTION body — so its bare local name can collide with a
+// module-level or sibling-scope unit of the same name (see the qual disambiguation below). A namespace/
+// module block and the source file are NOT function scopes (their members are top-level units).
+function isFunctionScoped(node) {
+  for (let p = node.parent; p; p = p.parent) {
+    if (ts.isSourceFile(p) || ts.isModuleBlock(p)) return false;
+    if (ts.isFunctionDeclaration(p) || ts.isFunctionExpression(p) || ts.isArrowFunction(p)
+        || ts.isMethodDeclaration(p) || ts.isConstructorDeclaration(p)
+        || ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p))
+      return true;
+  }
+  return false;
+}
 for (const sf of sources) {
   const mod = moduleOf(sf);
   (function collect(node) {
@@ -491,8 +504,15 @@ for (const sf of sources) {
     const n = localName(node);
     const isCjsExport = _lastCjs; // captured immediately: localName set it for THIS node only
     if (n) {
-      const qual = `${mod}.${n}`;
       const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
+      // Disambiguate FUNCTION-SCOPED local function units by position. A `const persist = () => …` (or a
+      // nested `function persist(){}`) inside a fn body shares the bare `mod.name` key with a module-level
+      // OR sibling-scope unit of the same name, so the second `fns.set` CLOBBERS the first and a call that
+      // resolves (correctly, via the checker) to the LOCAL decl reads the OTHER unit's effects off the
+      // shared entry — FABRICATING them onto a pure caller. `nodeName` is keyed by NODE identity, so a
+      // per-node-unique key keeps resolution exact; only TOP-LEVEL units need the stable bare name a
+      // consumer's hash-join targets (a function-scoped local is never an export, so nothing joins to it).
+      const qual = isFunctionScoped(node) ? `${mod}.${n}#${line + 1}:${character + 1}` : `${mod}.${n}`;
       fns.set(qual, { local: n, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
                       cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(), entry: false, isCjsExport,
                       loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
