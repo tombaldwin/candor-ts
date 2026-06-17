@@ -309,6 +309,19 @@ export function parsed(): Date { return new Date("2020-01-01"); }`,
         JSON.stringify(entry(report, "src.a.parsed")));
 }
 {
+  // covered-module precision: crypto's generateKeyPair*/generateKey*/generatePrime* draw from the CSPRNG
+  // just like random* — they read silent-pure before being modeled (the κ-coverage floor can't tell an
+  // unmodeled entropy draw from a pure unmodeled member; the fix is to MODEL the member).
+  const d = project({
+    "src/k.ts": `import * as crypto from "node:crypto";
+export function keypair() { return crypto.generateKeyPairSync("rsa", { modulusLength: 2048 }); }
+export function prime() { return crypto.generatePrimeSync(256); }`,
+  });
+  const { report } = scan(d);
+  check("crypto.generateKeyPairSync -> Rand", entry(report, "src.k.keypair")?.inferred.includes("Rand"));
+  check("crypto.generatePrimeSync -> Rand", entry(report, "src.k.prime")?.inferred.includes("Rand"));
+}
+{
   const d = project({
     "package.json": `{"dependencies": {"left-pad": "1.0.0"}}`,
     "src/x.ts": `export function f(): number { return 1; }`,

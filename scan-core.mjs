@@ -74,7 +74,10 @@ export const KAPPA_RULES = [
   // entropy: node:crypto's random surface + the password-hashing libs (salted -> Rand). Found by
   // the CTA dogfood on a Nest app: argon2.hash came out SILENTLY PURE (the curated-kappa caveat
   // landing on exactly the call a security review cares about).
-  [/^(node:)?crypto$/, /^(random|getRandomValues)/, "Rand"],
+  // `generateKey*`/`generateKeyPair*`/`generatePrime*` draw from the CSPRNG just like `random*` — they
+  // were silently pure inside the covered `crypto` module (the κ-coverage floor can't tell an unmodeled
+  // entropy draw from a pure unmodeled member; the fix is to MODEL the member, not drop coverage).
+  [/^(node:)?crypto$/, /^(random|getRandomValues|generateKey|generatePrime)/, "Rand"],
   // node:os identity reads — userInfo (the OS user record) and hostname (the machine name) are
   // environment/host reads (Env), like System.getenv's host-identity cousins. The rest of node:os
   // (platform/arch/cpus/totalmem/…) is inert host introspection, left pure.
