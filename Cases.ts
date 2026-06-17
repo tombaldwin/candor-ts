@@ -3,6 +3,8 @@
 import * as fsm from "node:fs";
 import * as netm from "node:net";
 import * as cp from "node:child_process";
+import * as cryptom from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 
 // --- one function per std-only effect ---
 export function fs_read(): void { try { fsm.readFileSync("/tmp/x"); } catch {} }
@@ -15,6 +17,10 @@ export function exec_curl(): void { try { cp.spawn("curl"); } catch {} }
 export function exec_dyn_head(tool: string): void { try { cp.spawn(tool, ["curl"]); } catch {} }
 export function env_read(): void { void process.env.X; }
 export function clock_now(): void { void Date.now(); }
+// Rand: node:crypto's CSPRNG. candor-ts is syntactic (AST), so the builtin need not resolve at scan time.
+export function rand_gen(): void { void cryptom.randomBytes(16); }
+// Db: node:sqlite's DatabaseSync.exec is the store round-trip (named import — candor-ts tracks the symbol).
+export function db_query(): void { void new DatabaseSync(":memory:").exec("SELECT 1"); }
 
 // --- purity (negative) ---
 export function pure_fn(): number { return 1 + 2; }
