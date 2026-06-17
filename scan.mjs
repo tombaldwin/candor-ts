@@ -464,7 +464,7 @@ for (const sf of sources) {
         const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
         fns.set(ctorQual, { local: `${node.name.text}.constructor`, direct: new Set(), edges: new Set(),
                             hosts: new Set(), tables: new Set(), cmds: new Set(), paths: new Set(),
-                            blind: new Set(), why: new Set(), entry: false,
+                            blind: new Set(), incomplete: new Set(), why: new Set(), entry: false,
                             loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
       }
       nodeName.set(node, ctorQual);
@@ -475,7 +475,7 @@ for (const sf of sources) {
       const qual = `${mod}.${n}`;
       const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
       fns.set(qual, { local: n, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
-                      cmds: new Set(), paths: new Set(), blind: new Set(), why: new Set(), entry: false, isCjsExport,
+                      cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(), entry: false, isCjsExport,
                       loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
       nodeName.set(node, qual);
       if ((ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)) && node.initializer)
@@ -980,6 +980,9 @@ function visitCalls(node) {
           // needs no entry here. Inert ctors (Agent/Server/Socket/TLSSocket/Http2Server*/message shells)
           // still synthesize "new" and stay pure.
           const CONNECTING_CTORS = new Set(["ClientRequest"]);
+          // Host-ESTABLISHING Net call names (the masking-fix allowlist): a Net call by one of these whose
+          // host is not a captured literal leaves the host invisible. Excludes use-verbs (write/end/send).
+          const NET_ESTABLISHING = new Set(["request", "get", "connect", "createConnection", "fetch"]);
           const ctorClassName = ts.isNewExpression(node)
             ? (ts.isConstructorDeclaration(decl) ? decl.parent?.name?.getText?.()
                : (decl.name ? decl.name.getText() : ""))
@@ -1005,6 +1008,14 @@ function visitCalls(node) {
             const lit = firstStringLiteral(node);
             const h = lit && hostLiteral(lit);
             if (h) rec.hosts.add(h);
+            // MASKING fix: a host-ESTABLISHING Net call whose host is NOT a captured literal (runtime URL, or
+            // built elsewhere) leaves the host invisible to the gate → mark the surface incomplete so a
+            // benign literal can't mask it. ALLOWLIST of establishing forms only (request/get/connect/
+            // createConnection/fetch + the connecting ctor) — NEVER use-calls (write/end/send), which would
+            // false-positive on `socket.connect("h").write(data)` (the host is captured at connect). Under-
+            // catches an unlisted establishing verb (safe direction); never over-flags a use-call.
+            else if (NET_ESTABLISHING.has(member) || CONNECTING_CTORS.has(ctorClassName))
+              rec.incomplete.add("Net");
           }
           if (eff === "Db") {
             const lit = firstStringLiteral(node);
@@ -1276,7 +1287,7 @@ while (changed) {
         if (!mine.has(e)) { mine.add(e); changed = true; }
   }
 }
-for (const m of ["hosts", "tables", "cmds", "paths", "blind"]) {
+for (const m of ["hosts", "tables", "cmds", "paths", "blind", "incomplete"]) {
   let moved = true;
   while (moved) {
     moved = false;
@@ -1349,7 +1360,11 @@ if (policyPath) {
     console.error(`candor-ts: policy ${policyPath} could not be read; gate NOT enforced`);
     process.exit(2);
   }
-  const v = evaluatePolicy(parsePolicy(text), functions, cg);
+  // The masking-incompleteness map (fn -> effects whose surface is incomplete), kept INTERNAL like the
+  // java/rust engines (not a report field) — passed to the gate so an incomplete surface fails closed.
+  const incompleteMap = new Map();
+  for (const [name, rec] of fns) if (rec.incomplete.size) incompleteMap.set(name, rec.incomplete);
+  const v = evaluatePolicy(parsePolicy(text), functions, cg, incompleteMap);
   for (const line of v) console.log(line);
   if (v.length) {
     console.error(`candor-ts: ${v.length} policy violation(s)`);

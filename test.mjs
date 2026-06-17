@@ -106,6 +106,23 @@ export function place(db: DatabaseSync): void { save(db); }`,
   check("unreadable policy exits 2 LOUDLY", r2.status === 2 && r2.stderr.includes("NOT enforced"));
 }
 
+// ── masking evasion (the cross-engine HIGH): a benign captured host must NOT certify an invisible
+// runtime-host reach; a use-call (write) after a captured connect host must NOT false-positive ──────
+{
+  const d = project({
+    "src/m.ts": `import https from "https";
+import { connect } from "net";
+export function maskFn(evil: string): void { https.get("https://benign.com/x"); https.get(evil); }
+export function cleanFn(): void { const s = connect(443, "benign.com"); s.write(Buffer.from("d")); }`,
+    "policy": "allow Net benign.com\n",
+  });
+  const { r } = scan(d, "--policy", path.join(d, "policy"));
+  check("masking: an invisible runtime-host reach is NOT certified by a benign captured host (008)",
+        r.stdout.includes("[AS-EFF-008]") && r.stdout.includes("src.m.maskFn"), r.stdout);
+  check("masking: a use-call (write) after a captured connect host does NOT false-positive",
+        !r.stdout.includes("src.m.cleanFn"), r.stdout);
+}
+
 // ── 4. honest Unknown: a callback parameter never reads pure ──────────────────────────────────────
 {
   const d = project({

@@ -103,7 +103,7 @@ export function literalAllowed(effect, reached, values) {
  * transitive inferred; AS-EFF-008 allowlists over the transitive literal surfaces, the no-visible-
  * literal case flagged as uncertifiable; AS-EFF-009 forbid by reachability). One line per violation.
  */
-export function evaluatePolicy(pol, functions, callgraph) {
+export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()) {
   const out = [];
   const surfaces = { Net: "hosts", Exec: "cmds", Fs: "paths", Db: "tables" };
   for (const f of functions) {
@@ -116,7 +116,11 @@ export function evaluatePolicy(pol, functions, callgraph) {
       if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
       if (!f.inferred.includes(r.effect)) continue;
       const reached = f[surfaces[r.effect]] ?? [];
-      if (reached.length === 0) {
+      // An INCOMPLETE surface (a structurally-invisible reach — a host-establishing call with a runtime/
+      // invisible host) can't be certified even with visible hosts, else a benign literal masks the
+      // invisible forbidden endpoint (the masking evasion). Matches candor-java 0.5.29 / candor-rust.
+      const surfaceIncomplete = incomplete.get(f.fn)?.has(r.effect);
+      if (reached.length === 0 || surfaceIncomplete) {
         out.push(`[AS-EFF-008] \`${f.fn}\` performs ${r.effect} with no visible literal — the surface cannot be certified: \`${r.raw}\``);
       } else {
         const bad = reached.filter((v) => !literalAllowed(r.effect, v, r.values));
