@@ -14,7 +14,11 @@ const ASCII_WS = /[ \t\n\v\f\r]+/;
 const ASCII_WS_TRIM = /^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g;
 export function parsePolicy(text) {
   const deny = [], allow = [], forbid = [];
-  for (const rawLine of text.split("\n")) {
+  // Split LINES on \n / \r\n / bare \r — the three forms Java's Files.readAllLines (the reference parser)
+  // breaks on. Splitting on \n ONLY let a classic-Mac (bare-\r) file collapse to one line: \r is also an
+  // in-line ASCII-ws token separator (below), so every rule after the first was glued into the first rule's
+  // tokens and dropped — a gateless-green divergence (sweep [16]/[17]). \v/\f stay in-line separators.
+  for (const rawLine of text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")) {
     const line = rawLine.split("#")[0].replace(ASCII_WS_TRIM, "");
     if (!line) continue;
     const t = line.split(ASCII_WS);

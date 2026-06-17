@@ -123,6 +123,87 @@ export function cleanFn(): void { const s = connect(443, "benign.com"); s.write(
         !r.stdout.includes("src.m.cleanFn"), r.stdout);
 }
 
+// ── sweep 2026-06-17: masking generalized to all 4 effects; establishing-set; fabrication; setters;
+// disclosure; bare-CR. Each guards a confirmed, reproduced finding. ───────────────────────────────
+{
+  // [11] masking is NOT Net-only: an Fs runtime-path / Exec runtime-command masked by a benign literal
+  // must fail closed; [12] dgram.send (UDP) is host-establishing.
+  const d = project({
+    "src/m.ts": `import * as fs from "node:fs";
+import * as cp from "node:child_process";
+import * as dgram from "node:dgram";
+export function maskFs(p: string): void { fs.writeFileSync("/var/app/ok.txt","ok"); fs.writeFileSync(p,"x"); }
+export function cleanFs(): void { fs.writeFileSync("/var/app/ok.txt","ok"); }
+export function maskExec(c: string): void { cp.execFileSync("ls"); cp.execFileSync(c); }
+export function maskUdp(h: string): void { const s = dgram.createSocket("udp4"); s.send(Buffer.from("x"),53,"safe.example.com"); s.send(Buffer.from("x"),53,h); }`,
+    "pol.fs": "allow Fs /var/app\n", "pol.exec": "allow Exec ls\n", "pol.net": "allow Net safe.example.com\n",
+  });
+  const fsG = scan(d, "--policy", path.join(d, "pol.fs")).r.stdout;
+  check("masking Fs: invisible runtime path fails closed", fsG.includes("[AS-EFF-008]") && fsG.includes("src.m.maskFs"), fsG);
+  check("masking Fs: the clean benign-literal path certifies", !fsG.includes("src.m.cleanFs"), fsG);
+  check("masking Exec: invisible runtime command fails closed",
+        scan(d, "--policy", path.join(d, "pol.exec")).r.stdout.includes("src.m.maskExec"));
+  check("masking [12]: dgram.send UDP runtime host fails closed",
+        scan(d, "--policy", path.join(d, "pol.net")).r.stdout.includes("src.m.maskUdp"));
+}
+{
+  // [9] net-cluster fabrication: pure config/metadata members are NOT Net.
+  const d = project({
+    "src/f.ts": `import * as tls from "node:tls";
+import * as http from "node:http";
+export function ciphers() { return tls.getCiphers(); }
+export function validate(n: string) { return http.validateHeaderName(n); }`,
+  });
+  const { report } = scan(d);
+  check("[9] tls.getCiphers is pure (not fabricated Net)", !entry(report, "src.f.ciphers"));
+  check("[9] http.validateHeaderName is pure (not fabricated Net)", !entry(report, "src.f.validate"));
+}
+{
+  // [10] compound/logical assignment invokes the setter; [32] destructuring-assignment target.
+  const d = project({
+    "src/s.ts": `import * as fs from "node:fs";
+class C { #n = 0; get count() { return this.#n; } set count(v: number) { fs.appendFileSync("/p", String(v)); } }
+export function bump(c: C) { c.count += 1; }
+export function coalesce(c: C) { c.count ??= 5; }
+export function destr(c: C) { ({ count: c.count } = { count: 7 }); }
+export function read(c: C) { return c.count; }`,
+  });
+  const { report } = scan(d);
+  check("[10] compound-assign (+=) invokes the effectful setter", entry(report, "src.s.bump")?.inferred.includes("Fs"));
+  check("[10] logical-assign (??=) invokes the effectful setter", entry(report, "src.s.coalesce")?.inferred.includes("Fs"));
+  check("[32] destructuring-assign target invokes the setter", entry(report, "src.s.destr")?.inferred.includes("Fs"));
+}
+{
+  // [31] a local `process` shadow must NOT fabricate Ipc/Clock by callee text.
+  const d = project({
+    "src/p.ts": `export function f() { const process = { send: (x: number) => x + 1 }; return process.send(41); }`,
+  });
+  check("[31] local process shadow does not fabricate Ipc", !entry(scan(d).report, "src.p.f"));
+}
+{
+  // [13] implicit-ctor blind class: `new Pool()` from an unmodeled pkg discloses `invisible`, not plain pure.
+  const d = project({
+    "node_modules/unmodeled-pkg/package.json": `{ "name": "unmodeled-pkg", "version": "1.0.0", "types": "index.d.ts", "main": "index.js" }`,
+    "node_modules/unmodeled-pkg/index.d.ts": `export class Pool { query(): void; }`,
+    "node_modules/unmodeled-pkg/index.js": `class Pool { query(){} }\nmodule.exports = { Pool };`,
+    "src/x.ts": `import { Pool } from "unmodeled-pkg";\nexport function makePool() { return new Pool(); }`,
+    "tsconfig.json": `{ "compilerOptions": { "target": "ES2020", "module": "commonjs", "moduleResolution": "node", "skipLibCheck": true }, "include": ["src/**/*"] }`,
+  });
+  const f = entry(scan(d).report, "src.x.makePool");
+  check("[13] blind-class construction discloses invisible (not silent-pure)",
+        f && (f.invisible ?? []).includes("unmodeled-pkg"), JSON.stringify(f));
+}
+{
+  // [17] bare-CR policy: a multi-rule classic-Mac policy must not collapse to rule 1.
+  const d = project({
+    "src/h.ts": `import * as cp from "node:child_process";\nexport function hop() { cp.execSync("ls"); }`,
+    "pol": "deny Clock nope\rdeny Exec hop\rdeny Net nope2\r",
+  });
+  const g = scan(d, "--policy", path.join(d, "pol")).r.stdout;
+  check("[17] bare-CR policy: rule after \\r is enforced (not dropped)",
+        g.includes("[AS-EFF-006]") && g.includes("src.h.hop"), g);
+}
+
 // ── 4. honest Unknown: a callback parameter never reads pure ──────────────────────────────────────
 {
   const d = project({

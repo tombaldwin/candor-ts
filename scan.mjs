@@ -305,6 +305,25 @@ function firstStringLiteral(node) {
   return null;
 }
 
+// Is this property/element access a SETTER target reached through a destructuring assignment —
+// `({ k: x.prop } = src)` or `[x.prop] = arr` (sweep [32])? Walk up through PropertyAssignment /
+// Object|ArrayLiteral wrappers to the enclosing `=`; it is a target only when the wrapping literal is the
+// LHS (`.left`) of the assignment. A property access on the RHS (`src = { k: x.prop }`) walks to a literal
+// that is `.right`, so it stays a getter READ — no false setter attribution.
+function isDestructuringAssignTarget(node) {
+  let cur = node, parent = node.parent;
+  while (parent) {
+    if (ts.isPropertyAssignment(parent) && parent.initializer === cur) { cur = parent; parent = parent.parent; continue; }
+    if (ts.isShorthandPropertyAssignment(parent)) return false; // `{prop}` has no access node to attribute
+    if (ts.isSpreadAssignment(parent) || ts.isSpreadElement(parent)) { cur = parent; parent = parent.parent; continue; }
+    if (ts.isObjectLiteralExpression(parent) || ts.isArrayLiteralExpression(parent)) { cur = parent; parent = parent.parent; continue; }
+    if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken)
+      return parent.left === cur;
+    return false;
+  }
+  return false;
+}
+
 // The literal PROGRAM head a subprocess call NAMES — argv[0] specifically, never a later argument.
 // Unlike firstStringLiteral (the first literal ANYWHERE in the args), this refuses to refine when
 // the program (arg0) is a runtime value but a trailing arg is a literal whose basename hits the head
@@ -754,8 +773,22 @@ function visitCalls(node) {
           // `new ExternalClass()` with an implicit ctor: same posture as an explicit external ctor
           // the classifier doesn't know — OPAQUE (contributes nothing), not Unknown. Consistency:
           // whether a library declares its ctor must not change the verdict.
-          else if (cd && ts.isClassDeclaration(cd) && !projectFiles.has(path.resolve(cd.getSourceFile().fileName)))
+          else if (cd && ts.isClassDeclaration(cd) && !projectFiles.has(path.resolve(cd.getSourceFile().fileName))) {
             externalClass = true;
+            // …but the construction DOES reach the class's package — disclose it as `invisible` (sweep
+            // [13]) so the pure verdict is qualified, exactly like an unmodeled METHOD call below. Without
+            // this, `new Pool()` from an unmodeled pkg read plain pure with no disclosure, no κ-ledger.
+            const cfile = cd.getSourceFile().fileName;
+            const cmod = declModule(cd);
+            const cpkg = cmod.startsWith("@types/") ? cmod.slice("@types/".length) : cmod;
+            const cdeclared = packageManifestEffects(cfile);
+            if (cdeclared !== null) { for (const e of cdeclared) rec.direct.add(e); }
+            else if (!cmod.startsWith("<") && !kappaKnows(cpkg) && !depCoveredPkgs.has(cpkg)
+                && /node_modules\//.test(cfile) && !/node_modules\/(@types\/node|typescript)\//.test(cfile)) {
+              unlistedSeen.set(cpkg, (unlistedSeen.get(cpkg) ?? 0) + 1);
+              rec.blind.add(cpkg);
+            }
+          }
         }
         if (!edged && !externalClass) {
           rec.direct.add("Unknown"); // unresolvable call → Unknown, never silent-pure (SPEC §4)
@@ -981,8 +1014,24 @@ function visitCalls(node) {
           // still synthesize "new" and stay pure.
           const CONNECTING_CTORS = new Set(["ClientRequest"]);
           // Host-ESTABLISHING Net call names (the masking-fix allowlist): a Net call by one of these whose
-          // host is not a captured literal leaves the host invisible. Excludes use-verbs (write/end/send).
-          const NET_ESTABLISHING = new Set(["request", "get", "connect", "createConnection", "fetch"]);
+          // host is not a captured literal leaves the host invisible. Excludes use-verbs (write/end/send on
+          // a connected socket). `post/put/patch/delete/head/options` cover the axios/got/undici tier whose
+          // URL is the call arg (sweep [18]); `dgram.send(buf,port,host)` is added module-aware below (UDP
+          // has no connect, so send carries the destination — sweep [12]).
+          const NET_ESTABLISHING = new Set(["request", "get", "post", "put", "patch", "delete", "head",
+            "options", "connect", "createConnection", "fetch"]);
+          // Fs/Exec USE-verbs whose LOCATOR was fixed earlier, not an arg of THIS call — so a missing literal
+          // here is the legitimate split-construct/use shape, never the masking signal (the establishing-
+          // allowlist discipline, generalized from Net to all 4 effects; sweep [11]). Fs: the fd/FileHandle
+          // ops (fd came from open()); the path-taking fs.* fns are establishing. Exec: ChildProcess methods
+          // (the command was fixed at spawn); the spawn fns are establishing.
+          const FS_USE_VERBS = new Set(["write", "writeSync", "read", "readSync", "close", "closeSync",
+            "fsync", "fsyncSync", "fdatasync", "fdatasyncSync", "ftruncate", "ftruncateSync", "fchmod",
+            "fchmodSync", "fchown", "fchownSync", "futimes", "futimesSync", "fstat", "fstatSync"]);
+          const EXEC_USE_VERBS = new Set(["kill", "send", "disconnect", "ref", "unref"]);
+          const netEstablishing = (member) =>
+            CONNECTING_CTORS.has(ctorClassName) || NET_ESTABLISHING.has(member)
+            || (/^(node:)?dgram$/.test(mod) && member === "send");
           const ctorClassName = ts.isNewExpression(node)
             ? (ts.isConstructorDeclaration(decl) ? decl.parent?.name?.getText?.()
                : (decl.name ? decl.name.getText() : ""))
@@ -1010,15 +1059,16 @@ function visitCalls(node) {
             if (h) rec.hosts.add(h);
             // MASKING fix: a host-ESTABLISHING Net call whose host is NOT a captured literal (runtime URL, or
             // built elsewhere) leaves the host invisible to the gate → mark the surface incomplete so a
-            // benign literal can't mask it. ALLOWLIST of establishing forms only (request/get/connect/
-            // createConnection/fetch + the connecting ctor) — NEVER use-calls (write/end/send), which would
-            // false-positive on `socket.connect("h").write(data)` (the host is captured at connect). Under-
-            // catches an unlisted establishing verb (safe direction); never over-flags a use-call.
-            else if (NET_ESTABLISHING.has(member) || CONNECTING_CTORS.has(ctorClassName))
+            // benign literal can't mask it. ALLOWLIST of establishing forms only — NEVER use-calls
+            // (write/end/non-dgram send), which would false-positive on `socket.connect("h").write(data)`
+            // (the host is captured at connect). Under-catches an unlisted establishing verb (safe
+            // direction); never over-flags a use-call.
+            else if (netEstablishing(member))
               rec.incomplete.add("Net");
           }
           if (eff === "Db") {
             const lit = firstStringLiteral(node);
+            const before = rec.tables.size;
             for (const t of lit ? tablesInSql(lit) : []) rec.tables.add(t);
             // ORM route: `this.userRepository.find(…)` — the receiver's `Repository<UserEntity>`
             // type argument names the entity; its `@Entity("user")` decorator names the table.
@@ -1030,6 +1080,11 @@ function visitCalls(node) {
                 if (tbl) rec.tables.add(tbl);
               }
             }
+            // masking: a Db call that surfaced NO table (no SQL literal, no entity-typed receiver) reaches a
+            // runtime/invisible table — a benign sibling query's literal table must not mask it. The entity
+            // route above is NOT a literal so it still counts as visible (a captured table); only a fully
+            // invisible query marks incomplete. `new` (a connection ctor) carries no table — skip it.
+            if (rec.tables.size === before && member !== "new") rec.incomplete.add("Db");
           }
           if (eff === "Exec") {
             const lit = firstStringLiteral(node);
@@ -1039,10 +1094,18 @@ function visitCalls(node) {
             // names no static program, so its trailing literal must not fabricate Net (spec §4).
             const head = programHeadLiteral(node);
             if (head) for (const e of commandHeadEffects(head)) rec.direct.add(e);
+            // masking (sweep [11]): an Exec call whose program head is NOT a static literal (runtime
+            // command) leaves the command invisible. Establishing = the spawn fns; ChildProcess use-verbs
+            // (kill/send/disconnect/ref/unref) carry no command and are excluded.
+            else if (!EXEC_USE_VERBS.has(member)) rec.incomplete.add("Exec");
           }
           if (eff === "Fs") {
             const lit = firstStringLiteral(node);
-            if (lit && /[/\\]|^[.~]/.test(lit)) rec.paths.add(lit); // path-shaped literals only
+            const pathCaptured = lit && /[/\\]|^[.~]/.test(lit); // path-shaped literals only
+            if (pathCaptured) rec.paths.add(lit);
+            // masking (sweep [11]): a path-taking fs.* call whose path is NOT a captured literal (runtime
+            // path) leaves it invisible. fd/FileHandle USE-verbs (fd came from a prior open()) are excluded.
+            else if (!FS_USE_VERBS.has(member)) rec.incomplete.add("Fs");
           }
           // CANDOR_DEPS: an unclassified call into a package with a loaded sibling report inherits
           // that function's recorded transitive effects (+ literal surfaces) by `hash`.
@@ -1131,8 +1194,19 @@ function visitCalls(node) {
     const callee = node.expression;
     const ctext = callee.getText().replace(/\s+/g, "");
     let geff = null;
-    if (ctext === "process.hrtime" || ctext === "process.hrtime.bigint") geff = "Clock";
-    else if (ctext === "process.send") geff = "Ipc";
+    // `process.*` is matched by exact text, so a project's OWN `const process = {…}` shadow would
+    // fabricate Clock/Ipc on a pure local method (sweep [31]) — guard it like the `fetch` arm: resolve the
+    // ROOT `process` identifier and fire only when it is NOT a project-local declaration (i.e. the global).
+    const processIsGlobal = () => {
+      if (!ts.isPropertyAccessExpression(callee)) return false;
+      let root = callee.expression;
+      while (ts.isPropertyAccessExpression(root)) root = root.expression; // process.hrtime.bigint → process
+      if (!ts.isIdentifier(root) || root.text !== "process") return false;
+      return !(checker.getSymbolAtLocation(root)?.declarations ?? [])
+        .some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+    };
+    if ((ctext === "process.hrtime" || ctext === "process.hrtime.bigint") && processIsGlobal()) geff = "Clock";
+    else if (ctext === "process.send" && processIsGlobal()) geff = "Ipc";
     else if (ts.isIdentifier(callee) && callee.text === "fetch"
              && !(checker.getSymbolAtLocation(callee)?.declarations ?? [])
                   .some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName))))
@@ -1161,21 +1235,28 @@ function visitCalls(node) {
   // call), never silently pure. A resolved-but-UNSEEN accessor (external declaration) reads Unknown,
   // following the same posture as an unresolvable call (SPEC §4).
   if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
-    // Is this property access the TARGET of an assignment (`x.prop = v`)? If so it's a setter site;
-    // otherwise it's a read (getter) site. (`x.prop += v` is both a read and a write, but the read
-    // side is the produced value — model it as a setter target only when it is the bare LHS of `=`.)
+    // Is this property access an assignment TARGET? A simple `x.prop = v` invokes the SETTER only. A
+    // COMPOUND/LOGICAL assignment (`+=`,`-=`,`??=`,`||=`,`&&=`,…) reads the current value AND writes — both
+    // the getter and the setter run (sweep [10]; pre-fix only a bare `=` was a setter site, so an effectful
+    // setter under `+=`/`??=` read PURE). A DESTRUCTURING-assignment target (`({k: x.prop} = src)` /
+    // `[x.prop] = arr`) is also a setter site, invisible to the simple-LHS test (sweep [32]).
     const p = node.parent;
-    const isAssignTarget = p && ts.isBinaryExpression(p) && p.left === node
-      && p.operatorToken.kind === ts.SyntaxKind.EqualsToken;
-    const hit = isAssignTarget ? accessorAt(node, "set") : accessorAt(node, "get");
-    if (hit) {
+    const isBinAssign = p && ts.isBinaryExpression(p) && p.left === node;
+    const simpleAssign = isBinAssign && p.operatorToken.kind === ts.SyntaxKind.EqualsToken;
+    const compoundAssign = isBinAssign && !simpleAssign
+      && p.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && p.operatorToken.kind <= ts.SyntaxKind.LastAssignment;
+    const recordKind = (kind) => {
+      const hit = accessorAt(node, kind);
+      if (!hit) return;
       const owner = enclosing(node);
-      if (owner) {
-        const an = hit.decl.parent?.name?.getText?.() ?? "?";
-        const pn = node.name?.getText?.() ?? node.argumentExpression?.getText?.() ?? "?";
-        recordAccessorHit(owner, hit, `${an}.${pn}`);
-      }
-    }
+      if (!owner) return;
+      const an = hit.decl.parent?.name?.getText?.() ?? "?";
+      const pn = node.name?.getText?.() ?? node.argumentExpression?.getText?.() ?? "?";
+      recordAccessorHit(owner, hit, `${an}.${pn}`);
+    };
+    if (simpleAssign || isDestructuringAssignTarget(node)) recordKind("set");
+    else if (compoundAssign) { recordKind("get"); recordKind("set"); }
+    else recordKind("get");
   }
   // OBJECT-DESTRUCTURING getter read (`const { prop } = obj`): each bound property is a READ that may
   // resolve to a getter whose body does I/O — the binding-pattern analog of `obj.prop`, invisible to

@@ -39,7 +39,14 @@ export const KAPPA_RULES = [
   // FABRICATED Net — the cardinal sin — purely from this classification, with no local Net edge). Only
   // these three named validators are freed; every genuine verb (connect/createConnection/createServer…)
   // stays Net (the matcher excludes ONLY new + the three validators, nothing else).
-  [/^(node:)?(net|dgram|tls|http2?|https)$/, /^(?!(new|isIP|isIPv4|isIPv6)$)/, "Net"],
+  // ALSO exempt the pure CONFIG/METADATA members the whole-module rule fabricated Net on (sweep [9], the
+  // cardinal sin — none touch a socket/fd/syscall): tls.getCiphers/createSecureContext/checkServerIdentity
+  // (cipher-list + cert helpers), http.validateHeaderName/validateHeaderValue (string validators, like
+  // isIP), and a Socket/Server's setKeepAlive/setNoDelay/ref/unref/address (TCP-option + bound-address
+  // metadata — no I/O). Every genuine verb still classifies; only these proven-pure names are freed.
+  [/^(node:)?(net|dgram|tls|http2?|https)$/,
+   /^(?!(new|isIP|isIPv4|isIPv6|getCiphers|createSecureContext|checkServerIdentity|validateHeaderName|validateHeaderValue|setKeepAlive|setNoDelay|ref|unref|address)$)/,
+   "Net"],
   // node:dns — name resolution is NETWORK I/O (lookup/lookupService hit the OS resolver; resolve*/
   // reverse query DNS servers directly). Was unclassified, so a `dns.resolve(...)` read silently pure.
   // Same construction-and-pure-accessor carve-out as the net cluster: `new dns.Resolver()` ("new") is
