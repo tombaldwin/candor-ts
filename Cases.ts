@@ -5,6 +5,7 @@ import * as netm from "node:net";
 import * as cp from "node:child_process";
 import * as cryptom from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import * as winstonm from "winston";
 
 // --- one function per std-only effect ---
 export function fs_read(): void { try { fsm.readFileSync("/tmp/x"); } catch {} }
@@ -21,6 +22,7 @@ export function clock_now(): void { void Date.now(); }
 export function rand_gen(): void { void cryptom.randomBytes(16); }
 // Db: node:sqlite's DatabaseSync.exec is the store round-trip (named import — candor-ts tracks the symbol).
 export function db_query(): void { void new DatabaseSync(":memory:").exec("SELECT 1"); }
+export function log_msg(): void { winstonm.info("m"); }
 
 // --- purity (negative) ---
 export function pure_fn(): number { return 1 + 2; }

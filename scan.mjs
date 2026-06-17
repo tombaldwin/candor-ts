@@ -791,9 +791,30 @@ function visitCalls(node) {
           }
         }
         if (!edged && !externalClass) {
-          rec.direct.add("Unknown"); // unresolvable call → Unknown, never silent-pure (SPEC §4)
-          const callee = (node.expression?.getText?.() ?? "?").replace(/\s+/g, "").slice(0, 60);
-          rec.why.add(`call:${callee}`); // an `any`-typed/indeterminate callee — named, so triage starts here
+          // Blind PACKAGE member call: the receiver is a NAMESPACE import from a bare specifier
+          // (`import * as winstonm from "winston"; winstonm.info()`) that didn't resolve — typically the
+          // package isn't installed in this tree. The κ table may still MODEL it, so classify by the import
+          // SPECIFIER (the syntactic path, mirroring how the Rust scanner classifies a crate path without
+          // building). Only fires for κ-modeled packages (winston/pino/pg/…); everything else still → Unknown.
+          let kEff = null;
+          if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+              && ts.isIdentifier(node.expression.expression)) {
+            const sym = checker.getSymbolAtLocation(node.expression.expression);
+            for (const d of sym?.declarations ?? []) {
+              if (ts.isNamespaceImport(d)) {
+                const spec = d.parent?.parent?.moduleSpecifier;
+                if (spec && ts.isStringLiteralLike(spec)) kEff = kappa(spec.text, node.expression.name.text);
+                break;
+              }
+            }
+          }
+          if (kEff) {
+            rec.direct.add(kEff); // κ-modeled package reached via an uninstalled namespace import
+          } else {
+            rec.direct.add("Unknown"); // unresolvable call → Unknown, never silent-pure (SPEC §4)
+            const callee = (node.expression?.getText?.() ?? "?").replace(/\s+/g, "").slice(0, 60);
+            rec.why.add(`call:${callee}`); // an `any`-typed/indeterminate callee — named, so triage starts here
+          }
         }
       } else {
         const mod = declModule(decl);
