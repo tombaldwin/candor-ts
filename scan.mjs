@@ -1453,9 +1453,25 @@ function visitCalls(node) {
                : (decl.name ? decl.name.getText() : ""))
             : "";
           const isConstruction = ts.isConstructorDeclaration(decl) || ts.isNewExpression(node);
+          // The κ member token. A named decl (function/method declaration) carries its own name; but a
+          // VALUE-BINDING export — `export const v4 = (...) => ...` (the shape REAL uuid v9+/nanoid ship,
+          // and the `type v4 = v4Buffer & v4String` callable type-alias of @types/uuid v8) resolves to an
+          // ANONYMOUS arrow/function-type whose `decl.name` is empty, so κ saw `""` and the package's
+          // entropy/net verb read silent-pure (verified against installed uuid/nanoid). Fall back to the
+          // BINDING name: an arrow/fn-expr's parent VariableDeclaration / PropertyAssignment / property,
+          // or a callable type-alias's TypeAliasDeclaration. Precision no-op where the old path already
+          // had a name (this only fills a former `""`); never synthesizes a name for `new`.
+          const bindingName = (d) => {
+            const p = d.parent;
+            if (!p) return "";
+            if ((ts.isVariableDeclaration(p) || ts.isPropertyDeclaration(p) || ts.isPropertyAssignment(p)
+                 || ts.isPropertySignature(p) || ts.isBindingElement(p) || ts.isTypeAliasDeclaration(p))
+                && p.name && ts.isIdentifier(p.name)) return p.name.getText();
+            return "";
+          };
           const member = isConstruction
             ? (CONNECTING_CTORS.has(ctorClassName) ? ctorClassName : "new")
-            : (decl.name ? decl.name.getText() : "");
+            : (decl.name ? decl.name.getText() : bindingName(decl));
           let eff = kappa(mod, member); // (CLASSIFY)
           // process.stdout/stderr/stdin are typed `tty.WriteStream`, which EXTENDS `net.Socket`, so a
           // `.write()`/`.end()` on them resolves to `net.Socket.write` and the whole-module Net rule

@@ -513,6 +513,187 @@ export function prime() { return crypto.generatePrimeSync(256); }`,
   check("missing node_modules warns LOUDLY", r.stderr.includes("WARNING") && r.stderr.includes("npm install"));
 }
 
+// ── coverage calibration: effectful npm packages the differential found disclosed-but-unmodeled ───
+// Each: the effect-bearing API → its effect, AND a PURE API of the SAME package → pure (no fabrication).
+{
+  const pkg = (name, types) => ({
+    [`node_modules/${name}/package.json`]: `{"name":"${name}","types":"index.d.ts","main":"index.js"}`,
+    [`node_modules/${name}/index.d.ts`]: types,
+    [`node_modules/${name}/index.js`]: ``,
+  });
+  // uuid: v1/v4/v6/v7 -> Rand; parse/stringify/validate -> pure (v3/v5 are deterministic hashes -> pure)
+  {
+    const d = project({
+      ...pkg("uuid", `export declare function v4(): string;
+export declare function v7(): string;
+export declare function v5(name: string, ns: string): string;
+export declare function parse(s: string): Uint8Array;
+export declare function validate(s: string): boolean;`),
+      "src/u.ts": `import { v4, v7, v5, parse, validate } from "uuid";
+export function gen() { return v4() + v7(); }
+export function hash() { return v5("a", "b"); }
+export function pure() { return validate("x") ? parse("y") : null; }`,
+    });
+    const { report } = scan(d);
+    check("uuid v4/v7 -> Rand", entry(report, "src.u.gen")?.inferred.includes("Rand"));
+    check("uuid v5 (deterministic hash) is PURE", entry(report, "src.u.hash") == null,
+          JSON.stringify(entry(report, "src.u.hash")));
+    check("uuid parse/validate are PURE", entry(report, "src.u.pure") == null,
+          JSON.stringify(entry(report, "src.u.pure")));
+  }
+  // nanoid: nanoid/customAlphabet -> Rand; urlAlphabet const -> pure
+  {
+    const d = project({
+      ...pkg("nanoid", `export declare function nanoid(size?: number): string;
+export declare function customAlphabet(alphabet: string, size?: number): () => string;
+export declare const urlAlphabet: string;`),
+      "src/n.ts": `import { nanoid, customAlphabet, urlAlphabet } from "nanoid";
+export function id() { return nanoid(); }
+export function factory() { return customAlphabet("abc", 5); }
+export function constRead() { return urlAlphabet.length; }`,
+    });
+    const { report } = scan(d);
+    check("nanoid -> Rand", entry(report, "src.n.id")?.inferred.includes("Rand"));
+    check("nanoid customAlphabet -> Rand", entry(report, "src.n.factory")?.inferred.includes("Rand"));
+    check("nanoid urlAlphabet const is PURE", entry(report, "src.n.constRead") == null,
+          JSON.stringify(entry(report, "src.n.constRead")));
+  }
+  // open: default export open() + openApp() -> Exec; apps const -> pure
+  {
+    const d = project({
+      ...pkg("open", `declare function open(target: string): Promise<unknown>;
+export declare function openApp(name: string): Promise<unknown>;
+export declare const apps: Record<string, string>;
+export default open;`),
+      "src/o.ts": `import open, { openApp, apps } from "open";
+export function url() { return open("http://x"); }
+export function app() { return openApp("safari"); }
+export function constRead() { return Object.keys(apps).length; }`,
+    });
+    const { report } = scan(d);
+    check("open default export -> Exec", entry(report, "src.o.url")?.inferred.includes("Exec"));
+    check("open openApp -> Exec", entry(report, "src.o.app")?.inferred.includes("Exec"));
+    check("open apps const is PURE", entry(report, "src.o.constRead") == null,
+          JSON.stringify(entry(report, "src.o.constRead")));
+  }
+  // gaxios: request/get/post -> Net (the HTTP client)
+  {
+    const d = project({
+      ...pkg("gaxios", `export declare class Gaxios { request(opts: object): Promise<unknown>; get(url: string): Promise<unknown>; }
+export declare function request(opts: object): Promise<unknown>;`),
+      "src/g.ts": `import { request } from "gaxios";
+export function fetch() { return request({ url: "http://api" }); }`,
+    });
+    const { report } = scan(d);
+    check("gaxios request -> Net", entry(report, "src.g.fetch")?.inferred.includes("Net"));
+  }
+  // stripe: the DEEP resource chain stripe.<resource>.<verb>() and the nested
+  // stripe.checkout.sessions.create() -> Net; toString -> pure; new Stripe() -> pure
+  {
+    const d = project({
+      ...pkg("stripe", `export declare class Stripe {
+  constructor(key: string);
+  customers: Stripe.CustomersResource;
+  checkout: Stripe.CheckoutResource;
+}
+export declare namespace Stripe {
+  interface CustomersResource { create(p: object): Promise<unknown>; toJSON(): string; }
+  interface CheckoutResource { sessions: SessionsResource; }
+  interface SessionsResource { create(p: object): Promise<unknown>; }
+}
+export default Stripe;`),
+      "src/s.ts": `import Stripe from "stripe";
+const stripe = new Stripe("sk");
+export function cust() { return stripe.customers.create({}); }
+export function sess() { return stripe.checkout.sessions.create({}); }
+export function ctor() { return new Stripe("x"); }`,
+    });
+    const { report } = scan(d);
+    check("stripe.customers.create() (deep chain) -> Net",
+          entry(report, "src.s.cust")?.inferred.includes("Net"), JSON.stringify(entry(report, "src.s.cust")));
+    check("stripe.checkout.sessions.create() (deeper chain) -> Net",
+          entry(report, "src.s.sess")?.inferred.includes("Net"), JSON.stringify(entry(report, "src.s.sess")));
+    check("new Stripe() construction is PURE (no Net fabricated)", entry(report, "src.s.ctor") == null,
+          JSON.stringify(entry(report, "src.s.ctor")));
+  }
+  // bullmq: queue.add / getJob -> Db (Redis); queue.on (event wiring) -> pure
+  {
+    const d = project({
+      ...pkg("bullmq", `export declare class Queue {
+  add(name: string, data: object): Promise<unknown>;
+  on(ev: string, cb: () => void): this;
+}`),
+      "src/b.ts": `import { Queue } from "bullmq";
+export function enqueue(q: Queue) { return q.add("job", {}); }
+export function wire(q: Queue) { return q.on("completed", () => {}); }`,
+    });
+    const { report } = scan(d);
+    check("bullmq queue.add -> Db", entry(report, "src.b.enqueue")?.inferred.includes("Db"));
+    check("bullmq queue.on (event wiring) is PURE", entry(report, "src.b.wire") == null,
+          JSON.stringify(entry(report, "src.b.wire")));
+  }
+  // @sentry/node: captureException/flush -> Net; init is config (pure)
+  {
+    const d = project({
+      "node_modules/@sentry/node/package.json": `{"name":"@sentry/node","types":"index.d.ts","main":"index.js"}`,
+      "node_modules/@sentry/node/index.d.ts": `export declare function captureException(e: unknown): string;
+export declare function flush(t?: number): Promise<boolean>;
+export declare function init(o: object): void;
+export declare function setTag(k: string, v: string): void;`,
+      "node_modules/@sentry/node/index.js": ``,
+      "src/se.ts": `import { captureException, flush, init, setTag } from "@sentry/node";
+export function report(e: Error) { return captureException(e); }
+export function drain() { return flush(2000); }
+export function setup() { init({}); setTag("a", "b"); }`,
+    });
+    const { report } = scan(d);
+    check("@sentry/node captureException -> Net", entry(report, "src.se.report")?.inferred.includes("Net"));
+    check("@sentry/node flush -> Net", entry(report, "src.se.drain")?.inferred.includes("Net"));
+    check("@sentry/node init/setTag (config) are PURE", entry(report, "src.se.setup") == null,
+          JSON.stringify(entry(report, "src.se.setup")));
+  }
+  // posthog-node: capture/flush -> Net; new PostHog() ctor is config (pure)
+  {
+    const d = project({
+      ...pkg("posthog-node", `export declare class PostHog {
+  constructor(key: string);
+  capture(e: object): void;
+  flush(): Promise<void>;
+  on(ev: string, cb: () => void): void;
+}`),
+      "src/p.ts": `import { PostHog } from "posthog-node";
+const client = new PostHog("k");
+export function track() { return client.capture({ event: "x" }); }
+export function drain() { return client.flush(); }
+export function ctor() { return new PostHog("y"); }`,
+    });
+    const { report } = scan(d);
+    check("posthog-node capture -> Net", entry(report, "src.p.track")?.inferred.includes("Net"));
+    check("posthog-node flush -> Net", entry(report, "src.p.drain")?.inferred.includes("Net"));
+    check("new PostHog() construction is PURE", entry(report, "src.p.ctor") == null,
+          JSON.stringify(entry(report, "src.p.ctor")));
+  }
+  // nest-winston: the injected logger's level verbs -> Log
+  {
+    const d = project({
+      "node_modules/nest-winston/package.json": `{"name":"nest-winston","types":"index.d.ts","main":"index.js"}`,
+      "node_modules/nest-winston/index.d.ts": `export declare class WinstonLogger {
+  log(m: string): void;
+  error(m: string): void;
+  setContext(c: string): void;
+}`,
+      "node_modules/nest-winston/index.js": ``,
+      "src/w.ts": `import { WinstonLogger } from "nest-winston";
+export function emit(l: WinstonLogger) { l.log("hi"); l.error("oops"); }
+export function ctx(l: WinstonLogger) { l.setContext("svc"); }`,
+    });
+    const { report } = scan(d);
+    check("nest-winston logger.log/error -> Log", entry(report, "src.w.emit")?.inferred.includes("Log"));
+    check("nest-winston setContext (config) is PURE", entry(report, "src.w.ctx") == null,
+          JSON.stringify(entry(report, "src.w.ctx")));
+  }
+}
+
 // ── 10. @Entity decorator names feed the tables surface (the TypeORM declarative move) ──────────
 {
   const d = project({

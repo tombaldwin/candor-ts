@@ -66,11 +66,60 @@ export const KAPPA_RULES = [
   [/^(node:)?sqlite$/, null, "Db"],
   // the curated npm tier
   [/^(axios|got|node-fetch|undici|ws|socket\.io(-client)?|nodemailer)$/, null, "Net"],
+  // gaxios is the axios-like HTTP client under googleapis (request/get/post/put/patch/delete/head do
+  // the network; it has no notable pure surface, but be VERB-precise like the rest of the Net tier so a
+  // future config accessor can't fabricate). `createAPIRequest` is googleapis-common's transport entry
+  // (every googleapis service method funnels through it → the real network). The deeper `googleapis`
+  // service chains (`calendar.events.insert()`) resolve their verb into the `googleapis` package, but
+  // those verbs are GENERIC (insert/list/get/update) and shared with pure builders — modeling them by
+  // name would fabricate; the actual network is the gaxios/createAPIRequest transport, modeled here, so
+  // a googleapis call that reaches the wire does so through a modeled unit when its source is scanned.
+  [/^gaxios$/, /^(request|get|post|put|patch|delete|head)$/, "Net"],
+  [/^googleapis-common$/, /^createAPIRequest$/, "Net"],
+  // google-auth-library mints/refreshes OAuth tokens and verifies ID tokens over the network. The
+  // verb surface only (the GoogleAuth/OAuth2Client/JWT constructors are config — inert until a verb).
+  [/^google-auth-library$/,
+   /^(request|getClient|getAccessToken|getRequestHeaders|authorize|refreshAccessToken|refreshToken|getTokenInfo|verifyIdToken|fetchIdToken|getCredentials|getProjectId|getSignedJwt)$/,
+   "Net"],
+  // stripe: methods land on a `new Stripe()` instance's resource chains
+  // (`stripe.customers.create()`, `stripe.checkout.sessions.create()`, `charges.*`, `paymentIntents.*`).
+  // A chained member call resolves its verb's DECLARATION into the `stripe` package (declModule keys on
+  // the source file, not the chain depth — verified), so keying on stripe's resource VERBS catches the
+  // deep chains. VERB-precise: the I/O verbs only (the SDK's resources share these); pure helpers
+  // (toString/JSON) and inert `new Stripe()` construction stay pure.
+  [/^stripe$/,
+   /^(create|retrieve|update|list|listLineItems|listPaymentMethods|del|delete|cancel|capture|confirm|expire|finalizeInvoice|pay|sendInvoice|markUncollectible|voidInvoice|refund|reverse|verify|search|approve|decline|attach|detach|deactivate)$/,
+   "Net"],
+  // error/telemetry SaaS — the capture/flush verbs ship the payload over the network. init/config are
+  // inert. @sentry/* re-exports captureException etc. from @sentry/core/@sentry/browser, so a consumer's
+  // import may resolve into any @sentry sub-package — match the whole scope, verb-precise.
+  [/^@sentry\/[^/]+$/,
+   /^(captureException|captureMessage|captureEvent|captureCheckIn|flush|close)$/, "Net"],
+  // posthog-node: capture/identify/group enqueue then flush over HTTP; flush/shutdown/captureImmediate
+  // and the feature-flag fetches (isFeatureEnabled/getFeatureFlag*) hit the API. Verb-precise; the
+  // `new PostHog()` ctor is inert (config).
+  [/^posthog-node$/,
+   /^(capture|captureImmediate|identify|identifyImmediate|alias|groupIdentify|flush|shutdown|isFeatureEnabled|getFeatureFlag|getFeatureFlagPayload|getAllFlags|getAllFlagsAndPayloads|getRemoteConfigPayload|reloadFeatureFlags)$/,
+   "Net"],
   [/^(pg|mysql2?|mongodb|ioredis|redis|sqlite3|better-sqlite3|knex)$/, null, "Db"],
+  // bull/bullmq are Redis-backed job queues — the queue/worker/job ops issue Redis commands (Db). Their
+  // surface is almost entirely I/O, but be VERB-precise (the I/O ops) so inert event-wiring
+  // (`queue.on(...)`) and `new Queue()`/`new Worker()` construction (which only opens a lazy connection)
+  // don't fabricate. The connection IS Redis — Db, consistent with the ioredis/redis classification.
+  [/^(bull|bullmq)$/,
+   /^(add|addBulk|getJob|getJobs|getJobCounts|getJobCountByTypes|getWaiting|getActive|getCompleted|getFailed|getDelayed|getWaitingChildren|getRepeatableJobs|removeRepeatable|removeRepeatableByKey|getMetrics|count|pause|resume|isPaused|drain|clean|obliterate|empty|close|remove|retry|retryJobs|promote|moveToCompleted|moveToFailed|updateData|updateProgress|process|waitUntilReady|getState|getDependencies|getChildrenValues)$/,
+   "Db"],
   [/^(execa|cross-spawn|shelljs)$/, null, "Exec"],
+  // the `open` package spawns the OS handler (xdg-open/open/start) — Exec. Default export `open(target)`
+  // resolves to member `open` (its declared fn name — verified); `openApp` likewise. The `apps` const is
+  // pure (a property read, never a call).
+  [/^open$/, /^(open|openApp)$/, "Exec"],
   [/^(fs-extra|graceful-fs|rimraf|glob|chokidar)$/, null, "Fs"],
   [/^dotenv$/, null, "Env"],
   [/^(winston|pino|bunyan|npmlog)$/, null, "Log"],
+  // nest-winston wraps winston; the injected logger's level verbs are the Log boundary (the
+  // WinstonModule.createLogger/forRoot config is inert).
+  [/^nest-winston$/, /^(log|info|warn|error|debug|verbose|silly|http)$/, "Log"],
   // entropy: node:crypto's random surface + the password-hashing libs (salted -> Rand). Found by
   // the CTA dogfood on a Nest app: argon2.hash came out SILENTLY PURE (the curated-kappa caveat
   // landing on exactly the call a security review cares about).
@@ -78,6 +127,14 @@ export const KAPPA_RULES = [
   // were silently pure inside the covered `crypto` module (the κ-coverage floor can't tell an unmodeled
   // entropy draw from a pure unmodeled member; the fix is to MODEL the member, not drop coverage).
   [/^(node:)?crypto$/, /^(random|getRandomValues|generateKey|generatePrime)/, "Rand"],
+  // uuid: the random-based generators draw from the CSPRNG (v4) / clock+MAC+random (v1) / random (v6/v7).
+  // v3 (MD5) and v5 (SHA-1) are DETERMINISTIC namespace hashes — same input, same UUID — so they are
+  // PURE and excluded. parse/stringify/validate/version/NIL/MAX are pure too (not matched).
+  [/^uuid$/, /^(v1|v4|v6|v7)$/, "Rand"],
+  // nanoid: nanoid()/customRandom() draw from crypto.getRandomValues; customAlphabet() returns a
+  // generator that does the same. `nanoid/non-secure` uses Math.random — still Rand. The `urlAlphabet`
+  // const is pure (a property read). Sound over-approximation: the factory call is the resolvable site.
+  [/^nanoid(\/non-secure)?$/, /^(nanoid|customAlphabet|customRandom)$/, "Rand"],
   // node:os identity reads — userInfo (the OS user record) and hostname (the machine name) are
   // environment/host reads (Env), like System.getenv's host-identity cousins. The rest of node:os
   // (platform/arch/cpus/totalmem/…) is inert host introspection, left pure.
