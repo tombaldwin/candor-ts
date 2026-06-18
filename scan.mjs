@@ -614,6 +614,31 @@ function realDecl(sym) {
   return sym.valueDeclaration ?? sym.declarations?.[0];
 }
 
+// Resolve a value-reference NODE (`expr` in `expr.call(…)`/`expr.apply(…)`) to the qualified name of the
+// FUNCTION UNIT it ultimately denotes — following ONE OR MORE local-variable aliases. The `.call`/`.apply`
+// arm lands on the es-lib member so `getResolvedSignature` never sees the real fn; for a direct identifier
+// (`effectful.call`) `realDecl` → the fn decl → a minted unit. But `const m = effectful; m.call(…)` resolves
+// `m` to its VARIABLE declaration, whose initializer is the bare identifier `effectful` — the variable node
+// itself is NOT a minted unit (only var-decls whose initializer is an arrow/fn-expr are), so the edge was
+// dropped → silent-pure (the cardinal sin). Here we chase the variable's initializer identifier/member to
+// the function it aliases. Returns the unit name, or null if the chain can't be pinned to a function unit.
+// Bounded depth guards a pathological `const a=b, b=a` cycle. NO fabrication: a non-fn binding (or any link
+// that doesn't resolve to a minted fn unit) returns null and the caller adds nothing / discloses Unknown.
+function resolveFnRefUnit(refNode, depth = 0) {
+  if (!refNode || depth > 8) return null;
+  if (!ts.isIdentifier(refNode) && !ts.isPropertyAccessExpression(refNode)) return null;
+  const d = realDecl(checker.getSymbolAtLocation(refNode));
+  if (!d) return null;
+  // Already a minted unit (the function itself, an arrow/fn-expr const, a class method/property)?
+  const direct = nodeName.get(d);
+  if (direct) return direct;
+  // A local variable / parameter bound to a function reference — follow the initializer alias.
+  if ((ts.isVariableDeclaration(d) || ts.isBindingElement(d) || ts.isParameter(d)) && d.initializer
+      && (ts.isIdentifier(d.initializer) || ts.isPropertyAccessExpression(d.initializer)))
+    return resolveFnRefUnit(d.initializer, depth + 1);
+  return null;
+}
+
 // Accessor resolution (the silent-pure-accessor fix): a property READ (`x.raw`) or property
 // ASSIGNMENT target (`x.path = v`) may resolve to a getter/setter whose body performs effects. We
 // resolve the property-name symbol to its declarations and look for an accessor of the matching
@@ -879,8 +904,22 @@ function visitCalls(node) {
             invokedRef = (node.arguments ?? [])[0] ?? null;
           if (invokedRef && (ts.isIdentifier(invokedRef) || ts.isPropertyAccessExpression(invokedRef))) {
             const d2 = realDecl(checker.getSymbolAtLocation(invokedRef));
-            const t = d2 && nodeName.get(d2);
+            // Resolve the receiver/arg0 to its function unit, FOLLOWING local-variable aliases
+            // (`const m = effectful; m.call(…)`) — the direct-identifier form already landed on a minted
+            // unit, but an aliased local var resolves to its VARIABLE decl (not a unit), which dropped the
+            // edge silent-pure. `resolveFnRefUnit` chases the initializer alias to the real fn.
+            const t = (d2 && nodeName.get(d2)) || resolveFnRefUnit(invokedRef);
             if (t) rec.edges.add(t);
+            // HONESTY: the receiver IS a local variable/parameter (it resolved to a value declaration)
+            // but we could NOT pin it to a function unit — e.g. bound to a param, a reassigned/branched
+            // value, an `any`-typed holder. The `.call`/`.apply` still INVOKES whatever it holds, so a
+            // silent-pure verdict would be the cardinal sin. Disclose Unknown instead. (A direct fn
+            // identifier / known fn always resolves above, so this never fires for the precise forms; a
+            // non-value receiver — a type, a literal — resolves to no decl and stays out, no fabrication.)
+            else if (d2 && (ts.isVariableDeclaration(d2) || ts.isBindingElement(d2) || ts.isParameter(d2))) {
+              rec.direct.add("Unknown");
+              rec.why.add(`call:${recvText.slice(0, 40)}.${m}`);
+            }
           }
         }
         if (mod === "<local>") {

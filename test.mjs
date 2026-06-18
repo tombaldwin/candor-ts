@@ -87,6 +87,48 @@ export function handler(): void {
         entry(report, "src.a.handler") === undefined, JSON.stringify(report.functions));
 }
 
+// ── 2d. a LOCAL-VAR-aliased fn invoked via .call()/.apply() must NOT silent-pure (reflective-invoke) ─
+// `const m = effectful; m.call(null, p)` — the `.call`/`.apply` arm special-cased member/identifier
+// RECEIVERS but never resolved a local var's binding through the `.call`/`.apply` property access, so the
+// edge dropped silent-pure (the cardinal sin). FIX = follow the alias to the real fn unit (recovers the
+// edge, like the direct `effectful.call(…)` form); an unresolvable holder discloses Unknown; a PURE local
+// var stays pure (no fabrication). Controls below pin all three boundaries.
+{
+  const d = project({
+    "src/a.ts": `import { writeFileSync } from "fs";
+function effectful(p: string) { writeFileSync(p, "x"); }
+class C {
+  doIt(p: string) { writeFileSync(p, "y"); }
+  m1(p: string) { const m = this.doIt; m.call(this, p); }
+}
+export function localCall(p: string)  { const m = effectful; m.call(null, p); }
+export function localApply(p: string) { const m = effectful; m.apply(null, [p]); }
+export function localPlain(p: string) { const m = effectful; m(p); }
+export function pureLocalCall() { const m = (n: number) => n * 2; return m.call(null, 1); }
+export function viaParam(fn: Function, p: string) { const m = fn; m.call(null, p); }`,
+  });
+  const { report } = scan(d);
+  const eff = (fn) => entry(report, fn)?.inferred ?? [];
+  const carries = (fn) => eff(fn).includes("Fs") || eff(fn).includes("Unknown");
+  // BUG cases: now recover the real effect (or at minimum disclose Unknown), no longer silent-pure.
+  check("local-var alias .call() no longer silent-pure (carries effect/Unknown)", carries("src.a.localCall"),
+        JSON.stringify(eff("src.a.localCall")));
+  check("local-var alias .apply() no longer silent-pure (carries effect/Unknown)", carries("src.a.localApply"),
+        JSON.stringify(eff("src.a.localApply")));
+  check("this-method alias .call() no longer silent-pure (carries effect/Unknown)", carries("src.a.C.m1"),
+        JSON.stringify(eff("src.a.C.m1")));
+  // Real-fix evidence: the alias is RESOLVED to the fn, so the precise Fs is recovered (not just Unknown).
+  check("local-var alias .call() recovers the precise Fs (real fix, edge resolved)", eff("src.a.localCall").includes("Fs"));
+  // CONTROL (precision preserved): the plain direct invoke still resolves to Fs.
+  check("control: plain local invoke m(p) still Fs", eff("src.a.localPlain").includes("Fs"));
+  // CONTROL (no fabrication): a PURE local var .call()'d must stay pure — never gain an effect.
+  check("no-fabrication: a pure local var .call()'d stays pure", eff("src.a.pureLocalCall").length === 0,
+        JSON.stringify(eff("src.a.pureLocalCall")));
+  // HONESTY: an unresolvable holder (a Function param) discloses Unknown, never silent-pure.
+  check("honesty: an unresolvable fn-holder .call()'d discloses Unknown (not silent-pure)",
+        eff("src.a.viaParam").includes("Unknown"), JSON.stringify(eff("src.a.viaParam")));
+}
+
 // ── 2b. `show` SURFACES the literal Fs paths + Exec cmds (the regression that shipped) ─────────────
 // scan writes the surface under report keys `paths`/`cmds`; `show` once read a nonexistent `e.fs`, so
 // it silently dropped every file path even though the MCP `candor_show` doc promises "paths". The CLI
