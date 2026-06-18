@@ -205,6 +205,32 @@ export function impact(fns, cg, q) {
   return { fn: tgt ?? q, affectedCount: affected.length, affected, entryPoints };
 }
 
+// blindspots (SPEC §3.1 ⟨0.6⟩): the Unknown SOURCES — fns whose OWN body has an unresolvable call (so
+// they carry `unknownWhy`), each ranked by its Unknown blast radius (the transitive callers that inherit
+// Unknown through it). The actionable inverse of a widely-propagated Unknown: a report can read mostly
+// Unknown from a handful of root causes — this names them, ranked, to declare/resolve/accept. Matches
+// candor-java/candor-query: { sources:[{fn,why,reaches,affected}], totalUnknown }.
+export function blindspots(fns, cg) {
+  const rev = reverseGraph(cg);
+  const totalUnknown = fns.filter((e) => (e.inferred ?? []).includes("Unknown")).length;
+  const sources = [];
+  for (const e of fns) {
+    const why = e.unknownWhy ?? [];
+    if (why.length === 0) continue; // a SOURCE carries its own unknownWhy; a purely-transitive Unknown does not
+    const reached = new Set();
+    const queue = [e.fn];
+    const seen = new Set([e.fn]);
+    while (queue.length) {
+      const n = queue.pop();
+      for (const c of rev.get(n) ?? []) if (!seen.has(c)) { seen.add(c); reached.add(c); queue.push(c); }
+    }
+    const affected = [...reached].sort();
+    sources.push({ fn: e.fn, why, reaches: affected.length, affected });
+  }
+  sources.sort((a, b) => b.reaches - a.reaches || a.fn.localeCompare(b.fn)); // most-smearing first, stable
+  return { sources, totalUnknown };
+}
+
 // path: the FORWARD provenance — a shortest BFS over the calls graph from `fn` to the nearest unit
 // that performs `eff` DIRECTLY (the source). Matches candor-query's {effect, fn, path:[{fn,loc,source}]}.
 export function path(fns, cg, fnQ, eff) {

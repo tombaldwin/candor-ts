@@ -25,7 +25,7 @@ import { printAgents } from "./contract.mjs";
 // a `matchTier` missing `#` (so the SAME query resolved differently between `impact` and `callers` on a
 // JVM `Type#method` report). Importing the shared functions removes all three divergences (review find).
 import { impact as coreImpact, path as corePath, gains as coreGains,
-         show as coreShow,
+         show as coreShow, blindspots as coreBlindspots,
          loadReport, loadCallgraph, matches } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
 
@@ -125,6 +125,13 @@ switch (cmd) {
     // MCP server serves. SPEC §3.1: {fn, affectedCount, affected, entryPoints:[{fn,inferred}]}.
     const [prefix, q] = args;
     emit(coreImpact(loadReport(prefix), loadCallgraph(prefix), q));
+    break;
+  }
+  case "blindspots": {
+    // the Unknown SOURCES, ranked by blast radius — the actionable inverse of a widely-propagated
+    // Unknown (SPEC §3.1 ⟨0.6⟩): { sources:[{fn,why,reaches,affected}], totalUnknown }.
+    const [prefix] = args;
+    emit(coreBlindspots(loadReport(prefix), loadCallgraph(prefix)));
     break;
   }
   case "gains": {

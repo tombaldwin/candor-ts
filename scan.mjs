@@ -1935,7 +1935,11 @@ for (const [name, rec] of fns) {
   if (inf.includes("Db") && rec.tables.size) entry.tables = [...rec.tables].sort();
   if (inf.includes("Exec") && rec.cmds.size) entry.cmds = [...rec.cmds].sort();
   if (inf.includes("Fs") && rec.paths.size) entry.paths = [...rec.paths].sort();
-  if (rec.direct.has("Unknown") && rec.why.size) entry.unknownWhy = [...rec.why].sort();
+  // ⟨0.6⟩ unknownWhy — REQUIRED on a DIRECT Unknown SOURCE (this fn's own body has the unresolvable call,
+  // so `rec.direct` carries Unknown), absent on a purely-transitive Unknown. The rich per-site reasons
+  // (rec.why: callback:/dispatch:/dynamic-key:) when recorded, else a generic fallback so a source is
+  // never left un-tagged — the source/transitive split the `blindspots` query needs (SPEC §3.1/§4).
+  if (rec.direct.has("Unknown")) entry.unknownWhy = rec.why.size ? [...rec.why].sort() : ["unresolved"];
   // HONESTY: the npm packages this fn transitively reaches that κ couldn't see through — effects through
   // them are NOT in `inferred`, so it is a LOWER BOUND when this is non-empty. Omitted when none.
   if (rec.blind.size) entry.invisible = [...rec.blind].sort();
