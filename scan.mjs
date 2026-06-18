@@ -347,6 +347,20 @@ const nodeName = new WeakMap();  // declaration node -> qualified name
 const entityTables = new Map();    // ClassDeclaration node -> table name
 const interfaceImpls = new Map();  // InterfaceDeclaration node -> implementing ClassDeclarations (CHA universe)
 const classOverrides = new Map();  // base-method MemberDeclaration node -> overriding subclass member nodes (class-CHA)
+// `Object.defineProperty(target, key, { get/set })` runtime accessors (the silent-pure defineProperty
+// hole): the TS checker types `target.key` as a plain DATA property (defineProperty is a runtime
+// construct), so `accessorAt` finds no get-accessor and the forcing site `target.key` reads
+// silent-pure. We index, keyed by the TARGET's symbol → key string → { get, set } descriptor function
+// node, every such accessor seen in the project. The forcing-site arm consults this when the type-level
+// accessor resolution comes up empty (precise edge when target+key resolve; else honest Unknown).
+const definePropAccessors = new Map(); // targetSymbol -> Map(key -> { get?: fnNode, set?: fnNode })
+// A descriptor accessor with a COMPUTED key (`Object.defineProperty(o, k, {get})`) on a RESOLVABLE
+// target: the target symbol is known but the key isn't, so a forcing site `o.anything` MIGHT hit it. We
+// record the target symbol → kinds present, and disclose Unknown at any access onto that target whose
+// type-level / precise-key resolution missed — never silent-pure (matching the syntactic object-literal-
+// getter posture). A descriptor whose TARGET itself is unresolvable can't be tied to any forcing site;
+// its unit is still minted (effects classified, callgraph-visible), and there is nothing more to disclose.
+const definePropDynamicKey = new Map(); // targetSymbol -> Set("get"|"set")
 // Resolve `extends X` to X's LOCAL ClassDeclaration (through an import alias), or null. Module-level
 // so both the class-CHA INDEX (below) and the dispatch site's RECEIVER-SUBTREE scoping share one
 // definition of the local inheritance edge.
@@ -376,6 +390,79 @@ function classInSubtree(cls, root) {
 function moduleOf(sf) {
   const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?[tj]sx?$/, "");
   return rel.split(path.sep).join(".");
+}
+// Is `node` (a function-expression / method-declaration / arrow) the `get` or `set` member of an
+// accessor DESCRIPTOR object passed to `Object.defineProperty(target, key, desc)` /
+// `Object.defineProperties(target, { key: desc, … })` / `Object.create(proto, { key: desc, … })`?
+// Returns { kind:"get"|"set", targetExpr, keyText } when so (keyText is null for a non-literal key),
+// or null. Only an accessor (`get`/`set`) descriptor qualifies — a `value:` (data) descriptor is NOT
+// a function-property-named get/set, so it never matches (no fabrication on data props). The descriptor
+// member may be `get(){}` (method), `get: function(){}` / `get: () => {}` (property-assignment): both
+// have a parent PropertyAssignment-or-MethodDeclaration whose name is the identifier `get`/`set`.
+function definePropertyAccessor(node) {
+  let memberName = null, propParent = null;
+  const p = node.parent;
+  if (!p) return null;
+  if ((ts.isMethodDeclaration(node) || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node))
+      && ts.isObjectLiteralExpression(node.parent)) {
+    // `{ get(){…} }` / `{ get x(){…} }` — but a real get/set-accessor here is the SYNTACTIC object
+    // literal getter (already handled honestly); only a plain METHOD named `get`/`set` is a descriptor
+    // member. A GetAccessor/SetAccessor inside a descriptor object is not how defineProperty descriptors
+    // are written, so restrict to a method whose name is literally `get`/`set`.
+    if (ts.isMethodDeclaration(node)) { memberName = node.name?.getText?.(); propParent = node; }
+  } else if (ts.isPropertyAssignment(p) && p.initializer === node && ts.isObjectLiteralExpression(p.parent)) {
+    memberName = p.name?.getText?.(); propParent = p;
+  }
+  if (memberName !== "get" && memberName !== "set") return null;
+  const descObj = ts.isMethodDeclaration(propParent) ? propParent.parent : propParent.parent; // ObjectLiteral
+  // Two shapes for the enclosing call:
+  //   defineProperty(target, key, descObj)        — descObj is arg #2
+  //   defineProperties(target, { key: descObj })  — descObj is a property value of arg #1
+  //   create(proto, { key: descObj })             — descObj is a property value of arg #1
+  const callOf = (n) => {
+    let c = n.parent;
+    while (c && !ts.isCallExpression(c)) c = c.parent;
+    return c;
+  };
+  // Walk out at most: descObj -> (its parent is either the defineProperty call's arg, OR a
+  // PropertyAssignment in a properties-map -> ObjectLiteral -> defineProperties/create call).
+  const fnName = (call) => call && call.expression && call.expression.getText().replace(/\s+/g, "");
+  // Case A: descObj is the 3rd argument of Object.defineProperty(target, key, descObj).
+  if (descObj.parent && ts.isCallExpression(descObj.parent)) {
+    const call = descObj.parent;
+    if (fnName(call) === "Object.defineProperty" && call.arguments[2] === descObj) {
+      const keyArg = call.arguments[1];
+      const keyText = keyArg && ts.isStringLiteralLike(keyArg) ? keyArg.text : null;
+      return { kind: memberName, targetExpr: call.arguments[0], keyText };
+    }
+    return null;
+  }
+  // Case B: descObj is a property value in a properties-map for defineProperties / create.
+  if (descObj.parent && ts.isPropertyAssignment(descObj.parent)
+      && ts.isObjectLiteralExpression(descObj.parent.parent)) {
+    const keyProp = descObj.parent;            // `key: descObj`
+    const propsMap = descObj.parent.parent;    // `{ key: descObj, … }`
+    const call = callOf(propsMap);
+    const fn = fnName(call);
+    if (call && (fn === "Object.defineProperties" || fn === "Object.create")
+        && (call.arguments[1] === propsMap)) {
+      const keyText = ts.isStringLiteralLike(keyProp.name) ? keyProp.name.text
+        : ts.isIdentifier(keyProp.name) ? keyProp.name.text : null;
+      // For defineProperties the target is arg0. For create the NEW object IS the call's result; the
+      // forcing site reads it through the binding the call is assigned to (`const o = Object.create(…)`),
+      // so the stable target is that VariableDeclaration's name. When create's result isn't bound to a
+      // simple identifier, there's no joinable target — targetExpr stays null (unit still minted; the
+      // unpinnable marker drives the Unknown disclosure, never silent-pure).
+      let targetExpr = null;
+      if (fn === "Object.defineProperties") targetExpr = call.arguments[0];
+      else if (fn === "Object.create" && call.parent
+               && ts.isVariableDeclaration(call.parent) && call.parent.initializer === call
+               && ts.isIdentifier(call.parent.name))
+        targetExpr = call.parent.name;
+      return { kind: memberName, targetExpr, keyText };
+    }
+  }
+  return null;
 }
 // `_lastCjs` is set by markCjs when localName() returns a CJS export-surface name, read right after
 // the call to tag THAT unit (spec 0.5 draft unitKind: "export"). Keyed to the unit, not a project-
@@ -415,6 +502,19 @@ function localName(node) {
   // invisible — same dogfood.
   if (ts.isConstructorDeclaration(node) && ts.isClassDeclaration(node.parent) && node.parent.name)
     return `${node.parent.name.text}.constructor`;
+  // `Object.defineProperty(target,"key",{ get(){…}/set(){…} })` descriptor accessors — the runtime
+  // accessor the TS checker can't see as a get/set (it types target.key as a data prop). Mint the
+  // descriptor body as a UNIT so its effects classify normally instead of being a silent-pure hole;
+  // the forcing-site arm edges target.key to it. Name keyed by target + key + kind so the same name a
+  // forcing site computes joins here. Both shapes (`get(){}` method, `get:fn` property) land here.
+  {
+    const da = definePropertyAccessor(node);
+    if (da) {
+      const tn = da.targetExpr ? da.targetExpr.getText().replace(/\s+/g, "") : "<create>";
+      const key = da.keyText ?? `[computed@${node.getStart()}]`;
+      return `defineProperty(${tn}).${da.kind} ${key}`;
+    }
+  }
   // CJS export units (--allow-js, the npm half of report chaining): dist JS exports through
   // assignment, not declarations, so `module.exports = function …` / `exports.foo = …` /
   // `module.exports = { sign: fn }` were not units at all — a dep scan of jsonwebtoken yielded 4
@@ -519,6 +619,26 @@ for (const sf of sources) {
       nodeName.set(node, qual);
       if ((ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)) && node.initializer)
         nodeName.set(node.initializer, qual);
+      // Index a `Object.defineProperty` descriptor accessor by its target SYMBOL + key, so a forcing
+      // site `target.key` (which the checker types as a plain data prop) can edge to this unit. When
+      // the target/key can't be pinned to a static symbol/literal, the unit still exists (named above)
+      // but no precise edge is possible — record an UNRESOLVED marker so an access onto such a target
+      // is disclosed Unknown rather than silently dropped.
+      const da = definePropertyAccessor(node);
+      if (da) {
+        const tsym = da.targetExpr ? checker.getSymbolAtLocation(da.targetExpr) : null;
+        if (tsym && da.keyText !== null) {
+          if (!definePropAccessors.has(tsym)) definePropAccessors.set(tsym, new Map());
+          const byKey = definePropAccessors.get(tsym);
+          if (!byKey.has(da.keyText)) byKey.set(da.keyText, {});
+          byKey.get(da.keyText)[da.kind] = node;
+        } else if (tsym) {
+          // computed key on a known target — any access onto this target may hit it: disclose Unknown.
+          if (!definePropDynamicKey.has(tsym)) definePropDynamicKey.set(tsym, new Set());
+          definePropDynamicKey.get(tsym).add(da.kind);
+        }
+        // (a wholly-unresolvable target leaves only the minted unit — nothing to join a forcing site to.)
+      }
     }
     ts.forEachChild(node, collect);
   })(sf);
@@ -671,6 +791,33 @@ function accessorAt(propNode, kind /* "get" | "set" */) {
     sym = checker.getSymbolAtLocation(propNode.name ?? propNode);
   }
   return accessorFromSym(sym, kind);
+}
+// A `Object.defineProperty` descriptor accessor for the forcing site `recv.key` (read → get, assign →
+// set), consulted ONLY when the type-level `accessorAt` came up empty (the checker types target.key as
+// a data prop, so defineProperty accessors are invisible to it). Resolve the receiver expression to its
+// binding symbol and the key to a static string; look both up in `definePropAccessors`. Returns the
+// descriptor function NODE (a minted unit) when found, or null. NO fabrication: a data (`value:`)
+// descriptor was never indexed, an absent target/key returns null.
+function definePropForceTarget(propNode, kind /* "get" | "set" */) {
+  if (definePropAccessors.size === 0) return null;
+  let recvExpr, keyText;
+  if (ts.isElementAccessExpression(propNode)) {
+    recvExpr = propNode.expression;
+    const arg = propNode.argumentExpression;
+    keyText = arg && ts.isStringLiteralLike(arg) ? arg.text : null;
+  } else if (ts.isPropertyAccessExpression(propNode)) {
+    recvExpr = propNode.expression;
+    keyText = propNode.name?.getText?.();
+  } else return null;
+  if (keyText == null) return null;
+  // Resolve the receiver to the SAME symbol the defineProperty target identifier resolved to. Follow an
+  // import alias so a cross-module `import { config }` access joins the defining module's index entry.
+  const rsym0 = checker.getSymbolAtLocation(recvExpr);
+  if (!rsym0) return null;
+  const rsym = rsym0.flags & ts.SymbolFlags.Alias ? (() => { try { return checker.getAliasedSymbol(rsym0); } catch { return rsym0; } })() : rsym0;
+  const byKey = definePropAccessors.get(rsym) ?? definePropAccessors.get(rsym0);
+  const entry = byKey?.get(keyText);
+  return entry?.[kind] ?? null;
 }
 // Record a resolved accessor HIT (read or write) as an edge from `owner`: into the accessor UNIT when
 // it's a local declaration we minted; otherwise Unknown (a resolved-but-unseen accessor body — never
@@ -1327,12 +1474,41 @@ function visitCalls(node) {
       && p.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && p.operatorToken.kind <= ts.SyntaxKind.LastAssignment;
     const recordKind = (kind) => {
       const hit = accessorAt(node, kind);
-      if (!hit) return;
-      const owner = enclosing(node);
-      if (!owner) return;
-      const an = hit.decl.parent?.name?.getText?.() ?? "?";
-      const pn = node.name?.getText?.() ?? node.argumentExpression?.getText?.() ?? "?";
-      recordAccessorHit(owner, hit, `${an}.${pn}`);
+      if (hit) {
+        const owner = enclosing(node);
+        if (!owner) return;
+        const an = hit.decl.parent?.name?.getText?.() ?? "?";
+        const pn = node.name?.getText?.() ?? node.argumentExpression?.getText?.() ?? "?";
+        recordAccessorHit(owner, hit, `${an}.${pn}`);
+        return;
+      }
+      // No type-level accessor — try the `Object.defineProperty` runtime-accessor index. The checker
+      // types target.key as a data prop, so an effectful defineProperty getter/setter is invisible to
+      // accessorAt; consult definePropForceTarget so the forcing site edges to the descriptor unit
+      // (precise) instead of reading silent-pure (the cardinal sin). A descriptor we minted is always
+      // local, so this is an EDGE; never Unknown for a resolved-and-seen descriptor.
+      const dpNode = definePropForceTarget(node, kind);
+      if (dpNode) {
+        const owner = enclosing(node);
+        const t = owner && nodeName.get(dpNode);
+        if (t) fns.get(owner).edges.add(t);
+        return;
+      }
+      // A computed-key descriptor accessor on this receiver's target means `recv.<anything>` MIGHT
+      // invoke an effectful accessor whose key we couldn't pin — disclose Unknown (never silent-pure),
+      // matching the syntactic object-literal-getter posture. Only when the receiver binds to a target
+      // that carries a dynamic-key descriptor of the right kind.
+      if (definePropDynamicKey.size > 0) {
+        const rsym0 = ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)
+          ? checker.getSymbolAtLocation(node.expression) : null;
+        const rsym = rsym0 && (rsym0.flags & ts.SymbolFlags.Alias)
+          ? (() => { try { return checker.getAliasedSymbol(rsym0); } catch { return rsym0; } })() : rsym0;
+        const kinds = (rsym && definePropDynamicKey.get(rsym)) || (rsym0 && definePropDynamicKey.get(rsym0));
+        if (kinds && kinds.has(kind)) {
+          const owner = enclosing(node);
+          if (owner) { fns.get(owner).direct.add("Unknown"); fns.get(owner).why.add(`defineProperty:dynamic-key`); }
+        }
+      }
     };
     if (simpleAssign || isDestructuringAssignTarget(node)) recordKind("set");
     else if (compoundAssign) { recordKind("get"); recordKind("set"); }

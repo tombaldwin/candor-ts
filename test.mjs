@@ -985,5 +985,66 @@ export function invokesMap(xs: number[]) { return xs.map(eff); }`,
         entry(report, "src.h.invokesMap")?.inferred.includes("Fs"));
 }
 
+// ── Object.defineProperty runtime-accessor: a descriptor get/set is invisible to the TS checker (it
+// types target.key as a DATA prop), so a forcing site `target.key` read silent-pure — the cardinal sin.
+// FIX = mint the descriptor body as a unit + edge the forcing site to it (precise when target+key pin),
+// else disclose Unknown (computed key). Controls pin no-fabrication (pure getter / value descriptor).
+{
+  const d = project({
+    "src/a.ts": `import { execSync } from "node:child_process";
+import fs from "node:fs";
+export const config: { token: string } = {} as any;
+Object.defineProperty(config, "token", {
+  configurable: true,
+  get() { const v = execSync("vault read -field=token secret/app").toString();
+          Object.defineProperty(config, "token", { value: v }); return v; }
+});
+export function readToken(): string { return config.token; }
+
+// setter variant
+export const sink: { k: string } = {} as any;
+Object.defineProperty(sink, "k", { set(v: string) { fs.writeFileSync("/tmp/z", v); } });
+export function write(): void { sink.k = "hi"; }
+
+// defineProperties (multiple) + a value descriptor among them
+export const multi: { a: string; b: string } = {} as any;
+Object.defineProperties(multi, {
+  a: { get() { return execSync("netstat").toString(); } },
+  b: { value: "x" },
+});
+export function readA(): string { return multi.a; }
+export function readB(): string { return multi.b; }
+
+// computed key on a known target — can't pin the key → honest Unknown disclosure
+export const dyn: Record<string, string> = {} as any;
+const kk = "secret";
+Object.defineProperty(dyn, kk, { get() { return execSync("id").toString(); } });
+export function readDyn(): string { return dyn.secret; }
+
+// NO-FABRICATION controls: a pure getter, and a value (data) descriptor — both stay pure.
+export const pure: { k: number } = {} as any;
+Object.defineProperty(pure, "k", { get() { return 1 + 1; } });
+export function readPure(): number { return pure.k; }
+export const dataOnly: { k: number } = {} as any;
+Object.defineProperty(dataOnly, "k", { value: 42 });
+export function readData(): number { return dataOnly.k; }`,
+  });
+  const { report } = scan(d);
+  check("defineProperty getter: forcing site carries the precise effect (Exec), not silent-pure",
+        entry(report, "src.a.readToken")?.inferred.includes("Exec"), JSON.stringify(entry(report, "src.a.readToken")));
+  check("defineProperty setter: assignment site carries the setter's effect (Fs)",
+        entry(report, "src.a.write")?.inferred.includes("Fs"), JSON.stringify(entry(report, "src.a.write")));
+  check("defineProperties: a getter member propagates (Exec)",
+        entry(report, "src.a.readA")?.inferred.includes("Exec"), JSON.stringify(entry(report, "src.a.readA")));
+  check("defineProperties: a value member among them does NOT fabricate (readB pure)",
+        entry(report, "src.a.readB") === undefined, JSON.stringify(entry(report, "src.a.readB")));
+  check("defineProperty computed key: forcing site discloses Unknown (never silent-pure)",
+        entry(report, "src.a.readDyn")?.inferred.includes("Unknown"), JSON.stringify(entry(report, "src.a.readDyn")));
+  check("NO-FABRICATION: a pure defineProperty getter stays pure",
+        entry(report, "src.a.readPure") === undefined, JSON.stringify(entry(report, "src.a.readPure")));
+  check("NO-FABRICATION: a value (data) descriptor stays pure",
+        entry(report, "src.a.readData") === undefined, JSON.stringify(entry(report, "src.a.readData")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
