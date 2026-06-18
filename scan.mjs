@@ -934,6 +934,63 @@ function iterationTargets(expr, isAsync) {
 function edgeToTargets(rec, decls) {
   for (const d of decls) { const t = nodeName.get(d); if (t) rec.edges.add(t); }
 }
+// Does iterating `expr` FORCE an OPAQUE (caller-supplied) iterable? Forcing an iterable runs its
+// `[Symbol.iterator]`/`next` body, which — when the iterable is a PARAMETER / `any` / a bare type-
+// parameter — is caller-chosen code that can perform arbitrary I/O. This is epistemically identical to
+// invoking an opaque callback parameter (the `call:param` → Unknown posture, scan.mjs ~1145-1158): a
+// silent-pure verdict would be the cardinal sin. Mirror that decision exactly. Returns a `why` string
+// (→ record Unknown) or null. By design this fires ONLY for genuinely caller-supplied iterables; a
+// CONCRETE built-in (array/string/Map/Set: the value resolves to a concrete type, not a param) stays
+// PURE, and a LOCAL iterable/generator (a local call result, a local class instance) is handled by the
+// existing local-edge path (iterationTargets / the call machinery) — neither is flagged here.
+// Opaque iterable INTERFACE names: a value whose TYPE is literally one of these is caller-supplied
+// iterator code (its `next` body is unknowable). A CONCRETE built-in (Array/Set/Map/String) has its own
+// symbol (`Array`/…) and runs a built-in iterator (no user code) → NOT opaque; a LOCAL class implementing
+// Iterable is handled by the local-edge path. So we key on the type's SYMBOL NAME, NOT on "is a parameter"
+// (the earlier param-identity check fabricated Unknown when iterating a concrete-typed array PARAM — the
+// conformance `loop_elem` regression: `(items: T[]) => { for (const c of items) … }`).
+const OPAQUE_ITERABLE_TYPES = new Set([
+  "Iterable", "Iterator", "IterableIterator", "Generator",
+  "AsyncIterable", "AsyncIterator", "AsyncIterableIterator", "AsyncGenerator",
+]);
+function opaqueIterableWhy(expr) {
+  const t = checker.getTypeAtLocation(expr);
+  if (!t) return null;
+  // (a) `any` or a bare TYPE PARAMETER (`<T extends Iterable<…>>(x: T)`): the concrete iterable is
+  // indeterminate, so its iterator body is unknowable — never silently pure.
+  if (t.flags & ts.TypeFlags.Any) return "iterate:any";
+  if (t.flags & ts.TypeFlags.TypeParameter) return "iterate:typeparam";
+  // (b) the type IS an opaque iterable INTERFACE *and* the value is CALLER-SUPPLIED (a parameter / binding
+  // element): `collect(source: Iterable<T>)`, `nexts(it: Iterator<T>)`, `drain(g: Generator<T>)`. The
+  // caller chooses the concrete iterator (arbitrary I/O), identical to invoking an opaque callback. BOTH
+  // conditions are required: a LOCAL generator/iterable CALL result (`for (const x of gen())`) also has a
+  // Generator/IterableIterator type but is NOT a param → excluded, so the local-edge path edges its real
+  // effect (no spurious Unknown); a concrete Array/Set/Map/String PARAM has its own symbol (not in the
+  // set) → excluded → PURE (built-in iterator, no user code; the conformance `loop_elem` case).
+  const sym = t.getSymbol && t.getSymbol();
+  if (sym && OPAQUE_ITERABLE_TYPES.has(sym.name) && ts.isIdentifier(expr)) {
+    const d = realDecl(checker.getSymbolAtLocation(expr));
+    if (d && (ts.isParameter(d) || ts.isBindingElement(d))) {
+      const idx = ts.isParameter(d) && d.parent ? d.parent.parameters.indexOf(d) : -1;
+      return idx >= 0 ? `iterate:param#${idx}` : "iterate:param";
+    }
+  }
+  return null;
+}
+// Record an opaque-iterable force as Unknown on the enclosing fn, UNLESS iteration already resolved a
+// LOCAL desugar target (then the real effect is edged — no Unknown needed). `localResolved` = the
+// non-empty result of iterationTargets (a local `[Symbol.iterator]`/`next` unit was found).
+function noteOpaqueIteration(node, iterExpr, localResolved) {
+  if (localResolved) return;
+  const owner = enclosing(node);
+  if (!owner) return;
+  const why = opaqueIterableWhy(iterExpr);
+  if (!why) return;
+  const rec = fns.get(owner);
+  if (!rec) return;
+  rec.direct.add("Unknown");
+  rec.why.add(why);
+}
 
 // Callee names that INVOKE a function/method argument (so a fn-reference passed to one is reachable
 // through it). Array/iterable HOFs, the timer/microtask schedulers, and Promise continuations. A
@@ -1066,6 +1123,28 @@ function visitCalls(node) {
             else if (d2 && (ts.isVariableDeclaration(d2) || ts.isBindingElement(d2) || ts.isParameter(d2))) {
               rec.direct.add("Unknown");
               rec.why.add(`call:${recvText.slice(0, 40)}.${m}`);
+            }
+          }
+          // EXPLICIT iterator force: `it.next()` / `it.return()` / `it.throw()` on an OPAQUE iterator
+          // (a parameter / `any` / type-parameter typed as the `Iterator`/`Generator` protocol) runs
+          // caller-supplied iterator code — epistemically identical to forcing a for-of over an opaque
+          // iterable, and to invoking an opaque callback. The method resolves to the non-local es-lib
+          // `Iterator.next` signature, so the desugar above never sees it and the call lands here pure.
+          // Disclose Unknown (cardinal-sin guard). Gated on the iterator-protocol type symbol so an
+          // unrelated `.next()` on some other opaque param is not flagged; a LOCAL iterator's `next`
+          // resolves `<local>` (edged below), never reaching this non-local arm.
+          if ((m === "next" || m === "return" || m === "throw")) {
+            const why = opaqueIterableWhy(recv);
+            const rt = checker.getTypeAtLocation(recv);
+            const sn = rt?.getSymbol?.()?.getName?.()
+              ?? (rt?.flags & ts.TypeFlags.TypeParameter ? checker.getBaseConstraintOfType(rt)?.getSymbol?.()?.getName?.() : undefined);
+            const ITER_PROTO = new Set([
+              "Iterator", "AsyncIterator", "Iterable", "AsyncIterable",
+              "IterableIterator", "AsyncIterableIterator", "Generator", "AsyncGenerator",
+            ]);
+            if (why && sn && ITER_PROTO.has(sn)) {
+              rec.direct.add("Unknown");
+              rec.why.add(why); // `iterate:param#i` / `iterate:any` / `iterate:typeparam`
             }
           }
         }
@@ -1557,7 +1636,14 @@ function visitCalls(node) {
       iterExpr = node.arguments[0]; // Array.from(bag) — the iterable form (arg0 is iterated)
     if (iterExpr) {
       const owner = enclosing(node);
-      if (owner) edgeToTargets(fns.get(owner), iterationTargets(iterExpr, iterAsync));
+      if (owner) {
+        const targets = iterationTargets(iterExpr, iterAsync);
+        edgeToTargets(fns.get(owner), targets);
+        // Opaque-iterable honesty: a param/`any`/type-parameter iterable runs caller-supplied iterator
+        // code — disclose Unknown, mirroring the opaque-callback `call:param` posture (cardinal-sin
+        // guard). Skipped when iteration already resolved a LOCAL unit (real effect already edged).
+        noteOpaqueIteration(node, iterExpr, targets.length > 0);
+      }
     }
   }
   // `using r = expr` / `await using r = expr` (MED): the scope-exit guarantees `r[Symbol.dispose]()` /

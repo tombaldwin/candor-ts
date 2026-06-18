@@ -1046,5 +1046,53 @@ export function readData(): number { return dataOnly.k; }`,
         entry(report, "src.a.readData") === undefined, JSON.stringify(entry(report, "src.a.readData")));
 }
 
+// ── opaque-iterable force: a param/any/type-param iterable runs caller-supplied iterator code ──────
+// (epistemically identical to invoking an opaque callback → Unknown, never silent-pure). PRESERVE
+// concrete built-in iteration (array/string/Map → pure) and LOCAL generators (real effect propagates).
+{
+  const d = project({
+    "src/it.ts": `import * as fs from "fs";
+// BUG fixed: forcing an OPAQUE iterable/iterator parameter must disclose Unknown (was silent-pure).
+export function collect<T>(source: Iterable<T>): T[] { const o: T[] = []; for (const x of source) o.push(x); return o; }
+export function spreads<T>(xs: Iterable<T>): T[] { return [...xs]; }
+export function nexts<T>(it: Iterator<T>): void { it.next(); }
+export function fromParam(xs: Iterable<number>): number[] { return Array.from(xs); }
+export function destrParam(xs: Iterable<number>): number { const [a] = xs; return a as number; }
+export function anyIter(x: any): void { for (const v of x) { void v; } }
+// CONTROL — opaque callback (already correct): Unknown.
+export function callsParam(f: () => void): void { f(); }
+// NO-REGRESSION — concrete built-in iterables run NO user code → stay PURE.
+export function arrIter(): number[] { const a = [1, 2, 3]; const o: number[] = []; for (const x of a) o.push(x); return o; }
+export function arrSpread(): number[] { const a = [1, 2, 3]; return [...a]; }
+export function mapIter(): string[] { const m = new Map<string, number>(); const o: string[] = []; for (const [k] of m) o.push(k); return o; }
+// LOCAL generator consumer: the real effect (Fs) must propagate, NOT Unknown.
+function* fsGen(): Generator<number> { fs.readFileSync("/x"); yield 1; }
+export function localConsume(): number[] { const o: number[] = []; for (const v of fsGen()) o.push(v); return o; }
+// LOCAL pure generator consumer: stays PURE (no fabrication).
+function* pureGen(): Generator<number> { yield 1; }
+export function pureConsume(): number[] { const o: number[] = []; for (const v of pureGen()) o.push(v); return o; }`,
+  });
+  const { report } = scan(d);
+  const u = (fn) => entry(report, fn)?.inferred?.includes("Unknown");
+  // opaque-iterable / opaque-iterator force → Unknown (the fixed under-report)
+  check("[iter] opaque Iterable param (for-of) → Unknown", u("src.it.collect"), JSON.stringify(entry(report, "src.it.collect")));
+  check("[iter] opaque Iterable param (spread [...x]) → Unknown", u("src.it.spreads"), JSON.stringify(entry(report, "src.it.spreads")));
+  check("[iter] opaque Iterator param (.next()) → Unknown", u("src.it.nexts"), JSON.stringify(entry(report, "src.it.nexts")));
+  check("[iter] opaque iterable (Array.from) → Unknown", u("src.it.fromParam"));
+  check("[iter] opaque iterable (array destructure) → Unknown", u("src.it.destrParam"));
+  check("[iter] any-typed iterable → Unknown", u("src.it.anyIter"));
+  check("[iter] control: opaque callback still Unknown", u("src.it.callsParam"));
+  // NO-REGRESSION: concrete built-in iteration stays PURE (omitted from the report = pure)
+  check("[iter] array iteration stays PURE", entry(report, "src.it.arrIter") === undefined, JSON.stringify(entry(report, "src.it.arrIter")));
+  check("[iter] array spread stays PURE", entry(report, "src.it.arrSpread") === undefined, JSON.stringify(entry(report, "src.it.arrSpread")));
+  check("[iter] Map iteration stays PURE", entry(report, "src.it.mapIter") === undefined, JSON.stringify(entry(report, "src.it.mapIter")));
+  // local generator: real effect propagates, NOT a fabricated/under-reported Unknown
+  check("[iter] LOCAL generator consumer propagates the real effect (Fs)",
+        entry(report, "src.it.localConsume")?.inferred?.includes("Fs")
+        && !u("src.it.localConsume"), JSON.stringify(entry(report, "src.it.localConsume")));
+  check("[iter] LOCAL pure generator consumer stays PURE",
+        entry(report, "src.it.pureConsume") === undefined, JSON.stringify(entry(report, "src.it.pureConsume")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
