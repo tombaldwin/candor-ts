@@ -759,6 +759,34 @@ function resolveFnRefUnit(refNode, depth = 0) {
   return null;
 }
 
+// Unwrap a `<ref>.bind(…)` partial-application chain to the underlying function-reference RECEIVER.
+// `setTimeout(this.flush.bind(this), 0)` / `effFs.bind(null)` / `cb.bind(null,a).bind(null,b)` schedule the
+// BOUND function, but the argument node is a CallExpression (callee = PropertyAccessExpression `.bind`), so
+// the HOF-ref arm — which only edges identifier / property-access args — dropped it (silent-pure: the
+// cardinal sin). `.bind` is the third reflective-invoke member alongside `.call`/`.apply`. Given an arg
+// node, returns:
+//   { ref }     — it IS a `.bind` chain and the root receiver is a resolvable id/property-access ref
+//                 (recursing through chained `.bind().bind()`); the caller resolves it to its fn unit.
+//   { ref:null }— it IS a `.bind` chain but the root receiver is NOT a plain ref (`getCallback().bind(null)`,
+//                 a parenthesized/`any` holder) — still INVOKED by the HOF, so the caller discloses Unknown.
+//   null        — not a `.bind` call at all; the caller's id/property-access path handles it.
+// A `.bind` on a PURE fn resolves to a pure unit (no fabrication); the bind-unresolvable case never goes
+// silent-pure.
+function unwrapBind(node, depth = 0) {
+  if (!node || depth > 8) return null;
+  if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) return null;
+  if (node.expression.name.text !== "bind") return null;
+  let recv = node.expression.expression;
+  while (ts.isParenthesizedExpression(recv)) recv = recv.expression;
+  // chained `.bind().bind()` — recurse only when the receiver is ITSELF a `.bind` call, else it's an
+  // arbitrary call (`getCallback().bind`) whose result we can't pin → unresolvable bind.
+  if (ts.isCallExpression(recv)) {
+    const inner = unwrapBind(recv, depth + 1);
+    return inner ?? { ref: null };
+  }
+  return { ref: (ts.isIdentifier(recv) || ts.isPropertyAccessExpression(recv)) ? recv : null };
+}
+
 // Accessor resolution (the silent-pure-accessor fix): a property READ (`x.raw`) or property
 // ASSIGNMENT target (`x.path = v`) may resolve to a getter/setter whose body performs effects. We
 // resolve the property-name symbol to its declarations and look for an accessor of the matching
@@ -1085,6 +1113,23 @@ function visitCalls(node) {
           : ts.isIdentifier(node.expression) ? node.expression.text : null;
         if (mod !== "<local>" && calleeName && HOF_INVOKERS.has(calleeName)) {
           for (const a of node.arguments ?? []) {
+            // A `<ref>.bind(…)` partial-application is a CallExpression (skipped by the id/property-access
+            // gate below) but the INVOKING HOF calls the bound fn → its effects are reachable. Unwrap the
+            // `.bind` chain to the root receiver and resolve it like a bare ref (`resolveFnRefUnit` follows
+            // local aliases too). A `.bind` whose receiver can't be pinned to a fn unit (`getCallback().bind`,
+            // a param/`any` holder) still INVOKES whatever it wraps — disclose Unknown, never silent-pure.
+            const bound = unwrapBind(a);
+            if (bound) {
+              const bref = bound.ref;
+              const d3 = bref && realDecl(checker.getSymbolAtLocation(bref));
+              const tb = (d3 && nodeName.get(d3)) || (bref && resolveFnRefUnit(bref));
+              if (tb) rec.edges.add(tb);
+              else {
+                rec.direct.add("Unknown");
+                rec.why.add(`bind:${(bref ?? a).getText().replace(/\s+/g, "").slice(0, 40)}`);
+              }
+              continue;
+            }
             if (!ts.isIdentifier(a) && !ts.isPropertyAccessExpression(a)) continue;
             const d2 = realDecl(checker.getSymbolAtLocation(a));
             const t = d2 && nodeName.get(d2);

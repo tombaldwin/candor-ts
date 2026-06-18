@@ -129,6 +129,60 @@ export function viaParam(fn: Function, p: string) { const m = fn; m.call(null, p
         eff("src.a.viaParam").includes("Unknown"), JSON.stringify(eff("src.a.viaParam")));
 }
 
+// ── 2e. a `.bind()`-wrapped callback passed to an INVOKING HOF must NOT silent-pure ─────────────────
+// `setTimeout(this.flush.bind(this), 0)` / `[1,2].forEach(effFs.bind(null))` schedule the BOUND fn, but the
+// argument is a CallExpression (callee = `.bind`), which the HOF-ref arm skipped (it only edged identifier /
+// property-access args) → the scheduling fn read silent-pure (the cardinal sin, gate-evadable `deny Fs`).
+// `.bind` is the missing third member of the `.call`/`.apply` reflective-invoke family. FIX = unwrap the
+// `.bind` chain to the root receiver and resolve it to its fn unit (recovers the precise effect); an
+// unresolvable receiver discloses Unknown; a `.bind` on a PURE fn stays pure (no fabrication).
+{
+  const d = project({
+    "src/a.ts": `import { writeFileSync } from "fs";
+import { execSync } from "child_process";
+function effFs(p: string) { writeFileSync(p, "x"); }
+function effExec() { execSync("ls"); }
+function pure(n: number) { return n + 1; }
+function getCb(): () => void { return () => {}; }
+class W {
+  flush() { writeFileSync("/tmp/x", "y"); }
+  schedule() { setTimeout(this.flush.bind(this), 0); }
+}
+export function bindSetTimeout()  { setTimeout(effFs.bind(null, "/tmp/x"), 0); }
+export function bindSetImmediate(){ setImmediate(effExec.bind(null)); }
+export function bindThen()        { Promise.resolve().then(effFs.bind(null, "/tmp/x")); }
+export function bindForEach()     { [1, 2].forEach(effFs.bind(null, "/tmp/x")); }
+export function bindMap()         { return [1, 2].map(effFs.bind(null, "/tmp/x")); }
+export function bindChained()     { setTimeout(effFs.bind(null).bind(null, "/tmp/x"), 0); }
+export function viaW()            { return new W().schedule(); }
+export function bindPure()        { setTimeout(pure.bind(null, 3), 0); }
+export function bindUnresolvable(){ setTimeout(getCb().bind(null), 0); }`,
+  });
+  const { report } = scan(d);
+  const eff = (fn) => entry(report, fn)?.inferred ?? [];
+  // BUG cases: the bound effectful callback's effect is now reachable at the scheduling fn (precise).
+  check("bind→setTimeout no longer silent-pure (carries Fs)", eff("src.a.bindSetTimeout").includes("Fs"),
+        JSON.stringify(eff("src.a.bindSetTimeout")));
+  check("bind→setImmediate carries Exec", eff("src.a.bindSetImmediate").includes("Exec"),
+        JSON.stringify(eff("src.a.bindSetImmediate")));
+  check("bind→Promise.then carries Fs", eff("src.a.bindThen").includes("Fs"),
+        JSON.stringify(eff("src.a.bindThen")));
+  check("bind→forEach carries Fs", eff("src.a.bindForEach").includes("Fs"),
+        JSON.stringify(eff("src.a.bindForEach")));
+  check("bind→map carries Fs", eff("src.a.bindMap").includes("Fs"),
+        JSON.stringify(eff("src.a.bindMap")));
+  check("this.method.bind(this)→setTimeout carries Fs", eff("src.a.W.schedule").includes("Fs"),
+        JSON.stringify(eff("src.a.W.schedule")));
+  check("chained .bind().bind() resolves through to root ref (Fs)", eff("src.a.bindChained").includes("Fs"),
+        JSON.stringify(eff("src.a.bindChained")));
+  // NO FABRICATION: a PURE fn .bind()'d and scheduled stays pure — never gains an effect.
+  check("no-fabrication: a pure fn .bind()'d to setTimeout stays pure", eff("src.a.bindPure").length === 0,
+        JSON.stringify(eff("src.a.bindPure")));
+  // HONESTY: an unresolvable receiver (`getCb().bind(null)`) discloses Unknown, never silent-pure.
+  check("honesty: an unresolvable .bind() receiver discloses Unknown (not silent-pure)",
+        eff("src.a.bindUnresolvable").includes("Unknown"), JSON.stringify(eff("src.a.bindUnresolvable")));
+}
+
 // ── 2b. `show` SURFACES the literal Fs paths + Exec cmds (the regression that shipped) ─────────────
 // scan writes the surface under report keys `paths`/`cmds`; `show` once read a nonexistent `e.fs`, so
 // it silently dropped every file path even though the MCP `candor_show` doc promises "paths". The CLI
