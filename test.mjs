@@ -183,6 +183,73 @@ export function bindUnresolvable(){ setTimeout(getCb().bind(null), 0); }`,
         eff("src.a.bindUnresolvable").includes("Unknown"), JSON.stringify(eff("src.a.bindUnresolvable")));
 }
 
+// ── 2f. IMPLICIT VALUE-COERCION edges: a coercion method (toString/valueOf/toJSON/[Symbol.toPrimitive])
+// invoked by the JS coercion protocol must NOT silent-pure the triggering fn ───────────────────────
+// `"x" + e` / `` `${e}` `` / `String(e)` call e.toString; `e * 2` / `-e` call e.valueOf;
+// `JSON.stringify(e)` calls e.toJSON; `[Symbol.toPrimitive]` is preferred for `+`/arith. None surfaces
+// as a CallExpression on the user method, so an effectful coercion member read silent-pure (cardinal
+// sin). FIX = resolve the operand's type's coercion member via the checker, edge to it when LOCAL.
+// NO FABRICATION: a PURE coercion member edges a pure unit; string+string / number+number / String(42) /
+// JSON.stringify of a plain object (no toJSON) resolve to no LOCAL member → stay pure.
+{
+  const d = project({
+    "src/a.ts": `import * as fsm from "node:fs";
+class Eff {
+  toString(): string { fsm.appendFileSync("/tmp/x", "s"); return "e"; }
+  valueOf(): number { fsm.appendFileSync("/tmp/x", "v"); return 1; }
+  toJSON(): object { fsm.appendFileSync("/tmp/x", "j"); return {}; }
+  [Symbol.toPrimitive](_h: string): string { fsm.appendFileSync("/tmp/x", "p"); return "e"; }
+}
+class Pure { toString() { return "p"; } valueOf() { return 2; } toJSON() { return {}; } }
+export function concatTrigger(): string { const e = new Eff(); return "x" + e; }
+export function templateTrigger(e: Eff): string { return \`event: \${e}\`; }
+export function stringTrigger(): string { const e = new Eff(); return String(e); }
+export function emptyConcat(): string { const e = new Eff(); return "" + e; }
+export function arithTrigger(): number { const e = new Eff(); return e * 2; }
+export function unaryTrigger(): number { const e = new Eff(); return -e; }
+export function jsonTrigger(): string { const e = new Eff(); return JSON.stringify(e); }
+export function pureConcat(): string { const p = new Pure(); return "x" + p; }
+export function pureArith(): number { const p = new Pure(); return p * 2; }
+export function pureJson(): string { const p = new Pure(); return JSON.stringify(p); }
+export function stringNum(): string { return String(42); }
+export function strStr(a: string, b: string): string { return a + b; }
+export function numNum(a: number, b: number): number { return a + b; }
+export function plainJson(): string { return JSON.stringify({ a: 1 }); }`,
+  });
+  const { report } = scan(d);
+  const eff = (fn) => entry(report, fn)?.inferred ?? [];
+  // EFFECTFUL triggers: the coercion member's Fs is now reachable at the triggering fn.
+  check("toString via string-concat carries Fs", eff("src.a.concatTrigger").includes("Fs"),
+        JSON.stringify(eff("src.a.concatTrigger")));
+  check("toString via template literal carries Fs", eff("src.a.templateTrigger").includes("Fs"),
+        JSON.stringify(eff("src.a.templateTrigger")));
+  check("toString via String() carries Fs", eff("src.a.stringTrigger").includes("Fs"),
+        JSON.stringify(eff("src.a.stringTrigger")));
+  check("toString via \"\"+x carries Fs", eff("src.a.emptyConcat").includes("Fs"),
+        JSON.stringify(eff("src.a.emptyConcat")));
+  check("valueOf via arithmetic (x*2) carries Fs", eff("src.a.arithTrigger").includes("Fs"),
+        JSON.stringify(eff("src.a.arithTrigger")));
+  check("valueOf via unary (-x) carries Fs", eff("src.a.unaryTrigger").includes("Fs"),
+        JSON.stringify(eff("src.a.unaryTrigger")));
+  check("toJSON via JSON.stringify carries Fs", eff("src.a.jsonTrigger").includes("Fs"),
+        JSON.stringify(eff("src.a.jsonTrigger")));
+  // NO FABRICATION: pure coercion members + primitive operands stay pure.
+  check("no-fabrication: pure toString via concat stays pure", eff("src.a.pureConcat").length === 0,
+        JSON.stringify(eff("src.a.pureConcat")));
+  check("no-fabrication: pure valueOf via arith stays pure", eff("src.a.pureArith").length === 0,
+        JSON.stringify(eff("src.a.pureArith")));
+  check("no-fabrication: pure toJSON via stringify stays pure", eff("src.a.pureJson").length === 0,
+        JSON.stringify(eff("src.a.pureJson")));
+  check("no-fabrication: String(42) stays pure", eff("src.a.stringNum").length === 0,
+        JSON.stringify(eff("src.a.stringNum")));
+  check("no-fabrication: string+string concat stays pure", eff("src.a.strStr").length === 0,
+        JSON.stringify(eff("src.a.strStr")));
+  check("no-fabrication: number+number arithmetic stays pure", eff("src.a.numNum").length === 0,
+        JSON.stringify(eff("src.a.numNum")));
+  check("no-fabrication: JSON.stringify of a plain object (no toJSON) stays pure",
+        eff("src.a.plainJson").length === 0, JSON.stringify(eff("src.a.plainJson")));
+}
+
 // ── 2b. `show` SURFACES the literal Fs paths + Exec cmds (the regression that shipped) ─────────────
 // scan writes the surface under report keys `paths`/`cmds`; `show` once read a nonexistent `e.fs`, so
 // it silently dropped every file path even though the MCP `candor_show` doc promises "paths". The CLI

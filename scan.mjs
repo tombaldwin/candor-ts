@@ -962,6 +962,71 @@ function iterationTargets(expr, isAsync) {
 function edgeToTargets(rec, decls) {
   for (const d of decls) { const t = nodeName.get(d); if (t) rec.edges.add(t); }
 }
+
+// ---- implicit VALUE-COERCION desugaring (the silent-pure holes where the JS coercion protocol calls a
+// user method the AST walk never visits) ----------------------------------------------------------
+// JS coerces an object to a primitive by INVOKING a method on it: `a + b`/`` `${x}` ``/`String(x)` call
+// `toString` (or `[Symbol.toPrimitive]`); `x + 1`/`-x`/`+x`/relational call `valueOf` (or
+// `[Symbol.toPrimitive]`); `JSON.stringify(x)` calls `toJSON`. None of these surface as a
+// CallExpression on the user method, so an effectful `toString`/`valueOf`/`toJSON`/`[Symbol.toPrimitive]`
+// reached this way read SILENT-PURE (the cardinal sin). We model the desugar EXACTLY as the spec demands:
+// resolve the operand's type's coercion member via the checker and edge to it ONLY when it is a LOCAL
+// unit. A built-in/external member (lib.es `Object.prototype.toString`, a stdlib `toJSON`) resolves
+// non-local → no edge → stays pure (the precision invariant); a PURE local member edges to a pure unit
+// (contributes nothing). NEVER a fabricated edge: a non-object operand, or a type with no such member,
+// resolves to nothing.
+
+// Resolve coercion members of `expr`'s type to their LOCAL decls. `names` is the ordered set of plain
+// member names to try; `withPrimitive` also consults the well-known `[Symbol.toPrimitive]` (which JS
+// prefers over toString/valueOf when present). A union operand is widened to its constituents so a
+// `A | B` value edges to whichever side declares a LOCAL coercion member. Returns LOCAL member decls.
+function coercionTargets(expr, names, withPrimitive) {
+  const t = checker.getTypeAtLocation(expr);
+  if (!t) return [];
+  // Widen unions/intersections so each branch's coercion member is considered (a `Foo | string` operand
+  // can be a Foo at runtime → its local toString runs). A primitive/literal constituent has no LOCAL
+  // member and contributes nothing.
+  const parts = t.isUnionOrIntersection?.() ? t.types : [t];
+  const out = [];
+  for (const part of parts) {
+    if (!part || !part.getProperty) continue;
+    if (withPrimitive) {
+      const pd = declOfSym(wellKnownSymbolMember(part, ["__@toPrimitive"]));
+      if (pd && declIsLocal(pd) && !out.includes(pd)) out.push(pd);
+    }
+    for (const n of names) {
+      const md = declOfSym(part.getProperty(n));
+      // A METHOD (or function-valued property) member — not a getter/data field of an unrelated shape.
+      if (md && declIsLocal(md)
+          && (ts.isMethodDeclaration(md) || ts.isMethodSignature(md)
+              || ts.isPropertyDeclaration(md) || ts.isPropertyAssignment(md)
+              || ts.isFunctionDeclaration(md) || ts.isFunctionExpression(md) || ts.isArrowFunction(md))
+          && !out.includes(md))
+        out.push(md);
+    }
+  }
+  return out;
+}
+// True when `expr`'s type is an OBJECT type that could carry a coercion method (so `a + b` may trigger
+// one). A pure primitive operand (string/number/boolean/bigint/null/undefined) never invokes
+// toString/valueOf in `+` (string+string concatenates, number+number adds — no method call), so we skip
+// it: edging there would be at best inert and the type-narrowing keeps `coercionTargets` from widening a
+// huge `string | Foo` into spurious work. An object/union-containing-object is a candidate.
+function mayCoerceObject(expr) {
+  const t = checker.getTypeAtLocation(expr);
+  if (!t) return false;
+  const parts = t.isUnionOrIntersection?.() ? t.types : [t];
+  const PRIM = ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFlags.BigIntLike
+    | ts.TypeFlags.BooleanLike | ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.VoidLike
+    | ts.TypeFlags.ESSymbolLike;
+  for (const part of parts) {
+    if (!part) continue;
+    if (part.flags & PRIM) continue;           // a pure primitive branch never coerces via a method
+    if (part.flags & ts.TypeFlags.Object) return true;
+    if (part.isUnionOrIntersection?.()) return true; // nested — let coercionTargets sort it out
+  }
+  return false;
+}
 // Does iterating `expr` FORCE an OPAQUE (caller-supplied) iterable? Forcing an iterable runs its
 // `[Symbol.iterator]`/`next` body, which — when the iterable is a PARAMETER / `any` / a bare type-
 // parameter — is caller-chosen code that can perform arbitrary I/O. This is epistemically identical to
@@ -1706,6 +1771,72 @@ function visitCalls(node) {
         const disposeDecl = declOfSym(wellKnownSymbolMember(t, prefixes));
         if (disposeDecl && declIsLocal(disposeDecl)) edgeToTargets(fns.get(owner), [disposeDecl]);
       }
+    }
+  }
+  // IMPLICIT VALUE-COERCION desugaring (HIGH): the JS coercion protocol invokes a user method the AST
+  // walk never visits as a CallExpression. Resolve the operand's type's coercion member and edge to it
+  // when LOCAL (a built-in/external member resolves non-local → no edge → stays pure). NEVER fabricate.
+  {
+    const owner = enclosing(node);
+    const recOf = () => owner && fns.get(owner);
+    // 1+2. BINARY operators. `+` with an OBJECT operand triggers toString/valueOf (string+string,
+    // number+number have no coercion method — stay pure, gated by mayCoerceObject). Arithmetic
+    // (`-`/`*`/`/`/`%`/`**`) and relational (`<`/`>`/`<=`/`>=`) coerce to a NUMBER → valueOf (then
+    // toString). `[Symbol.toPrimitive]` is preferred by JS over both — always consulted.
+    if (ts.isBinaryExpression(node) && owner) {
+      const op = node.operatorToken.kind;
+      const K = ts.SyntaxKind;
+      const ARITH = new Set([K.MinusToken, K.AsteriskToken, K.SlashToken, K.PercentToken,
+        K.AsteriskAsteriskToken, K.LessThanToken, K.GreaterThanToken, K.LessThanEqualsToken,
+        K.GreaterThanEqualsToken, K.AmpersandToken, K.BarToken, K.CaretToken,
+        K.LessThanLessThanToken, K.GreaterThanGreaterThanToken, K.GreaterThanGreaterThanGreaterThanToken]);
+      const COMPOUND_ARITH = new Set([K.MinusEqualsToken, K.AsteriskEqualsToken, K.SlashEqualsToken,
+        K.PercentEqualsToken, K.AsteriskAsteriskEqualsToken]);
+      if (op === K.PlusToken || op === K.PlusEqualsToken) {
+        // string concat / `+` arithmetic: an OBJECT operand is coerced via toString OR valueOf (the
+        // order depends on the hint, but EITHER may run — edge to both when local). string+string and
+        // number+number have only primitive operands → mayCoerceObject false → no edge (pure).
+        for (const operand of [node.left, node.right]) {
+          if (mayCoerceObject(operand))
+            edgeToTargets(recOf(), coercionTargets(operand, ["valueOf", "toString"], true));
+        }
+      } else if (ARITH.has(op) || COMPOUND_ARITH.has(op)) {
+        for (const operand of [node.left, node.right]) {
+          if (mayCoerceObject(operand))
+            edgeToTargets(recOf(), coercionTargets(operand, ["valueOf", "toString"], true));
+        }
+      }
+    }
+    // 2. UNARY arithmetic `-x` / `+x` / `~x` coerces the operand to a number → valueOf (then toString /
+    // [Symbol.toPrimitive]). (`!x` is boolean coercion — no method call; excluded.)
+    if (ts.isPrefixUnaryExpression(node) && owner
+        && (node.operator === ts.SyntaxKind.MinusToken || node.operator === ts.SyntaxKind.PlusToken
+            || node.operator === ts.SyntaxKind.TildeToken)
+        && mayCoerceObject(node.operand)) {
+      edgeToTargets(recOf(), coercionTargets(node.operand, ["valueOf", "toString"], true));
+    }
+    // 1. TEMPLATE expression `` `${x}` ``: each interpolated substitution is string-coerced → toString
+    // (then [Symbol.toPrimitive]/valueOf). (A TaggedTemplate is handled separately below — the tag fn
+    // receives the raw substitution values, no per-sub coercion, so we exclude tagged templates here.)
+    if (ts.isTemplateExpression(node) && owner && !ts.isTaggedTemplateExpression(node.parent)) {
+      for (const span of node.templateSpans)
+        if (mayCoerceObject(span.expression))
+          edgeToTargets(recOf(), coercionTargets(span.expression, ["toString", "valueOf"], true));
+    }
+    // 1+4. CALL forms `String(x)` (→ toString) and `JSON.stringify(x)` (→ toJSON). These resolve to the
+    // es-lib `StringConstructor`/`JSON.stringify` signature (not the user method), so the CallExpression
+    // walk above never follows the coercion. Edge to the argument's LOCAL toString / toJSON.
+    if (ts.isCallExpression(node) && owner && node.arguments?.[0]) {
+      const callee = node.expression.getText().replace(/\s+/g, "");
+      const arg0 = node.arguments[0];
+      if (callee === "String" && ts.isIdentifier(node.expression) && mayCoerceObject(arg0))
+        edgeToTargets(recOf(), coercionTargets(arg0, ["toString", "valueOf"], true));
+      // `"" + x` is covered by the binary arm; `String(x)` is the explicit conversion form.
+      else if (callee === "JSON.stringify")
+        // toJSON is consulted regardless of operand shape (JSON.stringify checks for it on any value);
+        // a plain object with no LOCAL toJSON resolves to nothing → pure (no fabrication). NO Symbol-
+        // toPrimitive here — JSON.stringify uses toJSON only, not the primitive-coercion protocol.
+        edgeToTargets(recOf(), coercionTargets(arg0, ["toJSON"], false));
     }
   }
   // TAGGED TEMPLATE (LOW): `` tag`…` `` calls `tag(strings, ...subs)`. getResolvedSignature resolves
