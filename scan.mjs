@@ -857,7 +857,7 @@ function recordAccessorHit(owner, hit, label) {
     rec.edges.add(t); // (EDGE) into the accessor unit — effects propagate
   } else {
     rec.direct.add("Unknown");
-    rec.why.add(`accessor:${label}`);
+    rec.why.add(`reflect:accessor:${label}`); // a defineProperty runtime accessor (descriptor get/set unseen) — metaprogramming, canonical `reflect:`
   }
 }
 
@@ -1051,8 +1051,8 @@ function opaqueIterableWhy(expr) {
   if (!t) return null;
   // (a) `any` or a bare TYPE PARAMETER (`<T extends Iterable<…>>(x: T)`): the concrete iterable is
   // indeterminate, so its iterator body is unknowable — never silently pure.
-  if (t.flags & ts.TypeFlags.Any) return "iterate:any";
-  if (t.flags & ts.TypeFlags.TypeParameter) return "iterate:typeparam";
+  if (t.flags & ts.TypeFlags.Any) return "callback:opaque-iterable:any";
+  if (t.flags & ts.TypeFlags.TypeParameter) return "callback:opaque-iterable:typeparam";
   // (b) the type IS an opaque iterable INTERFACE *and* the value is CALLER-SUPPLIED (a parameter / binding
   // element): `collect(source: Iterable<T>)`, `nexts(it: Iterator<T>)`, `drain(g: Generator<T>)`. The
   // caller chooses the concrete iterator (arbitrary I/O), identical to invoking an opaque callback. BOTH
@@ -1065,7 +1065,7 @@ function opaqueIterableWhy(expr) {
     const d = realDecl(checker.getSymbolAtLocation(expr));
     if (d && (ts.isParameter(d) || ts.isBindingElement(d))) {
       const idx = ts.isParameter(d) && d.parent ? d.parent.parameters.indexOf(d) : -1;
-      return idx >= 0 ? `iterate:param#${idx}` : "iterate:param";
+      return idx >= 0 ? `callback:opaque-iterable:param#${idx}` : "callback:opaque-iterable:param";
     }
   }
   return null;
@@ -1155,7 +1155,7 @@ function visitCalls(node) {
           } else {
             rec.direct.add("Unknown"); // unresolvable call → Unknown, never silent-pure (SPEC §4)
             const callee = (node.expression?.getText?.() ?? "?").replace(/\s+/g, "").slice(0, 60);
-            rec.why.add(`call:${callee}`); // an `any`-typed/indeterminate callee — named, so triage starts here
+            rec.why.add(`callback:${callee}`); // an `any`-typed/indeterminate callee (a function VALUE) — canonical `callback:`
           }
         }
       } else {
@@ -1191,7 +1191,7 @@ function visitCalls(node) {
               if (tb) rec.edges.add(tb);
               else {
                 rec.direct.add("Unknown");
-                rec.why.add(`bind:${(bref ?? a).getText().replace(/\s+/g, "").slice(0, 40)}`);
+                rec.why.add(`callback:bind:${(bref ?? a).getText().replace(/\s+/g, "").slice(0, 40)}`); // `.bind(...)` yields a function VALUE — canonical `callback:`
               }
               continue;
             }
@@ -1232,7 +1232,7 @@ function visitCalls(node) {
             // non-value receiver — a type, a literal — resolves to no decl and stays out, no fabrication.)
             else if (d2 && (ts.isVariableDeclaration(d2) || ts.isBindingElement(d2) || ts.isParameter(d2))) {
               rec.direct.add("Unknown");
-              rec.why.add(`call:${recvText.slice(0, 40)}.${m}`);
+              rec.why.add(`callback:${recvText.slice(0, 40)}.${m}`); // method on an indeterminate-valued receiver (no resolvable owner TYPE) — canonical `callback:`, not the frontier's `dispatch:OWNER.member`
             }
           }
           // EXPLICIT iterator force: `it.next()` / `it.return()` / `it.throw()` on an OPAQUE iterator
@@ -1254,7 +1254,7 @@ function visitCalls(node) {
             ]);
             if (why && sn && ITER_PROTO.has(sn)) {
               rec.direct.add("Unknown");
-              rec.why.add(why); // `iterate:param#i` / `iterate:any` / `iterate:typeparam`
+              rec.why.add(why); // `callback:opaque-iterable:param#i` / `:any` / `:typeparam` (opaque iteration ≈ opaque callback)
             }
           }
         }
@@ -1308,11 +1308,11 @@ function visitCalls(node) {
                   for (const ot of oTargets) rec.edges.add(ot);
                   if (!allResolved) {
                     rec.direct.add("Unknown");
-                    rec.why.add(`override:${decl.name?.getText?.() ?? "member"}`);
+                    rec.why.add(`dispatch:${decl.parent?.name?.getText?.() ?? "type"}.${decl.name?.getText?.() ?? "member"}`); // class-override dispatch (overridable member, unresolved/too-wide family) — canonical `dispatch:OWNER.member`, frontier-relevant
                   }
                 } else {
                   rec.direct.add("Unknown"); // override family too wide to enumerate soundly
-                  rec.why.add(`override:${decl.name?.getText?.() ?? "member"}`);
+                  rec.why.add(`dispatch:${decl.parent?.name?.getText?.() ?? "type"}.${decl.name?.getText?.() ?? "member"}`); // class-override dispatch (overridable member, unresolved/too-wide family) — canonical `dispatch:OWNER.member`, frontier-relevant
                 }
               }
             }
@@ -1375,8 +1375,9 @@ function visitCalls(node) {
               }
               if (!edged) {
                 rec.direct.add("Unknown");
-                const tn = decl.parent?.name?.getText?.() ?? decl.name?.getText?.() ?? "type";
-                rec.why.add(`dispatch:${tn}`); // resolution landed on a type, not a body
+                const tn = decl.parent?.name?.getText?.() ?? "type";
+                const mn = decl.name?.getText?.() ?? "member";
+                rec.why.add(`dispatch:${tn}.${mn}`); // resolution landed on a type, not a body — canonical `dispatch:OWNER.member` (frontier-relevant)
               }
             }
           }
@@ -1395,7 +1396,7 @@ function visitCalls(node) {
           // resolved to a benign es-lib member and read SILENT-PURE (a code-execution sink reported pure).
           if (name === "eval" && parent !== "Math" && parent !== "JSON") {
             rec.direct.add("Unknown");
-            rec.why.add("call:eval");
+            rec.why.add("reflect:eval"); // eval executes a runtime-supplied string — canonical `reflect:`
           }
           if ((parent === "DateConstructor" && name === "now") || (parent === "Performance" && name === "now"))
             rec.direct.add("Clock");
@@ -1711,7 +1712,7 @@ function visitCalls(node) {
         const kinds = (rsym && definePropDynamicKey.get(rsym)) || (rsym0 && definePropDynamicKey.get(rsym0));
         if (kinds && kinds.has(kind)) {
           const owner = enclosing(node);
-          if (owner) { fns.get(owner).direct.add("Unknown"); fns.get(owner).why.add(`defineProperty:dynamic-key`); }
+          if (owner) { fns.get(owner).direct.add("Unknown"); fns.get(owner).why.add(`reflect:defineProperty:dynamic-key`); } // dynamic-key descriptor install — metaprogramming, canonical `reflect:`
         }
       }
     };

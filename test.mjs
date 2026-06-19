@@ -799,7 +799,7 @@ export function recv(cb: () => void, other: string): void { cb(); }`,
   });
   const { report } = scan(d);
   check("unknownWhy names the unresolvable callee", 
-        entry(report, "src.u.launder")?.unknownWhy?.some((w) => w.startsWith("call:")),
+        entry(report, "src.u.launder")?.unknownWhy?.some((w) => w.startsWith("callback:")),
         JSON.stringify(entry(report, "src.u.launder")));
   check("unknownWhy names the opaque callback param",
         entry(report, "src.u.recv")?.unknownWhy?.includes("callback:param#0"),
@@ -869,9 +869,9 @@ export function orphan(k: Sink): void { k.flush(); }`,
         && entry(report, "src.app.handle")?.inferred.includes("Fs")
         && !entry(report, "src.app.handle")?.inferred.includes("Unknown"),
         JSON.stringify({ cg: cg["src.app.handle"], e: entry(report, "src.app.handle") }));
-  check("an interface with NO implementor stays honest Unknown (dispatch:<Type>)",
+  check("an interface with NO implementor stays honest Unknown (canonical dispatch:Owner.member)",
         entry(report, "src.app.orphan")?.inferred.includes("Unknown")
-        && entry(report, "src.app.orphan")?.unknownWhy?.includes("dispatch:Sink"),
+        && entry(report, "src.app.orphan")?.unknownWhy?.some((w) => w.startsWith("dispatch:Sink.")),
         JSON.stringify(entry(report, "src.app.orphan")));
 }
 
