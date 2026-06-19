@@ -1308,7 +1308,7 @@ function visitCalls(node) {
                   for (const ot of oTargets) rec.edges.add(ot);
                   if (!allResolved) {
                     rec.direct.add("Unknown");
-                    rec.why.add(`dispatch:${decl.parent?.name?.getText?.() ?? "type"}.${decl.name?.getText?.() ?? "member"}`); // class-override dispatch (overridable member, unresolved/too-wide family) — canonical `dispatch:OWNER.member`, frontier-relevant
+                    rec.why.add(`dispatch:${decl.parent?.name ? `${moduleOf(decl.parent.getSourceFile())}.${decl.parent.name.getText()}` : "type"}.${decl.name?.getText?.() ?? "member"}`); // class-override dispatch — canonical `dispatch:QUALIFIED-OWNER.member`, frontier-relevant
                   }
                 } else {
                   rec.direct.add("Unknown"); // override family too wide to enumerate soundly
@@ -1375,7 +1375,12 @@ function visitCalls(node) {
               }
               if (!edged) {
                 rec.direct.add("Unknown");
-                const tn = decl.parent?.name?.getText?.() ?? "type";
+                // QUALIFIED owner (module.Type), matching the `mod.Class.member` fn quals so the
+                // dispatch-frontier (callers --include-unknown) can resolve overrides against the
+                // hierarchy sidecar. Bare `decl.parent.name` would not match a reacher's declaringType.
+                const tn = decl.parent?.name
+                  ? `${moduleOf(decl.parent.getSourceFile())}.${decl.parent.name.getText()}`
+                  : "type";
                 const mn = decl.name?.getText?.() ?? "member";
                 rec.why.add(`dispatch:${tn}.${mn}`); // resolution landed on a type, not a body — canonical `dispatch:OWNER.member` (frontier-relevant)
               }
@@ -1961,6 +1966,30 @@ for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
 const writeAtomic = (file, text) => { const tmp = `${file}.${process.pid}.tmp`; fs.writeFileSync(tmp, text); fs.renameSync(tmp, file); };
 writeAtomic(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
 writeAtomic(`${outPrefix}.callgraph.json`, JSON.stringify(cg, null, 1));
+// Type-hierarchy sidecar (SPEC §4 / 0.7): each project class/interface (qualified `mod.Name`, matching
+// the `mod.Class.member` fn quals) -> its qualified direct supertypes/interfaces. Compact (O(types)),
+// lets `callers --include-unknown` resolve whether a confirmed reacher is an override of a `dispatch:`
+// owner WITHOUT storing the dropped candidate edges (which would re-encode the flood bounded-CHA prevents).
+const hierarchy = {};
+for (const sf of sources) {
+  const mod = moduleOf(sf);
+  (function walk(node) {
+    if ((ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node)) && node.name) {
+      const supers = [];
+      for (const h of node.heritageClauses ?? []) {
+        for (const t of h.types ?? []) {
+          let sym = checker.getSymbolAtLocation(t.expression);
+          if (sym && sym.flags & ts.SymbolFlags.Alias) { try { sym = checker.getAliasedSymbol(sym); } catch { /* keep */ } }
+          const d = (sym?.declarations ?? []).find((x) => ts.isClassDeclaration(x) || ts.isInterfaceDeclaration(x));
+          supers.push(d && d.name ? `${moduleOf(d.getSourceFile())}.${d.name.getText()}` : t.expression.getText());
+        }
+      }
+      if (supers.length) hierarchy[`${mod}.${node.name.getText()}`] = supers;
+    }
+    ts.forEachChild(node, walk);
+  })(sf);
+}
+writeAtomic(`${outPrefix}.hierarchy.json`, JSON.stringify(hierarchy, null, 1));
 console.error(`candor-ts: wrote ${functions.length} effectful functions (${fns.size} analyzed, ${sources.length} files) to ${outPrefix}.json`);
 if (unlistedSeen.size > 0) {
   const top = [...unlistedSeen.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));

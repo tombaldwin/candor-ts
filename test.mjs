@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { show, loadReport } from "./query-core.mjs";
+import { show, loadReport, callersFrontier } from "./query-core.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let pass = 0, fail = 0;
@@ -871,7 +871,7 @@ export function orphan(k: Sink): void { k.flush(); }`,
         JSON.stringify({ cg: cg["src.app.handle"], e: entry(report, "src.app.handle") }));
   check("an interface with NO implementor stays honest Unknown (canonical dispatch:Owner.member)",
         entry(report, "src.app.orphan")?.inferred.includes("Unknown")
-        && entry(report, "src.app.orphan")?.unknownWhy?.some((w) => w.startsWith("dispatch:Sink.")),
+        && entry(report, "src.app.orphan")?.unknownWhy?.some((w) => /^dispatch:.*\.Sink\.flush$/.test(w)),
         JSON.stringify(entry(report, "src.app.orphan")));
 }
 
@@ -1394,6 +1394,27 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
         && !u("src.it.localConsume"), JSON.stringify(entry(report, "src.it.localConsume")));
   check("[iter] LOCAL pure generator consumer stays PURE",
         entry(report, "src.it.pureConsume") === undefined, JSON.stringify(entry(report, "src.it.pureConsume")));
+}
+
+// ── callers --include-unknown ⟨0.7⟩: the unresolved-dispatch frontier. Confirmed callers never include a
+// fn reaching the target only via a `dispatch:OWNER.member` the engine declined to resolve; the frontier
+// discloses those iff a confirmed reacher is an override of OWNER.member (subtype-per-hierarchy = precise).
+{
+  const cg = { "m.Impl.run": ["m.Sink.touch"], "m.Sink.touch": [], "m.Frontier.go": [] };
+  const fns = [{ fn: "m.Frontier.go", unknownWhy: ["dispatch:m.Base.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
+  const hier = { "m.Impl": ["m.Base"] }; // Impl <: Base
+  const r = callersFrontier(cg, fns, hier, "m.Sink.touch");
+  check("frontier: a dispatch:Base.run is disclosed when a confirmed reacher overrides Base.run",
+        r.transitive.includes("m.Impl.run")
+        && r.possibleViaUnknownDispatch.length === 1
+        && r.possibleViaUnknownDispatch[0].fn === "m.Frontier.go"
+        && r.possibleViaUnknownDispatch[0].viaDispatchOn === "run",
+        JSON.stringify(r.possibleViaUnknownDispatch));
+  const fns2 = [{ fn: "m.Frontier.go", unknownWhy: ["dispatch:m.Unrelated.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
+  check("frontier: precision drops an unrelated same-named dispatch (hierarchy rules it out)",
+        callersFrontier(cg, fns2, hier, "m.Sink.touch").possibleViaUnknownDispatch.length === 0, "");
+  check("frontier: no hierarchy -> simple-name match over-lists (safe lower-bound direction)",
+        callersFrontier(cg, fns2, {}, "m.Sink.touch").possibleViaUnknownDispatch.length === 1, "");
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);

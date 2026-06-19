@@ -26,6 +26,7 @@ import { printAgents } from "./contract.mjs";
 // JVM `Type#method` report). Importing the shared functions removes all three divergences (review find).
 import { impact as coreImpact, path as corePath, gains as coreGains,
          show as coreShow, blindspots as coreBlindspots,
+         callers as coreCallers, callersFrontier, loadHierarchy,
          loadReport, loadCallgraph, matches } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
 
@@ -58,21 +59,14 @@ switch (cmd) {
     break;
   }
   case "callers": {
-    const [prefix, q] = args;
+    // --include-unknown ⟨0.7⟩ adds the unresolved-dispatch frontier (possibleViaUnknownDispatch); without
+    // it, the byte-for-byte {of,direct,transitive} shape is unchanged (cross-engine parity). Call the
+    // shared query-core so the CLI and MCP compute one truth (the prior inline copy had drifted before).
+    const includeUnknown = args.includes("--include-unknown");
+    const [prefix, q] = args.filter((a) => a !== "--include-unknown");
     const cg = loadCallgraph(prefix);
-    const names = Object.keys(cg);
-    const targets = matches(names, q);
-    const rev = new Map();
-    for (const [caller, callees] of Object.entries(cg))
-      for (const c of callees) (rev.get(c) ?? rev.set(c, []).get(c)).push(caller);
-    const direct = new Set(), transitive = new Set();
-    const queue = [...targets];
-    for (const t of targets) for (const c of rev.get(t) ?? []) direct.add(c);
-    while (queue.length) {
-      const n = queue.pop();
-      for (const c of rev.get(n) ?? []) if (!transitive.has(c) && !targets.includes(c)) { transitive.add(c); queue.push(c); }
-    }
-    emit({ of: targets, direct: [...direct].sort(), transitive: [...transitive].sort() });
+    if (includeUnknown) emit(callersFrontier(cg, loadReport(prefix), loadHierarchy(prefix), q));
+    else emit(coreCallers(cg, q));
     break;
   }
   case "map": {

@@ -158,6 +158,65 @@ export function callers(cg, q) {
   return { of: targets, direct: [...direct].sort(), transitive: [...transitive].sort() };
 }
 
+// The bare method name / declaring type of a `mod.Class.member` qual (drop a `#line:col` function-scoped
+// suffix, then split on the last dot). Used by the dispatch-frontier to match a confirmed reacher against
+// a `dispatch:OWNER.member` owner.
+const stripPos = (s) => { const h = s.indexOf("#"); return h >= 0 ? s.slice(0, h) : s; };
+export function simpleMethod(fn) { const b = stripPos(fn); const i = b.lastIndexOf("."); return i >= 0 ? b.slice(i + 1) : b; }
+export function declaringType(fn) { const b = stripPos(fn); const i = b.lastIndexOf("."); return i >= 0 ? b.slice(0, i) : b; }
+
+// Load the type-hierarchy sidecar (`<prefix>.hierarchy.json`, 0.7), or {} if absent (→ the frontier
+// falls back to a simple-name match, which over-lists — the safe direction).
+export function loadHierarchy(prefix) {
+  const norm = (h) => (h && typeof h === "object" && !Array.isArray(h))
+    ? Object.fromEntries(Object.entries(h).map(([k, v]) => [k, Array.isArray(v) ? v : []])) : {};
+  if (fs.existsSync(`${prefix}.hierarchy.json`)) {
+    try { return norm(JSON.parse(fs.readFileSync(`${prefix}.hierarchy.json`, "utf8"))); } catch { return {}; }
+  }
+  const h = {};
+  for (const f of siblings(prefix, (x) => x.endsWith(".hierarchy.json"))) {
+    try { Object.assign(h, JSON.parse(fs.readFileSync(f, "utf8"))); } catch { /* tolerate */ }
+  }
+  return norm(h);
+}
+
+// Reflexive+transitive subtype test over the hierarchy sidecar.
+function isSubtypeOf(type, owner, hierarchy) {
+  if (type === owner) return true;
+  const seen = new Set(), stack = [type];
+  while (stack.length) {
+    for (const s of hierarchy[stack.pop()] ?? []) { if (s === owner) return true; if (!seen.has(s)) { seen.add(s); stack.push(s); } }
+  }
+  return false;
+}
+
+// callers + the unresolved-dispatch frontier (--include-unknown, SPEC §3.1/§4 0.7): the CONFIRMED set,
+// plus functions that reach `q` only through a `dispatch:OWNER.member` the engine declined to resolve —
+// disclosed iff a confirmed reacher is an override of OWNER.member (same method AND a subtype of OWNER
+// per the hierarchy; empty hierarchy → simple-name match, over-lists). Never asserted ("cannot confirm").
+export function callersFrontier(cg, fns, hierarchy, q) {
+  const base = callers(cg, q);
+  const confirmed = new Set([...base.of, ...base.transitive]);
+  const typesByMethod = new Map();
+  for (const r of confirmed) { const m = simpleMethod(r); (typesByMethod.get(m) ?? typesByMethod.set(m, []).get(m)).push(declaringType(r)); }
+  const hasHier = hierarchy && Object.keys(hierarchy).length > 0;
+  const possible = [];
+  for (const f of fns) {
+    if (confirmed.has(f.fn)) continue;
+    const hits = new Set();
+    for (const w of f.unknownWhy ?? []) {
+      if (!w.startsWith("dispatch:")) continue;
+      const key = w.slice("dispatch:".length), m = simpleMethod(key), owner = declaringType(key);
+      const types = typesByMethod.get(m);
+      if (!types) continue;
+      if (!hasHier || types.some((t) => isSubtypeOf(t, owner, hierarchy))) hits.add(m);
+    }
+    if (hits.size) possible.push({ fn: f.fn, viaDispatchOn: [...hits].sort().join(",") });
+  }
+  possible.sort((a, b) => a.fn.localeCompare(b.fn));
+  return { ...base, possibleViaUnknownDispatch: possible };
+}
+
 export function map(fns) {
   const mods = {};
   for (const e of fns) {
