@@ -26,7 +26,7 @@ function siblings(prefix, predicate) {
 // calibrated-coverage sidecar). Exported so `hasReport` (the MCP existence check) uses the SAME predicate
 // as the loader — else a prefix whose only sibling is `.encountered-*`/`.calibrated.json` passes the
 // existence check but loads ZERO functions → an authoritative-empty result (silent under-report; review find).
-export const isReport = (f) => !f.endsWith(".callgraph.json") && !f.includes(".encountered-") && !f.endsWith(".calibrated.json");
+export const isReport = (f) => !f.endsWith(".callgraph.json") && !f.endsWith(".hierarchy.json") && !f.includes(".encountered-") && !f.endsWith(".calibrated.json");
 
 // Defend the queries against a partial/old-engine/hand-edited report: the §2 required fields are
 // defaulted, and a WRONG-TYPE field is coerced — a non-array `inferred` (e.g. the string "Net") must
