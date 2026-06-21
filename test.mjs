@@ -1443,5 +1443,28 @@ export function createCtx() { return vm.createContext({}); }`,
         entry(report, "src.a.createCtx") === undefined, JSON.stringify(entry(report, "src.a.createCtx")));
 }
 
+// ── dynamic require(<non-literal>) → Unknown (the CJS twin of import(m)); literal / require.resolve /
+// a project-local `require` shadow all stay pure (no fabrication). Corpus-testing find, sibling of vm. ──
+{
+  const d = project({
+    "src/a.ts": `export function dyn(m: string) { return require(m); }
+export function lit() { return require("node:fs"); }
+export function resolveIt(m: string) { return require.resolve(m); }`,
+    "src/shadow.ts": `function require(x: string) { return 1; }
+export function shadowed(y: string) { return require(y); }`,
+  });
+  const { report } = scan(d);
+  check("dynamic require(var) discloses Unknown (opaque module load, like import(m))",
+        entry(report, "src.a.dyn")?.inferred.includes("Unknown"));
+  check("dynamic require Unknown carries reflect:require why (SPEC §4)",
+        entry(report, "src.a.dyn")?.unknownWhy?.includes("reflect:require"));
+  check("literal require('node:fs') stays pure (static resolvable load, no method call)",
+        entry(report, "src.a.lit") === undefined, JSON.stringify(entry(report, "src.a.lit")));
+  check("require.resolve(m) stays pure (returns a path, loads nothing)",
+        entry(report, "src.a.resolveIt") === undefined);
+  check("a project-local `require` shadow stays pure (no fabricated Unknown)",
+        entry(report, "src.shadow.shadowed") === undefined, JSON.stringify(entry(report, "src.shadow.shadowed")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

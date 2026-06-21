@@ -1664,6 +1664,19 @@ function visitCalls(node) {
       const owner = enclosing(node);
       if (owner) fns.get(owner).direct.add(geff);
     }
+    // dynamic `require(<non-literal>)` — the CJS twin of `import(m)` (which already discloses Unknown):
+    // it loads an arbitrary module and runs its top-level code, so the effects are opaque → Unknown. A
+    // LITERAL `require('fs')` is a static, resolvable load (pure until a member call), so ONLY a
+    // non-literal arg is the escape. Gated like `fetch`: a bare `require` whose symbol is NOT a project
+    // declaration (a project's own `function require()` shadow never fabricates). Under-disclose Unknown,
+    // never a concrete effect. (Found by real-world corpus testing; sibling of the node:vm fix.)
+    if (ts.isIdentifier(callee) && callee.text === "require"
+        && node.arguments?.length === 1 && !ts.isStringLiteralLike(node.arguments[0])
+        && !(checker.getSymbolAtLocation(callee)?.declarations ?? [])
+             .some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)))) {
+      const owner = enclosing(node);
+      if (owner) { fns.get(owner).direct.add("Unknown"); fns.get(owner).why.add("reflect:require"); }
+    }
     // Object.assign(target, ...sources) copies each SOURCE's own enumerable props → invokes their
     // getters (the object-spread twin). Enumerate the sources' local getters.
     if (callee.getText().replace(/\s+/g, "") === "Object.assign") {
