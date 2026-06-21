@@ -251,7 +251,17 @@ function declModule(decl) {
   if (m) return m[1];
   if (/typescript\/lib\/lib\..*\.d\.ts$/.test(f)) return "<es-lib>";
   m = f.match(/node_modules\/(@[^/]+\/[^/]+|[^/]+)\//);
-  if (m) return m[1];
+  if (m) {
+    // `@types/X` (DefinitelyTyped) provides types for the RUNTIME package X — map it to X so the curated κ
+    // tier (keyed by the runtime name: pg/ws/…) fires. Without this a package typed via @types resolved to
+    // "@types/pg", the `pg`→Db rule never matched, and the resolved-but-unmodeled external decl read
+    // SILENT-PURE — `pool.query()` in a real TS Postgres app (which MUST have @types/pg installed to use
+    // pg) reported pure (found by a node_modules corpus run). Scoped runtime pkgs use the `__` convention:
+    // `@types/babel__core` → `@babel/core`.
+    const tm = m[1].match(/^@types\/(.+)$/);
+    if (tm) return tm[1].includes("__") ? "@" + tm[1].replace("__", "/") : tm[1];
+    return m[1];
+  }
   return f;
 }
 

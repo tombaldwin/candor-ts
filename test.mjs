@@ -1466,5 +1466,22 @@ export function shadowed(y: string) { return require(y); }`,
         entry(report, "src.shadow.shadowed") === undefined, JSON.stringify(entry(report, "src.shadow.shadowed")));
 }
 
+// @types/X (DefinitelyTyped) maps to the RUNTIME package X so the curated κ tier (keyed by runtime names)
+// fires — a curated package typed via @types must NOT read silent-pure. Corpus find: `pool.query()` reported
+// pure because the decl resolved to `@types/pg` (not `pg`), so the pg→Db rule never matched. A real TS
+// Postgres app MUST have @types/pg installed (pg ships no types), so this was a live silent under-report.
+{
+  const d = project({
+    "node_modules/pg/package.json": JSON.stringify({ name: "pg", version: "8.0.0", main: "index.js" }),
+    "node_modules/pg/index.js": "module.exports = {};",
+    "node_modules/@types/pg/index.d.ts": "export declare class Pool { query(sql: string): Promise<any>; }",
+    "src/a.ts": `import { Pool } from "pg";
+export function q(p: Pool) { return p.query("SELECT 1"); }`,
+  });
+  const { report } = scan(d);
+  check("@types/pg maps to pg → pool.query() is Db (not silent-pure; DefinitelyTyped curated mapping)",
+        entry(report, "src.a.q")?.inferred.includes("Db"), JSON.stringify(entry(report, "src.a.q")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
