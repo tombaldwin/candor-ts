@@ -16,7 +16,7 @@ import path from "node:path";
 
 import {
   matches, show, where, callers, map, impact, path as provenance, diff, gains, reachable, whatif,
-  loadReport, loadCallgraph, isReport,
+  containment, loadReport, loadCallgraph, isReport,
 } from "./query-core.mjs";
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
@@ -84,6 +84,31 @@ test("map: each module bucket is {effects, functions}", () => {
   const m = map(fns);
   assert.deepEqual(m["a.b"], { effects: ["Fs", "Net"], functions: 2 });
   assert.deepEqual(m["(root)"], { effects: ["Env"], functions: 1 });
+});
+
+// ── query-core: containment (SPEC §6.1 dispersion + AS-EFF-010 ratchet) ───────────────────────────
+// Layer = the segment after the common dotted prefix; boundary effects scored, ambient reported-not-scored.
+// 4-segment names (c.<layer>.<Class>.<method>) so the layer = the segment after the common `c` prefix —
+// mirrors the candor-spec containment conformance fixture (c.repo.Repo.* / c.svc.Svc.*).
+const CONT_CUR = [
+  { fn: "c.repo.Repo.readA", inferred: ["Fs"], direct: ["Fs"] },
+  { fn: "c.repo.Repo.readB", inferred: ["Fs"], direct: ["Fs"] },
+  { fn: "c.svc.Svc.net", inferred: ["Net"], direct: ["Net"] },
+  { fn: "c.svc.Svc.leak", inferred: ["Fs"], direct: ["Fs"] },  // the drift: Fs in a new layer
+];
+const CONT_BASE = CONT_CUR.filter((e) => e.fn !== "c.svc.Svc.leak");
+test("containment: per-boundary-effect dispersion (pct/layers/owner/placement)", () => {
+  const r = containment(CONT_CUR);
+  const fs = r.contained.find((c) => c.effect === "Fs");
+  assert.deepEqual(fs, { effect: "Fs", containmentPct: 66, layers: 2, owner: "repo", placement: { repo: 2, svc: 1 } });
+  const net = r.contained.find((c) => c.effect === "Net");
+  assert.deepEqual(net, { effect: "Net", containmentPct: 100, layers: 1, owner: "svc", placement: { svc: 1 } });
+  assert.deepEqual(r.ambient, {});
+});
+test("containment ratchet: a boundary effect entering a new layer is a leak", () => {
+  assert.deepEqual(containment(CONT_CUR, CONT_BASE), { leaks: ["Fs → svc"], cleanups: [] });
+  assert.deepEqual(containment(CONT_CUR, CONT_CUR), { leaks: [], cleanups: [] });          // unchanged
+  assert.deepEqual(containment(CONT_BASE, CONT_CUR), { leaks: [], cleanups: ["Fs ⊘ svc"] }); // improvement
 });
 
 // ── query-core: impact / path (the blast-radius + provenance shapes) ──────────────────────────────

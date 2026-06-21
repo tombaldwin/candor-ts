@@ -27,6 +27,7 @@ import { printAgents } from "./contract.mjs";
 import { impact as coreImpact, path as corePath, gains as coreGains,
          show as coreShow, blindspots as coreBlindspots,
          callers as coreCallers, callersFrontier, loadHierarchy,
+         containment as coreContainment,
          loadReport, loadCallgraph, matches } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
 
@@ -81,6 +82,18 @@ switch (cmd) {
     }
     emit(Object.fromEntries(Object.entries(mods).sort()
       .map(([k, v]) => [k, { effects: [...v.effects].sort(), functions: v.functions }])));
+    break;
+  }
+  case "containment": {
+    // SPEC §6.1 boundary-effect dispersion; with a baseline prefix it's the AS-EFF-010 ratchet (exit 1 on a
+    // new leak), matching candor-java / candor-query. JSON-only, like every other candor-ts query command.
+    const [prefix, basePrefix] = args;
+    if (basePrefix) {
+      const r = coreContainment(loadReport(prefix), loadReport(basePrefix));
+      emit(r);
+      process.exit(r.leaks.length ? 1 : 0);
+    }
+    emit(coreContainment(loadReport(prefix)));
     break;
   }
   case "diff": {

@@ -75,6 +75,7 @@ Q impact   $P <fn-query>            # THE BLAST RADIUS: {fn, affectedCount, affe
 Q callers  $P <fn-query> 1          # the lower-level form: {of, direct, transitive} — works for pure fns
 Q path     $P <fn> <Effect>         # how a fn reaches an effect: the chain to the nearest source
 Q map      $P 1                     # {module: {effects, functions}}
+Q containment $P [baseline-prefix]  # §6.1 boundary-effect dispersion; with a baseline = AS-EFF-010 ratchet (exit 1 on a leak)
 Q whatif   $P <fn> <Effect> [policy]  # pre-edit gate verdict (exit 1 if it would violate)
 Q diff     $P <baseline-prefix> 1   # per-function effect delta (exit 1 on a gained effect)
 Q gains    $P <baseline-prefix>     # supply-chain alarm: {gained, byFunction} — effects a surface grew

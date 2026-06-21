@@ -229,6 +229,69 @@ export function map(fns) {
     .map(([k, v]) => [k, { effects: [...v.effects].sort(), functions: v.functions }]));
 }
 
+// containment (SPEC §6.1) — how well each BOUNDARY effect stays in one layer (dispersion, NOT a count),
+// with the AS-EFF-010 ratchet when a baseline is given. Mirrors candor-java Query.containment and
+// candor-query cmd_containment: boundary effects are scored, ambient ones reported-not-scored; a layer is
+// the segment AFTER the common dotted prefix ("(root)" when no package layer follows). Uses DIRECT effects.
+export const CONTAINED = ["Db", "Net", "Exec", "Fs", "Ipc", "Clipboard"];
+export const AMBIENT = ["Log", "Clock", "Rand", "Env"];
+function commonPrefixLen(fns) {
+  let best = null;
+  for (const e of fns) {
+    const segs = e.fn.split(".");
+    if (best === null) { best = segs; continue; }
+    let i = 0; const n = Math.min(best.length, segs.length);
+    while (i < n && best[i] === segs[i]) i++;
+    best = best.slice(0, i);
+  }
+  return (best ?? []).length;
+}
+function layerOf(fn, prefixLen) {
+  const segs = fn.split(".");
+  return prefixLen + 2 < segs.length ? segs[prefixLen] : "(root)";
+}
+export function containment(fns, baseFns) {
+  const pl = commonPrefixLen(fns);
+  const known = new Set([...CONTAINED, ...AMBIENT]);
+  const byEff = {}; // effect -> { layer -> count }, over DIRECT effects
+  for (const e of fns) for (const eff of (e.direct ?? [])) {
+    if (!known.has(eff)) continue;
+    const layer = layerOf(e.fn, pl);
+    (byEff[eff] ??= {})[layer] = (byEff[eff][layer] ?? 0) + 1;
+  }
+  // RATCHET: a baseline was given — flag any contained effect now in a layer it wasn't in (a leak), note removals.
+  if (baseFns) {
+    const bpl = commonPrefixLen(baseFns);
+    const baseLayers = {};
+    for (const e of baseFns) for (const eff of (e.direct ?? [])) {
+      if (!CONTAINED.includes(eff)) continue;
+      (baseLayers[eff] ??= new Set()).add(layerOf(e.fn, bpl));
+    }
+    const leaks = [], cleanups = [];
+    for (const eff of CONTAINED) {
+      const now = new Set(Object.keys(byEff[eff] ?? {}));
+      const was = baseLayers[eff] ?? new Set();
+      for (const l of now) if (!was.has(l)) leaks.push(`${eff} → ${l}`);
+      for (const l of was) if (!now.has(l)) cleanups.push(`${eff} ⊘ ${l}`);
+    }
+    return { leaks: leaks.sort(), cleanups: cleanups.sort() };
+  }
+  // REPORT: the containment diagnostic.
+  const contained = [];
+  for (const eff of CONTAINED) {
+    const layers = byEff[eff]; if (!layers) continue;
+    const entries = Object.entries(layers);
+    const tot = entries.reduce((a, [, n]) => a + n, 0);
+    const owner = entries.slice().sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+    const placement = Object.fromEntries(entries.slice().sort((a, b) => a[0].localeCompare(b[0])));
+    contained.push({ effect: eff, containmentPct: Math.floor((100 * owner[1]) / tot),
+                     layers: entries.length, owner: owner[0], placement });
+  }
+  const ambient = {};
+  for (const eff of AMBIENT) if (byEff[eff]) ambient[eff] = Object.keys(byEff[eff]).length;
+  return { contained, ambient };
+}
+
 export function reachable(fns) {
   const roots = fns.filter((e) => e.entryPoint);
   const byEff = {};
