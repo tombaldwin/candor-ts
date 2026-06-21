@@ -89,7 +89,12 @@ switch (cmd) {
     // new leak), matching candor-java / candor-query. JSON-only, like every other candor-ts query command.
     const [prefix, basePrefix] = args;
     if (basePrefix) {
-      const r = coreContainment(loadReport(prefix), loadReport(basePrefix));
+      const baseFns = loadReport(basePrefix);
+      if (baseFns.length === 0) {   // fail CLOSED (exit 2), not a wall of bogus "everything leaked" (exit 1)
+        console.error(`candor-ts: no report at baseline prefix '${basePrefix}' — check the path`);
+        process.exit(2);
+      }
+      const r = coreContainment(loadReport(prefix), baseFns);
       emit(r);
       process.exit(r.leaks.length ? 1 : 0);
     }

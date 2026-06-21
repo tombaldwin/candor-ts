@@ -247,8 +247,13 @@ function commonPrefixLen(fns) {
   return (best ?? []).length;
 }
 function layerOf(fn, prefixLen) {
+  // The layer = the first segment after the common prefix, the leaf excluded. candor-ts names functions
+  // with a FILE.fn (free fns) or FILE.Class.method tail — a SHALLOW 1-segment-minimum tail — so the rule is
+  // `prefixLen + 1 < length` (matching candor-rust's layer_of). candor-java uses `+2` because its names carry
+  // an extra Package.Class.method segment; copying that here collapsed every 2-segment free function to
+  // "(root)", killing the dispersion signal on real TS reports.
   const segs = fn.split(".");
-  return prefixLen + 2 < segs.length ? segs[prefixLen] : "(root)";
+  return prefixLen + 1 < segs.length ? segs[prefixLen] : "(root)";
 }
 export function containment(fns, baseFns) {
   const pl = commonPrefixLen(fns);

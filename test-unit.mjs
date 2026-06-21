@@ -105,6 +105,18 @@ test("containment: per-boundary-effect dispersion (pct/layers/owner/placement)",
   assert.deepEqual(net, { effect: "Net", containmentPct: 100, layers: 1, owner: "svc", placement: { svc: 1 } });
   assert.deepEqual(r.ambient, {});
 });
+test("containment: 2-segment names (file.fn) bucket by FILE, not all to (root)", () => {
+  // REAL candor-ts naming for free functions is FILE.fn (2 segments). The layer rule must put each in its
+  // file's layer, not collapse everything to "(root)" (the `+2` bug that the 4-segment fixture above masked).
+  const r = containment([
+    { fn: "repo.readA", inferred: ["Fs"], direct: ["Fs"] },
+    { fn: "repo.readB", inferred: ["Fs"], direct: ["Fs"] },
+    { fn: "svc.net", inferred: ["Net"], direct: ["Net"] },
+  ]);
+  const fs = r.contained.find((c) => c.effect === "Fs");
+  assert.deepEqual(fs.placement, { repo: 2 });           // NOT { "(root)": 2 }
+  assert.deepEqual(r.contained.find((c) => c.effect === "Net").placement, { svc: 1 });
+});
 test("containment ratchet: a boundary effect entering a new layer is a leak", () => {
   assert.deepEqual(containment(CONT_CUR, CONT_BASE), { leaks: ["Fs → svc"], cleanups: [] });
   assert.deepEqual(containment(CONT_CUR, CONT_CUR), { leaks: [], cleanups: [] });          // unchanged
