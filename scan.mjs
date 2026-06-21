@@ -1489,7 +1489,13 @@ function visitCalls(node) {
           if (eff && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))
               && rootsAtStdStream(node.expression.expression))
             eff = null;
-          if (eff) rec.direct.add(eff);
+          if (eff) {
+            rec.direct.add(eff);
+            // a κ rule that resolves to the Unknown trust-marker (node:vm code execution) is a direct
+            // Unknown SOURCE — SPEC §4 requires a why on it, like eval's `reflect:eval`. (The rest of
+            // the κ table is concrete effects, which carry no why.)
+            if (eff === "Unknown") rec.why.add(`reflect:${mod.replace(/^node:/, "")}.${member}`);
+          }
           // the literal surfaces, read only at a CLASSIFIED call (SPEC §2)
           if (eff === "Net") {
             const lit = firstStringLiteral(node);

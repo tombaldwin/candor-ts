@@ -63,6 +63,13 @@ export const KAPPA_RULES = [
   [/^(node:)?worker_threads$/, /^(postMessage|receiveMessageOnPort)$/, "Ipc"],
   // node:cluster — `fork()` spawns a worker PROCESS and wires its IPC channel.
   [/^(node:)?cluster$/, /^fork$/, "Ipc"],
+  // node:vm executes a runtime-supplied code STRING in-process — `runInThisContext`/`runInContext`/
+  // `runInNewContext`/`compileFunction`, and the same verbs on a `new vm.Script(code)`. Like `eval`,
+  // the effects are whatever the code does (opaque) → genuinely Unknown (NOT Exec: no subprocess).
+  // Was unmodeled inside the κ-covered @types/node, so `vm.runInThisContext(code)` read SILENT-PURE
+  // (a code-execution sink reported pure — found by real-world corpus testing). The why is attached at
+  // the classify site (the only κ rule that resolves to the Unknown trust-marker, SPEC §4).
+  [/^(node:)?vm$/, /^(runInThisContext|runInContext|runInNewContext|compileFunction)$/, "Unknown"],
   [/^(node:)?sqlite$/, null, "Db"],
   // the curated npm tier
   [/^(axios|got|node-fetch|undici|ws|socket\.io(-client)?|nodemailer)$/, null, "Net"],

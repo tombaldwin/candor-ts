@@ -1417,5 +1417,31 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
         callersFrontier(cg, fns2, {}, "m.Sink.touch").possibleViaUnknownDispatch.length === 1, "");
 }
 
+// ── node:vm executes a runtime code STRING → Unknown (the eval-class disclosure). Was silent-pure —
+// found by real-world corpus testing (vm is κ-covered @types/node with no rule, so it read pure, not
+// invisible). Mirrors eval/Function/import() which already disclose Unknown. ──
+{
+  const d = project({
+    "src/a.ts": `import vm from "node:vm";
+export function runIt(c: string) { return vm.runInThisContext(c); }
+export function runNew(c: string) { return vm.runInNewContext(c); }
+export function scriptIt(c: string) { const s = new vm.Script(c); return s.runInContext(vm.createContext({})); }
+export function compileIt(c: string) { return vm.compileFunction(c); }
+export function createCtx() { return vm.createContext({}); }`,
+  });
+  const { report } = scan(d);
+  const u = (fn) => entry(report, fn)?.inferred.includes("Unknown");
+  check("vm.runInThisContext discloses Unknown (opaque code exec, not silent-pure)", u("src.a.runIt"));
+  check("vm.runInNewContext discloses Unknown", u("src.a.runNew"));
+  check("vm.Script.runInContext discloses Unknown", u("src.a.scriptIt"));
+  check("vm.compileFunction discloses Unknown", u("src.a.compileIt"));
+  check("vm Unknown carries a why (SPEC §4)",
+        entry(report, "src.a.runIt")?.unknownWhy?.some((w) => w.startsWith("reflect:vm")),
+        JSON.stringify(entry(report, "src.a.runIt")?.unknownWhy));
+  // anti-fabrication control: vm.createContext (builds a sandbox object, runs no code) stays pure.
+  check("vm.createContext stays pure (no fabricated Unknown — only the run/compile verbs)",
+        entry(report, "src.a.createCtx") === undefined, JSON.stringify(entry(report, "src.a.createCtx")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
