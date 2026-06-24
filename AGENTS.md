@@ -12,7 +12,7 @@ chains by hand.
 > **Already installed? Report the version and ask before upgrading — before you scan.** If this
 > project already has candor (a `.candor/` report directory, or `candor-ts` reachable via `npx`/a
 > global install), do this *first*: run `npx -y candor-ts --version` (offline) and **tell the user
-> plainly which version they're on** — e.g. *"This project is on candor-ts 0.5.1 (spec 0.5)."* On a
+> plainly which version they're on** — e.g. *"This project is on candor-ts 0.7.1 (spec 0.7)."* On a
 > build too old for the flag, read `candor.version` / `candor.spec` from an existing
 > `.candor/report*.json`, or `npm ls -g candor-ts`.
 >
@@ -20,8 +20,8 @@ chains by hand.
 > Net effect, so it will not reach the network to check itself. `candor-ts --version` prints the
 > installed build, the spec contract it speaks, and the upgrade line (`npm install -g
 > candor-ts@latest`) — fully offline. **You** have the network: compare the installed version against
-> npm. If it's behind, **ask the user before upgrading** — e.g. *"candor-ts 0.5.2 is available
-> (you're on 0.5.1) — upgrade before I scan?"* — and run `npm install -g candor-ts@latest` (or `npx
+> npm. If it's behind, **ask the user before upgrading** — e.g. *"candor-ts 0.7.2 is available
+> (you're on 0.7.1) — upgrade before I scan?"* — and run `npm install -g candor-ts@latest` (or `npx
 > -y candor-ts@latest`) only if they agree. Never upgrade silently: an analysis tool's version is
 > part of its result's provenance, so the user decides when it changes. If it's already current (or
 > the user declines), just proceed; if candor isn't installed at all, install it normally.
@@ -56,7 +56,7 @@ pure functions are omitted** — a function present in the callgraph sidecar but
 (a test file? an unexported arrow inside an object literal?) — conclude nothing.
 
 A dist-CJS export unit (a `module.exports` surface scanned with `--allow-js`) carries
-`unitKind: "export"` (spec 0.5 draft, informative); ordinary functions omit the field.
+`unitKind: "export"` (spec 0.7, informative); ordinary functions omit the field.
 
 **Multi-package (monorepos / private deps):** point `CANDOR_DEPS` at the dependencies' reports
 (a path list, or a directory of `*.json`); an unclassified call into a package with a loaded
