@@ -2020,6 +2020,17 @@ for (const sf of sources) {
 }
 writeAtomic(`${outPrefix}.hierarchy.json`, JSON.stringify(hierarchy, null, 1));
 console.error(`candor-ts: wrote ${functions.length} effectful functions (${fns.size} analyzed, ${sources.length} files) to ${outPrefix}.json`);
+{
+  // Effect breakdown — make the result visible at a glance, not just a count + a file path.
+  const counts = {};
+  for (const e of functions) for (const x of e.inferred) counts[x] = (counts[x] || 0) + 1;
+  const breakdown = ["Net", "Fs", "Db", "Exec", "Ipc", "Env", "Clipboard", "Clock", "Log", "Rand"]
+    .filter((k) => counts[k]).map((k) => `${k} ${counts[k]}`).join(" · ");
+  const unknown = counts.Unknown || 0;
+  if (breakdown || unknown) {
+    console.error(`  ${breakdown}${unknown ? `${breakdown ? "   ·   " : ""}Unknown ${unknown} (disclosed)` : ""}`);
+  }
+}
 if (unlistedSeen.size > 0) {
   const top = [...unlistedSeen.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const shown = top.slice(0, 8).map(([p, n]) => `${p} (${n} call${n === 1 ? "" : "s"})`).join(", ");
