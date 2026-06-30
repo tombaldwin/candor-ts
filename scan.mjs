@@ -41,7 +41,7 @@ const SPEC_VERSION = "0.7";
 // --version: a print-and-exit MODE, handled before the main arg walk so it never depends on a target.
 // Fully OFFLINE — candor never phones home. Staying current is the AGENT's job: read the installed
 // build + upgrade line here, then (the agent has the network) compare against npm and upgrade.
-if (process.argv.includes("--version")) {
+if (process.argv.includes("--version") || process.argv.includes("-V")) {
   console.log(`candor-ts ${PKG_VERSION} (spec ${SPEC_VERSION})`);
   console.log("upgrade: npm install -g candor-ts@latest");
   process.exit(0);
@@ -52,15 +52,16 @@ if (process.argv.includes("--version")) {
 if (process.argv.includes("-h") || process.argv.includes("--help")) {
   console.log(`candor-ts ${PKG_VERSION} — TypeScript/JavaScript effect scanner (candor-spec ${SPEC_VERSION})
 
-USAGE: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>] [--allow-js] [--agents] [--version]
+USAGE: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--policy <file>] [--allow-js] [--agents] [--version]
 
   <target>          a dir, a .ts file, or a tsconfig.json to scan
   --out <prefix>    write the report to <prefix>.json + <prefix>.callgraph.json
+  --json            print the report as JSON to stdout (instead of writing files)
   --policy <file>   enforce a policy file (deny/pure/allow/forbid, candor-spec §6.2) — exit 1 on a
                     violation, 2 if unreadable; honours $CANDOR_POLICY when the flag is absent
   --allow-js        also scan plain JS/Node (.js/.mjs/.cjs), not just TypeScript
   --agents          print the agent contract for this build (AGENTS.md)
-  --version         print the build and spec version (offline)
+  -V, --version     print the build and spec version (offline)
   -h, --help        show this help
 
 See https://github.com/tombaldwin/candor`);
@@ -72,12 +73,13 @@ See https://github.com/tombaldwin/candor`);
 // missing/flag-shaped value; an unknown flag fails; flags may precede the target. `--agents` is a
 // flag (a print-and-exit MODE) — it must NOT fire when it is the VALUE of --out/--policy, which the
 // value-consuming skip handles, nor produce a "lying unknown flag" error for a real flag given first.
-const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>] [--allow-js] [--agents] [--version] [--help]";
+const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--policy <file>] [--allow-js] [--agents] [--version] [--help]";
 const argv = process.argv.slice(2);
-let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, allowJs = false, wantAgents = false;
+let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, allowJs = false, wantAgents = false, wantJson = false;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--agents") wantAgents = true;
+  else if (a === "--json") wantJson = true;
   else if (a === "--allow-js") allowJs = true;
   else if (a === "--out" || a === "--policy") {
     const v = argv[i + 1];
@@ -172,13 +174,14 @@ if (!compilerOptions.typeRoots) {
   compilerOptions.typeRoots = roots;
 }
 if (!outPrefix) outPrefix = path.join(rootDir, ".candor", "report");
+// --json prints the report to stdout and writes NOTHING, so skip creating the (otherwise default) .candor/ dir.
 // The scanned package's name — the first half of the cross-package join key (SPEC §2 `hash`).
 let pkgName = path.basename(rootDir);
 try {
   const pj = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
   if (pj.name) pkgName = pj.name;
 } catch {}
-fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: true });
+if (!wantJson) fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: true });
 
 // A target with declared dependencies but no node_modules resolves almost nothing — the scan
 // would "succeed" with a near-total-Unknown report a fresh user could ship (CTA-dogfood finding).
@@ -2013,8 +2016,13 @@ for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
 // half-written report. An in-place writeFileSync leaves a truncation window where JSON.parse throws;
 // rename(2) is atomic within a filesystem, so a reader sees either the old report or the new one whole.
 const writeAtomic = (file, text) => { const tmp = `${file}.${process.pid}.tmp`; fs.writeFileSync(tmp, text); fs.renameSync(tmp, file); };
-writeAtomic(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
-writeAtomic(`${outPrefix}.callgraph.json`, JSON.stringify(cg, null, 1));
+// --json: print the §2 envelope to STDOUT instead of writing the report files (matches candor-scan/Rust).
+if (wantJson) {
+  console.log(JSON.stringify(envelope, null, 1));
+} else {
+  writeAtomic(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
+  writeAtomic(`${outPrefix}.callgraph.json`, JSON.stringify(cg, null, 1));
+}
 // Type-hierarchy sidecar (SPEC §4 / 0.7): each project class/interface (qualified `mod.Name`, matching
 // the `mod.Class.member` fn quals) -> its qualified direct supertypes/interfaces. Compact (O(types)),
 // lets `callers --include-unknown` resolve whether a confirmed reacher is an override of a `dispatch:`
@@ -2038,8 +2046,10 @@ for (const sf of sources) {
     ts.forEachChild(node, walk);
   })(sf);
 }
-writeAtomic(`${outPrefix}.hierarchy.json`, JSON.stringify(hierarchy, null, 1));
-console.error(`candor-ts: wrote ${functions.length} effectful functions (${fns.size} analyzed, ${sources.length} files) to ${outPrefix}.json`);
+if (!wantJson) {
+  writeAtomic(`${outPrefix}.hierarchy.json`, JSON.stringify(hierarchy, null, 1));
+  console.error(`candor-ts: wrote ${functions.length} effectful functions (${fns.size} analyzed, ${sources.length} files) to ${outPrefix}.json`);
+}
 {
   // Effect breakdown — make the result visible at a glance, not just a count + a file path.
   const counts = {};
