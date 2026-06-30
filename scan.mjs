@@ -47,12 +47,32 @@ if (process.argv.includes("--version")) {
   process.exit(0);
 }
 
+// -h / --help: a print-and-exit MODE (like --version), handled before the arg walk so `-h` (a single
+// dash) is never mistaken for the scan target by the positional fallthrough below.
+if (process.argv.includes("-h") || process.argv.includes("--help")) {
+  console.log(`candor-ts ${PKG_VERSION} — TypeScript/JavaScript effect scanner (candor-spec ${SPEC_VERSION})
+
+USAGE: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>] [--allow-js] [--agents] [--version]
+
+  <target>          a dir, a .ts file, or a tsconfig.json to scan
+  --out <prefix>    write the report to <prefix>.json + <prefix>.callgraph.json
+  --policy <file>   enforce a policy file (deny/pure/allow/forbid, candor-spec §6.2) — exit 1 on a
+                    violation, 2 if unreadable; honours $CANDOR_POLICY when the flag is absent
+  --allow-js        also scan plain JS/Node (.js/.mjs/.cjs), not just TypeScript
+  --agents          print the agent contract for this build (AGENTS.md)
+  --version         print the build and spec version (offline)
+  -h, --help        show this help
+
+See https://github.com/tombaldwin/candor`);
+  process.exit(0);
+}
+
 // ---- args ----------------------------------------------------------------------------------------
 // ONE pass: the first non-flag is the target; value-taking flags consume the next arg and FAIL on a
 // missing/flag-shaped value; an unknown flag fails; flags may precede the target. `--agents` is a
 // flag (a print-and-exit MODE) — it must NOT fire when it is the VALUE of --out/--policy, which the
 // value-consuming skip handles, nor produce a "lying unknown flag" error for a real flag given first.
-const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>] [--allow-js] [--agents] [--version]";
+const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>] [--allow-js] [--agents] [--version] [--help]";
 const argv = process.argv.slice(2);
 let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, allowJs = false, wantAgents = false;
 for (let i = 0; i < argv.length; i++) {
