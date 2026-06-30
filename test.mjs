@@ -289,6 +289,42 @@ export function place(db: DatabaseSync): void { save(db); }`,
   check("unreadable policy exits 2 LOUDLY", r2.status === 2 && r2.stderr.includes("NOT enforced"));
 }
 
+// ── 3a. --json: stdout is the §2 envelope and stays PURE JSON — even with a firing policy gate ──────
+{
+  const d = project({
+    "src/db.ts": `import { DatabaseSync } from "node:sqlite";
+export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v = 1"); }`,
+    "src/domain.ts": `import { save } from "./db.js";
+import { DatabaseSync } from "node:sqlite";
+export function place(db: DatabaseSync): void { save(db); }`,
+    "policy": "deny Db domain\n",
+  });
+  // (a) plain --json: stdout parses as the §2 envelope
+  const j = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--json"], { encoding: "utf8" });
+  let env = null;
+  try { env = JSON.parse(j.stdout); } catch { /* env stays null → checks fail with the raw text */ }
+  check("--json stdout parses as the §2 envelope", env !== null && Array.isArray(env.functions), j.stdout.slice(0, 120));
+  // (b) no report files are written in --json mode (the default .candor/ dir is not even created)
+  check("--json writes NO files (no .candor/report.json)", !fs.existsSync(path.join(d, ".candor", "report.json")));
+
+  // (c)+(d) --json + a firing policy gate: exit 1, stdout STILL pure JSON, violation text on stderr
+  const jg = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--json", "--policy", path.join(d, "policy")], { encoding: "utf8" });
+  check("--json + gate violation still exits 1", jg.status === 1, `status=${jg.status}`);
+  let envG = null;
+  try { envG = JSON.parse(jg.stdout); } catch { /* null → the check below fails with the raw stdout */ }
+  check("--json + gate violation: stdout stays PURE JSON (no [AS-EFF-…] leak)",
+        envG !== null && Array.isArray(envG.functions) && !jg.stdout.includes("[AS-EFF-"), jg.stdout.slice(0, 160));
+  check("--json + gate violation: the [AS-EFF-…] line is on stderr",
+        jg.stderr.includes("[AS-EFF-006]") && jg.stderr.includes("src.domain.place"), jg.stderr.slice(0, 200));
+}
+
+// ── 3b. single-dash unknown flag is rejected (NOT read as a positional target) ──────────────────────
+{
+  const bad = spawnSync("node", [path.join(HERE, "scan.mjs"), "-policy", "/nonexistent-xyz"], { encoding: "utf8" });
+  check("a single-dash unknown flag (`-policy`) exits 2 as an unknown flag, not a scan target",
+        bad.status === 2 && bad.stderr.includes("unknown flag -policy"), bad.stderr.slice(0, 120));
+}
+
 // ── masking evasion (the cross-engine HIGH): a benign captured host must NOT certify an invisible
 // runtime-host reach; a use-call (write) after a captured connect host must NOT false-positive ──────
 {
@@ -791,6 +827,27 @@ export function GET(): void { netm.connect(443, "api.x.com"); }`,
   check("reachable unions effects over entry points (rust-shaped JSON)",
         reach.entryPoints === 3 && reach.effects?.Db?.count === 1 && reach.effects?.Net?.count === 1,
         JSON.stringify(reach));
+
+  // whatif against a TYPO'd policy path must be LOUD (exit 2), not gateless-green (ok:true, exit 0).
+  const q = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), ...a], { encoding: "utf8" });
+  const wiBad = q("whatif", prefix, "GET", "Db", path.join(d, "no-such-policy"));
+  check("whatif on a non-existent policy path exits 2 LOUDLY (not gateless-green)",
+        wiBad.status === 2 && /could not be read/.test(wiBad.stderr), `status=${wiBad.status} ${wiBad.stderr.slice(0, 120)}`);
+  // a REAL policy still evaluates (control): a deny that the affected set trips → exit 1.
+  fs.writeFileSync(path.join(d, "pol"), "deny Net app\n");
+  const wiOk = q("whatif", prefix, "GET", "Net", path.join(d, "pol"));
+  check("whatif against a real policy still evaluates (exit 1 on a violation)",
+        wiOk.status === 1 && /"ok": false/.test(wiOk.stdout), `status=${wiOk.status} ${wiOk.stdout.slice(0, 120)}`);
+  // the 0/1 verbosity sentinel is NOT treated as a policy path (no spurious read attempt).
+  const wiSentinel = q("whatif", prefix, "GET", "Net", "1");
+  check("whatif treats a trailing 0/1 as the verbosity sentinel, not a policy path",
+        wiSentinel.status === 0 && /"ok": true/.test(wiSentinel.stdout), `status=${wiSentinel.status} ${wiSentinel.stdout.slice(0, 120)}`);
+
+  // parsepolicy on an unreadable file → clean exit 2, NOT an uncaught readFileSync stack trace.
+  const ppBad = q("parsepolicy", path.join(d, "no-such-policy"));
+  check("parsepolicy on an unreadable file exits 2 cleanly (no stack trace)",
+        ppBad.status === 2 && /could not be read/.test(ppBad.stderr) && !/Error:|at /.test(ppBad.stderr),
+        `status=${ppBad.status} ${ppBad.stderr.slice(0, 160)}`);
 }
 {
   const d = project({

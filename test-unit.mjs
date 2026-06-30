@@ -247,6 +247,14 @@ test("scopeMatches: segment-prefix match, bounded by name length", () => {
   assert.equal(scopeMatches("a.b", "x"), false);
   assert.equal(scopeMatches("a", "a.b.c"), false); // scope longer than name
 });
+test("scopeMatches: `::` scope segments match `.`-qualified names (cross-engine shared policy)", () => {
+  // Rust/Java qualify with `::`; a shared policy authored with `::` must NOT be inert in TS.
+  assert.equal(scopeMatches("svc.handler", "svc::handler"), true);
+  assert.equal(scopeMatches("a.b.foo", "a::b"), true);
+  assert.equal(scopeMatches("a.b.foo", "foo::b"), false); // segment ORDER still matters
+  // a `::`-qualified NAME also splits, so a `.` policy scope matches it (both directions)
+  assert.equal(scopeMatches("crate::mod::place", "mod.place"), true);
+});
 test("hostPart: strips :port but preserves IPv6", () => {
   assert.equal(hostPart("api.example.com:8080"), "api.example.com");
   assert.equal(hostPart("[::1]:5432"), "::1");      // bracketed ipv6 + port

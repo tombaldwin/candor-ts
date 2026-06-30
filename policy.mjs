@@ -56,10 +56,12 @@ export function parsePolicy(text) {
   return { deny, allow, forbid };
 }
 
-/** §6.2 scope match: by NAME SEGMENT over ".", last segment a prefix. */
+/** §6.2 scope match: by NAME SEGMENT, last segment a prefix.
+ * Segments split on BOTH "." and "::" — Rust/Java qualify with "::" while TS uses ".", and a shared
+ * policy must match across engines (a `Foo::bar` scope authored against Rust was inert in TS before). */
 export function scopeMatches(name, scope) {
-  const segs = name.split(".");
-  const parts = scope.split(".");
+  const segs = name.split(/[.:]+/).filter(Boolean);
+  const parts = scope.split(/[.:]+/).filter(Boolean);
   if (parts.length === 0 || parts.length > segs.length) return false;
   const last = parts[parts.length - 1], init = parts.slice(0, -1);
   outer: for (let i = 0; i + parts.length <= segs.length; i++) {

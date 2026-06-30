@@ -87,7 +87,11 @@ for (let i = 0; i < argv.length; i++) {
     if (a === "--out") outPrefix = v; else policyPath = v;
     i++;
   }
-  else if (a.startsWith("--")) { console.error(`candor-ts: unknown flag ${a} (${usage})`); process.exit(2); }
+  // Any leading-dash token that isn't a recognized flag is an unknown flag — NOT a positional target
+  // (SPEC §6.2/§7). `-h`/`-V`/`--help`/`--version` are print-and-exit modes consumed above, so by here
+  // a single-dash token (`-x`, the typo `-policy`) can only be a mistake; treating it as the scan
+  // target would silently scan the wrong thing.
+  else if (a.startsWith("-")) { console.error(`candor-ts: unknown flag ${a} (${usage})`); process.exit(2); }
   else if (target === null) target = a;
   else if (outPrefix === null) outPrefix = a; // legacy positional prefix
   else { console.error(`candor-ts: unexpected extra argument ${a} (${usage})`); process.exit(2); }
@@ -193,8 +197,8 @@ if (!wantJson) fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: 
       const deps = JSON.parse(fs.readFileSync(pkg, "utf8")).dependencies ?? {};
       if (Object.keys(deps).length > 0)
         console.error("candor-ts: WARNING — the target declares dependencies but has no node_modules; " +
-                      "imports will not resolve and most functions will read Unknown. " +
-                      "Run `npm install` in the target first.");
+                      "imports won't resolve, so calls into those packages read pure/invisible (not Unknown) " +
+                      "and effects through them are silently dropped. Run `npm install` in the target first.");
     } catch {}
   }
   // Prisma's client types are GENERATED — a project with the prisma dependency but no generated
@@ -2084,7 +2088,10 @@ if (policyPath) {
   const incompleteMap = new Map();
   for (const [name, rec] of fns) if (rec.incomplete.size) incompleteMap.set(name, rec.incomplete);
   const v = evaluatePolicy(parsePolicy(text), functions, cg, incompleteMap);
-  for (const line of v) console.log(line);
+  // In --json mode stdout is the §2 envelope and must stay pure JSON — route the gate's
+  // [AS-EFF-…] violation lines to stderr so a `candor-ts --json --policy … | jq` pipe never breaks.
+  const emitViolation = wantJson ? (l) => console.error(l) : (l) => console.log(l);
+  for (const line of v) emitViolation(line);
   if (v.length) {
     console.error(`candor-ts: ${v.length} policy violation(s)`);
     process.exit(1);

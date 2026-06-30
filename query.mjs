@@ -95,7 +95,15 @@ switch (cmd) {
     printAgents(); // shared with scan.mjs — one implementation, can't diverge within an install
     break;
   case "parsepolicy": {
-    emit(parsePolicy(fs.readFileSync(args[0], "utf8")));
+    // An unreadable/missing file is a clean exit-2 error, not an uncaught readFileSync stack trace.
+    let text;
+    try {
+      text = fs.readFileSync(args[0], "utf8");
+    } catch {
+      console.error(`candor: policy ${args[0] ?? "(no file given)"} could not be read`);
+      process.exit(2);
+    }
+    emit(parsePolicy(text));
     break;
   }
   case "show": {
@@ -234,8 +242,18 @@ switch (cmd) {
       for (const c of rev.get(n) ?? []) if (!affected.has(c)) { affected.add(c); queue.push(c); }
     }
     const violations = [];
-    if (maybePolicy && maybePolicy !== "0" && maybePolicy !== "1" && fs.existsSync(maybePolicy)) {
-      const pol = parsePolicy(fs.readFileSync(maybePolicy, "utf8"));
+    // A present policy arg (anything but the 0/1 verbosity sentinels) MUST exist and be readable —
+    // a typo'd path must be LOUD, not silently "no policy → ok:true, exit 0" (mirrors scan's --policy,
+    // which exits 2 on an unreadable file: a gate that can't read its policy can't certify anything).
+    if (maybePolicy && maybePolicy !== "0" && maybePolicy !== "1") {
+      let text;
+      try {
+        text = fs.readFileSync(maybePolicy, "utf8");
+      } catch {
+        console.error(`candor: policy ${maybePolicy} could not be read; whatif NOT evaluated against it`);
+        process.exit(2);
+      }
+      const pol = parsePolicy(text);
       for (const r of pol.deny) {
         if (r.effects.length && !r.effects.includes(eff)) continue; // pure ([]) forbids ANY effect
         for (const fn of affected)
