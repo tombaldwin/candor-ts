@@ -17,6 +17,8 @@
  *   node query.mjs whatif   <prefix> <fn> <Effect> [policy-file] [0|1]
  */
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { parsePolicy, scopeMatches } from "./policy.mjs";
 import { printAgents } from "./contract.mjs";
@@ -30,6 +32,61 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          containment as coreContainment,
          loadReport, loadCallgraph, matches } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
+
+// ONE version + spec source, the SAME way scan.mjs reads them: PKG_VERSION is the bare semver from
+// package.json; SPEC_VERSION is the spec contract this build speaks. Reused, never re-littered.
+const QUERY_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(QUERY_DIR, "package.json"), "utf8")).version;
+const SPEC_VERSION = "0.7";
+
+// The full subcommand catalogue — name + one-line description (derived from the per-subcommand
+// comments + the module-doc header). The single source for the --help list AND the no-arg/unknown
+// usage, so the two can never drift back to a stale hand-list again.
+const SUBCOMMANDS = [
+  ["parsepolicy", "<file>", "parse a policy file (candor-spec §6.2) and print it as JSON"],
+  ["show", "<prefix> <query> [0|1]", "the effect record(s) for a function — direct, inferred, surfaces"],
+  ["where", "<prefix> <Effect> [0|1]", "functions with an effect, split into directly / inherited"],
+  ["callers", "<prefix> <query> [0|1]", "who reaches a function: {of, direct, transitive} (--include-unknown)"],
+  ["map", "<prefix> [0|1]", "per-module effect rollup: {effects, functions} by module"],
+  ["containment", "<prefix> [baseline-prefix]", "§6.1 boundary-effect dispersion; with a baseline, the leak ratchet (exit 1)"],
+  ["diff", "<cur-prefix> <base-prefix>", "per-function effect delta vs a baseline: {changes:[{fn,gained,lost}]} (exit 1 on a gain)"],
+  ["reachable", "<prefix>", "effects unioned over the entry points: what the app DOES at runtime"],
+  ["impact", "<prefix> <query>", "blast radius of a function (backward dual of reachable)"],
+  ["blindspots", "<prefix>", "the Unknown sources, ranked by blast radius"],
+  ["gains", "<cur-prefix> <base-prefix>", "the supply-chain alarm: what the surface gained between two reports"],
+  ["path", "<prefix> <fn> <Effect>", "a call path from a function to where an effect enters"],
+  ["whatif", "<prefix> <fn> <Effect> [policy-file] [0|1]", "the impact of giving a function an effect, vs a policy (exit 1 on a violation)"],
+  ["agents", "", "print the agent contract for this build (AGENTS.md)"],
+];
+
+// The full usage block — every real subcommand, replacing the stale hand-list. Printed to stderr on
+// the no-arg / unknown-command path (exit 2) and reused in --help (stdout, exit 0).
+const usage = () => {
+  const w = Math.max(...SUBCOMMANDS.map(([n, a]) => `${n} ${a}`.trimEnd().length));
+  const lines = SUBCOMMANDS.map(([n, a, d]) => `  ${`${n} ${a}`.trimEnd().padEnd(w)}  ${d}`);
+  lines.push(`  ${"-V, --version".padEnd(w)}  print the build and spec version (offline)`);
+  lines.push(`  ${"-h, --help".padEnd(w)}  show this help`);
+  return `USAGE: candor-ts-query <command> [args]\n\n${lines.join("\n")}`;
+};
+
+// --version / -V: a print-and-exit MODE, handled before the switch so it never depends on a command.
+// Fully OFFLINE — candor never phones home. Staying current is the AGENT's job.
+if (process.argv.includes("--version") || process.argv.includes("-V")) {
+  console.log(`candor-ts-query ${PKG_VERSION} (spec ${SPEC_VERSION})`);
+  console.log("upgrade: npm install -g candor-ts@latest");
+  process.exit(0);
+}
+
+// -h / --help: a print-and-exit MODE, handled before the switch (so `-h`'s single dash is never
+// mistaken for a command). Banner + USAGE + the full described subcommand list + the github footer.
+if (process.argv.includes("-h") || process.argv.includes("--help")) {
+  console.log(`candor-ts-query ${PKG_VERSION} — read-only queries over a candor report (candor-spec ${SPEC_VERSION})
+
+${usage()}
+
+See https://github.com/tombaldwin/candor`);
+  process.exit(0);
+}
 
 const [, , cmd, ...args] = process.argv;
 switch (cmd) {
@@ -191,6 +248,8 @@ switch (cmd) {
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }
   default:
-    console.error("usage: node query.mjs <parsepolicy|show|where|callers|map|whatif> …");
+    // no command (cmd === undefined) or an unknown one: the FULL usage, not the stale 6-item list.
+    if (cmd !== undefined) console.error(`candor-ts-query: unknown command '${cmd}'`);
+    console.error(usage());
     process.exit(2);
 }
