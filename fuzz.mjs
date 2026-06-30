@@ -9,6 +9,11 @@
  * omitted) is a SILENT UNDER-REPORT, the bug class this exists to catch. The precision twin: a pure
  * bystander must stay OUT of the report.
  *
+ * A ROBUSTNESS lane (runRobustnessLane) complements the soundness chains: it feeds MALFORMED /
+ * CORRUPT inputs (syntactically-broken sources; truncated/non-JSON/wrong-shape reports) and asserts
+ * the engine never CRASHES — it must degrade to a clean exit and an honest report, never an uncaught
+ * throw. That is the adversarial/CLI bug class, distinct from the (well-formed) soundness seeds.
+ *
  * Run: node fuzz.mjs [N]   (default 25 seeds)
  */
 import { spawnSync } from "node:child_process";
@@ -302,9 +307,64 @@ export function noOverride(c: Cat): void { c.speak(); }
   return bad;
 }
 
+// ── ROBUSTNESS lane: the soundness chain above feeds only WELL-FORMED, compilable projects. The
+// adversarial twin: feed MALFORMED / CORRUPT inputs and assert the engine never CRASHES (no uncaught
+// throw, no engine stack on stderr) — it must degrade to a clean exit (0|1|2) and an honest report.
+// This is the bug class this session shipped fixes for (the CLI/adversarial layer): a hostile or
+// half-written input must be survived, not panicked on. Each case is its own seeded pathology.
+function runRobustnessLane() {
+  const bad = [];
+  const HOSTILE_SRC = [
+    ["unbalanced_parens", `export function f(: void { return\n`],                       // garbage signature
+    ["unterminated_string", `export function f(): string { return "no end\n`],            // lexer can't close
+    ["deep_nesting", `export function f(): number { return ${"(".repeat(400)}1${")".repeat(400)}; }\n`], // stack-depth bait
+    ["lone_brace", `}}}}}\nexport function g(): void {}\n`],                               // stray closers
+    ["empty", ``],                                                                        // a zero-byte source
+    ["bom_and_nulls", `\uFEFFexport function h(): void { /* \u0000\u0000 */ }\n`],     // BOM + embedded NULs
+    ["unicode_ident", `export function \u{1F600}(): void {}\n`],                           // non-ident codepoint
+  ];
+  // an engine stack from scan.mjs/scan-core/query-core on stderr = an uncaught throw escaped (a crash).
+  const crashed = (res) => res.status === null /* killed by signal */ || /\n\s+at \S+ \(.*\.mjs/.test(res.stderr || "");
+
+  for (const [name, src] of HOSTILE_SRC) {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-fuzz-rob-"));
+    fs.mkdirSync(path.join(d, "src"), { recursive: true });
+    fs.writeFileSync(path.join(d, "src", "x.ts"), src);
+    const res = spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8" });
+    if (crashed(res)) bad.push(`robustness[${name}]: scan CRASHED (signal/uncaught throw): status=${res.status} ${(res.stderr || "").slice(0, 200)}`);
+    else if (![0, 1, 2].includes(res.status)) bad.push(`robustness[${name}]: scan exited with an unexpected code ${res.status}`);
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // CORRUPT REPORT inputs fed to the read-side (query.mjs): truncated, non-JSON, wrong-shape, huge.
+  // loadReport must coerce each to [] and the command must exit cleanly with valid JSON — never throw.
+  const CORRUPT_REPORTS = [
+    ["truncated", `{ "candor": {}, "functions": [ { "fn": "x.`],
+    ["not_json", `<<<not json at all>>>`],
+    ["null_doc", `null`],
+    ["array_doc", `[1, 2, 3]`],                                            // top-level array, not an envelope
+    ["functions_not_array", `{ "functions": "Net" }`],                     // a string where an array is due
+    ["bom_json", `\uFEFF{ "functions": [] }`],                          // leading BOM ahead of valid JSON
+  ];
+  for (const [name, body] of CORRUPT_REPORTS) {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-fuzz-rep-"));
+    fs.writeFileSync(path.join(d, "rep.json"), body);
+    const prefix = path.join(d, "rep");
+    for (const argv of [["show", prefix, "x"], ["map", prefix], ["where", prefix, "Net"], ["reachable", prefix]]) {
+      const res = spawnSync("node", [path.join(HERE, "query.mjs"), ...argv], { encoding: "utf8" });
+      if (crashed(res)) bad.push(`robustness[report:${name} ${argv[0]}]: query CRASHED: status=${res.status} ${(res.stderr || "").slice(0, 200)}`);
+      else if (res.status !== 0) bad.push(`robustness[report:${name} ${argv[0]}]: query exited ${res.status} (expected clean 0 over a coerced-empty report)`);
+      else { try { JSON.parse(res.stdout); } catch { bad.push(`robustness[report:${name} ${argv[0]}]: query stdout was not valid JSON: ${res.stdout.slice(0, 120)}`); } }
+    }
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+  return bad;
+}
+
 const N = Number(process.argv[2] ?? 25);
 let fails = [];
 fails = fails.concat(runOverrideSiblingPrecision());
+fails = fails.concat(runRobustnessLane());
 for (let seed = 1; seed <= N; seed++) fails = fails.concat(runSeed(seed));
 for (const b of fails) console.log(`  ${b}`);
 const failedSeeds = new Set(fails.map((f) => f.split(":")[0]));

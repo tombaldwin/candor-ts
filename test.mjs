@@ -1540,5 +1540,170 @@ export function q(p: Pool) { return p.query("SELECT 1"); }`,
         entry(report, "src.a.q")?.inferred.includes("Db"), JSON.stringify(entry(report, "src.a.q")));
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// CLI / GATE BEHAVIOUR MATRIX — assert the real stdout/stderr/exit of `node scan.mjs …` and
+// `node query.mjs …`. This session's shipped bugs lived in the CLI/gate/adversarial layer (the
+// single-dash flag, the whatif/parsepolicy unreadable-policy exit, the --json purity), so this
+// section pins the WHOLE surface, not just the firing-gate happy path covered above (§3, §3a, §3b).
+// Helpers spawn the bin and return the raw {status,stdout,stderr}; assertions are on those three.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+const runScan = (...a) => spawnSync("node", [path.join(HERE, "scan.mjs"), ...a], { encoding: "utf8" });
+const runQuery = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), ...a], { encoding: "utf8" });
+const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"));
+
+// ── CLI-1. bare scan → reports files written, exit 0 (the default, file-writing mode) ─────────────
+{
+  const d = project({ "src/a.ts": `import * as fsm from "node:fs";\nexport function f(): void { fsm.readFileSync("/x"); }` });
+  const r = runScan(d);
+  check("bare scan exits 0 and WRITES the report files to .candor/", r.status === 0
+        && fs.existsSync(path.join(d, ".candor", "report.json"))
+        && fs.existsSync(path.join(d, ".candor", "report.callgraph.json")), `status=${r.status} stderr=${r.stderr?.slice(0, 120)}`);
+  // bare scan reports human progress on stderr (the §2 envelope is NOT dumped to stdout without --json)
+  check("bare scan: stdout is not the JSON envelope (file-writing mode, not --json)",
+        !r.stdout.includes('"functions"'), r.stdout.slice(0, 120));
+}
+
+// ── CLI-2. --json + a CLEAN policy → pure JSON envelope on stdout, exit 0 (the gate passes) ───────
+// §3a already covers --json (envelope shape, no files) and --json + a VIOLATING policy (exit 1,
+// stderr-only violations). The missing leg is the clean-pass: a satisfied gate must stay exit 0 with
+// stdout still pure JSON — never a spurious exit 1, never a violation line on a green run.
+{
+  const d = project({
+    "src/db.ts": `import { DatabaseSync } from "node:sqlite";\nexport function save(db: DatabaseSync): void { db.exec("UPDATE ledger SET v = 1"); }`,
+    "policy": "allow Db in db ledger\n",  // the only table touched (ledger) IS sanctioned → clean
+  });
+  const r = runScan(d, "--json", "--policy", path.join(d, "policy"));
+  check("--json + a CLEAN policy exits 0", r.status === 0, `status=${r.status} stderr=${r.stderr?.slice(0, 160)}`);
+  let env = null; try { env = JSON.parse(r.stdout); } catch { /* null → check below fails with raw stdout */ }
+  check("--json + a CLEAN policy: stdout is the PURE §2 envelope (no [AS-EFF-…] leak)",
+        env !== null && Array.isArray(env.functions) && !r.stdout.includes("[AS-EFF-"), r.stdout.slice(0, 160));
+}
+
+// ── CLI-3. --policy <clean> (non-JSON) → exit 0; the gate is silent on a satisfied policy ─────────
+{
+  const d = project({
+    "src/db.ts": `import { DatabaseSync } from "node:sqlite";\nexport function save(db: DatabaseSync): void { db.exec("UPDATE ledger SET v = 1"); }`,
+    "policy": "allow Db in db ledger\n",  // the only table touched (ledger) IS sanctioned → clean
+  });
+  const r = runScan(d, "--policy", path.join(d, "policy"));
+  check("--policy <clean> exits 0 (a satisfied gate is green)", r.status === 0, `status=${r.status} stderr=${r.stderr?.slice(0, 160)}`);
+  check("--policy <clean>: no [AS-EFF-…] violation line is printed on a clean run",
+        !r.stdout.includes("[AS-EFF-") && !r.stderr.includes("[AS-EFF-"), `${r.stdout.slice(0, 120)} / ${r.stderr.slice(0, 120)}`);
+}
+
+// ── CLI-4. --version / -V → `candor-ts <ver> (spec <X>)`, exit 0 (both spellings; offline) ─────────
+{
+  for (const flag of ["--version", "-V"]) {
+    const r = runScan(flag);
+    const line1 = r.stdout.split("\n")[0];
+    check(`scan ${flag} → 'candor-ts <ver> (spec <X>)' on line 1, exit 0`,
+          r.status === 0 && new RegExp(`^candor-ts ${PKG.version.replace(/\./g, "\\.")} \\(spec [0-9.]+\\)$`).test(line1),
+          `status=${r.status} line1=${JSON.stringify(line1)}`);
+  }
+}
+
+// ── CLI-5. --help / -h → usage (the real flag list), exit 0 (both spellings; `-h`'s single dash
+// must reach the print-and-exit mode, not be eaten by the unknown-flag arm) ─────────────────────
+{
+  for (const flag of ["--help", "-h"]) {
+    const r = runScan(flag);
+    check(`scan ${flag} → usage with the real flags, exit 0`,
+          r.status === 0 && /USAGE:/.test(r.stdout) && /--policy/.test(r.stdout) && /--json/.test(r.stdout),
+          `status=${r.status} ${r.stdout.slice(0, 120)}`);
+  }
+}
+
+// ── CLI-6. unknown flags: a DOUBLE-dash --bogus and a generic SINGLE-dash -x both exit 2 ───────────
+// §3b pins `-policy` (a single-dash near-miss of a real flag). These pin the general arms: any
+// unrecognized flag — long OR short — is a hard exit-2 unknown-flag error, never a silent scan
+// target. The single-dash case is the SHIPPED FIX (a `-x` once fell through to "scan path -x").
+{
+  const bogus = runScan("--bogus");
+  check("scan --bogus (unknown long flag) exits 2 with an unknown-flag error",
+        bogus.status === 2 && /unknown flag --bogus/.test(bogus.stderr), `status=${bogus.status} ${bogus.stderr.slice(0, 120)}`);
+  const dashX = runScan("-x");
+  check("scan -x (unknown SHORT flag) exits 2 — NOT read as a positional scan target (the single-dash fix)",
+        dashX.status === 2 && /unknown flag -x/.test(dashX.stderr), `status=${dashX.status} ${dashX.stderr.slice(0, 120)}`);
+}
+
+// ── CLI-7. ADVERSARIAL scan inputs: no crash, an honest (loud) disclosure on each pathology ───────
+{
+  // (a) a syntactically-broken .ts must not throw an uncaught TS-compiler stack — degrade to a report.
+  const broken = project({ "src/b.ts": `export function broken(: void { return\n` }); // unbalanced/garbage
+  const rb = runScan(broken);
+  check("adversarial: a syntactically-broken .ts does not crash (graceful exit 0|1|2, report written)",
+        [0, 1, 2].includes(rb.status) && !/\bat \w+ \(.*scan\.mjs/.test(rb.stderr)
+          && fs.existsSync(path.join(broken, ".candor", "report.json")),
+        `status=${rb.status} ${rb.stderr.slice(0, 200)}`);
+
+  // (b) deps DECLARED but no node_modules → the LOUD warning path (effects through unresolved pkgs are
+  // disclosed, not silently dropped) — must warn on stderr and still exit 0.
+  const noMods = project({
+    "package.json": `{"name":"x","dependencies":{"express":"^4.0.0"}}`,
+    "src/a.ts": `import e from "express";\nexport function f() { return e(); }\n`,
+  });
+  const rn = runScan(noMods);
+  check("adversarial: deps declared but no node_modules → LOUD warning on stderr, exit 0 (not silently pure)",
+        rn.status === 0 && /no node_modules/.test(rn.stderr) && /npm install/.test(rn.stderr),
+        `status=${rn.status} ${rn.stderr.slice(0, 200)}`);
+
+  // (c) --allow-js on PLAIN JS (no TS at all) → analyzes it, exit 0, effect honestly surfaced, no crash.
+  const pj = project({ "src/a.js": `const fs = require("fs");\nmodule.exports.r = function () { return fs.readFileSync("/x"); };\n` });
+  const rj = runScan(pj, "--allow-js");
+  const pjRep = fs.existsSync(path.join(pj, ".candor", "report.json"))
+    ? JSON.parse(fs.readFileSync(path.join(pj, ".candor", "report.json"), "utf8")) : null;
+  check("adversarial: --allow-js on plain JS does not crash and surfaces the effect (src.a.r → Fs)",
+        rj.status === 0 && pjRep?.functions.some((e) => e.fn === "src.a.r" && e.inferred.includes("Fs")),
+        `status=${rj.status} ${rj.stderr.slice(0, 160)}`);
+}
+
+// ── CLI-8. query.mjs print-and-exit modes + unknown command (the FULL, non-stale usage) ───────────
+{
+  for (const flag of ["--version", "-V"]) {
+    const r = runQuery(flag);
+    check(`query ${flag} → version banner, exit 0`,
+          r.status === 0 && /candor-ts-query [0-9]/.test(r.stdout.split("\n")[0]), `status=${r.status} ${r.stdout.slice(0, 80)}`);
+  }
+  for (const flag of ["--help", "-h"]) {
+    const r = runQuery(flag);
+    check(`query ${flag} → usage, exit 0`, r.status === 0 && /USAGE: candor-ts-query/.test(r.stdout), `status=${r.status} ${r.stdout.slice(0, 80)}`);
+  }
+  // unknown command → exit 2 AND the FULL subcommand list (the regression was a stale 6-item hand-list;
+  // assert several real subcommands are present so a drift back to a partial list fails here).
+  const unk = runQuery("bogus-cmd");
+  check("query <unknown command> exits 2 and prints the FULL (non-stale) usage with every subcommand",
+        unk.status === 2 && /unknown command 'bogus-cmd'/.test(unk.stderr)
+          && ["show", "where", "callers", "whatif", "reachable", "impact", "containment", "diff", "gains", "path", "parsepolicy"]
+            .every((c) => new RegExp(`\\b${c}\\b`).test(unk.stderr)),
+        unk.stderr.slice(0, 240));
+  // no command at all (cmd === undefined) → also the full usage, exit 2
+  const none = runQuery();
+  check("query with NO command exits 2 with the full usage", none.status === 2 && /USAGE: candor-ts-query/.test(none.stderr),
+        `status=${none.status} ${none.stderr.slice(0, 120)}`);
+}
+
+// ── CLI-9. query.mjs against a CORRUPT/TRUNCATED report → clean handling, never an uncaught throw ──
+// query-core's loadReport is unit-pinned (test-unit) to coerce a corrupt report to []; this pins the
+// CLI WIRING end to end: a query command over a truncated report must exit cleanly (0), emit valid
+// JSON, disclose the corruption on stderr, and NOT leak a readFileSync/JSON.parse stack trace.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-qcorrupt-"));
+  fs.writeFileSync(path.join(d, "rep.json"), `{ "candor": {}, "functions": [ { "fn": "x.`); // truncated mid-object
+  const prefix = path.join(d, "rep");
+  const r = runQuery("show", prefix, "x");
+  let parsed = null; try { parsed = JSON.parse(r.stdout); } catch { /* null → check fails with raw stdout */ }
+  check("query show on a CORRUPT report: clean exit 0, valid JSON ([]) on stdout, no uncaught throw",
+        r.status === 0 && Array.isArray(parsed) && parsed.length === 0
+          && !/\bat \w+ \(.*\.mjs/.test(r.stderr), `status=${r.status} stdout=${r.stdout.slice(0, 80)} stderr=${r.stderr.slice(0, 160)}`);
+  check("query show on a CORRUPT report: the corruption is DISCLOSED on stderr (not silently empty)",
+        /failed to parse/.test(r.stderr), r.stderr.slice(0, 200));
+  // map (a different loadReport consumer) must likewise survive a corrupt report without a stack.
+  const rm = runQuery("map", prefix);
+  check("query map on a CORRUPT report also exits cleanly with valid JSON (no stack trace)",
+        rm.status === 0 && !/\bat \w+ \(.*\.mjs/.test(rm.stderr) && (() => { try { JSON.parse(rm.stdout); return true; } catch { return false; } })(),
+        `status=${rm.status} ${rm.stderr.slice(0, 160)}`);
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
