@@ -109,14 +109,19 @@ export function literalAllowed(effect, reached, values) {
  * transitive inferred; AS-EFF-008 allowlists over the transitive literal surfaces, the no-visible-
  * literal case flagged as uncertifiable; AS-EFF-009 forbid by reachability). One line per violation.
  */
+// Each violation is a STRUCTURED record { rule, fn, effects, detail } (candor-spec §3.3 ⟨0.8⟩): `effects`
+// is the specific denied/allowed effect set the violation concerns ([] for the 009 layer-flow, which has
+// no single effect); `detail` is the message BODY (no `[AS-EFF-00x]` prefix — the rule carries the code).
+// The console gate renders `[${rule}] ${detail}`; --gate-json emits the records verbatim.
 export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()) {
   const out = [];
   const surfaces = { Net: "hosts", Exec: "cmds", Fs: "paths", Db: "tables" };
+  const push = (rule, fn, effects, detail) => out.push({ rule, fn, effects, detail });
   for (const f of functions) {
     for (const r of pol.deny) {
       if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
       const hits = r.effects.length === 0 ? f.inferred : f.inferred.filter((e) => r.effects.includes(e));
-      if (hits.length) out.push(`[AS-EFF-006] \`${f.fn}\` performs { ${hits.join(", ")} }, forbidden by policy: \`${r.raw}\``);
+      if (hits.length) push("AS-EFF-006", f.fn, hits, `\`${f.fn}\` performs { ${hits.join(", ")} }, forbidden by policy: \`${r.raw}\``);
     }
     for (const r of pol.allow) {
       if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
@@ -127,14 +132,14 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       // invisible forbidden endpoint (the masking evasion). Matches candor-java 0.5.29 / candor-rust.
       const surfaceIncomplete = incomplete.get(f.fn)?.has(r.effect);
       if (reached.length === 0 || surfaceIncomplete) {
-        out.push(`[AS-EFF-008] \`${f.fn}\` performs ${r.effect} with no visible literal — the surface cannot be certified: \`${r.raw}\``);
+        push("AS-EFF-008", f.fn, [r.effect], `\`${f.fn}\` performs ${r.effect} with no visible literal — the surface cannot be certified: \`${r.raw}\``);
       } else {
         const bad = reached.filter((v) => !literalAllowed(r.effect, v, r.values));
-        if (bad.length) out.push(`[AS-EFF-008] \`${f.fn}\` reaches { ${bad.join(", ")} } outside the allowlist: \`${r.raw}\``);
+        if (bad.length) push("AS-EFF-008", f.fn, [r.effect], `\`${f.fn}\` reaches { ${bad.join(", ")} } outside the allowlist: \`${r.raw}\``);
       }
     }
   }
-  // AS-EFF-009: forbid A -> B by reachability over the callgraph.
+  // AS-EFF-009: forbid A -> B by reachability over the callgraph. No single effect → effects: [].
   for (const r of pol.forbid) {
     for (const fn of Object.keys(callgraph)) {
       if (!scopeMatches(fn, r.from)) continue;
@@ -148,7 +153,7 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
           queue.push(c);
         }
       }
-      if (hit) out.push(`[AS-EFF-009] \`${fn}\` reaches into a forbidden layer (via \`${hit}\`), violating policy: \`${r.raw}\``);
+      if (hit) push("AS-EFF-009", fn, [], `\`${fn}\` reaches into a forbidden layer (via \`${hit}\`), violating policy: \`${r.raw}\``);
     }
   }
   return out;

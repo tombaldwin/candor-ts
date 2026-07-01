@@ -36,7 +36,7 @@ const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 // literal stamped into the envelope's `spec` field, so the doc lines and the report can never drift.
 // Reused, never re-littered.
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
-const SPEC_VERSION = "0.7";
+const SPEC_VERSION = "0.8";
 
 // --version: a print-and-exit MODE, handled before the main arg walk so it never depends on a target.
 // Fully OFFLINE — candor never phones home. Staying current is the AGENT's job: read the installed
@@ -52,13 +52,14 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
 if (process.argv.includes("-h") || process.argv.includes("--help")) {
   console.log(`candor-ts ${PKG_VERSION} — TypeScript/JavaScript effect scanner (candor-spec ${SPEC_VERSION})
 
-USAGE: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--policy <file>] [--allow-js] [--agents] [--version]
+USAGE: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--allow-js] [--agents] [--version]
 
   <target>          a dir, a .ts file, or a tsconfig.json to scan
   --out <prefix>    write the report to <prefix>.json + <prefix>.callgraph.json
   --json            print the report as JSON to stdout (instead of writing files)
   --policy <file>   enforce a policy file (deny/pure/allow/forbid, candor-spec §6.2) — exit 1 on a
                     violation, 2 if unreadable; honours $CANDOR_POLICY when the flag is absent
+  --gate-json <f>   write the structured gate verdict { spec, ok, violations } as JSON (candor-spec §3.3)
   --allow-js        also scan plain JS/Node (.js/.mjs/.cjs), not just TypeScript
   --agents          print the agent contract for this build (AGENTS.md)
   -V, --version     print the build and spec version (offline)
@@ -73,18 +74,18 @@ See https://github.com/tombaldwin/candor`);
 // missing/flag-shaped value; an unknown flag fails; flags may precede the target. `--agents` is a
 // flag (a print-and-exit MODE) — it must NOT fire when it is the VALUE of --out/--policy, which the
 // value-consuming skip handles, nor produce a "lying unknown flag" error for a real flag given first.
-const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--policy <file>] [--allow-js] [--agents] [--version] [--help]";
+const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--allow-js] [--agents] [--version] [--help]";
 const argv = process.argv.slice(2);
-let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, allowJs = false, wantAgents = false, wantJson = false;
+let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, gateJsonPath = null, allowJs = false, wantAgents = false, wantJson = false;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--agents") wantAgents = true;
   else if (a === "--json") wantJson = true;
   else if (a === "--allow-js") allowJs = true;
-  else if (a === "--out" || a === "--policy") {
+  else if (a === "--out" || a === "--policy" || a === "--gate-json") {
     const v = argv[i + 1];
     if (v === undefined || v.startsWith("--")) { console.error(`candor-ts: ${a} requires a value (${usage})`); process.exit(2); }
-    if (a === "--out") outPrefix = v; else policyPath = v;
+    if (a === "--out") outPrefix = v; else if (a === "--policy") policyPath = v; else gateJsonPath = v;
     i++;
   }
   // Any leading-dash token that isn't a recognized flag is an unknown flag — NOT a positional target
@@ -2074,6 +2075,7 @@ if (unlistedSeen.size > 0) {
 }
 
 // ---- the standing §6.2 gate (--policy / CANDOR_POLICY) --------------------------------------------
+let gateViolations = [];
 if (policyPath) {
   let text;
   try {
@@ -2087,14 +2089,22 @@ if (policyPath) {
   // java/rust engines (not a report field) — passed to the gate so an incomplete surface fails closed.
   const incompleteMap = new Map();
   for (const [name, rec] of fns) if (rec.incomplete.size) incompleteMap.set(name, rec.incomplete);
-  const v = evaluatePolicy(parsePolicy(text), functions, cg, incompleteMap);
+  gateViolations = evaluatePolicy(parsePolicy(text), functions, cg, incompleteMap);
   // In --json mode stdout is the §2 envelope and must stay pure JSON — route the gate's
   // [AS-EFF-…] violation lines to stderr so a `candor-ts --json --policy … | jq` pipe never breaks.
   const emitViolation = wantJson ? (l) => console.error(l) : (l) => console.log(l);
-  for (const line of v) emitViolation(line);
-  if (v.length) {
-    console.error(`candor-ts: ${v.length} policy violation(s)`);
-    process.exit(1);
-  }
-  console.error("candor-ts: policy ✓");
+  for (const x of gateViolations) emitViolation(`[${x.rule}] ${x.detail}`);
 }
+// --gate-json ⟨0.8⟩: the structured gate verdict { spec, ok, violations:[{rule,fn,effects,detail}] }, from
+// the SAME gateViolations that set the exit code (so it can't disagree). Written whenever the flag is set —
+// ok:true,[] when no gate is configured. Must precede the exit(1) below.
+if (gateJsonPath) {
+  const verdict = JSON.stringify({ spec: SPEC_VERSION, ok: gateViolations.length === 0, violations: gateViolations }, null, 1);
+  if (gateJsonPath === "-") console.log(verdict);
+  else writeAtomic(gateJsonPath, verdict + "\n");
+}
+if (policyPath && gateViolations.length) {
+  console.error(`candor-ts: ${gateViolations.length} policy violation(s)`);
+  process.exit(1);
+}
+if (policyPath) console.error("candor-ts: policy ✓");

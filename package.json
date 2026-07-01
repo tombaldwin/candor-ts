@@ -1,6 +1,6 @@
 {
   "name": "candor-ts",
-  "version": "0.7.7",
+  "version": "0.8.0",
   "description": "candor for TypeScript — per-function side effects, transitively, with a policy gate (candor-spec 0.5)",
   "type": "module",
   "dependencies": {

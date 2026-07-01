@@ -318,6 +318,35 @@ export function place(db: DatabaseSync): void { save(db); }`,
         jg.stderr.includes("[AS-EFF-006]") && jg.stderr.includes("src.domain.place"), jg.stderr.slice(0, 200));
 }
 
+// ── 3c. --gate-json ⟨0.8⟩: the structured gate verdict, faithful to the exit code ───────────────────
+{
+  const d = project({
+    "src/db.ts": `import { DatabaseSync } from "node:sqlite";
+export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v = 1"); }`,
+    "src/domain.ts": `import { save } from "./db.js";
+import { DatabaseSync } from "node:sqlite";
+export function place(db: DatabaseSync): void { save(db); }`,
+    "policy": "deny Db domain\n",
+  });
+  const gp = path.join(d, "gate.json");
+  const r = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", path.join(d, "policy"), "--gate-json", gp], { encoding: "utf8" });
+  check("--gate-json + violation still exits 1", r.status === 1, `status=${r.status}`);
+  let v = null;
+  try { v = JSON.parse(fs.readFileSync(gp, "utf8")); } catch { /* null → checks fail with raw */ }
+  check("--gate-json verdict declares spec 0.8", v?.spec === "0.8", JSON.stringify(v)?.slice(0, 120));
+  check("--gate-json verdict ok:false on a failing gate", v?.ok === false, `ok=${v?.ok}`);
+  const viol = v?.violations?.find((x) => x.fn === "src.domain.place");
+  check("--gate-json names the violating fn with its rule", viol?.rule === "AS-EFF-006", JSON.stringify(v?.violations)?.slice(0, 160));
+  check("--gate-json carries the denied effects", Array.isArray(viol?.effects) && viol.effects.includes("Db"), JSON.stringify(viol?.effects));
+
+  // clean case: --gate-json with no gate configured writes ok:true, []
+  const gp2 = path.join(d, "gate2.json");
+  const r2 = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--gate-json", gp2], { encoding: "utf8" });
+  let v2 = null;
+  try { v2 = JSON.parse(fs.readFileSync(gp2, "utf8")); } catch { /* null */ }
+  check("--gate-json with no gate → ok:true, []", r2.status === 0 && v2?.ok === true && v2.violations.length === 0, `status=${r2.status} ok=${v2?.ok}`);
+}
+
 // ── 3b. single-dash unknown flag is rejected (NOT read as a positional target) ──────────────────────
 {
   const bad = spawnSync("node", [path.join(HERE, "scan.mjs"), "-policy", "/nonexistent-xyz"], { encoding: "utf8" });
