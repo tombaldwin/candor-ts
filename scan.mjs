@@ -2090,9 +2090,10 @@ if (policyPath) {
   const incompleteMap = new Map();
   for (const [name, rec] of fns) if (rec.incomplete.size) incompleteMap.set(name, rec.incomplete);
   gateViolations = evaluatePolicy(parsePolicy(text), functions, cg, incompleteMap);
-  // In --json mode stdout is the §2 envelope and must stay pure JSON — route the gate's
-  // [AS-EFF-…] violation lines to stderr so a `candor-ts --json --policy … | jq` pipe never breaks.
-  const emitViolation = wantJson ? (l) => console.error(l) : (l) => console.log(l);
+  // When stdout carries a JSON document — the §2 envelope (--json) OR the streamed gate verdict
+  // (--gate-json -) — it must stay pure JSON: route the gate's [AS-EFF-…] violation lines to stderr so
+  // a `… | jq` / `… | candor-sarif` pipe never breaks.
+  const emitViolation = (wantJson || gateJsonPath === "-") ? (l) => console.error(l) : (l) => console.log(l);
   for (const x of gateViolations) emitViolation(`[${x.rule}] ${x.detail}`);
 }
 // --gate-json ⟨0.8⟩: the structured gate verdict { spec, ok, violations:[{rule,fn,effects,detail}] }, from
@@ -2101,7 +2102,12 @@ if (policyPath) {
 if (gateJsonPath) {
   const verdict = JSON.stringify({ spec: SPEC_VERSION, ok: gateViolations.length === 0, violations: gateViolations }, null, 1);
   if (gateJsonPath === "-") console.log(verdict);
-  else writeAtomic(gateJsonPath, verdict + "\n");
+  else {
+    // The verdict is a SURFACING side-output: an unwritable path must be one stderr line, never a raw
+    // ENOENT crash whose exit 1 reads as a policy violation on a clean run (max-review find).
+    try { writeAtomic(gateJsonPath, verdict + "\n"); }
+    catch (e) { console.error(`candor-ts: could not write --gate-json ${gateJsonPath}: ${e.message}`); }
+  }
 }
 if (policyPath && gateViolations.length) {
   console.error(`candor-ts: ${gateViolations.length} policy violation(s)`);

@@ -347,6 +347,27 @@ export function place(db: DatabaseSync): void { save(db); }`,
   check("--gate-json with no gate → ok:true, []", r2.status === 0 && v2?.ok === true && v2.violations.length === 0, `status=${r2.status} ok=${v2?.ok}`);
 }
 
+// ── 3d. --gate-json robustness: unwritable path never crashes; `-` keeps stdout pure ────────────────
+{
+  const d = project({
+    "src/db.ts": `import { DatabaseSync } from "node:sqlite";
+export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v = 1"); }`,
+    "policy": "deny Db\n",
+  });
+  // (a) unwritable verdict path: one stderr line, the true exit code kept (1 here — the violation), no throw.
+  const r = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", path.join(d, "policy"), "--gate-json", path.join(d, "no/such/dir/gate.json")], { encoding: "utf8" });
+  check("--gate-json unwritable path keeps the violation exit (1)", r.status === 1, `status=${r.status}`);
+  check("--gate-json unwritable path: no raw stack trace", !r.stderr.includes("at ") || r.stderr.includes("could not write"), r.stderr.slice(0, 200));
+  const rc = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--gate-json", path.join(d, "no/such/dir/gate.json")], { encoding: "utf8" });
+  check("--gate-json unwritable path on a GATELESS run stays exit 0", rc.status === 0, `status=${rc.status} stderr=${rc.stderr.slice(0,120)}`);
+  // (b) `--gate-json -`: stdout is PURE verdict JSON; the AS-EFF line goes to stderr.
+  const rd = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", path.join(d, "policy"), "--gate-json", "-"], { encoding: "utf8" });
+  let vd = null;
+  try { vd = JSON.parse(rd.stdout); } catch { /* null → fail below with raw */ }
+  check("--gate-json - : stdout parses as the pure verdict", vd?.ok === false, rd.stdout.slice(0, 160));
+  check("--gate-json - : the AS-EFF line is on stderr", rd.stderr.includes("[AS-EFF-006]"), rd.stderr.slice(0, 160));
+}
+
 // ── 3b. single-dash unknown flag is rejected (NOT read as a positional target) ──────────────────────
 {
   const bad = spawnSync("node", [path.join(HERE, "scan.mjs"), "-policy", "/nonexistent-xyz"], { encoding: "utf8" });
