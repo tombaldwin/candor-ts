@@ -19,11 +19,12 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
-import { parsePolicy, scopeMatches } from "./policy.mjs";
+import { evaluatePolicy, parsePolicy, scopeMatches } from "./policy.mjs";
 
 const VERSION = createRequire(import.meta.url)("./package.json").version; // single-sourced, like scan.mjs
 
-const DEFAULT_PREFIX = process.env.CANDOR_REPORT || process.argv[2] || null;
+const DEFAULT_PREFIX = process.env.CANDOR_REPORT || process.argv[2]
+  || (fs.existsSync(".candor") ? ".candor/report" : null);   // the engines' default --out convention
 
 // A report exists at the prefix if there's an exact `<prefix>.json` (candor-ts) OR a sibling
 // `<prefix>.<crate>.scan.json` (the candor-scan/Rust multi-report form) — the loaders read both, so
@@ -52,12 +53,32 @@ const clip = (s, n = 120) => { s = String(s); return s.length > n ? s.slice(0, n
 // report-query-only (spec §7.12); an arbitrary `policy` path (/etc/passwd, ~/.aws/credentials) whose
 // parsed deny-rule scopes are reflected back in violations[].rule is an arbitrary-file-read exfiltration
 // channel — tie the policy to the project it gates.
-function confinedPolicyRead(policyPath, prefix) {
-  const root = nodePath.resolve(nodePath.dirname(prefix));
+function confinedPolicyRead(policyPath, prefix, root = nodePath.resolve(nodePath.dirname(prefix))) {
   const abs = nodePath.resolve(policyPath);
   if (abs !== root && !abs.startsWith(root + nodePath.sep))
     throw new Error(`policy must be within the report's directory (${root}) — refusing to read \`${clip(policyPath)}\``);
   return fs.readFileSync(abs, "utf8");
+}
+// The repo's .candor/config (spec §3.4), discovered by walking UP from the report's directory — so
+// `candor_gate` with no `policy` arg uses the policy the repo has checked in, exactly like the engines.
+// Returns { policyText, repoRoot } or null. Read-only + best-effort here (the server never gates a build;
+// a broken config surfaces as the tool's error, not an exit).
+function configPolicy(prefix) {
+  let dir = nodePath.resolve(nodePath.dirname(prefix));
+  for (;;) {
+    const cand = nodePath.join(dir, ".candor", "config");
+    if (fs.existsSync(cand)) {
+      const m = fs.readFileSync(cand, "utf8").split(/\r?\n/)
+        .map((l) => l.split("#", 1)[0].trim()).filter(Boolean)
+        .map((l) => l.match(/^(\S+)\s*(.*)$/)).find((mm) => mm && mm[1].toLowerCase() === "policy");
+      if (!m) return null;
+      const rel = m[2].trim();
+      return { policyPath: nodePath.resolve(dir, rel), repoRoot: dir };
+    }
+    const parent = nodePath.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
 }
 
 // ---- the tools: name -> {description, schema, run} ------------------------------------------------
@@ -130,7 +151,62 @@ const TOOLS = {
       return r;
     },
   },
+  candor_gate: {
+    description: "The policy verdict over this report: { ok, violations:[{rule, fn, effects, detail}] } — 'would this repo pass its architecture gate?'. Uses `policy` if given, else the repo's checked-in .candor/config policy (spec §3.4). Computed from the report (an engine's own --gate-json run is the authoritative CI form).",
+    schema: { type: "object", properties: { policy: { type: "string", description: "path to a §6.2 policy file (optional; defaults to the repo's .candor/config `policy`)" }, ...reportArg }, required: [] },
+    run: (a, p) => {
+      let text;
+      if (a.policy) text = confinedPolicyRead(a.policy, p);
+      else {
+        const cfg = configPolicy(p);
+        if (!cfg) throw new Error("no policy: pass `policy`, or check one into the repo's .candor/config (spec §3.4)");
+        text = confinedPolicyRead(cfg.policyPath, p, cfg.repoRoot);
+      }
+      const v = evaluatePolicy(parsePolicy(text), Q.loadReport(p), Q.loadCallgraph(p));
+      return { ok: v.length === 0, violations: v };
+    },
+  },
+  candor_containment: {
+    description: "Per boundary effect (Db/Net/Exec/Fs/Ipc/Clipboard): how contained it is in one architectural layer — the dispersion diagnostic (spec §6.1). Not a score; per-effect facts.",
+    schema: { type: "object", properties: { ...reportArg } },
+    run: (_a, p) => Q.containment(Q.loadReport(p)),
+  },
+  candor_blindspots: {
+    description: "The Unknown SOURCES — calls the engine genuinely could not resolve (reflection, wide dispatch, fn-pointers) — ranked by how many functions inherit Unknown through each. Turns a high-Unknown report into a short worklist.",
+    schema: { type: "object", properties: { ...reportArg } },
+    run: (_a, p) => Q.blindspots(Q.loadReport(p), Q.loadCallgraph(p)),
+  },
+  candor_diff: {
+    description: "The per-function effect delta versus a baseline report: gained (introduced vs inherited) and lost effects. 'What did this change do to the effect surface?'.",
+    schema: { type: "object", properties: { baseline: { type: "string", description: "the baseline report prefix" }, ...reportArg }, required: ["baseline"] },
+    run: (a, p) => Q.diff(Q.loadReport(p), Q.loadReport(a.baseline)),
+  },
+  candor_gains: {
+    description: "The supply-chain alarm: effects the surface GAINED versus a baseline (package-level + per-function) — 'did this dependency bump add Net/Exec somewhere?'.",
+    schema: { type: "object", properties: { baseline: { type: "string", description: "the baseline report prefix" }, ...reportArg }, required: ["baseline"] },
+    run: (a, p) => Q.gains(Q.loadReport(p), Q.loadReport(a.baseline)),
+  },
 };
+
+// ---- MCP resources: the report + the checked-in policy, readable directly --------------------------
+function listResources(prefix) {
+  const res = [{ uri: `candor://report?prefix=${encodeURIComponent(prefix)}`, name: "candor report",
+                 description: "the spec §2 report envelope (all packages under the prefix)", mimeType: "application/json" }];
+  const cfg = prefix ? configPolicy(prefix) : null;
+  if (cfg && fs.existsSync(cfg.policyPath))
+    res.push({ uri: `candor://policy?prefix=${encodeURIComponent(prefix)}`, name: "candor policy",
+               description: "the repo's checked-in §6.2 architecture policy (via .candor/config)", mimeType: "text/plain" });
+  return res;
+}
+function readResource(uri, prefix) {
+  if (uri.startsWith("candor://report")) return { mimeType: "application/json", text: JSON.stringify(Q.loadReport(prefix)) };
+  if (uri.startsWith("candor://policy")) {
+    const cfg = configPolicy(prefix);
+    if (!cfg) throw new Error("no checked-in policy (no .candor/config with a `policy` key)");
+    return { mimeType: "text/plain", text: confinedPolicyRead(cfg.policyPath, prefix, cfg.repoRoot) };
+  }
+  throw new Error(`unknown resource: ${uri}`);
+}
 
 // ---- JSON-RPC 2.0 over stdio (newline-delimited; the MCP stdio framing) ---------------------------
 function send(msg) { process.stdout.write(JSON.stringify(msg) + "\n"); }
@@ -142,13 +218,24 @@ function handle(msg) {
   if (method === "initialize") {
     return result(id, {
       protocolVersion: params?.protocolVersion || "2025-06-18",
-      capabilities: { tools: {} },
+      capabilities: { tools: {}, resources: {} },
       serverInfo: { name: "candor-mcp", version: VERSION },
       instructions: "candor's read-only effect queries. Prefer candor_impact/candor_reachable/candor_where over manually tracing the call graph — they return deterministic ground truth from a precomputed report. Run a candor scan first to produce the report.",
     });
   }
   if (method === "notifications/initialized" || method === "notifications/cancelled") return; // notifications: no reply
   if (method === "ping") return result(id, {});
+  if (method === "resources/list") {
+    try { return result(id, { resources: DEFAULT_PREFIX && hasReport(DEFAULT_PREFIX) ? listResources(DEFAULT_PREFIX) : [] }); }
+    catch { return result(id, { resources: [] }); }
+  }
+  if (method === "resources/read") {
+    try {
+      const prefix = resolvePrefix({});
+      const r = readResource(params?.uri || "", prefix);
+      return result(id, { contents: [{ uri: params?.uri, ...r }] });
+    } catch (e) { return error(id, -32602, `candor: ${e.message}`); }
+  }
   if (method === "tools/list") {
     return result(id, {
       tools: Object.entries(TOOLS).map(([name, t]) => ({ name, description: t.description, inputSchema: t.schema })),

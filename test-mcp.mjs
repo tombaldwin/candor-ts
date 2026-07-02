@@ -159,6 +159,39 @@ const afterNull = await rawSession([
 ok("mcp: a `null`/primitive/array frame does NOT crash the server (it still answers the next request)",
    afterNull.some((r) => r.id === 2 && r.result !== undefined), JSON.stringify(afterNull));
 
+// ── the unified-surface additions: gate (via .candor/config), containment, blindspots, resources ────
+// The fixture project W gains a checked-in config + policy so candor_gate resolves them with NO args —
+// the spec §3.4 flow. `leaf` performs Net, so `deny Net` fires with the structured {rule,fn,effects}.
+fs.mkdirSync(path.join(W, ".candor"), { recursive: true });
+fs.writeFileSync(path.join(W, "arch.policy"), "deny Net\n");
+fs.writeFileSync(path.join(W, ".candor", "config"), "policy arch.policy\n");
+const extra = await mcpSession([
+  { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+  { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "candor_gate", arguments: {} } },
+  { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "candor_containment", arguments: {} } },
+  { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "candor_blindspots", arguments: {} } },
+  { jsonrpc: "2.0", id: 5, method: "resources/list" },
+  { jsonrpc: "2.0", id: 6, method: "resources/read", params: { uri: "candor://report" } },
+]);
+const toolText = (id) => JSON.parse(extra.find((r) => r.id === id).result.content[0].text);
+const gate = toolText(2);
+ok("mcp: candor_gate resolves the checked-in .candor/config policy (no args) and fails the violating repo",
+   gate.ok === false && gate.violations.some((v) => v.rule === "AS-EFF-006" && v.effects.includes("Net")),
+   JSON.stringify(gate));
+const cont = toolText(3);
+ok("mcp: candor_containment returns the per-effect dispersion shape",
+   cont && (Array.isArray(cont.contained) || typeof cont === "object"), JSON.stringify(cont).slice(0, 120));
+ok("mcp: candor_blindspots returns the sources shape",
+   Array.isArray(toolText(4).sources), JSON.stringify(toolText(4)).slice(0, 120));
+const resList = extra.find((r) => r.id === 5).result.resources;
+ok("mcp: resources/list names the report AND the checked-in policy",
+   resList.some((r) => r.uri.startsWith("candor://report")) && resList.some((r) => r.uri.startsWith("candor://policy")),
+   JSON.stringify(resList));
+const resRead = extra.find((r) => r.id === 6).result.contents[0];
+ok("mcp: resources/read serves the report envelope",
+   resRead.mimeType === "application/json" && JSON.parse(resRead.text).some((f) => f.fn === "app.leaf"),
+   String(resRead.text).slice(0, 120));
+
 fs.rmSync(W, { recursive: true, force: true });
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

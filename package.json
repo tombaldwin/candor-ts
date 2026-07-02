@@ -11,7 +11,8 @@
     "candor-ts": "./scan.mjs",
     "candor-ts-query": "./query.mjs",
     "candor-ts-mcp": "./mcp.mjs",
-    "candor-ts-watch": "./watch.mjs"
+    "candor-ts-watch": "./watch.mjs",
+    "candor-mcp": "./mcp.mjs"
   },
   "scripts": {
     "lint": "eslint *.mjs",
