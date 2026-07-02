@@ -100,6 +100,59 @@ for (let i = 0; i < argv.length; i++) {
 if (wantAgents) { printAgents(); process.exit(0); }
 if (target === null) { console.error(usage); process.exit(2); }
 
+// ---- .candor/config (candor-spec §config; the checked-in alternative to the CANDOR_* env vars) -----
+// Discovery is anchored to the SCAN TARGET (walk up from the target dir to the repo root's
+// .candor/config), never the CWD; $CANDOR_CONFIG overrides discovery entirely. Precedence: CLI flag →
+// CANDOR_* env → this file → default. FAIL-CLOSED: a configured-but-unusable file (a set CANDOR_CONFIG
+// naming a missing path; a discovered file that exists but can't be read) exits 2 — a gate source must
+// never vanish silently (the §6.2 unreadable-policy posture). Only genuine absence is an empty config.
+// Keys are the shared vocabulary (policy/baseline/strict/no-ambient/closed-world/taint/deps); candor-ts
+// implements `policy` + `deps` — the others are inert here (they drive other engines' gates), and a key
+// OUTSIDE the vocabulary warns (typo protection: a misspelt `policy` must not silently drop the gate).
+const CONFIG_KEYS = new Set(["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps"]);
+function loadCandorConfig(targetPath) {
+  let file = process.env.CANDOR_CONFIG ?? null;
+  if (file !== null) {
+    if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
+      console.error(`candor-ts: CANDOR_CONFIG set but ${file} is not a readable file — failing (exit 2)`);
+      process.exit(2);
+    }
+  } else {
+    let dir = path.resolve(targetPath);
+    try { if (!fs.statSync(dir).isDirectory()) dir = path.dirname(dir); } catch { dir = path.dirname(dir); }
+    for (let d = dir; ; d = path.dirname(d)) {
+      const cand = path.join(d, ".candor", "config");
+      if (fs.existsSync(cand)) { file = cand; break; }
+      if (path.dirname(d) === d) break;                       // filesystem root
+    }
+    if (file === null && fs.existsSync(".candor/config")) file = ".candor/config";
+    if (file === null) return {};
+  }
+  let text;
+  try { text = fs.readFileSync(file, "utf8"); }
+  catch (e) {
+    console.error(`candor-ts: config ${file} exists but could not be read (${e.message}) — failing (exit 2)`);
+    process.exit(2);
+  }
+  const cfg = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.split("#", 1)[0].trim();                 // strip inline comments (§6.2 lexical)
+    if (!line) continue;
+    const m = line.match(/^(\S+)\s*(.*)$/);
+    const key = m[1].toLowerCase(), val = (m[2] ?? "").trim();
+    if (!CONFIG_KEYS.has(key)) {
+      console.error(`candor-ts: ignoring unknown config key '${key}' in ${file}`);
+      continue;
+    }
+    cfg[key] = val;
+  }
+  return cfg;
+}
+const candorConfig = loadCandorConfig(target);
+// precedence: the --policy flag / CANDOR_POLICY env already populated policyPath; the config is the floor.
+// A BARE `policy` line ("" value) means configured-with-empty → the unreadable-policy path fails loud.
+if (policyPath === null && candorConfig.policy !== undefined) policyPath = candorConfig.policy;
+
 // ---- project discovery (a dir, a single file, or a tsconfig) --------------------------------------
 let rootDir, fileNames, compilerOptions = {
   target: ts.ScriptTarget.ES2022,
@@ -228,7 +281,7 @@ const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:
 // the envelope's `package` field (works for an all-pure EMPTY report) and from entry hash prefixes.
 const depCoveredPkgs = new Set();
 {
-  const spec = process.env.CANDOR_DEPS ?? "";
+  const spec = process.env.CANDOR_DEPS ?? candorConfig.deps ?? "";   // env overrides the config `deps` key
   const files = [];
   for (const tok of spec.split(/[\s:,]+/).filter(Boolean)) {
     try {

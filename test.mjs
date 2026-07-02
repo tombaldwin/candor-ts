@@ -368,6 +368,29 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
   check("--gate-json - : the AS-EFF line is on stderr", rd.stderr.includes("[AS-EFF-006]"), rd.stderr.slice(0, 160));
 }
 
+// ── 3e. .candor/config (§config): target-anchored, env-overridden, fail-closed ─────────────────────
+{
+  const d = project({
+    "src/db.ts": `import { DatabaseSync } from "node:sqlite";
+export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v = 1"); }`,
+    "deny-db.policy": "deny Db\n",
+    "deny-net.policy": "deny Net\n",
+    ".candor/config": "policy deny-db.policy\npolcy typo-key\n",
+  });
+  // rewrite the config's policy path to be absolute (the engine resolves it as given)
+  fs.writeFileSync(path.join(d, ".candor/config"), `policy ${path.join(d, "deny-db.policy")}\npolcy typo\n`);
+  // (a) the checked-in config drives the gate — no flag, no env — discovered via the TARGET's ancestors
+  const r = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "src")], { encoding: "utf8" });
+  check(".candor/config drives the gate (exit 1, AS-EFF-006)", r.status === 1 && r.stdout.includes("[AS-EFF-006]"), `status=${r.status} ${r.stdout.slice(0,120)}`);
+  check("unknown config key warns (typo protection)", r.stderr.includes("unknown config key 'polcy'"), r.stderr.slice(0, 200));
+  // (b) the env overrides the config (a passing deny-Net policy wins over the config's deny-Db)
+  const re = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "src")], { encoding: "utf8", env: { ...process.env, CANDOR_POLICY: path.join(d, "deny-net.policy") } });
+  check("CANDOR_POLICY env overrides the config", re.status === 0, `status=${re.status} ${re.stderr.slice(0,120)}`);
+  // (c) a set-but-unusable CANDOR_CONFIG fails closed (exit 2), never silently gateless
+  const rc = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "src")], { encoding: "utf8", env: { ...process.env, CANDOR_CONFIG: path.join(d, "no-such-config") } });
+  check("typo'd CANDOR_CONFIG fails closed (exit 2)", rc.status === 2, `status=${rc.status}`);
+}
+
 // ── 3b. single-dash unknown flag is rejected (NOT read as a positional target) ──────────────────────
 {
   const bad = spawnSync("node", [path.join(HERE, "scan.mjs"), "-policy", "/nonexistent-xyz"], { encoding: "utf8" });
