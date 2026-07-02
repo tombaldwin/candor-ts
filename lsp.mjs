@@ -7,6 +7,8 @@
  *     how many functions transitively call it (who is affected if it changes).
  *   • Diagnostics: the repo's architecture-policy verdict (the §6.2 gate, resolved from CANDOR_POLICY
  *     or the checked-in .candor/config — spec §3.4) as squiggles at each violating function's line.
+ *   • Hover: effect PROVENANCE — for each inherited effect, the `path` hop chain to the function that
+ *     performs it directly ("Net via mid → leaf (source)"), plus unknownWhy when the fn discloses opacity.
  *
  * The server is a pure CONSUMER of the spec report envelope + callgraph sidecar (any engine — JVM /
  * Rust / TS / Swift / agents; the same read layer as candor-mcp), and it never scans (the analyzer
@@ -96,6 +98,43 @@ function codeLenses(docPath) {
   });
 }
 
+// ---- Hover: effect provenance at the cursor ----------------------------------------------------------
+// The entry ENCLOSING the hovered line: the report pins each fn at its declaration line, so the match is
+// the greatest entry line ≤ the cursor (functions are sequential in a file — a sound approximation that
+// needs no parser). For each inferred effect: direct → "performed here"; inherited → the §3.1 `path`
+// chain to the direct source. unknownWhy rides along when the fn introduces opacity.
+function hoverAt(docPath, line) {
+  const found = entriesInDoc(docPath);
+  if (!found || !found.length) return null;
+  const at = found.filter((x) => x.line <= line).sort((a, b) => b.line - a.line)[0];
+  if (!at) return null;
+  const { entry } = at;
+  const fns = Q.loadReport(reportPrefix);
+  const cg = Q.loadCallgraph(reportPrefix);
+  const lines = [`**${entry.fn}** — ⚡ { ${(entry.inferred || []).join(", ") || "pure"} }`];
+  for (const eff of entry.inferred || []) {
+    if (eff === "Unknown") continue;                          // covered by unknownWhy below
+    if ((entry.direct || []).includes(eff)) {
+      lines.push(`- **${eff}** — performed directly here`);
+      continue;
+    }
+    try {
+      const hops = (Q.path(fns, cg, entry.fn, eff)?.path || []).map((h) => h.fn.split(/[.:]+/).pop() + (h.source ? " (source)" : ""));
+      lines.push(hops.length > 1 ? `- **${eff}** — via ${hops.slice(1).join(" → ")}` : `- **${eff}** — inherited (source is cross-boundary or framework-synthesised)`);
+    } catch { lines.push(`- **${eff}** — inherited`); }
+  }
+  if (entry.unknownWhy?.length) lines.push(`- **Unknown** — ${entry.unknownWhy.join(", ")}`);
+  if (entry.invisible?.length) lines.push(`- _invisible_: ${entry.invisible.join(", ")} (unmodeled — the effect set is a lower bound)`);
+  try {
+    const c = Q.callers(cg, entry.fn);
+    lines.push(`\nBlast radius: **${(c?.transitive || []).length}** transitive caller(s)`);
+  } catch { /* no callgraph */ }
+  return {
+    contents: { kind: "markdown", value: lines.join("\n") },
+    range: { start: { line: at.line, character: 0 }, end: { line: at.line, character: 200 } },
+  };
+}
+
 // ---- Diagnostics (the live gate) ---------------------------------------------------------------------
 function activePolicy() {
   const env = process.env.CANDOR_POLICY;
@@ -151,6 +190,7 @@ function handle(msg) {
       capabilities: {
         textDocumentSync: { openClose: true, save: true, change: 0 },  // report-backed: buffer edits don't move the map
         codeLensProvider: { resolveProvider: false },
+        hoverProvider: true,
       },
       serverInfo: { name: "candor-lsp", version: VERSION },
     });
@@ -161,6 +201,10 @@ function handle(msg) {
   if (method === "textDocument/didChange") return;                    // see textDocumentSync: report-backed
   if (method === "textDocument/didClose")
     return send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: params.textDocument.uri, diagnostics: [] } });
+  if (method === "textDocument/hover") {
+    try { return result(id, hoverAt(fileURLToPath(params.textDocument.uri), params.position?.line ?? 0)); }
+    catch { return result(id, null); }   // hover is best-effort — null, never a crash
+  }
   if (method === "textDocument/codeLens") {
     try { return result(id, codeLenses(fileURLToPath(params.textDocument.uri))); }
     catch { return result(id, []); }   // a non-file URI / unreadable report → no lenses, never a crash

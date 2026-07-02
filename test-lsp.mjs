@@ -68,10 +68,12 @@ const replies = await lspSession([
   { jsonrpc: "2.0", method: "initialized", params: {} },
   { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: DOC, languageId: "typescript", version: 1, text: "" } } },
   { jsonrpc: "2.0", id: 2, method: "textDocument/codeLens", params: { textDocument: { uri: DOC } } },
+  { jsonrpc: "2.0", id: 5, method: "textDocument/hover", params: { textDocument: { uri: DOC }, position: { line: 1, character: 4 } } },
+  { jsonrpc: "2.0", id: 6, method: "textDocument/hover", params: { textDocument: { uri: DOC }, position: { line: 3, character: 4 } } },
   { jsonrpc: "2.0", method: "textDocument/didClose", params: { textDocument: { uri: DOC } } },
   { jsonrpc: "2.0", id: 3, method: "nosuch/method", params: {} },
   { jsonrpc: "2.0", id: 4, method: "shutdown" },
-], 6); // init result + didOpen diagnostics + lens result + didClose diagnostics + error + shutdown
+], 8); // init + didOpen diagnostics + lens + 2 hovers + didClose diagnostics + error + shutdown
 
 const byId = (id) => replies.find((r) => r.id === id);
 const notes = replies.filter((r) => r.method === "textDocument/publishDiagnostics");
@@ -94,6 +96,13 @@ ok("codeLens: each effectful fn gets a lens", lenses.length >= 3, `got ${lenses.
 const leafLens = lenses.find((l) => l.range.start.line === 1);
 ok("the leaf lens names the effect and the blast radius",
    /⚡ .*Net.*blast radius 2/.test(leafLens?.command?.title ?? ""), leafLens?.command?.title);
+
+const hovLeaf = byId(5)?.result?.contents?.value ?? "";
+ok("hover on leaf: direct effect named", hovLeaf.includes("**app.leaf**") && /Net.*performed directly here/.test(hovLeaf), hovLeaf.slice(0, 140));
+ok("hover on leaf: blast radius present", /Blast radius: \*\*2\*\*/.test(hovLeaf), hovLeaf.slice(-60));
+const hovHandler = byId(6)?.result?.contents?.value ?? "";
+ok("hover on handler: inherited Net shows the provenance chain to the source",
+   /Net.*via .*leaf \(source\)/.test(hovHandler), hovHandler.slice(0, 180));
 
 ok("didClose clears the document's diagnostics",
    notes[1]?.params?.uri === DOC && notes[1].params.diagnostics.length === 0, JSON.stringify(notes[1]?.params));
