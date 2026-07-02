@@ -19,7 +19,7 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
-import { evaluatePolicy, parsePolicy, scopeMatches } from "./policy.mjs";
+import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches } from "./policy.mjs";
 
 const VERSION = createRequire(import.meta.url)("./package.json").version; // single-sourced, like scan.mjs
 
@@ -59,26 +59,9 @@ function confinedPolicyRead(policyPath, prefix, root = nodePath.resolve(nodePath
     throw new Error(`policy must be within the report's directory (${root}) — refusing to read \`${clip(policyPath)}\``);
   return fs.readFileSync(abs, "utf8");
 }
-// The repo's .candor/config (spec §3.4), discovered by walking UP from the report's directory — so
-// `candor_gate` with no `policy` arg uses the policy the repo has checked in, exactly like the engines.
-// Returns { policyText, repoRoot } or null. Read-only + best-effort here (the server never gates a build;
-// a broken config surfaces as the tool's error, not an exit).
+// The repo's .candor/config (spec §3.4), from the report's directory upward — shared impl in policy.mjs.
 function configPolicy(prefix) {
-  let dir = nodePath.resolve(nodePath.dirname(prefix));
-  for (;;) {
-    const cand = nodePath.join(dir, ".candor", "config");
-    if (fs.existsSync(cand)) {
-      const m = fs.readFileSync(cand, "utf8").split(/\r?\n/)
-        .map((l) => l.split("#", 1)[0].trim()).filter(Boolean)
-        .map((l) => l.match(/^(\S+)\s*(.*)$/)).find((mm) => mm && mm[1].toLowerCase() === "policy");
-      if (!m) return null;
-      const rel = m[2].trim();
-      return { policyPath: nodePath.resolve(dir, rel), repoRoot: dir };
-    }
-    const parent = nodePath.dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
+  return discoverConfigPolicy(nodePath.dirname(nodePath.resolve(prefix)) || ".");
 }
 
 // ---- the tools: name -> {description, schema, run} ------------------------------------------------

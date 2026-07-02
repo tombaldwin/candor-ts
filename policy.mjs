@@ -158,3 +158,26 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
   }
   return out;
 }
+
+// ---- .candor/config discovery (spec §3.4) — shared by the MCP + LSP surfaces -----------------------
+// Walk UP from `fromDir` to the nearest .candor/config and return its `policy` entry resolved against
+// that config's repo root: { policyPath, repoRoot } — or null. Read-only + best-effort (a consumer
+// surface never gates a build; a broken config surfaces as the caller's error).
+import fs from "node:fs";
+import nodePath from "node:path";
+export function discoverConfigPolicy(fromDir) {
+  let dir = nodePath.resolve(fromDir);
+  for (;;) {
+    const cand = nodePath.join(dir, ".candor", "config");
+    if (fs.existsSync(cand)) {
+      const m = fs.readFileSync(cand, "utf8").split(/\r?\n/)
+        .map((l) => l.split("#", 1)[0].trim()).filter(Boolean)
+        .map((l) => l.match(/^(\S+)\s*(.*)$/)).find((mm) => mm && mm[1].toLowerCase() === "policy");
+      if (!m) return null;
+      return { policyPath: nodePath.resolve(dir, m[2].trim()), repoRoot: dir };
+    }
+    const parent = nodePath.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}

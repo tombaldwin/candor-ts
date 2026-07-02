@@ -12,11 +12,12 @@
     "candor-ts-query": "./query.mjs",
     "candor-ts-mcp": "./mcp.mjs",
     "candor-ts-watch": "./watch.mjs",
-    "candor-mcp": "./mcp.mjs"
+    "candor-mcp": "./mcp.mjs",
+    "candor-lsp": "./lsp.mjs"
   },
   "scripts": {
     "lint": "eslint *.mjs",
-    "test": "npm run lint && node --test test-unit.mjs && node test.mjs && node test-mcp.mjs && node test-watch.mjs && npm run test:probe && npm run test:fuzz",
+    "test": "npm run lint && node --test test-unit.mjs && node test.mjs && node test-mcp.mjs && node test-lsp.mjs && node test-watch.mjs && npm run test:probe && npm run test:fuzz",
     "test:unit": "node --test test-unit.mjs",
     "test:probe": "node fabrication_probe.mjs",
     "test:fuzz": "node fuzz.mjs"
@@ -51,7 +52,8 @@
     "query-core.mjs",
     "scan-core.mjs",
     "mcp.mjs",
-    "watch.mjs"
+    "watch.mjs",
+    "lsp.mjs"
   ],
   "devDependencies": {
     "@eslint/js": "^9.39.4",
