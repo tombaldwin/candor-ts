@@ -31,7 +31,10 @@ import { fileURLToPath } from "node:url";
 import * as Q from "./query-core.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy } from "./policy.mjs";
 
-const VERSION = createRequire(import.meta.url)("./package.json").version;
+// Version: from the sibling package.json when running inside the npm package; a single-file BUNDLE of
+// this server (the IDE-plugin embedding) has no sibling package.json — fall back rather than crash.
+let VERSION = "bundled";
+try { VERSION = createRequire(import.meta.url)("./package.json").version; } catch { /* bundled */ }
 
 // ---- state (set at initialize) ---------------------------------------------------------------------
 let rootPath = null;
