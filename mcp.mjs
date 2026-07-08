@@ -162,12 +162,14 @@ const TOOLS = {
   candor_diff: {
     description: "The per-function effect delta versus a baseline report: gained (introduced vs inherited) and lost effects. 'What did this change do to the effect surface?'.",
     schema: { type: "object", properties: { baseline: { type: "string", description: "the baseline report prefix" }, ...reportArg }, required: ["baseline"] },
-    run: (a, p) => Q.diff(Q.loadReport(p), Q.loadReport(a.baseline)),
+    run: (a, p) => ({ baseline_version: Q.reportVersion(a.baseline) ?? "", engine_version: Q.reportVersion(p) ?? "",
+                      ...Q.diff(Q.loadReport(p), Q.loadReport(a.baseline)) }),
   },
   candor_gains: {
     description: "The supply-chain alarm: effects the surface GAINED versus a baseline (package-level + per-function) — 'did this dependency bump add Net/Exec somewhere?'.",
     schema: { type: "object", properties: { baseline: { type: "string", description: "the baseline report prefix" }, ...reportArg }, required: ["baseline"] },
-    run: (a, p) => Q.gains(Q.loadReport(p), Q.loadReport(a.baseline)),
+    run: (a, p) => ({ baseline_version: Q.reportVersion(a.baseline) ?? "", engine_version: Q.reportVersion(p) ?? "",
+                      ...Q.gains(Q.loadReport(p), Q.loadReport(a.baseline)) }),
   },
 };
 

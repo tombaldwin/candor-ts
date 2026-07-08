@@ -55,6 +55,21 @@ function normFns(parsed, source) {
   return out;
 }
 
+/** The producing engine build of the report(s) at a prefix (the §2.1 envelope `candor.version`) — null
+ *  when unreadable/absent (a legacy bare array has no provenance). Baselines are comparable only to
+ *  their own producing version (§2.1): diff/gains consumers disclose a mismatch (an engine swap makes
+ *  "gained" effects ambiguous — unmasking vs regression — the baseline-invalidation rule, AGENTS §2a). */
+export function reportVersion(prefix) {
+  const files = fs.existsSync(`${prefix}.json`) ? [`${prefix}.json`] : siblings(prefix, isReport);
+  for (const f of files) {
+    try {
+      const v = JSON.parse(fs.readFileSync(f, "utf8"))?.candor?.version;
+      if (v) return String(v);
+    } catch { /* unreadable sibling — keep looking */ }
+  }
+  return null;
+}
+
 export function loadReport(prefix) {
   if (fs.existsSync(`${prefix}.json`)) {
     // The PRIMARY report parse must DISCLOSE-and-tolerate like the sibling path — a bare JSON.parse here

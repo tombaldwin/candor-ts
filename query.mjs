@@ -30,7 +30,7 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          show as coreShow, blindspots as coreBlindspots,
          callers as coreCallers, callersFrontier, loadHierarchy,
          containment as coreContainment,
-         loadReport, loadCallgraph, matches } from "./query-core.mjs";
+         loadReport, loadCallgraph, matches , reportVersion } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
 
 // ONE version + spec source, the SAME way scan.mjs reads them: PKG_VERSION is the bare semver from
@@ -180,7 +180,13 @@ switch (cmd) {
       if (gained.length || lost.length) changes.push({ fn, gained, lost });
     }
     changes.sort((a, b) => a.fn.localeCompare(b.fn));
-    emit({ changes });
+    // §2.1: a baseline is comparable only to its own producing build — disclose a mismatch (the gains
+    // may be the engine reclassifying after a coverage batch, not the code changing). Same note + JSON
+    // provenance fields as the Rust candor-query (cross-engine parity, item 10).
+    const engineV = reportVersion(curPrefix), baseV = reportVersion(basePrefix);
+    if (engineV && baseV && engineV !== baseV)
+      console.error(`candor-ts: ⚠ baseline @${baseV} ≠ engine @${engineV} — some changes may be the engine reclassifying, not your code. Treat an engine swap as baseline-invalidating: review, then regenerate the baseline.`);
+    emit({ baseline_version: baseV ?? "", engine_version: engineV ?? "", changes });
     process.exit(changes.some((c) => c.gained.length) ? 1 : 0);
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }
@@ -215,7 +221,10 @@ switch (cmd) {
     // the supply-chain alarm (SPEC §5.1): {gained:[Effect], byFunction:[{fn,effect}]} — what the
     // surface gained between two reports (base → cur), the cross-engine machine-readable form.
     const [curPrefix, basePrefix] = args;
-    emit(coreGains(loadReport(curPrefix), loadReport(basePrefix)));
+    const gv = reportVersion(curPrefix), gbv = reportVersion(basePrefix);
+    if (gv && gbv && gv !== gbv)
+      console.error(`candor-ts: ⚠ baseline @${gbv} ≠ engine @${gv} — a "gained capability" may be the engine reclassifying, not the dependency changing. Regenerate both reports with one build to compare releases.`);
+    emit({ baseline_version: gbv ?? "", engine_version: gv ?? "", ...coreGains(loadReport(curPrefix), loadReport(basePrefix)) });
     break;
   }
   case "path": {

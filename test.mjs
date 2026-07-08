@@ -391,6 +391,26 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
   check("typo'd CANDOR_CONFIG fails closed (exit 2)", rc.status === 2, `status=${rc.status}`);
 }
 
+// ── 3f. diff/gains disclose a producing-build mismatch (§2.1 — baseline-invalidation) ──────────────
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-basever-"));
+  fs.writeFileSync(path.join(d, "cur.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.8" },
+    functions: [{ fn: "a.leaf", inferred: ["Net", "Log"], direct: ["Net", "Log"] }] }));
+  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.8" },
+    functions: [{ fn: "a.leaf", inferred: ["Net"], direct: ["Net"] }] }));
+  const r = spawnSync("node", [path.join(HERE, "query.mjs"), "diff", path.join(d, "cur"), path.join(d, "base"), "--json"], { encoding: "utf8" });
+  const out = JSON.parse(r.stdout);
+  check("diff carries the producing builds (rust-parity fields)", out.baseline_version === "aaaaaaa" && out.engine_version === "bbbbbbb", r.stdout.slice(0, 120));
+  check("diff still reports the drift (disclosure, not suppression)", out.changes.length === 1 && out.changes[0].gained.includes("Log"), JSON.stringify(out.changes));
+  check("the mismatch note is on stderr", r.stderr.includes("baseline-invalidating") && r.stderr.includes("aaaaaaa"), r.stderr.slice(0, 160));
+  // same-build → no note
+  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.8" },
+    functions: [{ fn: "a.leaf", inferred: ["Net"], direct: ["Net"] }] }));
+  const r2 = spawnSync("node", [path.join(HERE, "query.mjs"), "diff", path.join(d, "cur"), path.join(d, "base"), "--json"], { encoding: "utf8" });
+  check("same producing build → no mismatch note", !r2.stderr.includes("⚠"), r2.stderr.slice(0, 120));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── 3b. single-dash unknown flag is rejected (NOT read as a positional target) ──────────────────────
 {
   const bad = spawnSync("node", [path.join(HERE, "scan.mjs"), "-policy", "/nonexistent-xyz"], { encoding: "utf8" });
