@@ -184,10 +184,15 @@ switch (cmd) {
     // may be the engine reclassifying after a coverage batch, not the code changing). Same note + JSON
     // provenance fields as the Rust candor-query (cross-engine parity, item 10).
     const engineV = reportVersion(curPrefix), baseV = reportVersion(basePrefix);
-    if (engineV && baseV && engineV !== baseV)
+    const versionMismatch = engineV && baseV && engineV !== baseV;
+    if (versionMismatch)
       console.error(`candor-ts: ⚠ baseline @${baseV} ≠ engine @${engineV} — some changes may be the engine reclassifying, not your code. Treat an engine swap as baseline-invalidating: review, then regenerate the baseline.`);
     emit({ baseline_version: baseV ?? "", engine_version: engineV ?? "", changes });
-    process.exit(changes.some((c) => c.gained.length) ? 1 : 0);
+    // diff DISCLOSES (the posture) — it is not a gate. Its gained-effect exit 1 is a convenience for
+    // same-build ratchet use; under a version mismatch that signal is BOGUS (unmasking, not regression),
+    // so exit 0 and let the ⚠ inform — never deliver the wave as a CI failure (review §2.1: guards fail
+    // closed, queries disclose).
+    process.exit(!versionMismatch && changes.some((c) => c.gained.length) ? 1 : 0);
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }
   case "reachable": {

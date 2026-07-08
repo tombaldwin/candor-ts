@@ -401,6 +401,7 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
   const r = spawnSync("node", [path.join(HERE, "query.mjs"), "diff", path.join(d, "cur"), path.join(d, "base"), "--json"], { encoding: "utf8" });
   const out = JSON.parse(r.stdout);
   check("diff carries the producing builds (rust-parity fields)", out.baseline_version === "aaaaaaa" && out.engine_version === "bbbbbbb", r.stdout.slice(0, 120));
+  check("diff EXITS 0 under a version mismatch (disclosure, not a gate — the bogus-wave CI failure the posture forbids)", r.status === 0, `status=${r.status}`);
   check("diff still reports the drift (disclosure, not suppression)", out.changes.length === 1 && out.changes[0].gained.includes("Log"), JSON.stringify(out.changes));
   check("the mismatch note is on stderr", r.stderr.includes("baseline-invalidating") && r.stderr.includes("aaaaaaa"), r.stderr.slice(0, 160));
   // same-build → no note
@@ -408,6 +409,7 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
     functions: [{ fn: "a.leaf", inferred: ["Net"], direct: ["Net"] }] }));
   const r2 = spawnSync("node", [path.join(HERE, "query.mjs"), "diff", path.join(d, "cur"), path.join(d, "base"), "--json"], { encoding: "utf8" });
   check("same producing build → no mismatch note", !r2.stderr.includes("⚠"), r2.stderr.slice(0, 120));
+  check("same build WITH a gain → exits 1 (the legitimate ratchet signal is preserved)", r2.status === 1, `status=${r2.status}`);
   fs.rmSync(d, { recursive: true, force: true });
 }
 
