@@ -202,7 +202,8 @@ call form, any silent-pure = red), and conformance-held against the Rust/JVM/Swi
 npm classifier tier is deliberately curated and keeps growing case-by-case. Entry points
 (Nest/Next populations), `unknownWhy` origins, `reachable`, cross-package inheritance
 (`CANDOR_DEPS` + the spec §2 `hash`, version-trusted per §2.1), and `--allow-js` are all in.
-On npm: `npx -y candor-ts <dir>`.
+On npm: `npx -y candor-ts <dir>`. Per-release detail (⚠ marks report/verdict-affecting changes):
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Development
 
