@@ -269,6 +269,105 @@ ok("mcp --root: a report prefix outside the workspace is refused",
    rootById[3].result.content[0].text.slice(0, 160));
 fs.rmSync(OUTSIDE, { recursive: true, force: true });
 
+// ── the MCP list caps: an over-cap result is TRUNCATED with exact counts + a disclosure flag ────────
+// These caps are the agent-context contract (MCP_LIST_CAP=50): a large repo's where/callers/impact/
+// blindspots answer must stay token-bounded, the COUNT must stay exact, and the truncation must be
+// flagged — silently-shortened lists would misreport the blast radius. Synthetic report: 60 entry-point
+// callers of one Net+Unknown leaf (>cap on every listed surface).
+{
+  const CAP = fs.mkdtempSync("/tmp/candor-cap-");
+  const capFns = [{ fn: "cap.leaf", inferred: ["Net", "Unknown"], direct: ["Net"], unknownWhy: ["reflect:eval"] }];
+  const capCg = { "cap.leaf": [] };
+  for (let i = 0; i < 60; i++) {
+    const n = `cap.f${String(i).padStart(2, "0")}`;
+    capFns.push({ fn: n, inferred: ["Net", "Unknown"], direct: [], entryPoint: true });
+    capCg[n] = ["cap.leaf"];
+  }
+  fs.writeFileSync(`${CAP}/r.json`, JSON.stringify({ functions: capFns }));
+  fs.writeFileSync(`${CAP}/r.callgraph.json`, JSON.stringify(capCg));
+  fs.writeFileSync(`${CAP}/gate.policy`, "deny Net\n");
+  const CR = `${CAP}/r`;
+  const call = (id, name, args) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: { report: CR, ...args } } });
+  const capReplies = await mcpSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    call(2, "candor_where", { effect: "Net" }),
+    call(3, "candor_callers", { fn: "cap.leaf" }),
+    call(4, "candor_impact", { fn: "cap.leaf" }),
+    call(5, "candor_blindspots", {}),
+    call(6, "candor_whatif", { fn: "cap.f00", effect: "Net", policy: `${CAP}/gate.policy` }),
+    call(7, "candor_gate", {}),
+  ]);
+  const capById = Object.fromEntries(capReplies.map((r) => [r.id, r]));
+  const capText = (id) => JSON.parse(capById[id].result.content[0].text);
+  const w60 = capText(2);
+  ok("cap: candor_where truncates the over-cap inherited list to 50, keeps the exact counts, flags it",
+     w60.truncated === true && w60.inheritedCount === 60 && w60.inherited.length === 50
+     && w60.directlyCount === 1 && eq(w60.directly, ["cap.leaf"]), JSON.stringify(w60).slice(0, 160));
+  const c60 = capText(3);
+  ok("cap: candor_callers truncates direct+transitive to 50 with exact counts + the flag",
+     c60.truncated === true && c60.directCount === 60 && c60.direct.length === 50
+     && c60.transitiveCount === 60 && c60.transitive.length === 50, JSON.stringify(c60).slice(0, 160));
+  const i60 = capText(4);
+  ok("cap: candor_impact truncates affected (exact affectedCount stays) and flags it",
+     i60.affectedTruncated === true && i60.affectedCount === 60 && i60.affected.length === 50,
+     JSON.stringify(i60).slice(0, 160));
+  ok("cap: candor_impact truncates the entry-point list with its own count + flag",
+     i60.entryPointsTruncated === true && i60.entryPointCount === 60 && i60.entryPoints.length === 50,
+     JSON.stringify(i60).slice(0, 160));
+  const b60 = capText(5);
+  ok("cap: candor_blindspots truncates a source's affected list; `reaches` stays the exact count",
+     b60.sources[0]?.fn === "cap.leaf" && b60.sources[0].affectedTruncated === true
+     && b60.sources[0].reaches === 60 && b60.sources[0].affected.length === 50 && b60.totalUnknown === 61,
+     JSON.stringify(b60).slice(0, 200));
+  // a repo with NO .candor layout: the policy confinement root falls back to the report's own dir —
+  // a policy beside the report must be readable (the policyRoot non-.candor branch).
+  const wi60 = capText(6);
+  ok("policy confinement: with no .candor/config the report's own dir is the root (a sibling policy reads)",
+     capById[6].result.isError !== true && wi60.ok === false && wi60.violations.length > 0,
+     capById[6].result.content[0].text.slice(0, 160));
+  ok("candor_gate with no `policy` arg and no checked-in config is a loud error, never a silent green",
+     capById[7].result.isError === true && /no policy/.test(capById[7].result.content[0].text),
+     capById[7].result.content[0].text.slice(0, 120));
+  fs.rmSync(CAP, { recursive: true, force: true });
+}
+
+// ── resources/read: the policy resource, the URI-encoded prefix, refusals, and protocol errors ─────
+{
+  // a second repo whose checked-in config points OUTSIDE its own tree — the confined read must refuse
+  const CONF = fs.mkdtempSync("/tmp/candor-conf-");
+  fs.mkdirSync(path.join(CONF, ".candor"));
+  fs.writeFileSync(path.join(CONF, ".candor", "report.json"), JSON.stringify({ functions: [{ fn: "c.f", inferred: ["Net"], direct: ["Net"] }] }));
+  fs.writeFileSync(path.join(CONF, ".candor", "config"), "policy ../escape.policy\n");
+  const confPrefix = path.join(CONF, ".candor", "report");
+  const read = (id, uri) => ({ jsonrpc: "2.0", id, method: "resources/read", params: { uri } });
+  const resReplies = await mcpSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    read(2, "candor://policy"),                                                       // default prefix → W's checked-in policy
+    read(3, `candor://report?prefix=${encodeURIComponent(confPrefix)}`),              // the URI-encoded prefix is honored
+    read(4, `candor://policy?prefix=${encodeURIComponent(confPrefix)}`),              // config escapes the repo → refused
+    read(5, "candor://nope"),                                                         // unknown resource → error
+    { jsonrpc: "2.0", id: 6, method: "bogus/method" },                                // unknown METHOD → -32601
+  ]);
+  const resById = Object.fromEntries(resReplies.map((r) => [r.id, r]));
+  const pol = resById[2].result?.contents?.[0];
+  ok("resources/read candor://policy serves the checked-in §6.2 policy text",
+     pol?.mimeType === "text/plain" && pol.text === "deny Net\n", JSON.stringify(resById[2]).slice(0, 160));
+  const enc = resById[3].result?.contents?.[0];
+  ok("resources/read honors the ?prefix= encoded in the resource URI (not the default report)",
+     enc?.mimeType === "application/json" && JSON.parse(enc.text).some((f) => f.fn === "c.f"),
+     JSON.stringify(resById[3]).slice(0, 160));
+  ok("resources/read refuses a checked-in policy that escapes the repo (confined read, fail closed)",
+     resById[4].error?.code === -32602 && /must be within/.test(resById[4].error.message),
+     JSON.stringify(resById[4]).slice(0, 160));
+  ok("resources/read of an unknown candor:// URI is a protocol error, not silence",
+     resById[5].error?.code === -32602 && /unknown resource/.test(resById[5].error.message),
+     JSON.stringify(resById[5]).slice(0, 160));
+  ok("an unknown METHOD errors -32601 (the JSON-RPC error path)",
+     resById[6].error?.code === -32601 && /method not found/.test(resById[6].error.message),
+     JSON.stringify(resById[6]).slice(0, 160));
+  fs.rmSync(CONF, { recursive: true, force: true });
+}
+
 fs.rmSync(W, { recursive: true, force: true });
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
