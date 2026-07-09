@@ -16,7 +16,9 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
-      - run: npm install --no-fund --no-audit
+      # npm ci against the COMMITTED lockfile — a bare `npm install` let the gate float on whatever
+      # `typescript ^6` / eslint majors resolved to that day (an untested toolchain deciding CI red/green).
+      - run: npm ci --no-fund --no-audit
       # `npm test` runs the whole battery: behavioral (test/mcp/watch) + the fabrication probe + the
       # §7.13 soundness fuzzer. Driving it through the script keeps CI in lockstep with `npm test` so a
       # gate added locally can't be silently missing here (the probe + mcp/watch suites used to be).
