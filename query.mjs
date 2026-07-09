@@ -29,8 +29,9 @@ import { printAgents } from "./contract.mjs";
 import { impact as coreImpact, path as corePath, gains as coreGains,
          show as coreShow, blindspots as coreBlindspots,
          callers as coreCallers, callersFrontier, loadHierarchy,
-         containment as coreContainment,
-         loadReport, loadCallgraph, matches , reportVersion } from "./query-core.mjs";
+         containment as coreContainment, diff as coreDiff,
+         where as coreWhere, map as coreMap, whatif as coreWhatif,
+         loadReport, loadCallgraph, reportVersion } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
 
 // ONE version + spec source, the SAME way scan.mjs reads them: PKG_VERSION is the bare semver from
@@ -115,13 +116,11 @@ switch (cmd) {
     break;
   }
   case "where": {
+    // Shared query-core (like show/callers) — the CLI and MCP `candor_where` are ONE implementation.
+    // Hand-copies of core functions in this file have drifted three times (show, callers, diff); the
+    // fix each time was the same: delegate, keep query.mjs as arg-parsing + emit + exit codes only.
     const [prefix, eff] = args;
-    const fns = loadReport(prefix);
-    emit({
-      effect: eff,
-      directly: fns.filter((e) => e.direct.includes(eff)).map((e) => e.fn).sort(),
-      inherited: fns.filter((e) => e.inferred.includes(eff) && !e.direct.includes(eff)).map((e) => e.fn).sort(),
-    });
+    emit(coreWhere(loadReport(prefix), eff));
     break;
   }
   case "callers": {
@@ -136,17 +135,9 @@ switch (cmd) {
     break;
   }
   case "map": {
+    // Shared query-core — the CLI and MCP `candor_map` are one implementation (see `where` above).
     const [prefix] = args;
-    const fns = loadReport(prefix);
-    const mods = {};
-    for (const e of fns) {
-      const mod = e.fn.includes(".") ? e.fn.split(".").slice(0, -1).join(".") : "(root)";
-      const m = (mods[mod] ??= { effects: new Set(), functions: 0 });
-      for (const x of e.inferred) m.effects.add(x);
-      m.functions += 1;
-    }
-    emit(Object.fromEntries(Object.entries(mods).sort()
-      .map(([k, v]) => [k, { effects: [...v.effects].sort(), functions: v.functions }])));
+    emit(coreMap(loadReport(prefix)));
     break;
   }
   case "containment": {
@@ -168,18 +159,13 @@ switch (cmd) {
   }
   case "diff": {
     // per-function effect delta vs a baseline: {changes: [{fn, gained, lost}]} — the envelope shape
-    // the conformance suite pins (diff-vs-self must be {changes: []}).
+    // the conformance suite pins (diff-vs-self must be {changes: []}). Shared query-core: the CLI's
+    // former inline copy built `new Map(fns.map((e) => [e.fn, …]))` — the exact last-wins collapse
+    // core's effectsByFn was rewritten to avoid (merged multi-report siblings sharing a short fn name
+    // dropped one member's effects, so a gained Net could VANISH from diff and its exit-1 contract —
+    // a supply-chain miss, and the CLI disagreeing with MCP `candor_diff` on the same reports).
     const [curPrefix, basePrefix] = args;
-    const cur = new Map(loadReport(curPrefix).map((e) => [e.fn, new Set(e.inferred)]));
-    const base = new Map(loadReport(basePrefix).map((e) => [e.fn, new Set(e.inferred)]));
-    const changes = [];
-    for (const fn of new Set([...cur.keys(), ...base.keys()])) {
-      const c = cur.get(fn) ?? new Set(), b = base.get(fn) ?? new Set();
-      const gained = [...c].filter((e) => !b.has(e)).sort();
-      const lost = [...b].filter((e) => !c.has(e)).sort();
-      if (gained.length || lost.length) changes.push({ fn, gained, lost });
-    }
-    changes.sort((a, b) => a.fn.localeCompare(b.fn));
+    const { changes } = coreDiff(loadReport(curPrefix), loadReport(basePrefix));
     // §2.1: a baseline is comparable only to its own producing build — disclose a mismatch (the gains
     // may be the engine reclassifying after a coverage batch, not the code changing). Same note + JSON
     // provenance fields as the Rust candor-query (cross-engine parity, item 10).
@@ -239,26 +225,10 @@ switch (cmd) {
   }
   case "whatif": {
     const [prefix, target, eff, maybePolicy] = args;
-    const cg = loadCallgraph(prefix);
-    const names = Object.keys(cg);
-    const targets = matches(names, target);
-    if (targets.length === 0) {
-      console.error(`candor: no function matching \`${target}\` in the call graph`);
-      process.exit(2);
-    }
-    const rev = new Map();
-    for (const [caller, callees] of Object.entries(cg))
-      for (const c of callees) (rev.get(c) ?? rev.set(c, []).get(c)).push(caller);
-    const affected = new Set(targets);
-    const queue = [...targets];
-    while (queue.length) {
-      const n = queue.pop();
-      for (const c of rev.get(n) ?? []) if (!affected.has(c)) { affected.add(c); queue.push(c); }
-    }
-    const violations = [];
     // A present policy arg (anything but the 0/1 verbosity sentinels) MUST exist and be readable —
     // a typo'd path must be LOUD, not silently "no policy → ok:true, exit 0" (mirrors scan's --policy,
     // which exits 2 on an unreadable file: a gate that can't read its policy can't certify anything).
+    let pol = null;
     if (maybePolicy && maybePolicy !== "0" && maybePolicy !== "1") {
       let text;
       try {
@@ -267,16 +237,17 @@ switch (cmd) {
         console.error(`candor: policy ${maybePolicy} could not be read; whatif NOT evaluated against it`);
         process.exit(2);
       }
-      const pol = parsePolicy(text);
-      for (const r of pol.deny) {
-        if (r.effects.length && !r.effects.includes(eff)) continue; // pure ([]) forbids ANY effect
-        for (const fn of affected)
-          if (!r.scope || scopeMatches(fn, r.scope))
-            violations.push({ fn, rule: `deny ${r.effects.join(" ") || "(pure)"} ${r.scope}`.trim() });
-      }
+      pol = parsePolicy(text);
     }
-    emit({ of: targets, effect: eff, affected: [...affected].sort(), violations, ok: violations.length === 0 });
-    process.exit(violations.length ? 1 : 0);
+    // Shared query-core — the CLI and MCP `candor_whatif` are one blast-radius + deny evaluation
+    // (the CLI keeps the I/O + exit codes; the core is pure — see `where` above for the drift class).
+    const r = coreWhatif(loadCallgraph(prefix), target, eff, pol, scopeMatches);
+    if (r === null) {
+      console.error(`candor: no function matching \`${target}\` in the call graph`);
+      process.exit(2);
+    }
+    emit(r);
+    process.exit(r.violations.length ? 1 : 0);
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }
   default:

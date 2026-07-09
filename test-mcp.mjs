@@ -81,12 +81,42 @@ ok("loader: a non-array `inferred` is coerced to [], not iterated into character
    eq(Q.gains([{ fn: "x", inferred: "Net" }], [{ fn: "x", inferred: [] }]).gained, []));
 
 // ---- cross-check the shared queries against the canonical query.mjs (no drift) --------------------
-function cli(args) { return JSON.parse(execFileSync("node", [`${HERE}/query.mjs`, ...args], { encoding: "utf8" })); }
+// This block exists because the package's recurring failure mode is drift between duplicated
+// implementations (show, callers, and diff each drifted before being migrated to query-core) — every
+// query BOTH surfaces serve is pinned CLI == core, so a re-fork can't ship silently.
+function cliRaw(args) { return execFileSync("node", [`${HERE}/query.mjs`, ...args], { encoding: "utf8" }); }
+function cli(args) { return JSON.parse(cliRaw(args)); }
 ok("query-core where == query.mjs where (canonical, conformance-verified)",
    eq(Q.where(fns, "Net"), cli(["where", P, "Net"])));
 ok("query-core callers == query.mjs callers", eq(Q.callers(cg, "leaf"), cli(["callers", P, "leaf"])));
 ok("query-core reachable == query.mjs reachable", eq(Q.reachable(fns), cli(["reachable", P])));
 ok("query-core map == query.mjs map", eq(Q.map(fns), cli(["map", P])));
+ok("query-core diff-vs-self == query.mjs diff-vs-self (both {changes: []})",
+   eq(Q.diff(fns, fns), { changes: cli(["diff", P, P]).changes }));
+{ // whatif: same blast radius + verdict from both surfaces (no policy → the pure-core half)
+  const cliWi = cli(["whatif", P, "leaf", "Db"]);
+  ok("query-core whatif == query.mjs whatif",
+     eq(Q.whatif(cg, "leaf", "Db", null, () => false), cliWi), JSON.stringify(cliWi));
+}
+// REGRESSION (CLI): duplicate fn names across merged multi-report siblings must UNION in `diff`, not
+// collapse last-wins — the collapse masked a gained effect from the CLI's gained→exit-1 contract while
+// MCP candor_diff (query-core) reported it: the package's no-two-truths rule broken between surfaces.
+{
+  const DD = fs.mkdtempSync("/tmp/candor-dupdiff-");
+  // cur: two workspace members both defining `init`; only member a's gained Net. Baseline: neither.
+  fs.writeFileSync(`${DD}/cur.a.scan.json`, JSON.stringify({ functions: [{ fn: "init", inferred: ["Net"], direct: ["Net"] }] }));
+  fs.writeFileSync(`${DD}/cur.b.scan.json`, JSON.stringify({ functions: [{ fn: "init", inferred: [], direct: [] }] }));
+  fs.writeFileSync(`${DD}/base.json`, JSON.stringify({ functions: [{ fn: "init", inferred: [], direct: [] }] }));
+  const r = (() => { // execFileSync throws on exit 1 — capture status + stdout by hand
+    try { return { status: 0, stdout: cliRaw(["diff", `${DD}/cur`, `${DD}/base`]) }; }
+    catch (e) { return { status: e.status, stdout: e.stdout.toString() }; }
+  })();
+  const out = JSON.parse(r.stdout);
+  ok("CLI diff: a duplicated fn name UNIONS (the gained Net is not masked by a last-wins sibling)",
+     out.changes.some((c) => c.fn === "init" && c.gained.includes("Net")), r.stdout.slice(0, 160));
+  ok("CLI diff: the masked gain still trips the gained→exit-1 contract", r.status === 1, `status=${r.status}`);
+  fs.rmSync(DD, { recursive: true, force: true });
+}
 
 // ---- the MCP server, over its real stdio JSON-RPC transport --------------------------------------
 function mcpSession(requests) {
