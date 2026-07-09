@@ -2127,5 +2127,89 @@ export function copyPlain(): object { return Object.assign({}, plain); }`,
         `status=${r.status} ${r.stderr.slice(0, 160)}`);
 }
 
+// ── the AS-EFF-005 baseline guard (CANDOR_BASELINE / config `baseline`; SPEC §7 item 5) ────────────
+// Exit-code contract per gate surface (TESTING.md §2.5): gain → 1, clean → 0, absent file → note + 0,
+// unparseable / missing-or-mismatched producing version → 2 WITHOUT evaluating, new fns exempt.
+// Semantics mirror the reference engine (candor-java Policy.checkBaseline).
+{
+  const baseSrc = `import { DatabaseSync } from "node:sqlite";
+export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v = 1"); }`;
+  const gainedSrc = `import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
+export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v = 1"); readFileSync("/etc/x"); }`;
+  const d = project({ "src/db.ts": baseSrc });
+  const run = (env, ...extra) => spawnSync("node", [path.join(HERE, "scan.mjs"), d, ...extra],
+    { encoding: "utf8", env: { ...process.env, ...env } });
+  run({});                                                       // record the baseline (same build)
+  const bl = path.join(d, "baseline.json");
+  fs.copyFileSync(path.join(d, ".candor", "report.json"), bl);
+
+  // clean: same code vs its own baseline → exit 0, no violation
+  const rClean = run({ CANDOR_BASELINE: bl });
+  check("baseline guard: clean run exits 0", rClean.status === 0, `status=${rClean.status} ${rClean.stderr.slice(0, 160)}`);
+  check("baseline guard: clean run announces the active guard", rClean.stderr.includes("baseline ✓"), rClean.stderr.slice(0, 200));
+
+  // absent baseline FILE: one stderr note, guard inactive, exit unchanged (ratchet not adopted)
+  const rAbsent = run({ CANDOR_BASELINE: path.join(d, "no-such-baseline.json") });
+  check("baseline guard: absent file → note + exit 0 (guard inactive)",
+        rAbsent.status === 0 && /does not exist.*not active/.test(rAbsent.stderr), `status=${rAbsent.status} ${rAbsent.stderr.slice(0, 200)}`);
+
+  // gain: an EXISTING fn gaining an effect → [AS-EFF-005] + exit 1; and the record joins --gate-json
+  fs.writeFileSync(path.join(d, "src", "db.ts"), gainedSrc);
+  const gp = path.join(d, "gate.json");
+  const rGain = run({ CANDOR_BASELINE: bl }, "--gate-json", gp);
+  check("baseline guard: an existing fn gaining an effect exits 1", rGain.status === 1, `status=${rGain.status}`);
+  check("baseline guard: the gain is an [AS-EFF-005] line naming fn + effect",
+        rGain.stdout.includes("[AS-EFF-005]") && rGain.stdout.includes("src.db.save") && rGain.stdout.includes("Fs"),
+        rGain.stdout.slice(0, 240));
+  let gv = null;
+  try { gv = JSON.parse(fs.readFileSync(gp, "utf8")); } catch { /* null → the checks below fail with raw */ }
+  const gRec = gv?.violations?.find((x) => x.rule === "AS-EFF-005");
+  check("baseline guard: the AS-EFF-005 record joins the --gate-json verdict (ok:false)",
+        gv?.ok === false && gRec?.fn === "src.db.save" && Array.isArray(gRec?.effects) && gRec.effects.includes("Fs"),
+        JSON.stringify(gv)?.slice(0, 240));
+
+  // new-fn exemption: a NEW effectful fn (absent from the baseline) is reviewed as new code, not a regression
+  fs.writeFileSync(path.join(d, "src", "db.ts"),
+    `${baseSrc}\nimport { readFileSync } from "node:fs";\nexport function fresh(): void { readFileSync("/etc/y"); }`);
+  const rNew = run({ CANDOR_BASELINE: bl });
+  check("baseline guard: a NEW effectful fn is exempt (exit 0)", rNew.status === 0,
+        `status=${rNew.status} ${(rNew.stdout + rNew.stderr).slice(0, 200)}`);
+  fs.writeFileSync(path.join(d, "src", "db.ts"), gainedSrc);   // back to the gaining shape for the arms below
+
+  // doctored producing version (§2.1): exit 2 WITHOUT evaluating — no [AS-EFF-005] line even though a
+  // same-build compare WOULD find the gain (the bogus-wave/fail-open posture, the unreadable-policy class)
+  const doctored = path.join(d, "doctored.json");
+  fs.writeFileSync(doctored, fs.readFileSync(bl, "utf8").replace(/"version": "[^"]*"/, '"version": "candor-ts-0.0.1"'));
+  const rDoc = run({ CANDOR_BASELINE: doctored });
+  check("baseline guard: a different-build baseline exits 2 (invalid gate input, disclosed)",
+        rDoc.status === 2 && /produced by engine build candor-ts-0\.0\.1/.test(rDoc.stderr), `status=${rDoc.status} ${rDoc.stderr.slice(0, 240)}`);
+  check("baseline guard: the mismatch is NOT evaluated (no [AS-EFF-005] violation line)",
+        !rDoc.stdout.includes("[AS-EFF-005]") && !rDoc.stderr.includes("[AS-EFF-005]"), (rDoc.stdout + rDoc.stderr).slice(0, 240));
+
+  // a provenance-less (legacy bare-array) baseline is as unverifiable as a mismatch → exit 2
+  const legacy = path.join(d, "legacy.json");
+  fs.writeFileSync(legacy, JSON.stringify([{ fn: "src.db.save", inferred: ["Db"] }]));
+  const rLegacy = run({ CANDOR_BASELINE: legacy });
+  check("baseline guard: a baseline with no provenance header exits 2",
+        rLegacy.status === 2 && /no provenance header/.test(rLegacy.stderr), `status=${rLegacy.status} ${rLegacy.stderr.slice(0, 200)}`);
+
+  // present-but-unparseable: exit 2, never a silent pass (fail-closed, TESTING.md §2.2)
+  const bad = path.join(d, "bad.json");
+  fs.writeFileSync(bad, "{ definitely not json");
+  const rBad = run({ CANDOR_BASELINE: bad });
+  check("baseline guard: an unparseable baseline exits 2 (never a silent pass)",
+        rBad.status === 2 && /could not be parsed/.test(rBad.stderr), `status=${rBad.status} ${rBad.stderr.slice(0, 200)}`);
+
+  // config `baseline` key: a RELATIVE value anchors to the CONFIG's repo (never the process cwd) and
+  // activates the guard — the same gain must fire with no env var set at all
+  fs.mkdirSync(path.join(d, ".candor"), { recursive: true });
+  fs.writeFileSync(path.join(d, ".candor", "config"), "baseline baseline.json\n");
+  const rCfg = spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8", cwd: os.tmpdir() });
+  check("baseline guard: the config `baseline` key (relative, config-anchored) activates the guard — gain exits 1",
+        rCfg.status === 1 && rCfg.stdout.includes("[AS-EFF-005]"), `status=${rCfg.status} ${(rCfg.stdout + rCfg.stderr).slice(0, 240)}`);
+  fs.rmSync(path.join(d, ".candor", "config"));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

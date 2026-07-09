@@ -13,7 +13,9 @@
  * `any`-typed callee or a function-valued parameter/field IS the "could not resolve" case), and
  * emit the §2 report envelope + the §2.2 call-graph sidecar (every analyzed function a key). With
  * --policy (or CANDOR_POLICY), evaluate the §6.2 gate (AS-EFF-006/008/009) over the result: exit 1
- * on violation, exit 2 LOUDLY on an unreadable policy.
+ * on violation, exit 2 LOUDLY on an unreadable policy. With CANDOR_BASELINE (or a config `baseline`
+ * key), run the AS-EFF-005 regression guard against a saved report: an existing fn gaining an effect
+ * is a violation (exit 1); an unparseable or different-build baseline is invalid gate input (exit 2).
  *
  * Usage: node scan.mjs <dir | file.ts | tsconfig.json> [--out <prefix>] [--policy <file>]
  *        node scan.mjs <file.ts> <out-prefix>                  (legacy positional form)
@@ -64,6 +66,10 @@ USAGE: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--po
   --agents          print the agent contract for this build (AGENTS.md)
   -V, --version     print the build and spec version (offline)
   -h, --help        show this help
+
+CANDOR_BASELINE=<report.json> (or a .candor/config \`baseline\` key) runs the AS-EFF-005 regression
+guard against a saved same-build report: exit 1 when an existing function gained an effect, exit 2
+on an unparseable or different-build baseline (never evaluated), a stderr note when absent.
 
 See https://github.com/tombaldwin/candor`);
   process.exit(0);
@@ -168,6 +174,11 @@ const candorConfig = loadCandorConfig(target);
 // precedence: the --policy flag / CANDOR_POLICY env already populated policyPath; the config is the floor.
 // A BARE `policy` line ("" value) means configured-with-empty → the unreadable-policy path fails loud.
 if (policyPath === null && candorConfig.policy !== undefined) policyPath = candorConfig.policy;
+// baseline (the AS-EFF-005 regression guard, SPEC §7 item 5): CANDOR_BASELINE env → config `baseline`
+// (path-valued keys are already resolved against the config's anchor above). No CLI flag — matching
+// candor-java, the reference engine (env/config only). A BARE `baseline` line ("") fails loud below.
+let baselinePath = process.env.CANDOR_BASELINE ?? null;
+if (baselinePath === null && candorConfig.baseline !== undefined) baselinePath = candorConfig.baseline;
 
 // ---- project discovery (a dir, a single file, or a tsconfig) --------------------------------------
 let rootDir, fileNames, compilerOptions = {
@@ -2168,12 +2179,74 @@ if (unlistedSeen.size > 0) {
     + `effects through ${top.length === 1 ? "it are" : "them are"} INVISIBLE (not Unknown): ${shown}${more}`);
 }
 
+// ---- the gate surfaces: the AS-EFF-005 baseline guard + the standing §6.2 policy gate --------------
+// When stdout carries a JSON document — the §2 envelope (--json) OR the streamed gate verdict
+// (--gate-json -) — it must stay pure JSON: route the gate's [AS-EFF-…] violation lines to stderr so
+// a `… | jq` / `… | candor-sarif` pipe never breaks.
+const emitViolation = (wantJson || gateJsonPath === "-") ? (l) => console.error(l) : (l) => console.log(l);
+let gateViolations = [];
+
+// ---- the AS-EFF-005 baseline guard (CANDOR_BASELINE / config `baseline`; SPEC §7 item 5) -----------
+// Semantics mirror the reference engine (candor-java Policy.checkBaseline) exactly:
+//  · ABSENT file → one stderr note, guard inactive (ratchet not adopted; exit unchanged).
+//  · PRESENT but unparseable (corrupt/truncated/not-a-report) → exit 2 WITHOUT evaluating — the guard
+//    must never silently pass on unreadable gate input (the unreadable-policy class, §6.2).
+//  · A missing provenance header (legacy bare array) OR a producing `candor.version` ≠ this build →
+//    exit 2 WITHOUT evaluating (§2.1: a baseline is comparable only to its OWN producing version —
+//    evaluating a stale one yields a bogus AS-EFF-005 wave; skipping is an unbounded fail-open window).
+//    The read-only `diff`/`gains` QUERIES disclose a mismatch instead of failing — a comparison the
+//    user explicitly asked for should inform; this scan-time guard is the gate and fails closed.
+//  · Valid + same build → per-fn compare: an EXISTING fn gaining an effect is an [AS-EFF-005]
+//    violation (exit 1, joins --gate-json); a fn absent from the baseline is NEW code, reviewed as
+//    such, not a regression. Baselines omit pure fns (spec §2), so absent-prior means no prior claim.
+if (baselinePath !== null) {
+  const shownB = baselinePath === "" ? "(configured empty)" : baselinePath;
+  if (baselinePath !== "" && !fs.existsSync(baselinePath)) {
+    console.error(`candor-ts: CANDOR_BASELINE ${baselinePath} does not exist — the regression guard is `
+      + `not active (record one: candor-ts <target> --out <prefix>, then point at the report .json).`);
+  } else {
+    let root = null;
+    try { root = JSON.parse(fs.readFileSync(baselinePath, "utf8")); } catch { /* root stays null → exit 2 */ }
+    const arr = Array.isArray(root) ? root : (root && typeof root === "object" ? root.functions : null);
+    if (!Array.isArray(arr)) {
+      console.error(`candor-ts: baseline ${shownB} exists but could not be parsed (corrupt/truncated?) — `
+        + `failing (exit 2); the guard must not silently pass on an unreadable baseline. Regenerate it with this build.`);
+      process.exit(2);
+    }
+    const baseVersion = !Array.isArray(root) && root.candor && typeof root.candor === "object"
+      && typeof root.candor.version === "string" ? root.candor.version : null;
+    if (baseVersion === null) {
+      console.error(`candor-ts: the baseline ${shownB} has no provenance header (a legacy/bare-array report) — `
+        + `a baseline is comparable only to its producing build (§2.1). Failing (exit 2); regenerate it with this build.`);
+      process.exit(2);
+    }
+    if (baseVersion !== ENGINE_VERSION) {
+      console.error(`candor-ts: the baseline ${shownB} was produced by engine build ${baseVersion} but this is `
+        + `build ${ENGINE_VERSION} — an engine swap is baseline-invalidating and the gate cannot evaluate `
+        + `(exit 2; never a silent skip, never a bogus AS-EFF-005 wave). Regenerate deliberately with this build.`);
+      process.exit(2);
+    }
+    const base = new Map();
+    for (const e of arr) {
+      if (e && typeof e.fn === "string" && e.fn) base.set(e.fn, new Set(Array.isArray(e.inferred) ? e.inferred : []));
+    }
+    for (const name of [...inferred.keys()].sort()) {
+      const prior = base.get(name);
+      if (prior === undefined) continue;                    // new function — not a regression
+      const gained = [...inferred.get(name)].filter((x) => !prior.has(x)).sort();
+      if (gained.length) {
+        gateViolations.push({ rule: "AS-EFF-005", fn: name, effects: gained,
+          detail: `\`${name}\` gained effect { ${gained.join(", ")} } not present in the baseline` });
+      }
+    }
+  }
+}
+
 // ---- the standing §6.2 gate (--policy / CANDOR_POLICY) --------------------------------------------
 // `!== null`, not truthiness: a CONFIGURED-but-EMPTY policy (a bare `policy` config line, a set-but-
 // empty CANDOR_POLICY) is "" — falsy, so a truthy check silently skipped the gate, the exact quiet
 // drop the config comment above promises fails loud. "" now reaches the read, which fails → exit 2
 // (the Rust engine's behavior on the same input).
-let gateViolations = [];
 if (policyPath !== null) {
   let text;
   try {
@@ -2187,13 +2260,9 @@ if (policyPath !== null) {
   // java/rust engines (not a report field) — passed to the gate so an incomplete surface fails closed.
   const incompleteMap = new Map();
   for (const [name, rec] of fns) if (rec.incomplete.size) incompleteMap.set(name, rec.incomplete);
-  gateViolations = evaluatePolicy(parsePolicy(text), functions, cg, incompleteMap);
-  // When stdout carries a JSON document — the §2 envelope (--json) OR the streamed gate verdict
-  // (--gate-json -) — it must stay pure JSON: route the gate's [AS-EFF-…] violation lines to stderr so
-  // a `… | jq` / `… | candor-sarif` pipe never breaks.
-  const emitViolation = (wantJson || gateJsonPath === "-") ? (l) => console.error(l) : (l) => console.log(l);
-  for (const x of gateViolations) emitViolation(`[${x.rule}] ${x.detail}`);
+  gateViolations = gateViolations.concat(evaluatePolicy(parsePolicy(text), functions, cg, incompleteMap));
 }
+for (const x of gateViolations) emitViolation(`[${x.rule}] ${x.detail}`);
 // --gate-json ⟨0.8⟩: the structured gate verdict { spec, ok, violations:[{rule,fn,effects,detail}] }, from
 // the SAME gateViolations that set the exit code (so it can't disagree). Written whenever the flag is set —
 // ok:true,[] when no gate is configured. Must precede the exit(1) below.
@@ -2207,8 +2276,10 @@ if (gateJsonPath) {
     catch (e) { console.error(`candor-ts: could not write --gate-json ${gateJsonPath}: ${e.message}`); }
   }
 }
-if (policyPath !== null && gateViolations.length) {
+// gateViolations is non-empty only when a gate surface (policy / baseline) was active and fired.
+if (gateViolations.length) {
   console.error(`candor-ts: ${gateViolations.length} policy violation(s)`);
   process.exit(1);
 }
 if (policyPath !== null) console.error("candor-ts: policy ✓");
+if (baselinePath !== null && fs.existsSync(baselinePath)) console.error("candor-ts: baseline ✓"); // absent = inactive (noted above)

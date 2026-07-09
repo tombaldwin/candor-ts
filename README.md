@@ -20,6 +20,8 @@ node scan.mjs <project-dir>                 # tsconfig.json honored; tests exclu
                                             #   <dir>/.candor/report.json + .callgraph.json
 node scan.mjs . --policy .candor/policy     # the §6.2 gate: exit 1 on violation, 2 if unreadable
 node scan.mjs . --gate-json gate.json       # + the structured verdict {spec, ok, violations} (§3.3)
+CANDOR_BASELINE=saved.json node scan.mjs .  # AS-EFF-005 guard: exit 1 if an existing fn GAINED an
+                                            #   effect vs the saved report; 2 if it can't evaluate
 
 node scan.mjs --version                     # installed build + spec contract (offline), + upgrade line
 
@@ -35,9 +37,20 @@ node query.mjs diff     .candor/report baseline 1  # per-function effect delta (
 ```
 
 A checked-in **`.candor/config`** (spec §3.4) replaces the env wiring — `policy arch.policy` /
-`deps <report paths>` one per line, discovered by walking up from the scan target; relative values
-resolve against the config's repo, so CI is "point at the repo". A configured-but-unusable
-config/policy fails loud (exit 2), never silently gateless.
+`baseline <report.json>` / `deps <report paths>` one per line, discovered by walking up from the
+scan target; relative values resolve against the config's repo, so CI is "point at the repo". A
+configured-but-unusable config/policy/baseline fails loud (exit 2), never silently gateless.
+
+The scan-time **baseline guard** (AS-EFF-005, spec §7) makes effect *regressions* un-shippable:
+point `CANDOR_BASELINE` (or the config's `baseline` key) at a saved report, and any existing
+function that **gained** an effect fails the scan — exit 1, the records join the `--gate-json`
+verdict. New functions are exempt (reviewed as new code, not a regression). The guard is
+fail-closed like the policy gate: a present-but-unparseable baseline, or one produced by a
+different engine build (§2.1 — an engine upgrade is baseline-invalidating), exits 2 **without
+evaluating**; only a genuinely absent file is a one-line note (guard not active). Keep the two
+surfaces straight: `query diff` is the read-only comparison — it *discloses* a producing-build
+mismatch (⚠, exit 0) and informs; the scan-time guard is the gate-grade fail-closed surface, the
+one CI should hold. Semantics mirror the reference engine (candor-java) exactly.
 
 **Staying current:** check your installed version and upgrade — [candor/AGENTS.md §2a](https://github.com/tombaldwin/candor/blob/main/AGENTS.md#2a-staying-current--check-the-version-upgrade). `npx -y candor-ts --version` prints the build, the spec, and the upgrade one-liner (offline; candor never phones home).
 
