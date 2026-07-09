@@ -7,6 +7,10 @@
  *     how many functions transitively call it (who is affected if it changes).
  *   • Diagnostics: the repo's architecture-policy verdict (the §6.2 gate, resolved from CANDOR_POLICY
  *     or the checked-in .candor/config — spec §3.4) as squiggles at each violating function's line.
+ *     CAVEAT — a report-computed gate is WEAKER than the engine's own --gate-json run: the scan-time
+ *     gate also fails an allow rule whose literal surface is INCOMPLETE (a masked/invisible endpoint,
+ *     kept internal per the java/rust engines — not a report field), so no-squiggle here can still be
+ *     red in CI. The engine's --gate-json is the authoritative form (same caveat as MCP candor_gate).
  *   • Hover: effect PROVENANCE — for each inherited effect, the `path` hop chain to the function that
  *     performs it directly ("Net via mid → leaf (source)"), plus unknownWhy when the fn discloses opacity.
  *
@@ -40,14 +44,7 @@ try { VERSION = createRequire(import.meta.url)("./package.json").version; } catc
 let rootPath = null;
 let reportPrefix = process.env.CANDOR_REPORT || process.argv[2] || null;
 
-function hasReport(p) {
-  if (!p) return false;
-  if (fs.existsSync(`${p}.json`)) return true;
-  const base = nodePath.basename(p);
-  try {
-    return fs.readdirSync(nodePath.dirname(p) || ".").some((f) => f.startsWith(base + ".") && f.endsWith(".json") && Q.isReport(f));
-  } catch { return false; }
-}
+const hasReport = Q.hasReport; // single-sourced with the loader predicate (query-core) — see mcp.mjs
 
 // ---- fn → document mapping --------------------------------------------------------------------------
 // A report `loc` is `<file>:<line>[:col…]` where <file> is either a repo-relative PATH (the scan-source
@@ -70,29 +67,41 @@ function docMatches(docPath, fn, file) {
   const norm = docPath.split(nodePath.sep).join("/");
   return candidatePaths(fn, file).some((c) => norm === c || norm.endsWith("/" + c));
 }
-/** Every report entry whose loc maps into this document: [{ entry, line }]. Loaded FRESH per call. */
-function entriesInDoc(docPath) {
+/** Every report entry whose loc maps into this document: [{ entry, line }]. Loaded FRESH per call
+ *  (the per-request re-read is the freshness design); a caller that already has the report passes
+ *  it via `fns` so one request never parses the same file twice. */
+function entriesInDoc(docPath, fns = null) {
   if (!hasReport(reportPrefix)) return null;
   const out = [];
-  for (const e of Q.loadReport(reportPrefix)) {
+  for (const e of (fns ?? Q.loadReport(reportPrefix))) {
     const lp = e.loc && locParts(e.loc);
     if (lp && docMatches(docPath, e.fn, lp.file)) out.push({ entry: e, line: lp.line });
   }
   return out;
 }
 
+// The transitive-caller COUNT for an exact fn name over an already-inverted graph. The lenses used
+// Q.callers per entry, and every callers() call rebuilt reverseGraph from scratch — a 50-fn document
+// over a JVM-scale callgraph did 50 full graph inversions PER codeLens request (review find). One
+// inversion per request + a plain BFS; report fn names are exact cg keys, so no match ladder needed.
+function transitiveCallerCount(rev, fn) {
+  const seen = new Set([fn]);
+  const queue = [fn];
+  while (queue.length) {
+    const n = queue.pop();
+    for (const c of rev.get(n) ?? []) if (!seen.has(c)) { seen.add(c); queue.push(c); }
+  }
+  return seen.size - 1; // minus the target itself
+}
+
 // ---- CodeLens ---------------------------------------------------------------------------------------
 function codeLenses(docPath) {
   const found = entriesInDoc(docPath);
   if (found === null) return [];
-  const cg = Q.loadCallgraph(reportPrefix);
+  let rev = null;
+  try { rev = Q.reverseGraph(Q.loadCallgraph(reportPrefix)); } catch { /* no callgraph — effects-only lens */ }
   return found.map(({ entry, line }) => {
-    let blast = "";
-    try {
-      const c = Q.callers(cg, entry.fn);
-      const n = (c && c.transitive && c.transitive.length) || 0;
-      blast = ` · blast radius ${n}`;
-    } catch { /* no callgraph — effects-only lens */ }
+    const blast = rev ? ` · blast radius ${transitiveCallerCount(rev, entry.fn)}` : "";
     const eff = (entry.inferred || []).join(", ") || "pure";
     return {
       range: { start: { line, character: 0 }, end: { line, character: 0 } },
@@ -107,12 +116,13 @@ function codeLenses(docPath) {
 // needs no parser). For each inferred effect: direct → "performed here"; inherited → the §3.1 `path`
 // chain to the direct source. unknownWhy rides along when the fn introduces opacity.
 function hoverAt(docPath, line) {
-  const found = entriesInDoc(docPath);
+  if (!hasReport(reportPrefix)) return null;
+  const fns = Q.loadReport(reportPrefix);          // ONE load per request (entriesInDoc reuses it)
+  const found = entriesInDoc(docPath, fns);
   if (!found || !found.length) return null;
   const at = found.filter((x) => x.line <= line).sort((a, b) => b.line - a.line)[0];
   if (!at) return null;
   const { entry } = at;
-  const fns = Q.loadReport(reportPrefix);
   const cg = Q.loadCallgraph(reportPrefix);
   const lines = [`**${entry.fn}** — ⚡ { ${(entry.inferred || []).join(", ") || "pure"} }`];
   for (const eff of entry.inferred || []) {
@@ -139,9 +149,16 @@ function hoverAt(docPath, line) {
 }
 
 // ---- Diagnostics (the live gate) ---------------------------------------------------------------------
+const warned = new Set();
+function warnOnce(message) { if (!warned.has(message)) { warned.add(message); logMessage(message); } }
 function activePolicy() {
   const env = process.env.CANDOR_POLICY;
-  if (env && fs.existsSync(env)) return fs.readFileSync(env, "utf8");
+  if (env) {
+    if (fs.existsSync(env)) return fs.readFileSync(env, "utf8");
+    // Set-but-missing must be LOUD (the family's configured-but-unusable posture — scan exits 2 here).
+    // This is an advisory surface, so: disclose the policy-source swap, then fall through to discovery.
+    warnOnce(`candor-lsp: CANDOR_POLICY is set but ${env} does not exist — falling back to .candor/config discovery (diagnostics may reflect a different policy than you configured)`);
+  }
   const from = reportPrefix ? nodePath.dirname(nodePath.resolve(reportPrefix)) : rootPath;
   const cfg = from ? discoverConfigPolicy(from) : null;
   if (cfg && fs.existsSync(cfg.policyPath)) return fs.readFileSync(cfg.policyPath, "utf8");

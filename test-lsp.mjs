@@ -37,9 +37,9 @@ fs.writeFileSync(path.join(W, ".candor", "config"), "policy arch.policy\n");
 const DOC = pathToFileURL(path.join(W, "src", "app.ts")).href;
 
 // ---- an LSP stdio session (Content-Length framing) ---------------------------------------------------
-function lspSession(messages, expectedInbound) {
+function lspSession(messages, expectedInbound, extraEnv = {}) {
   return new Promise((resolve) => {
-    const srv = spawn("node", [path.join(HERE, "lsp.mjs")], { env: { ...process.env } });
+    const srv = spawn("node", [path.join(HERE, "lsp.mjs")], { env: { ...process.env, ...extraEnv } });
     let buf = Buffer.alloc(0);
     const inbound = [];
     srv.stdout.on("data", (chunk) => {
@@ -108,6 +108,22 @@ ok("didClose clears the document's diagnostics",
    notes[1]?.params?.uri === DOC && notes[1].params.diagnostics.length === 0, JSON.stringify(notes[1]?.params));
 ok("an unknown method errors (not silence)", byId(3)?.error?.code === -32601);
 ok("shutdown answers null", byId(4) && byId(4).result === null);
+
+// ── a SET-but-missing CANDOR_POLICY is disclosed (window/logMessage), never a silent source swap ────
+// The family posture is loud-on-configured-but-unusable (scan exits 2 here); the LSP is advisory, so it
+// warns and falls back to config discovery — but the swap must be visible, not quiet (review find).
+const missReplies = await lspSession([
+  { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(W).href } },
+  { jsonrpc: "2.0", method: "initialized", params: {} },
+  { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: DOC, languageId: "typescript", version: 1, text: "" } } },
+], 3, { CANDOR_POLICY: path.join(W, "no-such.policy") }); // init + logMessage + diagnostics
+const logNote = missReplies.find((r) => r.method === "window/logMessage");
+ok("set-but-missing CANDOR_POLICY logs a window/logMessage disclosure",
+   logNote && /CANDOR_POLICY is set but .*no-such\.policy/.test(logNote.params?.message ?? ""),
+   JSON.stringify(logNote)?.slice(0, 160));
+const missDiag = missReplies.find((r) => r.method === "textDocument/publishDiagnostics");
+ok("…and diagnostics still publish from the .candor/config fallback (the disclosed swap)",
+   missDiag?.params?.diagnostics?.some((x) => x.code === "AS-EFF-006"), JSON.stringify(missDiag?.params)?.slice(0, 160));
 
 fs.rmSync(W, { recursive: true, force: true });
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);
