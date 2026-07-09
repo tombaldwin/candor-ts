@@ -22,11 +22,27 @@ function siblings(prefix, predicate) {
       .map((f) => nodePath.join(dir, f));
   } catch { return []; }
 }
-// A sibling filename that is a real REPORT (not a callgraph sidecar, an encountered-crate ledger, or a
-// calibrated-coverage sidecar). Exported so `hasReport` (the MCP existence check) uses the SAME predicate
-// as the loader — else a prefix whose only sibling is `.encountered-*`/`.calibrated.json` passes the
-// existence check but loads ZERO functions → an authoritative-empty result (silent under-report; review find).
-export const isReport = (f) => !f.endsWith(".callgraph.json") && !f.endsWith(".hierarchy.json") && !f.includes(".encountered-") && !f.endsWith(".calibrated.json");
+// A sibling filename that is a real REPORT (not a callgraph sidecar, an encountered-crate ledger, a
+// calibrated-coverage sidecar, or a --gate-json verdict written beside the prefix). Exported so
+// `hasReport` (the MCP existence check) uses the SAME predicate as the loader — else a prefix whose only
+// sibling is `.encountered-*`/`.calibrated.json` passes the existence check but loads ZERO functions →
+// an authoritative-empty result (silent under-report; review find). `.gate.json` has no functions array,
+// so merging it "disclosed a malformed report" on every query over the recommended CI layout — noisy, excluded.
+export const isReport = (f) => !f.endsWith(".callgraph.json") && !f.endsWith(".hierarchy.json") && !f.includes(".encountered-") && !f.endsWith(".calibrated.json") && !f.endsWith(".gate.json");
+
+// A report exists at the prefix if there's an exact `<prefix>.json` (candor-ts) OR a sibling
+// `<prefix>.<crate>.scan.json` (the candor-scan/Rust multi-report form) — the loaders read both, so a
+// consumer (MCP/LSP) serves a report from ANY engine. ONE copy here: the check was triplicated across
+// mcp.mjs/lsp.mjs, and an earlier divergence from the loader predicate was itself a review find.
+export function hasReport(p) {
+  if (!p) return false;
+  if (fs.existsSync(`${p}.json`)) return true;
+  const base = nodePath.basename(p);
+  try {
+    return fs.readdirSync(nodePath.dirname(p) || ".").some((f) =>
+      f.startsWith(base + ".") && f.endsWith(".json") && isReport(f));
+  } catch { return false; }
+}
 
 // Defend the queries against a partial/old-engine/hand-edited report: the §2 required fields are
 // defaulted, and a WRONG-TYPE field is coerced — a non-array `inferred` (e.g. the string "Net") must
@@ -120,7 +136,9 @@ export function matches(names, q) {
   return best === 0 ? [] : names.filter((n) => matchTier(n, q) >= best);
 }
 
-function reverseGraph(cg) {
+// Exported for consumers that answer MANY caller-count questions over one loaded graph (the LSP
+// codeLens): building the inversion once per request instead of once per `callers()` call.
+export function reverseGraph(cg) {
   const rev = new Map();
   for (const [caller, callees] of Object.entries(cg))
     for (const c of callees) {

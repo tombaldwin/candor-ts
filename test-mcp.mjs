@@ -62,9 +62,14 @@ fs.writeFileSync(`${M}/r.a.scan.json`, JSON.stringify({ functions: [{ fn: "a::f"
 fs.writeFileSync(`${M}/r.b.scan.json`, JSON.stringify({ functions: [{ fn: "b::g", inferred: ["Fs"], direct: ["Fs"], calls: [] }] }));
 fs.writeFileSync(`${M}/r.a.scan.callgraph.json`, JSON.stringify({ "a::f": [] }));
 fs.writeFileSync(`${M}/r.b.scan.callgraph.json`, JSON.stringify({ "b::g": [] }));
+// a --gate-json verdict written beside the prefix is NOT a report sibling: merging it disclosed
+// "no functions array — OMITTED" on every query over the recommended CI layout (review find).
+fs.writeFileSync(`${M}/r.gate.json`, JSON.stringify({ spec: "0.8", ok: true, violations: [] }));
 const merged = Q.loadReport(`${M}/r`);
 ok("cross-engine loader: a multi-report prefix merges every sibling (Rust/workspace form)",
    merged.length === 2 && merged.some((e) => e.fn === "a::f") && merged.some((e) => e.fn === "b::g"));
+ok("loader: a sibling .gate.json verdict is not mistaken for a report (no malformed-report noise)",
+   !Q.isReport("r.gate.json") && merged.length === 2);
 ok("cross-engine loader: the callgraph sidecars merge too",
    "a::f" in Q.loadCallgraph(`${M}/r`) && "b::g" in Q.loadCallgraph(`${M}/r`));
 fs.rmSync(M, { recursive: true, force: true });
@@ -119,9 +124,9 @@ ok("query-core diff-vs-self == query.mjs diff-vs-self (both {changes: []})",
 }
 
 // ---- the MCP server, over its real stdio JSON-RPC transport --------------------------------------
-function mcpSession(requests) {
+function mcpSession(requests, extraArgs = []) {
   return new Promise((resolve) => {
-    const srv = spawn("node", [`${HERE}/mcp.mjs`], { env: { ...process.env, CANDOR_REPORT: P } });
+    const srv = spawn("node", [`${HERE}/mcp.mjs`, ...extraArgs], { env: { ...process.env, CANDOR_REPORT: P } });
     let out = "", responses = [];
     srv.stdout.on("data", (d) => {
       out += d;
@@ -221,6 +226,48 @@ const resRead = extra.find((r) => r.id === 6).result.contents[0];
 ok("mcp: resources/read serves the report envelope",
    resRead.mimeType === "application/json" && JSON.parse(resRead.text).some((f) => f.fn === "app.leaf"),
    String(resRead.text).slice(0, 120));
+
+// ── candor_whatif over MCP: the pre-edit gate must FAIL CLOSED on a bad policy path ────────────────
+// (review headline find: a typo'd/missing `policy` silently evaluated with NO policy → ok:true — a
+// false green on the agent-facing surface, the exact gateless-green shape the CLI whatif exits 2 on.)
+const OUTSIDE = fs.mkdtempSync("/tmp/candor-outside-");
+fs.writeFileSync(path.join(OUTSIDE, "other.policy"), "deny Net\n");
+const wi = (id, args) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "candor_whatif", arguments: args } });
+const wiReplies = await mcpSession([
+  { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+  wi(2, { fn: "mid", effect: "Net", policy: path.join(W, "arch.policy") }),      // repo-root policy, violating
+  wi(3, { fn: "mid", effect: "Db", policy: path.join(W, "arch.policy") }),       // repo-root policy, passing
+  wi(4, { fn: "mid", effect: "Net", policy: path.join(W, "no-such.policy") }),   // MISSING path → loud error
+  wi(5, { fn: "mid", effect: "Net", policy: path.join(OUTSIDE, "other.policy") }), // outside the repo → refused
+  wi(6, { fn: "mid", effect: "Net" }),                                           // no policy → blast radius only
+]);
+const wiById = Object.fromEntries(wiReplies.map((r) => [r.id, r]));
+const wiText = (id) => wiById[id].result.content[0].text;
+const wiJson = (id) => JSON.parse(wiText(id));
+ok("mcp whatif: a repo-root policy is READ (not refused by the old .candor-dir confinement root) and violates",
+   wiById[2].result.isError !== true && wiJson(2).ok === false && wiJson(2).violations.length > 0, wiText(2).slice(0, 160));
+ok("mcp whatif: the same policy passes a non-denied effect (control)",
+   wiById[3].result.isError !== true && wiJson(3).ok === true && wiJson(3).violations.length === 0, wiText(3).slice(0, 160));
+ok("mcp whatif: a MISSING policy path is a loud tool error (fail closed), never a clean ok:true",
+   wiById[4].result.isError === true && /could not be read/.test(wiText(4)), wiText(4).slice(0, 160));
+ok("mcp whatif: a policy outside the report's repo is refused (confinement)",
+   wiById[5].result.isError === true && /must be within/.test(wiText(5)), wiText(5).slice(0, 160));
+ok("mcp whatif: no policy given still answers the blast radius (ok:true, no violations)",
+   wiById[6].result.isError !== true && wiJson(6).ok === true && wiJson(6).affected.includes("app.handler"), wiText(6).slice(0, 160));
+
+// ── --root lockdown: a report prefix outside the declared workspace is refused ─────────────────────
+const rootReplies = await mcpSession([
+  { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+  { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "candor_where", arguments: { effect: "Net" } } },
+  { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "candor_where", arguments: { effect: "Net", report: `${OUTSIDE}/r` } } },
+], ["--root", W]);
+const rootById = Object.fromEntries(rootReplies.map((r) => [r.id, r]));
+ok("mcp --root: the in-workspace default prefix still serves",
+   rootById[2].result.isError !== true && JSON.parse(rootById[2].result.content[0].text).directly.includes("app.leaf"));
+ok("mcp --root: a report prefix outside the workspace is refused",
+   rootById[3].result.isError === true && /outside the served workspace/.test(rootById[3].result.content[0].text),
+   rootById[3].result.content[0].text.slice(0, 160));
+fs.rmSync(OUTSIDE, { recursive: true, force: true });
 
 fs.rmSync(W, { recursive: true, force: true });
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);

@@ -23,41 +23,57 @@ import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches } from 
 
 const VERSION = createRequire(import.meta.url)("./package.json").version; // single-sourced, like scan.mjs
 
-const DEFAULT_PREFIX = process.env.CANDOR_REPORT || process.argv[2]
+// CLI: [prefix] [--root <dir>]. `--root` LOCKS the server to a workspace: every report prefix (and
+// therefore every policy read, whose confinement root derives from the prefix) must live inside it.
+// Without it the confinement is only RELATIVE — the `report` arg is client-chosen, so a client that can
+// also plant a parseable report in a target tree could anchor policy reads there (review find).
+const CLI_ARGS = process.argv.slice(2);
+let WORKSPACE_ROOT = null;
+{
+  const i = CLI_ARGS.indexOf("--root");
+  if (i >= 0) { WORKSPACE_ROOT = nodePath.resolve(CLI_ARGS[i + 1] ?? "."); CLI_ARGS.splice(i, 2); }
+}
+const DEFAULT_PREFIX = process.env.CANDOR_REPORT || CLI_ARGS[0]
   || (fs.existsSync(".candor") ? ".candor/report" : null);   // the engines' default --out convention
 
-// A report exists at the prefix if there's an exact `<prefix>.json` (candor-ts) OR a sibling
-// `<prefix>.<crate>.scan.json` (the candor-scan/Rust multi-report form) — the loaders read both, so
-// the MCP server serves a report from ANY engine, not just candor-ts's.
-function hasReport(p) {
-  if (fs.existsSync(`${p}.json`)) return true;
-  const base = nodePath.basename(p);
-  try {
-    // SAME predicate (Q.isReport) the loader uses — a prefix whose only sibling is `.encountered-*` /
-    // `.calibrated.json` must NOT pass here, else loadReport finds zero functions and the tool returns an
-    // authoritative-empty result instead of "no report" (a silent under-report — review find).
-    return fs.readdirSync(nodePath.dirname(p) || ".").some((f) =>
-      f.startsWith(base + ".") && f.endsWith(".json") && Q.isReport(f));
-  } catch { return false; }
-}
+const within = (abs, root) => abs === root || abs.startsWith(root + nodePath.sep);
+// hasReport is the shared query-core check — the SAME predicate (Q.isReport) the loader uses, so a
+// prefix whose only sibling is `.encountered-*`/`.calibrated.json` can't pass existence yet load zero
+// functions (an authoritative-empty result — a silent under-report; review find).
 function resolvePrefix(args) {
   const p = args?.report || DEFAULT_PREFIX;
   if (!p) throw new Error("no report prefix: pass `report`, set $CANDOR_REPORT, or give one as the CLI arg");
-  if (!hasReport(p)) throw new Error(`no report at \`${p}\` (.json or .<crate>.scan.json) — run a candor scan first`);
+  if (WORKSPACE_ROOT && !within(nodePath.resolve(p), WORKSPACE_ROOT))
+    throw new Error(`report prefix \`${clip(p)}\` is outside the served workspace (--root ${WORKSPACE_ROOT}) — refusing`);
+  if (!Q.hasReport(p)) throw new Error(`no report at \`${p}\` (.json or .<crate>.scan.json) — run a candor scan first`);
   return p;
 }
 // Truncate a caller-supplied value echoed back in an error (a multi-MB `fn` would otherwise be reflected
 // verbatim — token/memory amplification over the agent transport, the opposite of the list-cap thrift).
 const clip = (s, n = 120) => { s = String(s); return s.length > n ? s.slice(0, n) + "…" : s; };
-// Read a caller-supplied policy file CONFINED to the report's directory tree. The MCP surface is
+// The confinement root for a caller-supplied policy path: the repo the report belongs to — the
+// .candor/config-discovered repo root when there is one, else the parent of a `.candor/` report
+// directory, else the report's own directory. The old default (always dirname(prefix)) was the
+// `.candor/` dir itself under the standard `.candor/report` layout, so a legitimate repo-root policy —
+// the very layout candor_gate resolves via cfg.repoRoot — was refused (review find).
+function policyRoot(prefix) {
+  const cfg = configPolicy(prefix);
+  if (cfg) return cfg.repoRoot;
+  const dir = nodePath.resolve(nodePath.dirname(prefix));
+  return nodePath.basename(dir) === ".candor" ? nodePath.dirname(dir) : dir;
+}
+// Read a caller-supplied policy file CONFINED to the report's repo tree. The MCP surface is
 // report-query-only (spec §7.12); an arbitrary `policy` path (/etc/passwd, ~/.aws/credentials) whose
 // parsed deny-rule scopes are reflected back in violations[].rule is an arbitrary-file-read exfiltration
-// channel — tie the policy to the project it gates.
-function confinedPolicyRead(policyPath, prefix, root = nodePath.resolve(nodePath.dirname(prefix))) {
+// channel — tie the policy to the project it gates. FAIL CLOSED on an unreadable path: the thrown error
+// surfaces as the tool-level isError — a typo'd policy must be LOUD, never a clean no-policy verdict
+// (the gateless-green shape the CLI's whatif exits 2 on).
+function confinedPolicyRead(policyPath, prefix, root = policyRoot(prefix)) {
   const abs = nodePath.resolve(policyPath);
-  if (abs !== root && !abs.startsWith(root + nodePath.sep))
-    throw new Error(`policy must be within the report's directory (${root}) — refusing to read \`${clip(policyPath)}\``);
-  return fs.readFileSync(abs, "utf8");
+  if (!within(abs, root) || (WORKSPACE_ROOT && !within(abs, WORKSPACE_ROOT)))
+    throw new Error(`policy must be within the report's repo (${root}) — refusing to read \`${clip(policyPath)}\``);
+  try { return fs.readFileSync(abs, "utf8"); }
+  catch { throw new Error(`policy \`${clip(policyPath)}\` could not be read — NOT evaluated (a missing gate source must be loud, never a clean verdict)`); }
 }
 // The repo's .candor/config (spec §3.4), from the report's directory upward — shared impl in policy.mjs.
 function configPolicy(prefix) {
@@ -75,8 +91,32 @@ const reportArg = { report: { type: "string", description: "report prefix (optio
 // only shapes the MCP result for its token-sensitive transport). Small results are returned verbatim.
 const MCP_LIST_CAP = 50;
 function capImpact(r) {
-  if (!Array.isArray(r.affected) || r.affected.length <= MCP_LIST_CAP) return r; // affectedCount is the full count
-  return { ...r, affected: r.affected.slice(0, MCP_LIST_CAP), affectedTruncated: true };
+  let out = r;
+  if (Array.isArray(r.affected) && r.affected.length > MCP_LIST_CAP)   // affectedCount is the full count
+    out = { ...out, affected: r.affected.slice(0, MCP_LIST_CAP), affectedTruncated: true };
+  if (Array.isArray(r.entryPoints) && r.entryPoints.length > MCP_LIST_CAP)
+    out = { ...out, entryPointCount: r.entryPoints.length, entryPoints: r.entryPoints.slice(0, MCP_LIST_CAP), entryPointsTruncated: true };
+  return out;
+}
+// The same token-amplification argument as capImpact, for the other unbounded lists: `where` on a
+// pervasive effect (Log, Unknown) lists most of a large repo; a blindspot source's `affected` is a
+// transitive-caller list. Counts stay exact; truncation is flagged.
+function capWhere(r) {
+  const cap = (k) => Array.isArray(r[k]) && r[k].length > MCP_LIST_CAP;
+  if (!cap("directly") && !cap("inherited")) return r;
+  return {
+    effect: r.effect,
+    directlyCount: r.directly.length, directly: r.directly.slice(0, MCP_LIST_CAP),
+    inheritedCount: r.inherited.length, inherited: r.inherited.slice(0, MCP_LIST_CAP),
+    truncated: true,
+  };
+}
+function capBlindspots(r) {
+  const sources = (r.sources ?? []).map((s) =>
+    Array.isArray(s.affected) && s.affected.length > MCP_LIST_CAP
+      ? { ...s, affected: s.affected.slice(0, MCP_LIST_CAP), affectedTruncated: true }  // `reaches` is the full count
+      : s);
+  return { ...r, sources };
 }
 function capCallers(r) {
   const d = r.direct ?? [], t = r.transitive ?? [];
@@ -97,7 +137,7 @@ const TOOLS = {
   candor_where: {
     description: "Which functions perform a given effect (e.g. Net, Db, Exec, Fs) — `directly` vs `inherited` via a callee. The effect-surface map.",
     schema: { type: "object", properties: { effect: { type: "string", description: "Net|Fs|Db|Exec|Env|Clock|Ipc|Log|Rand|Clipboard|Unknown" }, ...reportArg }, required: ["effect"] },
-    run: (a, p) => Q.where(Q.loadReport(p), a.effect),
+    run: (a, p) => capWhere(Q.where(Q.loadReport(p), a.effect)),
   },
   candor_reachable: {
     description: "What the program/fleet actually DOES at runtime: effects unioned over the entry points, with how many roots reach each and via which.",
@@ -128,14 +168,18 @@ const TOOLS = {
     description: "Hypothetically add `effect` to `fn` and report the blast radius; with `policy`, also the deny-rule violations it would cause. Pre-edit gate check.",
     schema: { type: "object", properties: { fn: { type: "string" }, effect: { type: "string" }, policy: { type: "string", description: "path to a CANDOR_POLICY file (optional)" }, ...reportArg }, required: ["fn", "effect"] },
     run: (a, p) => {
-      const pol = a.policy && fs.existsSync(a.policy) ? parsePolicy(confinedPolicyRead(a.policy, p)) : null;
+      // A GIVEN policy path is always read (confined, fail-closed) — the old `existsSync` guard made a
+      // typo'd/missing path silently evaluate with NO policy → `ok:true, violations:[]`, a false green
+      // on the agent-facing pre-edit gate (exactly what the CLI whatif exits 2 to prevent). The read's
+      // throw lands as the tool-level isError, mirroring the CLI's fail-closed posture.
+      const pol = a.policy ? parsePolicy(confinedPolicyRead(a.policy, p)) : null;
       const r = Q.whatif(Q.loadCallgraph(p), a.fn, a.effect, pol, scopeMatches);
       if (r === null) throw new Error(`no function matching \`${clip(a.fn)}\` in the call graph`);
       return r;
     },
   },
   candor_gate: {
-    description: "The policy verdict over this report: { ok, violations:[{rule, fn, effects, detail}] } — 'would this repo pass its architecture gate?'. Uses `policy` if given, else the repo's checked-in .candor/config policy (spec §3.4). Computed from the report (an engine's own --gate-json run is the authoritative CI form).",
+    description: "The policy verdict over this report: { ok, violations:[{rule, fn, effects, detail}] } — 'would this repo pass its architecture gate?'. Uses `policy` if given, else the repo's checked-in .candor/config policy (spec §3.4). Computed from the report — the engine's own --gate-json run is the authoritative CI form: it additionally fails an allow rule whose literal surface is INCOMPLETE (a masked/invisible endpoint), which is not a report field, so a green here can still be red in CI.",
     schema: { type: "object", properties: { policy: { type: "string", description: "path to a §6.2 policy file (optional; defaults to the repo's .candor/config `policy`)" }, ...reportArg }, required: [] },
     run: (a, p) => {
       let text;
@@ -157,7 +201,7 @@ const TOOLS = {
   candor_blindspots: {
     description: "The Unknown SOURCES — calls the engine genuinely could not resolve (reflection, wide dispatch, fn-pointers) — ranked by how many functions inherit Unknown through each. Turns a high-Unknown report into a short worklist.",
     schema: { type: "object", properties: { ...reportArg } },
-    run: (_a, p) => Q.blindspots(Q.loadReport(p), Q.loadCallgraph(p)),
+    run: (_a, p) => capBlindspots(Q.blindspots(Q.loadReport(p), Q.loadCallgraph(p))),
   },
   candor_diff: {
     description: "The per-function effect delta versus a baseline report: gained (introduced vs inherited) and lost effects. 'What did this change do to the effect surface?'.",
@@ -211,13 +255,19 @@ function handle(msg) {
   if (method === "notifications/initialized" || method === "notifications/cancelled") return; // notifications: no reply
   if (method === "ping") return result(id, {});
   if (method === "resources/list") {
-    try { return result(id, { resources: DEFAULT_PREFIX && hasReport(DEFAULT_PREFIX) ? listResources(DEFAULT_PREFIX) : [] }); }
+    try { return result(id, { resources: DEFAULT_PREFIX && Q.hasReport(DEFAULT_PREFIX) ? listResources(DEFAULT_PREFIX) : [] }); }
     catch { return result(id, { resources: [] }); }
   }
   if (method === "resources/read") {
     try {
-      const prefix = resolvePrefix({});
-      const r = readResource(params?.uri || "", prefix);
+      // Honor the prefix ENCODED in the resource URI (resources/list mints `?prefix=…`) — it was
+      // decorative before, always resolving the default (review find). resolvePrefix keeps the
+      // existence + --root checks on whatever the client asked for.
+      const uri = params?.uri || "";
+      let encoded = null;
+      try { encoded = new URL(uri).searchParams.get("prefix"); } catch { /* not URL-shaped — default */ }
+      const prefix = resolvePrefix(encoded ? { report: encoded } : {});
+      const r = readResource(uri, prefix);
       return result(id, { contents: [{ uri: params?.uri, ...r }] });
     } catch (e) { return error(id, -32602, `candor: ${e.message}`); }
   }
