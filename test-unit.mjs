@@ -16,10 +16,11 @@ import path from "node:path";
 
 import {
   matches, show, where, callers, map, impact, path as provenance, diff, gains, reachable, whatif,
-  containment, loadReport, loadCallgraph, isReport,
+  containment, loadReport, loadCallgraph, loadHierarchy, callersFrontier, blindspots, isReport,
 } from "./query-core.mjs";
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
+  discoverConfigPolicy,
 } from "./policy.mjs";
 import {
   isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
@@ -209,6 +210,95 @@ test("isReport: a callgraph/ledger/calibrated sibling is not a report", () => {
   assert.equal(isReport("p.foo.callgraph.json"), false);
   assert.equal(isReport("p.encountered-crates.json"), false);
   assert.equal(isReport("p.calibrated.json"), false);
+});
+
+// ── query-core: loadHierarchy (the ⟨0.7⟩ sidecar loader — was never executed by any suite) ─────────
+test("loadHierarchy: exact sidecar, wrong-type coercion, corrupt → {}, absent → {}", () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
+  // the exact `<prefix>.hierarchy.json` form; a non-array supertype value is coerced to []
+  fs.writeFileSync(path.join(d, "r.hierarchy.json"),
+    JSON.stringify({ "m.Impl": ["m.Base"], "m.Odd": "not-an-array" }));
+  assert.deepEqual(loadHierarchy(path.join(d, "r")), { "m.Impl": ["m.Base"], "m.Odd": [] });
+  // corrupt JSON → {} (tolerate — the frontier falls back to the safe over-listing direction)
+  fs.writeFileSync(path.join(d, "c.hierarchy.json"), "{ not json");
+  assert.deepEqual(loadHierarchy(path.join(d, "c")), {});
+  // a non-object parse (null) → {}
+  fs.writeFileSync(path.join(d, "n.hierarchy.json"), "null");
+  assert.deepEqual(loadHierarchy(path.join(d, "n")), {});
+  // absent entirely → {}
+  assert.deepEqual(loadHierarchy(path.join(d, "missing")), {});
+  fs.rmSync(d, { recursive: true, force: true });
+});
+test("loadHierarchy: multi-report SIBLINGS merge (the workspace form), corrupt sibling tolerated", () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
+  fs.writeFileSync(path.join(d, "r.a.scan.hierarchy.json"), JSON.stringify({ "a.Impl": ["a.Base"] }));
+  fs.writeFileSync(path.join(d, "r.b.scan.hierarchy.json"), JSON.stringify({ "b.Impl": ["b.Base"] }));
+  fs.writeFileSync(path.join(d, "r.c.scan.hierarchy.json"), "{ corrupt");
+  assert.deepEqual(loadHierarchy(path.join(d, "r")), { "a.Impl": ["a.Base"], "b.Impl": ["b.Base"] });
+  fs.rmSync(d, { recursive: true, force: true });
+});
+test("loadHierarchy → callersFrontier: a loaded sidecar actually drives the subtype filter", () => {
+  // The wiring pin: hierarchy from DISK (not a hand object) rules the unrelated dispatch out and the
+  // genuine override in — the loader and the frontier agree on shape.
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
+  fs.writeFileSync(path.join(d, "r.hierarchy.json"), JSON.stringify({ "m.Impl": ["m.Base"] }));
+  const hier = loadHierarchy(path.join(d, "r"));
+  const cg = { "m.Impl.run": ["m.Sink.touch"], "m.Sink.touch": [], "m.Go.go": [] };
+  const fns = [{ fn: "m.Go.go", unknownWhy: ["dispatch:m.Base.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
+  assert.deepEqual(callersFrontier(cg, fns, hier, "m.Sink.touch").possibleViaUnknownDispatch,
+    [{ fn: "m.Go.go", viaDispatchOn: "run" }]);
+  const fns2 = [{ fn: "m.Go.go", unknownWhy: ["dispatch:m.Elsewhere.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
+  assert.deepEqual(callersFrontier(cg, fns2, hier, "m.Sink.touch").possibleViaUnknownDispatch, []);
+  fs.rmSync(d, { recursive: true, force: true });
+});
+
+// ── query-core: blindspots ranking over real unknownWhy sources (the ⟨0.6⟩ shape) ──────────────────
+// Conformance owns cross-engine agreement; THIS pins the repo's own ranking loop (TESTING.md §3):
+// sources are the fns carrying their OWN unknownWhy, ranked by transitive blast radius, ties by name.
+test("blindspots: sources ranked by Unknown blast radius, exact reaches/affected, totalUnknown", () => {
+  const fns = [
+    { fn: "m.wide", inferred: ["Unknown"], unknownWhy: ["reflect:eval"] },     // reached by two callers
+    { fn: "m.narrow", inferred: ["Unknown"], unknownWhy: ["dispatch:m.B.x"] }, // reached by one
+    { fn: "m.mid", inferred: ["Unknown"] },                                    // transitive-only: NOT a source
+    { fn: "m.top", inferred: ["Unknown"] },
+  ];
+  const cg = { "m.top": ["m.mid"], "m.mid": ["m.wide"], "m.one": ["m.narrow", "m.wide"], "m.wide": [], "m.narrow": [] };
+  const r = blindspots(fns, cg);
+  assert.equal(r.totalUnknown, 4);
+  assert.deepEqual(r.sources.map((s) => s.fn), ["m.wide", "m.narrow"]); // most-smearing first; no transitive-only source
+  assert.equal(r.sources[0].reaches, 3);
+  assert.deepEqual(r.sources[0].affected, ["m.mid", "m.one", "m.top"]);
+  assert.deepEqual(r.sources[0].why, ["reflect:eval"]);
+  assert.deepEqual(r.sources[1], { fn: "m.narrow", why: ["dispatch:m.B.x"], reaches: 1, affected: ["m.one"] });
+});
+test("blindspots: equal blast radii tie-break by name (stable worklist order)", () => {
+  const fns = [
+    { fn: "m.b", inferred: ["Unknown"], unknownWhy: ["reflect:eval"] },
+    { fn: "m.a", inferred: ["Unknown"], unknownWhy: ["reflect:eval"] },
+  ];
+  const r = blindspots(fns, { "m.a": [], "m.b": [] });
+  assert.deepEqual(r.sources.map((s) => s.fn), ["m.a", "m.b"]);
+});
+
+// ── policy: discoverConfigPolicy terminates at the filesystem root (no config anywhere up-tree) ────
+test("discoverConfigPolicy: a dir with no .candor/config up to / returns null (clean no-config)", () => {
+  // The walk-to-root termination arm never ran under any suite. A fresh temp dir's ancestors are
+  // system dirs; if this ever finds a config, the TEST ENVIRONMENT is polluted — that should be loud.
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-noconf-"));
+  assert.equal(discoverConfigPolicy(d), null);
+  fs.rmSync(d, { recursive: true, force: true });
+});
+test("discoverConfigPolicy: a config WITHOUT a `policy` key is null, not a crash", () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-nopol-"));
+  fs.mkdirSync(path.join(d, ".candor"));
+  fs.writeFileSync(path.join(d, ".candor", "config"), "strict 1\n# just a comment\n");
+  assert.equal(discoverConfigPolicy(d), null);
+  // and the happy path from a NESTED dir: the walk finds the repo's config and anchors to its root
+  fs.writeFileSync(path.join(d, ".candor", "config"), "policy arch.policy\n");
+  fs.mkdirSync(path.join(d, "src", "deep"), { recursive: true });
+  assert.deepEqual(discoverConfigPolicy(path.join(d, "src", "deep")),
+    { policyPath: path.join(d, "arch.policy"), repoRoot: d });
+  fs.rmSync(d, { recursive: true, force: true });
 });
 
 // ── policy: the DSL grammar (positional, mirroring the Rust/JVM parsers) ───────────────────────────
