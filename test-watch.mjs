@@ -1,9 +1,15 @@
 #!/usr/bin/env node
-/** Tests for watch.mjs — the freshness loop helpers + an end-to-end "edit → detect → re-scan → the
- *  report reflects the edit" check (the agent loop that feeds candor-ts-mcp live ground truth). */
+/** Tests for watch.mjs — the freshness loop helpers, an end-to-end "edit → detect → re-scan → the
+ *  report reflects the edit" check (the agent loop that feeds candor-ts-mcp live ground truth), and
+ *  the LIVE LOOP itself (spawned process: stays alive, detects an edit, prints the Δ line). */
+import { spawn } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import * as W from "./watch.mjs";
 import * as Q from "./query-core.mjs";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 let pass = 0, fail = 0;
 const ok = (n, c, d = "") => c ? (pass++, console.log(`  ok   ${n}`)) : (fail++, console.log(`  FAIL ${n}  ${d}`));
@@ -51,5 +57,36 @@ ok("the freshness gate: a non-source write is not a tracked change",
    W.changedFiles(h2, W.hashFiles(W.trackedFiles(D))).length === 0);
 
 fs.rmSync(D, { recursive: true, force: true });
+
+// ---- the LIVE loop, spawned for real -----------------------------------------------------------------
+// This once shipped fully broken: an unref'd interval let Node exit ~0.6s after the startup scan, so the
+// watcher did ONE scan and died while printing "Watching…" — and only the helpers were tested, so nothing
+// caught it (watch.mjs's own comment records the incident). This is the pin for that exact bug class:
+// spawn the real process, wait past the first scan, edit a source, and require (a) a second
+// "re-scanned … Δ" line — the interval fired, the edit-delta rendered — and (b) the process still alive.
+{
+  const L = fs.mkdtempSync("/tmp/candor-watchlive-");
+  fs.writeFileSync(`${L}/app.ts`, `export function f(): void { /* pure */ }\n`);
+  const proc = spawn("node", [path.join(HERE, "watch.mjs"), L, "--interval", "150"], { stdio: ["ignore", "ignore", "pipe"] });
+  let err = "";
+  proc.stderr.on("data", (d) => { err += d; });
+  const waitFor = (re, ms) => new Promise((resolve) => {
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if (re.test(err) || Date.now() - t0 > ms) { clearInterval(iv); resolve(re.test(err)); }
+    }, 50);
+  });
+  const started = await waitFor(/Watching…/, 30000);
+  ok("live loop: the startup scan completes and the watcher announces itself", started, err.slice(0, 200));
+  // the agent edits: f gains Net — the loop must detect it, re-scan, and print the Δ
+  fs.writeFileSync(`${L}/app.ts`, `import * as http from "node:http";\nexport function f(): void { http.get("http://x"); }\n`);
+  const rescanned = await waitFor(/re-scanned .*— Δ .*\+Net/, 30000);
+  ok("live loop: the edit is detected, re-scanned, and the Δ line names the gained Net", rescanned, err.slice(-300));
+  ok("live loop: the process is STILL ALIVE after the re-scan (the unref regression)",
+     proc.exitCode === null, `exitCode=${proc.exitCode}`);
+  proc.kill();
+  fs.rmSync(L, { recursive: true, force: true });
+}
+
 console.log(`\ntest-watch: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
