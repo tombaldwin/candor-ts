@@ -43,7 +43,12 @@ This writes `<project-dir>/.candor/report.json` and `.candor/report.callgraph.js
 with `--out <prefix>`). **Install the TARGET's dependencies first** (`npm install` in the project)
 — without node_modules, imports don't resolve and most functions honestly read `Unknown` (the
 scanner warns loudly). Add `--policy <file>` (or set `CANDOR_POLICY`) to enforce a §6.2 policy over the
-scan: exit 1 on violation, exit 2 LOUDLY if the policy file is unreadable.
+scan: exit 1 on violation, exit 2 LOUDLY if the policy file is unreadable. `--gate-json <file|->`
+additionally writes the structured verdict `{spec, ok, violations:[{rule,fn,effects,detail}]}`
+(spec §3.3) — the machine-readable form CI/SARIF converters consume, from the SAME violations that
+set the exit code. A checked-in `.candor/config` (spec §3.4; `policy <file>` / `deps <paths>`, one
+key per line, discovered walking UP from the scan target, relative values anchored to the config's
+repo) is the no-env-wiring floor; flag → env → config → default.
 
 **Report shape:** the file is `{ "candor": {version, toolchain, spec}, "functions": [...] }`;
 `functions` is an **array** of entries (not a map — don't index it by name), each carrying **`fn`**
@@ -73,9 +78,11 @@ Q show     $P <fn-query> 1          # a function's effects (+ hosts/tables when 
 Q where    $P <Effect>   1          # {effect, directly, inherited}
 Q impact   $P <fn-query>            # THE BLAST RADIUS: {fn, affectedCount, affected, entryPoints}
 Q callers  $P <fn-query> 1          # the lower-level form: {of, direct, transitive} — works for pure fns
+Q callers  $P <fn-query> --include-unknown 1  # + possibleViaUnknownDispatch: the unresolved-dispatch frontier
 Q path     $P <fn> <Effect>         # how a fn reaches an effect: the chain to the nearest source
 Q map      $P 1                     # {module: {effects, functions}}
 Q containment $P [baseline-prefix]  # §6.1 boundary-effect dispersion; with a baseline = AS-EFF-010 ratchet (exit 1 on a leak)
+Q blindspots $P                     # the Unknown SOURCES (fns with unknownWhy), ranked by Unknown blast radius
 Q whatif   $P <fn> <Effect> [policy]  # pre-edit gate verdict (exit 1 if it would violate)
 Q diff     $P <baseline-prefix> 1   # per-function effect delta (exit 1 on a gained effect)
 Q gains    $P <baseline-prefix>     # supply-chain alarm: {gained, byFunction} — effects a surface grew
@@ -84,8 +91,14 @@ Q parsepolicy <policy-file>         # the canonical §6.2 parse (what the gate w
 ```
 
 And as an MCP server, so an agent pulls these as tools instead of shelling out:
-`CANDOR_REPORT=$P npx -y candor-ts-mcp` (tools `candor_impact`/`candor_reachable`/`candor_where`/…).
-`npx -y candor-ts-watch <dir>` keeps the report fresh as you edit (and reports the edit-delta).
+`CANDOR_REPORT=$P npx -y candor-ts-mcp` (tools `candor_impact`/`candor_reachable`/`candor_where`/…,
+plus `candor_gate`/`candor_whatif` — a given-but-unreadable `policy` is a loud tool error, never a
+clean verdict). `npx -y candor-ts-watch <dir>` keeps the report fresh as you edit (and reports the
+edit-delta); `candor-lsp` serves the same report as CodeLens/hover/diagnostics in any LSP editor.
+CAVEAT — the MCP/LSP gate verdicts are computed FROM THE REPORT: the engine's own `--policy` /
+`--gate-json` run additionally fails an allow rule whose literal surface is incomplete (a masked
+endpoint — internal state, not a report field), so treat a report-side green as advisory and the
+scan-time gate as the CI truth.
 
 Name queries resolve exact > segment-suffix (`db.save` matches `src.db.save`, never
 `src.db.save_all`) > substring — the same ladder as the other engines. The trailing `1` is the

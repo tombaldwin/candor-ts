@@ -19,6 +19,7 @@ npm install   # typescript + @types/node
 node scan.mjs <project-dir>                 # tsconfig.json honored; tests excluded; writes
                                             #   <dir>/.candor/report.json + .callgraph.json
 node scan.mjs . --policy .candor/policy     # the §6.2 gate: exit 1 on violation, 2 if unreadable
+node scan.mjs . --gate-json gate.json       # + the structured verdict {spec, ok, violations} (§3.3)
 
 node scan.mjs --version                     # installed build + spec contract (offline), + upgrade line
 
@@ -26,9 +27,17 @@ node query.mjs show     .candor/report db.save 1   # a function's effects (match
 node query.mjs where    .candor/report Net 1       # direct sources vs inheritors
 node query.mjs callers  .candor/report db.save 1   # the blast radius (transitive callers)
 node query.mjs map      .candor/report 1           # module → effects overview
+node query.mjs containment .candor/report          # §6.1 boundary-effect dispersion (+ baseline = ratchet)
+node query.mjs blindspots  .candor/report          # the Unknown SOURCES, ranked by blast radius
 node query.mjs whatif   .candor/report db.save Net policy  # pre-edit gate verdict (exit 1)
-node query.mjs diff     .candor/report baseline 1  # per-function effect delta (exit 1 on a gain)
+node query.mjs diff     .candor/report baseline 1  # per-function effect delta (exit 1 on a gain;
+                                                   #   a baseline from a DIFFERENT build ⇒ disclosed ⚠ + exit 0)
 ```
+
+A checked-in **`.candor/config`** (spec §3.4) replaces the env wiring — `policy arch.policy` /
+`deps <report paths>` one per line, discovered by walking up from the scan target; relative values
+resolve against the config's repo, so CI is "point at the repo". A configured-but-unusable
+config/policy fails loud (exit 2), never silently gateless.
 
 **Staying current:** check your installed version and upgrade — [candor/AGENTS.md §2a](https://github.com/tombaldwin/candor/blob/main/AGENTS.md#2a-staying-current--check-the-version-upgrade). `npx -y candor-ts --version` prints the build, the spec, and the upgrade one-liner (offline; candor never phones home).
 
@@ -53,10 +62,16 @@ Nest app this makes table-level policy live: `allow Db in article.service articl
 the service reaching `user` and `follows`.
 
 **The classifier** is curated (the same under-report-and-say-so posture as the other engines): the
-Node builtins (`fs`, `net`/`http`/`tls`, `child_process`, `node:sqlite`, `process.env`, the clock)
-plus a small npm tier (axios/got/node-fetch/undici/ws, pg/mysql2/mongodb/redis/knex,
-execa/cross-spawn, fs-extra/rimraf/glob, dotenv, winston/pino). An unlisted package contributes
-nothing — candor never guesses an effect.
+Node builtins (`fs`, `net`/`http`/`tls`, `dns`, `child_process`, `worker_threads`, `node:sqlite`,
+`node:vm`, `process.env`, the clock), the HTTP/queue/mail tier (axios/got/node-fetch/undici/ws/
+socket.io/nodemailer, gaxios + googleapis-common + google-auth-library, stripe, @sentry/*,
+posthog-node, bull/bullmq), the database drivers (pg/mysql2/mongodb/redis/ioredis/sqlite3/
+better-sqlite3/knex) **and the ORM tier** (TypeORM — with `@Entity("…")` table extraction —
+Prisma, Mongoose, Sequelize, drizzle-orm), plus execa/cross-spawn/shelljs/open, fs-extra/
+graceful-fs/rimraf/glob/chokidar, dotenv, winston/pino/bunyan. An unlisted package contributes
+nothing — candor never guesses an effect — but the scan **names it**: the receipt's `κ doesn't
+know N packages…` line lists every package the code demonstrably calls that κ neither classifies
+nor has reviewed-pure, and each function carries the `invisible` list it (transitively) reaches.
 
 ## MCP server — candor as agent ground truth
 
@@ -73,10 +88,21 @@ tracing the call graph by hand (the measured ~700–2000× token win on blast-ra
 
 Tools: `candor_impact` (backward blast radius), `candor_reachable` (what runs at runtime),
 `candor_where` (effect surface), `candor_path` (how an effect is reached), `candor_callers`,
-`candor_show`, `candor_map`, `candor_whatif` (pre-edit gate check). Each takes an optional `report`
-prefix (else `$CANDOR_REPORT`). The server is **query-only** — it never scans (the analyzer
-self-boundary, spec §7.12: an agent or a hook produces the report; the server reads it, Fs only). The
-query logic is the shared `query-core.mjs`, the same answers the CLI gives.
+`candor_show`, `candor_map`, `candor_containment`, `candor_blindspots`, `candor_whatif` (pre-edit
+gate check — a given-but-unreadable policy is a loud error, never a clean verdict), `candor_gate`
+(the checked-in `.candor/config` policy verdict), `candor_diff`/`candor_gains` (baseline deltas).
+Each takes an optional `report` prefix (else `$CANDOR_REPORT`); `--root <dir>` locks the server to
+one workspace. The server is **query-only** — it never scans (the analyzer self-boundary, spec
+§7.12: an agent or a hook produces the report; the server reads it, Fs only). The query logic is
+the shared `query-core.mjs`, the same answers the CLI gives.
+
+**`candor-lsp`** renders the same report where the code is, for any LSP-native editor (helix,
+neovim; the JetBrains plugin bundles it): a CodeLens per effectful function (`⚡ Db, Net · blast
+radius 12`), hover provenance (the hop chain to where an inherited effect is performed), and the
+repo's policy verdict as diagnostics. Like the MCP server it is a pure report consumer — any
+engine's report — and never scans. (Both report-computed gates are advisory: the engine's own
+`--gate-json` run additionally fails masked/incomplete literal surfaces and is the authoritative
+CI form.)
 
 **The live loop** — `candor-ts-watch` keeps the report fresh as the agent edits, so the answers are
 about the *current* code, not a stale snapshot:
@@ -129,7 +155,7 @@ every push to the spec.
 | A call resolving to a *type* (function-typed field/param) → `Unknown`, never silent-pure | SPEC §4 |
 | Unmatched external calls contribute nothing (curated-κ caveat) | SEMANTICS §8 C1 |
 | The literal surfaces `hosts`/`cmds`/`paths`/`tables`, literal-read only | SPEC §2 |
-| `{ candor: { version, toolchain, spec: "0.5" }, functions }` envelope; pure fns omitted | SPEC §2/§2.1 |
+| `{ candor: { version, toolchain, spec: "0.8" }, functions }` envelope; pure fns omitted | SPEC §2/§2.1 |
 | Call-graph sidecar with **every** analyzed function a key | SPEC §2.2 |
 | The gate: AS-EFF-006 / 008 / 009, loud on an unreadable policy | SPEC §6.2 |
 
@@ -147,13 +173,16 @@ read the Rust source".
 
 ## Status
 
-Young product (0.1.x): the analysis core, the gate, and the query surface are real,
-behaviorally tested (`node test.mjs`), **soundness-fuzzed with verified teeth** (`node fuzz.mjs` —
-spec §7.13: generated effect chains through every encoded call form, any silent-pure = red), and
-conformance-held. The npm classifier tier is
-deliberately curated and will keep growing case-by-case. Entry points (Nest/Next populations),
-`unknownWhy` origins, `reachable`, cross-package inheritance (`CANDOR_DEPS` + the spec §2 `hash`,
-version-trusted per §2.1), and `--allow-js` are all in. On npm: `npx -y candor-ts <dir>`.
+0.8.x, speaking candor-spec 0.8: the analysis core, the gate (`--policy` / `--gate-json` /
+`.candor/config`), the full §3.1 query surface (including `containment`, `blindspots`, the
+`--include-unknown` dispatch frontier), the MCP server, the LSP server, and the watch loop are
+real, behaviorally tested (`npm test` — ~360 assertions across six suites), **soundness-fuzzed
+with verified teeth** (`node fuzz.mjs` — spec §7.13: generated effect chains through every encoded
+call form, any silent-pure = red), and conformance-held against the Rust/JVM/Swift engines. The
+npm classifier tier is deliberately curated and keeps growing case-by-case. Entry points
+(Nest/Next populations), `unknownWhy` origins, `reachable`, cross-package inheritance
+(`CANDOR_DEPS` + the spec §2 `hash`, version-trusted per §2.1), and `--allow-js` are all in.
+On npm: `npx -y candor-ts <dir>`.
 
 ## Development
 
