@@ -1901,5 +1901,117 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── CLI-10. the query.mjs arms with no in-repo behavioral coverage (TESTING.md §2.1/§2.5) ───────────
+// Conformance exercises some of these cross-engine, but an engine-local regression stays green in this
+// repo's CI until the spec repo happens to run (§3) — so each arm gets a CLI-level spawn here with its
+// EXACT exit code (1 vs 2 is load-bearing: violation vs could-not-evaluate).
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-cliarms-"));
+  const eqJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const rep = (fns) => JSON.stringify({ candor: { version: "ttttttt", spec: "0.8" }, functions: fns });
+  fs.writeFileSync(path.join(d, "r.json"), rep([
+    { fn: "app.db.save", inferred: ["Db"], direct: ["Db"], loc: "db.ts:1", tables: ["orders"] },
+    { fn: "app.web.handler", inferred: ["Db"], direct: [], entryPoint: true, loc: "web.ts:1" },
+  ]));
+  fs.writeFileSync(path.join(d, "r.callgraph.json"), JSON.stringify({
+    "app.web.handler": ["app.db.save"], "app.db.save": [],
+  }));
+  const P = path.join(d, "r");
+
+  // containment (report form): Db fully contained in the db layer, exit 0
+  const cont = runQuery("containment", P);
+  const contJ = JSON.parse(cont.stdout);
+  check("CLI containment: the §6.1 dispersion report (Db 100% in `db`), exit 0",
+        cont.status === 0 && contJ.contained.length === 1
+          && contJ.contained[0].effect === "Db" && contJ.contained[0].containmentPct === 100
+          && contJ.contained[0].owner === "db" && contJ.contained[0].layers === 1,
+        `status=${cont.status} ${cont.stdout.slice(0, 160)}`);
+
+  // containment ratchet (AS-EFF-010): a NEW layer for a contained effect → leak, exit 1
+  fs.writeFileSync(path.join(d, "leaky.json"), rep([
+    { fn: "app.db.save", inferred: ["Db"], direct: ["Db"] },
+    { fn: "app.web.handler", inferred: ["Db"], direct: ["Db"], entryPoint: true }, // Db leaked into web
+  ]));
+  const ratchet = runQuery("containment", path.join(d, "leaky"), P);
+  check("CLI containment ratchet: a new layer leaks (Db → web) and exits 1",
+        ratchet.status === 1 && JSON.parse(ratchet.stdout).leaks.includes("Db → web"),
+        `status=${ratchet.status} ${ratchet.stdout.slice(0, 120)}`);
+  const clean = runQuery("containment", P, P);
+  check("CLI containment ratchet: self-vs-self is leak-free, exit 0",
+        clean.status === 0 && JSON.parse(clean.stdout).leaks.length === 0, `status=${clean.status}`);
+  // fail CLOSED on an unreadable baseline: exit 2, never a bogus everything-leaked exit 1
+  const noBase = runQuery("containment", P, path.join(d, "no-such-baseline"));
+  check("CLI containment ratchet: a missing baseline fails closed (exit 2, not a bogus leak wall)",
+        noBase.status === 2 && /no report at baseline prefix/.test(noBase.stderr),
+        `status=${noBase.status} ${noBase.stderr.slice(0, 120)}`);
+
+  // impact: the backward blast radius, §3.1 shape, exit 0
+  const imp = runQuery("impact", P, "save");
+  const impJ = JSON.parse(imp.stdout);
+  check("CLI impact: {fn, affectedCount, affected, entryPoints} with the entry point named, exit 0",
+        imp.status === 0 && impJ.fn === "app.db.save" && impJ.affectedCount === 1
+          && impJ.affected.includes("app.web.handler")
+          && impJ.entryPoints.some((e) => e.fn === "app.web.handler" && e.inferred.includes("Db")),
+        `status=${imp.status} ${imp.stdout.slice(0, 160)}`);
+
+  // path: forward provenance to the direct source, exit 0
+  const pth = runQuery("path", P, "handler", "Db");
+  const pthJ = JSON.parse(pth.stdout);
+  check("CLI path: handler → save with the source flagged, exit 0",
+        pth.status === 0 && pthJ.path.map((s) => s.fn).join(">") === "app.web.handler>app.db.save"
+          && pthJ.path[1].source === true && pthJ.path[0].source === false,
+        `status=${pth.status} ${pth.stdout.slice(0, 160)}`);
+
+  // gains: the supply-chain alarm + the §2.1 version-skew disclosure
+  fs.writeFileSync(path.join(d, "oldbase.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.8" },
+    functions: [{ fn: "app.db.save", inferred: ["Db"], direct: ["Db"] }] }));
+  fs.writeFileSync(path.join(d, "cur2.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.8" },
+    functions: [{ fn: "app.db.save", inferred: ["Db", "Exec"], direct: ["Db", "Exec"] }] }));
+  const g = runQuery("gains", path.join(d, "cur2"), path.join(d, "oldbase"));
+  const gJ = JSON.parse(g.stdout);
+  check("CLI gains: the gained effect + per-function detail + provenance fields, exit 0",
+        g.status === 0 && eqJson(gJ.gained, ["Exec"]) && gJ.byFunction.some((x) => x.fn === "app.db.save" && x.effect === "Exec")
+          && gJ.baseline_version === "aaaaaaa" && gJ.engine_version === "bbbbbbb",
+        `status=${g.status} ${g.stdout.slice(0, 160)}`);
+  check("CLI gains: a producing-build mismatch is DISCLOSED on stderr (reclassify vs regression ambiguity)",
+        /⚠/.test(g.stderr) && /reclassifying/.test(g.stderr), g.stderr.slice(0, 160));
+  fs.writeFileSync(path.join(d, "samebase.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.8" },
+    functions: [{ fn: "app.db.save", inferred: ["Db"], direct: ["Db"] }] }));
+  const g2 = runQuery("gains", path.join(d, "cur2"), path.join(d, "samebase"));
+  check("CLI gains: same producing build → no mismatch note", g2.status === 0 && !/⚠/.test(g2.stderr),
+        g2.stderr.slice(0, 120));
+
+  // parsepolicy SUCCESS (only the unreadable exit-2 arm was pinned): valid JSON of the parsed grammar
+  fs.writeFileSync(path.join(d, "arch.policy"), "deny Net web\nallow Fs in db /var/data\nforbid web -> db\n");
+  const pp = runQuery("parsepolicy", path.join(d, "arch.policy"));
+  const ppJ = JSON.parse(pp.stdout);
+  check("CLI parsepolicy: a readable policy emits the parsed {deny,allow,forbid} JSON, exit 0",
+        pp.status === 0 && ppJ.deny[0].scope === "web" && ppJ.allow[0].values.includes("/var/data")
+          && ppJ.forbid[0].to === "db",
+        `status=${pp.status} ${pp.stdout.slice(0, 160)}`);
+
+  // whatif with NO matching fn: could-not-evaluate → exit 2 (distinct from a violation's exit 1)
+  const wnm = runQuery("whatif", P, "no-such-fn-zzz", "Net");
+  check("CLI whatif: no matching function exits 2 with the no-match diagnostic (not 0, not 1)",
+        wnm.status === 2 && /no function matching/.test(wnm.stderr),
+        `status=${wnm.status} ${wnm.stderr.slice(0, 120)}`);
+
+  // blindspots over a report WITH unknownWhy sources (the in-repo pin; the arm ran only on clean reports)
+  fs.writeFileSync(path.join(d, "bs.json"), rep([
+    { fn: "app.dyn", inferred: ["Unknown"], unknownWhy: ["reflect:eval"] },
+    { fn: "app.caller", inferred: ["Unknown"] },
+  ]));
+  fs.writeFileSync(path.join(d, "bs.callgraph.json"), JSON.stringify({ "app.caller": ["app.dyn"], "app.dyn": [] }));
+  const bs = runQuery("blindspots", path.join(d, "bs"));
+  const bsJ = JSON.parse(bs.stdout);
+  check("CLI blindspots: the ranked sources shape over real unknownWhy sources, exit 0",
+        bs.status === 0 && bsJ.totalUnknown === 2 && bsJ.sources.length === 1
+          && bsJ.sources[0].fn === "app.dyn" && bsJ.sources[0].reaches === 1
+          && eqJson(bsJ.sources[0].affected, ["app.caller"]),
+        `status=${bs.status} ${bs.stdout.slice(0, 160)}`);
+
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
