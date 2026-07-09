@@ -2013,5 +2013,119 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── Object.create descriptor accessors (definePropertyAccessor Case B, the create half) ────────────
+// The defineProperty/defineProperties halves are pinned above; the Object.create(proto, {key: desc})
+// form — descriptor getters on the CREATED object, joined through the binding the result is assigned
+// to — had no execution. The unbound-result form can't join a forcing site, but the descriptor body is
+// still a minted unit whose effect is IN the report (never silent-pure at the report level).
+{
+  const d = project({
+    "src/c.ts": `import { execSync } from "node:child_process";
+const proto = {};
+export const o = Object.create(proto, {
+  p: { get: () => execSync("id").toString() },
+  q: { value: 42 },
+});
+export function readCreate(): string { return o.p; }
+export function readValue(): number { return o.q; }
+// the result NOT bound to a simple identifier: no joinable target, but the getter body is a unit
+export function makeUnbound(): object { return Object.create(proto, { z: { get: () => execSync("who").toString() } }); }`,
+  });
+  const { report } = scan(d);
+  check("Object.create descriptor getter: the forcing site through the bound const carries the effect (Exec)",
+        entry(report, "src.c.readCreate")?.inferred.includes("Exec"), JSON.stringify(entry(report, "src.c.readCreate")));
+  check("Object.create: a value descriptor member does NOT fabricate (readValue pure)",
+        entry(report, "src.c.readValue") === undefined, JSON.stringify(entry(report, "src.c.readValue")));
+  check("Object.create with an UNBOUND result: the descriptor getter is still a minted, effect-carrying unit",
+        report.functions.some((e) => /defineProperty\(<create>\)\.get z/.test(e.fn) && e.inferred.includes("Exec")),
+        JSON.stringify(report.functions.map((e) => e.fn)));
+}
+
+// ── the uninstalled-namespace-import κ fallback: classify by the import SPECIFIER ──────────────────
+// A namespace import from a bare specifier that didn't RESOLVE (package not installed in this tree)
+// still classifies through κ by the syntactic path — winston.info is Log, not Unknown noise; an
+// UNMODELED uninstalled package stays the honest Unknown disclosure (the anti-fabrication twin).
+{
+  const d = project({
+    "src/l.ts": `import * as winstonm from "winston";
+import * as mystery from "some-unlisted-pkg-zz";
+export function logIt(): void { winstonm.info("hello"); }
+export function callMystery(): void { mystery.go(); }`,
+  });
+  const { report } = scan(d);
+  const logIt = entry(report, "src.l.logIt");
+  check("uninstalled winston (κ-modeled) classifies Log via the import specifier, not Unknown",
+        logIt?.direct.includes("Log") && !logIt.inferred.includes("Unknown"), JSON.stringify(logIt));
+  const myst = entry(report, "src.l.callMystery");
+  check("uninstalled UNMODELED package: the call discloses Unknown with its why (never a guessed effect)",
+        myst?.inferred.includes("Unknown") && (myst.unknownWhy ?? []).some((w) => w.includes("mystery.go")),
+        JSON.stringify(myst));
+}
+
+// ── class-override dispatch: the >12-family TOO-WIDE arm falls to Unknown, never silent ────────────
+// The ≤12 fan-out edges every override (precise); a WIDER family cannot be enumerated soundly, so the
+// dispatch site must disclose Unknown with the canonical dispatch:OWNER.member why. Both sides of the
+// boundary pinned: 12 overrides → the real effect propagates (no Unknown); 13 → Unknown (and the
+// un-edged override effect is NOT silently claimed either way).
+{
+  const mkSubs = (n) => Array.from({ length: n }, (_, i) =>
+    i === 0
+      ? `export class S0 extends Base { m(): void { fsm.writeFileSync("/tmp/s0", "x"); } }`
+      : `export class S${i} extends Base { m(): void { /* pure */ } }`).join("\n");
+  const src = (n) => `import * as fsm from "node:fs";
+export class Base { m(): void { /* pure */ } }
+${mkSubs(n)}
+export function dispatch(b: Base): void { b.m(); }`;
+  const at = scan(project({ "src/w.ts": src(12) })); // AT the family bound: precise fan-out
+  const atD = at.report.functions.find((e) => e.fn === "src.w.dispatch");
+  check("override dispatch at the 12-family bound: the override's effect propagates precisely (Fs, no Unknown)",
+        atD?.inferred.includes("Fs") && !atD.inferred.includes("Unknown"), JSON.stringify(atD));
+  const over = scan(project({ "src/w.ts": src(13) })); // OVER the bound: too wide to enumerate soundly
+  const overD = over.report.functions.find((e) => e.fn === "src.w.dispatch");
+  check("override dispatch over the bound (13): Unknown disclosed with the canonical dispatch:Base.m why",
+        overD?.inferred.includes("Unknown") && (overD.unknownWhy ?? []).some((w) => w === "dispatch:Base.m"),
+        JSON.stringify(overD));
+}
+
+// ── Object.assign getter enumeration: copying a source's props invokes its getters ─────────────────
+// `Object.assign(t, src)` reads every own enumerable prop of src — an effectful getter RUNS (the
+// object-spread twin). Both recordAccessorHit branches pinned: a CLASS-typed source's getter is a
+// minted unit → the copier inherits the precise effect; an object-LITERAL getter (no minted unit)
+// falls to the disclosed-Unknown branch — never silent-pure either way. Plain data stays pure.
+{
+  const d = project({
+    "src/g.ts": `import { execSync } from "node:child_process";
+export class Vault { get tok(): string { return execSync("vault read tok").toString(); } }
+export const secretive = { get tok(): string { return execSync("vault read tok").toString(); } };
+export const plain = { a: 1 };
+export function copyClass(v: Vault): object { return Object.assign({}, v); }
+export function copyLit(): object { return Object.assign({}, secretive); }
+export function copyPlain(): object { return Object.assign({}, plain); }`,
+  });
+  const { report } = scan(d);
+  check("Object.assign enumerates a class source's getters: the copier inherits the precise Exec",
+        entry(report, "src.g.copyClass")?.inferred.includes("Exec"), JSON.stringify(entry(report, "src.g.copyClass")));
+  const lit = entry(report, "src.g.copyLit");
+  check("Object.assign over an object-literal getter: disclosed (Exec or Unknown+reflect:accessor), never silent",
+        lit !== undefined && (lit.inferred.includes("Exec")
+          || (lit.inferred.includes("Unknown") && (lit.unknownWhy ?? []).some((w) => w.startsWith("reflect:accessor:")))),
+        JSON.stringify(lit));
+  check("NO-FABRICATION: Object.assign from a plain-data source stays pure",
+        entry(report, "src.g.copyPlain") === undefined, JSON.stringify(entry(report, "src.g.copyPlain")));
+}
+
+// ── .candor/config discovered-but-UNREADABLE fails closed (exit 2) ─────────────────────────────────
+// The CANDOR_CONFIG-set-but-missing and configured-but-empty arms are pinned above; the discovery-path
+// read failure (config EXISTS but readFileSync throws — here a directory at the config path) was the
+// remaining untested fail-closed arm. A gate source must never vanish silently.
+{
+  const d = project({ "src/p.ts": `export function f(): void { /* pure */ }` });
+  fs.mkdirSync(path.join(d, ".candor", "config"), { recursive: true }); // a DIRECTORY named `config`
+  const r = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "src")], { encoding: "utf8" });
+  check("a discovered .candor/config that cannot be READ fails closed (exit 2, disclosed)",
+        r.status === 2 && /config .*could not be read/.test(r.stderr),
+        `status=${r.status} ${r.stderr.slice(0, 160)}`);
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
