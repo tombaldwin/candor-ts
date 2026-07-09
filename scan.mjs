@@ -498,6 +498,27 @@ function moduleOf(sf) {
   const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?[tj]sx?$/, "");
   return rel.split(path.sep).join(".");
 }
+// Enclosing `namespace`/`module` blocks are NAME SEGMENTS (the family ruling: §6.2 scope segments
+// split on the same boundaries as the §3.1 query name ladder, and a namespace is a segment — rust
+// modules and swift enum-namespaces already qualify this way). A unit declared in
+// `export namespace app { … }` is `mod.app.fn`, so a layer policy authored against namespace layers
+// (`forbid app -> repo`, `deny Db app`) bites in TS instead of being silently inert. Returns the
+// dotted prefix ("app." / "a.b.") or "". Dotted (`namespace a.b`) and nested forms both contribute
+// each identifier segment; ambient string-named modules (`declare module "x"`) and `declare global`
+// augmentations contribute nothing (not lexical layers of THIS module).
+function namespacePrefixOf(node) {
+  const segs = [];
+  for (let p = node.parent; p && !ts.isSourceFile(p); p = p.parent) {
+    if (!ts.isModuleBlock(p)) continue;
+    // `namespace a.b { … }` nests ModuleDeclarations (a -> b -> block); walk the chain so every
+    // dotted segment lands, innermost-first up.
+    for (let d = p.parent; d && ts.isModuleDeclaration(d); d = ts.isModuleDeclaration(d.parent) ? d.parent : null) {
+      if (d.name && ts.isIdentifier(d.name) && !(d.flags & ts.NodeFlags.GlobalAugmentation))
+        segs.unshift(d.name.text);
+    }
+  }
+  return segs.length ? `${segs.join(".")}.` : "";
+}
 // Is `node` (a function-expression / method-declaration / arrow) the `get` or `set` member of an
 // accessor DESCRIPTOR object passed to `Object.defineProperty(target, key, desc)` /
 // `Object.defineProperties(target, { key: desc, … })` / `Object.create(proto, { key: desc, … })`?
@@ -698,7 +719,7 @@ for (const sf of sources) {
           }
         }
       }
-      const ctorQual = `${mod}.${node.name.text}.constructor`;
+      const ctorQual = `${mod}.${namespacePrefixOf(node)}${node.name.text}.constructor`;
       if (!fns.has(ctorQual)) {
         const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
         fns.set(ctorQual, { local: `${node.name.text}.constructor`, direct: new Set(), edges: new Set(),
@@ -719,7 +740,11 @@ for (const sf of sources) {
       // shared entry — FABRICATING them onto a pure caller. `nodeName` is keyed by NODE identity, so a
       // per-node-unique key keeps resolution exact; only TOP-LEVEL units need the stable bare name a
       // consumer's hash-join targets (a function-scoped local is never an export, so nothing joins to it).
-      const qual = isFunctionScoped(node) ? `${mod}.${n}#${line + 1}:${character + 1}` : `${mod}.${n}`;
+      // Namespace segments go in the QUAL only; `local` (and so the §2 hash `pkg#local`) stays the
+      // bare name — a consumer's cross-package join resolves the callee's own name, never the
+      // producer's namespace nesting, so widening the hash would break report chaining.
+      const nsp = namespacePrefixOf(node);
+      const qual = isFunctionScoped(node) ? `${mod}.${nsp}${n}#${line + 1}:${character + 1}` : `${mod}.${nsp}${n}`;
       fns.set(qual, { local: n, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
                       cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(), entry: false, isCjsExport,
                       loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
@@ -1486,7 +1511,7 @@ function visitCalls(node) {
                 // dispatch-frontier (callers --include-unknown) can resolve overrides against the
                 // hierarchy sidecar. Bare `decl.parent.name` would not match a reacher's declaringType.
                 const tn = decl.parent?.name
-                  ? `${moduleOf(decl.parent.getSourceFile())}.${decl.parent.name.getText()}`
+                  ? `${moduleOf(decl.parent.getSourceFile())}.${namespacePrefixOf(decl.parent)}${decl.parent.name.getText()}`
                   : "type";
                 const mn = decl.name?.getText?.() ?? "member";
                 rec.why.add(`dispatch:${tn}.${mn}`); // resolution landed on a type, not a body — canonical `dispatch:OWNER.member` (frontier-relevant)
@@ -2112,10 +2137,10 @@ for (const sf of sources) {
           let sym = checker.getSymbolAtLocation(t.expression);
           if (sym && sym.flags & ts.SymbolFlags.Alias) { try { sym = checker.getAliasedSymbol(sym); } catch { /* keep */ } }
           const d = (sym?.declarations ?? []).find((x) => ts.isClassDeclaration(x) || ts.isInterfaceDeclaration(x));
-          supers.push(d && d.name ? `${moduleOf(d.getSourceFile())}.${d.name.getText()}` : t.expression.getText());
+          supers.push(d && d.name ? `${moduleOf(d.getSourceFile())}.${namespacePrefixOf(d)}${d.name.getText()}` : t.expression.getText());
         }
       }
-      if (supers.length) hierarchy[`${mod}.${node.name.getText()}`] = supers;
+      if (supers.length) hierarchy[`${mod}.${namespacePrefixOf(node)}${node.name.getText()}`] = supers;
     }
     ts.forEachChild(node, walk);
   })(sf);

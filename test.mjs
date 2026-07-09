@@ -289,6 +289,59 @@ export function place(db: DatabaseSync): void { save(db); }`,
   check("unreadable policy exits 2 LOUDLY", r2.status === 2 && r2.stderr.includes("NOT enforced"));
 }
 
+// ── 3n. NAMESPACE layers are name segments (the family ruling) ─────────────────────────────────────
+// §6.2 scope segments split on the same boundaries as the §3.1 name ladder, and a namespace is a
+// segment — rust modules and swift enum-namespaces already behave this way. Before this, a unit in
+// `export namespace app { … }` was named `mod.fn` (namespace DROPPED), so `forbid app -> repo` /
+// `deny Fs app` against namespace layers was silently inert while the same policy bit on directory
+// layers. The fix is in the NAMING (report-affecting: `fn` gains the namespace segments); the §2
+// hash keeps the bare local name so cross-package report chaining is unaffected.
+{
+  const d = project({
+    "src/a.ts": `import * as fsm from "node:fs";
+export namespace repo {
+  export function load(): string { return fsm.readFileSync("/x", "utf8"); }
+}
+export namespace app {
+  export function entry(): string { return repo.load(); }
+}
+export namespace lib.util {
+  export function deep(): string { return fsm.readFileSync("/y", "utf8"); }
+}
+export namespace outer {
+  export namespace inner {
+    export class C { m(): string { return fsm.readFileSync("/z", "utf8"); } }
+  }
+}`,
+    "layer.policy": "forbid app -> repo\n",
+    "cousin.policy": "forbid app -> other\n",
+    "deny.policy": "deny Fs app\n",
+    "denycousin.policy": "deny Fs cousin\n",
+  });
+  const { report, cg } = scan(d);
+  check("namespace is a name segment (fn carries it)",
+        entry(report, "src.a.repo.load")?.inferred.includes("Fs"), JSON.stringify(report.functions.map((f) => f.fn)));
+  check("dotted `namespace a.b` contributes every segment",
+        entry(report, "src.a.lib.util.deep")?.inferred.includes("Fs"));
+  check("nested namespaces + class methods qualify through the whole chain",
+        entry(report, "src.a.outer.inner.C.m")?.inferred.includes("Fs"));
+  check("cross-namespace edge resolves under the namespaced names",
+        cg["src.a.app.entry"]?.includes("src.a.repo.load"), JSON.stringify(cg));
+  check("§2 hash keeps the BARE local name (report chaining unaffected)",
+        entry(report, "src.a.repo.load")?.hash?.endsWith("#load"), entry(report, "src.a.repo.load")?.hash);
+  const gate = (pol) => spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out",
+                                           path.join(d, ".candor", "g"), "--policy", path.join(d, pol)], { encoding: "utf8" });
+  const rl = gate("layer.policy"), rc = gate("cousin.policy"), rd = gate("deny.policy"), rdc = gate("denycousin.policy");
+  check("forbid app -> repo BITES on namespace layers (009, exit 1)",
+        rl.status === 1 && rl.stdout.includes("[AS-EFF-009]") && rl.stdout.includes("src.a.app.entry"),
+        `status=${rl.status} ${rl.stdout}`);
+  check("forbid against a cousin namespace stays green (exit 0)", rc.status === 0, `status=${rc.status} ${rc.stdout}`);
+  check("deny Fs app BITES on the namespace scope (006, exit 1)",
+        rd.status === 1 && rd.stdout.includes("[AS-EFF-006]") && rd.stdout.includes("src.a.app.entry"),
+        `status=${rd.status} ${rd.stdout}`);
+  check("deny against a cousin scope stays green (exit 0)", rdc.status === 0, `status=${rdc.status} ${rdc.stdout}`);
+}
+
 // ── 3a. --json: stdout is the §2 envelope and stays PURE JSON — even with a firing policy gate ──────
 {
   const d = project({
