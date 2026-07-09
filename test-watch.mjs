@@ -63,7 +63,11 @@ fs.rmSync(D, { recursive: true, force: true });
 // watcher did ONE scan and died while printing "Watching…" — and only the helpers were tested, so nothing
 // caught it (watch.mjs's own comment records the incident). This is the pin for that exact bug class:
 // spawn the real process, wait past the first scan, edit a source, and require (a) a second
-// "re-scanned … Δ" line — the interval fired, the edit-delta rendered — and (b) the process still alive.
+// "re-scanned … Δ" line — the interval fired, the edit-delta rendered — (b) a SECOND edit is also
+// detected (the loop persists across intervals, not a one-shot), (c) the process still alive, and
+// (d) the documented Ctrl-C stop (SIGINT) is a GRACEFUL exit 0 — exit hooks run, so a NODE_V8_COVERAGE
+// child flushes its coverage (TESTING.md §6) and a supervisor sees a clean stop, not a crash.
+// Non-flaky by construction: every wait is a deadline-polled condition, never a fixed sleep (§9).
 {
   const L = fs.mkdtempSync("/tmp/candor-watchlive-");
   fs.writeFileSync(`${L}/app.ts`, `export function f(): void { /* pure */ }\n`);
@@ -82,9 +86,24 @@ fs.rmSync(D, { recursive: true, force: true });
   fs.writeFileSync(`${L}/app.ts`, `import * as http from "node:http";\nexport function f(): void { http.get("http://x"); }\n`);
   const rescanned = await waitFor(/re-scanned .*— Δ .*\+Net/, 30000);
   ok("live loop: the edit is detected, re-scanned, and the Δ line names the gained Net", rescanned, err.slice(-300));
-  ok("live loop: the process is STILL ALIVE after the re-scan (the unref regression)",
+  // a SECOND edit (revert to pure) must also be detected — the loop runs indefinitely, and the Δ
+  // renders the LOST effect. This is the "still alive N intervals later" pin without a fixed sleep:
+  // detecting it requires the interval to keep firing well after the first re-scan.
+  fs.writeFileSync(`${L}/app.ts`, `export function f(): void { /* pure again */ }\n`);
+  const rescanned2 = await waitFor(/re-scanned .*— Δ .*-Net/, 30000);
+  ok("live loop: a SECOND edit re-scans too (the loop persists; Δ names the lost Net)", rescanned2, err.slice(-300));
+  ok("live loop: the process is STILL ALIVE after both re-scans (the unref regression)",
      proc.exitCode === null, `exitCode=${proc.exitCode}`);
-  proc.kill();
+  // GRACEFUL shutdown: the documented stop is Ctrl-C — SIGINT must exit 0 (a clean stop, coverage
+  // flushed), never die on the default signal handler (which skips exit hooks and reads as a crash).
+  const exited = new Promise((resolve) => {
+    const t = setTimeout(() => resolve(null), 15000);
+    proc.on("exit", (code) => { clearTimeout(t); resolve(code); });
+  });
+  proc.kill("SIGINT");
+  const code = await exited;
+  ok("live loop: SIGINT (the documented Ctrl-C stop) is a GRACEFUL exit 0 — not a signal death",
+     code === 0, `exit code=${code} signal=${proc.signalCode}`);
   fs.rmSync(L, { recursive: true, force: true });
 }
 

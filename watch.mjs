@@ -121,6 +121,14 @@ async function main() {
   // NO .unref() — the interval is the ONLY thing keeping the process alive; unref'ing it made Node exit
   // ~0.6s after the startup scan, so the watcher did ONE scan and died while printing "Watching…" (the
   // whole feature was silently broken, and test-watch.mjs only tests the helpers, never the live loop).
+
+  // GRACEFUL stop: the documented quit is Ctrl-C, but the default SIGINT/SIGTERM handler TERMINATES —
+  // exit hooks never run, the stop reads as a signal death (no exit code) to a supervisor, and a child
+  // instrumented with NODE_V8_COVERAGE discards its coverage (the TESTING.md §6 flush rule — this made
+  // the live loop measure 0% while actually exercised). Handle both: announce, exit 0.
+  for (const sig of ["SIGINT", "SIGTERM"]) {
+    process.on(sig, () => { console.error(`candor-ts-watch: ${sig} — stopping`); process.exit(0); });
+  }
 }
 
 if (path.resolve(process.argv[1] || "") === path.resolve(fileURLToPath(import.meta.url))) main();
