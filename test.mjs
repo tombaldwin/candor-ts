@@ -1401,7 +1401,8 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
 // The κ rule for net/http/https/tls/http2 was once whole-module (`[regex, null, "Net"]`), painting
 // Net onto provably-pure members: `new http.Agent()` is a connection-pool CONFIG object (no I/O until
 // a request uses it), `new http.Server()`/`new net.Socket()` open nothing until `.listen()`/`.connect()`.
-// That is FABRICATION — candor's cardinal sin. The rule is now member-aware: construction (token "new")
+// That is FABRICATION — the precision failure, the opposite direction from candor's cardinal sin (the
+// silent under-report). The rule is now member-aware: construction (token "new")
 // is pure; every function/verb member keeps Net (so an unlisted effectful call never under-reports).
 // Both directions pinned here (the standalone fabrication_probe.mjs is the broader generative guard).
 {
@@ -1415,7 +1416,7 @@ export function pureHttpServer(): void { const x = new http.Server(); void x; }
 export function pureSocket(): void { const x = new net.Socket(); void x; }
 // PURE — the string VALIDATORS: net.isIP/isIPv4/isIPv6 parse a string and return 0/4/6 (or a bool);
 // no socket, no fd, no syscall. The whole-module Net rule once fabricated Net here (a node-fetch sweep
-// caught it: trustworthy URL predicates call isIP and inherited a phantom Net — the cardinal sin):
+// caught it: trustworthy URL predicates call isIP and inherited a phantom Net — a fabrication):
 export function pureIsIP(): void { const x = net.isIP("1.2.3.4"); void x; }
 export function pureIsIPv4(): void { const x = net.isIPv4("1.2.3.4"); void x; }
 export function pureIsIPv6(): void { const x = net.isIPv6("::1"); void x; }
@@ -1494,7 +1495,7 @@ export function effClientRequest(): void { const x = new http.ClientRequest("htt
         JSON.stringify(good) === JSON.stringify({ "a.f": ["a.g"], "a.g": [] }), JSON.stringify(good));
 }
 
-// ── decorator-factory effects must NOT be FABRICATED onto the decorated unit (cardinal sin) ───────
+// ── decorator-factory effects must NOT be FABRICATED onto the decorated unit (fabrication) ───────
 {
   const d = project({
     "src/d.ts": `import cp from "node:child_process";

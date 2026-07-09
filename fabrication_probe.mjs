@@ -3,7 +3,9 @@
  * Fabrication probe for candor-ts — a precision regression guard (sibling of the soundness fuzzer
  * fuzz.mjs, and the family probes soundness/fabrication_probe.{py} in candor-rust / candor-java).
  *
- * candor's CARDINAL SIN is FABRICATION: classifying a PURE call as effectful. Several node builtins
+ * candor's cardinal sin is the SILENT UNDER-REPORT (guarded by fuzz.mjs and the test suites); this
+ * probe guards the OPPOSITE direction: FABRICATION — a minted effect on a PURE call, the precision
+ * failure that poisons report trust. Several node builtins
  * are classified at WHOLE-MODULE level in scan.mjs's κ table (`[moduleRegex, null, effect]` — the
  * `null` member-matcher paints one effect onto EVERY member). That over-paints the module's
  * provably-pure members: inert CONSTRUCTION (`new http.Agent()` is a connection-pool config object;
@@ -15,7 +17,7 @@
  * Two directions, both guarded:
  *   PURE — a member that is PROVABLY free of I/O (inert construction, a pure constant/accessor).
  *          candor MUST report it pure (omitted from `functions` / empty `inferred`). An effect here
- *          => FABRICATION (the cardinal sin).
+ *          => FABRICATION (the precision failure).
  *   CTRL — a genuinely-effectful member (the request/connect/listen/spawn surface, an I/O verb).
  *          candor MUST still report the effect. Pure/omitted here => a LOST CONTROL (an
  *          under-report), the OTHER failure direction — so the fix can only REMOVE fabrication,
