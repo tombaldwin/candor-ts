@@ -120,7 +120,13 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
   for (const f of functions) {
     for (const r of pol.deny) {
       if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
-      const hits = r.effects.length === 0 ? f.inferred : f.inferred.filter((e) => r.effects.includes(e));
+      // `pure` (empty forbidden set) forbids every EFFECT — not `Unknown`, which is the §4 trust
+      // marker, not an effect (AS-EFF-003's concern; `deny Unknown <scope>` is the explicit knob).
+      // The reference engine (candor-java) and the rust deep engine exclude it identically; candor-ts
+      // wrongly counted an Unknown-only fn as a `pure` violation until 2026-07-09.
+      const hits = r.effects.length === 0
+        ? f.inferred.filter((e) => e !== "Unknown")
+        : f.inferred.filter((e) => r.effects.includes(e));
       if (hits.length) push("AS-EFF-006", f.fn, hits, `\`${f.fn}\` performs { ${hits.join(", ")} }, forbidden by policy: \`${r.raw}\``);
     }
     for (const r of pol.allow) {

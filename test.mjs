@@ -342,6 +342,31 @@ export namespace outer {
   check("deny against a cousin scope stays green (exit 0)", rdc.status === 0, `status=${rdc.status} ${rdc.stdout}`);
 }
 
+// ── 3o. `pure` forbids every EFFECT — not `Unknown` (the family ruling) ─────────────────────────────
+// Unknown is the §4 trust marker, not an effect: the reference engine (candor-java) and the rust deep
+// engine exclude it from a `pure` rule's hits, and `deny Unknown <scope>` is the explicit knob for
+// scopes that must exclude uncertainty (AS-EFF-003's concern). candor-ts wrongly counted an
+// Unknown-only fn as a `pure` violation until 2026-07-09 — a cross-engine verdict split on the same
+// policy. Effectful fns still trip `pure`; deny Unknown still fires.
+{
+  const d = project({
+    "src/u.ts": `export function entry(f: () => void): void { f(); }`,
+    "src/e.ts": `import * as fsm from "node:fs";\nexport function writer(): void { fsm.writeFileSync("/x", "1"); }`,
+    "pure-u.policy": "pure u\n",
+    "pure-e.policy": "pure e\n",
+    "deny-unknown.policy": "deny Unknown u\n",
+  });
+  const gate = (pol) => spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out",
+                                           path.join(d, ".candor", "g"), "--policy", path.join(d, pol)], { encoding: "utf8" });
+  const pu = gate("pure-u.policy"), pe = gate("pure-e.policy"), du = gate("deny-unknown.policy");
+  check("`pure` does NOT fire on an Unknown-only fn (exit 0 — Unknown is not an effect)",
+        pu.status === 0, `status=${pu.status} ${pu.stdout}`);
+  check("`pure` still fires on a genuinely effectful fn (006, exit 1)",
+        pe.status === 1 && pe.stdout.includes("[AS-EFF-006]"), `status=${pe.status} ${pe.stdout}`);
+  check("`deny Unknown <scope>` remains the strictness knob (006 on Unknown, exit 1)",
+        du.status === 1 && du.stdout.includes("Unknown"), `status=${du.status} ${du.stdout}`);
+}
+
 // ── 3a. --json: stdout is the §2 envelope and stays PURE JSON — even with a firing policy gate ──────
 {
   const d = project({
