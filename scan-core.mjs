@@ -36,11 +36,11 @@ export const KAPPA_RULES = [
   // 0/4/6 (or a boolean) with no socket, no fd, no syscall — pure functions. The whole-module Net rule
   // once fabricated Net onto them; a real-world sweep on node-fetch caught it (its trustworthy URL
   // predicates isOriginPotentiallyTrustworthy/isUrlPotentiallyTrustworthy call isIP() and inherited a
-  // FABRICATED Net — the cardinal sin — purely from this classification, with no local Net edge). Only
+  // FABRICATED Net — the precision failure — purely from this classification, with no local Net edge). Only
   // these three named validators are freed; every genuine verb (connect/createConnection/createServer…)
   // stays Net (the matcher excludes ONLY new + the three validators, nothing else).
   // ALSO exempt the pure CONFIG/METADATA members the whole-module rule fabricated Net on (sweep [9], the
-  // cardinal sin — none touch a socket/fd/syscall): tls.getCiphers/createSecureContext/checkServerIdentity
+  // precision failure — none touch a socket/fd/syscall): tls.getCiphers/createSecureContext/checkServerIdentity
   // (cipher-list + cert helpers), http.validateHeaderName/validateHeaderValue (string validators, like
   // isIP), and a Socket/Server's setKeepAlive/setNoDelay/ref/unref/address (TCP-option + bound-address
   // metadata — no I/O). Every genuine verb still classifies; only these proven-pure names are freed.
@@ -51,7 +51,7 @@ export const KAPPA_RULES = [
   // reverse query DNS servers directly). Was unclassified, so a `dns.resolve(...)` read silently pure.
   // Same construction-and-pure-accessor carve-out as the net cluster: `new dns.Resolver()` ("new") is
   // inert, and the SERVER-CONFIG accessors getServers/setServers/get|setDefaultResultOrder touch no
-  // network (in-process config) — classifying them Net would FABRICATE the cardinal sin. Every genuine
+  // network (in-process config) — classifying them Net would be a FABRICATION (the precision failure). Every genuine
   // resolver verb (lookup/resolve4/resolveMx/reverse/…) stays Net. Covers node:dns/promises too.
   [/^(node:)?dns(\/promises)?$/,
    /^(?!(new|getServers|setServers|getDefaultResultOrder|setDefaultResultOrder)$)/, "Net"],

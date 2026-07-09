@@ -1024,7 +1024,7 @@ function enclosing(node) {
     // the decorated declaration's body. The parent chain of a decorator's expression is
     // CallExpression → Decorator → MethodDeclaration/ClassDeclaration/Parameter, so `enclosing` otherwise
     // lands on the decorated unit and FABRICATES the factory's effects onto that method/class/param and
-    // every transitive caller (a cardinal sin — @Entity/@Injectable factories that touch I/O would
+    // every transitive caller (a fabrication — @Entity/@Injectable factories that touch I/O would
     // poison every decorated handler). Stop at the Decorator: the factory's own effects live in its own
     // function unit; the application site attributes to nothing (load-time, like a no-arg decorator).
     if (ts.isDecorator(p)) return null;
@@ -1231,7 +1231,7 @@ function noteOpaqueIteration(node, iterExpr, localResolved) {
 // Callee names that INVOKE a function/method argument (so a fn-reference passed to one is reachable
 // through it). Array/iterable HOFs, the timer/microtask schedulers, and Promise continuations. A
 // STORE/compare/log sink (`set`/`push`/`add`/`includes`/`indexOf`/`concat`/`log`/`stringify`/…) is
-// deliberately ABSENT — edging there would fabricate the fn's effects on a pure path (the cardinal sin).
+// deliberately ABSENT — edging there would fabricate the fn's effects on a pure path (the precision failure).
 const HOF_INVOKERS = new Set([
   "map", "forEach", "filter", "reduce", "reduceRight", "find", "findIndex", "findLast", "findLastIndex",
   "some", "every", "flatMap", "sort", "group", "groupBy", "partition", "mapValues", "flatMapDeep",
@@ -1313,7 +1313,7 @@ function visitCalls(node) {
         // on a non-local callee so a local callee that merely STORES (never invokes) keeps its precision.
         // ONLY a callee that actually INVOKES its fn argument makes the reference reachable here. The
         // earlier version edged for ANY non-local callee — fabricating the fn's effects onto a pure path
-        // (the cardinal sin) for STORE/compare/log sinks that never call it (`map.set(k, fn)`,
+        // (the precision failure) for STORE/compare/log sinks that never call it (`map.set(k, fn)`,
         // `arr.push(fn)`, `arr.includes(fn)`, `console.log(fn)`, `[fn]`). Gate on a known INVOKING HOF by
         // callee name; a custom non-local HOF that invokes its arg is an honest under-report (sound),
         // never a fabrication. (A LOCAL callee keeps its precise callback-flow below.)
@@ -1628,7 +1628,7 @@ function visitCalls(node) {
           // "Console" effect in §1, so it must be PURE. Suppress the fabricated effect for these receivers
           // (a real `net.Socket` you constructed and `.write()` to still classifies Net — only the three
           // std streams are freed). Real-world sweep: nanoid/commander(×43)/bunyan/pino fabricated Net
-          // purely from a `process.stdout.write` — the cardinal sin.
+          // purely from a `process.stdout.write` — the precision failure.
           if (eff && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))
               && rootsAtStdStream(node.expression.expression))
             eff = null;
