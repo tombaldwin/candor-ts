@@ -30,7 +30,9 @@ TRANSITIVE caller, across all files?" Work as you normally would (grep, read). W
 list to ./candor-manual-<target>.txt in the repo root (NOT a fixed /tmp name — repeated runs must
 not cross-contaminate) — one function per line, named the way the callgraph keys them:
 module-qualified with "." segments (src.db.save for save() in src/db.ts; class members
-src.api.Client.send, constructors src.api.Client.constructor; a NESTED named function is keyed flat
+src.api.Client.send, constructors src.api.Client.constructor; a function declared inside a TS
+namespace carries the namespace segments — src.util.Ns.helper for helper() in namespace Ns — only
+the report's `hash` field keeps the bare local name; a NESTED named function is keyed flat
 under its module, while an anonymous arrow — including one wrapped in a cast — folds into its
 enclosing function). Also note roughly how
 many file-reads/searches it took you.

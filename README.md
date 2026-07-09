@@ -5,7 +5,7 @@
 **candor for TypeScript: per-function side effects, transitively, with a deterministic policy
 gate.** candor-ts resolves every call through the TypeScript compiler API and reports, for each
 function in your project, which effects it can reach — `Net`, `Fs`, `Db`, `Exec`, `Env`, `Clock`,
-… — **including effects inherited through any chain of calls across files**, with an honest
+… — **including effects inherited through any chain of calls across files**, with a disclosed
 `Unknown` wherever resolution fails (a callback value, an `any`-typed callee — never silently
 pure). A [candor-spec](https://github.com/tombaldwin/candor-spec) implementation, sibling of the
 [Rust](https://github.com/tombaldwin/candor-rust) and
@@ -55,7 +55,13 @@ one CI should hold. Semantics mirror the reference engine (candor-java) exactly.
 **Staying current:** check your installed version and upgrade — [candor/AGENTS.md §2a](https://github.com/tombaldwin/candor/blob/main/AGENTS.md#2a-staying-current--check-the-version-upgrade). `npx -y candor-ts --version` prints the build, the spec, and the upgrade one-liner (offline; candor never phones home).
 
 Function names are module-qualified with `.` segments (`src.db.save`), so policy scopes read
-naturally:
+naturally. A function declared inside a TS `namespace` carries the namespace segments in `fn` and
+the callgraph keys (`src.util.Ns.helper`) — so layer policies on namespaces bite — while the §2
+`hash` join key keeps the bare local name; builds before 0.8.7 omitted the segments, so crossing
+that line invalidates saved baselines (regenerate them). A `pure <scope>` rule forbids every
+*effect* but not `Unknown` — the §4 trust marker is uncertainty, not an effect (matching the
+reference engine, candor-java); `deny Unknown <scope>` is the explicit knob for boundaries that
+must also exclude the unverifiable case.
 
 ```text
 # .candor/policy
@@ -145,16 +151,17 @@ a κ-ledger blind spot. A name outside the §1 vocabulary voids the declaration 
 silently narrow a surface). And `candor-ts-query gains <cur> <base>` flags the **supply-chain**
 delta — the effects a surface *gained* between two reports.
 Real-world consequence, measured on [rimraf](https://github.com/isaacs/rimraf) (50 files, 55
-functions analyzed): its DI-style fs injection means many functions honestly read `Unknown` —
+functions analyzed): its DI-style fs injection means many functions read `Unknown`, disclosed —
 that's the contract working, not noise. The report says "can reach", never "does"; an absent
 literal is never a claim of absence.
 
 ## Cross-engine consistency — machine-checked
 
-candor-ts runs live in the spec's conformance CI as the third engine in **three differentials**:
-the effect-set oracle (20 shared cases), the §6.2 policy-grammar battery (including `allow Db`),
-and the §3.1 query-shape and match-ladder checks — all three engines must answer identically, on
-every push to the spec.
+candor-ts is one of the **four code engines** (with the reference engine candor-java, the Rust
+engines, and candor-swift) held together by the spec's **16-part conformance suite**: the shared
+effect-set oracle, the §6.2 policy-grammar battery (including `allow Db`), the §3.1 query-shape
+and match-ladder checks, the gate exit-code contracts, and the newer parts up through the
+pure-vs-Unknown ruling (PART 16) — the engines must answer identically, on every push to the spec.
 
 ## What the analysis core implements (and where the spec told it how)
 
@@ -189,7 +196,7 @@ read the Rust source".
 0.8.x, speaking candor-spec 0.8: the analysis core, the gate (`--policy` / `--gate-json` /
 `.candor/config`), the full §3.1 query surface (including `containment`, `blindspots`, the
 `--include-unknown` dispatch frontier), the MCP server, the LSP server, and the watch loop are
-real, behaviorally tested (`npm test` — ~360 assertions across six suites), **soundness-fuzzed
+real, behaviorally tested (`npm test` — the behavioral suite across six harnesses), **soundness-fuzzed
 with verified teeth** (`node fuzz.mjs` — spec §7.13: generated effect chains through every encoded
 call form, any silent-pure = red), and conformance-held against the Rust/JVM/Swift engines. The
 npm classifier tier is deliberately curated and keeps growing case-by-case. Entry points

@@ -2211,5 +2211,24 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
   fs.rmSync(path.join(d, ".candor", "config"));
 }
 
+// ── doc drift gates (TESTING.md §9): the family phrases the docs must carry ────────────────────────
+// README/AGENTS are load-bearing self-descriptions: they must state the CURRENT spec contract
+// ("spec 0.8", no stale generation strings — AGENTS.md shipped "spec 0.7" examples a full generation
+// after the 0.8 roll) and, wherever they lean on the reference engine, attribute it (candor-java IS
+// the reference — the family ruling the baseline/pure semantics cite).
+{
+  for (const f of ["README.md", "AGENTS.md"]) {
+    const doc = fs.readFileSync(path.join(HERE, f), "utf8");
+    check(`${f} states the current spec contract (spec 0.8)`, doc.includes("spec 0.8"));
+    const stale = doc.match(/spec 0\.[0-7]\b/g) ?? [];
+    check(`${f} carries no stale spec-generation string`, stale.length === 0, JSON.stringify(stale));
+    const refLines = doc.split("\n").filter((l) => /reference engine/i.test(l));
+    check(`${f} mentions the reference engine at least once`, refLines.length > 0);
+    check(`${f}: every "reference engine" mention attributes candor-java`,
+          refLines.every((l) => /candor-java/.test(l)),
+          JSON.stringify(refLines.filter((l) => !/candor-java/.test(l))));
+  }
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -12,16 +12,16 @@ chains by hand.
 > **Already installed? Report the version and ask before upgrading — before you scan.** If this
 > project already has candor (a `.candor/` report directory, or `candor-ts` reachable via `npx`/a
 > global install), do this *first*: run `npx -y candor-ts --version` (offline) and **tell the user
-> plainly which version they're on** — e.g. *"This project is on candor-ts 0.7.1 (spec 0.7)."* On a
-> build too old for the flag, read `candor.version` / `candor.spec` from an existing
+> plainly which version they're on** — e.g. *"This project is on candor-ts `<version>` (spec 0.8)."*
+> On a build too old for the flag, read `candor.version` / `candor.spec` from an existing
 > `.candor/report*.json`, or `npm ls -g candor-ts`.
 >
 > **Staying current is your job, not candor's.** candor never phones home — it audits and denies the
 > Net effect, so it will not reach the network to check itself. `candor-ts --version` prints the
 > installed build, the spec contract it speaks, and the upgrade line (`npm install -g
 > candor-ts@latest`) — fully offline. **You** have the network: compare the installed version against
-> npm. If it's behind, **ask the user before upgrading** — e.g. *"candor-ts 0.7.2 is available
-> (you're on 0.7.1) — upgrade before I scan?"* — and run `npm install -g candor-ts@latest` (or `npx
+> npm. If it's behind, **ask the user before upgrading** — e.g. *"candor-ts `<latest>` is available
+> (you're on `<installed>`) — upgrade before I scan?"* — and run `npm install -g candor-ts@latest` (or `npx
 > -y candor-ts@latest`) only if they agree. Never upgrade silently: an analysis tool's version is
 > part of its result's provenance, so the user decides when it changes. If it's already current (or
 > the user declines), just proceed; if candor isn't installed at all, install it normally.
@@ -41,7 +41,7 @@ npx -y candor-ts <dir> --allow-js       # also analyze .js/.mjs sources (walks t
 
 This writes `<project-dir>/.candor/report.json` and `.candor/report.callgraph.json` (override
 with `--out <prefix>`). **Install the TARGET's dependencies first** (`npm install` in the project)
-— without node_modules, imports don't resolve and most functions honestly read `Unknown` (the
+— without node_modules, imports don't resolve and most functions read `Unknown` (disclosed; the
 scanner warns loudly). Add `--policy <file>` (or set `CANDOR_POLICY`) to enforce a §6.2 policy over the
 scan: exit 1 on violation, exit 2 LOUDLY if the policy file is unreadable. `--gate-json <file|->`
 additionally writes the structured verdict `{spec, ok, violations:[{rule,fn,effects,detail}]}`
@@ -62,7 +62,11 @@ match the reference engine (candor-java).
 **Report shape:** the file is `{ "candor": {version, toolchain, spec}, "functions": [...] }`;
 `functions` is an **array** of entries (not a map — don't index it by name), each carrying **`fn`**
 — module-qualified, `.`-separated
-(`src.db.save` for `save()` in `src/db.ts`; class methods are `src.api.Client.send`) — with
+(`src.db.save` for `save()` in `src/db.ts`; class methods are `src.api.Client.send`; a function
+declared inside a TS `namespace` carries the namespace segments too — `src.util.Ns.helper` — in
+`fn` AND the callgraph/hierarchy keys, while its `hash` keeps the bare local name for cross-package
+joining; builds before 0.8.7 omitted the namespace segments, so an engine upgrade across that line
+is baseline-invalidating — regenerate saved reports) — with
 `inferred` (the full transitive set) / `direct` / `unresolved` / optional `hosts`/`cmds`/`paths`/
 `tables` (the literal surfaces). **Only effectful-or-unresolved functions appear in the report;
 pure functions are omitted** — a function present in the callgraph sidecar but absent from
@@ -70,7 +74,7 @@ pure functions are omitted** — a function present in the callgraph sidecar but
 (a test file? an unexported arrow inside an object literal?) — conclude nothing.
 
 A dist-CJS export unit (a `module.exports` surface scanned with `--allow-js`) carries
-`unitKind: "export"` (spec 0.7, informative); ordinary functions omit the field.
+`unitKind: "export"` (spec 0.8, informative); ordinary functions omit the field.
 
 **Multi-package (monorepos / private deps):** point `CANDOR_DEPS` at the dependencies' reports
 (a path list, or a directory of `*.json`); an unclassified call into a package with a loaded
@@ -126,16 +130,17 @@ want-JSON flag.
 - **Arrow-const functions are first-class**: `export const f = async () => …` is analyzed and named
   like a declaration; calls to it are edges. An arrow assigned inside a function body becomes its
   own unit (`src.x.helper`) — effects still propagate to the enclosing caller through the edge.
-- **The classifier is curated** (node builtins + a small npm tier: axios/got/node-fetch/undici/ws,
-  pg/mysql2/mongodb/redis/knex, execa/cross-spawn, fs-extra/rimraf/glob, dotenv, winston/pino).
+- **The classifier is curated** — the node builtins plus a growing npm tier; the README's
+  "classifier" paragraph is the ONE current list (this file deliberately doesn't duplicate it — a
+  vendored copy here drifted a full generation once).
   An unlisted package contributes nothing — an effect through it is invisible, not `Unknown`. The
   scanner **names these per scan**: the receipt's `κ doesn't know N packages…` line lists every npm
   package the code demonstrably calls that κ neither classifies nor has reviewed-pure — read it
   before concluding "no effect" through anything it names.
 - **`process.env.X` reads are `Env`** (a property read, not a call); `Date.now()` is `Clock`.
-- **DI-style code reads `Unknown` a lot, honestly**: a function-typed parameter or field being
+- **DI-style code reads `Unknown` a lot, by design**: a function-typed parameter or field being
   called is genuinely indeterminate (rimraf's injected-fs style yields many `Unknown`s — that's the
-  §4 contract, not noise). When every visible call site passes a *named* function, the callback
+  §4 disclosure contract, not noise). When every visible call site passes a *named* function, the callback
   resolves instead. And a method call on a **local-interface-typed value** (`store.save()` where
   `class PgStore implements Store`) resolves to the local implementors when the dispatch is narrow
   (≤12 classes) — the layered-DI pattern carries its real effects; only an interface with no
@@ -155,6 +160,10 @@ pure  parse
 allow Db in db  orders ledger.*       # the db module touches ONLY these tables
 forbid domain -> infra
 ```
+
+Note the `pure` semantics: it forbids every *effect* but NOT `Unknown` — the §4 trust marker is
+uncertainty, not an effect (matching the reference engine, candor-java). Where a boundary must also
+exclude the unverifiable case, say so explicitly: `deny Unknown <scope>` is the knob.
 
 ## The trust rule — do not skip this
 
