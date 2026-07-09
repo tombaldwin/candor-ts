@@ -110,6 +110,16 @@ if (target === null) { console.error(usage); process.exit(2); }
 // implements `policy` + `deps` — the others are inert here (they drive other engines' gates), and a key
 // OUTSIDE the vocabulary warns (typo protection: a misspelt `policy` must not silently drop the gate).
 const CONFIG_KEYS = new Set(["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps"]);
+// The ANCHOR a config file's RELATIVE path values (policy/deps) resolve against: the repo the config
+// belongs to — the parent of its `.candor/` directory (the standard layout; candor-init scaffolds
+// `policy arch.policy` meaning the repo root's), else the config file's own directory. NEVER the
+// process CWD (family rule, matching policy.mjs discoverConfigPolicy's repoRoot): a checked-in config
+// must mean the same file whether the scan is launched from the repo, from $HOME, or from a CI step's
+// working-directory. Env/CLI values stay CWD-relative — they're per-invocation, not checked in.
+function configAnchor(file) {
+  const dir = path.dirname(path.resolve(file));
+  return path.basename(dir) === ".candor" ? path.dirname(dir) : dir;
+}
 function loadCandorConfig(targetPath) {
   let file = process.env.CANDOR_CONFIG ?? null;
   if (file !== null) {
@@ -146,6 +156,12 @@ function loadCandorConfig(targetPath) {
     }
     cfg[key] = val;
   }
+  // Resolve the PATH-valued keys against the config's anchor (see configAnchor). `deps` is a path
+  // LIST — each token resolves; an empty value stays empty (configured-with-empty fails loud below).
+  const anchor = configAnchor(file);
+  if (cfg.policy) cfg.policy = path.resolve(anchor, cfg.policy);
+  if (cfg.baseline) cfg.baseline = path.resolve(anchor, cfg.baseline);
+  if (cfg.deps) cfg.deps = cfg.deps.split(/[\s:,]+/).filter(Boolean).map((t) => path.resolve(anchor, t)).join(":");
   return cfg;
 }
 const candorConfig = loadCandorConfig(target);
@@ -2128,14 +2144,18 @@ if (unlistedSeen.size > 0) {
 }
 
 // ---- the standing §6.2 gate (--policy / CANDOR_POLICY) --------------------------------------------
+// `!== null`, not truthiness: a CONFIGURED-but-EMPTY policy (a bare `policy` config line, a set-but-
+// empty CANDOR_POLICY) is "" — falsy, so a truthy check silently skipped the gate, the exact quiet
+// drop the config comment above promises fails loud. "" now reaches the read, which fails → exit 2
+// (the Rust engine's behavior on the same input).
 let gateViolations = [];
-if (policyPath) {
+if (policyPath !== null) {
   let text;
   try {
     text = fs.readFileSync(policyPath, "utf8");
   } catch {
     // a set-but-unreadable policy must be LOUD — silently passing would let a violation ship
-    console.error(`candor-ts: policy ${policyPath} could not be read; gate NOT enforced`);
+    console.error(`candor-ts: policy ${policyPath === "" ? "(configured empty)" : policyPath} could not be read; gate NOT enforced`);
     process.exit(2);
   }
   // The masking-incompleteness map (fn -> effects whose surface is incomplete), kept INTERNAL like the
@@ -2162,8 +2182,8 @@ if (gateJsonPath) {
     catch (e) { console.error(`candor-ts: could not write --gate-json ${gateJsonPath}: ${e.message}`); }
   }
 }
-if (policyPath && gateViolations.length) {
+if (policyPath !== null && gateViolations.length) {
   console.error(`candor-ts: ${gateViolations.length} policy violation(s)`);
   process.exit(1);
 }
-if (policyPath) console.error("candor-ts: policy ✓");
+if (policyPath !== null) console.error("candor-ts: policy ✓");

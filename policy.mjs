@@ -161,8 +161,11 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
 
 // ---- .candor/config discovery (spec §3.4) — shared by the MCP + LSP surfaces -----------------------
 // Walk UP from `fromDir` to the nearest .candor/config and return its `policy` entry resolved against
-// that config's repo root: { policyPath, repoRoot } — or null. Read-only + best-effort (a consumer
-// surface never gates a build; a broken config surfaces as the caller's error).
+// that config's repo root: { policyPath, repoRoot } — or null. A RELATIVE `policy` value resolves
+// against the repo the config belongs to (the parent of its `.candor/`), NEVER the process CWD — the
+// family rule (scan.mjs configAnchor is the producer-side twin): a checked-in config means the same
+// file wherever the consumer process was launched. Read-only + best-effort (a consumer surface never
+// gates a build; a broken config surfaces as the caller's error).
 import fs from "node:fs";
 import nodePath from "node:path";
 export function discoverConfigPolicy(fromDir) {

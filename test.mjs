@@ -377,12 +377,23 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
     "deny-net.policy": "deny Net\n",
     ".candor/config": "policy deny-db.policy\npolcy typo-key\n",
   });
-  // rewrite the config's policy path to be absolute (the engine resolves it as given)
-  fs.writeFileSync(path.join(d, ".candor/config"), `policy ${path.join(d, "deny-db.policy")}\npolcy typo\n`);
-  // (a) the checked-in config drives the gate — no flag, no env — discovered via the TARGET's ancestors
+  // (a) the checked-in config drives the gate — no flag, no env — discovered via the TARGET's
+  // ancestors. The `policy` value is RELATIVE and the scan runs from a DIFFERENT cwd (this repo): it
+  // must resolve against the config's repo root, never the process cwd (the family rule) — a
+  // checked-in config means the same file wherever the scan is launched from.
   const r = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "src")], { encoding: "utf8" });
-  check(".candor/config drives the gate (exit 1, AS-EFF-006)", r.status === 1 && r.stdout.includes("[AS-EFF-006]"), `status=${r.status} ${r.stdout.slice(0,120)}`);
+  check(".candor/config drives the gate (exit 1, AS-EFF-006) — relative policy anchored to the repo, not the cwd",
+        r.status === 1 && r.stdout.includes("[AS-EFF-006]"), `status=${r.status} ${r.stdout.slice(0,120)} ${r.stderr.slice(0,160)}`);
   check("unknown config key warns (typo protection)", r.stderr.includes("unknown config key 'polcy'"), r.stderr.slice(0, 200));
+  // a configured-but-EMPTY policy (a bare `policy` line) fails LOUD (exit 2) — "" is falsy, and a
+  // truthy gate check silently dropped it (the quiet gateless-green the §config posture forbids)
+  const dEmpty = project({
+    "src/p.ts": `export function f(): void { /* pure */ }`,
+    ".candor/config": "policy\n",
+  });
+  const rEmpty = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(dEmpty, "src")], { encoding: "utf8" });
+  check("a bare `policy` config line fails closed (exit 2), never a silent no-gate",
+        rEmpty.status === 2 && /could not be read/.test(rEmpty.stderr), `status=${rEmpty.status} ${rEmpty.stderr.slice(0,160)}`);
   // (b) the env overrides the config (a passing deny-Net policy wins over the config's deny-Db)
   const re = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "src")], { encoding: "utf8", env: { ...process.env, CANDOR_POLICY: path.join(d, "deny-net.policy") } });
   check("CANDOR_POLICY env overrides the config", re.status === 0, `status=${re.status} ${re.stderr.slice(0,120)}`);
@@ -895,6 +906,18 @@ export function buy(): void { charge(100); }`,
   const buy3 = entry(rep3, "src.checkout.buy");
   check("a different-version dep report downgrades to Unknown (never silently trusted)",
         buy3?.inferred.includes("Unknown") && !buy3?.inferred.includes("Net"), JSON.stringify(buy3));
+
+  // a RELATIVE `deps` value in .candor/config resolves against the CONFIG's repo, not the process cwd
+  // (the family rule; the scan below runs from this repo's cwd, where "deps/billing.json" is nothing)
+  fs.mkdirSync(path.join(app, "deps"), { recursive: true });
+  fs.copyFileSync(path.join(dep, ".candor", "report.json"), path.join(app, "deps", "billing.json"));
+  fs.mkdirSync(path.join(app, ".candor"), { recursive: true });
+  fs.writeFileSync(path.join(app, ".candor", "config"), "deps deps/billing.json\n");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), app], { encoding: "utf8" });
+  const rep4 = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  const buy4 = entry(rep4, "src.checkout.buy");
+  check("config `deps` with a RELATIVE path anchors to the config's repo (cross-package effects inherit)",
+        buy4?.inferred.includes("Net") && buy4?.hosts?.includes("api.stripe.com"), JSON.stringify(buy4));
 }
 
 // ── 12. entry points + reachable + unknownWhy + allow-js + import-alias edges ────────────────────
