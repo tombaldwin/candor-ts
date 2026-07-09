@@ -40,6 +40,7 @@
     "node": ">=20"
   },
   "files": [
+    "Cases.ts",
     "scan.mjs",
     "query.mjs",
     "policy.mjs",
