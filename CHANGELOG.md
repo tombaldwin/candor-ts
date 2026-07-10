@@ -6,6 +6,24 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [Unreleased]
+
+### The LSP whatif code action (read-only surface — no report/verdict change)
+
+`candor-lsp` now offers, inside any function the report knows, one code action per boundary effect
+the function does not already perform — `candor: what if <fn> performed Net?`. Selecting it runs
+the `candor.whatif` workspace command server-side (the same query-core whatif as
+`candor-ts-query whatif` and MCP `candor_whatif` — single-sourced) and answers with a
+`window/showMessage` one-liner (the deny rule that WOULD fire + the caller blast radius; "no
+policy discovered — blast radius only" when the repo has none) plus a transient
+Information-severity diagnostic at the function carrying the detail (rule + the first 10 callers),
+cleared on the file's next didOpen/didSave or replaced by re-running the action. Plain LSP —
+helix/neovim/VS Code/JetBrains-via-LSP4IJ need no client-side code; the umbrella VS Code/JetBrains
+bundles pick it up on their next rebuild against this npm cut (same query-core imports — no
+esbuild bundle change needed). Also pinned: large-repo lens latency on a synthetic 5k-fn fixture
+(codeLens ≈ 63ms, codeAction ≈ 5ms — within budget; no caching added, the per-request re-read
+freshness contract is unchanged).
+
 ## [0.8.8] — 2026-07-10
 
 ### ⚠ The AS-EFF-005 baseline guard — `CANDOR_BASELINE` / config `baseline` now gate (SPEC §7 item 5)

@@ -13,6 +13,18 @@
  *     red in CI. The engine's --gate-json is the authoritative form (same caveat as MCP candor_gate).
  *   • Hover: effect PROVENANCE — for each inherited effect, the `path` hop chain to the function that
  *     performs it directly ("Net via mid → leaf (source)"), plus unknownWhy when the fn discloses opacity.
+ *   • CodeAction (pre-edit whatif): inside a function the report knows, one action per BOUNDARY effect
+ *     the fn does NOT already perform — `candor: what if <fn> performed Net?`. Each resolves to the
+ *     `candor.whatif` workspace/executeCommand, answered server-side with the SAME query-core whatif the
+ *     CLI and MCP use (single-source): a window/showMessage one-liner (the policy rule that WOULD fire +
+ *     the blast radius; no policy discovered → radius only, said so) and a transient Information
+ *     diagnostic at the fn's line carrying the detail (rule + first callers), cleared on the next
+ *     didOpen/didSave/didChange of that file or replaced by re-running the action. Plain LSP — works in
+ *     helix/neovim/VS Code/JetBrains-via-LSP4IJ without client-side code.
+ *
+ *   Perf (measured on the 5k-fn synthetic fixture in test-lsp.mjs — 50 files × 100 fns, one 5k-deep
+ *   call chain, worst-case doc): codeLens ≈ 63ms, codeAction ≈ 5ms per request, INCLUDING the
+ *   per-request report re-read. No caching layer — the freshness contract stays "re-read per request".
  *
  * The server is a pure CONSUMER of the spec report envelope + callgraph sidecar (any engine — JVM /
  * Rust / TS / Swift / agents; the same read layer as candor-mcp), and it never scans (the analyzer
@@ -33,7 +45,7 @@ import { createRequire } from "node:module";
 import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
 import * as Q from "./query-core.mjs";
-import { discoverConfigPolicy, evaluatePolicy, parsePolicy } from "./policy.mjs";
+import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches } from "./policy.mjs";
 
 // Version: from the sibling package.json when running inside the npm package; a single-file BUNDLE of
 // this server (the IDE-plugin embedding) has no sibling package.json — fall back rather than crash.
@@ -110,17 +122,22 @@ function codeLenses(docPath) {
   });
 }
 
-// ---- Hover: effect provenance at the cursor ----------------------------------------------------------
-// The entry ENCLOSING the hovered line: the report pins each fn at its declaration line, so the match is
-// the greatest entry line ≤ the cursor (functions are sequential in a file — a sound approximation that
-// needs no parser). For each inferred effect: direct → "performed here"; inherited → the §3.1 `path`
-// chain to the direct source. unknownWhy rides along when the fn introduces opacity.
-function hoverAt(docPath, line) {
-  if (!hasReport(reportPrefix)) return null;
-  const fns = Q.loadReport(reportPrefix);          // ONE load per request (entriesInDoc reuses it)
+// The entry ENCLOSING a line: the report pins each fn at its declaration line, so the match is the
+// greatest entry line ≤ the cursor (functions are sequential in a file — a sound approximation that
+// needs no parser). Shared by hover and codeAction — one rule for "which function is the cursor in".
+function enclosingEntry(docPath, line, fns = null) {
   const found = entriesInDoc(docPath, fns);
   if (!found || !found.length) return null;
-  const at = found.filter((x) => x.line <= line).sort((a, b) => b.line - a.line)[0];
+  return found.filter((x) => x.line <= line).sort((a, b) => b.line - a.line)[0] ?? null;
+}
+
+// ---- Hover: effect provenance at the cursor ----------------------------------------------------------
+// For each inferred effect: direct → "performed here"; inherited → the §3.1 `path` chain to the direct
+// source. unknownWhy rides along when the fn introduces opacity.
+function hoverAt(docPath, line) {
+  if (!hasReport(reportPrefix)) return null;
+  const fns = Q.loadReport(reportPrefix);          // ONE load per request (enclosingEntry reuses it)
+  const at = enclosingEntry(docPath, line, fns);
   if (!at) return null;
   const { entry } = at;
   const cg = Q.loadCallgraph(reportPrefix);
@@ -188,12 +205,90 @@ function publishDiagnostics(uri) {
   let docPath;
   try { docPath = fileURLToPath(uri); } catch { return; }
   try {
-    send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri, diagnostics: diagnosticsFor(docPath) } });
+    const diags = diagnosticsFor(docPath).concat(transient.get(uri) ?? []);
+    send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri, diagnostics: diags } });
   } catch (e) {
     logMessage(`candor-lsp: diagnostics failed for ${uri}: ${e.message}`);
   }
 }
 function logMessage(message) { send({ jsonrpc: "2.0", method: "window/logMessage", params: { type: 2, message } }); }
+function showMessage(type, message) { send({ jsonrpc: "2.0", method: "window/showMessage", params: { type, message } }); }
+
+// ---- CodeAction: the pre-edit whatif (spec §3.1 whatif, rendered as an editor action) -----------------
+// From a position inside a function the report knows, offer "what if <fn> performed <E>?" for each
+// BOUNDARY effect (Q.CONTAINED — ambient effects gate nothing) the fn does not already carry. The action
+// carries a plain `command` (no client-side resolve, no edit) so it works in any LSP client verbatim.
+const WHATIF_COMMAND = "candor.whatif";
+function codeActions(docPath, uri, range) {
+  const at = enclosingEntry(docPath, range?.start?.line ?? 0);
+  if (!at) return [];                                  // a fn the report doesn't know → no actions, never an error
+  const have = new Set(at.entry.inferred || []);
+  const out = [];
+  for (const eff of Q.CONTAINED) {                     // ≤6 boundary effects — the natural cap
+    if (have.has(eff)) continue;
+    out.push({
+      title: `candor: what if ${at.entry.fn} performed ${eff}?`,
+      command: {
+        title: `candor: what if ${at.entry.fn} performed ${eff}?`,
+        command: WHATIF_COMMAND,
+        arguments: [{ fn: at.entry.fn, effect: eff, uri, line: at.line }],
+      },
+    });
+  }
+  return out;
+}
+
+// Transient whatif diagnostics (Information severity, appended to the gate diagnostics on publish):
+// uri -> Diagnostic[]. Cleared on the next didOpen/didSave/didChange of that file; re-running the
+// action replaces the previous answer (one live whatif overlay per file, not an accumulating pile).
+const transient = new Map();
+function clearTransient(uri) {
+  if (transient.delete(uri)) publishDiagnostics(uri);   // republish without the overlay
+}
+
+// The candor.whatif command: the SAME query-core whatif the CLI (`query.mjs whatif`) and MCP
+// (`candor_whatif`) run — blast radius over the callgraph + the deny rules that WOULD fire, against the
+// live policy (CANDOR_POLICY / .candor/config discovery, same source as the diagnostics). Everything is
+// re-read per call (the freshness contract). Malformed args → logMessage + null, never a throw.
+function runWhatif(a) {
+  if (!a || typeof a !== "object" || typeof a.fn !== "string" || typeof a.effect !== "string") {
+    logMessage(`candor-lsp: ${WHATIF_COMMAND} called with malformed arguments (expected [{ fn, effect, uri?, line? }]) — ignored`);
+    return null;
+  }
+  if (!hasReport(reportPrefix)) {
+    showMessage(2, "candor: no report found — scan first (candor-ts <dir> --out .candor/report)");
+    return null;
+  }
+  const policyText = activePolicy();
+  const r = Q.whatif(Q.loadCallgraph(reportPrefix), a.fn, a.effect,
+                     policyText === null ? null : parsePolicy(policyText), scopeMatches);
+  if (r === null) {
+    showMessage(2, `candor: no function matching \`${a.fn}\` in the call graph — the report may be stale`);
+    return null;
+  }
+  const callers = r.affected.filter((f) => !r.of.includes(f));   // affected minus the target(s) themselves
+  const rules = [...new Set(r.violations.map((v) => v.rule))];
+  const verdict = policyText === null
+    ? `candor: no policy discovered — blast radius only: ${callers.length} caller(s) would inherit ${a.effect}`
+    : rules.length
+      ? `✗ ${rules[0]} would fire — ${callers.length} caller(s) inherit ${a.effect}`
+      : `✓ no policy rule fires — ${callers.length} caller(s) would inherit ${a.effect}`;
+  showMessage(rules.length ? 2 : 3, verdict);                    // warning when a rule fires, info otherwise
+  if (typeof a.uri === "string" && Number.isInteger(a.line)) {   // the detail, pinned at the fn's line
+    const head = callers.slice(0, 10);
+    const lines = [`what if ${r.of.join(", ")} performed ${a.effect}? ${verdict}`];
+    if (rules.length > 1) lines.push(`rules: ${rules.join("; ")}`);
+    lines.push(head.length
+      ? `callers: ${head.join(", ")}${callers.length > head.length ? ` +${callers.length - head.length} more` : ""}`
+      : "no callers — the blast radius is the function itself");
+    transient.set(a.uri, [{
+      range: { start: { line: a.line, character: 0 }, end: { line: a.line, character: 200 } },
+      severity: 3, source: "candor", code: "whatif", message: lines.join("\n"),
+    }]);
+    publishDiagnostics(a.uri);
+  }
+  return r;   // the raw whatif result rides back as the executeCommand result (a thick client can render it)
+}
 
 // ---- the LSP method surface ---------------------------------------------------------------------------
 function handle(msg) {
@@ -211,14 +306,19 @@ function handle(msg) {
         textDocumentSync: { openClose: true, save: true, change: 0 },  // report-backed: buffer edits don't move the map
         codeLensProvider: { resolveProvider: false },
         hoverProvider: true,
+        codeActionProvider: { resolveProvider: false },                // actions carry their command inline
+        executeCommandProvider: { commands: [WHATIF_COMMAND] },
       },
       serverInfo: { name: "candor-lsp", version: VERSION },
     });
   }
   if (method === "initialized" || method === "$/cancelRequest" || method === "$/setTrace") return;
-  if (method === "textDocument/didOpen") return publishDiagnostics(params.textDocument.uri);
-  if (method === "textDocument/didSave") return publishDiagnostics(params.textDocument.uri);
-  if (method === "textDocument/didChange") return;                    // see textDocumentSync: report-backed
+  // didOpen/didSave/didChange drop the file's transient whatif overlay — a fresh look at the file (or an
+  // edit) invalidates a hypothetical answered against the previous state. didChange is not negotiated
+  // (change: 0) but is handled defensively for clients that send it anyway.
+  if (method === "textDocument/didOpen") { transient.delete(params.textDocument.uri); return publishDiagnostics(params.textDocument.uri); }
+  if (method === "textDocument/didSave") { transient.delete(params.textDocument.uri); return publishDiagnostics(params.textDocument.uri); }
+  if (method === "textDocument/didChange") return clearTransient(params.textDocument.uri);
   if (method === "textDocument/didClose")
     return send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: params.textDocument.uri, diagnostics: [] } });
   if (method === "textDocument/hover") {
@@ -228,6 +328,18 @@ function handle(msg) {
   if (method === "textDocument/codeLens") {
     try { return result(id, codeLenses(fileURLToPath(params.textDocument.uri))); }
     catch { return result(id, []); }   // a non-file URI / unreadable report → no lenses, never a crash
+  }
+  if (method === "textDocument/codeAction") {
+    try { return result(id, codeActions(fileURLToPath(params.textDocument.uri), params.textDocument.uri, params.range)); }
+    catch { return result(id, []); }   // unknown fn / non-file URI / unreadable report → no actions, never an error
+  }
+  if (method === "workspace/executeCommand") {
+    if (params?.command !== WHATIF_COMMAND) {
+      logMessage(`candor-lsp: unknown command \`${params?.command}\` — this server provides only ${WHATIF_COMMAND}`);
+      return result(id, null);
+    }
+    try { return result(id, runWhatif(params?.arguments?.[0])); }
+    catch (e) { logMessage(`candor-lsp: ${WHATIF_COMMAND} failed: ${e.message}`); return result(id, null); }
   }
   if (method === "shutdown") return result(id, null);
   if (method === "exit") process.exit(0);

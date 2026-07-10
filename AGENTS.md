@@ -107,7 +107,11 @@ And as an MCP server, so an agent pulls these as tools instead of shelling out:
 `CANDOR_REPORT=$P npx -y candor-ts-mcp` (tools `candor_impact`/`candor_reachable`/`candor_where`/…,
 plus `candor_gate`/`candor_whatif` — a given-but-unreadable `policy` is a loud tool error, never a
 clean verdict). `npx -y candor-ts-watch <dir>` keeps the report fresh as you edit (and reports the
-edit-delta); `candor-lsp` serves the same report as CodeLens/hover/diagnostics in any LSP editor.
+edit-delta); `candor-lsp` serves the same report as CodeLens/hover/diagnostics in any LSP editor,
+plus the pre-edit whatif as a code action (`candor: what if <fn> performed <E>?` → the
+`candor.whatif` command: the query-core whatif's verdict + blast radius as a showMessage and a
+transient diagnostic, cleared on the file's next open/save — plain LSP, so helix/neovim/VS
+Code/JetBrains-via-LSP4IJ all get it without client code).
 CAVEAT — the MCP/LSP gate verdicts are computed FROM THE REPORT: the engine's own `--policy` /
 `--gate-json` run additionally fails an allow rule whose literal surface is incomplete (a masked
 endpoint — internal state, not a report field), so treat a report-side green as advisory and the

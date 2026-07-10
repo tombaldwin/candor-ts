@@ -5,7 +5,12 @@
  *   • didOpen publishes the gate verdict as diagnostics (the .candor/config-discovered policy),
  *     at the violating function's line, severity error, code AS-EFF-006;
  *   • codeLens renders each effectful fn's `⚡ effects · blast radius N` at its loc line;
- *   • didClose clears diagnostics; unknown methods error; shutdown answers.
+ *   • codeAction offers `candor: what if <fn> performed <E>?` per boundary effect the fn lacks, and
+ *     the candor.whatif executeCommand answers with showMessage + a transient Information diagnostic
+ *     (cleared on didSave), for: a rule-firing effect, a clean effect, a no-policy repo (radius only);
+ *   • didClose clears diagnostics; unknown methods error; shutdown answers; malformed whatif args and
+ *     unknown commands are logged, never a crash;
+ *   • a 5k-fn synthetic fixture pins codeLens/codeAction latency (the large-repo perf gate).
  * Hermetic: scans a throwaway project with the local scan.mjs, then drives lsp.mjs over LSP stdio
  * (Content-Length framing — deliberately NOT the MCP newline framing).
  */
@@ -32,7 +37,9 @@ export function handler(): void { mid(); }
 `);
 fs.mkdirSync(path.join(W, ".candor"));
 execFileSync("node", [path.join(HERE, "scan.mjs"), path.join(W, "src"), "--out", path.join(W, ".candor", "report")], { stdio: "ignore" });
-fs.writeFileSync(path.join(W, "arch.policy"), "deny Net\n");
+// `deny Db app` is INERT against the real report (nothing performs Db) — it exists so the whatif
+// code-action has a rule that fires only HYPOTHETICALLY, without disturbing the diagnostics pins.
+fs.writeFileSync(path.join(W, "arch.policy"), "deny Net\ndeny Db app\n");
 fs.writeFileSync(path.join(W, ".candor", "config"), "policy arch.policy\n");
 const DOC = pathToFileURL(path.join(W, "src", "app.ts")).href;
 
@@ -47,12 +54,13 @@ function lspSession(messages, expectedInbound, extraEnv = {}) {
     const srv = spawn("node", [path.join(HERE, "lsp.mjs")], { env: { ...process.env, ...extraEnv } });
     let buf = Buffer.alloc(0);
     const inbound = [];
+    const times = [];    // arrival timestamp per inbound message — the perf fixture reads reply gaps
     let finishing = false;
     const finish = () => {
       if (finishing) return;
       finishing = true;
       const deadline = setTimeout(() => srv.kill("SIGKILL"), 15000);
-      srv.on("exit", (code) => { clearTimeout(deadline); resolve({ inbound, exitCode: code }); });
+      srv.on("exit", (code) => { clearTimeout(deadline); resolve({ inbound, times, exitCode: code }); });
       srv.stdin.end();
     };
     srv.stdout.on("data", (chunk) => {
@@ -64,6 +72,7 @@ function lspSession(messages, expectedInbound, extraEnv = {}) {
         const len = m ? parseInt(m[1], 10) : 0;
         if (buf.length < he + 4 + len) break;
         inbound.push(JSON.parse(buf.slice(he + 4, he + 4 + len).toString()));
+        times.push(Date.now());
         buf = buf.slice(he + 4 + len);
         if (inbound.length >= expectedInbound) { finish(); return; }
       }
@@ -94,6 +103,10 @@ const notes = replies.filter((r) => r.method === "textDocument/publishDiagnostic
 const init = byId(1)?.result;
 ok("initialize: codeLens capability + server identity",
    init?.capabilities?.codeLensProvider && init?.serverInfo?.name === "candor-lsp", JSON.stringify(init)?.slice(0, 120));
+ok("initialize: codeAction + executeCommand capabilities (the whatif surface, advertised)",
+   init?.capabilities?.codeActionProvider
+   && init?.capabilities?.executeCommandProvider?.commands?.includes("candor.whatif"),
+   JSON.stringify(init?.capabilities)?.slice(0, 200));
 
 const diag = notes[0]?.params;
 ok("didOpen publishes the config-discovered gate verdict as diagnostics",
@@ -192,6 +205,152 @@ const { inbound: rpReplies } = await lspSession([
 const rpDiag = rpReplies.find((r) => r.method === "textDocument/publishDiagnostics");
 ok("initialize with rootPath (non-URI) resolves the workspace report + publishes the gate diagnostics",
    rpDiag?.params?.diagnostics?.some((x) => x.code === "AS-EFF-006"), JSON.stringify(rpDiag?.params)?.slice(0, 160));
+
+// ── the pre-edit whatif code-action: offer → execute → transient diagnostic → didSave clears ────────
+// leaf() already performs Net, so the offered actions are the OTHER boundary effects; `deny Db app`
+// (inert against the real report) is the rule that fires only hypothetically. The command surfaces its
+// answer as showMessage + a transient Information diagnostic, replaced on re-run, cleared on didSave.
+const RANGE1 = { start: { line: 1, character: 0 }, end: { line: 1, character: 0 } };   // inside leaf()
+const waArgs = (fn, effect) => [{ fn, effect, uri: DOC, line: 1 }];
+const { inbound: waReplies, exitCode: waExit } = await lspSession([
+  { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(W).href } },
+  { jsonrpc: "2.0", method: "initialized", params: {} },
+  { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: DOC, languageId: "typescript", version: 1, text: "" } } },
+  { jsonrpc: "2.0", id: 10, method: "textDocument/codeAction", params: { textDocument: { uri: DOC }, range: RANGE1, context: { diagnostics: [] } } },
+  { jsonrpc: "2.0", id: 11, method: "textDocument/codeAction", params: { textDocument: { uri: DOC }, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, context: { diagnostics: [] } } },
+  { jsonrpc: "2.0", id: 12, method: "workspace/executeCommand", params: { command: "candor.whatif", arguments: waArgs("app.leaf", "Db") } },
+  { jsonrpc: "2.0", method: "textDocument/didSave", params: { textDocument: { uri: DOC } } },
+  { jsonrpc: "2.0", id: 13, method: "workspace/executeCommand", params: { command: "candor.whatif", arguments: waArgs("app.leaf", "Exec") } },
+  { jsonrpc: "2.0", id: 14, method: "workspace/executeCommand", params: { command: "candor.whatif", arguments: waArgs("app.nosuchfn", "Db") } },
+  { jsonrpc: "2.0", id: 15, method: "workspace/executeCommand", params: { command: "candor.whatif", arguments: ["garbage"] } },
+  { jsonrpc: "2.0", id: 16, method: "workspace/executeCommand", params: { command: "candor.nope", arguments: [] } },
+  { jsonrpc: "2.0", id: 17, method: "shutdown" },
+], 18); // init + didOpen diag + 2 codeActions + (msg,diag,result) + didSave diag + (msg,diag,result) + (msg,result) + 2×(log,result) + shutdown
+const waById = (id) => waReplies.find((r) => r.id === id);
+const waSeq = waReplies.map((r) => r.method ?? `id:${r.id}`);
+
+const actions = waById(10)?.result ?? [];
+ok("codeAction inside leaf(): one whatif action per boundary effect leaf lacks (Net excluded)",
+   actions.length === 5 && !actions.some((a) => a.title.includes("performed Net"))
+   && ["Db", "Exec", "Fs", "Ipc", "Clipboard"].every((e) => actions.some((a) => a.title === `candor: what if app.leaf performed ${e}?`)),
+   JSON.stringify(actions.map((a) => a.title)));
+ok("each action carries the candor.whatif command with {fn, effect, uri, line} arguments",
+   actions.every((a) => a.command?.command === "candor.whatif"
+     && a.command.arguments?.[0]?.fn === "app.leaf" && a.command.arguments[0].uri === DOC
+     && a.command.arguments[0].line === 1),
+   JSON.stringify(actions[0]?.command));
+ok("codeAction outside any known fn (line 0) → no actions, never an error",
+   Array.isArray(waById(11)?.result) && waById(11).result.length === 0, JSON.stringify(waById(11)));
+
+// exec 12: the hypothetical Db fires `deny Db app` — showMessage one-liner + transient detail diagnostic.
+const fireIdx = waSeq.indexOf("id:12");
+const fireMsg = waReplies.slice(0, fireIdx).reverse().find((r) => r.method === "window/showMessage");
+ok("whatif(leaf, Db): showMessage names the rule that WOULD fire + the caller radius",
+   fireMsg?.params?.type === 2 && /✗ deny Db app would fire — 2 caller\(s\) inherit Db/.test(fireMsg?.params?.message ?? ""),
+   JSON.stringify(fireMsg?.params));
+const fireDiagNote = waReplies.slice(0, fireIdx).reverse().find((r) => r.method === "textDocument/publishDiagnostics");
+const fireDiag = fireDiagNote?.params?.diagnostics?.find((x) => x.code === "whatif");
+ok("…and a transient Information diagnostic at leaf's line carries the detail (rule + callers)",
+   fireDiag && fireDiag.severity === 3 && fireDiag.source === "candor" && fireDiag.range.start.line === 1
+   && /callers: app\.handler, app\.mid/.test(fireDiag.message), JSON.stringify(fireDiag)?.slice(0, 300));
+ok("…alongside the standing gate diagnostics, not replacing them",
+   fireDiagNote?.params?.diagnostics?.some((x) => x.code === "AS-EFF-006"),
+   JSON.stringify(fireDiagNote?.params?.diagnostics?.map((x) => x.code)));
+const fireRes = waById(12)?.result;
+ok("…and the executeCommand result is the raw whatif shape (ok:false, violations, affected)",
+   fireRes?.ok === false && fireRes.effect === "Db" && fireRes.affected?.length === 3
+   && fireRes.violations?.every((v) => v.rule === "deny Db app"), JSON.stringify(fireRes)?.slice(0, 200));
+
+// didSave clears the transient overlay (the gate diagnostics republish without the whatif code).
+const saveDiag = waReplies.slice(fireIdx + 1).find((r) => r.method === "textDocument/publishDiagnostics");
+ok("didSave clears the transient whatif diagnostic (gate diagnostics remain)",
+   saveDiag && !saveDiag.params.diagnostics.some((x) => x.code === "whatif")
+   && saveDiag.params.diagnostics.some((x) => x.code === "AS-EFF-006"),
+   JSON.stringify(saveDiag?.params?.diagnostics?.map((x) => x.code)));
+
+// exec 13: a clean hypothetical — no rule fires, the radius still reported (and the overlay returns).
+const cleanIdx = waSeq.indexOf("id:13");
+const cleanMsg = waReplies.slice(fireIdx + 1, cleanIdx).reverse().find((r) => r.method === "window/showMessage");
+ok("whatif(leaf, Exec): no rule fires — info message still reports the radius",
+   cleanMsg?.params?.type === 3 && /✓ no policy rule fires — 2 caller\(s\) would inherit Exec/.test(cleanMsg?.params?.message ?? ""),
+   JSON.stringify(cleanMsg?.params));
+ok("…with ok:true and empty violations in the result", waById(13)?.result?.ok === true && waById(13).result.violations.length === 0);
+
+// exec 14–16: the no-crash discipline — stale fn, malformed args, unknown command.
+const missIdx = waSeq.indexOf("id:14");
+const missMsg = waReplies.slice(cleanIdx + 1, missIdx).reverse().find((r) => r.method === "window/showMessage");
+ok("whatif on a fn the callgraph doesn't know: a showMessage miss (stale-report hint), result null",
+   /no function matching `app\.nosuchfn`/.test(missMsg?.params?.message ?? "") && waById(14)?.result === null,
+   JSON.stringify(missMsg?.params));
+ok("malformed candor.whatif arguments: logged, result null, never a throw",
+   waReplies.some((r) => r.method === "window/logMessage" && /malformed arguments/.test(r.params?.message ?? ""))
+   && waById(15)?.result === null, JSON.stringify(waById(15)));
+ok("an unknown workspace command: logged, result null",
+   waReplies.some((r) => r.method === "window/logMessage" && /unknown command `candor\.nope`/.test(r.params?.message ?? ""))
+   && waById(16)?.result === null, JSON.stringify(waById(16)));
+ok("the whatif session still shuts down cleanly (exit 0 on stdin end)", waById(17)?.result === null && waExit === 0, `exitCode=${waExit}`);
+
+// ── a no-policy repo: the whatif still answers — blast radius only, and SAYS so ────────────────────
+const W2 = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-nopol-"));
+fs.mkdirSync(path.join(W2, "src"));
+fs.copyFileSync(path.join(W, "src", "app.ts"), path.join(W2, "src", "app.ts"));
+fs.mkdirSync(path.join(W2, ".candor"));
+execFileSync("node", [path.join(HERE, "scan.mjs"), path.join(W2, "src"), "--out", path.join(W2, ".candor", "report")], { stdio: "ignore" });
+const DOC2 = pathToFileURL(path.join(W2, "src", "app.ts")).href;
+const { inbound: npReplies } = await lspSession([
+  { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(W2).href } },
+  { jsonrpc: "2.0", method: "initialized", params: {} },
+  { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: DOC2, languageId: "typescript", version: 1, text: "" } } },
+  { jsonrpc: "2.0", id: 2, method: "workspace/executeCommand", params: { command: "candor.whatif", arguments: [{ fn: "app.leaf", effect: "Db", uri: DOC2, line: 1 }] } },
+], 5); // init + didOpen diag + showMessage + transient diag + result
+const npMsg = npReplies.find((r) => r.method === "window/showMessage");
+ok("no policy discovered: the whatif says so and still reports the blast radius",
+   /no policy discovered — blast radius only: 2 caller\(s\) would inherit Db/.test(npMsg?.params?.message ?? ""),
+   JSON.stringify(npMsg?.params));
+ok("…result: ok:true, no violations, the affected set intact",
+   npReplies.find((r) => r.id === 2)?.result?.ok === true && npReplies.find((r) => r.id === 2).result.affected.length === 3,
+   JSON.stringify(npReplies.find((r) => r.id === 2)?.result)?.slice(0, 160));
+fs.rmSync(W2, { recursive: true, force: true });
+
+// ── large-repo latency (the P2 perf slice): 5k fns, one 5k-deep call chain, 50 files ────────────────
+// A synthetic report+callgraph written directly (no scan — the fixture pins the CONSUMER's cost). The
+// opened doc holds the 100 fns with the DEEPEST caller radii (worst-case BFS per lens). The pin is a
+// loose 1000ms — vs ~200ms budget and single-digit-ms measured (see below) — so it catches a complexity
+// regression (an O(n²) inversion-per-lens relapse) without flaking on a slow CI box.
+const PERF = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-perf-"));
+fs.mkdirSync(path.join(PERF, ".candor"));
+{
+  const functions = [], cg = {};
+  const nameOf = (i) => `f${Math.floor(i / 100)}.fn${i}`;
+  for (let i = 0; i < 5000; i++) {
+    functions.push({ fn: nameOf(i), inferred: ["Net"], direct: i === 0 ? ["Net"] : [], calls: [],
+                     loc: `src/f${Math.floor(i / 100)}.ts:${(i % 100) + 1}` });
+    cg[nameOf(i)] = i > 0 ? [nameOf(i - 1)] : [];      // one 5000-deep chain: fn_i → fn_{i-1}
+  }
+  fs.writeFileSync(path.join(PERF, ".candor", "report.json"), JSON.stringify({ candor: { version: "perf-fixture", spec: "0.8" }, functions }));
+  fs.writeFileSync(path.join(PERF, ".candor", "report.callgraph.json"), JSON.stringify(cg));
+}
+const PDOC = pathToFileURL(path.join(PERF, "src", "f0.ts")).href;   // fns 0..99 — the deep end of the chain
+const { inbound: pfReplies, times: pfTimes } = await lspSession([
+  { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(PERF).href } },
+  { jsonrpc: "2.0", method: "initialized", params: {} },
+  { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: PDOC, languageId: "typescript", version: 1, text: "" } } },
+  { jsonrpc: "2.0", id: 2, method: "textDocument/codeLens", params: { textDocument: { uri: PDOC } } },
+  { jsonrpc: "2.0", id: 3, method: "textDocument/codeAction", params: { textDocument: { uri: PDOC }, range: RANGE1, context: { diagnostics: [] } } },
+  { jsonrpc: "2.0", id: 4, method: "shutdown" },
+], 5); // init + didOpen diag + lens + action + shutdown
+const pfSeq = pfReplies.map((r) => r.method ?? `id:${r.id}`);
+const lensMs = pfTimes[pfSeq.indexOf("id:2")] - pfTimes[pfSeq.indexOf("id:2") - 1];
+const actionMs = pfTimes[pfSeq.indexOf("id:3")] - pfTimes[pfSeq.indexOf("id:3") - 1];
+console.log(`  perf 5k-fn fixture: codeLens ${lensMs}ms, codeAction ${actionMs}ms (budget ~200ms; pin 1000ms)`);
+ok("5k-fn fixture: codeLens answers all 100 doc fns with blast radii",
+   (pfReplies.find((r) => r.id === 2)?.result ?? []).length === 100
+   && /blast radius 4999/.test(pfReplies.find((r) => r.id === 2).result.find((l) => l.range.start.line === 0)?.command?.title ?? ""),
+   JSON.stringify(pfReplies.find((r) => r.id === 2)?.result?.[0]));
+ok("5k-fn fixture: codeLens latency within the large-repo pin", lensMs < 1000, `${lensMs}ms`);
+ok("5k-fn fixture: codeAction latency within the large-repo pin",
+   actionMs < 1000 && (pfReplies.find((r) => r.id === 3)?.result ?? []).length === 5, `${actionMs}ms`);
+fs.rmSync(PERF, { recursive: true, force: true });
 
 fs.rmSync(W, { recursive: true, force: true });
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);

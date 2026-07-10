@@ -123,6 +123,14 @@ engine's report — and never scans. (Both report-computed gates are advisory: t
 `--gate-json` run additionally fails masked/incomplete literal surfaces and is the authoritative
 CI form.)
 
+It also answers the pre-edit question in place: inside a function, a code action per boundary
+effect the fn doesn't yet perform — `candor: what if handler performed Net?` — runs the same
+whatif as `candor-ts-query whatif`/`candor_whatif` (blast radius + the policy rule that WOULD
+fire) and shows the verdict as a message plus a transient diagnostic at the function (cleared on
+the file's next open/save; with no policy discovered it says so and reports the radius alone).
+Plain `textDocument/codeAction` + `workspace/executeCommand` (`candor.whatif`) — it works
+unmodified in helix, neovim, VS Code, and JetBrains via LSP4IJ.
+
 **The live loop** — `candor-ts-watch` keeps the report fresh as the agent edits, so the answers are
 about the *current* code, not a stale snapshot:
 
