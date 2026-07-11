@@ -535,12 +535,30 @@ function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMa
       }
     }
   }
+  // higher hoist options: allowed-layer transitive callers of the minimal frontier that also route the
+  // effect — hoisting higher keeps the frontier pure too, at the cost of threading through more signatures
+  // (FIX-SPEC: the trade-off, disclosed not hidden).
+  const hoistHigher = new Set();
+  const hseen = new Set(hoistTo);
+  const hq = [...hoistTo];
+  while (hq.length) {
+    const cur = hq.shift();
+    for (const caller of rev.get(cur) ?? []) {
+      const ce = byName.get(caller);
+      if (ce && (ce.inferred ?? []).includes(eff) && deniedLayer(caller, eff, policyParsed, scopeMatches) === null && !hseen.has(caller)) {
+        hseen.add(caller);
+        hoistHigher.add(caller);
+        hq.push(caller);
+      }
+    }
+  }
   return {
     fn: start, effect: eff, layer,
     cleanHoist: hoistTo.size > 0,
     site: [...sites].sort(),
     deniedSpan: [...deniedSpan].sort(),
     hoistTo: [...hoistTo].sort(),
+    hoistHigher: [...hoistHigher].sort(),
     policyAlternative: layer ? `allow ${eff} ${layer}` : `allow ${eff}`,
   };
 }

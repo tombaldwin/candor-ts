@@ -352,6 +352,9 @@ function runFix(a) {
     if (r.cleanHoist) {
       lines.push(`hoist ${a.effect} to: ${r.hoistTo.join(", ")}`);
       lines.push(`then pure (thread the value): ${r.deniedSpan.join(", ")}`);
+      if (r.hoistHigher?.length) {
+        lines.push(`or hoist higher (up to ${r.hoistHigher.slice(0, 4).join(", ")}): keeps the frontier pure too, threads through more signatures`);
+      }
     } else {
       lines.push("no clean hoist — introduce a port (inject the effect from an allowed layer), or relax the boundary");
     }

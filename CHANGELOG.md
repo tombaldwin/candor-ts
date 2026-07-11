@@ -6,6 +6,16 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.8.11] — 2026-07-11
+
+### `fix`/`fix-gate` + the `candor.fix` code action: the higher-hoist trade-off
+
+Each remedy gains `hoistHigher` beside `hoistTo`: the allowed-layer transitive callers of the minimal
+frontier that also route the effect — every place you could originate it *further up*. The `candor.fix` LSP
+message surfaces it ("or hoist higher … keeps the frontier pure too, threads through more signatures").
+`hoistTo` (the minimal fix) is unchanged. Byte-for-byte identical to candor-query/java/swift, pinned by
+conformance PART 12b. Read-only, additive JSON field.
+
 ## [0.8.10] — 2026-07-11
 
 ### ✨ `fix` / `fix-gate` + the `candor.fix` code action + the `candor_fix` MCP tool (FIX-SPEC P3)

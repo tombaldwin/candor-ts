@@ -205,6 +205,14 @@ test("fix: hoists Net to the api caller, site is the infra leaf, span is the two
   assert.deepEqual(r.hoistTo, ["api.get"]);
   assert.deepEqual(r.deniedSpan, ["domain.bulk", "domain.price"]);
   assert.equal(r.policyAlternative, "allow Net domain");
+  assert.deepEqual(r.hoistHigher, [], "api.get is the top — no higher hoist option");
+});
+test("fix: surfaces the higher-hoist trade-off when an allowed caller sits above the frontier", () => {
+  const cg = { "main.run": ["api.get"], ...ofCg };
+  const fns = [{ fn: "main.run", inferred: ["Net"], direct: [], calls: ["api.get"] }, ...ofFns];
+  const r = fix(cg, fns, "domain.price", "Net", parsePolicy("deny Net domain"), scopeMatches);
+  assert.deepEqual(r.hoistTo, ["api.get"], "the MINIMAL frontier is unchanged");
+  assert.deepEqual(r.hoistHigher, ["main.run"], "main.run is the higher hoist option");
 });
 test("fix: a fn that performs the effect but isn't forbidden there → crossing:false", () => {
   const r = fix(ofCg, ofFns, "api.get", "Net", parsePolicy("deny Net domain"), scopeMatches);
