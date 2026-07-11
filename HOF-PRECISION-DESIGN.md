@@ -100,3 +100,75 @@ weighed against that larger lever.
 - **Recommendation:** worthwhile as a *correctness-of-precision* polish, but **low ROI in isolation** (3/82 on
   zx). Best done **together with, or after, the external-lib-method thread** (the 54-bucket) — that pair is
   what actually lifts the `unverified` signal on real TS code. If picking one, do the external-lib lever first.
+
+---
+
+# The external-lib lever (the bigger, 54-bucket)
+
+## The finding (recon evidence)
+
+candor-ts discloses a call into an **uncovered external package** in **two different ways depending on the
+call's syntactic shape** — the inconsistency is the defect:
+
+| call shape | example | disclosure | evidence |
+|---|---|---|---|
+| **named-import call** | `import {grey} from 'chalk'; grey(x)` | **κ-invisible** (named in the κ ledger, reads pure-disclosed) | `extlib-recon/mylib`: `writeLog`(Fs)+`grey` both read pure, stderr `κ doesn't know 1 package: mylib` |
+| **member access on a namespace import** | `import chalk from 'chalk'; chalk.grey(x)` | **per-call `callback:chalk.grey` Unknown** | zx: 54 of 82 Unknowns are this shape |
+
+Same underlying fact — "chalk is an uncovered package" — surfaced two ways. candor's intended model (the
+`INVISIBLE (not Unknown)` κ language + the *disclosed syntactic floor* profile) is that an **uncovered-package
+call is κ-invisible**, while **Unknown is reserved for unresolvable in-*code* dispatch** (fn values, dynamic
+member on an unknown-typed receiver). By that model `chalk.grey` is *misclassified*: it's an uncovered-package
+call wearing an in-code-dispatch (`callback:`) marker. Mechanism: `scan-core.mjs` `kappa(module, member)` +
+the κ-invisible fallback resolve the named-import arm to the package; the member-access arm doesn't route
+`chalk.grey` back to "chalk is an uncovered package," so it falls to `callback:` Unknown.
+
+## Options
+
+1. **Route member-access-on-uncovered-package into the κ channel (recommended).** `chalk.grey` → κ-invisible
+   (name chalk in the ledger), same as the named-import shape. Removes the 54 from Unknown, keeps disclosure
+   (κ ledger), and **converges candor-ts with candor-scan's κ-for-deps**. It's the *same soundness posture*
+   candor-ts already applies to named-import dep calls — a consistency alignment, not a new relaxation.
+2. **Chaining (`CANDOR_DEPS`, existing feature) — full fidelity.** Scan the dep, chain its report, resolve the
+   *real* effect (chalk→pure, an ORM→Db). Conformance-pinned (PART 14) **for named-imports**; member-access
+   chaining likely has the same split and **needs verifying**. This is the right answer for a user who wants
+   true dep effects; orthogonal to (1) and worth a docs push ("chain your deps") regardless.
+3. **Curate chalk-et-al as pure in the κ table — REJECT as the primary path.** The `scan-core.mjs:131` argon2
+   precedent (a curated-κ entry made `argon2.hash` **silently pure** on a real Nest app) shows every
+   curated-*pure* row is an unverified purity CLAIM and a silent-under-report generator. κ-*invisible*
+   (option 1, names the dep in the ledger) is honest-disclosed; κ-*curated-pure* is dangerous. Don't conflate.
+
+## The posture decision (Tom's call — it's the crux)
+
+Option 1 unifies **toward κ-invisible** (fewer Unknowns, ledger-disclosed, floor-style). The *opposite*
+unification — make named-import dep calls **Unknown** too (§4-strict: every unseeable dep call is Unknown) —
+is more conservative but **increases** the noise and **diverges** from candor-scan. Which is "right" turns on
+candor-ts's intended profile for deps: **disclosed-floor (κ)** or **sound-engine (§4 Unknown)**. The existing
+behavior + the κ language point to disclosed-floor, so option 1 aligns the outlier; but if candor-ts should be
+strictly §4 for deps, the whole κ-invisible-for-deps behavior (incl. `writeLog`→pure) is the thing to revisit.
+Either way the *inconsistency* is a bug; the direction is a posture choice.
+
+Cross-engine: option 1 converges candor-ts toward candor-scan; the κ-ledger conformance (PART 4c) still holds
+(chalk is named either way). Report-affecting (member-access fns: Unknown → pure+κ) → **baseline-invalidating
+⚠**, candor-ts-local.
+
+---
+
+# Comparison & recommendation
+
+| | **Array-HOF** (receiver-type) | **External-lib** (κ consistency) |
+|---|---|---|
+| zx impact | **3 / 82** Unknowns | **54 / 82** Unknowns |
+| root cause | indexed-access/imported array types not recognized as arrays | member-access on uncovered pkg → Unknown instead of κ |
+| fix shape | widen the array-type recognizer (type-level work) | route member-access into the existing κ channel (attribution) |
+| soundness | pure widening; only *provable* arrays; `any`/opaque stays Unknown | consistency alignment; same posture as named-import κ; disclosed |
+| main risk | creep toward reimplementing tsc's type system | trades Unknown → κ-invisible (weaker, but disclosed); posture call |
+| effort | small–medium | small (attribution) + optional chaining verification |
+| cross-engine | candor-ts-only, no spec impact | **converges** candor-ts toward candor-scan; κ-ledger contract holds |
+| character | *more precise* (Unknown → proven) | *more consistent* (one dep-disclosure channel) |
+
+**Recommendation: do the external-lib κ-consistency fix first.** It clears ~18× the real-world Unknown noise
+of the HOF item (54 vs 3), is small, fixes a genuine same-dep-two-disclosures inconsistency, and converges
+candor-ts with candor-scan. Then the array-HOF item as follow-on precision polish. Keep the **chaining docs
+push** in mind as the orthogonal full-fidelity path. The one thing to settle before coding the external-lib
+fix is the **posture** (κ-invisible vs §4-Unknown for deps) — that's a decision, not a discovery.
