@@ -6,6 +6,18 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.8.17] — 2026-07-11
+
+### ✨ Gate scans auto-disclose the provable-purity gap (no need to know to run `unverified`)
+
+A policy scan now emits the `unverified` disclosure automatically as a stderr note: after the gate verdict,
+any function in a `pure`/`deny <E>` scope that PASSES but is `Unknown` (an unresolvable call — the classic
+fn/closure-injected "port") is named, with the `deny <E> Unknown <scope>` upgrade that makes the layer PROVABLY
+clean. Closes the discovery gap — an author learns their "pure" layer isn't *provably* pure without knowing the
+`unverified` command exists. **Advisory only**: a note, never a violation, so the exit code, gate verdict, and
+`--gate-json` are untouched. Emitted from `scan.mjs` after `evaluatePolicy`. Mirrors candor-scan/java/swift
+(four-engine parity). Existing tests unchanged (316 + 61 unit pass).
+
 ## [0.8.16] — 2026-07-11
 
 ### ✨ `unverified` — the provable-purity disclosure ported here (four-engine parity)

@@ -26,7 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { parsePolicy, evaluatePolicy } from "./policy.mjs";
+import { parsePolicy, evaluatePolicy, scopeMatches } from "./policy.mjs";
 import { printAgents } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql } from "./scan-core.mjs";
 
@@ -2261,6 +2261,30 @@ if (policyPath !== null) {
   const incompleteMap = new Map();
   for (const [name, rec] of fns) if (rec.incomplete.size) incompleteMap.set(name, rec.incomplete);
   gateViolations = gateViolations.concat(evaluatePolicy(parsePolicy(text), functions, cg, incompleteMap));
+  // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
+  // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
+  // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).
+  const disclosePolicy = parsePolicy(text);
+  const purityHoles = [];
+  for (const f of functions) {
+    if (!(f.inferred ?? []).includes("Unknown")) continue;
+    for (const r of disclosePolicy.deny) {
+      if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
+      const violates = r.effects.length === 0
+        ? (f.inferred ?? []).some((x) => x !== "Unknown")
+        : (f.inferred ?? []).some((x) => r.effects.includes(x));
+      if (violates) continue;
+      const suffix = r.scope ? ` ${r.scope}` : "";
+      const upgrade = r.effects.length === 0 ? `deny Unknown${suffix}` : `deny ${r.effects.join(" ")} Unknown${suffix}`;
+      purityHoles.push([f.fn, upgrade]);
+      break;
+    }
+  }
+  if (purityHoles.length) {
+    console.error(`candor-ts: note — ${purityHoles.length} function(s) PASS the policy but are Unknown (purity NOT verified — the Unknown could hide a forbidden effect):`);
+    for (const [fn, up] of purityHoles) console.error(`    \`${fn}\`  → add  \`${up}\``);
+    console.error("  (advisory; add the upgrade(s) to REQUIRE provable purity, or run `candor-ts-query unverified` for detail — the gate verdict is unchanged)");
+  }
 }
 for (const x of gateViolations) emitViolation(`[${x.rule}] ${x.detail}`);
 // --gate-json ⟨0.8⟩: the structured gate verdict { spec, ok, violations:[{rule,fn,effects,detail}] }, from
