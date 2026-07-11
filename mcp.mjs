@@ -215,6 +215,26 @@ const TOOLS = {
       return { ok: v.length === 0, violations: v };
     },
   },
+  candor_unverified: {
+    description: "PROVABLE-PURITY check (INSTANT): a `pure`/`deny <E>` policy layer PASSES a function that has "
+                 + "no such effect — but if that function is Unknown (candor couldn't resolve one of its calls), "
+                 + "the pass is UNVERIFIED: the Unknown could hide the very effect the rule forbids. The classic "
+                 + "case is a fn/closure-injected 'port' — the domain reads as Unknown, so `deny Net domain`/`pure "
+                 + "domain` clear it though it may reach Net at runtime. Returns each such function + the `deny <E> "
+                 + "Unknown <scope>` upgrade that makes the layer PROVABLY clean. Uses `policy` if given, else the "
+                 + "repo's checked-in .candor/config policy.",
+    schema: { type: "object", properties: { policy: { type: "string", description: "path to a §6.2 policy file (optional; defaults to the repo's .candor/config `policy`)" }, ...reportArg }, required: [] },
+    run: (a, p) => {
+      let text;
+      if (a.policy) text = confinedPolicyRead(a.policy, p);
+      else {
+        const cfg = configPolicy(p);
+        if (!cfg) throw new Error("no policy: pass `policy`, or check one into the repo's .candor/config (spec §3.4)");
+        text = confinedPolicyRead(cfg.policyPath, p, cfg.repoRoot);
+      }
+      return Q.unverified(Q.loadReport(p), parsePolicy(text), scopeMatches);
+    },
+  },
   candor_containment: {
     description: "Per boundary effect (Db/Net/Exec/Fs/Ipc/Clipboard): how contained it is in one architectural layer — the dispersion diagnostic (spec §6.1). Not a score; per-effect facts.",
     schema: { type: "object", properties: { ...reportArg } },

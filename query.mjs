@@ -31,7 +31,7 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          callers as coreCallers, callersFrontier, loadHierarchy,
          containment as coreContainment, diff as coreDiff,
          where as coreWhere, map as coreMap, whatif as coreWhatif,
-         fix as coreFix, fixGate as coreFixGate,
+         fix as coreFix, fixGate as coreFixGate, unverified as coreUnverified,
          loadReport, loadCallgraph, reportVersion } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
 
@@ -60,6 +60,7 @@ const SUBCOMMANDS = [
   ["whatif", "<prefix> <fn> <Effect> [policy-file] [0|1]", "the impact of giving a function an effect, vs a policy (exit 1 on a violation)"],
   ["fix", "<prefix> <fn> <Effect> <policy-file>", "the boundary fix: where the effect belongs + the hoist refactor"],
   ["fix-gate", "<prefix> <policy-file>", "a fix for EVERY boundary crossing — the loop's block-message remedy"],
+  ["unverified", "<prefix> <policy-file> [--strict]", "pure/deny layers that PASS but are Unknown (not PROVABLY clean)"],
   ["agents", "", "print the agent contract for this build (AGENTS.md)"],
 ];
 
@@ -283,6 +284,20 @@ switch (cmd) {
     if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix-gate needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
     emit(coreFixGate(cg, loadReport(prefix), parsePolicy(ptext), scopeMatches));
     break;
+  }
+  case "unverified": {
+    // PROVABLE-PURITY disclosure: pure/deny layers that PASS but contain Unknown (not provably clean). A
+    // policy is required; `--strict` exits 1 on a hole. Advisory (exit 0) otherwise.
+    const strict = args.includes("--strict");
+    const [prefix, policyFile] = args.filter((a) => a !== "--strict");
+    if (!policyFile) { console.error("candor: unverified requires a policy file"); process.exit(2); }
+    let ptext;
+    try { ptext = fs.readFileSync(policyFile, "utf8"); }
+    catch { console.error(`candor: policy ${policyFile} could not be read`); process.exit(2); }
+    const r = coreUnverified(loadReport(prefix), parsePolicy(ptext), scopeMatches);
+    emit(r);
+    process.exit(strict && !r.ok ? 1 : 0);
+    break; // unreachable
   }
   default:
     // no command (cmd === undefined) or an unknown one: the FULL usage, not the stale 6-item list.

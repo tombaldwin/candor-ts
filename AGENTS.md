@@ -98,6 +98,7 @@ Q containment $P [baseline-prefix]  # §6.1 boundary-effect dispersion; with a b
 Q blindspots $P                     # the Unknown SOURCES (fns with unknownWhy), ranked by Unknown blast radius
 Q whatif   $P <fn> <Effect> [policy]  # pre-edit gate verdict (exit 1 if it would violate)
 Q fix      $P <fn> <Effect> <policy>  # the boundary FIX: where the effect belongs + the hoist refactor
+Q unverified $P <policy> [--strict]  # pure/deny layers that PASS but are Unknown (not PROVABLY clean)
 Q fix-gate $P <policy>              # a fix for EVERY crossing — the loop's block-message remedy
 Q diff     $P <baseline-prefix> 1   # per-function effect delta (exit 1 on a gained effect)
 Q gains    $P <baseline-prefix>     # supply-chain alarm: {gained, byFunction} — effects a surface grew

@@ -16,7 +16,7 @@ import path from "node:path";
 
 import {
   matches, show, where, callers, map, impact, path as provenance, diff, gains, reachable, whatif,
-  fix, fixGate,
+  fix, fixGate, unverified,
   containment, loadReport, loadCallgraph, loadHierarchy, callersFrontier, blindspots, isReport,
 } from "./query-core.mjs";
 import {
@@ -259,6 +259,17 @@ test("fix: a sandwiched allowed layer is NOT a clean hoist", () => {
   const r = fix(cg, fns, "inner", "Net", parsePolicy("deny Net domain"), scopeMatches);
   assert.equal(r.crossing, true);
   assert.equal(r.cleanHoist, false, "a sandwiched frontier is not a clean hoist");
+});
+test("unverified: flags an Unknown fn in a pure/deny scope + names the deny-Unknown upgrade", () => {
+  const fns = [
+    { fn: "domain.price", inferred: ["Unknown"], unknownWhy: ["callback:param#0"] },
+    { fn: "domain.calc", inferred: [] }, // provably pure — not flagged
+  ];
+  const r = unverified(fns, parsePolicy("pure domain"), scopeMatches);
+  assert.equal(r.ok, false);
+  assert.equal(r.unverified.length, 1);
+  assert.equal(r.unverified[0].fn, "domain.price");
+  assert.equal(r.unverified[0].upgrade, "deny Unknown domain");
 });
 test("fix-gate: no crossing → ok:true, empty remedies", () => {
   const r = fixGate(ofCg, ofFns, parsePolicy("deny Net nonesuch"), scopeMatches);

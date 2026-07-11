@@ -6,6 +6,16 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.8.16] — 2026-07-11
+
+### ✨ `unverified` — the provable-purity disclosure ported here (four-engine parity)
+
+Ports candor-query's `unverified` (candor-query 0.8.10): a `pure`/`deny <E>` layer PASSES a function that has
+no such effect — but if that function is `Unknown` (an unresolvable call, e.g. a fn/closure-injected port), the
+pass is UNVERIFIED. Discloses each such function in a governed layer + the `deny <E> Unknown <scope>` upgrade
+that makes the layer PROVABLY clean. `--strict` → exit 1. JSON `{ok, unverified[]}`. Byte-for-byte the same
+disclosure as the other engines, pinned four-way by conformance PART 12c. Read-only; gate verdict untouched.
+
 ## [0.8.15] — 2026-07-11
 
 ### `fix`: the no-clean-hoist advice names the port purity hierarchy (soundness investigation)

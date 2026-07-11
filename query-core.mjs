@@ -620,3 +620,28 @@ export function fixGate(cg, fns, policyParsed, scopeMatches) {
   const remedies = [...plans.keys()].sort().map((k) => plans.get(k));
   return { ok: remedies.length === 0, remedies };
 }
+
+// unverified: the PROVABLE-PURITY disclosure (eval/fixloop/DISPATCH-NOTE.md, mirrors candor-query). A
+// `pure`/`deny E` layer PASSES a function that carries none of its forbidden effects — but if that function is
+// `Unknown` (an unresolvable call), the pass is UNVERIFIED: the Unknown could hide the very effect the rule
+// forbids (the fn/closure-port hole). Returns each such function + the `deny E Unknown <scope>` upgrade.
+export function unverified(fns, policyParsed, scopeMatches) {
+  const holes = [];
+  for (const e of fns) {
+    if (!(e.inferred ?? []).includes("Unknown")) continue;
+    for (const r of policyParsed.deny) {
+      if (r.scope && !scopeMatches(e.fn, r.scope)) continue;
+      const violates = r.effects.length === 0
+        ? (e.inferred ?? []).some((x) => x !== "Unknown")   // pure: any real effect is a violation
+        : (e.inferred ?? []).some((x) => r.effects.includes(x)); // deny: a named effect is a violation
+      if (violates) continue;                                 // the gate handles a real violation
+      const suffix = r.scope ? ` ${r.scope}` : "";
+      const [rule, upgrade] = r.effects.length === 0
+        ? [`pure${suffix}`, `deny Unknown${suffix}`]
+        : [`deny ${r.effects.join(" ")}${suffix}`, `deny ${r.effects.join(" ")} Unknown${suffix}`];
+      holes.push({ fn: e.fn, rule, unknownWhy: e.unknownWhy ?? [], upgrade });
+      break;
+    }
+  }
+  return { ok: holes.length === 0, unverified: holes };
+}
