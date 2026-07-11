@@ -744,6 +744,39 @@ export function prime() { return crypto.generatePrimeSync(256); }`,
   const { r } = scan(path.join(d, "src"));
   check("subdir scan (devDeps, no node_modules) still warns", r.stderr.includes("WARNING") && r.stderr.includes("npm install"));
 }
+{
+  // κ-batch from the 0.9 dogfood on zx (source-verified): which -> Fs (PATH stat via isexe), @webpod/ps ->
+  // Exec (spawns the OS ps/kill), envapi member-precise (load/config READ the .env file -> Fs; parse/
+  // stringify are pure string transforms). The `parse` PURE assert is the fabrication guard — the argon2
+  // lesson: model the effectful member, never blanket-grant a mixed package.
+  const pkg = (name, types) => ({
+    [`node_modules/${name}/package.json`]: `{"name":"${name}","types":"index.d.ts","main":"index.js"}`,
+    [`node_modules/${name}/index.d.ts`]: types,
+    [`node_modules/${name}/index.js`]: ``,
+  });
+  const d = project({
+    ...pkg("which", `declare function which(cmd: string): Promise<string>;\nexport default which;`),
+    ...pkg("@webpod/ps", `export declare function lookup(q: object): Promise<object[]>;\nexport declare function kill(pid: number): Promise<void>;`),
+    ...pkg("envapi", `export declare function parse(s: string): Record<string, string>;\nexport declare function load(...f: string[]): Record<string, string>;\nexport declare function config(f?: string): void;`),
+    "src/cli.ts": `import which from "which";
+import { lookup, kill } from "@webpod/ps";
+import { parse, load, config } from "envapi";
+export function findExe(c: string) { return which(c); }
+export function listProcs() { return lookup({}); }
+export function killProc(p: number) { return kill(p); }
+export function loadEnv(f: string) { return load(f); }
+export function cfgEnv() { return config(); }
+export function parseEnv(s: string) { return parse(s); }`,
+  });
+  const { report } = scan(d);
+  check("κ: which -> Fs", entry(report, "src.cli.findExe")?.inferred.includes("Fs"));
+  check("κ: @webpod/ps lookup -> Exec", entry(report, "src.cli.listProcs")?.inferred.includes("Exec"));
+  check("κ: @webpod/ps kill -> Exec", entry(report, "src.cli.killProc")?.inferred.includes("Exec"));
+  check("κ: envapi load -> Fs", entry(report, "src.cli.loadEnv")?.inferred.includes("Fs"));
+  check("κ: envapi config -> Fs", entry(report, "src.cli.cfgEnv")?.inferred.includes("Fs"));
+  check("κ: envapi parse stays PURE (fabrication guard)", entry(report, "src.cli.parseEnv") == null,
+        JSON.stringify(entry(report, "src.cli.parseEnv")));
+}
 
 // ── coverage calibration: effectful npm packages the differential found disclosed-but-unmodeled ───
 // Each: the effect-bearing API → its effect, AND a PURE API of the SAME package → pure (no fabrication).

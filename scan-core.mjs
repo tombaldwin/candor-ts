@@ -123,6 +123,18 @@ export const KAPPA_RULES = [
   [/^open$/, /^(open|openApp)$/, "Exec"],
   [/^(fs-extra|graceful-fs|rimraf|glob|chokidar)$/, null, "Fs"],
   [/^dotenv$/, null, "Env"],
+  // CLI-tool packages surfaced by the 0.9 dogfood on `zx` (read `invisible` before — a κ-coverage gap, not
+  // a cardinal sin; modeled against each package's SOURCE, not its name):
+  // - `which`: resolves an executable by stat-ing PATH candidates (via `isexe`) — Fs. Both the async default
+  //   `which(cmd)` and `which.sync(cmd)` hit the filesystem; no pure member → whole-module Fs.
+  [/^which$/, null, "Fs"],
+  // - `@webpod/ps`: process listing/kill — kill/lookup/lookupSync/tree/treeSync ALL spawn the OS via
+  //   `exec({...})` (zurk/spawn) — verified in ps.js. Uniform process surface, no pure member → Exec.
+  [/^@webpod\/ps$/, null, "Exec"],
+  // - `envapi` (a dotenv variant): MIXED — `parse`/`stringify` are pure string transforms; `load`/`loadSafe`/
+  //   `config` READ the .env file (`fs.readFileSync`). Member-precise so `parse` never fabricates Fs (the
+  //   argon2 curated-κ lesson: model the effectful member, never blanket-grant a mixed package).
+  [/^envapi$/, /^(load|loadSafe|config)$/, "Fs"],
   [/^(winston|pino|bunyan|npmlog)$/, null, "Log"],
   // nest-winston wraps winston; the injected logger's level verbs are the Log boundary (the
   // WinstonModule.createLogger/forRoot config is inert).

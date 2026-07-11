@@ -6,6 +6,21 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.9.2] — 2026-07-12
+
+### ⚠ κ-coverage: `which`→Fs, `@webpod/ps`→Exec, `envapi`→Fs (0.9 dogfood on zx)
+
+Three common CLI-tool packages that read `invisible` (κ-unknown) now have their effects attributed, modeled
+against each package's **source** (not name-guessed): **`which`**→Fs (resolves an executable by stat-ing PATH
+via `isexe`; whole-module — no pure member), **`@webpod/ps`**→Exec (kill/lookup/tree all spawn the OS via
+`exec`; uniform), **`envapi`**→Fs **member-precise** (`load`/`loadSafe`/`config` read the `.env` file; `parse`/
+`stringify` stay **pure** — the argon2 lesson: never blanket-grant a mixed package). **⚠ report-affecting**:
+a function whose only effect was through one of these (e.g. `zx`'s `useBash`/`usePwsh` via `which`) moves from
+`invisible` to a concrete `Fs`/`Exec` — more precise, and it sharpens `deny Fs`/`deny Exec` gate fidelity;
+regenerate baselines across this build. The genuinely-pure libs (`chalk`, `minimist`, `depseek`) are left as
+honest `invisible` disclosures, NOT curated to a pure *claim*. 6 regression tests incl. the `parse`-pure
+fabrication guard.
+
 ## [0.9.1] — 2026-07-12
 
 ### 🔎 The "run `npm install`" warning now fires on subdir + devDependency scans
