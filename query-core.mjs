@@ -527,7 +527,9 @@ function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMa
     const cur = up.shift();
     for (const caller of rev.get(cur) ?? []) {
       const ce = byName.get(caller);
-      if (ce && !(ce.inferred ?? []).includes(eff)) continue; // doesn't route the effect
+      // skip a caller that doesn't route the effect — INCLUDING one absent from the report (a pure
+      // callgraph-only node never carries the effect). Matches candor-swift. (/code-review — was `ce && !…`.)
+      if (!ce || !(ce.inferred ?? []).includes(eff)) continue;
       if (deniedLayer(caller, eff, policyParsed, scopeMatches) !== null) {
         if (!deniedSpan.has(caller)) { deniedSpan.add(caller); up.push(caller); }
       } else {
@@ -566,10 +568,14 @@ function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMa
 // fix: the boundary remedy for ONE function (the remedial inverse of whatif). Returns null if the function
 // isn't in the graph; `{ crossing:false, reason }` if it performs the effect but no policy forbids it there
 // (or it doesn't perform it) — a no-op the caller reports plainly; else the full remedy (`crossing:true`).
+// NOTE: `cg` (the callgraph sidecar) is REQUIRED — unlike candor-query/java/swift, a candor-ts report does not
+// embed inline `calls`, so the sidecar is the only graph; the CLI/MCP callers fail loud when it's absent
+// rather than compute a degenerate empty-graph remedy. (/code-review.)
 export function fix(cg, fns, target, eff, policyParsed, scopeMatches) {
-  const names = new Set(Object.keys(cg));
-  for (const e of fns) names.add(e.fn);
-  const m = matches([...names], target);
+  // Resolve against REPORT function names only (not callgraph nodes, which include pure fns absent from the
+  // report) — so `fix <pure-fn>` is a uniform "no such fn" across engines, not a TS-only crossing:false.
+  // (/code-review — candor-query/java/swift all match report fns only.)
+  const m = matches(fns.map((e) => e.fn), target);
   if (m.length === 0) return null;
   const byName = indexFns(fns);
   // prefer a match that actually performs the effect, so a bare leaf resolves to the violating function
@@ -591,8 +597,10 @@ export function fixGate(cg, fns, policyParsed, scopeMatches) {
   const byName = indexFns(fns);
   const rev = reverseGraph(cg);
   const plans = new Map();
-  for (const e of fns) {
-    for (const eff of (e.inferred ?? [])) {
+  // Iterate functions in sorted-name order so the first-writer-wins `fn` representative of a collapsed
+  // remedy is deterministic across engines (candor-query/java/swift all iterate a sorted key set).
+  for (const e of [...fns].sort((a, b) => (a.fn < b.fn ? -1 : a.fn > b.fn ? 1 : 0))) {
+    for (const eff of [...(e.inferred ?? [])].sort()) {
       const layer = deniedLayer(e.fn, eff, policyParsed, scopeMatches);
       if (layer !== null) {
         const p = computeRemedy(e.fn, eff, layer, cg, rev, byName, policyParsed, scopeMatches);
@@ -601,6 +609,7 @@ export function fixGate(cg, fns, policyParsed, scopeMatches) {
       }
     }
   }
-  const remedies = [...plans.values()];
+  // Emit remedies in dedup-key order (candor-query BTreeMap / java TreeMap / swift sorted-keys all do).
+  const remedies = [...plans.keys()].sort().map((k) => plans.get(k));
   return { ok: remedies.length === 0, remedies };
 }

@@ -191,7 +191,11 @@ const TOOLS = {
         if (!cfg) throw new Error("no policy: pass `policy`, or check one into the repo's .candor/config (spec §3.4) — the fix is defined relative to the boundary it crosses");
         text = confinedPolicyRead(cfg.policyPath, p, cfg.repoRoot);
       }
-      const r = Q.fix(Q.loadCallgraph(p), Q.loadReport(p), a.fn, a.effect, parsePolicy(text), scopeMatches);
+      const cg = Q.loadCallgraph(p);
+      // The sidecar is the only graph a candor-ts report carries — fail loud (tool error) when it's absent,
+      // never a degenerate empty-graph remedy. (/code-review.)
+      if (!cg || Object.keys(cg).length === 0) throw new Error(`no call-graph sidecar for the report — fix needs it (re-scan with --out)`);
+      const r = Q.fix(cg, Q.loadReport(p), a.fn, a.effect, parsePolicy(text), scopeMatches);
       if (r === null) throw new Error(`no function matching \`${clip(a.fn)}\` in the call graph`);
       return r;
     },

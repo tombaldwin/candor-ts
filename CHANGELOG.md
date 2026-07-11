@@ -6,6 +6,21 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.8.12] — 2026-07-11
+
+### `fix`: cross-engine parity fixes (from a high-effort /code-review)
+
+- **Resolution universe**: `fix` now matches `target` against REPORT function names only (not callgraph
+  nodes, which include pure functions absent from the report) — so `fix <pure-fn>` is a uniform "no such fn"
+  across engines, not a TS-only `crossing:false`.
+- **`byName`-absent caller** in the up-walk is now skipped (matching candor-swift).
+- **`fix-gate` determinism**: functions are iterated in sorted order and remedies emitted in dedup-key order
+  (JS `Map` preserved insertion order before), so the array order and each collapsed remedy's `fn` match the
+  other engines.
+- **Sidecar required, fail-loud**: a candor-ts report embeds no inline `calls` (the sidecar is its only
+  graph), so `fix`/`fix-gate` (CLI + `candor_fix` MCP tool) now exit 2 / raise a tool error when the sidecar
+  is absent, rather than computing a degenerate empty-graph "no clean hoist".
+
 ## [0.8.11] — 2026-07-11
 
 ### `fix`/`fix-gate` + the `candor.fix` code action: the higher-hoist trade-off

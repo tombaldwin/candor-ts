@@ -222,6 +222,23 @@ test("fix: a fn that performs the effect but isn't forbidden there → crossing:
 test("fix: no such fn → null", () => {
   assert.equal(fix(ofCg, ofFns, "nope", "Net", parsePolicy("deny Net domain"), scopeMatches), null);
 });
+test("fix: prefers the effect-performing match among same-tier name matches", () => {
+  // `save` matches a pure `cache.save` and the effectful denied `repo.save` — must resolve to the latter.
+  const cg = { "cache.save": [], "repo.save": [] };
+  const fns = [
+    { fn: "cache.save", inferred: [], direct: [], calls: [] },
+    { fn: "repo.save", inferred: ["Net"], direct: ["Net"], calls: [] },
+  ];
+  const r = fix(cg, fns, "save", "Net", parsePolicy("deny Net repo"), scopeMatches);
+  assert.equal(r.crossing, true);
+  assert.equal(r.fn, "repo.save");
+});
+test("fix: resolves against report fns only, not callgraph-only pure nodes", () => {
+  // `helper` is in the callgraph (a pure node) but absent from the report → uniform 'no such fn' (null).
+  const cg = { "app.helper": [], "app.run": [] };
+  const fns = [{ fn: "app.run", inferred: ["Net"], direct: ["Net"], calls: [] }];
+  assert.equal(fix(cg, fns, "helper", "Net", parsePolicy("deny Net app"), scopeMatches), null);
+});
 test("fix-gate: the two domain inheritors collapse to one root-independent remedy", () => {
   const r = fixGate(ofCg, ofFns, parsePolicy("deny Net domain"), scopeMatches);
   assert.equal(r.ok, false);

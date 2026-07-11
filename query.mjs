@@ -263,7 +263,11 @@ switch (cmd) {
     let ptext;
     try { ptext = fs.readFileSync(policyFile, "utf8"); }
     catch { console.error(`candor: policy ${policyFile} could not be read — no fix computed`); process.exit(2); }
-    const r = coreFix(loadCallgraph(prefix), loadReport(prefix), target, eff, parsePolicy(ptext), scopeMatches);
+    const cg = loadCallgraph(prefix);
+    // The sidecar is the ONLY graph a candor-ts report carries (it embeds no inline `calls`). Fail LOUD when
+    // it's absent — never compute a degenerate empty-graph remedy that reads as a false "no clean hoist".
+    if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
+    const r = coreFix(cg, loadReport(prefix), target, eff, parsePolicy(ptext), scopeMatches);
     if (r === null) { console.error(`candor: no function matching \`${target}\` in the call graph`); process.exit(2); }
     emit(r);
     break;
@@ -275,7 +279,9 @@ switch (cmd) {
     let ptext;
     try { ptext = fs.readFileSync(policyFile, "utf8"); }
     catch { console.error(`candor: policy ${policyFile} could not be read — no fix computed`); process.exit(2); }
-    emit(coreFixGate(loadCallgraph(prefix), loadReport(prefix), parsePolicy(ptext), scopeMatches));
+    const cg = loadCallgraph(prefix);
+    if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix-gate needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
+    emit(coreFixGate(cg, loadReport(prefix), parsePolicy(ptext), scopeMatches));
     break;
   }
   default:
