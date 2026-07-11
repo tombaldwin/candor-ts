@@ -39,7 +39,7 @@ const emit = (v) => console.log(JSON.stringify(v, null, 1));
 // package.json; SPEC_VERSION is the spec contract this build speaks. Reused, never re-littered.
 const QUERY_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(QUERY_DIR, "package.json"), "utf8")).version;
-const SPEC_VERSION = "0.8";
+const SPEC_VERSION = "0.9";
 
 // The full subcommand catalogue — name + one-line description (derived from the per-subcommand
 // comments + the module-doc header). The single source for the --help list AND the no-arg/unknown
