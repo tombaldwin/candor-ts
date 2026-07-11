@@ -356,7 +356,7 @@ function runFix(a) {
         lines.push(`or hoist higher (up to ${r.hoistHigher.slice(0, 4).join(", ")}): keeps the frontier pure too, threads through more signatures`);
       }
     } else {
-      lines.push("no clean hoist — introduce a port (inject the effect from an allowed layer), or relax the boundary");
+      lines.push("no clean hoist — add a thin entry point ABOVE the layer and thread the value down (simplest), OR inject it as a function/closure (not a resolvable trait — candor charges the trait's impl back to the caller), OR relax the boundary");
     }
     lines.push(`policy alternative: ${r.policyAlternative}`);
     transient.set(a.uri, [{
