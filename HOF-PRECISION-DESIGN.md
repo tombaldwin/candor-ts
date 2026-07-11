@@ -138,15 +138,26 @@ the κ-invisible fallback resolve the named-import arm to the package; the membe
    curated-*pure* row is an unverified purity CLAIM and a silent-under-report generator. κ-*invisible*
    (option 1, names the dep in the ledger) is honest-disclosed; κ-*curated-pure* is dangerous. Don't conflate.
 
-## The posture decision (Tom's call — it's the crux)
+## The posture decision — RESOLVED: κ-invisible (2026-07-11)
 
-Option 1 unifies **toward κ-invisible** (fewer Unknowns, ledger-disclosed, floor-style). The *opposite*
-unification — make named-import dep calls **Unknown** too (§4-strict: every unseeable dep call is Unknown) —
-is more conservative but **increases** the noise and **diverges** from candor-scan. Which is "right" turns on
-candor-ts's intended profile for deps: **disclosed-floor (κ)** or **sound-engine (§4 Unknown)**. The existing
-behavior + the κ language point to disclosed-floor, so option 1 aligns the outlier; but if candor-ts should be
-strictly §4 for deps, the whole κ-invisible-for-deps behavior (incl. `writeLog`→pure) is the thing to revisit.
-Either way the *inconsistency* is a bug; the direction is a posture choice.
+Framed initially as an open posture choice, but the evidence settled it: **candor-ts already committed to
+invisible-not-Unknown for deps, in its shipped docs**, so this is a bug against a decided contract, not a new
+choice:
+- `AGENTS.md:144/184` — "an effect through an unlisted package is **invisible, not `Unknown`**."
+- `AGENTS.md:188-189` — each function carries a **per-function `invisible` list** of the κ-unknown packages it
+  reaches; `inferred: []` + non-empty `invisible` = "pure as far as candor can see." So the disclosure is
+  **trackable per function**, not merely an aggregate ledger — the "κ is too quiet" worry is void.
+- `README.md:83` — "the same under-report-and-say-so posture as the other engines" (the family posture).
+
+Proof of the bug (before/after): a named-import call `grey(x)` → `inferred:[] invisible:['mylib']` (honors the
+contract); a member-access call `chalk.grey(x)` → `inferred:['Unknown'] invisible:None unknownWhy:[callback:chalk.grey]`
+(violates it). So the member-access arm emits Unknown **instead of** populating `invisible`.
+
+The §4-strict alternative (make every unseeable dep call Unknown, incl. named-imports) is rejected: it would
+*contradict* candor-ts's shipped contract and *diverge* it from candor-scan/the family. The argon2 caveat
+(`scan-core.mjs:131`) is a **separate axis** — curated-*coverage* precision ("model the member," not drop
+coverage) — not the invisible-vs-Unknown question. Unknown stays reserved for genuine in-code unresolvable
+dispatch (`dispatch:`, `callback:param#0`) — the real ports `unverified` should surface.
 
 Cross-engine: option 1 converges candor-ts toward candor-scan; the κ-ledger conformance (PART 4c) still holds
 (chalk is named either way). Report-affecting (member-access fns: Unknown → pure+κ) → **baseline-invalidating
