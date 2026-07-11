@@ -16,7 +16,9 @@ fn/closure-injected "port") is named, with the `deny <E> Unknown <scope>` upgrad
 clean. Closes the discovery gap — an author learns their "pure" layer isn't *provably* pure without knowing the
 `unverified` command exists. **Advisory only**: a note, never a violation, so the exit code, gate verdict, and
 `--gate-json` are untouched. Emitted from `scan.mjs` after `evaluatePolicy`. Mirrors candor-scan/java/swift
-(four-engine parity). Existing tests unchanged (316 + 61 unit pass).
+(four-engine parity). Existing tests unchanged (316 + 61 unit pass). The gate note and `unverified` share ONE
+predicate (`unverifiedHoleRule` + `ruleUpgrade` in `query-core.mjs`) — a single definition of a hole, so the
+two disclosure paths cannot drift (PART 12d pins it).
 
 ## [0.8.16] — 2026-07-11
 

@@ -27,6 +27,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { parsePolicy, evaluatePolicy, scopeMatches } from "./policy.mjs";
+import { unverifiedHoleRule, ruleUpgrade } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql } from "./scan-core.mjs";
 
@@ -2267,18 +2268,9 @@ if (policyPath !== null) {
   const disclosePolicy = parsePolicy(text);
   const purityHoles = [];
   for (const f of functions) {
-    if (!(f.inferred ?? []).includes("Unknown")) continue;
-    for (const r of disclosePolicy.deny) {
-      if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
-      const violates = r.effects.length === 0
-        ? (f.inferred ?? []).some((x) => x !== "Unknown")
-        : (f.inferred ?? []).some((x) => r.effects.includes(x));
-      if (violates) continue;
-      const suffix = r.scope ? ` ${r.scope}` : "";
-      const upgrade = r.effects.length === 0 ? `deny Unknown${suffix}` : `deny ${r.effects.join(" ")} Unknown${suffix}`;
-      purityHoles.push([f.fn, upgrade]);
-      break;
-    }
+    // Same predicate + upgrade as `candor-ts-query unverified` (query-core.mjs) — one source of truth.
+    const r = unverifiedHoleRule(f.fn, f.inferred, disclosePolicy, scopeMatches);
+    if (r) purityHoles.push([f.fn, ruleUpgrade(r)[1]]);
   }
   if (purityHoles.length) {
     console.error(`candor-ts: note — ${purityHoles.length} function(s) PASS the policy but are Unknown (purity NOT verified — the Unknown could hide a forbidden effect):`);

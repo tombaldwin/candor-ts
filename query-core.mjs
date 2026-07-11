@@ -625,23 +625,43 @@ export function fixGate(cg, fns, policyParsed, scopeMatches) {
 // `pure`/`deny E` layer PASSES a function that carries none of its forbidden effects — but if that function is
 // `Unknown` (an unresolvable call), the pass is UNVERIFIED: the Unknown could hide the very effect the rule
 // forbids (the fn/closure-port hole). Returns each such function + the `deny E Unknown <scope>` upgrade.
+/** Reconstruct a rule's source form and its `Unknown`-forbidding upgrade: `[source, upgrade]`. `pure
+ *  <scope>` → ["pure <scope>", "deny Unknown <scope>"]; `deny <E…> <scope>` → ["deny <E…> <scope>",
+ *  "deny <E…> Unknown <scope>"]. Shared so the gate note and `unverified` name the identical upgrade. */
+export function ruleUpgrade(r) {
+  const suffix = r.scope ? ` ${r.scope}` : "";
+  return r.effects.length === 0
+    ? [`pure${suffix}`, `deny Unknown${suffix}`]
+    : [`deny ${r.effects.join(" ")}${suffix}`, `deny ${r.effects.join(" ")} Unknown${suffix}`];
+}
+
+/** The single predicate for a provable-purity hole (eval/fixloop/DISPATCH-NOTE.md): a function that is
+ *  Unknown, sits in a pure/deny scope, and PASSES that rule (carries none of its forbidden real effects) —
+ *  so its compliance is asserted but not verified (the Unknown could hide the very effect the rule forbids;
+ *  the classic case is a fn/closure-injected port). A *real* violation is the gate's job, not this. Returns
+ *  the first governing rule under which the function is such a hole, or null. Shared by the gate note
+ *  (scan.mjs) and `unverified` so "what a hole is" has ONE definition (conformance PART 12d pins agreement). */
+export function unverifiedHoleRule(fn, inferred, policyParsed, scopeMatches) {
+  const inf = inferred ?? [];
+  if (!inf.includes("Unknown")) return null;
+  for (const r of policyParsed.deny) {
+    if (r.scope && !scopeMatches(fn, r.scope)) continue;
+    const violates = r.effects.length === 0
+      ? inf.some((x) => x !== "Unknown")        // pure: any real effect is a violation
+      : inf.some((x) => r.effects.includes(x)); // deny: a named effect is a violation
+    if (!violates) return r;                    // else it's a real violation the gate already reports
+  }
+  return null;
+}
+
 export function unverified(fns, policyParsed, scopeMatches) {
   const holes = [];
   for (const e of fns) {
-    if (!(e.inferred ?? []).includes("Unknown")) continue;
-    for (const r of policyParsed.deny) {
-      if (r.scope && !scopeMatches(e.fn, r.scope)) continue;
-      const violates = r.effects.length === 0
-        ? (e.inferred ?? []).some((x) => x !== "Unknown")   // pure: any real effect is a violation
-        : (e.inferred ?? []).some((x) => r.effects.includes(x)); // deny: a named effect is a violation
-      if (violates) continue;                                 // the gate handles a real violation
-      const suffix = r.scope ? ` ${r.scope}` : "";
-      const [rule, upgrade] = r.effects.length === 0
-        ? [`pure${suffix}`, `deny Unknown${suffix}`]
-        : [`deny ${r.effects.join(" ")}${suffix}`, `deny ${r.effects.join(" ")} Unknown${suffix}`];
-      holes.push({ fn: e.fn, rule, unknownWhy: e.unknownWhy ?? [], upgrade });
-      break;
-    }
+    // Same predicate + upgrade as the gate note (scan.mjs) — one source of truth for a hole.
+    const r = unverifiedHoleRule(e.fn, e.inferred, policyParsed, scopeMatches);
+    if (!r) continue;
+    const [rule, upgrade] = ruleUpgrade(r);
+    holes.push({ fn: e.fn, rule, unknownWhy: e.unknownWhy ?? [], upgrade });
   }
   return { ok: holes.length === 0, unverified: holes };
 }
