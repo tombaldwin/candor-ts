@@ -540,14 +540,21 @@ function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMa
   // higher hoist options: allowed-layer transitive callers of the minimal frontier that also route the
   // effect — hoisting higher keeps the frontier pure too, at the cost of threading through more signatures
   // (FIX-SPEC: the trade-off, disclosed not hidden).
+  // The SANDWICHED-layer check (/code-review): a hoist is CLEAN only if no forbidden fn sits ABOVE the
+  // frontier. If a denied fn calls into a hoist target, hoisting the effect there leaves that caller
+  // violating. Detected in the same climb that gathers `hoistHigher` (the allowed ancestors).
   const hoistHigher = new Set();
+  let sandwiched = false;
   const hseen = new Set(hoistTo);
   const hq = [...hoistTo];
   while (hq.length) {
     const cur = hq.shift();
     for (const caller of rev.get(cur) ?? []) {
       const ce = byName.get(caller);
-      if (ce && (ce.inferred ?? []).includes(eff) && deniedLayer(caller, eff, policyParsed, scopeMatches) === null && !hseen.has(caller)) {
+      if (!ce || !(ce.inferred ?? []).includes(eff)) continue;
+      if (deniedLayer(caller, eff, policyParsed, scopeMatches) !== null) {
+        sandwiched = true;
+      } else if (!hseen.has(caller)) {
         hseen.add(caller);
         hoistHigher.add(caller);
         hq.push(caller);
@@ -556,7 +563,7 @@ function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMa
   }
   return {
     fn: start, effect: eff, layer,
-    cleanHoist: hoistTo.size > 0,
+    cleanHoist: hoistTo.size > 0 && !sandwiched,
     site: [...sites].sort(),
     deniedSpan: [...deniedSpan].sort(),
     hoistTo: [...hoistTo].sort(),

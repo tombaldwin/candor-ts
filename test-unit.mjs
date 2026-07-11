@@ -246,6 +246,20 @@ test("fix-gate: the two domain inheritors collapse to one root-independent remed
   assert.deepEqual(r.remedies[0].deniedSpan, ["domain.bulk", "domain.price"]);
   assert.deepEqual(r.remedies[0].hoistTo, ["api.get"]);
 });
+test("fix: a sandwiched allowed layer is NOT a clean hoist", () => {
+  // domain.top → api.mid → domain.inner → infra.fetch, deny Net domain. api.mid is the nearest allowed
+  // frontier but domain.top calls it → hoisting there leaves top violating → cleanHoist false.
+  const cg = { "domain.top": ["api.mid"], "api.mid": ["domain.inner"], "domain.inner": ["infra.fetch"], "infra.fetch": [] };
+  const fns = [
+    { fn: "domain.top", inferred: ["Net"], direct: [], calls: ["api.mid"] },
+    { fn: "api.mid", inferred: ["Net"], direct: [], calls: ["domain.inner"] },
+    { fn: "domain.inner", inferred: ["Net"], direct: [], calls: ["infra.fetch"] },
+    { fn: "infra.fetch", inferred: ["Net"], direct: ["Net"], calls: [] },
+  ];
+  const r = fix(cg, fns, "inner", "Net", parsePolicy("deny Net domain"), scopeMatches);
+  assert.equal(r.crossing, true);
+  assert.equal(r.cleanHoist, false, "a sandwiched frontier is not a clean hoist");
+});
 test("fix-gate: no crossing → ok:true, empty remedies", () => {
   const r = fixGate(ofCg, ofFns, parsePolicy("deny Net nonesuch"), scopeMatches);
   assert.equal(r.ok, true);
