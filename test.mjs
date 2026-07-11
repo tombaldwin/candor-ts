@@ -732,6 +732,18 @@ export function prime() { return crypto.generatePrimeSync(256); }`,
   const { r } = scan(d);
   check("missing node_modules warns LOUDLY", r.stderr.includes("WARNING") && r.stderr.includes("npm install"));
 }
+{
+  // Regression for the 0.9 dogfood trap (scanning `zx/src`): a SUBDIR scan of a project whose manifest is
+  // one level up, whose deps are devDependencies (npm install fetches those too), and with no node_modules —
+  // must STILL warn. Before: the check only looked at <scanRoot>/package.json's `dependencies`, so this read
+  // as a codebase full of spurious `Unknown`s with no warning. Exercises both fixes (walk-up + devDeps).
+  const d = project({
+    "package.json": `{"devDependencies": {"chalk": "^5"}}`,
+    "src/x.ts": `import chalk from "chalk";\nexport function f(s: string): string { return chalk.grey(s); }`,
+  });
+  const { r } = scan(path.join(d, "src"));
+  check("subdir scan (devDeps, no node_modules) still warns", r.stderr.includes("WARNING") && r.stderr.includes("npm install"));
+}
 
 // ── coverage calibration: effectful npm packages the differential found disclosed-but-unmodeled ───
 // Each: the effect-bearing API → its effect, AND a PURE API of the SAME package → pure (no fabrication).

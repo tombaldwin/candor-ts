@@ -6,6 +6,18 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.9.1] — 2026-07-12
+
+### 🔎 The "run `npm install`" warning now fires on subdir + devDependency scans
+
+The un-installed-project warning (imports won't resolve → calls read `Unknown`, types don't resolve) was
+silent in two real cases: scanning a **`src/` subdirectory** (it only checked the scan root for
+`package.json`) and a project whose imports are **devDependencies** (it only counted `dependencies`, but
+`npm install` fetches devDeps too). Now it walks up to the nearest manifest and counts both dependency kinds.
+Report-identical (stderr diagnostic only — no report/verdict change); it just stops an un-installed scan from
+silently reading as a codebase full of spurious `Unknown`s (the trap a 0.9 dogfood on `zx/src` fell into).
+Regression test added.
+
 ## [0.9.0] — 2026-07-11
 
 ### spec 0.9 — the remedial-loop rung

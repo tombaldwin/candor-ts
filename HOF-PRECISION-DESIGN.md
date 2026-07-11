@@ -1,7 +1,30 @@
 # candor-ts — HOF receiver-type precision (scope)
 
-_Scoping doc from the 2026-07-11 spec-0.9 dogfood (see candor umbrella BACKLOG). Status: **scoped, not
-started.** Deliberately narrow + soundness-bounded._
+> ## ⚠ CORRECTION (2026-07-12): both findings below were a DOGFOOD ARTIFACT — no candor-ts bug
+>
+> Implementing the external-lib fix disproved its own premise. The zx scan was run on `zx/src` **without
+> `npm install`**, so imports and their types couldn't resolve — which is why chalk read `callback:` Unknown
+> and `bufArrJoin`'s `TSpawnStore[keyof TSpawnStore]` read Unknown. With deps resolvable, candor-ts already
+> does the right thing, proven by controlled fixtures:
+> - member-access on a **resolvable** uncovered package (default / namespace / wrapped-const / callable-getter
+>   / multi-file re-export) → `invisible: [pkg]` (κ), **not** Unknown. The named-vs-member "inconsistency" was
+>   really **resolvable-vs-unresolvable** — I varied the wrong thing (mylib was installed, chalk was not).
+> - `bufArrJoinLocal` — the *exact* `arr.reduce((acc,x)=>acc+bufToString(x),'')` shape on an indexed-access
+>   array type — is **PURE** when the type resolves. Indexed-access recognition already works.
+> - An **unresolvable** import → `callback:` Unknown for BOTH named-import and member-access (consistent, and
+>   arguably correct §4: candor can't confirm it's even a package).
+>
+> **So neither lever is a bug; do not implement them.** The real, salvaged issue: candor-ts's existing
+> "no node_modules → run npm install" warning didn't fire because (a) it only checked the scan *root* (I
+> scanned `src/`) and (b) it only counted `dependencies` (zx's chalk is a devDependency). **Both fixed**
+> (walk up to the manifest; count devDependencies) + a regression test, so the next scan of an un-installed
+> project is warned instead of silently reading as spurious Unknowns. The analysis below is kept as the
+> record of the investigation; treat its "bug" framing as retracted.
+
+---
+
+_Scoping doc from the 2026-07-11 spec-0.9 dogfood (see candor umbrella BACKLOG). Status: **RETRACTED — dogfood
+artifact, see correction above.** Original text preserved below._
 
 ## The finding (precise diagnosis, with evidence)
 

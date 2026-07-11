@@ -273,14 +273,25 @@ if (!wantJson) fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: 
 // would "succeed" with a near-total-Unknown report a fresh user could ship (CTA-dogfood finding).
 // Warn LOUDLY; the report is still written (it is sound), but the cause must be visible.
 {
-  const pkg = path.join(rootDir, "package.json");
-  if (fs.existsSync(pkg) && !fs.existsSync(path.join(rootDir, "node_modules"))) {
+  // Find the nearest package.json AT OR ABOVE the scan root: scanning a `src/` subdirectory must still see
+  // the project manifest one level up, else the warning stays silent and a deps-less scan reads as a
+  // codebase full of spurious `Unknown`s (the exact trap a 0.9 dogfood fell into — scanning `zx/src`).
+  let projDir = null;
+  for (let d = rootDir; ; d = path.dirname(d)) {
+    if (fs.existsSync(path.join(d, "package.json"))) { projDir = d; break; }
+    if (path.dirname(d) === d) break;                       // filesystem root
+  }
+  if (projDir && !fs.existsSync(path.join(projDir, "node_modules"))) {
     try {
-      const deps = JSON.parse(fs.readFileSync(pkg, "utf8")).dependencies ?? {};
+      // BOTH dependency kinds: `npm install` installs devDependencies too, and a project can import a
+      // dev/vendored package in its source (zx imports `chalk` as a devDependency) — a `dependencies`-only
+      // check left exactly that case unwarned.
+      const pj = JSON.parse(fs.readFileSync(path.join(projDir, "package.json"), "utf8"));
+      const deps = { ...(pj.dependencies ?? {}), ...(pj.devDependencies ?? {}) };
       if (Object.keys(deps).length > 0)
-        console.error("candor-ts: WARNING — the target declares dependencies but has no node_modules; " +
-                      "imports won't resolve, so calls into those packages read pure/invisible (not Unknown) " +
-                      "and effects through them are silently dropped. Run `npm install` in the target first.");
+        console.error("candor-ts: WARNING — the project declares dependencies but has no node_modules; " +
+                      "imports won't resolve, so calls into those packages can't be analyzed (they read " +
+                      "`Unknown`, and their types don't resolve). Run `npm install` in the project first.");
     } catch {}
   }
   // Prisma's client types are GENERATED — a project with the prisma dependency but no generated
