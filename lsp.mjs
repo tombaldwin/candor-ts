@@ -356,7 +356,7 @@ function runFix(a) {
         lines.push(`or hoist higher (up to ${r.hoistHigher.slice(0, 4).join(", ")}): keeps the frontier pure too, threads through more signatures`);
       }
     } else {
-      lines.push("no clean hoist — add a thin entry point ABOVE the layer and thread the value down (simplest), OR inject it as a function/closure (not a resolvable trait — candor charges the trait's impl back to the caller), OR relax the boundary");
+      lines.push(`no clean hoist — add a thin entry point ABOVE the layer and thread the value down as DATA (provably pure — recommended), OR inject a function/closure (clears deny ${a.effect} but reads as Unknown, which a \`deny ${a.effect} Unknown\` policy still flags; not a trait — candor charges the trait's impl back), OR relax the boundary`);
     }
     lines.push(`policy alternative: ${r.policyAlternative}`);
     transient.set(a.uri, [{
