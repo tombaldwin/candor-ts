@@ -224,21 +224,37 @@ const { inbound: waReplies, exitCode: waExit } = await lspSession([
   { jsonrpc: "2.0", id: 14, method: "workspace/executeCommand", params: { command: "candor.whatif", arguments: waArgs("app.nosuchfn", "Db") } },
   { jsonrpc: "2.0", id: 15, method: "workspace/executeCommand", params: { command: "candor.whatif", arguments: ["garbage"] } },
   { jsonrpc: "2.0", id: 16, method: "workspace/executeCommand", params: { command: "candor.nope", arguments: [] } },
+  { jsonrpc: "2.0", id: 18, method: "workspace/executeCommand", params: { command: "candor.fix", arguments: waArgs("app.leaf", "Net") } },
   { jsonrpc: "2.0", id: 17, method: "shutdown" },
-], 18); // init + didOpen diag + 2 codeActions + (msg,diag,result) + didSave diag + (msg,diag,result) + (msg,result) + 2×(log,result) + shutdown
+], 21); // …as before + (msg,diag,result) for the candor.fix crossing
 const waById = (id) => waReplies.find((r) => r.id === id);
 const waSeq = waReplies.map((r) => r.method ?? `id:${r.id}`);
 
 const actions = waById(10)?.result ?? [];
+const whatifActions = actions.filter((a) => a.command?.command === "candor.whatif");
+const fixActions = actions.filter((a) => a.command?.command === "candor.fix");
 ok("codeAction inside leaf(): one whatif action per boundary effect leaf lacks (Net excluded)",
-   actions.length === 5 && !actions.some((a) => a.title.includes("performed Net"))
-   && ["Db", "Exec", "Fs", "Ipc", "Clipboard"].every((e) => actions.some((a) => a.title === `candor: what if app.leaf performed ${e}?`)),
+   whatifActions.length === 5 && !whatifActions.some((a) => a.title.includes("performed Net"))
+   && ["Db", "Exec", "Fs", "Ipc", "Clipboard"].every((e) => whatifActions.some((a) => a.title === `candor: what if app.leaf performed ${e}?`)),
    JSON.stringify(actions.map((a) => a.title)));
-ok("each action carries the candor.whatif command with {fn, effect, uri, line} arguments",
-   actions.every((a) => a.command?.command === "candor.whatif"
+// leaf() PERFORMS Net and the active policy forbids it → the remedial companion offers the fix (only for a
+// real crossing; the whatif actions above are for effects leaf lacks — the two are complementary).
+ok("codeAction inside leaf(): a candor.fix action for the Net crossing leaf() actually has",
+   fixActions.length === 1 && fixActions[0].title === "candor fix: hoist Net out of app.leaf"
+   && fixActions[0].command.arguments?.[0]?.fn === "app.leaf" && fixActions[0].command.arguments[0].effect === "Net",
+   JSON.stringify(fixActions.map((a) => a.title)));
+ok("each action carries its command (whatif|fix) with {fn, effect, uri, line} arguments",
+   actions.every((a) => (a.command?.command === "candor.whatif" || a.command?.command === "candor.fix")
      && a.command.arguments?.[0]?.fn === "app.leaf" && a.command.arguments[0].uri === DOC
      && a.command.arguments[0].line === 1),
    JSON.stringify(actions[0]?.command));
+// candor.fix executeCommand: leaf() performs Net under `deny Net` (whole-project) → a crossing with NO clean
+// hoist (every caller is also denied); runFix returns the raw remedy and surfaces the port/relax guidance.
+const fixResult = waById(18)?.result;
+ok("candor.fix executeCommand returns the raw remedy (crossing, no clean hoist under whole-project deny)",
+   fixResult?.crossing === true && fixResult.cleanHoist === false
+   && fixResult.site?.includes("app.leaf") && fixResult.policyAlternative === "allow Net",
+   JSON.stringify(fixResult));
 ok("codeAction outside any known fn (line 0) → no actions, never an error",
    Array.isArray(waById(11)?.result) && waById(11).result.length === 0, JSON.stringify(waById(11)));
 

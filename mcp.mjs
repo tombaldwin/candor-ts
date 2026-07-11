@@ -178,6 +178,24 @@ const TOOLS = {
       return r;
     },
   },
+  candor_fix: {
+    description: "THE BOUNDARY FIX: when `fn` performs `effect` in a layer the policy forbids (a violation candor_whatif/candor_gate reports), compute the architectural REMEDY — not just 'the domain can't do Net', but WHERE the effect belongs and the refactor to put it there: the direct call site to hoist, the forbidden-layer functions that become pure and thread the value as a parameter, and the nearest allowed-layer caller to perform the effect ({ crossing, site, deniedSpan, hoistTo, policyAlternative }). The remedial inverse of candor_whatif. Call this INSTEAD OF guessing a fix (adding `allow` to the domain, moving the I/O one call up, threading a handle the wrong way). Advisory: it names the structure, you write the code; the gate re-scan verifies. Uses `policy` if given, else the repo's checked-in .candor/config policy (spec §3.4).",
+    schema: { type: "object", properties: { fn: { type: "string" }, effect: { type: "string" }, policy: { type: "string", description: "path to a §6.2 policy file (optional; defaults to the repo's .candor/config `policy`)" }, ...reportArg }, required: ["fn", "effect"] },
+    run: (a, p) => {
+      // The fix is defined relative to a boundary — a policy is required. Given → confined fail-closed read;
+      // else the repo's checked-in policy (same resolution as candor_gate), so it works zero-config.
+      let text;
+      if (a.policy) text = confinedPolicyRead(a.policy, p);
+      else {
+        const cfg = configPolicy(p);
+        if (!cfg) throw new Error("no policy: pass `policy`, or check one into the repo's .candor/config (spec §3.4) — the fix is defined relative to the boundary it crosses");
+        text = confinedPolicyRead(cfg.policyPath, p, cfg.repoRoot);
+      }
+      const r = Q.fix(Q.loadCallgraph(p), Q.loadReport(p), a.fn, a.effect, parsePolicy(text), scopeMatches);
+      if (r === null) throw new Error(`no function matching \`${clip(a.fn)}\` in the call graph`);
+      return r;
+    },
+  },
   candor_gate: {
     description: "The policy verdict over this report: { ok, violations:[{rule, fn, effects, detail}] } — 'would this repo pass its architecture gate?'. Uses `policy` if given, else the repo's checked-in .candor/config policy (spec §3.4). Computed from the report — the engine's own --gate-json run is the authoritative CI form: it additionally fails an allow rule whose literal surface is INCOMPLETE (a masked/invisible endpoint), which is not a report field, so a green here can still be red in CI.",
     schema: { type: "object", properties: { policy: { type: "string", description: "path to a §6.2 policy file (optional; defaults to the repo's .candor/config `policy`)" }, ...reportArg }, required: [] },

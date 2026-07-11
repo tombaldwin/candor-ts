@@ -16,6 +16,7 @@ import path from "node:path";
 
 import {
   matches, show, where, callers, map, impact, path as provenance, diff, gains, reachable, whatif,
+  fix, fixGate,
   containment, loadReport, loadCallgraph, loadHierarchy, callersFrontier, blindspots, isReport,
 } from "./query-core.mjs";
 import {
@@ -185,6 +186,45 @@ test("whatif: hypothetical effect → blast radius + deny violations", () => {
 });
 test("whatif: no such fn → null", () => {
   assert.equal(whatif({ a: [] }, "nope", "Net", null, scopeMatches), null);
+});
+
+// ── fix / fix-gate: the boundary remedy (FIX-SPEC), the remedial inverse of whatif ────────────────
+// orderflow: api.get → domain.bulk → domain.price → infra.fetch, all carrying Net, the leaf direct.
+const ofCg = { "api.get": ["domain.bulk"], "domain.bulk": ["domain.price"], "domain.price": ["infra.fetch"], "infra.fetch": [] };
+const ofFns = [
+  { fn: "api.get", inferred: ["Net"], direct: [], calls: ["domain.bulk"] },
+  { fn: "domain.bulk", inferred: ["Net"], direct: [], calls: ["domain.price"] },
+  { fn: "domain.price", inferred: ["Net"], direct: [], calls: ["infra.fetch"] },
+  { fn: "infra.fetch", inferred: ["Net"], direct: ["Net"], calls: [] },
+];
+test("fix: hoists Net to the api caller, site is the infra leaf, span is the two domain fns", () => {
+  const r = fix(ofCg, ofFns, "domain.price", "Net", parsePolicy("deny Net domain"), scopeMatches);
+  assert.equal(r.crossing, true);
+  assert.equal(r.layer, "domain");
+  assert.deepEqual(r.site, ["infra.fetch"]);
+  assert.deepEqual(r.hoistTo, ["api.get"]);
+  assert.deepEqual(r.deniedSpan, ["domain.bulk", "domain.price"]);
+  assert.equal(r.policyAlternative, "allow Net domain");
+});
+test("fix: a fn that performs the effect but isn't forbidden there → crossing:false", () => {
+  const r = fix(ofCg, ofFns, "api.get", "Net", parsePolicy("deny Net domain"), scopeMatches);
+  assert.equal(r.crossing, false);
+  assert.equal(r.reason, "not-forbidden");
+});
+test("fix: no such fn → null", () => {
+  assert.equal(fix(ofCg, ofFns, "nope", "Net", parsePolicy("deny Net domain"), scopeMatches), null);
+});
+test("fix-gate: the two domain inheritors collapse to one root-independent remedy", () => {
+  const r = fixGate(ofCg, ofFns, parsePolicy("deny Net domain"), scopeMatches);
+  assert.equal(r.ok, false);
+  assert.equal(r.remedies.length, 1);
+  assert.deepEqual(r.remedies[0].deniedSpan, ["domain.bulk", "domain.price"]);
+  assert.deepEqual(r.remedies[0].hoistTo, ["api.get"]);
+});
+test("fix-gate: no crossing → ok:true, empty remedies", () => {
+  const r = fixGate(ofCg, ofFns, parsePolicy("deny Net nonesuch"), scopeMatches);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.remedies, []);
 });
 
 // ── query-core: loader robustness (never crash, never fabricate, disclose) ────────────────────────

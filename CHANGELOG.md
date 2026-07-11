@@ -6,6 +6,28 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.8.10] — 2026-07-11
+
+### ✨ `fix` / `fix-gate` + the `candor.fix` code action + the `candor_fix` MCP tool (FIX-SPEC P3)
+
+The boundary FIX capability (integrations/FIX-SPEC.md) — the remedial inverse of `whatif` — lands in the
+TypeScript engine across all three surfaces, byte-for-byte the same remedy as candor-query / candor-java:
+
+- **`query.mjs fix <prefix> <fn> <Effect> <policy>`** and **`fix-gate <prefix> <policy>`** (JSON): when a
+  function performs an effect its layer forbids, compute the direct call **site** to hoist, the forbidden-
+  layer functions that become pure (the **deniedSpan**), and the nearest allowed-layer caller (**hoistTo**),
+  plus the policy-relax alternative. The cut is **site-anchored** (walks up from the site through the denied
+  layer), so the span is root-independent — `fix-gate` collapses the inheritors of one crossing to one plan.
+- **`candor_fix` MCP tool** — the remedy for any MCP agent; policy resolves from `.candor/config` like
+  `candor_gate`, so it works zero-config in a repo with a checked-in policy.
+- **`candor.fix` LSP code action** — when the cursor sits in a function that actually violates the policy,
+  offer "candor fix: hoist <E> out of <fn>"; the command shows the plan (hoist target / pure span / port or
+  relax) as a showMessage + a transient diagnostic, alongside the existing pre-edit whatif action.
+
+Read-only over the report + callgraph; no report-byte or verdict change; advisory (the gate re-scan stays
+the ground truth). New coverage: query-core unit tests (fix/fix-gate), an MCP `candor_fix` test, and LSP
+tests for the code-action offering + the `candor.fix` command.
+
 ## [0.8.9] — 2026-07-10
 
 ### The LSP whatif code action (read-only surface — no report/verdict change)

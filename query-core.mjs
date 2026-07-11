@@ -486,3 +486,103 @@ export function whatif(cg, target, eff, policyParsed, scopeMatches) {
   }
   return { of: targets, effect: eff, affected: [...affected].sort(), violations, ok: violations.length === 0 };
 }
+
+// deniedLayer: the deny/`pure` scope (the "layer") forbidding `eff` at `fn`, or null if allowed there.
+// Mirrors the gate's AS-EFF-006 predicate (candor-java/candor-query): a `deny` fires when it names the
+// effect; a `pure` rule (empty effects) forbids every real effect but not Unknown.
+function deniedLayer(fn, eff, policyParsed, scopeMatches) {
+  for (const r of policyParsed.deny) {
+    const denies = r.effects.length === 0 ? eff !== "Unknown" : r.effects.includes(eff);
+    if (denies && (!r.scope || scopeMatches(fn, r.scope))) return r.scope ?? "";
+  }
+  return null;
+}
+
+// The site-anchored cut (integrations/FIX-SPEC.md), shared by fix + fixGate — the byte-for-byte port of
+// candor-query / candor-java's computeRemedy. Forward-BFS to the direct site(s), then climb UP through the
+// denied layer so the pure span is the same whichever inheriting function triggered it (root-independent);
+// the allowed-layer callers where the climb stops are the hoist frontier.
+function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMatches) {
+  const sites = new Set();
+  const fseen = new Set([start]);
+  const fq = [start];
+  while (fq.length) {
+    const cur = fq.shift();
+    const fe = byName.get(cur);
+    if (fe && (fe.direct ?? []).includes(eff)) sites.add(cur);
+    for (const c of cg[cur] ?? []) {
+      const ce = byName.get(c);
+      if (ce && (ce.inferred ?? []).includes(eff) && !fseen.has(c)) { fseen.add(c); fq.push(c); }
+    }
+  }
+  const anchors = sites.size ? [...sites] : [start];
+  const deniedSpan = new Set();
+  const hoistTo = new Set();
+  const up = [];
+  for (const a of anchors) {
+    if (deniedLayer(a, eff, policyParsed, scopeMatches) !== null) deniedSpan.add(a);
+    up.push(a);
+  }
+  while (up.length) {
+    const cur = up.shift();
+    for (const caller of rev.get(cur) ?? []) {
+      const ce = byName.get(caller);
+      if (ce && !(ce.inferred ?? []).includes(eff)) continue; // doesn't route the effect
+      if (deniedLayer(caller, eff, policyParsed, scopeMatches) !== null) {
+        if (!deniedSpan.has(caller)) { deniedSpan.add(caller); up.push(caller); }
+      } else {
+        hoistTo.add(caller);
+      }
+    }
+  }
+  return {
+    fn: start, effect: eff, layer,
+    cleanHoist: hoistTo.size > 0,
+    site: [...sites].sort(),
+    deniedSpan: [...deniedSpan].sort(),
+    hoistTo: [...hoistTo].sort(),
+    policyAlternative: layer ? `allow ${eff} ${layer}` : `allow ${eff}`,
+  };
+}
+
+// fix: the boundary remedy for ONE function (the remedial inverse of whatif). Returns null if the function
+// isn't in the graph; `{ crossing:false, reason }` if it performs the effect but no policy forbids it there
+// (or it doesn't perform it) — a no-op the caller reports plainly; else the full remedy (`crossing:true`).
+export function fix(cg, fns, target, eff, policyParsed, scopeMatches) {
+  const names = new Set(Object.keys(cg));
+  for (const e of fns) names.add(e.fn);
+  const m = matches([...names], target);
+  if (m.length === 0) return null;
+  const byName = indexFns(fns);
+  // prefer a match that actually performs the effect, so a bare leaf resolves to the violating function
+  const start = m.find((n) => (byName.get(n)?.inferred ?? []).includes(eff)) ?? m[0];
+  const se = byName.get(start);
+  if (!se || !(se.inferred ?? []).includes(eff))
+    return { fn: start, effect: eff, crossing: false, reason: "does-not-perform" };
+  const layer = deniedLayer(start, eff, policyParsed, scopeMatches);
+  if (layer === null)
+    return { fn: start, effect: eff, crossing: false, reason: "not-forbidden" };
+  const rev = reverseGraph(cg);
+  return { crossing: true, ...computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMatches) };
+}
+
+// fixGate: a remedy for EVERY deny/`pure` (AS-EFF-006) crossing in the report, collapsing the inheritors of
+// one root cause to a single plan (keyed by effect|layer|site|hoist). Returns { ok, remedies } — the shape
+// the edit-time loop folds into its block message.
+export function fixGate(cg, fns, policyParsed, scopeMatches) {
+  const byName = indexFns(fns);
+  const rev = reverseGraph(cg);
+  const plans = new Map();
+  for (const e of fns) {
+    for (const eff of (e.inferred ?? [])) {
+      const layer = deniedLayer(e.fn, eff, policyParsed, scopeMatches);
+      if (layer !== null) {
+        const p = computeRemedy(e.fn, eff, layer, cg, rev, byName, policyParsed, scopeMatches);
+        const key = `${p.effect}|${p.layer}|${p.site}|${p.hoistTo}`;
+        if (!plans.has(key)) plans.set(key, p);
+      }
+    }
+  }
+  const remedies = [...plans.values()];
+  return { ok: remedies.length === 0, remedies };
+}

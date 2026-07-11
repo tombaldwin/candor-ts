@@ -97,6 +97,8 @@ Q map      $P 1                     # {module: {effects, functions}}
 Q containment $P [baseline-prefix]  # §6.1 boundary-effect dispersion; with a baseline = AS-EFF-010 ratchet (exit 1 on a leak)
 Q blindspots $P                     # the Unknown SOURCES (fns with unknownWhy), ranked by Unknown blast radius
 Q whatif   $P <fn> <Effect> [policy]  # pre-edit gate verdict (exit 1 if it would violate)
+Q fix      $P <fn> <Effect> <policy>  # the boundary FIX: where the effect belongs + the hoist refactor
+Q fix-gate $P <policy>              # a fix for EVERY crossing — the loop's block-message remedy
 Q diff     $P <baseline-prefix> 1   # per-function effect delta (exit 1 on a gained effect)
 Q gains    $P <baseline-prefix>     # supply-chain alarm: {gained, byFunction} — effects a surface grew
 Q reachable $P 1                    # what the app DOES at runtime: effects over the entry points
@@ -105,13 +107,14 @@ Q parsepolicy <policy-file>         # the canonical §6.2 parse (what the gate w
 
 And as an MCP server, so an agent pulls these as tools instead of shelling out:
 `CANDOR_REPORT=$P npx -y candor-ts-mcp` (tools `candor_impact`/`candor_reachable`/`candor_where`/…,
-plus `candor_gate`/`candor_whatif` — a given-but-unreadable `policy` is a loud tool error, never a
-clean verdict). `npx -y candor-ts-watch <dir>` keeps the report fresh as you edit (and reports the
-edit-delta); `candor-lsp` serves the same report as CodeLens/hover/diagnostics in any LSP editor,
-plus the pre-edit whatif as a code action (`candor: what if <fn> performed <E>?` → the
-`candor.whatif` command: the query-core whatif's verdict + blast radius as a showMessage and a
-transient diagnostic, cleared on the file's next open/save — plain LSP, so helix/neovim/VS
-Code/JetBrains-via-LSP4IJ all get it without client code).
+plus `candor_gate`/`candor_whatif`/`candor_fix` — a given-but-unreadable `policy` is a loud tool
+error, never a clean verdict). `npx -y candor-ts-watch <dir>` keeps the report fresh as you edit (and
+reports the edit-delta); `candor-lsp` serves the same report as CodeLens/hover/diagnostics in any LSP
+editor, plus two code actions (plain LSP — helix/neovim/VS Code/JetBrains-via-LSP4IJ all get them
+without client code): the pre-edit whatif (`candor: what if <fn> performed <E>?` → the `candor.whatif`
+command) and, when the cursor sits in a function that actually violates the policy, the boundary FIX
+(`candor fix: hoist <E> out of <fn>` → the `candor.fix` command: where the effect belongs + the hoist
+refactor, as a showMessage and a transient diagnostic, cleared on the file's next open/save).
 CAVEAT — the MCP/LSP gate verdicts are computed FROM THE REPORT: the engine's own `--policy` /
 `--gate-json` run additionally fails an allow rule whose literal surface is incomplete (a masked
 endpoint — internal state, not a report field), so treat a report-side green as advisory and the

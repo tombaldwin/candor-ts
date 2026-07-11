@@ -219,6 +219,7 @@ function showMessage(type, message) { send({ jsonrpc: "2.0", method: "window/sho
 // BOUNDARY effect (Q.CONTAINED — ambient effects gate nothing) the fn does not already carry. The action
 // carries a plain `command` (no client-side resolve, no edit) so it works in any LSP client verbatim.
 const WHATIF_COMMAND = "candor.whatif";
+const FIX_COMMAND = "candor.fix";
 function codeActions(docPath, uri, range) {
   const at = enclosingEntry(docPath, range?.start?.line ?? 0);
   if (!at) return [];                                  // a fn the report doesn't know → no actions, never an error
@@ -234,6 +235,30 @@ function codeActions(docPath, uri, range) {
         arguments: [{ fn: at.entry.fn, effect: eff, uri, line: at.line }],
       },
     });
+  }
+  // The REMEDIAL companion (integrations/FIX-SPEC.md): for each BOUNDARY effect the fn ALREADY performs that
+  // the active policy FORBIDS here, offer the FIX — where the effect belongs + the hoist. Only real crossings
+  // are offered (Q.fix returns `crossing:false` otherwise), so this is empty unless the cursor sits in a
+  // function that actually violates the boundary. Same policy source as the diagnostics + the whatif action.
+  const policyText = activePolicy();
+  if (policyText !== null && hasReport(reportPrefix)) {
+    const pol = parsePolicy(policyText);
+    const cg = Q.loadCallgraph(reportPrefix);
+    const fns = Q.loadReport(reportPrefix);
+    for (const eff of Q.CONTAINED) {
+      if (!have.has(eff)) continue;
+      const r = Q.fix(cg, fns, at.entry.fn, eff, pol, scopeMatches);
+      if (r && r.crossing) {
+        out.push({
+          title: `candor fix: hoist ${eff} out of ${at.entry.fn}`,
+          command: {
+            title: `candor fix: hoist ${eff} out of ${at.entry.fn}`,
+            command: FIX_COMMAND,
+            arguments: [{ fn: at.entry.fn, effect: eff, uri, line: at.line }],
+          },
+        });
+      }
+    }
   }
   return out;
 }
@@ -290,6 +315,56 @@ function runWhatif(a) {
   return r;   // the raw whatif result rides back as the executeCommand result (a thick client can render it)
 }
 
+// The candor.fix command: the SAME query-core `fix` the CLI (`query.mjs fix`) and MCP (`candor_fix`) run —
+// the boundary remedy (where the effect belongs + the hoist refactor), against the live policy (same source
+// as the diagnostics). Re-read per call (the freshness contract). Malformed args → logMessage + null.
+function runFix(a) {
+  if (!a || typeof a !== "object" || typeof a.fn !== "string" || typeof a.effect !== "string") {
+    logMessage(`candor-lsp: ${FIX_COMMAND} called with malformed arguments (expected [{ fn, effect, uri?, line? }]) — ignored`);
+    return null;
+  }
+  if (!hasReport(reportPrefix)) {
+    showMessage(2, "candor: no report found — scan first (candor-ts <dir> --out .candor/report)");
+    return null;
+  }
+  const policyText = activePolicy();
+  if (policyText === null) {
+    showMessage(2, "candor: no policy discovered — a fix is defined relative to a boundary; set CANDOR_POLICY or check one into .candor/config");
+    return null;
+  }
+  const r = Q.fix(Q.loadCallgraph(reportPrefix), Q.loadReport(reportPrefix), a.fn, a.effect,
+                  parsePolicy(policyText), scopeMatches);
+  if (r === null) {
+    showMessage(2, `candor: no function matching \`${a.fn}\` in the call graph — the report may be stale`);
+    return null;
+  }
+  if (!r.crossing) {
+    showMessage(3, `candor: \`${a.fn}\` — ${a.effect} isn't forbidden here; no boundary fix needed`);
+    return r;
+  }
+  const verdict = r.cleanHoist
+    ? `candor fix: hoist ${a.effect} to ${r.hoistTo.join(", ")} — the ${r.deniedSpan.length} ${r.layer || "(root)"} function(s) then stay pure (or relax the boundary: ${r.policyAlternative})`
+    : `candor fix: no clean hoist for ${a.effect} — introduce a port, or relax the boundary: ${r.policyAlternative}`;
+  showMessage(2, verdict);
+  if (typeof a.uri === "string" && Number.isInteger(a.line)) {   // the plan, pinned at the fn's line
+    const lines = [`candor fix — hoist ${a.effect} out of the ${r.layer || "(root)"} boundary`];
+    lines.push(`site: ${r.site.join(", ") || "(cross-module or Unknown source)"}`);
+    if (r.cleanHoist) {
+      lines.push(`hoist ${a.effect} to: ${r.hoistTo.join(", ")}`);
+      lines.push(`then pure (thread the value): ${r.deniedSpan.join(", ")}`);
+    } else {
+      lines.push("no clean hoist — introduce a port (inject the effect from an allowed layer), or relax the boundary");
+    }
+    lines.push(`policy alternative: ${r.policyAlternative}`);
+    transient.set(a.uri, [{
+      range: { start: { line: a.line, character: 0 }, end: { line: a.line, character: 200 } },
+      severity: 3, source: "candor", code: "fix", message: lines.join("\n"),
+    }]);
+    publishDiagnostics(a.uri);
+  }
+  return r;   // the raw remedy rides back as the executeCommand result (a thick client can render it)
+}
+
 // ---- the LSP method surface ---------------------------------------------------------------------------
 function handle(msg) {
   const { id, method, params } = msg;
@@ -307,7 +382,7 @@ function handle(msg) {
         codeLensProvider: { resolveProvider: false },
         hoverProvider: true,
         codeActionProvider: { resolveProvider: false },                // actions carry their command inline
-        executeCommandProvider: { commands: [WHATIF_COMMAND] },
+        executeCommandProvider: { commands: [WHATIF_COMMAND, FIX_COMMAND] },
       },
       serverInfo: { name: "candor-lsp", version: VERSION },
     });
@@ -334,12 +409,14 @@ function handle(msg) {
     catch { return result(id, []); }   // unknown fn / non-file URI / unreadable report → no actions, never an error
   }
   if (method === "workspace/executeCommand") {
-    if (params?.command !== WHATIF_COMMAND) {
-      logMessage(`candor-lsp: unknown command \`${params?.command}\` — this server provides only ${WHATIF_COMMAND}`);
+    const handlers = { [WHATIF_COMMAND]: runWhatif, [FIX_COMMAND]: runFix };
+    const run = handlers[params?.command];
+    if (!run) {
+      logMessage(`candor-lsp: unknown command \`${params?.command}\` — this server provides ${WHATIF_COMMAND} and ${FIX_COMMAND}`);
       return result(id, null);
     }
-    try { return result(id, runWhatif(params?.arguments?.[0])); }
-    catch (e) { logMessage(`candor-lsp: ${WHATIF_COMMAND} failed: ${e.message}`); return result(id, null); }
+    try { return result(id, run(params?.arguments?.[0])); }
+    catch (e) { logMessage(`candor-lsp: ${params?.command} failed: ${e.message}`); return result(id, null); }
   }
   if (method === "shutdown") return result(id, null);
   if (method === "exit") process.exit(0);

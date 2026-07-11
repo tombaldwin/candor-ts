@@ -207,12 +207,19 @@ const extra = await mcpSession([
   { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "candor_blindspots", arguments: {} } },
   { jsonrpc: "2.0", id: 5, method: "resources/list" },
   { jsonrpc: "2.0", id: 6, method: "resources/read", params: { uri: "candor://report" } },
+  // candor_fix resolves the SAME checked-in policy as candor_gate (no args) — leaf performs Net under the
+  // whole-project `deny Net`, a real crossing with no clean hoist (every caller is also denied).
+  { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "candor_fix", arguments: { fn: "leaf", effect: "Net" } } },
 ]);
 const toolText = (id) => JSON.parse(extra.find((r) => r.id === id).result.content[0].text);
 const gate = toolText(2);
 ok("mcp: candor_gate resolves the checked-in .candor/config policy (no args) and fails the violating repo",
    gate.ok === false && gate.violations.some((v) => v.rule === "AS-EFF-006" && v.effects.includes("Net")),
    JSON.stringify(gate));
+const fixR = toolText(7);
+ok("mcp: candor_fix resolves the checked-in policy (no args) and returns the boundary remedy",
+   fixR.crossing === true && fixR.site.includes("app.leaf") && fixR.policyAlternative === "allow Net",
+   JSON.stringify(fixR));
 const cont = toolText(3);
 ok("mcp: candor_containment returns the per-effect dispersion shape",
    cont && (Array.isArray(cont.contained) || typeof cont === "object"), JSON.stringify(cont).slice(0, 120));

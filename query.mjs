@@ -31,6 +31,7 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          callers as coreCallers, callersFrontier, loadHierarchy,
          containment as coreContainment, diff as coreDiff,
          where as coreWhere, map as coreMap, whatif as coreWhatif,
+         fix as coreFix, fixGate as coreFixGate,
          loadReport, loadCallgraph, reportVersion } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
 
@@ -57,6 +58,8 @@ const SUBCOMMANDS = [
   ["gains", "<cur-prefix> <base-prefix>", "the supply-chain alarm: what the surface gained between two reports"],
   ["path", "<prefix> <fn> <Effect>", "a call path from a function to where an effect enters"],
   ["whatif", "<prefix> <fn> <Effect> [policy-file] [0|1]", "the impact of giving a function an effect, vs a policy (exit 1 on a violation)"],
+  ["fix", "<prefix> <fn> <Effect> <policy-file>", "the boundary fix: where the effect belongs + the hoist refactor"],
+  ["fix-gate", "<prefix> <policy-file>", "a fix for EVERY boundary crossing — the loop's block-message remedy"],
   ["agents", "", "print the agent contract for this build (AGENTS.md)"],
 ];
 
@@ -249,6 +252,31 @@ switch (cmd) {
     emit(r);
     process.exit(r.violations.length ? 1 : 0);
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
+  }
+  case "fix": {
+    // THE BOUNDARY FIX (integrations/FIX-SPEC.md): where a forbidden effect belongs + the hoist refactor.
+    // The remedial inverse of whatif. A policy is REQUIRED and must be readable (the fix is defined relative
+    // to the boundary the edit crossed) — a typo'd path fails LOUD, never a silently-empty "no crossing".
+    const [prefix, target, eff, policyFile] = args;
+    if (!target || !eff) { console.error("usage: candor-ts-query fix <prefix> <fn> <Effect> <policy-file>"); process.exit(2); }
+    if (!policyFile) { console.error("candor: fix requires a policy file — the fix is the refactor that restores the boundary the edit crossed"); process.exit(2); }
+    let ptext;
+    try { ptext = fs.readFileSync(policyFile, "utf8"); }
+    catch { console.error(`candor: policy ${policyFile} could not be read — no fix computed`); process.exit(2); }
+    const r = coreFix(loadCallgraph(prefix), loadReport(prefix), target, eff, parsePolicy(ptext), scopeMatches);
+    if (r === null) { console.error(`candor: no function matching \`${target}\` in the call graph`); process.exit(2); }
+    emit(r);
+    break;
+  }
+  case "fix-gate": {
+    // A remedy for EVERY deny/pure crossing — the shape the edit-time loop folds into its block message.
+    const [prefix, policyFile] = args;
+    if (!policyFile) { console.error("candor: fix-gate requires a policy file"); process.exit(2); }
+    let ptext;
+    try { ptext = fs.readFileSync(policyFile, "utf8"); }
+    catch { console.error(`candor: policy ${policyFile} could not be read — no fix computed`); process.exit(2); }
+    emit(coreFixGate(loadCallgraph(prefix), loadReport(prefix), parsePolicy(ptext), scopeMatches));
+    break;
   }
   default:
     // no command (cmd === undefined) or an unknown one: the FULL usage, not the stale 6-item list.
