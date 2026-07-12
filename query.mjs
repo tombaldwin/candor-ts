@@ -9,18 +9,22 @@
  * but its author had by then read the reference engines; the ongoing guarantee for it is the
  * conformance differential, not clean-room provenance.
  *
- *   node query.mjs parsepolicy <file>
- *   node query.mjs show     <prefix> <query>  <0|1>
- *   node query.mjs where    <prefix> <Effect> <0|1>
- *   node query.mjs callers  <prefix> <query>  <0|1>
- *   node query.mjs map      <prefix>          <0|1>
- *   node query.mjs whatif   <prefix> <fn> <Effect> [policy-file] [0|1]
+ * CANONICAL grammar (candor-spec §3.3.1 ⟨0.10⟩ — one shape, every engine):
+ *   node query.mjs <verb> <verb-args…> [--report <locator>] [--policy <file>] [--json] [--strict] [--include-unknown]
+ * The report is DISCOVERED (walk up from CWD for a `.candor/` dir → `<that>/.candor/report`; CANDOR_REPORT
+ * overrides) unless --report gives a locator (a dir → `<dir>/.candor/report`; a `.json` path → that report
+ * path; else a prefix). diff/gains are the exception: two positional locators <current> <baseline>.
+ *
+ * DEPRECATED aliases (kept accepted through the 0.10 line, stderr-noted — candor-spec §3.3.1 / PART 17):
+ *   node query.mjs <verb> <PREFIX> <verb-args…> [0|1]      (leading-positional report + trailing 0|1 sentinel)
+ *   node query.mjs whatif/fix <prefix> <fn> <Effect> [policy-file] [0|1]   (positional policy)
  */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parsePolicy, scopeMatches } from "./policy.mjs";
+import { parsePolicy, scopeMatches, discoverConfigPolicy } from "./policy.mjs";
+import { hasReport } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 // ONE source of truth for loading + name-matching — query.mjs kept DRIFTED local copies that didn't
 // merge sibling reports, didn't tolerate a corrupt report (bare JSON.parse → uncaught crash), and used
@@ -41,26 +45,161 @@ const QUERY_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(QUERY_DIR, "package.json"), "utf8")).version;
 const SPEC_VERSION = "0.9";
 
+// ---- the §3.3.1 canonical query grammar (⟨0.10⟩, additive over 0.9) --------------------------------
+// One shape for every verb: `<verb> <verb-args…> [--report <locator>] [--policy <file>] [--json]
+// [--strict] [--include-unknown]`. The report is DISCOVERED by default; --report overrides. The old
+// leading-positional-report form, the trailing `0|1` JSON sentinel, and a positional policy stay
+// accepted as DEPRECATED aliases (stderr-noted) so the conformance suite's old-grammar invocations
+// (and every 0.9 caller) keep working — never removed before the next breaking bump.
+
+// A one-line deprecation note to STDERR (stdout stays pure JSON — the machine consumer never sees it).
+// De-duplicated so a single invocation prints each distinct note at most once.
+const _deprecated = new Set();
+const deprecate = (msg) => { if (!_deprecated.has(msg)) { _deprecated.add(msg); console.error(`candor-ts-query: [deprecated] ${msg}`); } };
+
+// Resolve a --report <locator> by the ONE §3.3.1 rule: a directory → `<dir>/.candor/report`; a path
+// ending `.json` → that full report path (minus the `.json`, since loadReport takes a prefix and adds
+// it back); otherwise a bare prefix. Returns the PREFIX loadReport/loadCallgraph expect.
+function locatorToPrefix(loc) {
+  try { if (fs.statSync(loc).isDirectory()) return path.join(loc, ".candor", "report"); } catch { /* not a dir */ }
+  if (loc.endsWith(".json")) return loc.slice(0, -".json".length);   // full report path → its prefix
+  return loc;                                                        // bare prefix
+}
+
+// DISCOVER the report prefix when no --report: CANDOR_REPORT env wins; else walk UP from CWD for a
+// `.candor/` directory and use its `report` prefix (the §3.4 discovery mechanism, the twin of scan.mjs's
+// config walk-up). Returns a prefix (possibly non-existent — the loaders disclose an empty result).
+function discoverReportPrefix() {
+  const env = process.env.CANDOR_REPORT;
+  if (env) return locatorToPrefix(env);
+  for (let d = process.cwd(); ; d = path.dirname(d)) {
+    if (fs.existsSync(path.join(d, ".candor"))) return path.join(d, ".candor", "report");
+    if (path.dirname(d) === d) break;                                // filesystem root
+  }
+  return path.join(".candor", "report");                             // fallback: the CWD's own .candor/
+}
+
+// Parse the canonical flags out of a verb's args, leaving the POSITIONAL verb-args behind. Handles the
+// deprecated `0|1` trailing sentinel (→ noted, dropped; JSON is the default here anyway) so the old
+// grammar stays green. `flags` names the boolean flags this verb honours (`strict`/`includeUnknown`).
+// Returns { positionals, reportPrefix, reportExplicit, policyFile, strict, includeUnknown }.
+function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknown = false } = {}) {
+  const positionals = [];
+  let reportLocator = null, policyFile = null, wantStrict = false, wantIncludeUnknown = false;
+  for (let i = 0; i < rawArgs.length; i++) {
+    const a = rawArgs[i];
+    if (a === "--report") { reportLocator = rawArgs[++i]; continue; }
+    if (policy && a === "--policy") { policyFile = rawArgs[++i]; continue; }
+    if (a === "--json") { continue; }                                // JSON is candor-ts's only output; accept + ignore
+    if (strict && a === "--strict") { wantStrict = true; continue; }
+    if (includeUnknown && a === "--include-unknown") { wantIncludeUnknown = true; continue; }
+    positionals.push(a);
+  }
+  // Deprecated trailing `0|1` JSON sentinel (Rust/TS legacy): if the LAST positional is a bare 0 or 1,
+  // strip it (candor-ts emits JSON regardless) and note the deprecation. Only when it's genuinely a
+  // trailing sentinel — never eat a `where 1`-style effect (effects aren't bare digits).
+  if (positionals.length && /^[01]$/.test(positionals[positionals.length - 1])) {
+    deprecate("the trailing `0|1` JSON sentinel is deprecated — candor-ts emits JSON; use --json to select it explicitly");
+    positionals.pop();
+  }
+  const reportExplicit = reportLocator !== null;
+  const reportPrefix = reportExplicit ? locatorToPrefix(reportLocator) : discoverReportPrefix();
+  return { positionals, reportPrefix, reportExplicit, policyFile, strict: wantStrict, includeUnknown: wantIncludeUnknown };
+}
+
+// A verb that takes ONE report + `argc` verb-positionals (where <Effect>: 1; show/callers/impact <fn>:
+// 1; path <fn> <Effect>: 2; map/reachable/blindspots: 0). Applies discovery + --report, then peels the
+// DEPRECATED leading-positional report: if --report wasn't given AND the first positional resolves to a
+// report AND there's one positional MORE than the verb needs, treat that first token as the report.
+// Returns { prefix, args } — `args` is exactly the verb's own positionals.
+function resolveReportVerb(rawArgs, argc, opts = {}) {
+  const p = parseCanonical(rawArgs, opts);
+  let { positionals, reportPrefix } = p;
+  if (!p.reportExplicit && positionals.length === argc + 1 && hasReport(locatorToPrefix(positionals[0]))) {
+    deprecate("a leading-positional report is deprecated — pass it as `--report <locator>` (a dir, a .json path, or a prefix); the report is discovered from `.candor/` by default");
+    reportPrefix = locatorToPrefix(positionals[0]);
+    positionals = positionals.slice(1);
+  }
+  return { ...p, prefix: reportPrefix, args: positionals };
+}
+
+// whatif/fix share a shape: one report + `<fn> <Effect>` + a policy. Canonical §3.3.1: `<fn> <Effect>
+// [--policy <file>]`, report discovered/--report. DEPRECATED aliases (kept green for the old grammar):
+// a leading-positional report AND a trailing positional policy — `<prefix> <fn> <Effect> [policy]`.
+// Peels both (stderr-noted), then resolves the policy through resolvePolicy (flag > positional >
+// CANDOR_POLICY > .candor/config). Returns { prefix, target, eff, policyFile }.
+function resolveWhatifFix(rawArgs) {
+  const p = parseCanonical(rawArgs, { policy: true });
+  let positionals = p.positionals, prefix = p.reportPrefix, positionalPolicy = null;
+  // A leading-positional report fires only when --report is absent, there are MORE than the 2 verb args,
+  // and the first token resolves to a report (else the extra positional is the deprecated policy).
+  if (!p.reportExplicit && positionals.length > 2 && hasReport(locatorToPrefix(positionals[0]))) {
+    deprecate("a leading-positional report is deprecated — pass it as `--report <locator>`; the report is discovered from `.candor/` by default");
+    prefix = locatorToPrefix(positionals[0]);
+    positionals = positionals.slice(1);
+  }
+  const [target, eff, posPolicy] = positionals;               // a 3rd positional is the deprecated policy
+  if (posPolicy) positionalPolicy = posPolicy;
+  const { policyFile } = resolvePolicy(p.policyFile, positionalPolicy);
+  return { prefix, target, eff, policyFile };
+}
+
+// fix-gate/unverified share a shape: one report + a policy + no verb-positionals (unverified also takes
+// --strict). Canonical §3.3.1: `[--policy <file>] [--strict]`, report discovered/--report. DEPRECATED
+// alias: a leading report + a positional policy — `<prefix> <policy-file> [--strict]`. Peels both
+// (stderr-noted), then resolves the policy through resolvePolicy. Returns { prefix, policyFile, strict }.
+function resolveGateVerb(rawArgs, { strict = false } = {}) {
+  const p = parseCanonical(rawArgs, { policy: true, strict });
+  let positionals = p.positionals, prefix = p.reportPrefix, positionalPolicy = null;
+  if (!p.reportExplicit && positionals.length && hasReport(locatorToPrefix(positionals[0]))) {
+    deprecate("a leading-positional report is deprecated — pass it as `--report <locator>`; the report is discovered from `.candor/` by default");
+    prefix = locatorToPrefix(positionals[0]);
+    positionals = positionals.slice(1);
+  }
+  if (positionals[0]) positionalPolicy = positionals[0];       // the remaining positional is the deprecated policy
+  const { policyFile } = resolvePolicy(p.policyFile, positionalPolicy);
+  return { prefix, policyFile, strict: p.strict };
+}
+
+// Resolve the policy for the gate verbs (whatif/fix/fix-gate/unverified): the --policy flag, else the
+// deprecated positional policy, else CANDOR_POLICY, else the `.candor/config` `policy` key (§3.3/§3.4,
+// the same precedence scan.mjs uses). Returns { policyFile, fromPositional } — policyFile null if none.
+function resolvePolicy(policyFlag, positionalPolicy) {
+  if (policyFlag) return { policyFile: policyFlag, fromPositional: false };
+  if (positionalPolicy) {
+    deprecate("a positional policy file is deprecated — pass it as `--policy <file>` (or set CANDOR_POLICY / a .candor/config `policy` key)");
+    return { policyFile: positionalPolicy, fromPositional: true };
+  }
+  if (process.env.CANDOR_POLICY) return { policyFile: process.env.CANDOR_POLICY, fromPositional: false };
+  const disc = discoverConfigPolicy(process.cwd());
+  if (disc?.policyPath) return { policyFile: disc.policyPath, fromPositional: false };
+  return { policyFile: null, fromPositional: false };
+}
+
 // The full subcommand catalogue — name + one-line description (derived from the per-subcommand
 // comments + the module-doc header). The single source for the --help list AND the no-arg/unknown
 // usage, so the two can never drift back to a stale hand-list again.
+// Grammar per candor-spec §3.3.1 ⟨0.10⟩: the report is a FLAG (--report), discovered from `.candor/`
+// by default; verb args are positional; --json selects JSON; --policy supplies a policy. The old
+// leading-positional/`0|1`/positional-policy forms stay accepted as deprecated aliases (see the parser).
+const REPORT_TAIL = "[--report <locator>] [--json]";
 const SUBCOMMANDS = [
   ["parsepolicy", "<file>", "parse a policy file (candor-spec §6.2) and print it as JSON"],
-  ["show", "<prefix> <query> [0|1]", "the effect record(s) for a function — direct, inferred, surfaces"],
-  ["where", "<prefix> <Effect> [0|1]", "functions with an effect, split into directly / inherited"],
-  ["callers", "<prefix> <query> [0|1]", "who reaches a function: {of, direct, transitive} (--include-unknown)"],
-  ["map", "<prefix> [0|1]", "per-module effect rollup: {effects, functions} by module"],
-  ["containment", "<prefix> [baseline-prefix]", "§6.1 boundary-effect dispersion; with a baseline, the leak ratchet (exit 1)"],
-  ["diff", "<cur-prefix> <base-prefix>", "per-function effect delta vs a baseline: {changes:[{fn,gained,lost}]} (exit 1 on a gain)"],
-  ["reachable", "<prefix>", "effects unioned over the entry points: what the app DOES at runtime"],
-  ["impact", "<prefix> <query>", "blast radius of a function (backward dual of reachable)"],
-  ["blindspots", "<prefix>", "the Unknown sources, ranked by blast radius"],
-  ["gains", "<cur-prefix> <base-prefix>", "the supply-chain alarm: what the surface gained between two reports"],
-  ["path", "<prefix> <fn> <Effect>", "a call path from a function to where an effect enters"],
-  ["whatif", "<prefix> <fn> <Effect> [policy-file] [0|1]", "the impact of giving a function an effect, vs a policy (exit 1 on a violation)"],
-  ["fix", "<prefix> <fn> <Effect> <policy-file>", "the boundary fix: where the effect belongs + the hoist refactor"],
-  ["fix-gate", "<prefix> <policy-file>", "a fix for EVERY boundary crossing — the loop's block-message remedy"],
-  ["unverified", "<prefix> <policy-file> [--strict]", "pure/deny layers that PASS but are Unknown (not PROVABLY clean)"],
+  ["show", `<query> ${REPORT_TAIL}`, "the effect record(s) for a function — direct, inferred, surfaces"],
+  ["where", `<Effect> ${REPORT_TAIL}`, "functions with an effect, split into directly / inherited"],
+  ["callers", `<query> [--include-unknown] ${REPORT_TAIL}`, "who reaches a function: {of, direct, transitive}"],
+  ["map", REPORT_TAIL, "per-module effect rollup: {effects, functions} by module"],
+  ["containment", `[<baseline>] ${REPORT_TAIL}`, "§6.1 boundary-effect dispersion; with a baseline, the leak ratchet (exit 1)"],
+  ["diff", "<current> <baseline> [--json]", "per-function effect delta vs a baseline: {changes:[{fn,gained,lost}]} (exit 1 on a gain)"],
+  ["reachable", REPORT_TAIL, "effects unioned over the entry points: what the app DOES at runtime"],
+  ["impact", `<query> ${REPORT_TAIL}`, "blast radius of a function (backward dual of reachable)"],
+  ["blindspots", REPORT_TAIL, "the Unknown sources, ranked by blast radius"],
+  ["gains", "<current> <baseline> [--json]", "the supply-chain alarm: what the surface gained between two reports"],
+  ["path", `<fn> <Effect> ${REPORT_TAIL}`, "a call path from a function to where an effect enters"],
+  ["whatif", `<fn> <Effect> [--policy <file>] ${REPORT_TAIL}`, "the impact of giving a function an effect, vs a policy (exit 1 on a violation)"],
+  ["fix", `<fn> <Effect> [--policy <file>] ${REPORT_TAIL}`, "the boundary fix: where the effect belongs + the hoist refactor"],
+  ["fix-gate", `[--policy <file>] ${REPORT_TAIL}`, "a fix for EVERY boundary crossing — the loop's block-message remedy"],
+  ["unverified", `[--policy <file>] [--strict] ${REPORT_TAIL}`, "pure/deny layers that PASS but are Unknown (not PROVABLY clean)"],
   ["agents", "", "print the agent contract for this build (AGENTS.md)"],
 ];
 
@@ -115,7 +254,7 @@ switch (cmd) {
     // Was a hand-copy of query-core's show that had DRIFTED — it read the wrong Fs key (`e.fs`, never
     // written; the paths silently vanished) and dropped Exec `cmds` entirely. Call the shared show so
     // the CLI and the MCP `candor_show` are one implementation that cannot diverge again.
-    const [prefix, q] = args;
+    const { prefix, args: [q] } = resolveReportVerb(args, 1);
     emit(coreShow(loadReport(prefix), q));
     break;
   }
@@ -123,7 +262,7 @@ switch (cmd) {
     // Shared query-core (like show/callers) — the CLI and MCP `candor_where` are ONE implementation.
     // Hand-copies of core functions in this file have drifted three times (show, callers, diff); the
     // fix each time was the same: delegate, keep query.mjs as arg-parsing + emit + exit codes only.
-    const [prefix, eff] = args;
+    const { prefix, args: [eff] } = resolveReportVerb(args, 1);
     emit(coreWhere(loadReport(prefix), eff));
     break;
   }
@@ -131,8 +270,7 @@ switch (cmd) {
     // --include-unknown ⟨0.7⟩ adds the unresolved-dispatch frontier (possibleViaUnknownDispatch); without
     // it, the byte-for-byte {of,direct,transitive} shape is unchanged (cross-engine parity). Call the
     // shared query-core so the CLI and MCP compute one truth (the prior inline copy had drifted before).
-    const includeUnknown = args.includes("--include-unknown");
-    const [prefix, q] = args.filter((a) => a !== "--include-unknown");
+    const { prefix, args: [q], includeUnknown } = resolveReportVerb(args, 1, { includeUnknown: true });
     const cg = loadCallgraph(prefix);
     if (includeUnknown) emit(callersFrontier(cg, loadReport(prefix), loadHierarchy(prefix), q));
     else emit(coreCallers(cg, q));
@@ -140,14 +278,26 @@ switch (cmd) {
   }
   case "map": {
     // Shared query-core — the CLI and MCP `candor_map` are one implementation (see `where` above).
-    const [prefix] = args;
+    const { prefix } = resolveReportVerb(args, 0);
     emit(coreMap(loadReport(prefix)));
     break;
   }
   case "containment": {
-    // SPEC §6.1 boundary-effect dispersion; with a baseline prefix it's the AS-EFF-010 ratchet (exit 1 on a
-    // new leak), matching candor-java / candor-query. JSON-only, like every other candor-ts query command.
-    const [prefix, basePrefix] = args;
+    // SPEC §6.1 boundary-effect dispersion; with a baseline it's the AS-EFF-010 ratchet (exit 1 on a new
+    // leak), matching candor-java / candor-query. JSON-only, like every other candor-ts query command.
+    // Canonical §3.3.1: `containment [<baseline>]` — the main report discovered / --report, the baseline
+    // an optional positional locator. DEPRECATED alias: `containment <prefix> [<baseline-prefix>]` — a
+    // leading-positional main report (fires only when --report is absent and the first token resolves to
+    // a report), keeping the two old-grammar tests (`containment P`, `containment leaky P`) green.
+    const p = parseCanonical(args, {});
+    let prefix = p.reportPrefix, basePrefix;
+    if (!p.reportExplicit && p.positionals.length && hasReport(locatorToPrefix(p.positionals[0]))) {
+      deprecate("a leading-positional report is deprecated — pass it as `--report <locator>`; the baseline stays positional (`containment [<baseline>]`)");
+      prefix = locatorToPrefix(p.positionals[0]);
+      basePrefix = p.positionals[1] ? locatorToPrefix(p.positionals[1]) : undefined;
+    } else {
+      basePrefix = p.positionals[0] ? locatorToPrefix(p.positionals[0]) : undefined;
+    }
     if (basePrefix) {
       const baseFns = loadReport(basePrefix);
       if (baseFns.length === 0) {   // fail CLOSED (exit 2), not a wall of bogus "everything leaked" (exit 1)
@@ -168,7 +318,11 @@ switch (cmd) {
     // core's effectsByFn was rewritten to avoid (merged multi-report siblings sharing a short fn name
     // dropped one member's effects, so a gained Net could VANISH from diff and its exit-1 contract —
     // a supply-chain miss, and the CLI disagreeing with MCP `candor_diff` on the same reports).
-    const [curPrefix, basePrefix] = args;
+    // §3.3.1: diff/gains are the exception to discovery — two positional locators <current> <baseline>,
+    // each resolved by the shared locator rule (dir / .json path / prefix). --json is accepted (JSON is
+    // the only output). No leading-positional-report alias here: both positionals ARE the reports.
+    const { positionals } = parseCanonical(args, {});
+    const [curPrefix, basePrefix] = positionals.map(locatorToPrefix);
     const { changes } = coreDiff(loadReport(curPrefix), loadReport(basePrefix));
     // §2.1: a baseline is comparable only to its own producing build — disclose a mismatch (the gains
     // may be the engine reclassifying after a coverage batch, not the code changing). Same note + JSON
@@ -188,7 +342,7 @@ switch (cmd) {
   case "reachable": {
     // what the app DOES at runtime: effects unioned over the entry points (SPEC §3.1; same JSON
     // shape as the Rust engine: {entryPoints, effects: {Eff: {count, via}}}).
-    const [prefix] = args;
+    const { prefix } = resolveReportVerb(args, 0);
     const fns = loadReport(prefix);
     const roots = fns.filter((e) => e.entryPoint);
     const byEff = {};
@@ -201,21 +355,24 @@ switch (cmd) {
   case "impact": {
     // blast radius (backward dual of reachable) — reuses the shared query-core, the same logic the
     // MCP server serves. SPEC §3.1: {fn, affectedCount, affected, entryPoints:[{fn,inferred}]}.
-    const [prefix, q] = args;
+    const { prefix, args: [q] } = resolveReportVerb(args, 1);
     emit(coreImpact(loadReport(prefix), loadCallgraph(prefix), q));
     break;
   }
   case "blindspots": {
     // the Unknown SOURCES, ranked by blast radius — the actionable inverse of a widely-propagated
     // Unknown (SPEC §3.1 ⟨0.6⟩): { sources:[{fn,why,reaches,affected}], totalUnknown }.
-    const [prefix] = args;
+    const { prefix } = resolveReportVerb(args, 0);
     emit(coreBlindspots(loadReport(prefix), loadCallgraph(prefix)));
     break;
   }
   case "gains": {
     // the supply-chain alarm (SPEC §5.1): {gained:[Effect], byFunction:[{fn,effect}]} — what the
     // surface gained between two reports (base → cur), the cross-engine machine-readable form.
-    const [curPrefix, basePrefix] = args;
+    // §3.3.1: like diff, two positional locators <current> <baseline> (no discovery), each resolved by
+    // the shared locator rule; --json accepted.
+    const { positionals } = parseCanonical(args, {});
+    const [curPrefix, basePrefix] = positionals.map(locatorToPrefix);
     const gv = reportVersion(curPrefix), gbv = reportVersion(basePrefix);
     if (gv && gbv && gv !== gbv)
       console.error(`candor-ts: ⚠ baseline @${gbv} ≠ engine @${gv} — a "gained capability" may be the engine reclassifying, not the dependency changing. Regenerate both reports with one build to compare releases.`);
@@ -223,22 +380,25 @@ switch (cmd) {
     break;
   }
   case "path": {
-    const [prefix, fn, eff] = args;
+    const { prefix, args: [fn, eff] } = resolveReportVerb(args, 2);
     emit(corePath(loadReport(prefix), loadCallgraph(prefix), fn, eff));
     break;
   }
   case "whatif": {
-    const [prefix, target, eff, maybePolicy] = args;
-    // A present policy arg (anything but the 0/1 verbosity sentinels) MUST exist and be readable —
-    // a typo'd path must be LOUD, not silently "no policy → ok:true, exit 0" (mirrors scan's --policy,
-    // which exits 2 on an unreadable file: a gate that can't read its policy can't certify anything).
+    // §3.3.1: `whatif <fn> <Effect> [--policy <file>]`, report discovered / --report. DEPRECATED aliases:
+    // a leading-positional report and a trailing positional policy (`whatif <prefix> <fn> <Effect>
+    // [policy]`). resolveWhatifFix peels both (stderr-noted) so the old grammar stays green.
+    const { prefix, target, eff, policyFile } = resolveWhatifFix(args);
+    // A present policy MUST exist and be readable — a typo'd path must be LOUD, not silently "no policy →
+    // ok:true, exit 0" (mirrors scan's --policy, which exits 2 on an unreadable file: a gate that can't
+    // read its policy can't certify anything). Flag, positional, CANDOR_POLICY and .candor/config all land here.
     let pol = null;
-    if (maybePolicy && maybePolicy !== "0" && maybePolicy !== "1") {
+    if (policyFile) {
       let text;
       try {
-        text = fs.readFileSync(maybePolicy, "utf8");
+        text = fs.readFileSync(policyFile, "utf8");
       } catch {
-        console.error(`candor: policy ${maybePolicy} could not be read; whatif NOT evaluated against it`);
+        console.error(`candor: policy ${policyFile} could not be read; whatif NOT evaluated against it`);
         process.exit(2);
       }
       pol = parsePolicy(text);
@@ -258,9 +418,11 @@ switch (cmd) {
     // THE BOUNDARY FIX (integrations/FIX-SPEC.md): where a forbidden effect belongs + the hoist refactor.
     // The remedial inverse of whatif. A policy is REQUIRED and must be readable (the fix is defined relative
     // to the boundary the edit crossed) — a typo'd path fails LOUD, never a silently-empty "no crossing".
-    const [prefix, target, eff, policyFile] = args;
-    if (!target || !eff) { console.error("usage: candor-ts-query fix <prefix> <fn> <Effect> <policy-file>"); process.exit(2); }
-    if (!policyFile) { console.error("candor: fix requires a policy file — the fix is the refactor that restores the boundary the edit crossed"); process.exit(2); }
+    // §3.3.1: `fix <fn> <Effect> [--policy <file>]`, report discovered / --report; the old
+    // `fix <prefix> <fn> <Effect> <policy-file>` form (leading report + positional policy) stays accepted.
+    const { prefix, target, eff, policyFile } = resolveWhatifFix(args);
+    if (!target || !eff) { console.error("usage: candor-ts-query fix <fn> <Effect> [--policy <file>] [--report <locator>]"); process.exit(2); }
+    if (!policyFile) { console.error("candor: fix requires a policy file — the fix is the refactor that restores the boundary the edit crossed (pass --policy <file>, or set CANDOR_POLICY / a .candor/config `policy` key)"); process.exit(2); }
     let ptext;
     try { ptext = fs.readFileSync(policyFile, "utf8"); }
     catch { console.error(`candor: policy ${policyFile} could not be read — no fix computed`); process.exit(2); }
@@ -275,8 +437,10 @@ switch (cmd) {
   }
   case "fix-gate": {
     // A remedy for EVERY deny/pure crossing — the shape the edit-time loop folds into its block message.
-    const [prefix, policyFile] = args;
-    if (!policyFile) { console.error("candor: fix-gate requires a policy file"); process.exit(2); }
+    // §3.3.1: `fix-gate [--policy <file>]`, report discovered / --report. DEPRECATED alias: the old
+    // `fix-gate <prefix> <policy-file>` (leading report + positional policy).
+    const { prefix, policyFile } = resolveGateVerb(args);
+    if (!policyFile) { console.error("candor: fix-gate requires a policy file (pass --policy <file>, or set CANDOR_POLICY / a .candor/config `policy` key)"); process.exit(2); }
     let ptext;
     try { ptext = fs.readFileSync(policyFile, "utf8"); }
     catch { console.error(`candor: policy ${policyFile} could not be read — no fix computed`); process.exit(2); }
@@ -288,9 +452,10 @@ switch (cmd) {
   case "unverified": {
     // PROVABLE-PURITY disclosure: pure/deny layers that PASS but contain Unknown (not provably clean). A
     // policy is required; `--strict` exits 1 on a hole. Advisory (exit 0) otherwise.
-    const strict = args.includes("--strict");
-    const [prefix, policyFile] = args.filter((a) => a !== "--strict");
-    if (!policyFile) { console.error("candor: unverified requires a policy file"); process.exit(2); }
+    // §3.3.1: `unverified [--policy <file>] [--strict]`, report discovered / --report. DEPRECATED alias:
+    // the old `unverified <prefix> <policy-file> [--strict]` (leading report + positional policy).
+    const { prefix, policyFile, strict } = resolveGateVerb(args, { strict: true });
+    if (!policyFile) { console.error("candor: unverified requires a policy file (pass --policy <file>, or set CANDOR_POLICY / a .candor/config `policy` key)"); process.exit(2); }
     let ptext;
     try { ptext = fs.readFileSync(policyFile, "utf8"); }
     catch { console.error(`candor: policy ${policyFile} could not be read`); process.exit(2); }
