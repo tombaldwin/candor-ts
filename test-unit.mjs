@@ -26,7 +26,7 @@ import {
 import {
   isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
 } from "./scan-core.mjs";
-import { bestFind, tokenize } from "./surface.mjs";
+import { bestFind, bestFinds, tokenize } from "./surface.mjs";
 
 // ── query-core: the §3.1 match ladder (exact > segment-suffix > substring) ────────────────────────
 test("matches: exact beats substring cousins", () => {
@@ -599,4 +599,65 @@ test("surface.bestFind: nothing when there are no non-Unknown effects", () => {
   const inferred = new Map([["util.parse", eff("Unknown")]]);
   const calls = new Map();
   assert.equal(bestFind(inferred, direct, calls), null);
+});
+
+// ── surface.mjs: bestFinds — the top-N pool behind the `tour` verb (port of surface.rs::best_finds) ──
+test("surface.bestFinds: names the benign-deep reach on a benign-deep fixture", () => {
+  // The `tour` fixture: settings.Settings.load inherits Net 3 hops down via net_layer.doSend, plus an
+  // effecty api.fetch that must NOT win (excluded by the leaf lexicon).
+  const direct = new Map([["net_layer.doSend", eff("Net")]]);
+  const inferred = new Map([
+    ["net_layer.doSend", eff("Net")], ["core.syncState", eff("Net")],
+    ["core.refresh", eff("Net")], ["settings.Settings.load", eff("Net")], ["api.fetch", eff("Net")],
+  ]);
+  const calls = new Map([
+    ["core.syncState", cal("net_layer.doSend")], ["core.refresh", cal("core.syncState")],
+    ["settings.Settings.load", cal("core.refresh")], ["api.fetch", cal("net_layer.doSend")],
+  ]);
+  const loc = new Map([["net_layer.doSend", "src/net.ts:9:1"]]);
+  const finds = bestFinds(inferred, direct, calls, loc, 10);
+  assert.ok(finds.length >= 1, "the benign-deep reach should surface");
+  assert.equal(finds[0].func, "settings.Settings.load");
+  assert.equal(finds[0].effect, "Net");
+  assert.equal(finds[0].hops, 3);
+  assert.equal(finds[0].source, "net_layer.doSend");
+  assert.equal(finds[0].sourceLoc, "src/net.ts:9:1"); // the SOURCE's loc, for the tour callout
+  assert.ok(finds.every((f) => f.func !== "api.fetch"), "effecty api.fetch is excluded");
+});
+
+test("surface.bestFinds: top-1 equals bestFind's winner (one heuristic, no drift)", () => {
+  const direct = new Map([["net_layer.doSend", eff("Net")]]);
+  const inferred = new Map([
+    ["net_layer.doSend", eff("Net")], ["core.refresh", eff("Net")], ["settings.Settings.load", eff("Net")],
+  ]);
+  const calls = new Map([
+    ["core.refresh", cal("net_layer.doSend")], ["settings.Settings.load", cal("core.refresh")],
+  ]);
+  const top1 = bestFinds(inferred, direct, calls, new Map(), 1);
+  const w = bestFind(inferred, direct, calls).winner;
+  assert.equal(top1.length, 1);
+  assert.equal(top1[0].func, w.func);
+  assert.equal(top1[0].effect, w.effect);
+  assert.equal(top1[0].hops, w.hops);
+  assert.equal(top1[0].source, w.source);
+});
+
+test("surface.bestFinds: dedupes to one row per function and caps at N", () => {
+  // Two distinct benign candidates reach Net at different depths; the top-N lists each ONCE, ranked, and
+  // N caps the list. (The intermediaries are EFFECTY-named — syncState/downloadStep — so they add no rows.)
+  const direct = new Map([["net_layer.doSend", eff("Net")]]);
+  const inferred = new Map([
+    ["net_layer.doSend", eff("Net")], ["core.syncState", eff("Net")], ["core.downloadStep", eff("Net")],
+    ["settings.Settings.load", eff("Net")], ["model.render", eff("Net")],
+  ]);
+  const calls = new Map([
+    ["core.syncState", cal("net_layer.doSend")], ["core.downloadStep", cal("core.syncState")],
+    ["settings.Settings.load", cal("core.downloadStep")], ["model.render", cal("net_layer.doSend")],
+  ]);
+  const got = bestFinds(inferred, direct, calls, new Map(), 10);
+  assert.equal(got.length, 2, "two distinct benign functions, one row each");
+  assert.equal(got[0].func, "settings.Settings.load"); // deeper reach ranks first
+  assert.equal(got[1].func, "model.render");
+  assert.equal(bestFinds(inferred, direct, calls, new Map(), 1).length, 1); // N caps
+  assert.equal(new Set(got.map((f) => f.func)).size, got.length); // no function twice
 });

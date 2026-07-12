@@ -115,23 +115,20 @@ function nearestSource(func, effect, direct, inferred, calls) {
   return null;
 }
 
-// Compute the single most surprising reach.
-//   · returns null                      — ZERO effectful functions (caller emits nothing)
-//   · returns { winner: null }          — effectful, but none cleared the bar (honest fallback)
-//   · returns { winner: <Find> }        — the winning reach
-//
-// `inferred`/`direct` are Map<qual, Set<effect>>; `calls` is Map<qual, Iterable<qual>>; `isTest` is an
-// optional (qual) => bool predicate (defaults to false — the caller supplies path-based test detection).
-export function bestFind(inferred, direct, calls, isTest = () => false) {
+// Collect EVERY scored candidate reach (unranked), plus whether the project is effectful at all. The
+// single source of the candidate pool for both bestFind (top-1) and bestFinds (top-N) — one heuristic,
+// no drift. `loc` is a Map<qual, "file:line"> for the source callout ("" when absent). Returns
+// { cands: <Find[]>, anyEffectful }.
+function collectCandidates(inferred, direct, calls, loc, isTest) {
   // Any function carrying a real (non-Unknown) effect makes the project "effectful" — governs
-  // whether we emit the fallback vs nothing.
+  // whether the caller emits the fallback vs nothing.
   let anyEffectful = false;
 
   // Deterministic iteration: sort quals ascending so the tie-break (qual ascending) is stable and
   // Map insertion order never leaks into the result.
   const quals = [...inferred.keys()].sort();
 
-  let best = null;
+  const cands = [];
 
   for (const f of quals) {
     const inf = inferred.get(f);
@@ -154,18 +151,54 @@ export function bestFind(inferred, direct, calls, isTest = () => false) {
       const crossing = moduleOf(ns.source) !== fMod ? 2 : 1;
       const score = sal * benignity * hopsFactor(ns.hops) * crossing;
       if (score === 0) continue;
-      const cand = { func: f, effect: e, hops: ns.hops, source: ns.source, benignToken: benign ?? "", score };
-      // Tie-break: higher score, then fewer hops, then qual ascending. Quals are iterated ascending
-      // and effects ascending, so a strict > keeps the first (smallest qual) winner.
-      const better = best === null
-        || cand.score > best.score
-        || (cand.score === best.score && cand.hops < best.hops);
-      if (better) best = cand;
+      cands.push({
+        func: f, effect: e, hops: ns.hops, source: ns.source,
+        sourceLoc: loc?.get(ns.source) ?? "", benignToken: benign ?? "", score,
+      });
     }
   }
+  return { cands, anyEffectful };
+}
 
+// Compute the top-`n` most surprising reaches, most-surprising first. DEDUPED by function — each
+// function appears at most once (its single highest-scoring reach). The list is empty when nothing
+// clears the bar. Each Find carries { func, effect, hops, source, sourceLoc, benignToken, score }.
+//
+// Ranking (the tie-break, applied to the whole candidate pool before the per-function dedup + take):
+// score DESC → hops ASC → qualified name ASC. With `n === 1` the result is BYTE-IDENTICAL to the old
+// bestFind's winner — the shared candidate pool + this same tie-break, one implementation. Port of
+// surface.rs::best_finds. `loc` is a Map<qual, "file:line"> for the source callout (optional).
+export function bestFinds(inferred, direct, calls, loc, n, isTest = () => false) {
+  const { cands } = collectCandidates(inferred, direct, calls, loc, isTest);
+  // Rank the whole pool: score DESC, hops ASC, qual ASC. Quals were iterated ascending and effects
+  // ascending, so on a full tie the first-pushed (smallest qual) candidate sorts first — matching the
+  // old bestFind's "keep the earliest winner on an exact tie" (a stable sort preserves push order).
+  cands.sort((a, b) => (b.score - a.score) || (a.hops - b.hops) || (a.func < b.func ? -1 : a.func > b.func ? 1 : 0));
+  // DEDUP by function — each appears at most once (its highest-scoring reach, first in ranked order).
+  // Then take up to `n` distinct functions.
+  const seenFns = new Set();
+  const out = [];
+  for (const c of cands) {
+    if (out.length >= n) break;
+    if (!seenFns.has(c.func)) { seenFns.add(c.func); out.push(c); }
+  }
+  return out;
+}
+
+// Compute the single most surprising reach (the scan-time note).
+//   · returns null                      — ZERO effectful functions (caller emits nothing)
+//   · returns { winner: null }          — effectful, but none cleared the bar (honest fallback)
+//   · returns { winner: <Find> }        — the winning reach
+//
+// `inferred`/`direct` are Map<qual, Set<effect>>; `calls` is Map<qual, Iterable<qual>>; `isTest` is an
+// optional (qual) => bool predicate (defaults to false — the caller supplies path-based test detection).
+// ONE implementation with bestFinds — the winner is exactly bestFinds(…, 1)[0] (the scan-note output
+// stays byte-identical, verified by the surface tests + conformance).
+export function bestFind(inferred, direct, calls, isTest = () => false) {
+  const { anyEffectful } = collectCandidates(inferred, direct, calls, undefined, isTest);
   if (!anyEffectful) return null;
-  return { winner: best };
+  const top = bestFinds(inferred, direct, calls, undefined, 1, isTest);
+  return { winner: top.length ? top[0] : null };
 }
 
 // Emit the surface note to STDERR. `loc` is a Map<qual, "file:line"> for the source callout; `log` is

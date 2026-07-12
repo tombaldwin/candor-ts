@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import { parsePolicy, scopeMatches, discoverConfigPolicy } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
+import { bestFinds } from "./surface.mjs";
 // ONE source of truth for loading + name-matching — query.mjs kept DRIFTED local copies that didn't
 // merge sibling reports, didn't tolerate a corrupt report (bare JSON.parse → uncaught crash), and used
 // a `matchTier` missing `#` (so the SAME query resolved differently between `impact` and `callers` on a
@@ -226,6 +227,7 @@ const SUBCOMMANDS = [
   ["reachable", REPORT_TAIL, "effects unioned over the entry points: what the app DOES at runtime"],
   ["impact", `<query> ${REPORT_TAIL}`, "blast radius of a function (backward dual of reachable)"],
   ["blindspots", REPORT_TAIL, "the Unknown sources, ranked by blast radius"],
+  ["tour", `[<N>] ${REPORT_TAIL}`, "the N most surprising transitive reaches — the guided cold-repo poke (no re-scan)"],
   ["gains", "<current> <baseline> [--json]", "the supply-chain alarm: what the surface gained between two reports"],
   ["path", `<fn> <Effect> ${REPORT_TAIL}`, "a call path from a function to where an effect enters"],
   ["whatif", `<fn> <Effect> [--policy <file>] ${REPORT_TAIL}`, "the impact of giving a function an effect, vs a policy (exit 1 on a violation)"],
@@ -400,6 +402,65 @@ switch (cmd) {
     // Unknown (SPEC §3.1 ⟨0.6⟩): { sources:[{fn,why,reaches,affected}], totalUnknown }.
     const { prefix } = resolveReportVerb(args, 0);
     emit(coreBlindspots(loadReport(prefix), loadCallgraph(prefix)));
+    break;
+  }
+  case "tour": {
+    // The ON-DEMAND, top-N cold-repo opener (SURFACE-BEST-FIND-DESIGN.md, P2): the N most SURPRISING
+    // transitive reaches in an existing report — NO re-scan. Delegates to the SHARED surface.mjs
+    // bestFinds (the same heuristic the scan-time note uses, so the ranking can't drift), reading the
+    // report + callgraph sidecar the scan already wrote. Port of candor-rust's candor-query tour verb —
+    // human + --json output byte-identical (a conformance PART pins it four-way).
+    // §3.3.1: `tour [<N>]`, report discovered / --report; the lone OPTIONAL positional is N (default 10).
+    // Unlike the JSON-only verbs, tour has BOTH a human default AND a --json form (like the Rust engine),
+    // so detect --json explicitly (parseCanonical otherwise silently swallows it).
+    const wantJson = args.includes("--json");
+    const { prefix, args: tourArgs } = resolveReportVerb(args, 1);
+    let n = 10;
+    if (tourArgs.length) {
+      // A non-integer N is a USAGE error (exit 2), like the Rust engine — never silently defaulted.
+      if (!/^\d+$/.test(tourArgs[0])) {
+        console.error("usage: candor-ts-query tour [<N>] [--report <locator>] [--json]   (N is a positive integer)");
+        process.exit(2);
+      }
+      n = parseInt(tourArgs[0], 10);
+    }
+    const fns = loadReport(prefix);
+    const cg = loadCallgraph(prefix);
+    // Build the maps the heuristic wants from the report entries + the callgraph sidecar. `inferred`/
+    // `direct` come from the report; `calls` is the full callgraph sidecar (every edge — the graph the
+    // scan held in memory); `loc` maps a function to its "file:line" for the source callout.
+    const inferred = new Map(), direct = new Map(), loc = new Map(), calls = new Map();
+    for (const e of fns) {
+      inferred.set(e.fn, new Set(e.inferred));
+      if (e.direct.length) direct.set(e.fn, new Set(e.direct));
+      if (e.loc) loc.set(e.fn, e.loc);
+    }
+    for (const [k, v] of Object.entries(cg)) calls.set(k, v);
+    const finds = bestFinds(inferred, direct, calls, loc, n);
+    // <crate> is the report prefix's basename (matching Rust's prefix_base) — the report's label.
+    const crateName = path.basename(prefix);
+    if (wantJson) {
+      // Pure JSON to STDOUT: {"reaches":[{fn,effect,hops,source,loc,score}, …]} — same shape + key order
+      // as the Rust engine's tour --json (loc is the SOURCE's file:line, "" when absent).
+      const out = { reaches: finds.map((f) => ({
+        fn: f.func, effect: f.effect, hops: f.hops, source: f.source, loc: f.sourceLoc, score: f.score,
+      })) };
+      console.log(JSON.stringify(out));
+      break;
+    }
+    if (finds.length === 0) {
+      // Effectful-but-nothing-surprising vs genuinely-pure both land here; the honest line is the useful
+      // answer (never a manufactured surprise) — mirrors the scan-note fallback + the Rust engine.
+      console.log("candor: nothing hidden — every effect sits where its name says it should.");
+      break;
+    }
+    console.log(`candor tour — the ${finds.length} most surprising reach${finds.length === 1 ? "" : "es"} in ${crateName}:`);
+    finds.forEach((f, i) => {
+      const hopWord = f.hops === 1 ? "hop" : "hops";
+      const whereS = f.sourceLoc ? ` (${f.sourceLoc})` : "";
+      console.log(`  ${i + 1}. \`${f.func}\` performs ${f.effect}, ${f.hops} ${hopWord} away via \`${f.source}\`${whereS}`);
+      console.log(`     →  candor path ${f.func} ${f.effect}`);
+    });
     break;
   }
   case "gains": {
