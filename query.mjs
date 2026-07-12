@@ -27,6 +27,7 @@ import { parsePolicy, scopeMatches, discoverConfigPolicy } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
+import { isTestPath } from "./scan-core.mjs";
 // ONE source of truth for loading + name-matching — query.mjs kept DRIFTED local copies that didn't
 // merge sibling reports, didn't tolerate a corrupt report (bare JSON.parse → uncaught crash), and used
 // a `matchTier` missing `#` (so the SAME query resolved differently between `impact` and `callers` on a
@@ -37,7 +38,7 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          containment as coreContainment, diff as coreDiff,
          where as coreWhere, map as coreMap, whatif as coreWhatif,
          fix as coreFix, fixGate as coreFixGate, unverified as coreUnverified,
-         loadReport, loadCallgraph, reportVersion } from "./query-core.mjs";
+         loadReport, loadCallgraph, reportVersion, reportPackage } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
 
 // ONE version + spec source, the SAME way scan.mjs reads them: PKG_VERSION is the bare semver from
@@ -417,33 +418,50 @@ switch (cmd) {
     const { prefix, args: tourArgs } = resolveReportVerb(args, 1);
     let n = 10;
     if (tourArgs.length) {
-      // A non-integer N is a USAGE error (exit 2), like the Rust engine — never silently defaulted.
-      if (!/^\d+$/.test(tourArgs[0])) {
-        console.error("usage: candor-ts-query tour [<N>] [--report <locator>] [--json]   (N is a positive integer)");
+      // N MUST be a positive integer ≥ 1 that fits a safe integer — like the Rust engine, which rejects
+      // `tour 0` and a non-usize. `tour 0` printing "nothing hidden" over an effectful crate would be a
+      // false all-clear (the §4 cardinal sin), so a non-integer, zero, or out-of-range value → exit 2.
+      const parsed = /^\d+$/.test(tourArgs[0]) ? Number(tourArgs[0]) : NaN;
+      if (!Number.isSafeInteger(parsed) || parsed < 1) {
+        console.error("usage: candor-ts-query tour [<N>] [--report <locator>] [--json]   (N is a positive integer ≥ 1)");
         process.exit(2);
       }
-      n = parseInt(tourArgs[0], 10);
+      n = parsed;
     }
     const fns = loadReport(prefix);
     const cg = loadCallgraph(prefix);
     // Build the maps the heuristic wants from the report entries + the callgraph sidecar. `inferred`/
-    // `direct` come from the report; `calls` is the full callgraph sidecar (every edge — the graph the
-    // scan held in memory); `loc` maps a function to its "file:line" for the source callout.
+    // `direct` come from the report; `loc` maps a function to its "file:line" for the source callout.
     const inferred = new Map(), direct = new Map(), loc = new Map(), calls = new Map();
     for (const e of fns) {
       inferred.set(e.fn, new Set(e.inferred));
       if (e.direct.length) direct.set(e.fn, new Set(e.direct));
       if (e.loc) loc.set(e.fn, e.loc);
     }
-    for (const [k, v] of Object.entries(cg)) calls.set(k, v);
-    const finds = bestFinds(inferred, direct, calls, loc, n);
-    // <crate> is the report prefix's basename (matching Rust's prefix_base) — the report's label.
-    const crateName = path.basename(prefix);
+    // `calls` prefers the FULL callgraph sidecar (every edge — the graph the scan held in memory). When
+    // the sidecar is absent/empty, FALL BACK to each entry's inline `.calls` (mirrors tour.rs:66-77:
+    // `if cg.is_empty() { use entry.calls } else { use cg }`). Without this fallback a report whose
+    // sidecar was deleted/never-written yields an empty graph, nearestSource finds nothing, and tour
+    // prints a FALSE "nothing hidden" at exit 0 — a silent under-report (the §4 cardinal sin). A corrupt
+    // sidecar is already disclosed on stderr by loadCallgraph, which then returns {} → we fall back here.
+    if (Object.keys(cg).length === 0) {
+      for (const e of fns) if (e.calls.length) calls.set(e.fn, e.calls);
+    } else {
+      for (const [k, v] of Object.entries(cg)) calls.set(k, v);
+    }
+    // Exclude test scaffolding — a qual is test code iff its recorded loc lies on a test path, the SAME
+    // isTestPath predicate the scan-note passes (scan.mjs's isTestQual). Without it `tour` surfaces test
+    // functions the scan-note (and every other engine) hides — an inconsistent, noisier reach list.
+    const isTestQual = (q) => { const l = loc.get(q); return l ? isTestPath(l) : false; };
+    const finds = bestFinds(inferred, direct, calls, loc, n, isTestQual);
+    // The header names the report's §2 envelope `package` — meaningful and locator-independent, so every
+    // engine and every --report form print the SAME crate. Falls back to the prefix basename.
+    const crateName = reportPackage(prefix) ?? path.basename(prefix);
     if (wantJson) {
-      // Pure JSON to STDOUT: {"reaches":[{fn,effect,hops,source,loc,score}, …]} — same shape + key order
-      // as the Rust engine's tour --json (loc is the SOURCE's file:line, "" when absent).
+      // Pure JSON to STDOUT: {"reaches":[{effect,fn,hops,loc,score,source}, …]} — ALPHABETICAL keys, the
+      // same order Rust+Swift emit (loc is the SOURCE's file:line, "" when absent).
       const out = { reaches: finds.map((f) => ({
-        fn: f.func, effect: f.effect, hops: f.hops, source: f.source, loc: f.sourceLoc, score: f.score,
+        effect: f.effect, fn: f.func, hops: f.hops, loc: f.sourceLoc, score: f.score, source: f.source,
       })) };
       console.log(JSON.stringify(out));
       break;

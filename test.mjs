@@ -2062,6 +2062,78 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── CLI-11. `tour`: the missing-sidecar fallback + N validation (the surface-port review fixes) ─────
+// The scan-time note surfaces the single best reach; `tour` is its on-demand top-N form (SURFACE-BEST-
+// FIND-DESIGN.md P2). Two cardinal-sin holes the review flagged in the port: (a) with the callgraph
+// sidecar deleted, `tour` built `calls` ONLY from the sidecar, found nothing, and printed a FALSE
+// "nothing hidden" at exit 0 — a silent under-report; the fix falls back to each entry's inline `calls`
+// (mirrors tour.rs). (b) `tour 0`/an out-of-range N printed the same false all-clear instead of a usage
+// error; the fix rejects it (exit 2). Also pins the alphabetical --json keys + the package-named header.
+{
+  const d = project({
+    "cases.ts": `import * as fsm from "node:fs";
+class Settings { static load(): boolean { return refresh(); } }
+function refresh(): boolean { return compute(); }
+function compute(): boolean { return ioReadThing(); }
+export function ioReadThing(): boolean { fsm.readFileSync("/tmp/x"); return true; }
+export { Settings };`,
+  });
+  const prefix = path.join(d, "tsrep");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "cases.ts"), prefix], { encoding: "utf8" });
+
+  // The report must EMBED inline `calls` per entry (the sidecar is not the only graph) — that's what the
+  // no-sidecar fallback reads.
+  const rep = JSON.parse(fs.readFileSync(`${prefix}.json`, "utf8"));
+  check("tour: the report embeds inline `calls` edges (the no-sidecar fallback source)",
+        rep.functions.find((e) => e.fn === "cases.Settings.load")?.calls?.includes("cases.refresh"),
+        JSON.stringify(rep.functions.find((e) => e.fn === "cases.Settings.load")));
+
+  const topReach = (out) => { try { return JSON.parse(out).reaches?.[0]; } catch { return null; } };
+
+  // (with the sidecar) tour surfaces the benign-deep reach; --json keys are ALPHABETICAL (effect, fn,
+  // hops, loc, score, source) — the exact order the Rust+Swift engines emit.
+  const withCg = runQuery("tour", "--report", prefix, "--json");
+  const tr = topReach(withCg.stdout);
+  check("tour --json: surfaces the benign-deep reach (Settings.load → Fs) with the sidecar present",
+        withCg.status === 0 && tr?.fn === "cases.Settings.load" && tr?.effect === "Fs",
+        `status=${withCg.status} ${withCg.stdout.slice(0, 200)}`);
+  check("tour --json: reach keys are ALPHABETICAL (effect, fn, hops, loc, score, source) — Rust/Swift order",
+        tr && JSON.stringify(Object.keys(tr)) === JSON.stringify(["effect", "fn", "hops", "loc", "score", "source"]),
+        JSON.stringify(tr && Object.keys(tr)));
+  // the human header names the report's §2 PACKAGE (not the prefix basename `tsrep`).
+  const human = runQuery("tour", "--report", prefix);
+  check("tour: the header names the report's package (envelope `package`, not the prefix basename)",
+        human.status === 0 && new RegExp(`in ${rep.package}:`).test(human.stdout) && !/in tsrep:/.test(human.stdout),
+        human.stdout.split("\n")[0]);
+
+  // (a) DELETE the callgraph sidecar → tour must STILL surface the reach via the inline `calls` fallback,
+  // never a false "nothing hidden". This is the BLOCKER fix (a deleted/never-written sidecar is common).
+  fs.rmSync(`${prefix}.callgraph.json`);
+  const noCg = runQuery("tour", "--report", prefix, "--json");
+  const trNo = topReach(noCg.stdout);
+  check("tour: with the callgraph sidecar DELETED, STILL surfaces the reach (inline `calls` fallback, not a false all-clear)",
+        noCg.status === 0 && trNo?.fn === "cases.Settings.load" && trNo?.effect === "Fs",
+        `status=${noCg.status} ${noCg.stdout.slice(0, 200)}`);
+  const noCgHuman = runQuery("tour", "--report", prefix);
+  check("tour: sidecar deleted → the human note does NOT print the false 'nothing hidden'",
+        !/nothing hidden/.test(noCgHuman.stdout), noCgHuman.stdout.slice(0, 160));
+
+  // (b) N validation: `tour 0`, a non-integer, and an out-of-range N are all usage errors (exit 2) — a
+  // `tour 0` printing "nothing hidden" over an effectful crate is a false all-clear (the §4 cardinal sin).
+  for (const bad of ["0", "1.5", "abc", "99999999999999999999"]) {
+    const r = runQuery("tour", bad, "--report", prefix);
+    check(`tour ${bad}: invalid N → exit 2 usage error (never a false 'nothing hidden')`,
+          r.status === 2 && /usage: candor-ts-query tour/.test(r.stderr) && !/nothing hidden/.test(r.stdout),
+          `status=${r.status} ${(r.stdout + r.stderr).slice(0, 160)}`);
+  }
+  // a VALID positive N still works (exit 0).
+  const good = runQuery("tour", "2", "--report", prefix, "--json");
+  check("tour 2: a valid positive N works (exit 0, ≤2 reaches)",
+        good.status === 0 && (JSON.parse(good.stdout).reaches?.length ?? 99) <= 2, `status=${good.status}`);
+
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── Object.create descriptor accessors (definePropertyAccessor Case B, the create half) ────────────
 // The defineProperty/defineProperties halves are pinned above; the Object.create(proto, {key: desc})
 // form — descriptor getters on the CREATED object, joined through the binding the result is assigned

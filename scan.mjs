@@ -2112,6 +2112,11 @@ for (const [name, rec] of fns) {
     overdeclared: [],
     unresolved: inf.includes("Unknown"),
   };
+  // Inline call edges (§2 `calls`) — the SAME edges the callgraph sidecar carries, embedded per entry so a
+  // consumer without the sidecar (deleted, never-written, an old workspace) can still reconstruct the graph.
+  // `tour` falls back to these when the sidecar is empty (surface robustness — mirrors the Rust report, whose
+  // entries carry `calls`); omitted when a fn has no outgoing edges to keep pure leaves lean.
+  if (rec.edges.size) entry.calls = [...rec.edges].sort();
   if (inf.includes("Net") && rec.hosts.size) entry.hosts = [...rec.hosts].sort();
   if (inf.includes("Db") && rec.tables.size) entry.tables = [...rec.tables].sort();
   if (inf.includes("Exec") && rec.cmds.size) entry.cmds = [...rec.cmds].sort();

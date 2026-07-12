@@ -45,11 +45,16 @@ export function tokenize(name) {
       prevLower = false;
       continue;
     }
-    const isUpper = ch >= "A" && ch <= "Z";
+    // Unicode-aware uppercase (matches surface.rs's `ch.is_uppercase()`): a letter that differs from
+    // its lowercase form and equals its uppercase form. ASCII-only for the digit check (surface.rs uses
+    // `is_ascii_digit`), so a non-ASCII uppercase letter STILL starts a new token.
+    const lower = ch.toLowerCase();
+    const isUpper = ch !== lower && ch === ch.toUpperCase();
+    const isLower = ch !== ch.toUpperCase() && ch === lower;
     // camelCase boundary: a lower/digit followed by an upper starts a new token.
     if (isUpper && prevLower && cur) { out.push(cur); cur = ""; }
-    cur += ch.toLowerCase();
-    prevLower = (ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9");
+    cur += lower;
+    prevLower = isLower || (ch >= "0" && ch <= "9");
   }
   if (cur) out.push(cur);
   return out;
@@ -104,7 +109,10 @@ function nearestSource(func, effect, direct, inferred, calls) {
     if (d >= 1 && direct.get(cur)?.has(effect)) return { hops: d, source: cur };
     const cs = calls.get(cur);
     if (cs) {
-      for (const c of cs) {
+      // Iterate callees in SORTED order — surface.rs/Java/Swift walk a BTreeSet<String> (sorted), so at
+      // an equal-distance tie the SAME source/score/`candor path` is chosen on every engine. Raw Map/JSON
+      // insertion order here would let a tie resolve differently (non-determinism vs the reference).
+      for (const c of [...cs].sort()) {
         if (!seen.has(c) && inferred.get(c)?.has(effect)) {
           seen.add(c);
           q.push([c, d + 1]);

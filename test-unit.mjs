@@ -545,6 +545,14 @@ test("surface.tokenize: splits on separator, `_` and camelCase", () => {
   assert.deepEqual(tokenize("api_client.latestVersion"), ["api", "client", "latest", "version"]);
 });
 
+test("surface.tokenize: a NON-ASCII uppercase letter starts a new token (Unicode-aware, matches surface.rs)", () => {
+  // surface.rs uses `ch.is_uppercase()` (Unicode) for the camelCase boundary; an ASCII-only `A..Z` check
+  // would miss a non-ASCII capital (e.g. Cyrillic `Б`) so `netБar` would stay ONE token, drifting from the
+  // reference. The lowercase fold + boundary must both be Unicode-aware; the digit check stays ASCII.
+  assert.deepEqual(tokenize("netБar"), ["net", "бar"]);
+  assert.deepEqual(tokenize("straße"), ["straße"]); // no interior uppercase → one token (ß is lowercase)
+});
+
 test("surface.bestFind: benign deep-inherited reach beats a shallow effecty one", () => {
   // Graph (mirrors surface.rs's benign_deep_inherited_beats_shallow_effecty, `.`-qualified):
   //   settings.Settings.load  (benign leaf "load")  -inherits-> Net, 3 hops
@@ -660,4 +668,22 @@ test("surface.bestFinds: dedupes to one row per function and caps at N", () => {
   assert.equal(got[1].func, "model.render");
   assert.equal(bestFinds(inferred, direct, calls, new Map(), 1).length, 1); // N caps
   assert.equal(new Set(got.map((f) => f.func)).size, got.length); // no function twice
+});
+
+test("surface.nearestSource: iterates callees in SORTED order (deterministic tie-break, matches surface.rs)", () => {
+  // A benign root reaches Net via TWO equal-distance direct sources; the BFS must pick the one that sorts
+  // FIRST (`aaa.doSend` < `zzz.doSend`), regardless of the callee-set INSERTION order. surface.rs walks a
+  // sorted BTreeSet; raw Map order here would let the pick flip between engines (a non-determinism find).
+  const direct = new Map([["aaa.doSend", eff("Net")], ["zzz.doSend", eff("Net")]]);
+  const inferred = new Map([
+    ["aaa.doSend", eff("Net")], ["zzz.doSend", eff("Net")], ["settings.load", eff("Net")],
+  ]);
+  // Insert the callees in NON-sorted order (zzz before aaa) — the sorted iteration must still pick aaa.
+  const forward = new Map([["settings.load", new Set(["zzz.doSend", "aaa.doSend"])]]);
+  const reverse = new Map([["settings.load", new Set(["aaa.doSend", "zzz.doSend"])]]);
+  const f1 = bestFinds(inferred, direct, forward, new Map(), 1);
+  const f2 = bestFinds(inferred, direct, reverse, new Map(), 1);
+  assert.equal(f1[0].source, "aaa.doSend", "sorted BFS picks the first-sorting source regardless of insertion order");
+  assert.equal(f2[0].source, "aaa.doSend");
+  assert.equal(f1[0].source, f2[0].source, "the source is insertion-order-independent (deterministic)");
 });

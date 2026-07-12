@@ -86,6 +86,20 @@ export function reportVersion(prefix) {
   return null;
 }
 
+/** The report's §2 envelope `package` name — meaningful and locator-independent, so every engine and
+ *  every --report form print the same crate in the `tour` header. null when absent/unreadable (the
+ *  caller falls back to the prefix basename). Mirrors surface.rs/tour.rs::report_package. */
+export function reportPackage(prefix) {
+  const files = fs.existsSync(`${prefix}.json`) ? [`${prefix}.json`] : siblings(prefix, isReport);
+  for (const f of files) {
+    try {
+      const p = JSON.parse(fs.readFileSync(f, "utf8"))?.package;
+      if (typeof p === "string" && p) return p;
+    } catch { /* unreadable sibling — keep looking */ }
+  }
+  return null;
+}
+
 export function loadReport(prefix) {
   if (fs.existsSync(`${prefix}.json`)) {
     // The PRIMARY report parse must DISCLOSE-and-tolerate like the sibling path — a bare JSON.parse here
