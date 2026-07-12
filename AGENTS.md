@@ -142,9 +142,9 @@ want-JSON flag.
   "classifier" paragraph is the ONE current list (this file deliberately doesn't duplicate it — a
   vendored copy here drifted a full generation once).
   An unlisted package contributes nothing — an effect through it is invisible, not `Unknown`. The
-  scanner **names these per scan**: the receipt's `κ doesn't know N packages…` line lists every npm
-  package the code demonstrably calls that κ neither classifies nor has reviewed-pure — read it
-  before concluding "no effect" through anything it names.
+  scanner **names these per scan**: the receipt's coverage-ledger line (marker: `classifier doesn't
+  cover`) lists every npm package the code demonstrably calls that candor's classifier neither
+  classifies nor has reviewed-pure — read it before concluding "no effect" through anything it names.
 - **`process.env.X` reads are `Env`** (a property read, not a call); `Date.now()` is `Clock`.
 - **DI-style code reads `Unknown` a lot, by design**: a function-typed parameter or field being
   called is genuinely indeterminate (rimraf's injected-fs style yields many `Unknown`s — that's the
@@ -180,12 +180,12 @@ present — a callback value, an `any`-typed callee, resolution landing on a typ
 body), the set may be incomplete: read the source for *that* function before relying on it. Never
 conclude a function is pure while it is marked unresolved. The literal surfaces (`hosts`/`tables`/
 `cmds`/`paths`) are the decidable subset only — absence is never a claim of absence. **And the
-curated-κ caveat cuts the other way:** a call into an npm package κ doesn't know contributes
-NOTHING — invisible, not `Unknown`. The scan's receipt now DISCLOSES these by name (`κ doesn't
-know N packages…`), so the blind spots are per-scan evidence, not a doc footnote: never conclude
+curated-classifier caveat cuts the other way:** a call into an npm package the classifier doesn't
+cover contributes NOTHING — invisible, not `Unknown`. The scan's receipt now DISCLOSES these by name
+(the coverage ledger, marker: `classifier doesn't cover`), so the blind spots are per-scan evidence, not a doc footnote: never conclude
 "no effect" through a package that line names (the documented weaker edge of the
 never-silently-pure promise, same as every candor engine's curated classifier). Each function ALSO
-carries an `invisible` list — the κ-unknown packages it (transitively) reaches — so `inferred` is
+carries an `invisible` list — the uncovered packages it (transitively) reaches — so `inferred` is
 never an unqualified claim PER FUNCTION: `inferred: []` with a non-empty `invisible` means "pure as
 far as candor could see, but it could not see through these" (a LOWER bound), not "pure". An uncurated
 dependency can opt out of that blind spot by declaring `"candorEffects": ["Net", …]` in its

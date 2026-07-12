@@ -88,9 +88,10 @@ posthog-node, bull/bullmq), the database drivers (pg/mysql2/mongodb/redis/ioredi
 better-sqlite3/knex) **and the ORM tier** (TypeORM — with `@Entity("…")` table extraction —
 Prisma, Mongoose, Sequelize, drizzle-orm), plus execa/cross-spawn/shelljs/open, fs-extra/
 graceful-fs/rimraf/glob/chokidar, dotenv, winston/pino/bunyan. An unlisted package contributes
-nothing — candor never guesses an effect — but the scan **names it**: the receipt's `κ doesn't
-know N packages…` line lists every package the code demonstrably calls that κ neither classifies
-nor has reviewed-pure, and each function carries the `invisible` list it (transitively) reaches.
+nothing — candor never guesses an effect — but the scan **names it**: the receipt's coverage-ledger
+line (marker: `classifier doesn't cover`) lists every package the code demonstrably calls that
+candor's classifier neither classifies nor has reviewed-pure, and each function carries the
+`invisible` list it (transitively) reaches.
 
 ## MCP server — candor as agent ground truth
 
@@ -155,7 +156,7 @@ field being called, an `any`-typed callee, resolution landing on a type rather t
 An **uncurated dependency** can opt out of `Unknown`/silent-pure by **declaring its effects** in its
 `package.json` — `"candorEffects": ["Net"]` (spec §5.1, the effect manifest). candor-ts reads it as
 the declared-not-verified tier: the package's calls classify to the declared set, and it stops being
-a κ-ledger blind spot. A name outside the §1 vocabulary voids the declaration loudly (a typo must not
+a coverage-ledger blind spot. A name outside the §1 vocabulary voids the declaration loudly (a typo must not
 silently narrow a surface). And `candor-ts-query gains <cur> <base>` flags the **supply-chain**
 delta — the effects a surface *gained* between two reports.
 Real-world consequence, measured on [rimraf](https://github.com/isaacs/rimraf) (50 files, 55
@@ -176,12 +177,12 @@ pure-vs-Unknown ruling (PART 16) — the engines must answer identically, on eve
 | Piece | Spec source |
 |---|---|
 | Resolve every call via the compiler API (`getResolvedSignature`), never syntax | CLASSIFIER §1 |
-| κ classifies the resolved target's module (`node:fs`→Fs, `node:net`→Net, …) | CLASSIFIER §2, TS notes |
+| The classifier maps the resolved target's module (`node:fs`→Fs, `node:net`→Net, …) | CLASSIFIER §2, TS notes |
 | `process.env` property read → Env; `Date.now` → Clock | SPEC §1 |
 | Local edges (cross-file) + least-fixpoint propagation | SEMANTICS §5a |
 | Closure bodies attribute to the nearest enclosing function | SEMANTICS §2 |
 | A call resolving to a *type* (function-typed field/param) → `Unknown`, never silent-pure | SPEC §4 |
-| Unmatched external calls contribute nothing (curated-κ caveat) | SEMANTICS §8 C1 |
+| Unmatched external calls contribute nothing (curated-classifier caveat) | SEMANTICS §8 C1 |
 | The literal surfaces `hosts`/`cmds`/`paths`/`tables`, literal-read only | SPEC §2 |
 | `{ candor: { version, toolchain, spec: "0.10" }, functions }` envelope; pure fns omitted | SPEC §2/§2.1 |
 | Call-graph sidecar with **every** analyzed function a key | SPEC §2.2 |
@@ -228,5 +229,5 @@ node scan.mjs <dir | file.ts | tsconfig.json> --out .candor/report   # scan a pr
 ```
 
 The pure cores are factored into importable modules — `query-core.mjs` (the §3.1 queries),
-`policy.mjs` (the §6.2 DSL + literal matchers), and `scan-core.mjs` (the κ classifier + the SQL/
+`policy.mjs` (the §6.2 DSL + literal matchers), and `scan-core.mjs` (the classifier + the SQL/
 command/host extractors) — so they're unit-tested directly; the TS-compiler-driven walk stays in `scan.mjs`.

@@ -1142,9 +1142,9 @@ import * as fsm from "node:fs";
 export function go(): string { fsm.readFileSync("/x"); chunk("ab"); return pad("hi"); }`,
   });
   const { r } = scan(d);
-  check("κ ledger names an unlisted package in the receipt",
-        /κ doesn't know 1 package/.test(r.stderr) && /leftpad \(1 call\)/.test(r.stderr), r.stderr);
-  check("κ ledger stays quiet about reviewed-pure and curated packages",
+  check("coverage ledger names an unlisted package in the receipt",
+        /classifier doesn't cover 1 package/.test(r.stderr) && /leftpad \(1 call\)/.test(r.stderr), r.stderr);
+  check("coverage ledger stays quiet about reviewed-pure and curated packages",
         !/lodash/.test(r.stderr) && !/node:fs/.test(r.stderr), r.stderr);
 }
 
@@ -1380,10 +1380,10 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
   check("effect manifest: a typo'd effect name voids the declaration (f pure + mylib disclosed invisible) and warns",
         fVoid?.inferred.length === 0 && fVoid?.invisible?.includes("mylib")
           && /candorEffects has an invalid effect/.test(r2.stderr), r2.stderr);
-  // candorEffects: [] is an explicit "declared pure" — covered, NOT a κ blind spot
+  // candorEffects: [] is an explicit "declared pure" — covered, NOT a coverage blind spot
   const { r: r3 } = scan(project(pkg([])));
   check("effect manifest: candorEffects:[] is declared-pure (covered), not a blind spot",
-        !/doesn't know[^\n]*mylib/.test(r3.stderr), r3.stderr);
+        !/doesn't cover[^\n]*mylib/.test(r3.stderr), r3.stderr);
   // a non-array candorEffects is malformed → warned and ignored, never silently
   const { r: r4 } = scan(project({ ...pkg([]), "node_modules/mylib/package.json": JSON.stringify({ name: "mylib", version: "1.0.0", types: "index.d.ts", main: "index.js", candorEffects: "Net" }) }));
   check("effect manifest: a non-array candorEffects is warned and ignored (not silent)",

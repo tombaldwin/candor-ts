@@ -6,6 +6,20 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [Unreleased]
+
+### Coverage-ledger rename: drop the bare `κ` from user- and agent-facing output
+
+The scan receipt's uncovered-package line no longer opens with the unexplained Greek letter `κ` — the
+first thing a cold reader saw. The output now reads `candor-ts: candor's classifier doesn't cover N
+package(s) this code calls into — their effects are INVISIBLE to the scan (absent from the report, NOT
+a claim they're pure): …`. The **new machine marker shared across all engines is `classifier doesn't
+cover`** (was `κ doesn't know`); it-are/them-are and the `(not Unknown)` parenthetical are dropped.
+README.md and AGENTS.md drop bare `κ` from prose (coverage ledger / candor's classifier). `κ` is
+retained only as internal maintainer vocabulary (code identifiers `kappa`/`kappaKnows`/`KAPPA_RULES`,
+the `scan-core.mjs` classifier header, this changelog's history, and the internal design doc). No
+report-schema or gate-verdict change — stderr wording only.
+
 ## [0.10.0] — 2026-07-12
 
 ### spec 0.10 — the §3.3.1 canonical query grammar

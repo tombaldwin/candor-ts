@@ -1733,7 +1733,7 @@ function visitCalls(node) {
           }
           // unmatched external = (OPAQUE): contributes nothing — the curated-κ caveat C1. The
           // κ-coverage LEDGER makes the caveat per-scan evidence instead of a doc footnote: count
-          // every npm package the code demonstrably calls that κ doesn't know and no sibling
+          // every npm package the code demonstrably calls that the classifier doesn't cover ("classifier doesn't cover" marker) and no sibling
           // report covers (the argon2 lesson — the blind spot landed on exactly the call a
           // security review cared about). Builtins are excluded: κ's builtin coverage is the
           // bounded frontier, and an unlisted builtin (path, util) is known-pure, not blind.
@@ -2187,8 +2187,8 @@ if (unlistedSeen.size > 0) {
   const top = [...unlistedSeen.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const shown = top.slice(0, 8).map(([p, n]) => `${p} (${n} call${n === 1 ? "" : "s"})`).join(", ");
   const more = top.length > 8 ? ` + ${top.length - 8} more` : "";
-  console.error(`candor-ts: κ doesn't know ${top.length} package${top.length === 1 ? "" : "s"} this code calls into — `
-    + `effects through ${top.length === 1 ? "it are" : "them are"} INVISIBLE (not Unknown): ${shown}${more}`);
+  console.error(`candor-ts: candor's classifier doesn't cover ${top.length} package${top.length === 1 ? "" : "s"} this code calls into — `
+    + `their effects are INVISIBLE to the scan (absent from the report, NOT a claim they're pure): ${shown}${more}`);
 }
 
 // ---- the gate surfaces: the AS-EFF-005 baseline guard + the standing §6.2 policy gate --------------
