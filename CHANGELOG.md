@@ -6,6 +6,19 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.10.0] — 2026-07-12
+
+### spec 0.10 — the §3.3.1 canonical query grammar
+
+candor-ts now declares **spec `0.10`** (`SPEC_VERSION` in `scan.mjs` + `query.mjs`; the envelope +
+`--gate-json` verdict carry it). The floor ratchets to 0.10 as the canonical §3.3.1 query grammar lands:
+report discovery + the `--report`, `--json`, and `--policy` flags are the pinned query invocation form.
+The old positional invocation forms are **deprecated-but-accepted** (still parse; a soft note steers callers
+to the flagged form). No report-schema or gate-verdict change — a 0.9 report/verdict is byte-identical under
+0.10; this is a **tier-2 (pinned-tool-surface) rung** covering the query surface. Cross-impl conformance
+**PART 17** pins the grammar. **⚠ the `spec` string changed** — a consumer pinning `spec == "0.9"` must
+accept `0.10`.
+
 ## [0.9.2] — 2026-07-12
 
 ### ⚠ κ-coverage: `which`→Fs, `@webpod/ps`→Exec, `envapi`→Fs (0.9 dogfood on zx)
