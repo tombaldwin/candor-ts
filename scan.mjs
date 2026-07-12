@@ -30,6 +30,7 @@ import { parsePolicy, evaluatePolicy, scopeMatches } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql } from "./scan-core.mjs";
+import { emitSurface } from "./surface.mjs";
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -2189,6 +2190,27 @@ if (unlistedSeen.size > 0) {
   const more = top.length > 8 ? ` + ${top.length - 8} more` : "";
   console.error(`candor-ts: candor's classifier doesn't cover ${top.length} package${top.length === 1 ? "" : "s"} this code calls into — `
     + `their effects are INVISIBLE to the scan (absent from the report, NOT a claim they're pure): ${shown}${more}`);
+}
+
+// ---- the cold-repo hook: surface the single most SURPRISING transitive reach (surface.mjs) ---------
+// One extra stderr line after the coverage ledger — the most benign-named function reaching a scary
+// effect a few hops away + a ready-to-run `candor path`. Deterministic; honest "nothing hidden"
+// fallback. Ported EXACTLY from candor-rust's surface.rs so every engine surfaces the SAME reach on a
+// shared fixture. Prefix is `candor:` (brand voice) and the command is `candor path …` — identical on
+// every engine. STDERR only, so the --json report on stdout stays clean.
+if (!wantJson) {
+  const directMap = new Map();
+  const callsMap = new Map();
+  const locMap = new Map();
+  for (const [name, rec] of fns) {
+    directMap.set(name, rec.direct);
+    callsMap.set(name, rec.edges);
+    if (rec.loc) locMap.set(name, rec.loc);
+  }
+  // A qual is test code iff its recorded loc (file:line[:col]) lies on a test path — the same predicate
+  // the scan already uses to keep test files out of the report.
+  const isTestQual = (q) => { const l = locMap.get(q); return l ? isTestPath(l) : false; };
+  emitSurface(inferred, directMap, callsMap, locMap, isTestQual);
 }
 
 // ---- the gate surfaces: the AS-EFF-005 baseline guard + the standing §6.2 policy gate --------------

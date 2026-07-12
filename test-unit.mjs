@@ -26,6 +26,7 @@ import {
 import {
   isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
 } from "./scan-core.mjs";
+import { bestFind, tokenize } from "./surface.mjs";
 
 // ── query-core: the §3.1 match ladder (exact > segment-suffix > substring) ────────────────────────
 test("matches: exact beats substring cousins", () => {
@@ -533,4 +534,69 @@ test("isTestPath: test/spec/node_modules are not production sources", () => {
   assert.equal(isTestPath("node_modules/x/index.ts"), true);
   assert.equal(isTestPath("tests/helper.ts"), true);
   assert.equal(isTestPath("src/app.ts"), false);
+});
+
+// ── surface.mjs: the cold-repo "most surprising reach" hook (port of surface.rs) ───────────────────
+const eff = (...xs) => new Set(xs);
+const cal = (...xs) => new Set(xs);
+
+test("surface.tokenize: splits on separator, `_` and camelCase", () => {
+  assert.deepEqual(tokenize("settings.Settings.needsUpdate"), ["settings", "settings", "needs", "update"]);
+  assert.deepEqual(tokenize("api_client.latestVersion"), ["api", "client", "latest", "version"]);
+});
+
+test("surface.bestFind: benign deep-inherited reach beats a shallow effecty one", () => {
+  // Graph (mirrors surface.rs's benign_deep_inherited_beats_shallow_effecty, `.`-qualified):
+  //   settings.Settings.load  (benign leaf "load")  -inherits-> Net, 3 hops
+  //     -> core.refresh -> core.syncState -> net_layer.doSend (direct Net)
+  //   api.fetch  (effecty leaf "fetch") -inherits-> Net, 1 hop  (EXCLUDED — effecty)
+  const direct = new Map();
+  const inferred = new Map();
+  const calls = new Map();
+
+  direct.set("net_layer.doSend", eff("Net"));
+  inferred.set("net_layer.doSend", eff("Net"));
+
+  inferred.set("core.syncState", eff("Net"));
+  calls.set("core.syncState", cal("net_layer.doSend"));
+
+  inferred.set("core.refresh", eff("Net"));
+  calls.set("core.refresh", cal("core.syncState"));
+
+  // benign candidate: settings.Settings.load, 3 hops to source.
+  inferred.set("settings.Settings.load", eff("Net"));
+  calls.set("settings.Settings.load", cal("core.refresh"));
+
+  // effecty candidate: api.fetch, 1 hop — must be excluded by the EFFECTY leaf.
+  inferred.set("api.fetch", eff("Net"));
+  calls.set("api.fetch", cal("net_layer.doSend"));
+
+  const res = bestFind(inferred, direct, calls);
+  assert.notEqual(res, null, "project is effectful");
+  const w = res.winner;
+  assert.notEqual(w, null, "expected a winner");
+  assert.equal(w.func, "settings.Settings.load");
+  assert.equal(w.effect, "Net");
+  assert.equal(w.hops, 3);
+  assert.equal(w.source, "net_layer.doSend");
+  assert.equal(w.benignToken, "load");
+});
+
+test("surface.bestFind: honest fallback when nothing qualifies", () => {
+  // One effectful function, but it is a DIRECT source (not inherited) AND effecty-named — no candidate
+  // qualifies → { winner: null }, the honest fallback.
+  const direct = new Map([["net.client.send", eff("Net")]]);
+  const inferred = new Map([["net.client.send", eff("Net")]]);
+  const calls = new Map();
+  const res = bestFind(inferred, direct, calls);
+  assert.notEqual(res, null, "project is effectful");
+  assert.equal(res.winner, null, "expected the honest fallback, got a winner");
+});
+
+test("surface.bestFind: nothing when there are no non-Unknown effects", () => {
+  // No non-Unknown effect anywhere → null (caller emits nothing at all).
+  const direct = new Map();
+  const inferred = new Map([["util.parse", eff("Unknown")]]);
+  const calls = new Map();
+  assert.equal(bestFind(inferred, direct, calls), null);
 });

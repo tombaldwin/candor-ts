@@ -52,6 +52,7 @@
     "LICENSE-APACHE",
     "query-core.mjs",
     "scan-core.mjs",
+    "surface.mjs",
     "mcp.mjs",
     "watch.mjs",
     "lsp.mjs"
