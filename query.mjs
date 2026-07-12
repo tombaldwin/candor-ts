@@ -68,7 +68,10 @@ function locatorToPrefix(loc) {
 
 // DISCOVER the report prefix when no --report: CANDOR_REPORT env wins; else walk UP from CWD for a
 // `.candor/` directory and use its `report` prefix (the §3.4 discovery mechanism, the twin of scan.mjs's
-// config walk-up). Returns a prefix (possibly non-existent — the loaders disclose an empty result).
+// config walk-up). Returns null when NEITHER is found — the caller then fails LOUD (exit 2). It must NOT
+// fall back to a bogus `.candor/report` prefix: that made the loaders read ZERO functions and every
+// discovery verb emit an authoritative-empty answer at exit 0 — a false all-clear, the §4 cardinal sin
+// (`where Net` in a dir with no `.candor/` up-tree). Matches the Rust engine's discover_report_prefix.
 function discoverReportPrefix() {
   const env = process.env.CANDOR_REPORT;
   if (env) return locatorToPrefix(env);
@@ -76,29 +79,58 @@ function discoverReportPrefix() {
     if (fs.existsSync(path.join(d, ".candor"))) return path.join(d, ".candor", "report");
     if (path.dirname(d) === d) break;                                // filesystem root
   }
-  return path.join(".candor", "report");                             // fallback: the CWD's own .candor/
+  return null;                                                       // no --report, no .candor/ discovered
+}
+
+// The report prefix for a discovery verb (no --report): the parsed/explicit locator, else discovery.
+// A null prefix (no --report AND nothing discovered) is a LOUD exit-2 failure — never a silent empty
+// answer. A resolved prefix that names NO report files is likewise loud (hasReport). One helper so every
+// verb's no-report path is identical to the Rust engine's (report_or_discover + the no-files check).
+function requireReport(prefix) {
+  if (prefix === null) {
+    console.error("candor-ts: no report found (no --report and no .candor/ discovered) — scan the crate first.");
+    process.exit(2);
+  }
+  if (!hasReport(prefix)) {
+    console.error(`candor-ts: no report files at prefix '${prefix}' — check the path, or scan the crate first.`);
+    process.exit(2);
+  }
+  return prefix;
 }
 
 // Parse the canonical flags out of a verb's args, leaving the POSITIONAL verb-args behind. Handles the
 // deprecated `0|1` trailing sentinel (→ noted, dropped; JSON is the default here anyway) so the old
-// grammar stays green. `flags` names the boolean flags this verb honours (`strict`/`includeUnknown`).
+// grammar stays green. `flags` names the boolean flags this verb honours (`strict`/`includeUnknown`);
+// `argc` is the verb's CANONICAL positional arity (report excluded) — the sentinel/leading-report peels
+// are gated on the positional count EXCEEDING it, so a canonical arg (`show 1`, `callers 0`, `path fn 0`)
+// is never eaten as a sentinel (matches the Rust grammar's Shape.verb_args arity gate).
 // Returns { positionals, reportPrefix, reportExplicit, policyFile, strict, includeUnknown }.
-function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknown = false } = {}) {
+function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknown = false, argc = 0 } = {}) {
   const positionals = [];
   let reportLocator = null, policyFile = null, wantStrict = false, wantIncludeUnknown = false;
   for (let i = 0; i < rawArgs.length; i++) {
     const a = rawArgs[i];
-    if (a === "--report") { reportLocator = rawArgs[++i]; continue; }
-    if (policy && a === "--policy") { policyFile = rawArgs[++i]; continue; }
+    if (a === "--report") {
+      // A `--report` with no following value is a LOUD usage error (exit 2), never a silent fall-back to
+      // discovery and never an uncaught `locatorToPrefix(undefined)` TypeError (`where Fs --report`).
+      if (i + 1 >= rawArgs.length) { console.error("candor-ts: --report requires a <locator> value (a directory, a .json report path, or a prefix)"); process.exit(2); }
+      reportLocator = rawArgs[++i]; continue;
+    }
+    if (policy && a === "--policy") {
+      if (i + 1 >= rawArgs.length) { console.error("candor-ts: --policy requires a <file> value"); process.exit(2); }
+      policyFile = rawArgs[++i]; continue;
+    }
     if (a === "--json") { continue; }                                // JSON is candor-ts's only output; accept + ignore
     if (strict && a === "--strict") { wantStrict = true; continue; }
     if (includeUnknown && a === "--include-unknown") { wantIncludeUnknown = true; continue; }
     positionals.push(a);
   }
   // Deprecated trailing `0|1` JSON sentinel (Rust/TS legacy): if the LAST positional is a bare 0 or 1,
-  // strip it (candor-ts emits JSON regardless) and note the deprecation. Only when it's genuinely a
-  // trailing sentinel — never eat a `where 1`-style effect (effects aren't bare digits).
-  if (positionals.length && /^[01]$/.test(positionals[positionals.length - 1])) {
+  // strip it (candor-ts emits JSON regardless) and note the deprecation. ARITY-GATED: only when the
+  // positional count EXCEEDS the verb's canonical arity — otherwise `show 1` / `callers 0` / `where 1` /
+  // `path fn 0` would have their genuine query token eaten and run with a missing arg (degenerate empty
+  // result, exit 0). Never strip a positional the canonical form needs (matches Rust's arity gate).
+  if (positionals.length > argc && /^[01]$/.test(positionals[positionals.length - 1])) {
     deprecate("the trailing `0|1` JSON sentinel is deprecated — candor-ts emits JSON; use --json to select it explicitly");
     positionals.pop();
   }
@@ -113,14 +145,14 @@ function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknow
 // report AND there's one positional MORE than the verb needs, treat that first token as the report.
 // Returns { prefix, args } — `args` is exactly the verb's own positionals.
 function resolveReportVerb(rawArgs, argc, opts = {}) {
-  const p = parseCanonical(rawArgs, opts);
+  const p = parseCanonical(rawArgs, { ...opts, argc });
   let { positionals, reportPrefix } = p;
   if (!p.reportExplicit && positionals.length === argc + 1 && hasReport(locatorToPrefix(positionals[0]))) {
     deprecate("a leading-positional report is deprecated — pass it as `--report <locator>` (a dir, a .json path, or a prefix); the report is discovered from `.candor/` by default");
     reportPrefix = locatorToPrefix(positionals[0]);
     positionals = positionals.slice(1);
   }
-  return { ...p, prefix: reportPrefix, args: positionals };
+  return { ...p, prefix: requireReport(reportPrefix), args: positionals };
 }
 
 // whatif/fix share a shape: one report + `<fn> <Effect>` + a policy. Canonical §3.3.1: `<fn> <Effect>
@@ -129,7 +161,7 @@ function resolveReportVerb(rawArgs, argc, opts = {}) {
 // Peels both (stderr-noted), then resolves the policy through resolvePolicy (flag > positional >
 // CANDOR_POLICY > .candor/config). Returns { prefix, target, eff, policyFile }.
 function resolveWhatifFix(rawArgs) {
-  const p = parseCanonical(rawArgs, { policy: true });
+  const p = parseCanonical(rawArgs, { policy: true, argc: 2 });
   let positionals = p.positionals, prefix = p.reportPrefix, positionalPolicy = null;
   // A leading-positional report fires only when --report is absent, there are MORE than the 2 verb args,
   // and the first token resolves to a report (else the extra positional is the deprecated policy).
@@ -141,7 +173,7 @@ function resolveWhatifFix(rawArgs) {
   const [target, eff, posPolicy] = positionals;               // a 3rd positional is the deprecated policy
   if (posPolicy) positionalPolicy = posPolicy;
   const { policyFile } = resolvePolicy(p.policyFile, positionalPolicy);
-  return { prefix, target, eff, policyFile };
+  return { prefix: requireReport(prefix), target, eff, policyFile };
 }
 
 // fix-gate/unverified share a shape: one report + a policy + no verb-positionals (unverified also takes
@@ -149,7 +181,7 @@ function resolveWhatifFix(rawArgs) {
 // alias: a leading report + a positional policy — `<prefix> <policy-file> [--strict]`. Peels both
 // (stderr-noted), then resolves the policy through resolvePolicy. Returns { prefix, policyFile, strict }.
 function resolveGateVerb(rawArgs, { strict = false } = {}) {
-  const p = parseCanonical(rawArgs, { policy: true, strict });
+  const p = parseCanonical(rawArgs, { policy: true, strict, argc: 0 });
   let positionals = p.positionals, prefix = p.reportPrefix, positionalPolicy = null;
   if (!p.reportExplicit && positionals.length && hasReport(locatorToPrefix(positionals[0]))) {
     deprecate("a leading-positional report is deprecated — pass it as `--report <locator>`; the report is discovered from `.candor/` by default");
@@ -158,7 +190,7 @@ function resolveGateVerb(rawArgs, { strict = false } = {}) {
   }
   if (positionals[0]) positionalPolicy = positionals[0];       // the remaining positional is the deprecated policy
   const { policyFile } = resolvePolicy(p.policyFile, positionalPolicy);
-  return { prefix, policyFile, strict: p.strict };
+  return { prefix: requireReport(prefix), policyFile, strict: p.strict };
 }
 
 // Resolve the policy for the gate verbs (whatif/fix/fix-gate/unverified): the --policy flag, else the
@@ -285,19 +317,23 @@ switch (cmd) {
   case "containment": {
     // SPEC §6.1 boundary-effect dispersion; with a baseline it's the AS-EFF-010 ratchet (exit 1 on a new
     // leak), matching candor-java / candor-query. JSON-only, like every other candor-ts query command.
-    // Canonical §3.3.1: `containment [<baseline>]` — the main report discovered / --report, the baseline
-    // an optional positional locator. DEPRECATED alias: `containment <prefix> [<baseline-prefix>]` — a
-    // leading-positional main report (fires only when --report is absent and the first token resolves to
-    // a report), keeping the two old-grammar tests (`containment P`, `containment leaky P`) green.
-    const p = parseCanonical(args, {});
+    // Canonical §3.3.1: `containment [<baseline>]` — the main report discovered / --report, the SINGLE
+    // canonical positional is the OPTIONAL baseline (verb_args: 1). A lone bare positional is therefore
+    // the BASELINE (the gating ratchet), NEVER re-read as the deprecated leading report — which silently
+    // dropped to non-gating report-mode (exit 0), the §4 cardinal-sin gate-off this fixes. The deprecated
+    // old form (`containment <report> <baseline>`) is ARITY-GATED: the leading-report peel fires only when
+    // the positionals EXCEED 1, so `containment P` stays the ratchet and `containment leaky P` still peels
+    // `leaky` as the report and leaves `P` the baseline (both old-grammar tests stay green). Matches Rust.
+    const p = parseCanonical(args, { argc: 1 });
     let prefix = p.reportPrefix, basePrefix;
-    if (!p.reportExplicit && p.positionals.length && hasReport(locatorToPrefix(p.positionals[0]))) {
+    if (!p.reportExplicit && p.positionals.length > 1 && hasReport(locatorToPrefix(p.positionals[0]))) {
       deprecate("a leading-positional report is deprecated — pass it as `--report <locator>`; the baseline stays positional (`containment [<baseline>]`)");
       prefix = locatorToPrefix(p.positionals[0]);
       basePrefix = p.positionals[1] ? locatorToPrefix(p.positionals[1]) : undefined;
     } else {
       basePrefix = p.positionals[0] ? locatorToPrefix(p.positionals[0]) : undefined;
     }
+    prefix = requireReport(prefix);
     if (basePrefix) {
       const baseFns = loadReport(basePrefix);
       if (baseFns.length === 0) {   // fail CLOSED (exit 2), not a wall of bogus "everything leaked" (exit 1)

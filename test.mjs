@@ -1964,8 +1964,11 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   }));
   const P = path.join(d, "r");
 
-  // containment (report form): Db fully contained in the db layer, exit 0
-  const cont = runQuery("containment", P);
+  // containment (report form): Db fully contained in the db layer, exit 0. §3.3.1 ⟨0.10⟩: a single bare
+  // positional is now the BASELINE (the ratchet), so report-mode passes the report via `--report` — the
+  // migrated form (the old bare `containment <prefix>` re-read the prefix as the report and silently
+  // dropped to non-gating mode; that gate-off is the bug fixed here, so report-mode is `--report <loc>`).
+  const cont = runQuery("containment", "--report", P);
   const contJ = JSON.parse(cont.stdout);
   check("CLI containment: the §6.1 dispersion report (Db 100% in `db`), exit 0",
         cont.status === 0 && contJ.contained.length === 1
