@@ -74,6 +74,25 @@ ok("cross-engine loader: the callgraph sidecars merge too",
    "a::f" in Q.loadCallgraph(`${M}/r`) && "b::g" in Q.loadCallgraph(`${M}/r`));
 fs.rmSync(M, { recursive: true, force: true });
 
+// a corrupt MATCHED sidecar makes the graph PARTIAL (the hardFail precedent) — and gains' origin
+// ladder must not read a dropped file's fns as "new" (the supply-chain attack signal downgraded):
+// report hit → existing; graph node → existing; graph empty OR partial → unknown; else new.
+{
+  const PG = fs.mkdtempSync("/tmp/candor-partialcg-");
+  fs.writeFileSync(`${PG}/r.a.scan.callgraph.json`, JSON.stringify({ "a::f": [] }));
+  fs.writeFileSync(`${PG}/r.b.scan.callgraph.json`, "{ truncated");   // matched, unparseable → edges dropped
+  const pcg = Q.loadCallgraph(`${PG}/r`);
+  ok("loadCallgraph: a corrupt MATCHED sibling sidecar tags the graph `partial` (non-enumerable)",
+     pcg.partial === true && !Object.keys(pcg).includes("partial") && "a::f" in pcg, JSON.stringify(pcg));
+  ok("loadCallgraph: an ABSENT sidecar is NOT partial (the empty graph is the whole truth)",
+     Q.loadCallgraph(`${PG}/none`).partial === false);
+  const pg = Q.gains([{ fn: "a::f", inferred: ["Net"] }, { fn: "b::g", inferred: ["Net"] }], [], pcg);
+  const orig = (fn) => pg.byFunction.find((x) => x.fn === fn)?.origin;
+  ok("gains origin over a PARTIAL baseline graph: a surviving node stays 'existing'; an absent fn is 'unknown', never 'new'",
+     orig("a::f") === "existing" && orig("b::g") === "unknown", JSON.stringify(pg.byFunction));
+  fs.rmSync(PG, { recursive: true, force: true });
+}
+
 // REGRESSION: diff/gains must UNION effects across same-named rows, not last-wins. Two merged workspace
 // members with a shared short fn name (the multi-report loader produces both) collapsed to the last,
 // so gains MISSED a gained effect (a supply-chain false negative — the dangerous direction).
@@ -373,6 +392,39 @@ fs.rmSync(OUTSIDE, { recursive: true, force: true });
      resById[6].error?.code === -32601 && /method not found/.test(resById[6].error.message),
      JSON.stringify(resById[6]).slice(0, 160));
   fs.rmSync(CONF, { recursive: true, force: true });
+}
+
+// ── a CORRUPT report is a tool-level ERROR over MCP, never an empty all-clear ──────────────────────
+// Q.loadReport tolerates-and-tags (hardFail); the tools ignored the tag, so a corrupt report returned
+// a SUCCESSFUL empty result ({gained:[],byFunction:[]}, {} map) where the CLI exits 2 — the §4
+// cardinal-sin false all-clear on the agent surface. Also: the BASELINE prefix of diff/gains skipped
+// the resolvePrefix existence check (only the main report had it), so a typo'd baseline diffed as
+// an authoritative empty. Both now surface as the isError tool result.
+{
+  const C = fs.mkdtempSync("/tmp/candor-mcpcorrupt-");
+  fs.writeFileSync(`${C}/r.json`, `{ "functions": [ { "fn": "x.`); // truncated mid-write
+  const call = (id, name, args) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const cr = await mcpSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    call(2, "candor_gains", { report: `${C}/r`, baseline: P }),
+    call(3, "candor_map", { report: `${C}/r` }),
+    call(4, "candor_diff", { report: P, baseline: `${C}/r` }),
+    call(5, "candor_diff", { report: P, baseline: `${C}/no-such` }),
+    call(6, "candor_impact", { report: `${C}/r`, fn: "x" }),
+  ]);
+  const crById = Object.fromEntries(cr.map((r) => [r.id, r]));
+  const crText = (id) => crById[id].result.content[0].text;
+  ok("mcp corrupt: candor_gains over a corrupt CURRENT report is a loud tool error, never {gained:[]} (all-clear)",
+     crById[2].result.isError === true && /refusing to report an empty/.test(crText(2)), crText(2).slice(0, 160));
+  ok("mcp corrupt: candor_map over a corrupt report is a loud tool error, never {}",
+     crById[3].result.isError === true && /refusing to report an empty/.test(crText(3)), crText(3).slice(0, 160));
+  ok("mcp corrupt: candor_diff over a corrupt BASELINE is a loud tool error, never an empty delta",
+     crById[4].result.isError === true && /refusing to report an empty/.test(crText(4)), crText(4).slice(0, 160));
+  ok("mcp: a baseline prefix matching NO report files is a loud tool error (resolvePrefix), never an empty diff",
+     crById[5].result.isError === true && /no report at/.test(crText(5)), crText(5).slice(0, 160));
+  ok("mcp corrupt: the fn-existence guard reports the corruption, not a bogus 'no function matching'",
+     crById[6].result.isError === true && /refusing to report an empty/.test(crText(6)), crText(6).slice(0, 160));
+  fs.rmSync(C, { recursive: true, force: true });
 }
 
 fs.rmSync(W, { recursive: true, force: true });

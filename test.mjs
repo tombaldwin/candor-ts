@@ -2026,6 +2026,32 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
         pthH.status === 0 && pthH.stdout === expectHuman && !pthH.stdout.includes("{"),
         `status=${pthH.status} stdout=${JSON.stringify(pthH.stdout).slice(0, 200)}`);
 
+  // the accepted 0.11 default change (human chain replaced JSON as the no-flag output) leaves a ONE-line
+  // stderr breadcrumb, so a pre-0.11 pipeline that broke on the new default is pointed at --json.
+  check("CLI path (human): the 0.11 default-change breadcrumb prints ONCE, on stderr only",
+        (pthH.stderr.match(/tip — `--json` selects the machine-readable path shape \(the default before 0\.11\)/g) || []).length === 1
+          && !pthH.stdout.includes("tip —"),
+        `stderr=${JSON.stringify(pthH.stderr).slice(0, 240)}`);
+  check("CLI path --json: NO breadcrumb tip (the machine branch is untouched)",
+        !/tip — `--json`/.test(pth.stderr), pth.stderr.slice(0, 160));
+
+  // header/chain agreement: the human render resolved its START twice over two DIFFERENT name sets —
+  // the REPORT names (header + inferred wording) and the CALLGRAPH keys (corePath's chain) — so the
+  // query "save" could describe `app.db.save` in the header yet trace `app.cache.save` in the graph:
+  // a misleading "not statically traceable" over a perfectly traceable fn. The report-resolved start
+  // is now passed to corePath (an exact name resolves identically in both sets).
+  fs.writeFileSync(path.join(d, "dres.json"), JSON.stringify({ functions: [
+    { fn: "app.db.save", inferred: ["Db"], direct: ["Db"], loc: "db.ts:1" },
+  ] }));
+  // app.cache.save comes FIRST among the callgraph keys, so the raw query "save" resolved to IT there.
+  fs.writeFileSync(path.join(d, "dres.callgraph.json"), JSON.stringify({ "app.cache.save": [], "app.db.save": [] }));
+  const pthD = runQuery("path", "save", "Db", "--report", path.join(d, "dres"));
+  check("CLI path (human): header and chain resolve the SAME fn (report + callgraph name sets can't disagree)",
+        pthD.status === 0 && pthD.stdout.includes("how `app.db.save` comes to perform Db")
+          && /app\.db\.save {3}\[Db source @ db\.ts:1\]/.test(pthD.stdout)
+          && !/not statically traceable/.test(pthD.stdout),
+        `status=${pthD.status} stdout=${JSON.stringify(pthD.stdout).slice(0, 240)}`);
+
   // path (human) when the effect isn't performed → Rust's "does not perform  (inferred: [...])" wording,
   // exit 0 (an honest non-answer, NOT an error). `save` performs Db but not Net.
   const pthN = runQuery("path", P, "save", "Net");
@@ -2077,6 +2103,43 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   check("CLI gains: origin — no baseline callgraph → 'unknown' for report-absent fns",
         originOf(gU, "m.f") === "unknown" && originOf(gU, "m.h") === "unknown",
         JSON.stringify(gU.byFunction));
+
+  // a PARTIAL baseline callgraph (a matched sidecar failed to parse — loadCallgraph drops its edges,
+  // discloses on stderr, and tags the graph `partial`) must NOT let a dropped file's fns read as "new":
+  // absence from the surviving edges proves nothing, so origin downgrades to "unknown" — never the
+  // supply-chain attack signal ("existing" fn newly effectful) relabeled as a benign new feature.
+  fs.writeFileSync(path.join(d, "obase.callgraph.json"), "{ truncated-mid-write");
+  const gPart = runQuery("gains", path.join(d, "ocur"), path.join(d, "obase"));
+  const gP = JSON.parse(gPart.stdout);
+  check("CLI gains: origin — a PARTIAL baseline callgraph → 'unknown', never a fabricated 'new'",
+        originOf(gP, "m.f") === "unknown" && originOf(gP, "m.h") === "unknown"
+          && /callgraph .* failed to parse/.test(gPart.stderr),
+        `${JSON.stringify(gP.byFunction)} stderr=${gPart.stderr.slice(0, 120)}`);
+  fs.unlinkSync(path.join(d, "obase.callgraph.json"));
+
+  // the two-locator verbs fail LOUD on a typo'd prefix (the Rust engine's "no report files at …"
+  // check, named per side): [] with hardFail=false otherwise emitted an authoritative EMPTY
+  // {gained:[]} / {changes:[]} at exit 0 — a silent all-clear on the alarm/ratchet verbs.
+  const gTypoC = runQuery("gains", path.join(d, "no-such-cur"), path.join(d, "oldbase"));
+  check("CLI gains: a typo'd CURRENT locator exits 2 with the no-files disclosure (no empty all-clear)",
+        gTypoC.status === 2 && /no report files at current prefix/.test(gTypoC.stderr) && gTypoC.stdout.trim() === "",
+        `status=${gTypoC.status} ${gTypoC.stderr.slice(0, 120)}`);
+  const gTypoB = runQuery("gains", path.join(d, "cur2"), path.join(d, "no-such-base"));
+  check("CLI gains: a typo'd BASELINE locator exits 2, naming the baseline side",
+        gTypoB.status === 2 && /no report files at baseline prefix/.test(gTypoB.stderr) && gTypoB.stdout.trim() === "",
+        `status=${gTypoB.status} ${gTypoB.stderr.slice(0, 120)}`);
+  const dTypoC = runQuery("diff", path.join(d, "no-such-cur"), path.join(d, "oldbase"));
+  check("CLI diff: a typo'd CURRENT locator exits 2 with the no-files disclosure (no empty all-clear)",
+        dTypoC.status === 2 && /no report files at current prefix/.test(dTypoC.stderr) && dTypoC.stdout.trim() === "",
+        `status=${dTypoC.status} ${dTypoC.stderr.slice(0, 120)}`);
+  const dTypoB = runQuery("diff", path.join(d, "cur2"), path.join(d, "no-such-base"));
+  check("CLI diff: a typo'd BASELINE locator exits 2, naming the baseline side",
+        dTypoB.status === 2 && /no report files at baseline prefix/.test(dTypoB.stderr) && dTypoB.stdout.trim() === "",
+        `status=${dTypoB.status} ${dTypoB.stderr.slice(0, 120)}`);
+  const dMissing = runQuery("diff", path.join(d, "cur2"));
+  check("CLI diff: a MISSING locator is a usage error (exit 2), not a crash or an empty delta",
+        dMissing.status === 2 && /usage: candor-ts-query diff/.test(dMissing.stderr),
+        `status=${dMissing.status} ${dMissing.stderr.slice(0, 120)}`);
 
   // parsepolicy SUCCESS (only the unreadable exit-2 arm was pinned): valid JSON of the parsed grammar
   fs.writeFileSync(path.join(d, "arch.policy"), "deny Net web\nallow Fs in db /var/data\nforbid web -> db\n");

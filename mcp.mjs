@@ -51,6 +51,18 @@ function resolvePrefix(args) {
 // Truncate a caller-supplied value echoed back in an error (a multi-MB `fn` would otherwise be reflected
 // verbatim — token/memory amplification over the agent transport, the opposite of the list-cap thrift).
 const clip = (s, n = 120) => { s = String(s); return s.length > n ? s.slice(0, n) + "…" : s; };
+// Load a report but FAIL LOUD (a thrown tool-level error) when files were FOUND yet nothing parsed —
+// Q.loadReport discloses-and-tolerates, returning [] with the non-enumerable `hardFail` tag there, and
+// an empty SUCCESSFUL result ({gained:[],byFunction:[]}, [] show, {} map) reads as an all-clear over a
+// corrupt report — the §4 cardinal sin, exactly what the CLI's loadReportOrDie exits 2 on. The throw
+// surfaces as the same isError result shape every other tool failure uses. EVERY tool that loads a
+// report (main prefix or baseline) goes through this — never bare Q.loadReport.
+function loadReportLoud(p) {
+  const fns = Q.loadReport(p);
+  if (fns.length === 0 && fns.hardFail)
+    throw new Error(`every report found at prefix \`${clip(p)}\` failed to load — refusing to report an empty (all-clear) answer over a corrupt report; re-run the scan`);
+  return fns;
+}
 // The confinement root for a caller-supplied policy path: the repo the report belongs to — the
 // .candor/config-discovered repo root when there is one, else the parent of a `.candor/` report
 // directory, else the report's own directory. The old default (always dirname(prefix)) was the
@@ -132,22 +144,22 @@ const TOOLS = {
   candor_impact: {
     description: "Backward blast radius: every effectful function that transitively calls `fn`, and which runtime entry points are downstream. Answers 'if I change this, what surfaces at runtime?' — the cheapest possible alternative to tracing callers by hand.",
     schema: { type: "object", properties: { fn: { type: "string", description: "the function/unit to assess" }, ...reportArg }, required: ["fn"] },
-    run: (a, p) => capImpact(Q.impact(Q.loadReport(p), Q.loadCallgraph(p), a.fn)),
+    run: (a, p) => capImpact(Q.impact(loadReportLoud(p), Q.loadCallgraph(p), a.fn)),
   },
   candor_where: {
     description: "Which functions perform a given effect (e.g. Net, Db, Exec, Fs) — `directly` vs `inherited` via a callee. The effect-surface map.",
     schema: { type: "object", properties: { effect: { type: "string", description: "Net|Fs|Db|Exec|Env|Clock|Ipc|Log|Rand|Clipboard|Unknown" }, ...reportArg }, required: ["effect"] },
-    run: (a, p) => capWhere(Q.where(Q.loadReport(p), a.effect)),
+    run: (a, p) => capWhere(Q.where(loadReportLoud(p), a.effect)),
   },
   candor_reachable: {
     description: "What the program/fleet actually DOES at runtime: effects unioned over the entry points, with how many roots reach each and via which.",
     schema: { type: "object", properties: { ...reportArg } },
-    run: (_a, p) => Q.reachable(Q.loadReport(p)),
+    run: (_a, p) => Q.reachable(loadReportLoud(p)),
   },
   candor_path: {
     description: "Forward provenance: the shortest call chain from `fn` to the nearest function that performs `effect` DIRECTLY — 'this reaches Net through WHAT?'.",
     schema: { type: "object", properties: { fn: { type: "string" }, effect: { type: "string" }, ...reportArg }, required: ["fn", "effect"] },
-    run: (a, p) => Q.path(Q.loadReport(p), Q.loadCallgraph(p), a.fn, a.effect),
+    run: (a, p) => Q.path(loadReportLoud(p), Q.loadCallgraph(p), a.fn, a.effect),
   },
   candor_callers: {
     description: "Who calls `fn` — direct (one hop) and transitive callers over the effect-relevant call graph.",
@@ -157,12 +169,12 @@ const TOOLS = {
   candor_show: {
     description: "A function's effects (inferred = transitive, direct = own body) plus its literal surfaces (hosts/cmds/paths/tables) when present.",
     schema: { type: "object", properties: { fn: { type: "string" }, ...reportArg }, required: ["fn"] },
-    run: (a, p) => Q.show(Q.loadReport(p), a.fn),
+    run: (a, p) => Q.show(loadReportLoud(p), a.fn),
   },
   candor_map: {
     description: "Per-module effect overview: each module's union of effects and function count. The architecture-at-a-glance.",
     schema: { type: "object", properties: { ...reportArg } },
-    run: (_a, p) => Q.map(Q.loadReport(p)),
+    run: (_a, p) => Q.map(loadReportLoud(p)),
   },
   candor_whatif: {
     description: "Hypothetically add `effect` to `fn` and report the blast radius; with `policy`, also the deny-rule violations it would cause. Pre-edit gate check.",
@@ -195,7 +207,7 @@ const TOOLS = {
       // The sidecar is the only graph a candor-ts report carries — fail loud (tool error) when it's absent,
       // never a degenerate empty-graph remedy. (/code-review.)
       if (!cg || Object.keys(cg).length === 0) throw new Error(`no call-graph sidecar for the report — fix needs it (re-scan with --out)`);
-      const r = Q.fix(cg, Q.loadReport(p), a.fn, a.effect, parsePolicy(text), scopeMatches);
+      const r = Q.fix(cg, loadReportLoud(p), a.fn, a.effect, parsePolicy(text), scopeMatches);
       if (r === null) throw new Error(`no function matching \`${clip(a.fn)}\` in the call graph`);
       return r;
     },
@@ -211,7 +223,7 @@ const TOOLS = {
         if (!cfg) throw new Error("no policy: pass `policy`, or check one into the repo's .candor/config (spec §3.4)");
         text = confinedPolicyRead(cfg.policyPath, p, cfg.repoRoot);
       }
-      const v = evaluatePolicy(parsePolicy(text), Q.loadReport(p), Q.loadCallgraph(p));
+      const v = evaluatePolicy(parsePolicy(text), loadReportLoud(p), Q.loadCallgraph(p));
       return { ok: v.length === 0, violations: v };
     },
   },
@@ -232,31 +244,44 @@ const TOOLS = {
         if (!cfg) throw new Error("no policy: pass `policy`, or check one into the repo's .candor/config (spec §3.4)");
         text = confinedPolicyRead(cfg.policyPath, p, cfg.repoRoot);
       }
-      return Q.unverified(Q.loadReport(p), parsePolicy(text), scopeMatches);
+      return Q.unverified(loadReportLoud(p), parsePolicy(text), scopeMatches);
     },
   },
   candor_containment: {
     description: "Per boundary effect (Db/Net/Exec/Fs/Ipc/Clipboard): how contained it is in one architectural layer — the dispersion diagnostic (spec §6.1). Not a score; per-effect facts.",
     schema: { type: "object", properties: { ...reportArg } },
-    run: (_a, p) => Q.containment(Q.loadReport(p)),
+    run: (_a, p) => Q.containment(loadReportLoud(p)),
   },
   candor_blindspots: {
     description: "The Unknown SOURCES — calls the engine genuinely could not resolve (reflection, wide dispatch, fn-pointers) — ranked by how many functions inherit Unknown through each. Turns a high-Unknown report into a short worklist.",
     schema: { type: "object", properties: { ...reportArg } },
-    run: (_a, p) => capBlindspots(Q.blindspots(Q.loadReport(p), Q.loadCallgraph(p))),
+    run: (_a, p) => capBlindspots(Q.blindspots(loadReportLoud(p), Q.loadCallgraph(p))),
   },
   candor_diff: {
     description: "The per-function effect delta versus a baseline report: gained (introduced vs inherited) and lost effects. 'What did this change do to the effect surface?'.",
     schema: { type: "object", properties: { baseline: { type: "string", description: "the baseline report prefix" }, ...reportArg }, required: ["baseline"] },
-    run: (a, p) => ({ baseline_version: Q.reportVersion(a.baseline) ?? "", engine_version: Q.reportVersion(p) ?? "",
-                      ...Q.diff(Q.loadReport(p), Q.loadReport(a.baseline)) }),
+    run: (a, p) => {
+      // The BASELINE locator gets the SAME existence + --root confinement checks as the main report
+      // (resolvePrefix) — a typo'd baseline loaded [] with hardFail=false and diffed as an
+      // authoritative empty {changes:[]} (the CLI now exits 2 on the same miss).
+      const b = resolvePrefix({ report: a.baseline });
+      return { baseline_version: Q.reportVersion(b) ?? "", engine_version: Q.reportVersion(p) ?? "",
+               ...Q.diff(loadReportLoud(p), loadReportLoud(b)) };
+    },
   },
   candor_gains: {
     description: "The supply-chain alarm: effects the surface GAINED versus a baseline (package-level + per-function) — 'did this dependency bump add Net/Exec somewhere?'.",
     schema: { type: "object", properties: { baseline: { type: "string", description: "the baseline report prefix" }, ...reportArg }, required: ["baseline"] },
-    run: (a, p) => ({ baseline_version: Q.reportVersion(a.baseline) ?? "", engine_version: Q.reportVersion(p) ?? "",
-                      // ⟨spec 0.12 staged⟩ baseline callgraph → byFunction[].origin, same as the CLI (parity).
-                      ...Q.gains(Q.loadReport(p), Q.loadReport(a.baseline), Q.loadCallgraph(a.baseline)) }),
+    run: (a, p) => {
+      // Same baseline existence + --root confinement as candor_diff — an empty {gained:[]} over a
+      // typo'd baseline is a silent all-clear on the supply-chain ALARM tool.
+      const b = resolvePrefix({ report: a.baseline });
+      // ⟨spec 0.12 staged⟩ baseline callgraph → byFunction[].origin, same as the CLI (parity). The
+      // loader's non-enumerable `partial` tag rides along: a corrupt baseline sidecar (edges dropped,
+      // disclosed) downgrades origin to "unknown", never a fabricated "new" over a truncated graph.
+      return { baseline_version: Q.reportVersion(b) ?? "", engine_version: Q.reportVersion(p) ?? "",
+               ...Q.gains(loadReportLoud(p), loadReportLoud(b), Q.loadCallgraph(b)) };
+    },
   },
 };
 
@@ -271,7 +296,7 @@ function listResources(prefix) {
   return res;
 }
 function readResource(uri, prefix) {
-  if (uri.startsWith("candor://report")) return { mimeType: "application/json", text: JSON.stringify(Q.loadReport(prefix)) };
+  if (uri.startsWith("candor://report")) return { mimeType: "application/json", text: JSON.stringify(loadReportLoud(prefix)) };
   if (uri.startsWith("candor://policy")) {
     const cfg = configPolicy(prefix);
     if (!cfg) throw new Error("no checked-in policy (no .candor/config with a `policy` key)");
@@ -333,7 +358,7 @@ function handle(msg) {
       // A tool that targets a `fn` gets a clear "not found" rather than a silently-empty result —
       // an agent must distinguish "no such function" from "found, nothing calls it".
       if (args.fn !== undefined) {
-        const names = [...new Set([...Object.keys(Q.loadCallgraph(prefix)), ...Q.loadReport(prefix).map((e) => e.fn)])];
+        const names = [...new Set([...Object.keys(Q.loadCallgraph(prefix)), ...loadReportLoud(prefix).map((e) => e.fn)])];
         if (Q.matches(names, args.fn).length === 0)
           return result(id, { content: [{ type: "text", text: `candor: no function matching \`${clip(args.fn)}\` in this report` }], isError: true });
       }

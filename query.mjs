@@ -49,8 +49,12 @@ const emit = (v) => console.log(JSON.stringify(v, null, 1));
 // Prints to stdout and returns nothing (matches the JSON-only verbs' fire-and-forget style).
 function renderPathHuman(fns, cg, fnQ, eff) {
   // Resolve the start over the REPORT entries (as Rust does) — that's where `inferred` lives, and the
-  // no-effect wording quotes it. corePath resolves over the callgraph keys for the chain; the two agree
-  // on any fn that has an entry, which every graphed fn does.
+  // no-effect wording quotes it. The RESOLVED name (not the raw query) is then handed to corePath,
+  // which re-resolves over the CALLGRAPH keys — a DIFFERENT name set: a raw partial query could pick
+  // a different fn there (report `app.db.save`, graph `app.cache.save` for the query "save"), so the
+  // header described one function and the chain/verdict another (a misleading "not statically
+  // traceable" over a traceable fn). An exact name resolves identically in both sets (match tier 3,
+  // exact, beats every partial tier and only its own name can equal it), so they cannot disagree.
   const start = coreMatches(fns.map((e) => e.fn), fnQ)[0];
   if (start === undefined) {
     // No matching function at all — parity with Rust/Java's "no function matching" (stderr, exit 2).
@@ -67,7 +71,7 @@ function renderPathHuman(fns, cg, fnQ, eff) {
     console.log(`${start} does not perform ${eff}  (inferred: ${dbg})`);
     return;
   }
-  const r = corePath(fns, cg, fnQ, eff);
+  const r = corePath(fns, cg, start, eff);
   if (r.path.length === 0) {
     // Inferred, but no LOCAL direct source on a `calls` path — reached cross-crate or via Unknown.
     console.log(`${start} performs ${eff} but its source is not a local function `
@@ -421,7 +425,13 @@ switch (cmd) {
     // each resolved by the shared locator rule (dir / .json path / prefix). --json is accepted (JSON is
     // the only output). No leading-positional-report alias here: both positionals ARE the reports.
     const { positionals } = parseCanonical(args, {});
+    if (positionals.length < 2) { console.error("usage: candor-ts-query diff <current> <baseline> [--json]"); process.exit(2); }
     const [curPrefix, basePrefix] = positionals.map(locatorToPrefix);
+    // BOTH locators must name real report files (the Rust engine's no-files check, named per side so
+    // the user knows which path to fix): a typo'd prefix loaded [] with hardFail=false and emitted an
+    // authoritative EMPTY {changes:[]} at exit 0 — the §4 false all-clear on the ratchet verb.
+    if (!hasReport(curPrefix)) { console.error(`candor-ts: no report files at current prefix '${curPrefix}' — check the path.`); process.exit(2); }
+    if (!hasReport(basePrefix)) { console.error(`candor-ts: no report files at baseline prefix '${basePrefix}' — check the path.`); process.exit(2); }
     const { changes } = coreDiff(loadReportOrDie(curPrefix), loadReportOrDie(basePrefix));
     // §2.1: a baseline is comparable only to its own producing build — disclose a mismatch (the gains
     // may be the engine reclassifying after a coverage batch, not the code changing). Same note + JSON
@@ -547,12 +557,20 @@ switch (cmd) {
     // §3.3.1: like diff, two positional locators <current> <baseline> (no discovery), each resolved by
     // the shared locator rule; --json accepted.
     const { positionals } = parseCanonical(args, {});
+    if (positionals.length < 2) { console.error("usage: candor-ts-query gains <current> <baseline> [--json]"); process.exit(2); }
     const [curPrefix, basePrefix] = positionals.map(locatorToPrefix);
+    // BOTH locators must name real report files (the Rust engine's no-files check, named per side):
+    // a typo'd prefix loaded [] with hardFail=false and emitted an authoritative EMPTY
+    // {gained:[],byFunction:[]} at exit 0 — a silent all-clear on the supply-chain ALARM verb.
+    if (!hasReport(curPrefix)) { console.error(`candor-ts: no report files at current prefix '${curPrefix}' — check the path.`); process.exit(2); }
+    if (!hasReport(basePrefix)) { console.error(`candor-ts: no report files at baseline prefix '${basePrefix}' — check the path.`); process.exit(2); }
     const gv = reportVersion(curPrefix), gbv = reportVersion(basePrefix);
     if (gv && gbv && gv !== gbv)
       console.error(`candor-ts: ⚠ baseline @${gbv} ≠ engine @${gv} — a "gained capability" may be the engine reclassifying, not the dependency changing. Regenerate both reports with one build to compare releases.`);
     // ⟨spec 0.12 staged⟩ the BASELINE callgraph feeds byFunction[].origin (existing/new/unknown) —
-    // a missing sidecar makes loadCallgraph return {} → "unknown": the JSON itself discloses.
+    // a MISSING sidecar loads {} and a corrupt (matched-but-unparseable) one is tagged `partial`
+    // with its edges dropped-and-disclosed: either way "new" is unavailable and origin falls back
+    // to "unknown" — the JSON itself discloses, never guessing "new" over a truncated graph.
     emit({ baseline_version: gbv ?? "", engine_version: gv ?? "", ...coreGains(loadReportOrDie(curPrefix), loadReportOrDie(basePrefix), loadCallgraph(basePrefix)) });
     break;
   }
@@ -565,7 +583,13 @@ switch (cmd) {
     const fns = loadReportOrDie(prefix);
     const cg = loadCallgraph(prefix);
     if (wantJson) emit(corePath(fns, cg, fn, eff));           // conformance PART 5 shape — UNCHANGED
-    else renderPathHuman(fns, cg, fn, eff);
+    else {
+      // The accepted 0.11 default change (the human chain replaced JSON as the no-flag output) gets a
+      // ONE-line stderr breadcrumb, so a pre-0.11 pipeline that broke on the new default is pointed at
+      // --json rather than left guessing. stderr only — stdout stays the human chain; --json untouched.
+      console.error("candor-ts-query: tip — `--json` selects the machine-readable path shape (the default before 0.11)");
+      renderPathHuman(fns, cg, fn, eff);
+    }
     break;
   }
   case "whatif": {

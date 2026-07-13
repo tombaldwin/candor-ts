@@ -170,6 +170,13 @@ export function loadReport(prefix) {
   }
   return tagHardFail(fns, hardFail);
 }
+// The returned graph carries a non-enumerable `partial` flag (the loadReport `hardFail` precedent):
+// true iff a sidecar file was MATCHED but failed to read/parse — its edges were DROPPED (disclosed on
+// stderr above), so the graph is an UNDER-approximation. An ABSENT sidecar is NOT partial: nothing
+// matched, and the empty graph is the whole (disclosable) truth. gains' origin ladder needs the
+// distinction: over a partial baseline graph, absence from the surviving edges proves nothing, so
+// labeling a dropped file's fns "new" would downgrade the attack signal — fall back to "unknown".
+const tagPartial = (cg, partial) => { Object.defineProperty(cg, "partial", { value: partial, enumerable: false }); return cg; };
 export function loadCallgraph(prefix) {
   // A `null`/non-object parse (a `null` callgraph, an array, a number) must NOT reach Object.entries —
   // it throws "Cannot convert null to object". Coerce anything but a plain object to {} (an empty
@@ -180,16 +187,18 @@ export function loadCallgraph(prefix) {
   if (fs.existsSync(`${prefix}.callgraph.json`)) {
     // The PRIMARY callgraph parse must DISCLOSE-and-tolerate like the sibling path below and like
     // loadReport — a bare JSON.parse here threw an uncaught stack trace on the CLI for a corrupt or
-    // `null` `<prefix>.callgraph.json` (asymmetric with siblings). Tolerate (empty graph) + disclose.
-    try { return norm(JSON.parse(fs.readFileSync(`${prefix}.callgraph.json`, "utf8"))); }
-    catch { console.error(`candor-ts: callgraph ${prefix}.callgraph.json failed to parse — its edges are OMITTED from this query (corrupt or mid-write); re-run the scan`); return {}; }
+    // `null` `<prefix>.callgraph.json` (asymmetric with siblings). Tolerate (empty graph) + disclose,
+    // and TAG the drop (`partial`) so a consumer never mistakes the truncated graph for the whole one.
+    try { return tagPartial(norm(JSON.parse(fs.readFileSync(`${prefix}.callgraph.json`, "utf8"))), false); }
+    catch { console.error(`candor-ts: callgraph ${prefix}.callgraph.json failed to parse — its edges are OMITTED from this query (corrupt or mid-write); re-run the scan`); return tagPartial({}, true); }
   }
   const cg = {};
+  let partial = false;
   for (const f of siblings(prefix, (x) => x.endsWith(".callgraph.json"))) {
     try { Object.assign(cg, JSON.parse(fs.readFileSync(f, "utf8"))); }
-    catch { console.error(`candor-ts: callgraph ${f} failed to parse — its edges are OMITTED from this query (corrupt or mid-write); re-run the scan`); }
+    catch { console.error(`candor-ts: callgraph ${f} failed to parse — its edges are OMITTED from this query (corrupt or mid-write); re-run the scan`); partial = true; }
   }
-  return norm(cg);
+  return tagPartial(norm(cg), partial);
 }
 
 // ---- the §3.1 match ladder: exact > segment-suffix > substring ------------------------------------
@@ -530,16 +539,24 @@ export function diff(curFns, baseFns) {
 // Reports OMIT pure functions (§2), so existence is keyed on the baseline CALLGRAPH (a baseline-pure
 // fn is a graph node with no report entry):
 //   "existing" — in the baseline report, or a baseline-callgraph node (caller key or callee);
-//   "new"      — a baseline callgraph WAS loaded and the fn is in neither (did not exist at baseline);
-//   "unknown"  — absent from the baseline report AND no baseline callgraph found (empty graph):
-//                existence is undecidable, DISCLOSED rather than guessed (§4).
+//   "new"      — a COMPLETE baseline callgraph was loaded and the fn is in neither (did not exist);
+//   "unknown"  — absent from the baseline report AND the graph cannot decide: no baseline callgraph
+//                found (empty graph) OR the graph is PARTIAL (loadCallgraph's non-enumerable `partial`
+//                tag — a matched sidecar failed to load, its edges were dropped-and-disclosed, so
+//                absence from the survivors proves nothing). Undecidable is DISCLOSED, never guessed
+//                (§4) — a partial graph must not downgrade the attack signal from a dropped file's
+//                fns to a benign-looking "new".
 // `baseCg` defaults to {} (no callgraph → "unknown") so core-only callers keep working unchanged.
 export function gains(curFns, baseFns, baseCg = {}) {
   const baseSet = new Set(baseFns.map((e) => e.fn));
   const cgNodes = new Set(Object.entries(baseCg).flatMap(([k, vs]) => [k, ...vs]));
+  // The ladder: report hit → existing; graph node → existing (a surviving node is real even in a
+  // partial graph — the drop loses nodes, never invents them); else "new" only when a COMPLETE
+  // non-empty graph can vouch for non-existence; else "unknown".
+  const graphDecides = cgNodes.size > 0 && baseCg.partial !== true;
   const originOf = (fn) => baseSet.has(fn) ? "existing"
-    : cgNodes.size === 0 ? "unknown"
-    : cgNodes.has(fn) ? "existing" : "new";
+    : cgNodes.has(fn) ? "existing"
+    : graphDecides ? "new" : "unknown";
   const gained = new Set(), byFunction = [];
   for (const c of diff(curFns, baseFns).changes) {
     for (const e of c.gained) { gained.add(e); byFunction.push({ effect: e, fn: c.fn, origin: originOf(c.fn) }); }
