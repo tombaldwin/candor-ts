@@ -523,10 +523,26 @@ export function diff(curFns, baseFns) {
 // gains: the package-level SUPPLY-CHAIN alarm (spec §5.1) — the UNION of effects the surface gained
 // between two reports (base → cur), with per-function detail. A dependency that grows a Net/Exec reach
 // between releases. Same shape as candor-query's `gains --json`. Built on diff so it can't drift.
-export function gains(curFns, baseFns) {
+//
+// ⟨spec 0.12 staged⟩ each byFunction entry carries `origin` — the candor-gains prototype's key finding
+// promoted into the open query. A gain on a fn that EXISTED at the baseline (shipped pure, now does
+// Net — the supply-chain attack signal) is a different alarm from a NEW fn that does Net (a feature).
+// Reports OMIT pure functions (§2), so existence is keyed on the baseline CALLGRAPH (a baseline-pure
+// fn is a graph node with no report entry):
+//   "existing" — in the baseline report, or a baseline-callgraph node (caller key or callee);
+//   "new"      — a baseline callgraph WAS loaded and the fn is in neither (did not exist at baseline);
+//   "unknown"  — absent from the baseline report AND no baseline callgraph found (empty graph):
+//                existence is undecidable, DISCLOSED rather than guessed (§4).
+// `baseCg` defaults to {} (no callgraph → "unknown") so core-only callers keep working unchanged.
+export function gains(curFns, baseFns, baseCg = {}) {
+  const baseSet = new Set(baseFns.map((e) => e.fn));
+  const cgNodes = new Set(Object.entries(baseCg).flatMap(([k, vs]) => [k, ...vs]));
+  const originOf = (fn) => baseSet.has(fn) ? "existing"
+    : cgNodes.size === 0 ? "unknown"
+    : cgNodes.has(fn) ? "existing" : "new";
   const gained = new Set(), byFunction = [];
   for (const c of diff(curFns, baseFns).changes) {
-    for (const e of c.gained) { gained.add(e); byFunction.push({ fn: c.fn, effect: e }); }
+    for (const e of c.gained) { gained.add(e); byFunction.push({ effect: e, fn: c.fn, origin: originOf(c.fn) }); }
   }
   return { gained: [...gained].sort(), byFunction };
 }

@@ -255,7 +255,8 @@ const TOOLS = {
     description: "The supply-chain alarm: effects the surface GAINED versus a baseline (package-level + per-function) — 'did this dependency bump add Net/Exec somewhere?'.",
     schema: { type: "object", properties: { baseline: { type: "string", description: "the baseline report prefix" }, ...reportArg }, required: ["baseline"] },
     run: (a, p) => ({ baseline_version: Q.reportVersion(a.baseline) ?? "", engine_version: Q.reportVersion(p) ?? "",
-                      ...Q.gains(Q.loadReport(p), Q.loadReport(a.baseline)) }),
+                      // ⟨spec 0.12 staged⟩ baseline callgraph → byFunction[].origin, same as the CLI (parity).
+                      ...Q.gains(Q.loadReport(p), Q.loadReport(a.baseline), Q.loadCallgraph(a.baseline)) }),
   },
 };
 

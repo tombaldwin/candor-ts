@@ -551,7 +551,9 @@ switch (cmd) {
     const gv = reportVersion(curPrefix), gbv = reportVersion(basePrefix);
     if (gv && gbv && gv !== gbv)
       console.error(`candor-ts: ⚠ baseline @${gbv} ≠ engine @${gv} — a "gained capability" may be the engine reclassifying, not the dependency changing. Regenerate both reports with one build to compare releases.`);
-    emit({ baseline_version: gbv ?? "", engine_version: gv ?? "", ...coreGains(loadReportOrDie(curPrefix), loadReportOrDie(basePrefix)) });
+    // ⟨spec 0.12 staged⟩ the BASELINE callgraph feeds byFunction[].origin (existing/new/unknown) —
+    // a missing sidecar makes loadCallgraph return {} → "unknown": the JSON itself discloses.
+    emit({ baseline_version: gbv ?? "", engine_version: gv ?? "", ...coreGains(loadReportOrDie(curPrefix), loadReportOrDie(basePrefix), loadCallgraph(basePrefix)) });
     break;
   }
   case "path": {

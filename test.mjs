@@ -2047,7 +2047,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   const g = runQuery("gains", path.join(d, "cur2"), path.join(d, "oldbase"));
   const gJ = JSON.parse(g.stdout);
   check("CLI gains: the gained effect + per-function detail + provenance fields, exit 0",
-        g.status === 0 && eqJson(gJ.gained, ["Exec"]) && gJ.byFunction.some((x) => x.fn === "app.db.save" && x.effect === "Exec")
+        g.status === 0 && eqJson(gJ.gained, ["Exec"]) && gJ.byFunction.some((x) => x.fn === "app.db.save" && x.effect === "Exec" && x.origin === "existing")
           && gJ.baseline_version === "aaaaaaa" && gJ.engine_version === "bbbbbbb",
         `status=${g.status} ${g.stdout.slice(0, 160)}`);
   check("CLI gains: a producing-build mismatch is DISCLOSED on stderr (reclassify vs regression ambiguity)",
@@ -2057,6 +2057,26 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   const g2 = runQuery("gains", path.join(d, "cur2"), path.join(d, "samebase"));
   check("CLI gains: same producing build → no mismatch note", g2.status === 0 && !/⚠/.test(g2.stderr),
         g2.stderr.slice(0, 120));
+
+  // ⟨spec 0.12 staged⟩ byFunction[].origin, keyed on the BASELINE CALLGRAPH (reports omit pure fns, §2):
+  // a baseline-pure fn that now does Net is "existing" (the supply-chain attack signal, a different alarm
+  // from a "new" fn); no baseline callgraph at all → "unknown" (undecidable, disclosed not guessed).
+  fs.writeFileSync(path.join(d, "obase.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.11" },
+    functions: [{ fn: "m.g", inferred: ["Fs"], direct: ["Fs"] }] }));
+  fs.writeFileSync(path.join(d, "obase.callgraph.json"), JSON.stringify({ "m.f": ["m.g"], "m.g": [] }));
+  fs.writeFileSync(path.join(d, "ocur.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.11" },
+    functions: [{ fn: "m.f", inferred: ["Net"], direct: ["Net"] }, { fn: "m.g", inferred: ["Fs"], direct: ["Fs"] },
+                { fn: "m.h", inferred: ["Net"], direct: ["Net"] }] }));
+  const originOf = (j, fn) => j.byFunction.find((x) => x.fn === fn)?.origin;
+  const gO = JSON.parse(runQuery("gains", path.join(d, "ocur"), path.join(d, "obase")).stdout);
+  check("CLI gains: origin — baseline-pure callgraph node gaining Net is 'existing', an unseen fn is 'new'",
+        originOf(gO, "m.f") === "existing" && originOf(gO, "m.h") === "new",
+        JSON.stringify(gO.byFunction));
+  fs.unlinkSync(path.join(d, "obase.callgraph.json"));
+  const gU = JSON.parse(runQuery("gains", path.join(d, "ocur"), path.join(d, "obase")).stdout);
+  check("CLI gains: origin — no baseline callgraph → 'unknown' for report-absent fns",
+        originOf(gU, "m.f") === "unknown" && originOf(gU, "m.h") === "unknown",
+        JSON.stringify(gU.byFunction));
 
   // parsepolicy SUCCESS (only the unreadable exit-2 arm was pinned): valid JSON of the parsed grammar
   fs.writeFileSync(path.join(d, "arch.policy"), "deny Net web\nallow Fs in db /var/data\nforbid web -> db\n");
