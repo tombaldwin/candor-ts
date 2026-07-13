@@ -93,11 +93,35 @@ export function reportPackage(prefix) {
   const files = fs.existsSync(`${prefix}.json`) ? [`${prefix}.json`] : siblings(prefix, isReport);
   for (const f of files) {
     try {
-      const p = JSON.parse(fs.readFileSync(f, "utf8"))?.package;
+      const doc = JSON.parse(fs.readFileSync(f, "utf8"));
+      const p = doc?.package;
       if (typeof p === "string" && p) return p;
+      // The `packages` PLURAL envelope — the JVM shape (SPEC §2): one entry names it verbatim; several
+      // name their longest common dotted prefix (`com.a.x` + `com.a.y` → `com.a`); none shared → null.
+      if (Array.isArray(doc?.packages)) {
+        const label = packagesLabel(doc.packages.filter((x) => typeof x === "string" && x));
+        if (label) return label;
+      }
     } catch { /* unreadable sibling — keep looking */ }
   }
   return null;
+}
+
+// The longest common dot-separated prefix of a plural `packages` list — whole segments only (`com.ab` +
+// `com.ac` share `com`, not `com.a`); null when nothing is shared. Mirrors Rust's packages_label (tour.rs).
+function packagesLabel(pkgs) {
+  if (pkgs.length === 0) return null;
+  if (pkgs.length === 1) return pkgs[0];
+  const first = pkgs[0].split(".");
+  let n = first.length;
+  for (const p of pkgs.slice(1)) {
+    const segs = p.split(".");
+    let i = 0;
+    while (i < Math.min(n, segs.length) && segs[i] === first[i]) i++;
+    n = i;
+    if (n === 0) return null; // nothing shared — the basename fallback is more honest
+  }
+  return first.slice(0, n).join(".");
 }
 
 // The returned array carries a non-enumerable `hardFail` flag: true iff a report file was FOUND but
