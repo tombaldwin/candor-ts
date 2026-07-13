@@ -93,6 +93,7 @@ Q impact   $P <fn-query>            # THE BLAST RADIUS: {fn, affectedCount, affe
 Q callers  $P <fn-query> 1          # the lower-level form: {of, direct, transitive} — works for pure fns
 Q callers  $P <fn-query> --include-unknown 1  # + possibleViaUnknownDispatch: the unresolved-dispatch frontier
 Q path     $P <fn> <Effect>         # how a fn reaches an effect: the chain to the nearest source
+Q tour [N] --report $P              # the N (default 10) most surprising transitive reaches
 Q map      $P 1                     # {module: {effects, functions}}
 Q containment $P [baseline-prefix]  # §6.1 boundary-effect dispersion; with a baseline = AS-EFF-010 ratchet (exit 1 on a leak)
 Q blindspots $P                     # the Unknown SOURCES (fns with unknownWhy), ranked by Unknown blast radius
