@@ -101,23 +101,48 @@ export function reportPackage(prefix) {
 }
 
 // The returned array carries a non-enumerable `hardFail` flag: true iff a report file was FOUND but
-// wholly failed to read/parse. The loud CLI wrapper (loadReportOrDie) needs it to tell "empty-but-valid
-// report" apart from "the report we found was corrupt", which must never read as an empty all-clear.
+// yielded NO trustworthy functions — a parse failure OR a malformed shape (a `null`/array/wrong-typed
+// doc, a non-array `functions`, all-junk entries). The loud CLI wrapper (loadReportOrDie) needs it to
+// tell "the report we found was corrupt" (never an all-clear) apart from a well-formed EMPTY report.
 const tagHardFail = (fns, hardFail) => { Object.defineProperty(fns, "hardFail", { value: hardFail, enumerable: false }); return fns; };
+
+// A well-formed report that legitimately lists ZERO functions — the ONLY empty result that is NOT a
+// corruption (parity with the Rust engine, which returns Ok(empty) for a valid empty envelope). A §2
+// envelope with `functions: []`, or a legacy bare `[]`. Anything else empty is malformed → hard fail.
+const isCleanEmptyReport = (parsed) =>
+  (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.functions) && parsed.functions.length === 0)
+  || (Array.isArray(parsed) && parsed.length === 0);
+
+// Load ONE report file → { entries, hardFail }. A read/parse throw, or an empty result over a doc that
+// is NOT a clean-empty report, is a hard fail (the file was found but carries no trustworthy functions —
+// letting it read as [] would be the §4 false all-clear). Discloses every failure mode on stderr.
+function loadOneReport(file, label) {
+  let parsed;
+  try { parsed = JSON.parse(fs.readFileSync(file, "utf8")); }
+  catch { console.error(`candor-ts: report ${label} failed to parse — its functions are OMITTED from this query (corrupt or mid-write); re-run the scan`); return { entries: [], hardFail: true }; }
+  const entries = normFns(parsed, label);
+  // normFns already DISCLOSED any malformation (no functions array / dropped entries). If nothing usable
+  // survived AND the doc wasn't a clean-empty report, the report is corrupt — fail loud, never empty.
+  if (entries.length === 0 && !isCleanEmptyReport(parsed)) {
+    console.error(`candor-ts: report ${label} yielded no usable functions — OMITTED (malformed report); re-run the scan`);
+    return { entries, hardFail: true };
+  }
+  return { entries, hardFail: false };
+}
+
 export function loadReport(prefix) {
   if (fs.existsSync(`${prefix}.json`)) {
-    // The PRIMARY report parse must DISCLOSE-and-tolerate like the sibling path — a bare JSON.parse here
-    // threw an uncaught stack trace on the CLI for a corrupt `<prefix>.json` (asymmetric with siblings).
-    try { return tagHardFail(normFns(JSON.parse(fs.readFileSync(`${prefix}.json`, "utf8")), `${prefix}.json`), false); }
-    catch { console.error(`candor-ts: report ${prefix}.json failed to parse — OMITTED (corrupt or mid-write); re-run the scan`); return tagHardFail([], true); }
+    const { entries, hardFail } = loadOneReport(`${prefix}.json`, `${prefix}.json`);
+    return tagHardFail(entries, hardFail);
   }
   // No exact <prefix>.json — merge the multi-report siblings (the Rust/workspace form).
   const fns = [];
   let hardFail = false;
   for (const f of siblings(prefix, isReport)) {
     // DISCLOSE a malformed sibling — never silently drop it (a vanished report reads as "no effect").
-    try { fns.push(...normFns(JSON.parse(fs.readFileSync(f, "utf8")), f)); }
-    catch { console.error(`candor-ts: report ${f} failed to parse — its functions are OMITTED from this query (corrupt or mid-write); re-run the scan`); hardFail = true; }
+    const r = loadOneReport(f, f);
+    fns.push(...r.entries);
+    if (r.hardFail) hardFail = true;
   }
   return tagHardFail(fns, hardFail);
 }

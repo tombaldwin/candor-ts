@@ -337,7 +337,9 @@ function runRobustnessLane() {
   }
 
   // CORRUPT REPORT inputs fed to the read-side (query.mjs): truncated, non-JSON, wrong-shape, huge.
-  // loadReport must coerce each to [] and the command must exit cleanly with valid JSON — never throw.
+  // A report FOUND but yielding no trustworthy functions must FAIL LOUD (clean exit 2), never exit 0 with
+  // an empty answer — that reads as "no effects" (the §4 cardinal-sin false all-clear; a gate on `map`
+  // would PASS). The fuzzer's real job stands: NO crash / uncaught stack, just a clean loud exit.
   const CORRUPT_REPORTS = [
     ["truncated", `{ "candor": {}, "functions": [ { "fn": "x.`],
     ["not_json", `<<<not json at all>>>`],
@@ -353,9 +355,21 @@ function runRobustnessLane() {
     for (const argv of [["show", prefix, "x"], ["map", prefix], ["where", prefix, "Net"], ["reachable", prefix]]) {
       const res = spawnSync("node", [path.join(HERE, "query.mjs"), ...argv], { encoding: "utf8" });
       if (crashed(res)) bad.push(`robustness[report:${name} ${argv[0]}]: query CRASHED: status=${res.status} ${(res.stderr || "").slice(0, 200)}`);
-      else if (res.status !== 0) bad.push(`robustness[report:${name} ${argv[0]}]: query exited ${res.status} (expected clean 0 over a coerced-empty report)`);
-      else { try { JSON.parse(res.stdout); } catch { bad.push(`robustness[report:${name} ${argv[0]}]: query stdout was not valid JSON: ${res.stdout.slice(0, 120)}`); } }
+      else if (res.status !== 2) bad.push(`robustness[report:${name} ${argv[0]}]: query exited ${res.status} (expected a clean LOUD exit 2 over a corrupt report — never an empty all-clear)`);
+      else if (res.stdout.trim() !== "") bad.push(`robustness[report:${name} ${argv[0]}]: corrupt report emitted stdout '${res.stdout.slice(0, 80)}' — should be silent (the answer is the stderr disclosure)`);
     }
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+  // The COMPLEMENT: a WELL-FORMED report that legitimately lists zero functions is NOT corrupt — it must
+  // exit 0 with a valid (empty) answer, matching the Rust engine. This pins that the loud rule above fires
+  // on corruption ONLY, never on a genuinely effect-free report (else it would raise false alarms).
+  {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-fuzz-empty-"));
+    fs.writeFileSync(path.join(d, "rep.json"), `{ "candor": { "version": "fuzz" }, "functions": [] }`);
+    const prefix = path.join(d, "rep");
+    const res = spawnSync("node", [path.join(HERE, "query.mjs"), "map", prefix], { encoding: "utf8" });
+    if (res.status !== 0) bad.push(`robustness[report:clean_empty map]: a well-formed empty report exited ${res.status} (expected clean 0 — not a corruption)`);
+    else { try { JSON.parse(res.stdout); } catch { bad.push(`robustness[report:clean_empty map]: stdout was not valid JSON: ${res.stdout.slice(0, 120)}`); } }
     fs.rmSync(d, { recursive: true, force: true });
   }
   return bad;
