@@ -79,12 +79,14 @@ function hasToken(name, lexicon) {
 }
 
 // Salience of an effect — the boundary/security-relevant effects a reviewer cares about score higher.
+// Clock/Log/Rand are DELIBERATELY 0 (not surfaced): a mundane clock/log reach isn't "the most
+// surprising reach", and a repo whose only reaches are mundane should honestly say "nothing hidden".
+// Matches the Rust reference (candor-classify/src/surface.rs) + the java/swift ports.
 function salience(effect) {
   switch (effect) {
     case "Net": case "Exec": case "Db": case "Ipc": return 5;
     case "Fs": case "Env": return 3;
-    case "Clock": case "Log": case "Rand": return 1;
-    default: return 0;
+    default: return 0; // Clock/Log/Rand/Unknown/everything-else — mundane, never surfaced
   }
 }
 

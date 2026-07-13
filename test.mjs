@@ -2003,13 +2003,40 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
           && impJ.entryPoints.some((e) => e.fn === "app.web.handler" && e.inferred.includes("Db")),
         `status=${imp.status} ${imp.stdout.slice(0, 160)}`);
 
-  // path: forward provenance to the direct source, exit 0
-  const pth = runQuery("path", P, "handler", "Db");
+  // path --json: forward provenance to the direct source, the §3.1 shape (conformance PART 5 pins it
+  // four-way — the human default below must NOT change it). --json is now REQUIRED to select JSON.
+  const pth = runQuery("path", P, "handler", "Db", "--json");
   const pthJ = JSON.parse(pth.stdout);
-  check("CLI path: handler → save with the source flagged, exit 0",
-        pth.status === 0 && pthJ.path.map((s) => s.fn).join(">") === "app.web.handler>app.db.save"
-          && pthJ.path[1].source === true && pthJ.path[0].source === false,
+  check("CLI path --json: handler → save with the source flagged, exit 0 (the pinned shape, UNCHANGED)",
+        pth.status === 0 && pthJ.effect === "Db" && pthJ.fn === "app.web.handler"
+          && pthJ.path.map((s) => s.fn).join(">") === "app.web.handler>app.db.save"
+          && pthJ.path[1].source === true && pthJ.path[0].source === false
+          && pthJ.path[1].loc === "db.ts:1",
         `status=${pth.status} ${pth.stdout.slice(0, 160)}`);
+
+  // path HUMAN (no --json): the indented provenance chain, BYTE-IDENTICAL to the Rust/Java reference.
+  // The surface opener suggests `candor path <fn> <effect>`, so the default output must be readable —
+  // NOT raw JSON. Header + one indented line per hop; the source annotated `[<effect> source @ <loc>]`.
+  const pthH = runQuery("path", P, "handler", "Db");
+  const expectHuman = "candor path — how `app.web.handler` comes to perform Db:\n\n"
+    + "  app.web.handler\n"
+    + "    → app.db.save   [Db source @ db.ts:1]\n";
+  check("CLI path (human): the indented chain, NOT JSON — byte-identical to the Rust reference",
+        pthH.status === 0 && pthH.stdout === expectHuman && !pthH.stdout.includes("{"),
+        `status=${pthH.status} stdout=${JSON.stringify(pthH.stdout).slice(0, 200)}`);
+
+  // path (human) when the effect isn't performed → Rust's "does not perform  (inferred: [...])" wording,
+  // exit 0 (an honest non-answer, NOT an error). `save` performs Db but not Net.
+  const pthN = runQuery("path", P, "save", "Net");
+  check("CLI path (human): a not-performed effect prints the `does not perform  (inferred: …)` line, exit 0",
+        pthN.status === 0 && pthN.stdout === `app.db.save does not perform Net  (inferred: ["Db"])\n`,
+        `status=${pthN.status} stdout=${JSON.stringify(pthN.stdout).slice(0, 200)}`);
+  // and its --json counterpart still emits the honest empty-path object — the shape is UNCHANGED by this
+  // fix (corePath is untouched; it echoes the raw query token in `fn` for an empty path, as it always has).
+  const pthNJ = runQuery("path", P, "save", "Net", "--json");
+  check("CLI path --json: a not-performed effect emits {effect,fn,path:[]} (the pinned empty-path shape, UNCHANGED)",
+        pthNJ.status === 0 && eqJson(JSON.parse(pthNJ.stdout), { effect: "Net", fn: "save", path: [] }),
+        `status=${pthNJ.status} ${pthNJ.stdout.slice(0, 160)}`);
 
   // gains: the supply-chain alarm + the §2.1 version-skew disclosure
   fs.writeFileSync(path.join(d, "oldbase.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.10" },

@@ -38,8 +38,53 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          containment as coreContainment, diff as coreDiff,
          where as coreWhere, map as coreMap, whatif as coreWhatif,
          fix as coreFix, fixGate as coreFixGate, unverified as coreUnverified,
+         matches as coreMatches,
          loadReport, loadCallgraph, reportVersion, reportPackage } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
+
+// Render `path` in HUMAN (non-`--json`) form — the indented provenance chain, BYTE-IDENTICAL to the
+// Rust reference (candor-query/src/callers.rs) and the Java port (Query.java). The `--json` shape is
+// UNTOUCHED (conformance PART 5 pins `{effect, fn, path:[{fn,loc,source}]}` four-way): this path is
+// only taken when the caller did NOT pass --json, and it reads the SAME `path` array corePath computes.
+// Prints to stdout and returns nothing (matches the JSON-only verbs' fire-and-forget style).
+function renderPathHuman(fns, cg, fnQ, eff) {
+  // Resolve the start over the REPORT entries (as Rust does) — that's where `inferred` lives, and the
+  // no-effect wording quotes it. corePath resolves over the callgraph keys for the chain; the two agree
+  // on any fn that has an entry, which every graphed fn does.
+  const start = coreMatches(fns.map((e) => e.fn), fnQ)[0];
+  if (start === undefined) {
+    // No matching function at all — parity with Rust/Java's "no function matching" (stderr, exit 2).
+    console.error(`candor-query path: no function matching '${fnQ}'`);
+    process.exit(2);
+  }
+  const startEntry = fns.find((e) => e.fn === start);
+  const inferred = startEntry?.inferred ?? [];
+  if (!inferred.includes(eff)) {
+    // The effect is not even inferred — the honest "does not perform" answer (SPEC §3.1), NOT an error.
+    // `inferred` is printed in Rust's `{:?}` debug shape: each name quoted, ", "-joined, in `[...]`,
+    // in the report's original order (unsorted). An empty set prints `[]`.
+    const dbg = `[${inferred.map((e) => `"${e}"`).join(", ")}]`;
+    console.log(`${start} does not perform ${eff}  (inferred: ${dbg})`);
+    return;
+  }
+  const r = corePath(fns, cg, fnQ, eff);
+  if (r.path.length === 0) {
+    // Inferred, but no LOCAL direct source on a `calls` path — reached cross-crate or via Unknown.
+    console.log(`${start} performs ${eff} but its source is not a local function `
+      + `(cross-crate, or via Unknown) — not statically traceable.`);
+    return;
+  }
+  console.log(`candor path — how \`${start}\` comes to perform ${eff}:\n`);
+  r.path.forEach((step, i) => {
+    const indent = "  ".repeat(i + 1);
+    const arrow = i === 0 ? "" : "→ ";
+    const isSource = i === r.path.length - 1;
+    const tag = isSource
+      ? `   [${eff} source${step.loc ? ` @ ${step.loc}` : ""}]`
+      : "";
+    console.log(`${indent}${arrow}${step.fn}${tag}`);
+  });
+}
 
 // ONE version + spec source, the SAME way scan.mjs reads them: PKG_VERSION is the bare semver from
 // package.json; SPEC_VERSION is the spec contract this build speaks. Reused, never re-littered.
@@ -495,8 +540,15 @@ switch (cmd) {
     break;
   }
   case "path": {
+    // BOTH a human default AND a --json form (like the Rust/Java engines). The surface opener suggests
+    // `candor path <fn> <effect>`, so the DEFAULT is the readable indented chain; --json selects the
+    // pinned JSON shape. parseCanonical otherwise swallows --json, so detect it explicitly (as `tour` does).
+    const wantJson = args.includes("--json");
     const { prefix, args: [fn, eff] } = resolveReportVerb(args, 2);
-    emit(corePath(loadReport(prefix), loadCallgraph(prefix), fn, eff));
+    const fns = loadReport(prefix);
+    const cg = loadCallgraph(prefix);
+    if (wantJson) emit(corePath(fns, cg, fn, eff));           // conformance PART 5 shape — UNCHANGED
+    else renderPathHuman(fns, cg, fn, eff);
     break;
   }
   case "whatif": {

@@ -609,6 +609,35 @@ test("surface.bestFind: nothing when there are no non-Unknown effects", () => {
   assert.equal(bestFind(inferred, direct, calls), null);
 });
 
+test("surface.bestFind: a Clock/Log/Rand-only repo honestly says nothing hidden (salience 0)", () => {
+  // A benign function inheriting ONLY mundane effects (Clock/Log/Rand) must NOT surface — those effects
+  // now score salience 0 (matches surface.rs), so no candidate clears the bar. The repo IS effectful
+  // (real, non-Unknown effects), so the caller emits the honest "nothing hidden" fallback, not a
+  // manufactured surprise. Guards the Fix-2 salience change.
+  const direct = new Map([
+    ["logger.emit", eff("Log")],
+    ["timer.tick", eff("Clock")],
+    ["entropy.draw", eff("Rand")],
+  ]);
+  const inferred = new Map([
+    ["logger.emit", eff("Log")],
+    ["timer.tick", eff("Clock")],
+    ["entropy.draw", eff("Rand")],
+    // benign-named inheritors reaching each mundane effect — would have surfaced at salience 1.
+    ["settings.load", eff("Log")],
+    ["config.get", eff("Clock")],
+    ["util.build", eff("Rand")],
+  ]);
+  const calls = new Map([
+    ["settings.load", cal("logger.emit")],
+    ["config.get", cal("timer.tick")],
+    ["util.build", cal("entropy.draw")],
+  ]);
+  const res = bestFind(inferred, direct, calls);
+  assert.notEqual(res, null, "project is effectful (Clock/Log/Rand are real effects)");
+  assert.equal(res.winner, null, "mundane-only reaches must not surface — expected the honest fallback");
+});
+
 // ── surface.mjs: bestFinds — the top-N pool behind the `tour` verb (port of surface.rs::best_finds) ──
 test("surface.bestFinds: names the benign-deep reach on a benign-deep fixture", () => {
   // The `tour` fixture: settings.Settings.load inherits Net 3 hops down via net_layer.doSend, plus an
