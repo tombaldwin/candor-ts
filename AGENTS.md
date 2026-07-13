@@ -86,7 +86,7 @@ downgraded to `Unknown` rather than silently trusted (spec §2.1). Caveat: a typ
 ## Query it (same names/shapes as the Rust and JVM engines — candor-spec §3.1)
 
 ```sh
-Q() { npx -y candor-ts-query "$@"; }; P=".candor/report"   # a function — works in bash AND zsh
+Q() { npx -y -p candor-ts candor-ts-query "$@"; }; P=".candor/report"   # a function — works in bash AND zsh
 Q show     $P <fn-query> 1          # a function's effects (+ hosts/tables when visible)
 Q where    $P <Effect>   1          # {effect, directly, inherited}
 Q impact   $P <fn-query>            # THE BLAST RADIUS: {fn, affectedCount, affected, entryPoints}
