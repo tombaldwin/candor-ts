@@ -6,7 +6,50 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
-## [Unreleased]
+## [0.11.0] — 2026-07-13
+
+### spec 0.11 — the surprising-reach surface
+
+candor-ts now declares **spec `0.11`** (`SPEC_VERSION` in `scan.mjs` + `query.mjs`; the envelope +
+`--gate-json` verdict carry it). No report-schema or gate-verdict change — a 0.10 report/verdict is
+byte-identical under 0.11; this is a **tier-2 (pinned-tool-surface) rung** covering the surprising-reach
+surface and the loud-failure contract below. Cross-impl conformance PART 4f–4k addenda pin the new
+surfaces four-way. **⚠ the `spec` string changed** — a consumer pinning `spec == "0.10"` must accept `0.11`.
+
+### ✨ The surprising-reach surface: scan opener + `candor tour [N]`
+
+After the scan summary + coverage ledger, the scan now emits the single most surprising transitive
+reach — a benign-named function inheriting a boundary effect a few hops away — with a ready-to-run
+`candor path`. The new **`tour [N]`** verb (default 10) generalizes it over a saved report, no re-scan:
+a ranked human list + `--json` (`{reaches:[{fn,effect,hops,source,loc,score}]}`). Deterministic, no LLM;
+byte-identical opener/ranking to the Rust/Java/Swift engines (shared lexicons, scoring, sorted-BFS
+tie-break). A **salience floor** keeps mundane reaches out: Clock/Log/Rand score 0 and never surface;
+**test code is excluded** by the shared module-segment rule (drops `*Tests`/`tests::`, never a
+production `test_connection`). `tour 0` exits 2; a missing/empty callgraph sidecar falls back to the
+report's inline calls (never a false "nothing hidden"), a corrupt sidecar is disclosed on stderr.
+
+### ✨ `path` pretty-prints by default
+
+`path` now emits the human indented provenance chain by default (byte-identical to the Rust/Java
+engines); the pinned JSON shape moved behind `--json`. A script parsing `path`'s old raw-JSON default
+must add `--json`.
+
+### 🔒 A corrupt report fails LOUD — never an empty all-clear
+
+A corrupt report used to load as `[]` at exit 0, so `tour` printed "nothing hidden" and `map` emitted
+`{}` — a gate over corrupt input would PASS (the §4 false all-clear). Both halves are closed:
+**syntactic** corruption (JSON that throws) and **semantic** corruption (valid JSON of the wrong shape —
+null, bare junk, a non-array `functions`) now exit a loud **2** with a disclosure and silent stdout, on
+every discovery verb. A well-formed empty report (`functions: []`, or the legacy bare `[]`) is the ONLY
+non-corrupt empty and stays exit 0. Likewise from the §3.3.1 review: no discoverable report → exit 2
+(never a fabricated empty answer), and `--report`/`--policy` missing a value → clean exit 2, not an
+uncaught TypeError. Fuzz CI pins all six corrupt shapes + the clean-empty complement.
+
+### The `tour` header honours the plural `packages` envelope (JVM shape)
+
+Over a multi-package report (SPEC §2 plural `packages`), the tour header now names the code by the
+list's longest common dotted prefix (one entry verbatim; none shared → basename fallback) instead of
+the report filename.
 
 ### Coverage-ledger rename: drop the bare `κ` from user- and agent-facing output
 
