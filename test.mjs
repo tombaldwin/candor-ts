@@ -1924,25 +1924,26 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
         `status=${none.status} ${none.stderr.slice(0, 120)}`);
 }
 
-// ── CLI-9. query.mjs against a CORRUPT/TRUNCATED report → clean handling, never an uncaught throw ──
-// query-core's loadReport is unit-pinned (test-unit) to coerce a corrupt report to []; this pins the
-// CLI WIRING end to end: a query command over a truncated report must exit cleanly (0), emit valid
-// JSON, disclose the corruption on stderr, and NOT leak a readFileSync/JSON.parse stack trace.
+// ── CLI-9. query.mjs against a CORRUPT/TRUNCATED report → FAIL LOUD, never a false all-clear ──
+// A report that is FOUND but wholly fails to parse must exit 2 with the corruption DISCLOSED on stderr —
+// NOT exit 0 with an empty answer. Emptiness reads as "no effects": `show`/`map` returning [] / {} at
+// exit 0 over a corrupt report is the §4 cardinal-sin false all-clear (a gate on `map` would PASS). All
+// four engines now die loud here (candor-rust load_entries_loud; java throws; swift → no-report). The
+// original no-crash guarantee is kept: the exit is a clean console.error, NOT a leaked JSON.parse stack.
 {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-qcorrupt-"));
   fs.writeFileSync(path.join(d, "rep.json"), `{ "candor": {}, "functions": [ { "fn": "x.`); // truncated mid-object
   const prefix = path.join(d, "rep");
   const r = runQuery("show", prefix, "x");
-  let parsed = null; try { parsed = JSON.parse(r.stdout); } catch { /* null → check fails with raw stdout */ }
-  check("query show on a CORRUPT report: clean exit 0, valid JSON ([]) on stdout, no uncaught throw",
-        r.status === 0 && Array.isArray(parsed) && parsed.length === 0
+  check("query show on a CORRUPT report: FAILS LOUD (exit 2), no empty all-clear, no uncaught throw",
+        r.status === 2 && r.stdout.trim() === ""
           && !/\bat \w+ \(.*\.mjs/.test(r.stderr), `status=${r.status} stdout=${r.stdout.slice(0, 80)} stderr=${r.stderr.slice(0, 160)}`);
   check("query show on a CORRUPT report: the corruption is DISCLOSED on stderr (not silently empty)",
-        /failed to parse/.test(r.stderr), r.stderr.slice(0, 200));
-  // map (a different loadReport consumer) must likewise survive a corrupt report without a stack.
+        /failed to parse/.test(r.stderr) && /refusing to report an empty/.test(r.stderr), r.stderr.slice(0, 240));
+  // map (a different loadReport consumer) must likewise die loud — an empty {} at exit 0 false-passes a gate.
   const rm = runQuery("map", prefix);
-  check("query map on a CORRUPT report also exits cleanly with valid JSON (no stack trace)",
-        rm.status === 0 && !/\bat \w+ \(.*\.mjs/.test(rm.stderr) && (() => { try { JSON.parse(rm.stdout); return true; } catch { return false; } })(),
+  check("query map on a CORRUPT report also FAILS LOUD (exit 2), no {} all-clear, no stack trace",
+        rm.status === 2 && rm.stdout.trim() === "" && !/\bat \w+ \(.*\.mjs/.test(rm.stderr),
         `status=${rm.status} ${rm.stderr.slice(0, 160)}`);
   fs.rmSync(d, { recursive: true, force: true });
 }

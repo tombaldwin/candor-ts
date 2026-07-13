@@ -145,6 +145,21 @@ function requireReport(prefix) {
   return prefix;
 }
 
+// Load a report, but FAIL LOUD (exit 2) when a file was found yet nothing parsed — the disclose-and-
+// tolerate loadReport returns [] there, which every verb would read as "no effects": `tour` prints
+// "nothing hidden", a policy `map`/gate PASSES — the §4 cardinal-sin false all-clear over a corrupt
+// report. A legitimately effect-free crate still writes a report that LISTS its functions, so empty +
+// hardFail is always the corrupt case (mirrors candor-rust load_entries_loud; java/swift already die
+// loud). One corrupt file among several still merges (non-empty → returned), staying tolerant.
+function loadReportOrDie(prefix) {
+  const fns = loadReport(prefix);
+  if (fns.length === 0 && fns.hardFail) {
+    console.error(`candor-ts: every report found at prefix '${prefix}' failed to load — refusing to report an empty (all-clear) answer over a corrupt report; re-run the scan.`);
+    process.exit(2);
+  }
+  return fns;
+}
+
 // Parse the canonical flags out of a verb's args, leaving the POSITIONAL verb-args behind. Handles the
 // deprecated `0|1` trailing sentinel (→ noted, dropped; JSON is the default here anyway) so the old
 // grammar stays green. `flags` names the boolean flags this verb honours (`strict`/`includeUnknown`);
@@ -335,7 +350,7 @@ switch (cmd) {
     // written; the paths silently vanished) and dropped Exec `cmds` entirely. Call the shared show so
     // the CLI and the MCP `candor_show` are one implementation that cannot diverge again.
     const { prefix, args: [q] } = resolveReportVerb(args, 1);
-    emit(coreShow(loadReport(prefix), q));
+    emit(coreShow(loadReportOrDie(prefix), q));
     break;
   }
   case "where": {
@@ -343,7 +358,7 @@ switch (cmd) {
     // Hand-copies of core functions in this file have drifted three times (show, callers, diff); the
     // fix each time was the same: delegate, keep query.mjs as arg-parsing + emit + exit codes only.
     const { prefix, args: [eff] } = resolveReportVerb(args, 1);
-    emit(coreWhere(loadReport(prefix), eff));
+    emit(coreWhere(loadReportOrDie(prefix), eff));
     break;
   }
   case "callers": {
@@ -352,14 +367,14 @@ switch (cmd) {
     // shared query-core so the CLI and MCP compute one truth (the prior inline copy had drifted before).
     const { prefix, args: [q], includeUnknown } = resolveReportVerb(args, 1, { includeUnknown: true });
     const cg = loadCallgraph(prefix);
-    if (includeUnknown) emit(callersFrontier(cg, loadReport(prefix), loadHierarchy(prefix), q));
+    if (includeUnknown) emit(callersFrontier(cg, loadReportOrDie(prefix), loadHierarchy(prefix), q));
     else emit(coreCallers(cg, q));
     break;
   }
   case "map": {
     // Shared query-core — the CLI and MCP `candor_map` are one implementation (see `where` above).
     const { prefix } = resolveReportVerb(args, 0);
-    emit(coreMap(loadReport(prefix)));
+    emit(coreMap(loadReportOrDie(prefix)));
     break;
   }
   case "containment": {
@@ -383,16 +398,16 @@ switch (cmd) {
     }
     prefix = requireReport(prefix);
     if (basePrefix) {
-      const baseFns = loadReport(basePrefix);
+      const baseFns = loadReportOrDie(basePrefix);
       if (baseFns.length === 0) {   // fail CLOSED (exit 2), not a wall of bogus "everything leaked" (exit 1)
         console.error(`candor-ts: no report at baseline prefix '${basePrefix}' — check the path`);
         process.exit(2);
       }
-      const r = coreContainment(loadReport(prefix), baseFns);
+      const r = coreContainment(loadReportOrDie(prefix), baseFns);
       emit(r);
       process.exit(r.leaks.length ? 1 : 0);
     }
-    emit(coreContainment(loadReport(prefix)));
+    emit(coreContainment(loadReportOrDie(prefix)));
     break;
   }
   case "diff": {
@@ -407,7 +422,7 @@ switch (cmd) {
     // the only output). No leading-positional-report alias here: both positionals ARE the reports.
     const { positionals } = parseCanonical(args, {});
     const [curPrefix, basePrefix] = positionals.map(locatorToPrefix);
-    const { changes } = coreDiff(loadReport(curPrefix), loadReport(basePrefix));
+    const { changes } = coreDiff(loadReportOrDie(curPrefix), loadReportOrDie(basePrefix));
     // §2.1: a baseline is comparable only to its own producing build — disclose a mismatch (the gains
     // may be the engine reclassifying after a coverage batch, not the code changing). Same note + JSON
     // provenance fields as the Rust candor-query (cross-engine parity, item 10).
@@ -427,7 +442,7 @@ switch (cmd) {
     // what the app DOES at runtime: effects unioned over the entry points (SPEC §3.1; same JSON
     // shape as the Rust engine: {entryPoints, effects: {Eff: {count, via}}}).
     const { prefix } = resolveReportVerb(args, 0);
-    const fns = loadReport(prefix);
+    const fns = loadReportOrDie(prefix);
     const roots = fns.filter((e) => e.entryPoint);
     const byEff = {};
     for (const e of roots) for (const x of e.inferred) (byEff[x] ??= []).push(e.fn);
@@ -440,14 +455,14 @@ switch (cmd) {
     // blast radius (backward dual of reachable) — reuses the shared query-core, the same logic the
     // MCP server serves. SPEC §3.1: {fn, affectedCount, affected, entryPoints:[{fn,inferred}]}.
     const { prefix, args: [q] } = resolveReportVerb(args, 1);
-    emit(coreImpact(loadReport(prefix), loadCallgraph(prefix), q));
+    emit(coreImpact(loadReportOrDie(prefix), loadCallgraph(prefix), q));
     break;
   }
   case "blindspots": {
     // the Unknown SOURCES, ranked by blast radius — the actionable inverse of a widely-propagated
     // Unknown (SPEC §3.1 ⟨0.6⟩): { sources:[{fn,why,reaches,affected}], totalUnknown }.
     const { prefix } = resolveReportVerb(args, 0);
-    emit(coreBlindspots(loadReport(prefix), loadCallgraph(prefix)));
+    emit(coreBlindspots(loadReportOrDie(prefix), loadCallgraph(prefix)));
     break;
   }
   case "tour": {
@@ -473,7 +488,7 @@ switch (cmd) {
       }
       n = parsed;
     }
-    const fns = loadReport(prefix);
+    const fns = loadReportOrDie(prefix);
     const cg = loadCallgraph(prefix);
     // Build the maps the heuristic wants from the report entries + the callgraph sidecar. `inferred`/
     // `direct` come from the report; `loc` maps a function to its "file:line" for the source callout.
@@ -536,7 +551,7 @@ switch (cmd) {
     const gv = reportVersion(curPrefix), gbv = reportVersion(basePrefix);
     if (gv && gbv && gv !== gbv)
       console.error(`candor-ts: ⚠ baseline @${gbv} ≠ engine @${gv} — a "gained capability" may be the engine reclassifying, not the dependency changing. Regenerate both reports with one build to compare releases.`);
-    emit({ baseline_version: gbv ?? "", engine_version: gv ?? "", ...coreGains(loadReport(curPrefix), loadReport(basePrefix)) });
+    emit({ baseline_version: gbv ?? "", engine_version: gv ?? "", ...coreGains(loadReportOrDie(curPrefix), loadReportOrDie(basePrefix)) });
     break;
   }
   case "path": {
@@ -545,7 +560,7 @@ switch (cmd) {
     // pinned JSON shape. parseCanonical otherwise swallows --json, so detect it explicitly (as `tour` does).
     const wantJson = args.includes("--json");
     const { prefix, args: [fn, eff] } = resolveReportVerb(args, 2);
-    const fns = loadReport(prefix);
+    const fns = loadReportOrDie(prefix);
     const cg = loadCallgraph(prefix);
     if (wantJson) emit(corePath(fns, cg, fn, eff));           // conformance PART 5 shape — UNCHANGED
     else renderPathHuman(fns, cg, fn, eff);
@@ -597,7 +612,7 @@ switch (cmd) {
     // The sidecar is the ONLY graph a candor-ts report carries (it embeds no inline `calls`). Fail LOUD when
     // it's absent — never compute a degenerate empty-graph remedy that reads as a false "no clean hoist".
     if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
-    const r = coreFix(cg, loadReport(prefix), target, eff, parsePolicy(ptext), scopeMatches);
+    const r = coreFix(cg, loadReportOrDie(prefix), target, eff, parsePolicy(ptext), scopeMatches);
     if (r === null) { console.error(`candor: no function matching \`${target}\` in the call graph`); process.exit(2); }
     emit(r);
     break;
@@ -613,7 +628,7 @@ switch (cmd) {
     catch { console.error(`candor: policy ${policyFile} could not be read — no fix computed`); process.exit(2); }
     const cg = loadCallgraph(prefix);
     if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix-gate needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
-    emit(coreFixGate(cg, loadReport(prefix), parsePolicy(ptext), scopeMatches));
+    emit(coreFixGate(cg, loadReportOrDie(prefix), parsePolicy(ptext), scopeMatches));
     break;
   }
   case "unverified": {
@@ -626,7 +641,7 @@ switch (cmd) {
     let ptext;
     try { ptext = fs.readFileSync(policyFile, "utf8"); }
     catch { console.error(`candor: policy ${policyFile} could not be read`); process.exit(2); }
-    const r = coreUnverified(loadReport(prefix), parsePolicy(ptext), scopeMatches);
+    const r = coreUnverified(loadReportOrDie(prefix), parsePolicy(ptext), scopeMatches);
     emit(r);
     process.exit(strict && !r.ok ? 1 : 0);
     break; // unreachable

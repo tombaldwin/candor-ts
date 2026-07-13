@@ -100,21 +100,26 @@ export function reportPackage(prefix) {
   return null;
 }
 
+// The returned array carries a non-enumerable `hardFail` flag: true iff a report file was FOUND but
+// wholly failed to read/parse. The loud CLI wrapper (loadReportOrDie) needs it to tell "empty-but-valid
+// report" apart from "the report we found was corrupt", which must never read as an empty all-clear.
+const tagHardFail = (fns, hardFail) => { Object.defineProperty(fns, "hardFail", { value: hardFail, enumerable: false }); return fns; };
 export function loadReport(prefix) {
   if (fs.existsSync(`${prefix}.json`)) {
     // The PRIMARY report parse must DISCLOSE-and-tolerate like the sibling path — a bare JSON.parse here
     // threw an uncaught stack trace on the CLI for a corrupt `<prefix>.json` (asymmetric with siblings).
-    try { return normFns(JSON.parse(fs.readFileSync(`${prefix}.json`, "utf8")), `${prefix}.json`); }
-    catch { console.error(`candor-ts: report ${prefix}.json failed to parse — OMITTED (corrupt or mid-write); re-run the scan`); return []; }
+    try { return tagHardFail(normFns(JSON.parse(fs.readFileSync(`${prefix}.json`, "utf8")), `${prefix}.json`), false); }
+    catch { console.error(`candor-ts: report ${prefix}.json failed to parse — OMITTED (corrupt or mid-write); re-run the scan`); return tagHardFail([], true); }
   }
   // No exact <prefix>.json — merge the multi-report siblings (the Rust/workspace form).
   const fns = [];
+  let hardFail = false;
   for (const f of siblings(prefix, isReport)) {
     // DISCLOSE a malformed sibling — never silently drop it (a vanished report reads as "no effect").
     try { fns.push(...normFns(JSON.parse(fs.readFileSync(f, "utf8")), f)); }
-    catch { console.error(`candor-ts: report ${f} failed to parse — its functions are OMITTED from this query (corrupt or mid-write); re-run the scan`); }
+    catch { console.error(`candor-ts: report ${f} failed to parse — its functions are OMITTED from this query (corrupt or mid-write); re-run the scan`); hardFail = true; }
   }
-  return fns;
+  return tagHardFail(fns, hardFail);
 }
 export function loadCallgraph(prefix) {
   // A `null`/non-object parse (a `null` callgraph, an array, a number) must NOT reach Object.entries —
