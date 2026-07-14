@@ -369,5 +369,80 @@ ok("5k-fn fixture: codeAction latency within the large-repo pin",
 fs.rmSync(PERF, { recursive: true, force: true });
 
 fs.rmSync(W, { recursive: true, force: true });
+// ── the activity push (AGENT-SURFACE-DESIGN.md P2): a new BLOCKED record surfaces in-editor ─────────
+{
+  const AW = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-act-"));
+  fs.mkdirSync(path.join(AW, ".candor"), { recursive: true });
+  fs.writeFileSync(path.join(AW, "edited.ts"), "export const x = 1;\n");
+  const LOG = path.join(AW, ".candor", "activity.jsonl");
+  fs.writeFileSync(LOG, '{"ts":"2026-07-14T09:00:00Z","verdict":"blocked","gained":["Db"],"blastRadius":9}\n'); // PRE-EXISTING — must NOT replay
+  const blocked = '{"ts":"2026-07-14T10:00:00Z","sessionId":"s1","engine":"candor-scan","edited":["edited.ts"],"gained":["Fs"],"blastRadius":3,"maxHops":2,"verdict":"blocked","violations":["AS-EFF-006"]}\n';
+  const clean = '{"ts":"2026-07-14T10:01:00Z","verdict":"clean","gained":[],"blastRadius":0}\n';
+  const got = await new Promise((resolve) => {
+    const srv = spawn("node", [path.join(HERE, "lsp.mjs")], { env: { ...process.env, CANDOR_LSP_ACTIVITY_POLL_MS: "80" } });
+    let buf = Buffer.alloc(0); const inbound = [];
+    const send = (m) => { const b = Buffer.from(JSON.stringify(m), "utf8"); srv.stdin.write(`Content-Length: ${b.length}\r\n\r\n`); srv.stdin.write(b); };
+    const deadline = setTimeout(() => { srv.kill("SIGKILL"); resolve(inbound); }, 15000);
+    srv.stdout.on("data", (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      for (;;) {
+        const he = buf.indexOf("\r\n\r\n"); if (he < 0) break;
+        const m = buf.slice(0, he).toString().match(/Content-Length:\s*(\d+)/i);
+        const len = m ? parseInt(m[1], 10) : 0;
+        if (buf.length < he + 4 + len) break;
+        inbound.push(JSON.parse(buf.slice(he + 4, he + 4 + len).toString()));
+        buf = buf.slice(he + 4 + len);
+        // done once we've seen: the blocked showMessage, the overlay publish, and the clean-record clear
+        const clears = inbound.filter((x) => x.method === "textDocument/publishDiagnostics" && x.params.diagnostics.length === 0).length;
+        if (inbound.some((x) => x.method === "window/showMessage" && /candor gate: blocked/.test(x.params.message)) && clears >= 1) {
+          clearTimeout(deadline); srv.kill(); resolve(inbound); return;
+        }
+      }
+    });
+    send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(AW).href } });
+    send({ jsonrpc: "2.0", method: "initialized", params: {} });
+    setTimeout(() => fs.appendFileSync(LOG, blocked), 250);   // appended AFTER startup — this one pushes
+    setTimeout(() => fs.appendFileSync(LOG, clean), 900);     // then the gate goes green — overlay clears
+  });
+  const msgs = got.filter((x) => x.method === "window/showMessage").map((x) => x.params.message);
+  const gateMsg = msgs.find((m) => /candor gate: blocked/.test(m)) || "";
+  ok("activity push: a NEW blocked record shows the delta in-editor",
+     /introduces \{Fs\}/.test(gateMsg) && /blast radius 3/.test(gateMsg) && /deepest propagation 2 hop/.test(gateMsg) && /AS-EFF-006/.test(gateMsg), gateMsg);
+  ok("activity push: the PRE-EXISTING record did not replay (no Db message)", !msgs.some((m) => /\{Db\}/.test(m)), msgs.join(" | "));
+  const pubs = got.filter((x) => x.method === "textDocument/publishDiagnostics" && /edited\.ts$/.test(x.params.uri));
+  ok("activity push: the edited file carries a transient gate diagnostic", pubs.some((p) => p.params.diagnostics.some((d) => d.code === "gate")), JSON.stringify(pubs[0]?.params ?? {}));
+  ok("activity push: the next CLEAN record clears the overlay", pubs.some((p) => p.params.diagnostics.length === 0));
+  fs.rmSync(AW, { recursive: true, force: true });
+}
+
+{
+  // off-switch: CANDOR_LSP_ACTIVITY=off → no push even when a blocked record lands
+  const AW = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-actoff-"));
+  fs.mkdirSync(path.join(AW, ".candor"), { recursive: true });
+  const LOG = path.join(AW, ".candor", "activity.jsonl"); fs.writeFileSync(LOG, "");
+  const got = await new Promise((resolve) => {
+    const srv = spawn("node", [path.join(HERE, "lsp.mjs")], { env: { ...process.env, CANDOR_LSP_ACTIVITY: "off", CANDOR_LSP_ACTIVITY_POLL_MS: "80" } });
+    let buf = Buffer.alloc(0); const inbound = [];
+    const send = (m) => { const b = Buffer.from(JSON.stringify(m), "utf8"); srv.stdin.write(`Content-Length: ${b.length}\r\n\r\n`); srv.stdin.write(b); };
+    setTimeout(() => { srv.kill(); resolve(inbound); }, 1200);
+    srv.stdout.on("data", (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      for (;;) {
+        const he = buf.indexOf("\r\n\r\n"); if (he < 0) break;
+        const m = buf.slice(0, he).toString().match(/Content-Length:\s*(\d+)/i);
+        const len = m ? parseInt(m[1], 10) : 0;
+        if (buf.length < he + 4 + len) break;
+        inbound.push(JSON.parse(buf.slice(he + 4, he + 4 + len).toString()));
+        buf = buf.slice(he + 4 + len);
+      }
+    });
+    send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(AW).href } });
+    send({ jsonrpc: "2.0", method: "initialized", params: {} });
+    setTimeout(() => fs.appendFileSync(LOG, '{"verdict":"blocked","gained":["Fs"],"blastRadius":1}\n'), 200);
+  });
+  ok("activity push: CANDOR_LSP_ACTIVITY=off disables it", !got.some((x) => x.method === "window/showMessage" && /candor gate/.test(x.params.message)));
+  fs.rmSync(AW, { recursive: true, force: true });
+}
+
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

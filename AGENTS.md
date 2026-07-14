@@ -115,7 +115,9 @@ error, never a clean verdict — and `candor_activity`: what the edit-time gate 
 largest blast radius, deepest propagation — so you can self-inspect the loop without shelling out;
 a missing log is an empty result, not an error). `npx -y candor-ts-watch <dir>` keeps the report fresh as you edit (and
 reports the edit-delta); `candor-lsp` serves the same report as CodeLens/hover/diagnostics in any LSP
-editor, plus two code actions (plain LSP — helix/neovim/VS Code/JetBrains-via-LSP4IJ all get them
+editor (and TAILS `.candor/activity.jsonl`: a new blocked gate record pushes the delta — gained
+effects, blast radius, deepest propagation, the AS-EFF cause — as a showMessage + a transient
+diagnostic on the edited files, cleared by the next clean record; `CANDOR_LSP_ACTIVITY=off` disables), plus two code actions (plain LSP — helix/neovim/VS Code/JetBrains-via-LSP4IJ all get them
 without client code): the pre-edit whatif (`candor: what if <fn> performed <E>?` → the `candor.whatif`
 command) and, when the cursor sits in a function that actually violates the policy, the boundary FIX
 (`candor fix: hoist <E> out of <fn>` → the `candor.fix` command: where the effect belongs + the hoist

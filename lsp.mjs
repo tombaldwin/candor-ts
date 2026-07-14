@@ -43,7 +43,7 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import nodePath from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import * as Q from "./query-core.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches } from "./policy.mjs";
 
@@ -57,6 +57,79 @@ let rootPath = null;
 let reportPrefix = process.env.CANDOR_REPORT || process.argv[2] || null;
 
 const hasReport = Q.hasReport; // single-sourced with the loader predicate (query-core) — see mcp.mjs
+
+// ---- the activity push (AGENT-SURFACE-DESIGN.md P2) --------------------------------------------------
+// The Stop hook / standalone reviews append to .candor/activity.jsonl (lib-candor-summary.sh's pinned
+// record shape); the LSP tails it and surfaces each new BLOCKED record in-editor — the same payload the
+// hook shows the agent, pushed to the human. This is the LSP's ONE watcher (everything else stays
+// re-read-per-request): a small stat poll, unref'd so it never holds the process open, off-switchable
+// (CANDOR_LSP_ACTIVITY=off). Only records appended AFTER startup push (no history replay); a truncated/
+// rotated log resets the tail; a partial trailing line waits for its newline; corrupt lines are skipped.
+let activityLog = null, activityOffset = 0, activityTimer = null;
+const activityOverlaid = new Set();   // uris carrying a gate overlay — cleared on the next clean record
+function startActivityWatch() {
+  if ((process.env.CANDOR_LSP_ACTIVITY || "").toLowerCase() === "off") return;
+  const dir = rootPath ? nodePath.join(rootPath, ".candor")
+            : reportPrefix ? nodePath.dirname(reportPrefix) : null;
+  if (!dir) return;
+  activityLog = nodePath.join(dir, "activity.jsonl");
+  try { activityOffset = fs.statSync(activityLog).size; } catch { activityOffset = 0; }
+  const ms = Math.max(50, parseInt(process.env.CANDOR_LSP_ACTIVITY_POLL_MS || "2000", 10) || 2000);
+  activityTimer = setInterval(pollActivity, ms);
+  activityTimer.unref();
+}
+function pollActivity() {
+  let size;
+  try { size = fs.statSync(activityLog).size; } catch { return; }   // absent — keep waiting
+  if (size < activityOffset) activityOffset = 0;                     // rotation/truncation — restart the tail
+  if (size === activityOffset) return;
+  let text;
+  try {
+    const fd = fs.openSync(activityLog, "r");
+    const buf = Buffer.alloc(size - activityOffset);
+    fs.readSync(fd, buf, 0, buf.length, activityOffset);
+    fs.closeSync(fd);
+    text = buf.toString("utf8");
+  } catch { return; }
+  activityOffset = size;
+  const lastNl = text.lastIndexOf("\n");
+  if (lastNl < 0) { activityOffset -= Buffer.byteLength(text); return; }        // mid-write — retry next poll
+  if (lastNl < text.length - 1) { activityOffset -= Buffer.byteLength(text.slice(lastNl + 1)); text = text.slice(0, lastNl + 1); }
+  for (const l of text.split("\n")) {
+    if (!l.trim()) continue;
+    let r; try { r = JSON.parse(l); } catch { continue; }            // corrupt line — skipped, like stats
+    if (r && typeof r === "object" && !Array.isArray(r)) onActivityRecord(r);
+  }
+}
+function onActivityRecord(r) {
+  if (r.verdict === "clean") {
+    // the gate went green again — drop the overlays (the message noise stays hook-side; quiet here)
+    for (const uri of activityOverlaid) { transient.delete(uri); publishDiagnostics(uri); }
+    activityOverlaid.clear();
+    return;
+  }
+  if (r.verdict !== "blocked") return;                               // setup records aren't editor events
+  const parts = [];
+  if (Array.isArray(r.gained) && r.gained.length) parts.push(`introduces {${r.gained.join(", ")}}`);
+  if (Number.isInteger(r.blastRadius) && r.blastRadius > 0) parts.push(`blast radius ${r.blastRadius} fn(s)`);
+  if (Number.isInteger(r.maxHops)) parts.push(`deepest propagation ${r.maxHops} hop(s)`);
+  const codes = Array.isArray(r.violations) && r.violations.length ? ` [${r.violations.join(", ")}]` : "";
+  const msg = `candor gate: blocked — ${parts.join("; ") || "see the review output"}${codes}`;
+  showMessage(2, msg);
+  // pin the delta to the edited files as a transient overlay (the whatif/fix mechanism: cleared on the
+  // file's next open/save, or by the next clean record above). Hook records carry `edited`; standalone
+  // records have edited=null — the showMessage above is then the whole push.
+  for (const p of Array.isArray(r.edited) ? r.edited : []) {
+    if (typeof p !== "string" || !p) continue;
+    let uri; try { uri = pathToFileURL(nodePath.resolve(rootPath ?? process.cwd(), p)).href; } catch { continue; }
+    transient.set(uri, [{
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 200 } },
+      severity: 2, source: "candor", code: "gate", message: msg,
+    }]);
+    activityOverlaid.add(uri);
+    publishDiagnostics(uri);
+  }
+}
 
 // ---- fn → document mapping --------------------------------------------------------------------------
 // A report `loc` is `<file>:<line>[:col…]` where <file> is either a repo-relative PATH (the scan-source
@@ -379,6 +452,7 @@ function handle(msg) {
       const cand = nodePath.join(rootPath, ".candor", "report");
       if (hasReport(cand)) reportPrefix = cand;
     }
+    startActivityWatch();
     return result(id, {
       capabilities: {
         textDocumentSync: { openClose: true, save: true, change: 0 },  // report-backed: buffer edits don't move the map
@@ -421,6 +495,7 @@ function handle(msg) {
     try { return result(id, run(params?.arguments?.[0])); }
     catch (e) { logMessage(`candor-lsp: ${params?.command} failed: ${e.message}`); return result(id, null); }
   }
+  if (method === "shutdown" && activityTimer) clearInterval(activityTimer);
   if (method === "shutdown") return result(id, null);
   if (method === "exit") process.exit(0);
   if (id !== undefined) error(id, -32601, `method not found: ${method}`);
