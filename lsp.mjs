@@ -63,10 +63,32 @@ const hasReport = Q.hasReport; // single-sourced with the loader predicate (quer
 // record shape); the LSP tails it and surfaces each new BLOCKED record in-editor — the same payload the
 // hook shows the agent, pushed to the human. This is the LSP's ONE watcher (everything else stays
 // re-read-per-request): a small stat poll, unref'd so it never holds the process open, off-switchable
-// (CANDOR_LSP_ACTIVITY=off). Only records appended AFTER startup push (no history replay); a truncated/
-// rotated log resets the tail; a partial trailing line waits for its newline; corrupt lines are skipped.
+// (CANDOR_LSP_ACTIVITY=off). Only records appended AFTER startup push (no history replay); a SHRUNKEN
+// log (the writer's cap trim-rewrite, or a rotation) skips to its end — never replays; a partial
+// trailing line waits for its newline; corrupt lines are skipped.
 let activityLog = null, activityOffset = 0, activityTimer = null;
-const activityOverlaid = new Set();   // uris carrying a gate overlay — cleared on the next clean record
+// The activity gate overlay has its OWN store, SEPARATE from the whatif/fix `transient` map: the two
+// are set by different actors (the tailer vs the client's executeCommand) and clear on different events
+// (next clean record vs the file's next didOpen/didSave/didChange) — sharing one map let a blocked
+// record clobber a live whatif overlay, and a clean record delete an unrelated whatif set afterwards.
+// Keys are canonicalDocKey() paths, NOT uri strings: the setter's path is server-computed while the
+// clearer's comes from the client's uri, and the two encodings diverge (Windows drive-case/%3A,
+// symlinked workspaces) — a string-keyed overlay wedged, uncleanable by any didOpen/didSave.
+const activityTransient = new Map();  // canonical doc key -> Diagnostic[] (the gate overlay)
+const activityOverlaid = new Set();   // canonical doc keys carrying a gate overlay — cleared on the next clean record
+// One canonical key for the activity overlay maps: the RESOLVED filesystem path — realpath when the
+// file exists (symlinked workspaces: /var vs /private/var), case-folded on win32 (drive-letter case).
+// Both the server-computed side (activity records' `edited` paths) and the client side (didOpen/
+// didSave uris, via fileURLToPath) funnel through this, so an encoding divergence cannot wedge the
+// overlay. The whatif/fix `transient` map deliberately does NOT get this treatment: its keys are only
+// ever CLIENT-supplied uris on both sides (codeAction arguments echo the client's own uri back into
+// executeCommand, and the clear reads the same client field), so set and clear already agree
+// byte-for-byte — canonicalizing there would be motion without a divergence to fix.
+function canonicalDocKey(p) {
+  let abs = nodePath.resolve(p);
+  try { abs = fs.realpathSync.native(abs); } catch { /* not on disk (yet) — resolve() is the best we have */ }
+  return process.platform === "win32" ? abs.toLowerCase() : abs;
+}
 function startActivityWatch() {
   if ((process.env.CANDOR_LSP_ACTIVITY || "").toLowerCase() === "off") return;
   const dir = rootPath ? nodePath.join(rootPath, ".candor")
@@ -81,7 +103,17 @@ function startActivityWatch() {
 function pollActivity() {
   let size;
   try { size = fs.statSync(activityLog).size; } catch { return; }   // absent — keep waiting
-  if (size < activityOffset) activityOffset = 0;                     // rotation/truncation — restart the tail
+  if (size < activityOffset) {
+    // Shrunk — NOT an exceptional rotation: the writer (lib-candor-summary.sh candor_log_activity)
+    // rewrites the log via tail+mv on EVERY append once past its line cap, so past that point every
+    // poll sees a smaller file. Restarting the tail at 0 replayed the whole trimmed rewrite (~cap
+    // lines) each poll — a showMessage flood of historical blocked records. Skip to the END instead:
+    // the rewrite's tail is overwhelmingly history we already pushed. Trade-off, made deliberately —
+    // we may MISS the few genuinely-new records that arrived in the same rewrite, and that beats
+    // flooding the editor with thousands of stale ones.
+    activityOffset = size;
+    return;
+  }
   if (size === activityOffset) return;
   let text;
   try {
@@ -103,8 +135,10 @@ function pollActivity() {
 }
 function onActivityRecord(r) {
   if (r.verdict === "clean") {
-    // the gate went green again — drop the overlays (the message noise stays hook-side; quiet here)
-    for (const uri of activityOverlaid) { transient.delete(uri); publishDiagnostics(uri); }
+    // the gate went green again — drop the GATE overlays only (a live whatif/fix overlay on the same
+    // file is the client's own question, not the gate's — it clears on the file's next open/save/edit,
+    // never here). The message noise stays hook-side; quiet here.
+    for (const key of activityOverlaid) { activityTransient.delete(key); publishDiagnostics(pathToFileURL(key).href); }
     activityOverlaid.clear();
     return;
   }
@@ -116,17 +150,22 @@ function onActivityRecord(r) {
   const codes = Array.isArray(r.violations) && r.violations.length ? ` [${r.violations.join(", ")}]` : "";
   const msg = `candor gate: blocked — ${parts.join("; ") || "see the review output"}${codes}`;
   showMessage(2, msg);
-  // pin the delta to the edited files as a transient overlay (the whatif/fix mechanism: cleared on the
-  // file's next open/save, or by the next clean record above). Hook records carry `edited`; standalone
-  // records have edited=null — the showMessage above is then the whole push.
+  // pin the delta to the edited files as the gate's own transient overlay (activityTransient — cleared
+  // on the file's next open/save, or by the next clean record above; a whatif/fix overlay on the same
+  // file coexists rather than being overwritten). Hook records carry `edited`; standalone records have
+  // edited=null — the showMessage above is then the whole push.
   for (const p of Array.isArray(r.edited) ? r.edited : []) {
     if (typeof p !== "string" || !p) continue;
-    let uri; try { uri = pathToFileURL(nodePath.resolve(rootPath ?? process.cwd(), p)).href; } catch { continue; }
-    transient.set(uri, [{
+    let key, uri;
+    try {
+      key = canonicalDocKey(nodePath.resolve(rootPath ?? process.cwd(), p));
+      uri = pathToFileURL(key).href;
+    } catch { continue; }
+    activityTransient.set(key, [{
       range: { start: { line: 0, character: 0 }, end: { line: 0, character: 200 } },
       severity: 2, source: "candor", code: "gate", message: msg,
     }]);
-    activityOverlaid.add(uri);
+    activityOverlaid.add(key);
     publishDiagnostics(uri);
   }
 }
@@ -278,7 +317,13 @@ function publishDiagnostics(uri) {
   let docPath;
   try { docPath = fileURLToPath(uri); } catch { return; }
   try {
-    const diags = diagnosticsFor(docPath).concat(transient.get(uri) ?? []);
+    // three layers, merged: the standing gate verdict + the client's whatif/fix overlay (keyed by the
+    // client's uri string) + the activity gate overlay (keyed by the canonical path derived from the
+    // uri being published — so the lookup meets the tailer's server-computed key whatever the client's
+    // uri encoding looks like).
+    const diags = diagnosticsFor(docPath)
+      .concat(transient.get(uri) ?? [])
+      .concat(activityTransient.get(canonicalDocKey(docPath)) ?? []);
     send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri, diagnostics: diags } });
   } catch (e) {
     logMessage(`candor-lsp: diagnostics failed for ${uri}: ${e.message}`);
@@ -336,12 +381,28 @@ function codeActions(docPath, uri, range) {
   return out;
 }
 
-// Transient whatif diagnostics (Information severity, appended to the gate diagnostics on publish):
+// Transient whatif/fix diagnostics (Information severity, appended to the gate diagnostics on publish):
 // uri -> Diagnostic[]. Cleared on the next didOpen/didSave/didChange of that file; re-running the
 // action replaces the previous answer (one live whatif overlay per file, not an accumulating pile).
+// Keyed by the CLIENT's uri string on both sides (the set comes from executeCommand arguments that
+// echo the client's own uri; the clear reads the same field) — no canonicalization needed here, unlike
+// activityTransient whose setter computes its own paths (see canonicalDocKey).
 const transient = new Map();
 function clearTransient(uri) {
   if (transient.delete(uri)) publishDiagnostics(uri);   // republish without the overlay
+}
+// didOpen/didSave drop BOTH per-file overlays: the client's whatif/fix answer (a fresh look at the
+// file invalidates a hypothetical answered against its previous state) and the activity gate overlay
+// (same rationale — plus pruning activityOverlaid so a later clean record can't touch a file whose
+// overlay the user already dismissed). The activity side goes through canonicalDocKey to meet the
+// tailer's server-computed keys.
+function clearOverlays(uri) {
+  transient.delete(uri);
+  try {
+    const key = canonicalDocKey(fileURLToPath(uri));
+    activityTransient.delete(key);
+    activityOverlaid.delete(key);
+  } catch { /* non-file uri — no activity overlay possible */ }
 }
 
 // The candor.whatif command: the SAME query-core whatif the CLI (`query.mjs whatif`) and MCP
@@ -465,11 +526,12 @@ function handle(msg) {
     });
   }
   if (method === "initialized" || method === "$/cancelRequest" || method === "$/setTrace") return;
-  // didOpen/didSave/didChange drop the file's transient whatif overlay — a fresh look at the file (or an
-  // edit) invalidates a hypothetical answered against the previous state. didChange is not negotiated
-  // (change: 0) but is handled defensively for clients that send it anyway.
-  if (method === "textDocument/didOpen") { transient.delete(params.textDocument.uri); return publishDiagnostics(params.textDocument.uri); }
-  if (method === "textDocument/didSave") { transient.delete(params.textDocument.uri); return publishDiagnostics(params.textDocument.uri); }
+  // didOpen/didSave drop the file's transient overlays (whatif/fix + activity gate — clearOverlays);
+  // a fresh look at the file (or an edit) invalidates an answer given against its previous state.
+  // didChange is not negotiated (change: 0) but is handled defensively for clients that send it anyway
+  // (whatif overlay only — the activity overlay clears on open/save or the next clean record).
+  if (method === "textDocument/didOpen") { clearOverlays(params.textDocument.uri); return publishDiagnostics(params.textDocument.uri); }
+  if (method === "textDocument/didSave") { clearOverlays(params.textDocument.uri); return publishDiagnostics(params.textDocument.uri); }
   if (method === "textDocument/didChange") return clearTransient(params.textDocument.uri);
   if (method === "textDocument/didClose")
     return send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: params.textDocument.uri, diagnostics: [] } });

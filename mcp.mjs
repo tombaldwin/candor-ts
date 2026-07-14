@@ -48,6 +48,17 @@ function resolvePrefix(args) {
   if (!Q.hasReport(p)) throw new Error(`no report at \`${p}\` (.json or .<crate>.scan.json) — run a candor scan first`);
   return p;
 }
+// Resolve a BASELINE prefix (candor_diff / candor_gains): the EXISTENCE check stays loud — a typo'd
+// baseline that loads [] would diff/gain as an authoritative empty, a silent all-clear on the
+// supply-chain alarm — but the --root confinement deliberately does NOT apply. A baseline is read-only
+// comparison input the agent explicitly names (a prior-release report is routinely, and correctly, kept
+// OUTSIDE the repo tree so the new scan can't clobber it), not a served-workspace resource: nothing is
+// anchored to it that --root defends — its policy is never read, only its function/effect rows and
+// callgraph sidecar are compared. Confining it broke that legitimate out-of-tree workflow.
+function resolveBaseline(p) {
+  if (!Q.hasReport(p)) throw new Error(`no report at \`${clip(p)}\` (.json or .<crate>.scan.json) — run a candor scan first`);
+  return p;
+}
 // Truncate a caller-supplied value echoed back in an error (a multi-MB `fn` would otherwise be reflected
 // verbatim — token/memory amplification over the agent transport, the opposite of the list-cap thrift).
 const clip = (s, n = 120) => { s = String(s); return s.length > n ? s.slice(0, n) + "…" : s; };
@@ -261,10 +272,10 @@ const TOOLS = {
     description: "The per-function effect delta versus a baseline report: gained (introduced vs inherited) and lost effects. 'What did this change do to the effect surface?'.",
     schema: { type: "object", properties: { baseline: { type: "string", description: "the baseline report prefix" }, ...reportArg }, required: ["baseline"] },
     run: (a, p) => {
-      // The BASELINE locator gets the SAME existence + --root confinement checks as the main report
-      // (resolvePrefix) — a typo'd baseline loaded [] with hardFail=false and diffed as an
-      // authoritative empty {changes:[]} (the CLI now exits 2 on the same miss).
-      const b = resolvePrefix({ report: a.baseline });
+      // Baseline existence is loud (a typo'd baseline loaded [] with hardFail=false and diffed as an
+      // authoritative empty {changes:[]}; the CLI exits 2 on the same miss) — but NOT --root-confined:
+      // see resolveBaseline for the out-of-tree-baseline trust argument.
+      const b = resolveBaseline(a.baseline);
       return { baseline_version: Q.reportVersion(b) ?? "", engine_version: Q.reportVersion(p) ?? "",
                ...Q.diff(loadReportLoud(p), loadReportLoud(b)) };
     },
@@ -273,9 +284,10 @@ const TOOLS = {
     description: "The supply-chain alarm: effects the surface GAINED versus a baseline (package-level + per-function) — 'did this dependency bump add Net/Exec somewhere?'.",
     schema: { type: "object", properties: { baseline: { type: "string", description: "the baseline report prefix" }, ...reportArg }, required: ["baseline"] },
     run: (a, p) => {
-      // Same baseline existence + --root confinement as candor_diff — an empty {gained:[]} over a
-      // typo'd baseline is a silent all-clear on the supply-chain ALARM tool.
-      const b = resolvePrefix({ report: a.baseline });
+      // Same baseline posture as candor_diff (loud existence, no --root confinement — resolveBaseline):
+      // an empty {gained:[]} over a typo'd baseline is a silent all-clear on the supply-chain ALARM
+      // tool, while a prior-release baseline legitimately lives outside the served tree.
+      const b = resolveBaseline(a.baseline);
       // ⟨spec 0.12 staged⟩ baseline callgraph → byFunction[].origin, same as the CLI (parity). The
       // loader's non-enumerable `partial` tag rides along: a corrupt baseline sidecar (edges dropped,
       // disclosed) downgrades origin to "unknown", never a fabricated "new" over a truncated graph.
@@ -286,7 +298,7 @@ const TOOLS = {
   candor_activity: {
     description: "What the edit-time gate caught: MEASURED activity from .candor/activity.jsonl (the Stop-hook / standalone review log) — edits checked, verdicts, violations by AS-EFF code, effects introduced, largest blast radius, deepest propagation (hops), plus the most recent records. Counted from the log, no model. A missing log is an empty result (the loop isn't wired here — not an error); corrupt lines are skipped.",
     schema: { type: "object", properties: {
-      log: { type: "string", description: "activity log path (default .candor/activity.jsonl under the served root)" },
+      log: { type: "string", description: "activity log path (default .candor/activity.jsonl under --root, else beside the served report prefix, else cwd)" },
       session: { type: "string", description: "filter to one sessionId" },
       since: { type: "string", description: "ISO timestamp lower bound (records with no ts are kept)" },
       limit: { type: "number", description: "how many recent records to return (default 5, max 50)" },
@@ -302,9 +314,25 @@ const TOOLS = {
 // buckets clean/blocked/setup. The `edited` paths in `recent` are the hook's local-only fields —
 // the MCP transport is the same machine (the agent already reads those files), so serving them is
 // not the off-box transmission FEEDBACK-SPEC's privacy note forbids.
+// The anchor a relative/default activity-log path resolves against — a LADDER, mirroring how the LSP
+// derives its watch dir (rootPath ?? dirname(reportPrefix)):
+//   1. --root: the served workspace is the explicit truth when one is declared;
+//   2. the served report prefix ($CANDOR_REPORT / CLI arg): the documented
+//      `CANDOR_REPORT=/repo/.candor/report npx candor-ts-mcp` invocation runs from ANY cwd, and the
+//      activity log lives beside the report — anchoring at cwd found nothing. A `<repo>/.candor/report`
+//      prefix anchors at `<repo>` (so the `.candor/activity.jsonl` default lands beside the report);
+//      any other prefix anchors at its own directory (its `.candor/` sits with it);
+//   3. cwd — nothing else to go on.
+function activityAnchor() {
+  if (WORKSPACE_ROOT) return WORKSPACE_ROOT;
+  if (DEFAULT_PREFIX) {
+    const dir = nodePath.resolve(nodePath.dirname(DEFAULT_PREFIX));
+    return nodePath.basename(dir) === ".candor" ? nodePath.dirname(dir) : dir;
+  }
+  return process.cwd();
+}
 function readActivity(a) {
-  const root = WORKSPACE_ROOT ?? process.cwd();
-  const log = nodePath.resolve(root, a?.log || ".candor/activity.jsonl");
+  const log = nodePath.resolve(activityAnchor(), a?.log || ".candor/activity.jsonl");
   if (WORKSPACE_ROOT && !within(log, WORKSPACE_ROOT))
     throw new Error(`activity log \`${clip(a?.log)}\` is outside the served workspace (--root ${WORKSPACE_ROOT}) — refusing`);
   let lines = [];
@@ -316,9 +344,20 @@ function readActivity(a) {
     try { const r = JSON.parse(l); if (r && typeof r === "object" && !Array.isArray(r)) recs.push(r); } catch { /* corrupt line — skipped, like stats */ }
   }
   const since = a?.since;
-  const kept = recs.filter((r) =>
-    (!a?.session || r.sessionId === a.session) &&
-    (!since || typeof r.ts !== "string" || r.ts >= since));
+  // `since` compares TEMPORALLY when the caller's value parses: a bytewise ISO compare mis-filters the
+  // offset/millis variants an agent naturally supplies ("…T11:30:00+01:00" sorts after "…T11:00:00Z"
+  // lexicographically yet is the earlier instant). The log's own ts format is pinned, but records are
+  // read tolerantly: a record whose ts doesn't parse is KEPT, matching the null-ts posture (a filter
+  // must never silently hide records it can't place). Only when the caller's `since` itself doesn't
+  // parse do we fall back to the old lexicographic compare (best effort over refusing).
+  const sinceMs = since ? Date.parse(since) : NaN;
+  const afterSince = (r) => {
+    if (!since || typeof r.ts !== "string") return true;
+    if (Number.isNaN(sinceMs)) return r.ts >= since;      // unparseable bound — lexicographic fallback
+    const tsMs = Date.parse(r.ts);
+    return Number.isNaN(tsMs) ? true : tsMs >= sinceMs;   // unparseable record ts — kept, like null ts
+  };
+  const kept = recs.filter((r) => (!a?.session || r.sessionId === a.session) && afterSince(r));
   const summary = { log, edits: kept.length, clean: 0, blocked: 0, setup: 0,
                     violations: {}, effectsIntroduced: new Set(),
                     largestBlastRadius: 0, deepestPropagation: 0, from: null, to: null };

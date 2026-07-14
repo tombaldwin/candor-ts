@@ -144,9 +144,9 @@ ok("query-core diff-vs-self == query.mjs diff-vs-self (both {changes: []})",
 }
 
 // ---- the MCP server, over its real stdio JSON-RPC transport --------------------------------------
-function mcpSession(requests, extraArgs = []) {
+function mcpSession(requests, extraArgs = [], extraEnv = { CANDOR_REPORT: P }) {
   return new Promise((resolve) => {
-    const srv = spawn("node", [`${HERE}/mcp.mjs`, ...extraArgs], { env: { ...process.env, CANDOR_REPORT: P } });
+    const srv = spawn("node", [`${HERE}/mcp.mjs`, ...extraArgs], { env: { ...process.env, ...extraEnv } });
     let out = "", responses = [];
     srv.stdout.on("data", (d) => {
       out += d;
@@ -282,11 +282,18 @@ ok("mcp whatif: a policy outside the report's repo is refused (confinement)",
 ok("mcp whatif: no policy given still answers the blast radius (ok:true, no violations)",
    wiById[6].result.isError !== true && wiJson(6).ok === true && wiJson(6).affected.includes("app.handler"), wiText(6).slice(0, 160));
 
-// ── --root lockdown: a report prefix outside the declared workspace is refused ─────────────────────
+// ── --root lockdown: a report prefix outside the declared workspace is refused — but an out-of-tree
+// BASELINE (diff/gains) is accepted: a prior-release report deliberately kept outside the repo is
+// read-only comparison input the agent names explicitly, not a served-workspace resource.
+fs.copyFileSync(`${P}.json`, `${OUTSIDE}/r.json`);                       // the out-of-tree baseline —
+fs.copyFileSync(`${P}.callgraph.json`, `${OUTSIDE}/r.callgraph.json`);   // an identical prior "release"
 const rootReplies = await mcpSession([
   { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
   { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "candor_where", arguments: { effect: "Net" } } },
   { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "candor_where", arguments: { effect: "Net", report: `${OUTSIDE}/r` } } },
+  { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "candor_diff", arguments: { baseline: `${OUTSIDE}/r` } } },
+  { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "candor_gains", arguments: { baseline: `${OUTSIDE}/r` } } },
+  { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "candor_diff", arguments: { baseline: `${OUTSIDE}/no-such` } } },
 ], ["--root", W]);
 const rootById = Object.fromEntries(rootReplies.map((r) => [r.id, r]));
 ok("mcp --root: the in-workspace default prefix still serves",
@@ -294,6 +301,15 @@ ok("mcp --root: the in-workspace default prefix still serves",
 ok("mcp --root: a report prefix outside the workspace is refused",
    rootById[3].result.isError === true && /outside the served workspace/.test(rootById[3].result.content[0].text),
    rootById[3].result.content[0].text.slice(0, 160));
+ok("mcp --root: an OUT-OF-TREE baseline is accepted by candor_diff (read-only comparison input, not confined)",
+   rootById[4].result.isError !== true && eq(JSON.parse(rootById[4].result.content[0].text).changes, []),
+   rootById[4].result.content[0].text.slice(0, 160));
+ok("mcp --root: an OUT-OF-TREE baseline is accepted by candor_gains too (identical scan → no gained effects)",
+   rootById[5].result.isError !== true && eq(JSON.parse(rootById[5].result.content[0].text).gained, []),
+   rootById[5].result.content[0].text.slice(0, 160));
+ok("mcp --root: a MISSING baseline stays a loud, informative error (existence check kept)",
+   rootById[6].result.isError === true && /no report at .*no-such.*run a candor scan first/.test(rootById[6].result.content[0].text),
+   rootById[6].result.content[0].text.slice(0, 160));
 fs.rmSync(OUTSIDE, { recursive: true, force: true });
 
 // ── the MCP list caps: an over-cap result is TRUNCATED with exact counts + a disclosure flag ────────
@@ -463,6 +479,44 @@ fs.rmSync(W, { recursive: true, force: true });
   // no report exists under A at all — the tool must not demand one (noReport dispatch).
   ok("activity: works with NO report in the workspace (log-only tool needs no scan)",
      aById[2].result.isError !== true);
+
+  // ── the default-log anchor ladder: the documented `CANDOR_REPORT=/repo/.candor/report npx
+  // candor-ts-mcp` invocation, run from a DIFFERENT cwd (this test's), no --root, no `log` arg — the
+  // default must resolve beside the served report prefix, not against the process cwd (which found
+  // nothing). The old anchor was WORKSPACE_ROOT ?? cwd.
+  const viaPrefix = await mcpSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    call(2, "candor_activity", {}),
+  ], [], { CANDOR_REPORT: path.join(A, ".candor", "report") });
+  const vp = JSON.parse(viaPrefix.find((r) => r.id === 2).result.content[0].text);
+  ok("activity: the DEFAULT log resolves beside $CANDOR_REPORT from a different cwd (anchor ladder, not cwd)",
+     vp.edits === 2 && vp.blocked === 1 && vp.log === path.join(A, ".candor", "activity.jsonl"),
+     viaPrefix.find((r) => r.id === 2).result.content[0].text.slice(0, 200));
+
+  // ── `since` filters TEMPORALLY, not bytewise: an offset-variant bound ("…T11:30:00+01:00" ==
+  // 10:30:00Z) sorts lexicographically AFTER both Z-form record timestamps — the old compare dropped
+  // everything; temporally it must keep the 11:00Z record. A record whose ts doesn't parse is KEPT
+  // (the null-ts posture); an unparseable `since` falls back to the lexicographic compare.
+  fs.writeFileSync(path.join(A, ".candor", "since.jsonl"), [
+    '{"ts":"2026-07-14T10:00:00Z","verdict":"clean","gained":[],"blastRadius":0}',
+    '{"ts":"2026-07-14T11:00:00Z","sessionId":"late","verdict":"blocked","gained":["Net"],"blastRadius":1}',
+    '{"ts":"not a timestamp","verdict":"clean","gained":[],"blastRadius":0}',
+  ].join("\n") + "\n");
+  const sr = await mcpSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    call(2, "candor_activity", { log: `${A}/.candor/since.jsonl`, since: "2026-07-14T11:30:00+01:00" }),  // == 10:30Z
+    call(3, "candor_activity", { log: `${A}/.candor/since.jsonl`, since: "2026-07-14T10:30:00.000Z" }),   // millis variant
+    call(4, "candor_activity", { log: `${A}/.candor/since.jsonl`, since: "zzz-not-a-date" }),             // unparseable bound
+  ], ["--root", A]);
+  const sj = (id) => JSON.parse(sr.find((r) => r.id === id).result.content[0].text);
+  ok("activity since: an OFFSET-variant bound filters temporally (keeps 11:00Z + the unparseable-ts record)",
+     sj(2).edits === 2 && sj(2).blocked === 1 && sj(2).recent.some((r) => r.sessionId === "late"),
+     sr.find((r) => r.id === 2).result.content[0].text.slice(0, 200));
+  ok("activity since: a millis-variant bound filters the same way (and unparseable record ts stays KEPT)",
+     sj(3).edits === 2 && sj(3).recent.some((r) => r.ts === "not a timestamp"),
+     sr.find((r) => r.id === 3).result.content[0].text.slice(0, 200));
+  ok("activity since: an unparseable bound falls back to the lexicographic compare (all three below 'zzz…' drop)",
+     sj(4).edits === 0, sr.find((r) => r.id === 4).result.content[0].text.slice(0, 160));
   fs.rmSync(A, { recursive: true, force: true });
 }
 

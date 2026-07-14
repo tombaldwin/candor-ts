@@ -444,5 +444,170 @@ fs.rmSync(W, { recursive: true, force: true });
   fs.rmSync(AW, { recursive: true, force: true });
 }
 
+// ── a phase-driven LSP session for the poll-timed activity tests: send frames, AWAIT inbound
+// predicates (scanned in arrival order, each match consumed — so identical-looking publishes in
+// different phases don't alias), instead of a fixed reply count.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function lspDrive(extraEnv = {}) {
+  const srv = spawn("node", [path.join(HERE, "lsp.mjs")], { env: { ...process.env, CANDOR_LSP_ACTIVITY_POLL_MS: "80", ...extraEnv } });
+  let buf = Buffer.alloc(0);
+  const inbound = [];
+  const waiters = [];
+  srv.stdout.on("data", (chunk) => {
+    buf = Buffer.concat([buf, chunk]);
+    for (;;) {
+      const he = buf.indexOf("\r\n\r\n"); if (he < 0) break;
+      const m = buf.slice(0, he).toString().match(/Content-Length:\s*(\d+)/i);
+      const len = m ? parseInt(m[1], 10) : 0;
+      if (buf.length < he + 4 + len) break;
+      inbound.push(JSON.parse(buf.slice(he + 4, he + 4 + len).toString()));
+      buf = buf.slice(he + 4 + len);
+      for (const w of [...waiters]) w();
+    }
+  });
+  let scanFrom = 0;
+  const waitFor = (pred, timeout = 10000) => new Promise((resolve) => {
+    let done = false;
+    const t = setTimeout(() => { done = true; waiters.splice(waiters.indexOf(scan), 1); resolve(null); }, timeout);
+    function scan() {
+      if (done) return;
+      for (let i = scanFrom; i < inbound.length; i++) {
+        if (pred(inbound[i])) {
+          done = true; scanFrom = i + 1; clearTimeout(t);
+          waiters.splice(waiters.indexOf(scan), 1); resolve(inbound[i]); return;
+        }
+      }
+    }
+    waiters.push(scan);
+    scan();
+  });
+  const send = (m) => { const b = Buffer.from(JSON.stringify(m), "utf8"); srv.stdin.write(`Content-Length: ${b.length}\r\n\r\n`); srv.stdin.write(b); };
+  // graceful close (TESTING.md §6 — coverage flushes on stdin end), SIGKILL only as the hang backstop
+  const close = () => new Promise((resolve) => {
+    const t = setTimeout(() => srv.kill("SIGKILL"), 5000);
+    srv.on("exit", (code) => { clearTimeout(t); resolve(code); });
+    srv.stdin.end();
+  });
+  return { inbound, waitFor, send, close };
+}
+
+// ── FINDING 1 regression: the writer's cap trim-rewrite (any size DECREASE) must NOT replay history ──
+// lib-candor-summary.sh rewrites the log via tail+mv on EVERY append once past CANDOR_ACTIVITY_CAP, so
+// a shrink is routine — the old offset-to-0 reset replayed the whole trimmed tail (~5000 records, each
+// blocked one a showMessage) on every poll. The fix skips the tail to the file's END.
+{
+  const AW = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-trim-"));
+  fs.mkdirSync(path.join(AW, ".candor"), { recursive: true });
+  const LOG = path.join(AW, ".candor", "activity.jsonl");
+  const oldLine = (i) => `{"ts":"2026-07-14T0${i % 10}:00:00Z","verdict":"blocked","edited":null,"gained":["Db"],"blastRadius":${i}}\n`;
+  fs.writeFileSync(LOG, Array.from({ length: 20 }, (_, i) => oldLine(i)).join(""));
+  const s = lspDrive();
+  s.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(AW).href } });
+  s.send({ jsonrpc: "2.0", method: "initialized", params: {} });
+  await s.waitFor((m) => m.id === 1);
+  await sleep(250);                                     // let the tail settle at the initial size
+  // the writer's trim: keep the last 10 lines, replace atomically (tail > tmp && mv — same shape)
+  const tail = fs.readFileSync(LOG, "utf8").split("\n").filter(Boolean).slice(-10).map((l) => l + "\n").join("");
+  fs.writeFileSync(LOG + ".tmp", tail);
+  fs.renameSync(LOG + ".tmp", LOG);
+  await sleep(400);                                     // several polls observe the shrunken file
+  // a genuinely NEW record appended AFTER the rewrite must still push (the tail re-anchored at the end)
+  fs.appendFileSync(LOG, '{"ts":"2026-07-14T12:00:00Z","verdict":"blocked","edited":null,"gained":["Exec"],"blastRadius":1}\n');
+  const fresh = await s.waitFor((m) => m.method === "window/showMessage" && /introduces \{Exec\}/.test(m.params.message));
+  await s.close();
+  const gateMsgs = s.inbound.filter((m) => m.method === "window/showMessage" && /candor gate: blocked/.test(m.params.message));
+  ok("trim-rewrite: NO historical record replays after the size decrease (no Db flood)",
+     !gateMsgs.some((m) => /\{Db\}/.test(m.params.message)), gateMsgs.map((m) => m.params.message).join(" | ").slice(0, 200));
+  ok("trim-rewrite: a record appended AFTER the rewrite still pushes (tail re-anchored at the end, not wedged)",
+     fresh !== null && gateMsgs.length === 1, `gate messages: ${gateMsgs.length}`);
+  fs.rmSync(AW, { recursive: true, force: true });
+}
+
+// ── FINDING 2 regression: the activity gate overlay and the whatif overlay COEXIST and clear
+// independently — a blocked record must not clobber a live whatif; a clean record must not delete it.
+{
+  // realpath'd fixture so the client uri and the tailer's canonical key coincide (the DIVERGENT case
+  // is pinned separately below); no policy → every published diagnostic is an overlay.
+  const WA = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-ovl-")));
+  fs.mkdirSync(path.join(WA, "src"));
+  fs.writeFileSync(path.join(WA, "src", "app.ts"), `import http from "node:http";
+export function leaf(): void { http.get("http://x"); }
+export function mid(): void { leaf(); }
+export function handler(): void { mid(); }
+`);
+  fs.mkdirSync(path.join(WA, ".candor"));
+  execFileSync("node", [path.join(HERE, "scan.mjs"), path.join(WA, "src"), "--out", path.join(WA, ".candor", "report")], { stdio: "ignore" });
+  const LOG = path.join(WA, ".candor", "activity.jsonl");
+  fs.writeFileSync(LOG, "");
+  const ADOC = pathToFileURL(path.join(WA, "src", "app.ts")).href;
+  const pub = (m) => m.method === "textDocument/publishDiagnostics" && m.params.uri === ADOC;
+  const codes = (m) => m.params.diagnostics.map((d) => d.code);
+  const s = lspDrive();
+  s.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(WA).href } });
+  s.send({ jsonrpc: "2.0", method: "initialized", params: {} });
+  s.send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: ADOC, languageId: "typescript", version: 1, text: "" } } });
+  await s.waitFor(pub);                                 // the didOpen publish (empty — no policy)
+  s.send({ jsonrpc: "2.0", id: 2, method: "workspace/executeCommand", params: { command: "candor.whatif", arguments: [{ fn: "app.leaf", effect: "Db", uri: ADOC, line: 1 }] } });
+  const p1 = await s.waitFor((m) => pub(m) && codes(m).includes("whatif"));
+  ok("overlay coexistence: the whatif overlay publishes (radius-only, no-policy repo)", p1 !== null, JSON.stringify(p1?.params));
+  fs.appendFileSync(LOG, '{"ts":"2026-07-14T10:00:00Z","verdict":"blocked","edited":["src/app.ts"],"gained":["Fs"],"blastRadius":3,"violations":["AS-EFF-006"]}\n');
+  const p2 = await s.waitFor((m) => pub(m) && codes(m).includes("gate"));
+  ok("a blocked record ADDS the gate overlay alongside the live whatif overlay (no clobber — own map)",
+     p2 !== null && codes(p2).includes("whatif"), JSON.stringify(p2?.params.diagnostics.map((d) => d.code)));
+  fs.appendFileSync(LOG, '{"ts":"2026-07-14T10:01:00Z","verdict":"clean","gained":[],"blastRadius":0}\n');
+  const p3 = await s.waitFor((m) => pub(m) && !codes(m).includes("gate"));
+  ok("the next clean record clears ONLY the gate overlay — the whatif overlay SURVIVES",
+     p3 !== null && codes(p3).includes("whatif"), JSON.stringify(p3?.params.diagnostics.map((d) => d.code)));
+  s.send({ jsonrpc: "2.0", method: "textDocument/didSave", params: { textDocument: { uri: ADOC } } });
+  const p4 = await s.waitFor((m) => pub(m) && m.params.diagnostics.length === 0);
+  ok("didSave clears the whatif overlay too (both overlay layers gone)", p4 !== null, JSON.stringify(p4?.params));
+  // the 2a regression proper: after a save PRUNED the file from activityOverlaid, a later clean record
+  // must not touch the file's FRESH whatif overlay (the old shared map deleted it).
+  s.send({ jsonrpc: "2.0", id: 3, method: "workspace/executeCommand", params: { command: "candor.whatif", arguments: [{ fn: "app.leaf", effect: "Exec", uri: ADOC, line: 1 }] } });
+  await s.waitFor((m) => pub(m) && codes(m).includes("whatif"));
+  const pubsBefore = s.inbound.filter(pub).length;
+  fs.appendFileSync(LOG, '{"ts":"2026-07-14T10:02:00Z","verdict":"clean","gained":[],"blastRadius":0}\n');
+  await sleep(400);                                     // several polls process the clean record
+  ok("a clean record after the save leaves the fresh whatif overlay untouched (pruned bookkeeping — no republish)",
+     s.inbound.filter(pub).length === pubsBefore, `publishes went ${pubsBefore} → ${s.inbound.filter(pub).length}`);
+  await s.close();
+  fs.rmSync(WA, { recursive: true, force: true });
+}
+
+// ── FINDING 3 regression: the activity overlay clears through CANONICAL keys even when the client's
+// uri encoding diverges from the server-computed one. The divergences exercised: a percent-encoded
+// letter in the client's uri ("%65dited.ts" = "edited.ts" — every platform), and, on macOS, the
+// tmpdir symlink (/var → /private/var: the fixture path is NOT realpath'd, the tailer's key is).
+{
+  const AC = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-enc-"));
+  fs.mkdirSync(path.join(AC, ".candor"), { recursive: true });
+  fs.writeFileSync(path.join(AC, "edited.ts"), "export const x = 1;\n");
+  const LOG = path.join(AC, ".candor", "activity.jsonl");
+  fs.writeFileSync(LOG, "");
+  const variant = pathToFileURL(path.join(AC, "edited.ts")).href.replace(/edited\.ts$/, "%65dited.ts");
+  const pubEdited = (m) => m.method === "textDocument/publishDiagnostics" && /dited\.ts$/.test(m.params.uri);
+  const s = lspDrive();
+  s.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(AC).href } });
+  s.send({ jsonrpc: "2.0", method: "initialized", params: {} });
+  await s.waitFor((m) => m.id === 1);
+  fs.appendFileSync(LOG, '{"ts":"2026-07-14T10:00:00Z","verdict":"blocked","edited":["edited.ts"],"gained":["Fs"],"blastRadius":1,"violations":["AS-EFF-006"]}\n');
+  const set = await s.waitFor((m) => pubEdited(m) && m.params.diagnostics.some((d) => d.code === "gate"));
+  ok("divergent-encoding: the blocked record sets the gate overlay (server-computed key)", set !== null, JSON.stringify(set?.params));
+  // the clear arrives under a DIFFERENT uri string for the same file — must still find the overlay
+  s.send({ jsonrpc: "2.0", method: "textDocument/didSave", params: { textDocument: { uri: variant } } });
+  const cleared = await s.waitFor((m) => m.method === "textDocument/publishDiagnostics" && m.params.uri === variant);
+  ok("divergent-encoding: didSave under the variant uri publishes WITHOUT the gate overlay (canonical lookup)",
+     cleared !== null && cleared.params.diagnostics.length === 0, JSON.stringify(cleared?.params));
+  // the decisive pin: the save must have PRUNED the canonical key — a later clean record then has
+  // nothing to republish. The wedged (string-keyed) overlay republished the server uri here.
+  const pubsBefore = s.inbound.filter(pubEdited).length;
+  fs.appendFileSync(LOG, '{"ts":"2026-07-14T10:01:00Z","verdict":"clean","gained":[],"blastRadius":0}\n');
+  await sleep(400);
+  ok("divergent-encoding: the variant-uri save PRUNED the overlay bookkeeping (a later clean record republishes nothing)",
+     s.inbound.filter(pubEdited).length === pubsBefore, `publishes went ${pubsBefore} → ${s.inbound.filter(pubEdited).length}`);
+  await s.close();
+  fs.rmSync(AC, { recursive: true, force: true });
+}
+
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
