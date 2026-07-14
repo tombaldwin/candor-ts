@@ -710,8 +710,18 @@ export function make(): Implicit { return new Implicit(); }`,
     "src/reach.ts": `function work(){ return fetch("https://api.openai.com/x"); }\nwork();`,
     "src/pure.ts": `const x = 1 + 2; export function f(): number { return x; }`,
     "src/dec.ts": `function factory(){ fetch("https://api.openai.com/x"); return (t: any) => t; }\n@factory()\nexport class C {}`,
+    "src/sb.ts": `export class C { static { fetch("https://api.openai.com/x"); } }`,
   });
   const { report } = scan(d);
+  // a `static { … }` block runs at class-DEFINITION, not instance construction — its own initializer
+  // unit `C.<static-init>` (unitKind initializer), NOT folded into the instance `C.constructor`.
+  const sb = entry(report, "src.sb.C.<static-init>");
+  check("static block → C.<static-init> unit carries Llm+Net (not folded into the ctor)",
+        sb && sb.inferred.includes("Llm") && sb.inferred.includes("Net"), JSON.stringify(report.functions));
+  check("the static-init unit is tagged unitKind:initializer",
+        sb?.unitKind === "initializer", JSON.stringify(sb));
+  check("a static block is NOT attributed to C.constructor",
+        entry(report, "src.sb.C.constructor") == null, JSON.stringify(report.functions));
   const m1 = entry(report, "src.tla.<module>");
   check("top-level await fetch → <module> unit carries Llm+Net (not silent-pure)",
         m1 && m1.inferred.includes("Llm") && m1.inferred.includes("Net"), JSON.stringify(report.functions));

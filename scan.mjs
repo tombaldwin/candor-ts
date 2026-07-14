@@ -1114,9 +1114,34 @@ function moduleUnit(sf) {
   }
   return qual;
 }
+// The synthesized static-initializer unit for a `class C { static { … } }` block (spec §2 unitKind
+// "initializer"). A static block runs at class-DEFINITION time, not instance construction — but its
+// body's effects otherwise walked up in `enclosing` to the ClassDeclaration, which maps to the
+// `C.constructor` unit, so a static-init effect was MISLABELED as the instance ctor (and carried no
+// unitKind). Mint it as its own unit, lazily, mirroring `moduleUnit`. (An anonymous class expression's
+// static block keys under `<anonymous>`; there is at most one static-init unit per class name.)
+function staticBlockUnit(node) {
+  const cls = node.parent;
+  const sf = node.getSourceFile();
+  const mod = moduleOf(sf);
+  const cname = (ts.isClassDeclaration(cls) || ts.isClassExpression(cls)) && cls.name ? cls.name.text : "<anonymous>";
+  const qual = `${mod}.${cname}.<static-init>`;
+  let rec = fns.get(qual);
+  if (!rec) {
+    rec = { local: "<static-init>", direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
+            cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(),
+            entry: false, unitKind: "initializer",
+            loc: `${path.relative(rootDir, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart()).line + 1}:1` };
+    fns.set(qual, rec);
+  }
+  return qual;
+}
 // nearest enclosing analyzed function (closures attribute to it — SEMANTICS §2)
 function enclosing(node) {
   for (let p = node; p; p = p.parent) {
+    // A `static { … }` block is its own initializer unit (class-definition time), NOT the instance ctor
+    // the ClassDeclaration maps to — intercept before the nodeName lookup would fold it into .constructor.
+    if (ts.isClassStaticBlockDeclaration(p)) return staticBlockUnit(p);
     // A call/effect lexically inside a DECORATOR (`@factory(arg)`) runs at class-DEFINITION time, NOT in
     // the decorated declaration's body. The parent chain of a decorator's expression is
     // CallExpression → Decorator → MethodDeclaration/ClassDeclaration/Parameter, so `enclosing` otherwise
