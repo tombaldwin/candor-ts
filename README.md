@@ -184,7 +184,7 @@ pure-vs-Unknown ruling (PART 16) — the engines must answer identically, on eve
 | A call resolving to a *type* (function-typed field/param) → `Unknown`, never silent-pure | SPEC §4 |
 | Unmatched external calls contribute nothing (curated-classifier caveat) | SEMANTICS §8 C1 |
 | The literal surfaces `hosts`/`cmds`/`paths`/`tables`, literal-read only | SPEC §2 |
-| `{ candor: { version, toolchain, spec: "0.11" }, functions }` envelope; pure fns omitted | SPEC §2/§2.1 |
+| `{ candor: { version, toolchain, spec: "0.12" }, functions }` envelope; pure fns omitted | SPEC §2/§2.1 |
 | Call-graph sidecar with **every** analyzed function a key | SPEC §2.2 |
 | The gate: AS-EFF-006 / 008 / 009, loud on an unreadable policy | SPEC §6.2 |
 
@@ -202,7 +202,7 @@ read the Rust source".
 
 ## Status
 
-0.11.x, speaking candor-spec 0.11: the analysis core, the gate (`--policy` / `--gate-json` /
+0.12.x, speaking candor-spec 0.12: the analysis core, the gate (`--policy` / `--gate-json` /
 `.candor/config`), the full §3.1 query surface (including `containment`, `blindspots`, the
 `--include-unknown` dispatch frontier), the MCP server, the LSP server, and the watch loop are
 real, behaviorally tested (`npm test` — the behavioral suite across six harnesses), **soundness-fuzzed

@@ -6,6 +6,58 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.12.0] — 2026-07-14
+
+### spec 0.12 — gains provenance + the MCP loud-failure contract
+
+candor-ts now declares **spec `0.12`** (`SPEC_VERSION` in `scan.mjs` + `query.mjs`; the envelope +
+`--gate-json` verdict carry it). No report-schema or gate-verdict change — a 0.11 report/verdict is
+byte-identical under 0.12; this is a **tier-2 (pinned-tool-surface) rung** covering the gains `origin`
+surface and the MCP loud-failure contract below. **⚠ the `spec` string changed** — a consumer pinning
+`spec == "0.11"` must accept `0.12`.
+
+### 🔒 The MCP corrupt-report false all-clear is FIXED — the reason to upgrade
+
+0.11 closed the CLI half of the corrupt-report hole; the MCP server still had it: a corrupt report
+loaded as `[]`, so every tool answered an empty result at success — a false all-clear over input the
+server could not actually read. Now **every MCP tool and the report resource error LOUDLY** on a
+corrupt report (the CLI's syntactic + semantic corruption ladder, surfaced as a tool error / resource
+error, never an empty answer). A bonus hole found in the same sweep is closed too: the
+`candor_diff`/`candor_gains` **baseline** locators bypassed prefix resolution entirely — no existence
+check, no `--root` confinement. Both now resolve through the same guarded path as every other locator.
+
+### ✨ `gains` carries `origin` (existing|new|unknown)
+
+Each `byFunction` entry in `gains` now says where the gaining function came from: **`existing`** (in
+the baseline, effects changed), **`new`** (not in the baseline graph), or **`unknown`** (the baseline
+callgraph is missing, empty, or **partial** — a matched sidecar that failed to load never silently
+downgrades to "absent"). The origin ladder mirrors the Rust reference engine and is pinned four-way by
+conformance PART 5b; keys stay alphabetical (`effect`, `fn`, `origin`). The **`candor_gains` MCP tool
+carries the field too** — the CLI and MCP share the same core call, so the two surfaces cannot
+diverge. The §2.1 producing-build mismatch stays disclosed on stderr alongside it.
+
+### 🔒 `gains`/`diff` refuse to run over nothing
+
+Both locators of `gains`/`diff` are guarded: a locator matching no files exits a loud **2** naming
+which side is missing (previously the missing side loaded as empty and the comparison ran anyway),
+and a `gains`/`diff` invocation missing a locator is a clean usage error, not an uncaught TypeError.
+
+### `path` (human mode): the header and the chain agree
+
+`path`'s human renderer resolved the start function once for the header and separately for the chain,
+so a fuzzy match could print a header naming one function over a chain walked from another. The
+report-resolved start now feeds both. And the accepted 0.11 default change (human chain replaced JSON
+as the no-flag output) gets a **once-per-invocation stderr tip** — `` `--json` selects the
+machine-readable path shape (the default before 0.11) `` — so a pre-0.11 pipeline that broke on the
+new default is pointed straight at the fix.
+
+### AGENTS.md: the Q() helper names the package
+
+The documented query helper is now `npx -y -p candor-ts candor-ts-query` — the bare
+`npx -y candor-ts-query` 404s on a cold npx cache (npx resolves a *package* by that name, and the
+query bin lives inside the `candor-ts` package; it only worked over a global install). Pre-existing
+doc bug, not a 0.11 regression.
+
 ## [0.11.0] — 2026-07-13
 
 ### spec 0.11 — the surprising-reach surface

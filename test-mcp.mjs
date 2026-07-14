@@ -64,7 +64,7 @@ fs.writeFileSync(`${M}/r.a.scan.callgraph.json`, JSON.stringify({ "a::f": [] }))
 fs.writeFileSync(`${M}/r.b.scan.callgraph.json`, JSON.stringify({ "b::g": [] }));
 // a --gate-json verdict written beside the prefix is NOT a report sibling: merging it disclosed
 // "no functions array — OMITTED" on every query over the recommended CI layout (review find).
-fs.writeFileSync(`${M}/r.gate.json`, JSON.stringify({ spec: "0.11", ok: true, violations: [] }));
+fs.writeFileSync(`${M}/r.gate.json`, JSON.stringify({ spec: "0.12", ok: true, violations: [] }));
 const merged = Q.loadReport(`${M}/r`);
 ok("cross-engine loader: a multi-report prefix merges every sibling (Rust/workspace form)",
    merged.length === 2 && merged.some((e) => e.fn === "a::f") && merged.some((e) => e.fn === "b::g"));
