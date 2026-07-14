@@ -29,7 +29,8 @@ import { createRequire } from "node:module";
 import { parsePolicy, evaluatePolicy, scopeMatches } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
-import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql } from "./scan-core.mjs";
+import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
+         modelHostEffects, isModelSdkPackage } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -391,7 +392,7 @@ function declModule(decl) {
 // silent pure/blind-spot the package would otherwise carry, exactly like a cap type (and unlike
 // candor's own analysis, which is checked). A name outside §1 VOIDS the declaration loudly — a typo
 // must never silently narrow a surface. Cached per package. `file` is the resolved declaration source.
-const EFFECT_VOCAB = new Set(["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard"]);
+const EFFECT_VOCAB = new Set(["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Llm"]);
 const _manifestCache = new Map();
 // Returns the declared effect array (possibly EMPTY — `[]` is an explicit "declared pure", covered, not
 // a blind spot), or `null` for no/invalid declaration (still a blind spot). A name outside §1 voids the
@@ -1656,7 +1657,14 @@ function visitCalls(node) {
           if (eff === "Net") {
             const lit = firstStringLiteral(node);
             const h = lit && hostLiteral(lit);
-            if (h) rec.hosts.add(h);
+            if (h) {
+              rec.hosts.add(h);
+              // SPEC §1 ⟨0.13⟩ Llm host-literal refinement: a known model host makes this a model call
+              // (Llm + Net — Net is never dropped), exactly as a jdbc URL classifies Db. The bare
+              // `localhost:11434` Ollama endpoint has no dot so hostLiteral rejects it as a Net literal —
+              // that case is handled by the port gate below (host stays uncaptured, per java parity #2).
+              for (const e of modelHostEffects(h)) rec.direct.add(e);
+            }
             // MASKING fix: a host-ESTABLISHING Net call whose host is NOT a captured literal (runtime URL, or
             // built elsewhere) leaves the host invisible to the gate → mark the surface incomplete so a
             // benign literal can't mask it. ALLOWLIST of establishing forms only — NEVER use-calls
@@ -1665,7 +1673,18 @@ function visitCalls(node) {
             // direction); never over-flags a use-call.
             else if (netEstablishing(member))
               rec.incomplete.add("Net");
+            // §1 ⟨0.13⟩ Ollama: a LOCAL model endpoint (`localhost:11434`/`127.0.0.1:11434`) names a
+            // DOTLESS bare host that hostLiteral rejects as a Net literal — the model signal is the `:11434`
+            // PORT. Refine to Llm on that port WITHOUT capturing the host as a Net literal (java parity #2:
+            // preserve the host gate so `deny Llm` catches it while `allow Llm localhost` fails closed). A
+            // dotted `foo.internal:11434` already captured above; this only rescues the dotless case.
+            if (lit && !h && /(^|[^\d]):11434(\/|$|[^\d])/.test(lit)) rec.direct.add("Llm");
           }
+          // SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface: a call into a curated model-provider client (the
+          // scan-core MODEL_SDK regex, also the whole-module Net κ rule above) dispatches a model request
+          // → Llm + Net. Net came from κ (eff === "Net"); add Llm on top. NO method-name gating (java
+          // parity #1) — any call into these single-purpose clients is a model dispatch. Additive.
+          if (isModelSdkPackage(mod)) rec.direct.add("Llm");
           if (eff === "Db") {
             const lit = firstStringLiteral(node);
             const before = rec.tables.size;
@@ -1818,7 +1837,25 @@ function visitCalls(node) {
       geff = "Net";
     if (geff) {
       const owner = enclosing(node);
-      if (owner) fns.get(owner).direct.add(geff);
+      if (owner) {
+        const rec = fns.get(owner);
+        rec.direct.add(geff);
+        // The global `fetch(url)` is a host-bearing Net call — capture its host literal (like the κ-Net
+        // path) so the allowlist/masking gate sees it, and refine to `Llm` on a known model host (SPEC §1
+        // ⟨0.13⟩). Without this, `fetch("https://api.anthropic.com/…")` read bare Net with no host at all.
+        if (geff === "Net") {
+          const lit = firstStringLiteral(node);
+          const h = lit && hostLiteral(lit);
+          if (h) {
+            rec.hosts.add(h);
+            for (const e of modelHostEffects(h)) rec.direct.add(e);
+          } else {
+            // a runtime-URL fetch masks the host — fail the surface closed, like a host-establishing κ call.
+            rec.incomplete.add("Net");
+          }
+          if (lit && !h && /(^|[^\d]):11434(\/|$|[^\d])/.test(lit)) rec.direct.add("Llm"); // Ollama port gate
+        }
+      }
     }
     // dynamic `require(<non-literal>)` — the CJS twin of `import(m)` (which already discloses Unknown):
     // it loads an arbitrary module and runs its top-level code, so the effects are opaque → Unknown. A
@@ -2182,7 +2219,7 @@ if (!wantJson) {
   // Effect breakdown — make the result visible at a glance, not just a count + a file path.
   const counts = {};
   for (const e of functions) for (const x of e.inferred) counts[x] = (counts[x] || 0) + 1;
-  const breakdown = ["Net", "Fs", "Db", "Exec", "Ipc", "Env", "Clipboard", "Clock", "Log", "Rand"]
+  const breakdown = ["Net", "Llm", "Fs", "Db", "Exec", "Ipc", "Env", "Clipboard", "Clock", "Log", "Rand"]
     .filter((k) => counts[k]).map((k) => `${k} ${counts[k]}`).join(" · ");
   const unknown = counts.Unknown || 0;
   if (breakdown || unknown) {

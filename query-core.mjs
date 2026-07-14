@@ -343,7 +343,7 @@ export function map(fns) {
 // with the AS-EFF-010 ratchet when a baseline is given. Mirrors candor-java Query.containment and
 // candor-query cmd_containment: boundary effects are scored, ambient ones reported-not-scored; a layer is
 // the segment AFTER the common dotted prefix ("(root)" when no package layer follows). Uses DIRECT effects.
-export const CONTAINED = ["Db", "Net", "Exec", "Fs", "Ipc", "Clipboard"];
+export const CONTAINED = ["Db", "Net", "Llm", "Exec", "Fs", "Ipc", "Clipboard"];
 export const AMBIENT = ["Log", "Clock", "Rand", "Env"];
 function commonPrefixLen(fns) {
   let best = null;

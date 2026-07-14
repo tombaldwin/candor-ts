@@ -981,6 +981,84 @@ export class Svc {
         e?.inferred.includes("Db") && e?.tables?.includes("user"), JSON.stringify(e));
 }
 
+// ── ⟨0.13⟩ Llm: model-host refinement + model-SDK surface + the deny/allow gate (SPEC §1) ───────────
+{
+  // (a) HOST-LITERAL refinement: a known model host → Net + Llm; an unknown host stays bare Net.
+  const d = project({
+    "src/m.ts": `export async function ask() { return fetch("https://api.anthropic.com/v1/messages", { method: "POST" }); }
+export async function weather() { return fetch("https://api.weather.gov/points/1,2"); }
+export async function ollama() { return fetch("http://localhost:11434/api/generate"); }
+export async function bedrock() { return fetch("https://bedrock-runtime.us-east-1.amazonaws.com/x"); }`,
+  });
+  const { report } = scan(d);
+  const ask = entry(report, "src.m.ask");
+  check("Llm host-literal: fetch to a model host classifies { Net, Llm }",
+        ask?.inferred.includes("Net") && ask?.inferred.includes("Llm") && ask?.hosts?.includes("api.anthropic.com"),
+        JSON.stringify(ask));
+  check("Llm host-literal: an UNKNOWN host stays bare Net (never guessed)",
+        entry(report, "src.m.weather")?.inferred.includes("Net")
+        && !entry(report, "src.m.weather")?.inferred.includes("Llm"),
+        JSON.stringify(entry(report, "src.m.weather")));
+  check("Llm host-literal: Ollama :11434 refines to Llm",
+        entry(report, "src.m.ollama")?.inferred.includes("Llm"), JSON.stringify(entry(report, "src.m.ollama")));
+  check("Llm host-literal: AWS Bedrock runtime refines to Llm",
+        entry(report, "src.m.bedrock")?.inferred.includes("Llm"), JSON.stringify(entry(report, "src.m.bedrock")));
+
+  // (b) MODEL-SDK surface: an `import OpenAI from "openai"` client call → Llm + Net (stubbed like the
+  //     κ-coverage tests — no real package needed; the SDK is recognized by its module NAME via κ).
+  const stub = (name, member) => ({
+    [`node_modules/${name}/package.json`]: `{"name":"${name}","version":"0.0.0","main":"index.js","types":"index.d.ts"}`,
+    [`node_modules/${name}/index.d.ts`]: `declare class OpenAI { chat: { completions: { create(o: object): Promise<string> } }; ${member}(s: string): Promise<string>; }
+export default OpenAI;`,
+    [`node_modules/${name}/index.js`]: `module.exports = class OpenAI { async ${member}(s) { return s; } };`,
+  });
+  const sd = project({
+    ...stub("openai", "invoke"),
+    "src/s.ts": `import OpenAI from "openai";
+const client = new OpenAI();
+export async function complete() { return client.invoke("hello"); }`,
+  });
+  const sdkReport = scan(sd).report;
+  const comp = entry(sdkReport, "src.s.complete");
+  check("Llm model-SDK: a call into the `openai` client classifies { Net, Llm } (no method gating)",
+        comp?.inferred.includes("Llm") && comp?.inferred.includes("Net"), JSON.stringify(comp));
+  check("Llm model-SDK: the SDK is κ-covered — NOT a blind spot in the ledger",
+        !/classifier doesn't cover/.test(scan(sd).r.stderr) || !/openai/.test(scan(sd).r.stderr),
+        scan(sd).r.stderr.slice(0, 160));
+
+  // (c) the gate: `deny Llm` fires on a model-reaching fn (exit 1, AS-EFF names Llm).
+  fs.writeFileSync(path.join(d, "deny"), "deny Llm src.m.ask\n");
+  const dg = scan(d, "--policy", path.join(d, "deny")).r;
+  check("deny Llm gates a model-reaching fn (exit 1, AS-EFF-006 names Llm)",
+        dg.status === 1 && dg.stdout.includes("[AS-EFF-006]") && dg.stdout.includes("src.m.ask") && dg.stdout.includes("Llm"),
+        `status=${dg.status} ${dg.stdout.slice(0, 200)}`);
+
+  // (d) allow Llm certifies a sanctioned model host, flags an un-sanctioned one.
+  fs.writeFileSync(path.join(d, "allow"), "allow Llm in src.m.ask api.anthropic.com\nallow Llm in src.m.bedrock api.anthropic.com\n");
+  const ag = scan(d, "--policy", path.join(d, "allow")).r;
+  check("allow Llm certifies the sanctioned host, flags the un-sanctioned one (AS-EFF-008)",
+        ag.status === 1 && ag.stdout.includes("[AS-EFF-008]") && ag.stdout.includes("src.m.bedrock")
+        && !ag.stdout.includes("src.m.ask"), `status=${ag.status} ${ag.stdout.slice(0, 240)}`);
+}
+
+// ── ⟨0.13⟩ Llm: a MASKED host on a model-reaching fn fails the allow-Llm surface closed (parity #3) ─
+{
+  // The fn reaches a KNOWN model host (Llm is inferred) AND a runtime host (masks the Net surface). A
+  // benign visible model literal must NOT certify `allow Llm` — the incomplete Net surface fails it
+  // closed, exactly as java's incompleteAsLlm re-keys a Net-incomplete surface onto Llm (parity #3).
+  const d = project({
+    "src/m.ts": `export async function pick(runtimeUrl: string) {
+  await fetch("https://api.anthropic.com/v1/messages");   // visible model host → Llm inferred
+  return fetch(runtimeUrl);                                // runtime host → Net surface incomplete
+}`,
+  });
+  fs.writeFileSync(path.join(d, "allow"), "allow Llm in src.m.pick api.anthropic.com\n");
+  const g = scan(d, "--policy", path.join(d, "allow")).r;
+  check("masked model host: a Net-incomplete surface fails `allow Llm` closed (AS-EFF-008, parity #3)",
+        g.status === 1 && g.stdout.includes("[AS-EFF-008]") && g.stdout.includes("src.m.pick"),
+        `status=${g.status} ${g.stdout.slice(0, 200)}`);
+}
+
 // ── 11. cross-package inheritance (CANDOR_DEPS, spec §2 hash) ─────────────────────────────────────
 {
   // the DEPENDENCY, scanned from source — its report carries hashes (pkg#LocalName)

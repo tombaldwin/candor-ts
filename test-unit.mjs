@@ -25,6 +25,7 @@ import {
 } from "./policy.mjs";
 import {
   isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
+  isModelHost, modelHostEffects, isModelSdkPackage,
 } from "./scan-core.mjs";
 import { bestFind, bestFinds, tokenize } from "./surface.mjs";
 
@@ -418,7 +419,8 @@ test("parsePolicy: dedups repeated tokens (a set, matching rust/java)", () => {
   assert.deepEqual(parsePolicy("allow Net api api").allow[0].values, ["api"]);
 });
 test("EFFECTS: the §1 vocabulary", () => {
-  assert.ok(EFFECTS.includes("Net") && EFFECTS.includes("Clipboard") && EFFECTS.length === 10);
+  assert.ok(EFFECTS.includes("Net") && EFFECTS.includes("Clipboard") && EFFECTS.includes("Llm")
+    && EFFECTS.length === 11); // ⟨0.13⟩ added Llm
 });
 
 // ── policy: scope matching + the per-effect literal matchers ──────────────────────────────────────
@@ -506,6 +508,57 @@ test("kappaKnows: curated-or-ratified-pure, else unknown", () => {
   assert.equal(kappaKnows("fs"), true);     // a KAPPA_RULES module
   assert.equal(kappaKnows("rxjs"), true);   // a ratified-pure module
   assert.equal(kappaKnows("totally-random-pkg"), false);
+});
+
+// ── scan-core: the ⟨0.13⟩ Llm surfaces (SPEC §1 — mirrors java Literals/Rules VERBATIM) ─────────────
+test("isModelHost: known model hosts + subdomains + Ollama port + Bedrock", () => {
+  assert.equal(isModelHost("api.openai.com"), true);
+  assert.equal(isModelHost("api.anthropic.com"), true);
+  assert.equal(isModelHost("generativelanguage.googleapis.com"), true);
+  assert.equal(isModelHost("api.cohere.ai"), true);       // both .ai...
+  assert.equal(isModelHost("api.cohere.com"), true);      // ...and .com (java parity #5)
+  assert.equal(isModelHost("API.OPENAI.COM"), true);      // case-insensitive
+  assert.equal(isModelHost("eu.api.openai.com"), true);   // a subdomain of a listed host counts
+  assert.equal(isModelHost("api.anthropic.com:443"), true); // :port stripped
+  assert.equal(isModelHost("localhost:11434"), true);     // Ollama port
+  assert.equal(isModelHost("127.0.0.1:11434"), true);
+  assert.equal(isModelHost("bedrock-runtime.us-east-1.amazonaws.com"), true); // Bedrock (parity #4)
+  assert.equal(isModelHost("my-bedrock-proxy.amazonaws.com"), true);          // contains "bedrock" + .amazonaws.com
+});
+test("isModelHost: an UNKNOWN host stays bare — never guessed", () => {
+  assert.equal(isModelHost("api.weather.gov"), false);
+  assert.equal(isModelHost("example.com"), false);
+  assert.equal(isModelHost("openai.com.evil.example"), false); // NOT a subdomain of a listed host
+  assert.equal(isModelHost("s3.amazonaws.com"), false);        // .amazonaws.com but not bedrock
+  assert.equal(isModelHost("localhost:8080"), false);          // a non-11434 local port is not Ollama
+  assert.equal(isModelHost(null), false);
+});
+test("modelHostEffects: [Llm] for a model host, [] otherwise (Net added by the caller)", () => {
+  assert.deepEqual(modelHostEffects("api.openai.com"), ["Llm"]);
+  assert.deepEqual(modelHostEffects("api.weather.gov"), []);
+});
+test("isModelSdkPackage: the curated model-SDK clients (+ sub-paths), else false", () => {
+  assert.equal(isModelSdkPackage("openai"), true);
+  assert.equal(isModelSdkPackage("@anthropic-ai/sdk"), true);
+  assert.equal(isModelSdkPackage("@google/generative-ai"), true);
+  assert.equal(isModelSdkPackage("@aws-sdk/client-bedrock-runtime"), true);
+  assert.equal(isModelSdkPackage("ai"), true);            // Vercel AI SDK
+  assert.equal(isModelSdkPackage("@mistralai/mistralai"), true);
+  assert.equal(isModelSdkPackage("cohere-ai"), true);
+  assert.equal(isModelSdkPackage("groq-sdk"), true);
+  assert.equal(isModelSdkPackage("ollama"), true);
+  assert.equal(isModelSdkPackage("langchain"), true);
+  assert.equal(isModelSdkPackage("@langchain/core"), true);
+  assert.equal(isModelSdkPackage("openai/resources"), true);        // a sub-path import
+  assert.equal(isModelSdkPackage("@langchain/core/language_models"), true);
+  assert.equal(isModelSdkPackage("openai-shims"), false); // NOT a prefix false-positive (tail `(/|$)`)
+  assert.equal(isModelSdkPackage("aimless"), false);      // `ai` must not match `aimless`
+  assert.equal(isModelSdkPackage("express"), false);
+});
+test("kappa: a model-SDK package classifies Net (Llm added at the classify site)", () => {
+  assert.equal(kappa("openai", "create"), "Net");         // whole-module Net; classify site adds Llm
+  assert.equal(kappa("@anthropic-ai/sdk", "messages"), "Net");
+  assert.equal(kappaKnows("openai"), true);               // covered — not a κ blind spot
 });
 
 // ── scan-core: the literal extractors (shared verbatim with the other engines) ────────────────────

@@ -234,8 +234,8 @@ const actions = waById(10)?.result ?? [];
 const whatifActions = actions.filter((a) => a.command?.command === "candor.whatif");
 const fixActions = actions.filter((a) => a.command?.command === "candor.fix");
 ok("codeAction inside leaf(): one whatif action per boundary effect leaf lacks (Net excluded)",
-   whatifActions.length === 5 && !whatifActions.some((a) => a.title.includes("performed Net"))
-   && ["Db", "Exec", "Fs", "Ipc", "Clipboard"].every((e) => whatifActions.some((a) => a.title === `candor: what if app.leaf performed ${e}?`)),
+   whatifActions.length === 6 && !whatifActions.some((a) => a.title.includes("performed Net"))
+   && ["Db", "Llm", "Exec", "Fs", "Ipc", "Clipboard"].every((e) => whatifActions.some((a) => a.title === `candor: what if app.leaf performed ${e}?`)),
    JSON.stringify(actions.map((a) => a.title)));
 // leaf() PERFORMS Net and the active policy forbids it → the remedial companion offers the fix (only for a
 // real crossing; the whatif actions above are for effects leaf lacks — the two are complementary).
@@ -365,7 +365,7 @@ ok("5k-fn fixture: codeLens answers all 100 doc fns with blast radii",
    JSON.stringify(pfReplies.find((r) => r.id === 2)?.result?.[0]));
 ok("5k-fn fixture: codeLens latency within the large-repo pin", lensMs < 1000, `${lensMs}ms`);
 ok("5k-fn fixture: codeAction latency within the large-repo pin",
-   actionMs < 1000 && (pfReplies.find((r) => r.id === 3)?.result ?? []).length === 5, `${actionMs}ms`);
+   actionMs < 1000 && (pfReplies.find((r) => r.id === 3)?.result ?? []).length === 6, `${actionMs}ms`);
 fs.rmSync(PERF, { recursive: true, force: true });
 
 fs.rmSync(W, { recursive: true, force: true });

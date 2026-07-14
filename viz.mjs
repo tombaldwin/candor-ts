@@ -23,7 +23,7 @@ const fns = Array.isArray(rep) ? rep : rep.functions;
 const cg = fs.existsSync(cgPath) ? JSON.parse(fs.readFileSync(cgPath, "utf8")) : {};
 
 const PALETTE = [
-  ["Exec", "#ff5470"], ["Net", "#4cc4ff"], ["Db", "#ffb347"], ["Fs", "#3ce8a0"],
+  ["Exec", "#ff5470"], ["Net", "#4cc4ff"], ["Llm", "#00d0c0"], ["Db", "#ffb347"], ["Fs", "#3ce8a0"],
   ["Ipc", "#c77dff"], ["Env", "#a78bfa"], ["Clock", "#2dd4bf"], ["Rand", "#ff7ad9"],
   ["Log", "#94a3b8"], ["Clipboard", "#e0c84a"], ["Unknown", "#7c8794"],
 ];

@@ -84,7 +84,7 @@ function hasToken(name, lexicon) {
 // Matches the Rust reference (candor-classify/src/surface.rs) + the java/swift ports.
 function salience(effect) {
   switch (effect) {
-    case "Net": case "Exec": case "Db": case "Ipc": return 5;
+    case "Net": case "Llm": case "Exec": case "Db": case "Ipc": return 5;
     case "Fs": case "Env": return 3;
     default: return 0; // Clock/Log/Rand/Unknown/everything-else — mundane, never surfaced
   }

@@ -185,7 +185,25 @@ export const KAPPA_RULES = [
   [/^drizzle-orm$/, /^(execute|transaction|findMany|findFirst|all|get|run)$/, "Db"],
   // Nest's HttpService wraps axios — the request verbs are Net.
   [/^@nestjs\/axios$/, /^(get|post|put|patch|delete|head|request)$/, "Net"],
+  // SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface — the curated model-provider clients (Rules.MODEL_SDK_PACKAGES
+  // in the java reference). These are SINGLE-PURPOSE: any call into them dispatches a model request, which
+  // IS network I/O — so they classify Net here (the whole-module Net machinery: host literals, the masking
+  // gate) and the classify site adds `Llm` on top via isModelSdkPackage() (Net is never dropped). NO
+  // method-name gating (java parity #1: any call into a model-SDK package is Llm+Net). Sub-path imports
+  // (`openai/resources`, `@langchain/core/language_models`) are covered by the `(/|$)` tail. Curated
+  // STARTER list — the §7 coverage ledger discloses an uncovered provider package like any other.
+  [/^(openai|@anthropic-ai\/sdk|@google\/generative-ai|@aws-sdk\/client-bedrock-runtime|ai|@mistralai\/mistralai|cohere-ai|groq-sdk|ollama|langchain|@langchain\/core)(\/|$)/,
+   null, "Net"],
 ];
+// SPEC §1 ⟨0.13⟩ `Llm` model-SDK packages — the curated model-provider clients whose calls refine Net to
+// Llm (mirrors Literals.modelHostEffects on the SDK side; matched by the same regex the KAPPA_RULES Net
+// entry uses, so the two can never drift). isModelSdkPackage answers "is this resolved module a model
+// SDK?" — a call into it is Llm+Net (Net comes from the κ rule above; the classify site adds Llm).
+export const MODEL_SDK_RE =
+  /^(openai|@anthropic-ai\/sdk|@google\/generative-ai|@aws-sdk\/client-bedrock-runtime|ai|@mistralai\/mistralai|cohere-ai|groq-sdk|ollama|langchain|@langchain\/core)(\/|$)/;
+export function isModelSdkPackage(moduleName) {
+  return MODEL_SDK_RE.test(moduleName);
+}
 export function kappa(moduleName, member) {
   for (const [mre, vre, eff] of KAPPA_RULES) {
     if (mre.test(moduleName) && (!vre || vre.test(member))) return eff;
@@ -227,6 +245,48 @@ export function hostLiteral(s) {
   if (m) return m[1].replace(/^.*@/, "");
   if (/^[a-z0-9._-]+(:\d+)?$/i.test(s) && s.includes(".")) return s; // bare host[.tld][:port]
   return null;
+}
+// SPEC §1 ⟨0.13⟩ `Llm` HOST-LITERAL refinement — the known machine-learning model-provider hosts. A
+// statically-known Net request to one of these classifies `Llm` IN ADDITION to `Net` (Net is never
+// dropped — a model call IS network I/O), just as a jdbc URL classifies `Db`. The four reference engines
+// share this table VERBATIM (java Literals.MODEL_HOSTS). Matched by host, case-insensitive; a SUBDOMAIN
+// of a listed host counts. Curated STARTER set; the §7 coverage ledger discloses an uncovered provider.
+export const MODEL_HOSTS = new Set([
+  "api.openai.com",
+  "api.anthropic.com",
+  "generativelanguage.googleapis.com",
+  "api.mistral.ai",
+  "api.cohere.ai", "api.cohere.com",
+  "api.groq.com",
+  "api.together.xyz",
+  "api.perplexity.ai",
+  "openrouter.ai",
+]);
+// Whether an endpoint HOST literal is a known model provider (case-insensitive; a subdomain of a
+// MODEL_HOSTS entry counts). Strips a `:port` suffix first. Two special forms carry their own rule (java
+// Literals.isModelHost parity): any host whose port is 11434 is a local Ollama endpoint
+// (`localhost:11434`, `127.0.0.1:11434`); and an AWS Bedrock runtime host `*.bedrock*.amazonaws.com`
+// (host CONTAINS "bedrock" AND ends `.amazonaws.com` — java parity #4).
+export function isModelHost(hostLiteral) {
+  if (hostLiteral == null) return false;
+  // Ollama: a `:11434` port anywhere is the local model endpoint (keep it simple, per SPEC §1).
+  const colon = hostLiteral.lastIndexOf(":");
+  if (colon >= 0 && hostLiteral.slice(colon + 1) === "11434") return true;
+  // hostPart: strip a trailing :port (but keep a bracketed/unbracketed IPv6 intact, like policy.hostPart).
+  let host = hostLiteral;
+  if (host.startsWith("[")) host = host.slice(1).split("]")[0];
+  else if ((host.match(/:/g) ?? []).length <= 1) host = host.split(":")[0];
+  host = host.toLowerCase();
+  if (MODEL_HOSTS.has(host)) return true;
+  for (const m of MODEL_HOSTS) if (host.endsWith("." + m)) return true; // a subdomain counts
+  if (host.endsWith(".amazonaws.com") && host.includes("bedrock")) return true; // AWS Bedrock runtime
+  return false;
+}
+// The effects a model-host literal implies: ["Llm"] for a known model host, else []. Shared with the
+// sibling engines like commandHeadEffects; `Net` is added by the caller (the host was captured on a
+// Net-bearing call), so this returns ONLY the refinement.
+export function modelHostEffects(hostLiteral) {
+  return isModelHost(hostLiteral) ? ["Llm"] : [];
 }
 // Table-position identifiers in a SQL string literal (SPEC §2 `tables`). Mirrors the Rust
 // tables_in_sql exactly: must open with a statement keyword; FROM/JOIN/INTO anywhere,

@@ -4,8 +4,10 @@
  * engines follow (candor-classify::policy), so the TS gate can never disagree with its own whatif.
  */
 
-export const EFFECTS = ["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard"];
-const ALLOW_EFFECTS = new Set(["Net", "Exec", "Fs", "Db"]); // the four literal surfaces
+export const EFFECTS = ["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Llm"];
+// The literal surfaces `allow` can restrict. `Llm` ⟨0.13⟩ rides Net's host literal (SPEC §1) —
+// `allow Llm <host…>` restricts which MODEL hosts a scope may reach, matched by hostname like Net.
+const ALLOW_EFFECTS = new Set(["Net", "Exec", "Fs", "Db", "Llm"]);
 
 // The §6.2 token separator: ASCII whitespace ONLY (space/tab/LF/VT/FF/CR). JS `\s`/`String.trim` strip
 // Unicode spaces (NBSP, ideographic, …) that Java drops — a gateless-green cross-engine divergence
@@ -36,7 +38,7 @@ export function parsePolicy(text) {
       deny.push({ effects: [], scope: t[1] ?? "", raw: line });
     } else if (t[0] === "allow") {
       if (t.length < 3) { warn("allow names no values"); continue; }
-      if (!ALLOW_EFFECTS.has(t[1])) { warn("allow supports only Net hosts / Exec commands / Fs paths / Db tables"); continue; }
+      if (!ALLOW_EFFECTS.has(t[1])) { warn("allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables"); continue; }
       let scope = "", vi = 2;
       if (t[2] === "in") { scope = t[3] ?? ""; vi = 4; }
       const values = t.slice(vi);
@@ -97,6 +99,8 @@ export function tableCovered(a, r) {
 export function literalAllowed(effect, reached, values) {
   switch (effect) {
     case "Net":  return values.some((a) => hostPart(a) === hostPart(reached));
+    // `Llm` ⟨0.13⟩ rides Net's host literal (SPEC §1) — matched by hostname exactly like Net.
+    case "Llm":  return values.some((a) => hostPart(a) === hostPart(reached));
     case "Exec": return values.some((a) => cmdBase(a) === cmdBase(reached));
     case "Fs":   return values.some((a) => pathCovered(a, reached));
     case "Db":   return values.some((a) => tableCovered(a, reached));
@@ -115,7 +119,8 @@ export function literalAllowed(effect, reached, values) {
 // The console gate renders `[${rule}] ${detail}`; --gate-json emits the records verbatim.
 export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()) {
   const out = [];
-  const surfaces = { Net: "hosts", Exec: "cmds", Fs: "paths", Db: "tables" };
+  // `Llm` ⟨0.13⟩ reaches the SAME hosts surface as Net (an Llm host WAS captured as a Net host literal).
+  const surfaces = { Net: "hosts", Llm: "hosts", Exec: "cmds", Fs: "paths", Db: "tables" };
   const push = (rule, fn, effects, detail) => out.push({ rule, fn, effects, detail });
   for (const f of functions) {
     for (const r of pol.deny) {
@@ -136,7 +141,11 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       // An INCOMPLETE surface (a structurally-invisible reach — a host-establishing call with a runtime/
       // invisible host) can't be certified even with visible hosts, else a benign literal masks the
       // invisible forbidden endpoint (the masking evasion). Matches candor-java 0.5.29 / candor-rust.
-      const surfaceIncomplete = incomplete.get(f.fn)?.has(r.effect);
+      // `Llm` ⟨0.13⟩ rides the Net host literal (SPEC §1), so a runtime/masked host that makes the Net
+      // surface incomplete must fail-close `allow Llm …` identically (java parity #3): a benign visible
+      // model host must not certify a scope that also reaches a hidden one.
+      const surfaceIncomplete = incomplete.get(f.fn)?.has(r.effect)
+        || (r.effect === "Llm" && incomplete.get(f.fn)?.has("Net"));
       if (reached.length === 0 || surfaceIncomplete) {
         push("AS-EFF-008", f.fn, [r.effect], `\`${f.fn}\` performs ${r.effect} with no visible literal — the surface cannot be certified: \`${r.raw}\``);
       } else {
