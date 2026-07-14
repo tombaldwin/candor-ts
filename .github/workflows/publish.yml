@@ -29,5 +29,21 @@ jobs:
       # A broken build must not reach npm.
       - name: Full test battery (behavioral + probe + fuzzer)
         run: npm test
+      # Idempotency guard: the release cycle sometimes publishes this version manually before the tag
+      # lands (release-verify needs it live synchronously), so the tag-triggered run would otherwise
+      # red-fail with "cannot publish over the previously published versions". Skip cleanly when the
+      # version is already on npm — a duplicate is a no-op, not a failure. When THIS run wins the race it
+      # still publishes with OIDC provenance (the preferred path).
+      - name: Skip if this version is already on npm
+        id: exists
+        run: |
+          V=$(node -p "require('./package.json').version")
+          if npm view "candor-ts@$V" version >/dev/null 2>&1; then
+            echo "candor-ts@$V is already published — nothing to do"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Publish to npm (provenance via OIDC)
+        if: steps.exists.outputs.published == 'false'
         run: npm publish --provenance --access public
