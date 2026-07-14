@@ -548,13 +548,50 @@ function resolveConstUrlString(expr) {
   }
   return null;
 }
+// Does a literal URL-head string already contain a COMPLETE authority — i.e. is there a `/` AFTER the
+// `://` still WITHIN the literal text? `https://api.openai.com/v1/` → yes (host fully present, only the
+// PATH follows); `https://api.` / `https://` / `https://api.openai.com:` → no (the authority is not yet
+// terminated, so an interpolation could still be part of the host/port). Requires a `scheme://` prefix;
+// a bare relative path never qualifies.
+function literalHeadCompletesAuthority(head) {
+  const m = head.match(/^[a-z][a-z0-9+.-]*:\/\//i);
+  if (!m) return false;                          // no scheme://… → authority not started in the literal
+  return head.indexOf("/", m[0].length) >= 0;    // a `/` after the `://` terminates the authority
+}
+// LITERAL-HEAD HOST EXTRACTION (java literal-inlining parity): a template `\`https://host/${path}\`` or a
+// concat `"https://host/" + path` whose FIRST STATIC segment (the text before the first interpolation /
+// the concat's left literal) ALREADY contains a complete `scheme://authority/…` carries a statically-known
+// host — the interpolation is only in the PATH. Return that literal head (a real URL prefix `hostLiteral`
+// parses to the authority). If the head does NOT terminate the authority with a `/` (`https://${h}/x`,
+// `https://api.${x}.com/y`, `https://host:${port}/y`, `https://api.openai${x}/v1`) the interpolation could
+// be part of the host/port → return null (safe under-report: stays bare Net). Distinct from
+// resolveConstUrlString, which anchors on a CONST identifier at the head; here the head is a plain LITERAL.
+function literalHeadHostUrl(expr) {
+  if (expr == null) return null;
+  // template `\`<head>${…}…\``: the literal head is expr.head.text (empty when the interpolation leads).
+  if (ts.isTemplateExpression(expr)) {
+    const head = expr.head.text;
+    return literalHeadCompletesAuthority(head) ? head : null;
+  }
+  // concat `"<left literal>" + <anything>`: only the LEFT operand's literal text is the static head; the
+  // right is a runtime value living in the path. (A nested `"a" + "b" + x` left is a BinaryExpression, not
+  // a string literal, so it is not read here — a safe under-report, not a fabrication.)
+  if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.PlusToken
+      && ts.isStringLiteralLike(expr.left)) {
+    const head = expr.left.text;
+    return literalHeadCompletesAuthority(head) ? head : null;
+  }
+  return null;
+}
 function urlArgLiteral(node, member) {
   const args = node.arguments ?? [];
   const litAt = (i) => {
     const a = args[i];
     if (!a) return null;
     if (ts.isStringLiteralLike(a)) return a.text;
-    return resolveConstUrlString(a); // const-anchored host (fetch(API_BASE), `${API_BASE}/x`, API_BASE+"/x")
+    // const-anchored host (fetch(API_BASE), `${API_BASE}/x`, API_BASE+"/x"), THEN literal-head extraction
+    // (`\`https://host/${p}\``, `"https://host/" + p`) when the literal head already completes the authority.
+    return resolveConstUrlString(a) ?? literalHeadHostUrl(a);
   };
   if (member && NET_URL_ARG1_MEMBERS.has(member)) return litAt(0) ?? litAt(1); // (port, host) or (path)
   return litAt(0);

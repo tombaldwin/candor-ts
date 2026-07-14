@@ -1137,6 +1137,7 @@ export async function runtimeVal(){ return fetch(\`\${runtimeHost}/chat\`); }
 const seg = "chat";
 export async function literalPrefix(){ return fetch(\`https://api.openai.com/\${seg}\`); }
 let mutable = "https://api.openai.com";
+export async function splitAuthority(){ return fetch(\`https://\${seg}/chat\`); }
 mutable = "https://elsewhere.example.com";
 export async function letVar(){ return fetch(\`\${mutable}/chat\`); }
 export async function nonConstHead(){ return fetch(\`\${getConfig()}/chat\`); }`,
@@ -1150,13 +1151,25 @@ export async function nonConstHead(){ return fetch(\`\${getConfig()}/chat\`); }`
             && (e?.hosts ?? []).includes("cdn.example.com"),
             JSON.stringify(e));
     }
-    // a runtime value / reassignable `let` / literal-prefixed template / non-const interpolation head are
-    // all UNRESOLVABLE → bare Net, no host, no Llm. This is the "NEVER guess" boundary.
-    for (const fn of ["runtimeVal", "literalPrefix", "letVar", "nonConstHead"]) {
+    // a runtime value / reassignable `let` / non-const interpolation head are all UNRESOLVABLE at the head
+    // → bare Net, no host, no Llm. This is the "NEVER guess" boundary. `splitAuthority` (`https://${seg}/`)
+    // interpolates INSIDE the authority, so the literal head never completes a host → also bare Net.
+    for (const fn of ["runtimeVal", "letVar", "nonConstHead", "splitAuthority"]) {
       const e = entry(gr, `src.g.${fn}`);
       check(`const-host fabrication guard: an unresolvable host stays bare Net (no Llm, no host guess) (${fn})`,
             e?.inferred.includes("Net") && !e?.inferred.includes("Llm")
             && !(e?.hosts ?? []).some((h) => h.includes("openai") || h.includes("elsewhere")),
+            JSON.stringify(e));
+    }
+    // `literalPrefix` (`\`https://api.openai.com/\${seg}\``) — the literal HEAD already completes the
+    // authority (a `/` after `://` within the literal), so the host is statically known: LITERAL-HEAD
+    // extraction refines it to Llm + Net + host, exactly like an inline literal. (Was formerly a bare-Net
+    // under-report; this is the gap closed.)
+    {
+      const e = entry(gr, "src.g.literalPrefix");
+      check("literal-head: `https://api.openai.com/${seg}` — host in the literal head → { Net, Llm, host }",
+            e?.inferred.includes("Net") && e?.inferred.includes("Llm")
+            && (e?.hosts ?? []).includes("api.openai.com"),
             JSON.stringify(e));
     }
     // the gate must still fire `deny Llm` on the const-anchored model call (the resolution is real, not
@@ -1166,6 +1179,51 @@ export async function nonConstHead(){ return fetch(\`\${getConfig()}/chat\`); }`
     check("const-host: deny Llm gates the const-anchored model call (exit 1, AS-EFF-006 names Llm)",
           cg.status === 1 && cg.stdout.includes("[AS-EFF-006]") && cg.stdout.includes("src.c.callTmpl") && cg.stdout.includes("Llm"),
           `status=${cg.status} ${cg.stdout.slice(0, 200)}`);
+  }
+
+  // ── LITERAL-HEAD HOST EXTRACTION (the most common real-world URL shape: host in the literal head, the
+  //    interpolation only in the PATH). A template `\`scheme://authority/${path}\`` or concat
+  //    `"scheme://authority/" + path` whose literal HEAD terminates the authority with a `/` after `://`
+  //    carries a statically-known host → refine like an inline literal. When the interpolation is or could
+  //    be WITHIN the authority (split host, whole host, dotless label, interpolated port), the head does NOT
+  //    complete the authority → stays bare Net (safe under-report, never a host/Llm guess). ──
+  {
+    const ld = project({
+      "src/lh.ts": `export async function tmplPath(p: string){ return fetch(\`https://api.openai.com/v1/\${p}\`); }
+export async function tmplRootPath(p: string){ return fetch(\`https://api.openai.com/\${p}\`); }
+export async function concatPath(p: string){ return fetch("https://api.openai.com/v1/" + p); }
+export async function splitAuthority(x: string){ return fetch(\`https://api.\${x}.com/v1/y\`); }
+export async function wholeHost(h: string){ return fetch(\`https://\${h}/v1/y\`); }
+export async function dotlessLabel(x: string){ return fetch(\`https://api.openai\${x}/v1\`); }
+export async function interpPort(port: string){ return fetch(\`https://api.openai.com:\${port}/v1\`); }
+export async function cdnGuard(p: string){ return fetch(\`https://cdn.example.com/v1/\${p}\`); }`,
+    });
+    const lr = scan(ld).report;
+    // POSITIVE — the literal head completes the authority `api.openai.com` (a model host) → Net + Llm + host.
+    for (const fn of ["tmplPath", "tmplRootPath", "concatPath"]) {
+      const e = entry(lr, `src.lh.${fn}`);
+      check(`literal-head POSITIVE: model host in the literal head → { Net, Llm, host } (${fn})`,
+            e?.inferred.includes("Net") && e?.inferred.includes("Llm")
+            && (e?.hosts ?? []).includes("api.openai.com"),
+            JSON.stringify(e));
+    }
+    // NEGATIVE — the interpolation is or could be inside the authority → bare Net, NO host, NO Llm.
+    for (const fn of ["splitAuthority", "wholeHost", "dotlessLabel", "interpPort"]) {
+      const e = entry(lr, `src.lh.${fn}`);
+      check(`literal-head NEGATIVE: interpolation in the authority stays bare Net (no host, no Llm) (${fn})`,
+            e?.inferred.includes("Net") && !e?.inferred.includes("Llm")
+            && (e?.hosts ?? []).length === 0,
+            JSON.stringify(e));
+    }
+    // FABRICATION GUARD — a non-model literal-head host (`cdn.example.com`) is captured as a PLAIN Net host
+    // but MUST NOT become Llm.
+    {
+      const e = entry(lr, "src.lh.cdnGuard");
+      check("literal-head FABRICATION GUARD: a non-model literal-head host → { Net, host } but NOT Llm",
+            e?.inferred.includes("Net") && !e?.inferred.includes("Llm")
+            && (e?.hosts ?? []).includes("cdn.example.com"),
+            JSON.stringify(e));
+    }
   }
 
   // (b) MODEL-SDK surface: an `import OpenAI from "openai"` client call → Llm + Net (stubbed like the
