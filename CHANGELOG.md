@@ -6,6 +6,62 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.13.0] — 2026-07-14
+
+### spec 0.13 — the `Llm` effect + the edit-time gate's self-inspection surfaces
+
+candor-ts now declares **spec `0.13`** (`SPEC_VERSION` in `scan.mjs` + `query.mjs`; the envelope +
+`--gate-json` verdict carry it). **⚠ the `spec` string changed** — a consumer pinning `spec == "0.12"`
+must accept `0.13` — and, because `Llm` is a new boundary effect a scan can now emit, **a report over
+model-provider code gains an effect it did not carry at 0.12** (regenerate baselines; a policy that
+allow-listed `Net` for such a call may need an explicit `Llm` allow). The two headlines below are the
+reason to upgrade: the `Llm` effect, and the `candor_activity` MCP tool + the candor-lsp activity push.
+
+### ✨ The `Llm` effect — a model-provider call, surfaced as its own boundary effect
+
+A call to a model provider is now classified **`Llm`** — a boundary effect that **refines `Net`** (the
+`Db`-over-`Net` precedent): every `Llm` is a `Net`, but the finer label names *which* kind of network
+egress crossed the boundary. Two recognisers feed it: a **verbatim set of known model-host literals**
+(the OpenAI / Anthropic / Bedrock / Ollama-loopback / … hosts), matched against the **host actually
+parsed** from the call's URL argument — never a raw string substring; and a **curated npm model-SDK
+list** (`openai`, `@anthropic-ai/sdk`, `@aws-sdk/client-bedrock-runtime`, `ai`, `ollama`, `langchain`,
+…) applied as a whole-module `Net` κ rule that refines to `Llm` at the classify site. `Llm` joins the
+boundary / salience / CONTAINED sets and the AS-EFF-008 masked set, and `Llm` allows key off `Net`
+incompleteness, so the gate treats it consistently with every other boundary effect.
+
+A **latent global-`fetch` host-capture bug found in the same sweep is fixed**: `fetch(url)` had been
+capturing **no host** (so the literal never reached the allowlist/masking path) — it now captures the
+URL literal like every other network call and refines to `Llm` on a model host. The host predicate was
+also tightened against fabrication: the recogniser reads the host from the documented argument position
+(a trailing options literal is not the host), the Ollama `:11434` refinement is **loopback-only** (a
+remote `:11434` is plain `Net`, not `Llm`), and the Bedrock match is a **first-label** check
+(`bedrock-runtime` / `bedrock-agent-runtime`), never an S3-bucket substring — so `axios.post` to a URL
+with `:11434` in the *path*, or an `s3://…bedrock…` bucket, no longer fabricates `Llm`.
+
+### ✨ Self-inspecting the edit-time gate — the `candor_activity` MCP tool + the LSP activity push
+
+An agent or a human can now ask **"what has the edit-time gate actually caught?"** without shelling out.
+
+- **`candor_activity` (MCP)** reads `.candor/activity.jsonl` and reports the gate's ledger: edits and
+  verdicts, violations bucketed by AS-EFF code, effects introduced, the largest **blast radius**, the
+  **deepest propagation**, plus the most recent records — with `session` / `since` / `limit` filters.
+  Field semantics mirror the candor-agents `stats` surface (both count the one pinned record shape).
+  Its postures are disclosure-first: a **missing log is an EMPTY result with a wiring note** (absence is
+  not corruption), corrupt lines are skipped, the log path is `--root`-confined, and the tool needs
+  **no report** (usable before any scan). A companion fix in the same sweep: the `candor_diff` /
+  `candor_gains` **baseline** locators now resolve through the guarded prefix path like every other
+  locator (existence stays loud; `--root` confinement is relaxed for the read-only baseline arg only,
+  restoring the out-of-tree prior-release comparison workflow).
+
+- **The candor-lsp activity push** surfaces a newly **blocked** gate record **in-editor**: candor-lsp
+  tails `.candor/activity.jsonl` (its one watcher) and, on a new BLOCKED record, pushes the delta the
+  Stop hook showed the agent to the **human** — a `window/showMessage` (introduces `{E}`; blast radius
+  N; deepest propagation M hop(s) `[AS-EFF-…]`) plus a transient gate diagnostic on each edited file,
+  cleared on that file's next open/save or by the next clean record. Only records appended **after
+  startup** push (no history replay); a log rotation resets the tail without replaying its contents; a
+  partial trailing line waits for its newline; corrupt lines are skipped; and `CANDOR_LSP_ACTIVITY=off`
+  disables the push entirely.
+
 ## [0.12.0] — 2026-07-14
 
 ### spec 0.12 — gains provenance + the MCP loud-failure contract
