@@ -1105,6 +1105,69 @@ export async function realModel() { return fetch("https://api.anthropic.com/v1/m
           `status=${gs.status} ${gs.stdout.slice(0, 200)}`);
   }
 
+  // ── CONST-STRING PROPAGATION (java constant-inlining parity) — a host anchored by a `const NAME =
+  //    "literal"` string resolves through the SAME host-extraction path, so Llm/Db/Net-host all benefit ──
+  {
+    const cd = project({
+      "src/c.ts": `const API_BASE = "https://api.openai.com/v1";
+export async function callTmpl(){ return fetch(\`\${API_BASE}/chat/completions\`); }
+export async function callBare(){ return fetch(API_BASE); }
+export async function callConcat(){ return fetch(API_BASE + "/completions"); }
+export async function inlineControl(){ return fetch("https://api.openai.com/v1/chat"); }`,
+    });
+    const cr = scan(cd).report;
+    for (const fn of ["callTmpl", "callBare", "callConcat", "inlineControl"]) {
+      const e = entry(cr, `src.c.${fn}`);
+      check(`const-host: fetch anchored by a const model host → { Net, Llm, host } (${fn})`,
+            e?.inferred.includes("Net") && e?.inferred.includes("Llm")
+            && (e?.hosts ?? []).includes("api.openai.com"),
+            JSON.stringify(e));
+    }
+
+    // FABRICATION GUARDS — a const/template/concat that is NOT a model host, or whose head is NOT a
+    // readable `const` string literal, MUST stay bare Net and NEVER fabricate Llm (nor a host guess).
+    const gd = project({
+      "src/g.ts": `const CDN = "https://cdn.example.com";
+export async function cdnTmpl(){ return fetch(\`\${CDN}/asset.js\`); }
+export async function cdnBare(){ return fetch(CDN); }
+export async function cdnConcat(){ return fetch(CDN + "/x"); }
+declare function getConfig(): string;
+const runtimeHost = getConfig();
+export async function runtimeVal(){ return fetch(\`\${runtimeHost}/chat\`); }
+const seg = "chat";
+export async function literalPrefix(){ return fetch(\`https://api.openai.com/\${seg}\`); }
+let mutable = "https://api.openai.com";
+mutable = "https://elsewhere.example.com";
+export async function letVar(){ return fetch(\`\${mutable}/chat\`); }
+export async function nonConstHead(){ return fetch(\`\${getConfig()}/chat\`); }`,
+    });
+    const gr = scan(gd).report;
+    // the CDN const is a real, statically-known host → captured as a PLAIN Net host, but NEVER Llm.
+    for (const fn of ["cdnTmpl", "cdnBare", "cdnConcat"]) {
+      const e = entry(gr, `src.g.${fn}`);
+      check(`const-host fabrication guard: a non-model const host stays { Net } only, host captured but NOT Llm (${fn})`,
+            e?.inferred.includes("Net") && !e?.inferred.includes("Llm")
+            && (e?.hosts ?? []).includes("cdn.example.com"),
+            JSON.stringify(e));
+    }
+    // a runtime value / reassignable `let` / literal-prefixed template / non-const interpolation head are
+    // all UNRESOLVABLE → bare Net, no host, no Llm. This is the "NEVER guess" boundary.
+    for (const fn of ["runtimeVal", "literalPrefix", "letVar", "nonConstHead"]) {
+      const e = entry(gr, `src.g.${fn}`);
+      check(`const-host fabrication guard: an unresolvable host stays bare Net (no Llm, no host guess) (${fn})`,
+            e?.inferred.includes("Net") && !e?.inferred.includes("Llm")
+            && !(e?.hosts ?? []).some((h) => h.includes("openai") || h.includes("elsewhere")),
+            JSON.stringify(e));
+    }
+    // the gate must still fire `deny Llm` on the const-anchored model call (the resolution is real, not
+    // cosmetic — it reaches the verdict).
+    fs.writeFileSync(path.join(cd, "deny-const"), "deny Llm src.c.callTmpl\n");
+    const cg = scan(cd, "--policy", path.join(cd, "deny-const")).r;
+    check("const-host: deny Llm gates the const-anchored model call (exit 1, AS-EFF-006 names Llm)",
+          cg.status === 1 && cg.stdout.includes("[AS-EFF-006]") && cg.stdout.includes("src.c.callTmpl") && cg.stdout.includes("Llm"),
+          `status=${cg.status} ${cg.stdout.slice(0, 200)}`);
+  }
+
   // (b) MODEL-SDK surface: an `import OpenAI from "openai"` client call → Llm + Net (stubbed like the
   //     κ-coverage tests — no real package needed; the SDK is recognized by its module NAME via κ).
   const stub = (name, member) => ({

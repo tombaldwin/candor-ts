@@ -477,9 +477,85 @@ function programHeadLiteral(node) {
 // options in the other overloads) — so those two members read arg0-or-arg1. Only STRING-LITERAL positions
 // are considered; returns null when the URL slot is not a static string literal — the safe direction.
 const NET_URL_ARG1_MEMBERS = new Set(["connect", "createConnection"]);
+// CONST-STRING PROPAGATION (java constant-inlining parity): resolve a bare identifier that references a
+// `const NAME = "literal"` string to its literal value, and ONLY then. Returns the string, or null. The
+// soundness rule is strict: resolve ONLY when EVERY value-declaration of the symbol is an immutable
+// `const` (or a `readonly` field) whose initializer is a plain string literal. A `let`/`var` (reassignable),
+// a declaration with no string-literal initializer (runtime value, function result, env read, config field,
+// concatenation, another template), or a symbol with MORE than the string-literal decls we can see → null,
+// so the call stays bare/runtime as before. NEVER guess a value we cannot read off a `const` initializer.
+function constStringValue(expr) {
+  if (!ts.isIdentifier(expr)) return null;
+  const sym = checker.getSymbolAtLocation(expr);
+  const decls = sym?.declarations ?? [];
+  if (decls.length === 0) return null;
+  let resolved = null;
+  for (const d of decls) {
+    // A `const x = "..."` variable declaration, or a `readonly x = "..."` class/property field. Both are
+    // VariableDeclaration/PropertyDeclaration nodes with an initializer; the immutability gate differs.
+    if (ts.isVariableDeclaration(d)) {
+      // the enclosing VariableDeclarationList must be `const` — a `let`/`var` can be reassigned later.
+      const list = d.parent;
+      const isConst = list && ts.isVariableDeclarationList(list)
+        && (list.flags & ts.NodeFlags.Const) !== 0;
+      if (!isConst || !d.initializer || !ts.isStringLiteral(d.initializer)) return null;
+      if (resolved != null && resolved !== d.initializer.text) return null; // conflicting decls — bail
+      resolved = d.initializer.text;
+    } else if (ts.isPropertyDeclaration(d)) {
+      const isReadonly = (ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Readonly) !== 0;
+      if (!isReadonly || !d.initializer || !ts.isStringLiteral(d.initializer)) return null;
+      if (resolved != null && resolved !== d.initializer.text) return null;
+      resolved = d.initializer.text;
+    } else {
+      return null; // any other declaration shape (function, param, import alias, …) → do not resolve
+    }
+  }
+  return resolved;
+}
+// Resolve a URL ARGUMENT EXPRESSION to a statically-known URL/host string when its HOST is anchored by a
+// `const NAME = "literal"` string (java constant-inlining parity). Three shapes, all requiring the host to
+// live at the HEAD of the value:
+//   • a bare const identifier            fetch(API_BASE)             → API_BASE's value
+//   • a template whose HEAD is a const   fetch(`${API_BASE}/chat`)   → value + the literal template tail
+//   • a concat whose LEFT is a const     fetch(API_BASE + "/chat")   → value + the right literal
+// The template tail / concat right are appended ONLY when they are themselves plain literals, so the
+// returned string is a real static URL prefix `hostLiteral` can parse (`https://host/…`). A template with a
+// literal host-bearing PREFIX before the interpolation (`\`https://${h}\``) has a non-empty template HEAD, so
+// its head is NOT a const identifier → not resolved here (and the literal prefix alone never named a full
+// host). Anything else (non-const identifier, interpolation of a runtime value, nested template) → null.
+function resolveConstUrlString(expr) {
+  if (expr == null) return null;
+  // bare identifier: fetch(API_BASE)
+  const bare = constStringValue(expr);
+  if (bare != null) return bare;
+  // template literal `${HEAD_CONST}<tail literal>`: the const value must sit at the HEAD (empty template
+  // head text), and we may only append a SINGLE trailing literal span — a second `${…}` interpolation is a
+  // runtime value we will not resolve, but it only follows the host, so the host prefix is still sound.
+  if (ts.isTemplateExpression(expr)) {
+    if (expr.head.text !== "") return null;              // literal prefix before the const → not const-anchored
+    const first = expr.templateSpans[0];
+    const head = first && constStringValue(first.expression);
+    if (head == null) return null;                       // first interpolation is not a const string
+    // append the literal text between the first interpolation and the next (or end) — the URL path segment.
+    return head + (first.literal.text ?? "");
+  }
+  // string concat `CONST + "…"`: left must be a const string; append the right ONLY if it is a plain literal.
+  if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = constStringValue(expr.left);
+    if (left == null) return null;
+    const right = ts.isStringLiteralLike(expr.right) ? expr.right.text : "";
+    return left + right;
+  }
+  return null;
+}
 function urlArgLiteral(node, member) {
   const args = node.arguments ?? [];
-  const litAt = (i) => (args[i] && ts.isStringLiteralLike(args[i]) ? args[i].text : null);
+  const litAt = (i) => {
+    const a = args[i];
+    if (!a) return null;
+    if (ts.isStringLiteralLike(a)) return a.text;
+    return resolveConstUrlString(a); // const-anchored host (fetch(API_BASE), `${API_BASE}/x`, API_BASE+"/x")
+  };
   if (member && NET_URL_ARG1_MEMBERS.has(member)) return litAt(0) ?? litAt(1); // (port, host) or (path)
   return litAt(0);
 }
