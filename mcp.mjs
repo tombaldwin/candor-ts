@@ -283,7 +283,58 @@ const TOOLS = {
                ...Q.gains(loadReportLoud(p), loadReportLoud(b), Q.loadCallgraph(b)) };
     },
   },
+  candor_activity: {
+    description: "What the edit-time gate caught: MEASURED activity from .candor/activity.jsonl (the Stop-hook / standalone review log) — edits checked, verdicts, violations by AS-EFF code, effects introduced, largest blast radius, deepest propagation (hops), plus the most recent records. Counted from the log, no model. A missing log is an empty result (the loop isn't wired here — not an error); corrupt lines are skipped.",
+    schema: { type: "object", properties: {
+      log: { type: "string", description: "activity log path (default .candor/activity.jsonl under the served root)" },
+      session: { type: "string", description: "filter to one sessionId" },
+      since: { type: "string", description: "ISO timestamp lower bound (records with no ts are kept)" },
+      limit: { type: "number", description: "how many recent records to return (default 5, max 50)" },
+    } },
+    noReport: true,   // reads the activity log, not a report — usable before any scan exists
+    run: (a) => readActivity(a),
+  },
 };
+
+// The candor_activity reader. Field SEMANTICS mirror `candor-agents stats` (the two count the same
+// pinned record shape — lib-candor-summary.sh's writer — so they cannot tell different stories):
+// non-object lines skipped, bool-typed numerics ignored, `since` keeps null-ts records, verdict
+// buckets clean/blocked/setup. The `edited` paths in `recent` are the hook's local-only fields —
+// the MCP transport is the same machine (the agent already reads those files), so serving them is
+// not the off-box transmission FEEDBACK-SPEC's privacy note forbids.
+function readActivity(a) {
+  const root = WORKSPACE_ROOT ?? process.cwd();
+  const log = nodePath.resolve(root, a?.log || ".candor/activity.jsonl");
+  if (WORKSPACE_ROOT && !within(log, WORKSPACE_ROOT))
+    throw new Error(`activity log \`${clip(a?.log)}\` is outside the served workspace (--root ${WORKSPACE_ROOT}) — refusing`);
+  let lines = [];
+  try { lines = fs.readFileSync(log, "utf8").split("\n"); }
+  catch { return { log: null, edits: 0, note: "no activity log — the edit-time loop isn't wired here (integrations/claude-code)" }; }
+  const recs = [];
+  for (const l of lines) {
+    if (!l.trim()) continue;
+    try { const r = JSON.parse(l); if (r && typeof r === "object" && !Array.isArray(r)) recs.push(r); } catch { /* corrupt line — skipped, like stats */ }
+  }
+  const since = a?.since;
+  const kept = recs.filter((r) =>
+    (!a?.session || r.sessionId === a.session) &&
+    (!since || typeof r.ts !== "string" || r.ts >= since));
+  const summary = { log, edits: kept.length, clean: 0, blocked: 0, setup: 0,
+                    violations: {}, effectsIntroduced: new Set(),
+                    largestBlastRadius: 0, deepestPropagation: 0, from: null, to: null };
+  for (const r of kept) {
+    const v = r.verdict === "clean" || r.verdict === "blocked" ? r.verdict : "setup";
+    summary[v]++;
+    for (const code of Array.isArray(r.violations) ? r.violations : []) summary.violations[code] = (summary.violations[code] ?? 0) + 1;
+    for (const e of Array.isArray(r.gained) ? r.gained : []) summary.effectsIntroduced.add(e);
+    if (typeof r.blastRadius === "number" && Number.isInteger(r.blastRadius)) summary.largestBlastRadius = Math.max(summary.largestBlastRadius, r.blastRadius);
+    if (typeof r.maxHops === "number" && Number.isInteger(r.maxHops)) summary.deepestPropagation = Math.max(summary.deepestPropagation, r.maxHops);
+    if (typeof r.ts === "string") { if (!summary.from || r.ts < summary.from) summary.from = r.ts; if (!summary.to || r.ts > summary.to) summary.to = r.ts; }
+  }
+  summary.effectsIntroduced = [...summary.effectsIntroduced].sort();
+  const limit = Math.min(Math.max(1, Number.isInteger(a?.limit) ? a.limit : 5), 50);
+  return { ...summary, recent: kept.slice(-limit) };
+}
 
 // ---- MCP resources: the report + the checked-in policy, readable directly --------------------------
 function listResources(prefix) {
@@ -354,7 +405,9 @@ function handle(msg) {
       const missing = (t.schema.required || []).filter((k) => args[k] === undefined || args[k] === "");
       if (missing.length)
         return result(id, { content: [{ type: "text", text: `candor: missing required argument(s): ${missing.join(", ")}` }], isError: true });
-      const prefix = resolvePrefix(args);
+      // A log-only tool (candor_activity) needs no report — resolving one would wrongly demand a
+      // scan before the gate's own activity can be read.
+      const prefix = t.noReport ? null : resolvePrefix(args);
       // A tool that targets a `fn` gets a clear "not found" rather than a silently-empty result —
       // an agent must distinguish "no such function" from "found, nothing calls it".
       if (args.fn !== undefined) {

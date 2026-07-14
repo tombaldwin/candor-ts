@@ -7,6 +7,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as Q from "./query-core.mjs";
@@ -428,5 +429,42 @@ fs.rmSync(OUTSIDE, { recursive: true, force: true });
 }
 
 fs.rmSync(W, { recursive: true, force: true });
+// ── candor_activity: the edit-time gate's self-inspection tool (FEEDBACK-SPEC "richer MCP push") ──
+{
+  const A = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-act-"));
+  fs.mkdirSync(path.join(A, ".candor"), { recursive: true });
+  fs.writeFileSync(path.join(A, ".candor", "activity.jsonl"), [
+    '{"ts":"2026-07-14T10:00:00Z","sessionId":"s1","engine":"candor-scan","edited":null,"gained":["Fs"],"blastRadius":3,"maxHops":2,"verdict":"blocked","violations":["AS-EFF-006"],"unknowns":0,"effects":["Fs"],"reviewMs":100}',
+    '{ corrupt line — skipped }',
+    '{"ts":"2026-07-14T11:00:00Z","sessionId":"s2","engine":"candor-scan","edited":null,"gained":[],"blastRadius":0,"verdict":"clean","violations":[],"unknowns":0,"effects":["Fs"],"reviewMs":50}',
+  ].join("\n") + "\n");
+  const call = (id, name, args) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const ar = await mcpSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    call(2, "candor_activity", { log: `${A}/.candor/activity.jsonl` }),
+    call(3, "candor_activity", { log: `${A}/.candor/activity.jsonl`, session: "s1" }),
+    call(4, "candor_activity", { log: `${A}/.candor/no-such.jsonl` }),
+    call(5, "candor_activity", { log: "../../etc/passwd" }),
+  ], ["--root", A]);
+  const aById = Object.fromEntries(ar.map((r) => [r.id, r]));
+  const aj = (id) => JSON.parse(aById[id].result.content[0].text);
+  ok("activity: summary counts edits/verdicts and skips the corrupt line",
+     aj(2).edits === 2 && aj(2).blocked === 1 && aj(2).clean === 1, aById[2].result.content[0].text.slice(0, 160));
+  ok("activity: violations by code + effectsIntroduced + blast + deepestPropagation aggregated",
+     aj(2).violations["AS-EFF-006"] === 1 && aj(2).effectsIntroduced.includes("Fs")
+       && aj(2).largestBlastRadius === 3 && aj(2).deepestPropagation === 2, aById[2].result.content[0].text.slice(0, 200));
+  ok("activity: recent records returned (most recent last)",
+     aj(2).recent.length === 2 && aj(2).recent[1].sessionId === "s2");
+  ok("activity: session filter narrows to one record", aj(3).edits === 1 && aj(3).blocked === 1);
+  ok("activity: a missing log is an empty result with a wiring note, NOT an error",
+     aById[4].result.isError !== true && aj(4).edits === 0 && /isn't wired/.test(aj(4).note || ""));
+  ok("activity: a log path escaping --root is REFUSED (confinement)",
+     aById[5].result.isError === true && /outside the served workspace/.test(aById[5].result.content[0].text));
+  // no report exists under A at all — the tool must not demand one (noReport dispatch).
+  ok("activity: works with NO report in the workspace (log-only tool needs no scan)",
+     aById[2].result.isError !== true);
+  fs.rmSync(A, { recursive: true, force: true });
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

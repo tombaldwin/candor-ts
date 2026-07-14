@@ -110,7 +110,10 @@ Q parsepolicy <policy-file>         # the canonical §6.2 parse (what the gate w
 And as an MCP server, so an agent pulls these as tools instead of shelling out:
 `CANDOR_REPORT=$P npx -y candor-ts-mcp` (tools `candor_impact`/`candor_reachable`/`candor_where`/…,
 plus `candor_gate`/`candor_whatif`/`candor_fix` — a given-but-unreadable `policy` is a loud tool
-error, never a clean verdict). `npx -y candor-ts-watch <dir>` keeps the report fresh as you edit (and
+error, never a clean verdict — and `candor_activity`: what the edit-time gate CAUGHT, measured from
+`.candor/activity.jsonl` — edits checked, verdicts, violations by AS-EFF code, effects introduced,
+largest blast radius, deepest propagation — so you can self-inspect the loop without shelling out;
+a missing log is an empty result, not an error). `npx -y candor-ts-watch <dir>` keeps the report fresh as you edit (and
 reports the edit-delta); `candor-lsp` serves the same report as CodeLens/hover/diagnostics in any LSP
 editor, plus two code actions (plain LSP — helix/neovim/VS Code/JetBrains-via-LSP4IJ all get them
 without client code): the pre-edit whatif (`candor: what if <fn> performed <E>?` → the `candor.whatif`
