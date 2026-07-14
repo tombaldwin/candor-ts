@@ -30,7 +30,7 @@ import { parsePolicy, evaluatePolicy, scopeMatches } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
-         modelHostEffects, isModelSdkPackage } from "./scan-core.mjs";
+         modelHostEffects, isModelHost, isModelSdkPackage } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -467,6 +467,66 @@ function isDestructuringAssignTarget(node) {
 function programHeadLiteral(node) {
   const a0 = (node.arguments ?? [])[0];
   return a0 && ts.isStringLiteralLike(a0) ? a0.text : null;
+}
+// The URL/endpoint literal of a host-bearing Net call, read from the DOCUMENTED URL arg position — a host
+// predicate must run against the extracted URL argument, never the first literal ANYWHERE in the args:
+// `fetch(runtimeUrl, "some-literal")` must NOT read the trailing literal (headers/body/options) as the
+// host (the programHeadLiteral discipline, generalized from Exec to Net — FINDING 6). Position is
+// member-aware: the HTTP verbs (fetch/get/post/put/patch/delete/head/options/request) take the URL FIRST;
+// net.connect/createConnection put the host at arg1 in the `(port, host)` overload (and arg0 is a path/
+// options in the other overloads) — so those two members read arg0-or-arg1. Only STRING-LITERAL positions
+// are considered; returns null when the URL slot is not a static string literal — the safe direction.
+const NET_URL_ARG1_MEMBERS = new Set(["connect", "createConnection"]);
+function urlArgLiteral(node, member) {
+  const args = node.arguments ?? [];
+  const litAt = (i) => (args[i] && ts.isStringLiteralLike(args[i]) ? args[i].text : null);
+  if (member && NET_URL_ARG1_MEMBERS.has(member)) return litAt(0) ?? litAt(1); // (port, host) or (path)
+  return litAt(0);
+}
+// Is arg0 a RUNTIME STRING expression whose host can't be known statically — a template, a string
+// concat, or a `string`-typed variable/member/call? Only THIS shape masks the host and must fail the
+// surface closed. A STRUCTURED url arg (`new URL(...)`, a `Request` object, any non-string value) carries
+// its host in a form the literal gate never saw, but it did not mask a literal that WAS there — pre-Llm
+// behavior added Net and moved on, so it must NOT regress to fail-closed. Absent arg0 → not a masking
+// string either (never fabricate incompleteness). A static string literal is handled by urlArgLiteral, so
+// it is excluded here.
+function urlArgIsRuntimeString(node) {
+  const a0 = (node.arguments ?? [])[0];
+  if (!a0 || ts.isStringLiteralLike(a0)) return false;
+  if (ts.isTemplateExpression(a0)) return true; // `${base}/path` — host built at runtime
+  if (ts.isBinaryExpression(a0) && a0.operatorToken.kind === ts.SyntaxKind.PlusToken) return true; // concat
+  // a variable/member/call arg: a masking runtime host only when its static type is `string` (a
+  // `new URL()`/`Request`/other object is NOT a string type — leave it clean, as before the Llm port).
+  const t = checker.getTypeAtLocation(a0);
+  return t ? (t.flags & (ts.TypeFlags.String | ts.TypeFlags.StringLiteral)) !== 0 : false;
+}
+// The Ollama local-endpoint decision (java Literals parity #2), routed through the EXTRACTED host, never
+// a raw literal that merely CONTAINS ":11434". `urlLit` is arg0's string text; `host` is hostLiteral(urlLit)
+// (null when arg0 didn't parse as a structured host/URL). Returns "capture" (a dotted model/Ollama host
+// hostLiteral kept — the caller captures it and adds modelHostEffects), "llm-no-capture" (a DOTLESS
+// `localhost:11434`/`127.0.0.1:11434` — refine to Llm but do NOT capture the host as a Net allowlist
+// literal, so the host gate stays intact: java parity #2), or null (no model signal). CRITICAL: the
+// :11434 → Llm rule fires ONLY when arg0 parsed as a STRUCTURED host:port whose port is 11434 — a raw
+// relative path like `/v1/models:11434/generate` never parses as a host, so it can never fabricate Llm.
+function isDotlessLocalOllama(host) {
+  if (host == null) return false;
+  const colon = host.lastIndexOf(":");
+  if (colon < 0 || host.slice(colon + 1) !== "11434") return false;
+  const hostPart = host.slice(0, colon).toLowerCase();
+  return hostPart === "localhost" || hostPart === "127.0.0.1"; // dotless local endpoint only
+}
+function ollamaFromUrlArg(urlLit) {
+  if (urlLit == null) return null;
+  // Parse arg0 as a host[:port] the same way the capture path does. `scheme://host[:port]/…` yields the
+  // authority even when the host is dotless; a bare `foo.internal:11434` yields itself; a relative path
+  // (`/v1/x:11434/y`) parses to NOTHING → never a host, so it can never fabricate Llm (FINDING 1).
+  const parsed = hostLiteral(urlLit);
+  if (parsed == null) return null;
+  // FINDING 9: a DOTLESS local Ollama endpoint (`http://localhost:11434/…`) refines to Llm WITHOUT
+  // capturing the host as a Net allowlist literal (java parity #2 — preserve the host gate). A DOTTED
+  // model/Ollama host (`foo.internal:11434`, `api.anthropic.com`) is captured as before.
+  if (isDotlessLocalOllama(parsed)) return "llm-no-capture";
+  return isModelHost(parsed) ? "capture-model" : "capture-plain";
 }
 // qualifies by the file's basename (`Cases.union_a`).
 const fns = new Map();           // qualified name -> { direct, edges, hosts, tables, cmds, paths, loc }
@@ -1655,30 +1715,31 @@ function visitCalls(node) {
           }
           // the literal surfaces, read only at a CLASSIFIED call (SPEC §2)
           if (eff === "Net") {
-            const lit = firstStringLiteral(node);
-            const h = lit && hostLiteral(lit);
-            if (h) {
+            // The host predicate runs against the EXTRACTED URL argument (arg0 — the URL/endpoint slot of
+            // fetch/axios/the HTTP verbs), NEVER the first literal anywhere in the args: a trailing literal
+            // in headers/body/options must not be read as the host (FINDING 6). Ollama's model decision runs
+            // through the parsed host too, never a raw string that merely contains ":11434" (FINDING 1/9).
+            const urlLit = urlArgLiteral(node, member);
+            const ollama = ollamaFromUrlArg(urlLit);
+            if (ollama === "capture-model" || ollama === "capture-plain") {
+              const h = hostLiteral(urlLit);
               rec.hosts.add(h);
               // SPEC §1 ⟨0.13⟩ Llm host-literal refinement: a known model host makes this a model call
-              // (Llm + Net — Net is never dropped), exactly as a jdbc URL classifies Db. The bare
-              // `localhost:11434` Ollama endpoint has no dot so hostLiteral rejects it as a Net literal —
-              // that case is handled by the port gate below (host stays uncaptured, per java parity #2).
+              // (Llm + Net — Net is never dropped), exactly as a jdbc URL classifies Db.
               for (const e of modelHostEffects(h)) rec.direct.add(e);
+            } else {
+              // No captured host literal. §1 ⟨0.13⟩ Ollama LOCAL endpoint (`localhost:11434`/`127.0.0.1:11434`):
+              // refine to Llm but do NOT capture the host as a Net allowlist literal (java parity #2 —
+              // preserve the host gate so `deny Llm` catches it while `allow Llm localhost` fails closed).
+              if (ollama === "llm-no-capture") rec.direct.add("Llm");
+              // MASKING fix: a host-ESTABLISHING Net call whose host is NOT a captured literal (runtime URL, or
+              // built elsewhere) leaves the host invisible to the gate → mark the surface incomplete so a
+              // benign literal can't mask it. ALLOWLIST of establishing forms only — NEVER use-calls
+              // (write/end/non-dgram send), which would false-positive on `socket.connect("h").write(data)`
+              // (the host is captured at connect). Under-catches an unlisted establishing verb (safe
+              // direction); never over-flags a use-call.
+              if (netEstablishing(member)) rec.incomplete.add("Net");
             }
-            // MASKING fix: a host-ESTABLISHING Net call whose host is NOT a captured literal (runtime URL, or
-            // built elsewhere) leaves the host invisible to the gate → mark the surface incomplete so a
-            // benign literal can't mask it. ALLOWLIST of establishing forms only — NEVER use-calls
-            // (write/end/non-dgram send), which would false-positive on `socket.connect("h").write(data)`
-            // (the host is captured at connect). Under-catches an unlisted establishing verb (safe
-            // direction); never over-flags a use-call.
-            else if (netEstablishing(member))
-              rec.incomplete.add("Net");
-            // §1 ⟨0.13⟩ Ollama: a LOCAL model endpoint (`localhost:11434`/`127.0.0.1:11434`) names a
-            // DOTLESS bare host that hostLiteral rejects as a Net literal — the model signal is the `:11434`
-            // PORT. Refine to Llm on that port WITHOUT capturing the host as a Net literal (java parity #2:
-            // preserve the host gate so `deny Llm` catches it while `allow Llm localhost` fails closed). A
-            // dotted `foo.internal:11434` already captured above; this only rescues the dotless case.
-            if (lit && !h && /(^|[^\d]):11434(\/|$|[^\d])/.test(lit)) rec.direct.add("Llm");
           }
           // SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface: a call into a curated model-provider client (the
           // scan-core MODEL_SDK regex, also the whole-module Net κ rule above) dispatches a model request
@@ -1839,21 +1900,29 @@ function visitCalls(node) {
       const owner = enclosing(node);
       if (owner) {
         const rec = fns.get(owner);
-        rec.direct.add(geff);
-        // The global `fetch(url)` is a host-bearing Net call — capture its host literal (like the κ-Net
-        // path) so the allowlist/masking gate sees it, and refine to `Llm` on a known model host (SPEC §1
-        // ⟨0.13⟩). Without this, `fetch("https://api.anthropic.com/…")` read bare Net with no host at all.
+        rec.direct.add(geff); // Net is added unconditionally for a global fetch (never gated on host capture)
+        // The global `fetch(url)` is a host-bearing Net call — capture its URL-ARGUMENT host (arg0, like the
+        // κ-Net path) so the allowlist/masking gate sees it, and refine to `Llm` on a known model host (SPEC
+        // §1 ⟨0.13⟩). Without this, `fetch("https://api.anthropic.com/…")` read bare Net with no host at all.
         if (geff === "Net") {
-          const lit = firstStringLiteral(node);
-          const h = lit && hostLiteral(lit);
-          if (h) {
+          // Host predicate runs against arg0 (the URL slot), NEVER the first literal anywhere in the args:
+          // `fetch(runtimeUrl, "literal")` must not read the trailing literal as the host (FINDING 6). Ollama's
+          // model decision runs through the parsed host, never a raw ":11434" substring (FINDING 1/9).
+          const urlLit = urlArgLiteral(node);
+          const ollama = ollamaFromUrlArg(urlLit);
+          if (ollama === "capture-model" || ollama === "capture-plain") {
+            const h = hostLiteral(urlLit);
             rec.hosts.add(h);
             for (const e of modelHostEffects(h)) rec.direct.add(e);
-          } else {
-            // a runtime-URL fetch masks the host — fail the surface closed, like a host-establishing κ call.
+          } else if (ollama === "llm-no-capture") {
+            // §1 ⟨0.13⟩ dotless local Ollama endpoint: Llm WITHOUT capturing the host (java parity #2).
+            rec.direct.add("Llm");
+          } else if (urlArgIsRuntimeString(node)) {
+            // Only a RUNTIME STRING url (template/concat/`string`-typed value) masks the host → fail closed,
+            // like a host-establishing κ call. A structured `new URL(...)`/`Request` arg (or absent arg) did
+            // NOT mask a literal — it passed clean pre-Llm-port, so it must NOT regress to fail-closed (FINDING 7).
             rec.incomplete.add("Net");
           }
-          if (lit && !h && /(^|[^\d]):11434(\/|$|[^\d])/.test(lit)) rec.direct.add("Llm"); // Ollama port gate
         }
       }
     }

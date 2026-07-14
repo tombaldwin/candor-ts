@@ -1003,6 +1003,66 @@ export async function bedrock() { return fetch("https://bedrock-runtime.us-east-
         entry(report, "src.m.ollama")?.inferred.includes("Llm"), JSON.stringify(entry(report, "src.m.ollama")));
   check("Llm host-literal: AWS Bedrock runtime refines to Llm",
         entry(report, "src.m.bedrock")?.inferred.includes("Llm"), JSON.stringify(entry(report, "src.m.bedrock")));
+  // FINDING 9: a dotless local Ollama endpoint refines to Llm but the host is NOT captured as a Net
+  // allowlist literal (java parity #2 — preserve the host gate). `localhost:11434` must NOT appear in hosts.
+  check("FINDING 9: Ollama localhost:11434 → Llm but host is NOT captured in the allowlist surface",
+        entry(report, "src.m.ollama")?.inferred.includes("Llm")
+        && !(entry(report, "src.m.ollama")?.hosts ?? []).some((h) => h.includes("11434") || h === "localhost"),
+        JSON.stringify(entry(report, "src.m.ollama")));
+
+  // ── FINDINGS 1/6/7 — a host predicate runs against the EXTRACTED URL arg, never a raw literal ──────
+  {
+    const pkg = (name, types) => ({
+      [`node_modules/${name}/package.json`]: `{"name":"${name}","types":"index.d.ts","main":"index.js"}`,
+      [`node_modules/${name}/index.d.ts`]: types,
+      [`node_modules/${name}/index.js`]: ``,
+    });
+    // FINDING 1: the :11434 gate must run against a PARSED host, not a raw literal that merely contains
+    // ":11434". A relative path `axios.post("/v1/models:11434/generate")` parses to no host → NO Llm.
+    // FINDING 6: `fetch(runtimeUrl, "literal")` — the trailing literal (options/headers) is NOT the host.
+    // FINDING 7: `fetch(new URL(...))` is a STRUCTURED arg — it must NOT fail the surface closed.
+    // (`incomplete` is an INTERNAL surface, not a report field, so masking is asserted through the GATE.)
+    const fd = project({
+      ...pkg("axios", `declare const axios: { post(url: string, body?: unknown): Promise<unknown>; get(url: string): Promise<unknown>; };\nexport default axios;`),
+      "src/f.ts": `import axios from "axios";
+export function relPath(): Promise<unknown> { return axios.post("/v1/models:11434/generate", {}); }
+export async function wrongArg(u: string) { return fetch(u, { headers: { host: "api.anthropic.com" } }); }
+export async function structured() { const u = new URL("https://api.example.com/x"); return fetch(u).then(() => fetch("https://api.example.com/y")); }
+export async function realModel() { return fetch("https://api.anthropic.com/v1/messages"); }`,
+    });
+    const fr = scan(fd).report;
+    const rel = entry(fr, "src.f.relPath");
+    check("FINDING 1: axios.post to a relative path containing ':11434' does NOT fabricate Llm",
+          rel?.inferred.includes("Net") && !rel?.inferred.includes("Llm")
+          && !(rel?.hosts ?? []).some((h) => h.includes("11434")),
+          JSON.stringify(rel));
+    const wrong = entry(fr, "src.f.wrongArg");
+    check("FINDING 6: fetch(runtimeUrl, {host literal}) does NOT read the trailing literal as the host",
+          wrong?.inferred.includes("Net") && !(wrong?.hosts ?? []).includes("api.anthropic.com")
+          && !wrong?.inferred.includes("Llm"),
+          JSON.stringify(wrong));
+    const real = entry(fr, "src.f.realModel");
+    check("FINDINGS intact: fetch to a real model host still → { Net, Llm, host captured }",
+          real?.inferred.includes("Net") && real?.inferred.includes("Llm")
+          && (real?.hosts ?? []).includes("api.anthropic.com"),
+          JSON.stringify(real));
+    // FINDING 6 (masking preserved): the RUNTIME-STRING url `fetch(u, …)` masks the host → an `allow Net`
+    // on that host must FAIL CLOSED (AS-EFF-008), exactly like the other runtime-host masking cases.
+    fs.writeFileSync(path.join(fd, "allow-wrong"), "allow Net in src.f.wrongArg api.anthropic.com\n");
+    const gw = scan(fd, "--policy", path.join(fd, "allow-wrong")).r;
+    check("FINDING 6: the runtime-string-URL fetch fails the Net surface closed (masking preserved, AS-EFF-008)",
+          gw.status === 1 && gw.stdout.includes("[AS-EFF-008]") && gw.stdout.includes("src.f.wrongArg"),
+          `status=${gw.status} ${gw.stdout.slice(0, 200)}`);
+    // FINDING 7 (no fail-closed regression): `structured` reaches a VISIBLE literal host (api.example.com)
+    // AND a STRUCTURED `fetch(new URL(u))`. The structured arg did NOT mask a literal — pre-fix it wrongly
+    // marked the surface incomplete, so `allow Net api.example.com` failed closed even though the only real
+    // host IS allowlisted. Post-fix the structured arg is clean → the gate CERTIFIES it (exit 0, no AS-EFF-008).
+    fs.writeFileSync(path.join(fd, "allow-struct"), "allow Net in src.f.structured api.example.com\n");
+    const gs = scan(fd, "--policy", path.join(fd, "allow-struct")).r;
+    check("FINDING 7: fetch(new URL(...)) alongside a visible host is NOT fail-closed — gate certifies clean (exit 0)",
+          gs.status === 0 && !gs.stdout.includes("src.f.structured"),
+          `status=${gs.status} ${gs.stdout.slice(0, 200)}`);
+  }
 
   // (b) MODEL-SDK surface: an `import OpenAI from "openai"` client call → Llm + Net (stubbed like the
   //     κ-coverage tests — no real package needed; the SDK is recognized by its module NAME via κ).

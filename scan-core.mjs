@@ -267,19 +267,24 @@ export const MODEL_HOSTS = new Set([
 // Literals.isModelHost parity): any host whose port is 11434 is a local Ollama endpoint
 // (`localhost:11434`, `127.0.0.1:11434`); and an AWS Bedrock runtime host `*.bedrock*.amazonaws.com`
 // (host CONTAINS "bedrock" AND ends `.amazonaws.com` — java parity #4).
+// Ollama is a LOCAL endpoint: :11434 → Llm ONLY on a loopback host (max-review r3 parity fix — "any host
+// on :11434" fabricated Llm on an unrelated internal service). Bedrock matches the EXACT model-inference
+// service label, not the substring "bedrock" (which caught `bedrock-backups.s3.amazonaws.com`, an S3 bucket).
+const OLLAMA_LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+const BEDROCK_RUNTIME_LABELS = new Set(["bedrock-runtime", "bedrock-agent-runtime"]);
 export function isModelHost(hostLiteral) {
   if (hostLiteral == null) return false;
-  // Ollama: a `:11434` port anywhere is the local model endpoint (keep it simple, per SPEC §1).
-  const colon = hostLiteral.lastIndexOf(":");
-  if (colon >= 0 && hostLiteral.slice(colon + 1) === "11434") return true;
-  // hostPart: strip a trailing :port (but keep a bracketed/unbracketed IPv6 intact, like policy.hostPart).
-  let host = hostLiteral;
-  if (host.startsWith("[")) host = host.slice(1).split("]")[0];
-  else if ((host.match(/:/g) ?? []).length <= 1) host = host.split(":")[0];
+  // hostPart: strip a trailing :port (keep a bracketed/unbracketed IPv6 intact, like policy.hostPart);
+  // also recover the port for the Ollama loopback check.
+  let host = hostLiteral, port = null;
+  if (host.startsWith("[")) { const e = host.indexOf("]"); if (e >= 0) { const rest = host.slice(e + 1); if (rest.startsWith(":")) port = rest.slice(1); host = host.slice(1, e); } }
+  else if ((host.match(/:/g) ?? []).length === 1) { const p = host.split(":"); host = p[0]; port = p[1]; }
   host = host.toLowerCase();
+  if (port === "11434") return OLLAMA_LOCAL_HOSTS.has(host);   // Ollama: loopback only
   if (MODEL_HOSTS.has(host)) return true;
   for (const m of MODEL_HOSTS) if (host.endsWith("." + m)) return true; // a subdomain counts
-  if (host.endsWith(".amazonaws.com") && host.includes("bedrock")) return true; // AWS Bedrock runtime
+  // AWS Bedrock runtime: the FIRST label is the model-inference service (bedrock-runtime.<region>.amazonaws.com).
+  if (host.endsWith(".amazonaws.com") && BEDROCK_RUNTIME_LABELS.has(host.split(".")[0])) return true;
   return false;
 }
 // The effects a model-host literal implies: ["Llm"] for a known model host, else []. Shared with the
