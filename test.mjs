@@ -411,7 +411,7 @@ export function place(db: DatabaseSync): void { save(db); }`,
   check("--gate-json + violation still exits 1", r.status === 1, `status=${r.status}`);
   let v = null;
   try { v = JSON.parse(fs.readFileSync(gp, "utf8")); } catch { /* null → checks fail with raw */ }
-  check("--gate-json verdict declares spec 0.13", v?.spec === "0.13", JSON.stringify(v)?.slice(0, 120));
+  check("--gate-json verdict declares spec 0.14", v?.spec === "0.14", JSON.stringify(v)?.slice(0, 120));
   check("--gate-json verdict ok:false on a failing gate", v?.ok === false, `ok=${v?.ok}`);
   const viol = v?.violations?.find((x) => x.fn === "src.domain.place");
   check("--gate-json names the violating fn with its rule", viol?.rule === "AS-EFF-006", JSON.stringify(v?.violations)?.slice(0, 160));
@@ -483,9 +483,9 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
 // ── 3f. diff/gains disclose a producing-build mismatch (§2.1 — baseline-invalidation) ──────────────
 {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-basever-"));
-  fs.writeFileSync(path.join(d, "cur.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.13" },
+  fs.writeFileSync(path.join(d, "cur.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.14" },
     functions: [{ fn: "a.leaf", inferred: ["Net", "Log"], direct: ["Net", "Log"] }] }));
-  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.13" },
+  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.14" },
     functions: [{ fn: "a.leaf", inferred: ["Net"], direct: ["Net"] }] }));
   const r = spawnSync("node", [path.join(HERE, "query.mjs"), "diff", path.join(d, "cur"), path.join(d, "base"), "--json"], { encoding: "utf8" });
   const out = JSON.parse(r.stdout);
@@ -494,7 +494,7 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
   check("diff still reports the drift (disclosure, not suppression)", out.changes.length === 1 && out.changes[0].gained.includes("Log"), JSON.stringify(out.changes));
   check("the mismatch note is on stderr", r.stderr.includes("baseline-invalidating") && r.stderr.includes("aaaaaaa"), r.stderr.slice(0, 160));
   // same-build → no note
-  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.13" },
+  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.14" },
     functions: [{ fn: "a.leaf", inferred: ["Net"], direct: ["Net"] }] }));
   const r2 = spawnSync("node", [path.join(HERE, "query.mjs"), "diff", path.join(d, "cur"), path.join(d, "base"), "--json"], { encoding: "utf8" });
   check("same producing build → no mismatch note", !r2.stderr.includes("⚠"), r2.stderr.slice(0, 120));
@@ -696,6 +696,37 @@ export function make(): Implicit { return new Implicit(); }`,
   check("implicit ctor synthesized; `new` edges to it",
         entry(report, "src.f.make")?.inferred.includes("Fs") && entry(report, "src.f.make")?.unresolved === false,
         JSON.stringify(entry(report, "src.f.make")));
+}
+
+// ── 8b. TOP-LEVEL executable statements attribute to a synthesized `<module>` unit (the ESM
+// top-level-await / serverless-handler silent-pure hole: a file whose top-level body does I/O was
+// scanned as functions:[] → a false "pure" verdict that a `deny Llm`/`deny Fs` gate PASSED). The
+// module body is the file's own initializer — the field-init `Class.constructor` synthesis one level
+// up. Minted LAZILY, unitKind "initializer" (spec §2, java's `<clinit>` twin). ──────────────────
+{
+  const d = project({
+    "src/tla.ts": `const r = await fetch("https://api.openai.com/x"); export { r };`,
+    "src/fsmod.ts": `import { readFileSync } from "node:fs";\nconst c = readFileSync("/etc/x"); export { c };`,
+    "src/reach.ts": `function work(){ return fetch("https://api.openai.com/x"); }\nwork();`,
+    "src/pure.ts": `const x = 1 + 2; export function f(): number { return x; }`,
+    "src/dec.ts": `function factory(){ fetch("https://api.openai.com/x"); return (t: any) => t; }\n@factory()\nexport class C {}`,
+  });
+  const { report } = scan(d);
+  const m1 = entry(report, "src.tla.<module>");
+  check("top-level await fetch → <module> unit carries Llm+Net (not silent-pure)",
+        m1 && m1.inferred.includes("Llm") && m1.inferred.includes("Net"), JSON.stringify(report.functions));
+  check("the synthesized <module> unit is tagged unitKind:initializer",
+        m1?.unitKind === "initializer", JSON.stringify(m1));
+  check("top-level `const c = readFileSync(...)` → <module> carries Fs",
+        entry(report, "src.fsmod.<module>")?.inferred.includes("Fs"), JSON.stringify(report.functions));
+  check("top-level `work()` makes <module> TRANSITIVELY Llm+Net (edge, not dropped)",
+        entry(report, "src.reach.<module>")?.inferred.includes("Net")
+          && entry(report, "src.reach.work")?.inferred.includes("Net"), JSON.stringify(report.functions));
+  check("a PURE top-level does NOT gain a <module> unit (pure units omitted)",
+        entry(report, "src.pure.<module>") == null, JSON.stringify(report.functions));
+  check("a DECORATOR application (@factory()) is NOT attributed to <module> (load-time, factory owns it)",
+        entry(report, "src.dec.<module>") == null && entry(report, "src.dec.factory")?.inferred.includes("Net"),
+        JSON.stringify(report.functions));
 }
 
 // ── 9. ambient builtins + crypto tier + the missing-deps warning (CTA dogfood) ───────────────────
@@ -2093,7 +2124,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-cliarms-"));
   const eqJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-  const rep = (fns) => JSON.stringify({ candor: { version: "ttttttt", spec: "0.13" }, functions: fns });
+  const rep = (fns) => JSON.stringify({ candor: { version: "ttttttt", spec: "0.14" }, functions: fns });
   fs.writeFileSync(path.join(d, "r.json"), rep([
     { fn: "app.db.save", inferred: ["Db"], direct: ["Db"], loc: "db.ts:1", tables: ["orders"] },
     { fn: "app.web.handler", inferred: ["Db"], direct: [], entryPoint: true, loc: "web.ts:1" },
@@ -2204,9 +2235,9 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
         `status=${pthNJ.status} ${pthNJ.stdout.slice(0, 160)}`);
 
   // gains: the supply-chain alarm + the §2.1 version-skew disclosure
-  fs.writeFileSync(path.join(d, "oldbase.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.13" },
+  fs.writeFileSync(path.join(d, "oldbase.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.14" },
     functions: [{ fn: "app.db.save", inferred: ["Db"], direct: ["Db"] }] }));
-  fs.writeFileSync(path.join(d, "cur2.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.13" },
+  fs.writeFileSync(path.join(d, "cur2.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.14" },
     functions: [{ fn: "app.db.save", inferred: ["Db", "Exec"], direct: ["Db", "Exec"] }] }));
   const g = runQuery("gains", path.join(d, "cur2"), path.join(d, "oldbase"));
   const gJ = JSON.parse(g.stdout);
@@ -2216,7 +2247,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
         `status=${g.status} ${g.stdout.slice(0, 160)}`);
   check("CLI gains: a producing-build mismatch is DISCLOSED on stderr (reclassify vs regression ambiguity)",
         /⚠/.test(g.stderr) && /reclassifying/.test(g.stderr), g.stderr.slice(0, 160));
-  fs.writeFileSync(path.join(d, "samebase.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.13" },
+  fs.writeFileSync(path.join(d, "samebase.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.14" },
     functions: [{ fn: "app.db.save", inferred: ["Db"], direct: ["Db"] }] }));
   const g2 = runQuery("gains", path.join(d, "cur2"), path.join(d, "samebase"));
   check("CLI gains: same producing build → no mismatch note", g2.status === 0 && !/⚠/.test(g2.stderr),
@@ -2225,10 +2256,10 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   // ⟨spec 0.12 staged⟩ byFunction[].origin, keyed on the BASELINE CALLGRAPH (reports omit pure fns, §2):
   // a baseline-pure fn that now does Net is "existing" (the supply-chain attack signal, a different alarm
   // from a "new" fn); no baseline callgraph at all → "unknown" (undecidable, disclosed not guessed).
-  fs.writeFileSync(path.join(d, "obase.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.13" },
+  fs.writeFileSync(path.join(d, "obase.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.14" },
     functions: [{ fn: "m.g", inferred: ["Fs"], direct: ["Fs"] }] }));
   fs.writeFileSync(path.join(d, "obase.callgraph.json"), JSON.stringify({ "m.f": ["m.g"], "m.g": [] }));
-  fs.writeFileSync(path.join(d, "ocur.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.13" },
+  fs.writeFileSync(path.join(d, "ocur.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.14" },
     functions: [{ fn: "m.f", inferred: ["Net"], direct: ["Net"] }, { fn: "m.g", inferred: ["Fs"], direct: ["Fs"] },
                 { fn: "m.h", inferred: ["Net"], direct: ["Net"] }] }));
   const originOf = (j, fn) => j.byFunction.find((x) => x.fn === fn)?.origin;
@@ -2583,14 +2614,14 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
 
 // ── doc drift gates (TESTING.md §9): the family phrases the docs must carry ────────────────────────
 // README/AGENTS are load-bearing self-descriptions: they must state the CURRENT spec contract
-// ("spec 0.13", no stale generation strings — AGENTS.md shipped "spec 0.7" examples a full generation
+// ("spec 0.14", no stale generation strings — AGENTS.md shipped "spec 0.7" examples a full generation
 // after the 0.8 roll) and, wherever they lean on the reference engine, attribute it (candor-java IS
 // the reference — the family ruling the baseline/pure semantics cite).
 {
   for (const f of ["README.md", "AGENTS.md"]) {
     const doc = fs.readFileSync(path.join(HERE, f), "utf8");
-    check(`${f} states the current spec contract (spec 0.13)`, doc.includes("spec 0.13"));
-    const stale = doc.match(/spec 0\.[0-7]\b|spec 0\.9\b|spec 0\.10\b|spec 0\.11\b|spec 0\.12\b/g) ?? [];
+    check(`${f} states the current spec contract (spec 0.14)`, doc.includes("spec 0.14"));
+    const stale = doc.match(/spec 0\.[0-7]\b|spec 0\.9\b|spec 0\.10\b|spec 0\.11\b|spec 0\.12\b|spec 0\.13\b/g) ?? [];
     check(`${f} carries no stale spec-generation string`, stale.length === 0, JSON.stringify(stale));
     const refLines = doc.split("\n").filter((l) => /reference engine/i.test(l));
     check(`${f} mentions the reference engine at least once`, refLines.length > 0);

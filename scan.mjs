@@ -41,7 +41,7 @@ const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 // literal stamped into the envelope's `spec` field, so the doc lines and the report can never drift.
 // Reused, never re-littered.
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
-const SPEC_VERSION = "0.13";
+const SPEC_VERSION = "0.14";
 
 // --version: a print-and-exit MODE, handled before the main arg walk so it never depends on a target.
 // Fully OFFLINE — candor never phones home. Staying current is the AGENT's job: read the installed
@@ -1091,6 +1091,29 @@ function enumerateGetters(owner, type) {
   }
 }
 
+// The synthesized `<module>` unit for a source file's TOP-LEVEL executable statements (spec §2
+// unitKind "initializer" — java's `<clinit>` twin). Top-level `await fetch(…)`, a bare
+// `readFileSync(…)`, an IIFE, `export const r = await fetch(…)` execute at MODULE-LOAD time and
+// belong to nothing named — without this unit their effects reached the SourceFile in `enclosing`,
+// resolved to `null`, and were DROPPED → a false "pure" verdict (the cardinal sin: ESM top-level
+// await / serverless handler files / side-effecting config modules scanned as functions: []). This
+// is the field-initializer `Class.constructor` synthesis (~scan.mjs:774) one level up: the module
+// body is the file's own initializer. Minted LAZILY — only when a top-level statement actually
+// attributes an effect/edge here — so a pure top-level never gains a unit (pure units are omitted).
+// The qual mirrors sibling top-level units (`moduleOf(sf).<module>`); the bare local is `<module>`.
+function moduleUnit(sf) {
+  const mod = moduleOf(sf);
+  const qual = `${mod}.<module>`;
+  let rec = fns.get(qual);
+  if (!rec) {
+    rec = { local: "<module>", direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
+            cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(),
+            entry: false, unitKind: "initializer",
+            loc: `${path.relative(rootDir, sf.fileName)}:1:1` };
+    fns.set(qual, rec);
+  }
+  return qual;
+}
 // nearest enclosing analyzed function (closures attribute to it — SEMANTICS §2)
 function enclosing(node) {
   for (let p = node; p; p = p.parent) {
@@ -1104,6 +1127,9 @@ function enclosing(node) {
     if (ts.isDecorator(p)) return null;
     const n = nodeName.get(p);
     if (n) return n;
+    // Reached the SourceFile with no named unit: a TOP-LEVEL executable statement. Attribute to the
+    // file's synthesized `<module>` initializer unit (minted lazily here) rather than dropping it.
+    if (ts.isSourceFile(p)) return moduleUnit(p);
   }
   return null;
 }
@@ -2236,7 +2262,10 @@ for (const [name, rec] of fns) {
   // them are NOT in `inferred`, so it is a LOWER BOUND when this is non-empty. Omitted when none.
   if (rec.blind.size) entry.invisible = [...rec.blind].sort();
   if (rec.entry) entry.entryPoint = true;
-  if (rec.isCjsExport) entry.unitKind = "export"; // spec 0.5 draft, informative — per-unit, not by name
+  // unitKind (spec §2, informative — per-unit, not by name): the synthesized `<module>` initializer
+  // carries its own kind (set at mint), a CJS export is tagged "export".
+  if (rec.unitKind) entry.unitKind = rec.unitKind;
+  else if (rec.isCjsExport) entry.unitKind = "export"; // spec 0.5 draft, informative — per-unit, not by name
   functions.push(entry);
 }
 // `package` names what this report COVERS — a consumer chaining it registers coverage even when

@@ -6,6 +6,33 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.14.0] — 2026-07-14
+
+### spec 0.14 — the top-level `<module>` initializer unit
+
+candor-ts now declares **spec `0.14`** (`SPEC_VERSION` in `scan.mjs` + `query.mjs`; the envelope +
+`--gate-json` verdict carry it). **⚠ report bytes change** — a consumer pinning `spec == "0.13"` must
+accept `0.14`, and a module whose top-level executable code performed an effect **was previously
+DROPPED as an empty, false-"pure" report**; it now emits a synthesized `<module>` unit (regenerate
+baselines; a scan over such a file gains a unit and its effects it did not carry at 0.13). The headline
+below is the reason to upgrade.
+
+### ✨ The top-level `<module>` initializer unit — an effect that was silently dropped is now a unit
+
+A module whose **top-level executable code** performed an effect — a top-level `await`, an IIFE, a bare
+`fetch(…)` / `readFileSync(…)`, an `export const x = await …` — carried that effect **nowhere**: the
+top-level statements belong to no named function, so a report over such a file came back **empty**, a
+false-"pure" answer. That is the cardinal sin: a `deny Llm` / `deny Net` / `deny Fs` gate **passed** a
+file that egressed at import time, because the effect had no unit to attach to.
+
+The top-level effects are now synthesized as **one `<module>` unit per file**, carrying
+`unitKind:"initializer"`, the effects performed at module scope, and the call edges out of top-level
+code (so its inferred set reflects the **transitive** reach of everything the module runs on import).
+The unit takes part in the gate like any other: a top-level `fetch` to a model host now fails a
+`deny Llm` policy, a top-level `readFileSync` fails `deny Fs`. Found by dogfooding a real OSS LLM app
+(**openai-quickstart-node**), whose model call ran at module top level and reported as pure. Conformance
+**PART 4p** pins the initializer unit four-way (candor-java / -rust / -ts / -swift).
+
 ## [0.13.0] — 2026-07-14
 
 ### spec 0.13 — the `Llm` effect + the edit-time gate's self-inspection surfaces
