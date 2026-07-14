@@ -520,17 +520,20 @@ test("isModelHost: known model hosts + subdomains + Ollama port + Bedrock", () =
   assert.equal(isModelHost("API.OPENAI.COM"), true);      // case-insensitive
   assert.equal(isModelHost("eu.api.openai.com"), true);   // a subdomain of a listed host counts
   assert.equal(isModelHost("api.anthropic.com:443"), true); // :port stripped
-  assert.equal(isModelHost("localhost:11434"), true);     // Ollama port
+  assert.equal(isModelHost("localhost:11434"), true);     // Ollama — LOOPBACK :11434 only
   assert.equal(isModelHost("127.0.0.1:11434"), true);
-  assert.equal(isModelHost("bedrock-runtime.us-east-1.amazonaws.com"), true); // Bedrock (parity #4)
-  assert.equal(isModelHost("my-bedrock-proxy.amazonaws.com"), true);          // contains "bedrock" + .amazonaws.com
+  assert.equal(isModelHost("bedrock-runtime.us-east-1.amazonaws.com"), true);       // Bedrock RUNTIME
+  assert.equal(isModelHost("bedrock-agent-runtime.us-east-1.amazonaws.com"), true); // + agent runtime
 });
-test("isModelHost: an UNKNOWN host stays bare — never guessed", () => {
+test("isModelHost: an UNKNOWN host stays bare — never guessed (no over-match fabrication)", () => {
   assert.equal(isModelHost("api.weather.gov"), false);
   assert.equal(isModelHost("example.com"), false);
   assert.equal(isModelHost("openai.com.evil.example"), false); // NOT a subdomain of a listed host
   assert.equal(isModelHost("s3.amazonaws.com"), false);        // .amazonaws.com but not bedrock
   assert.equal(isModelHost("localhost:8080"), false);          // a non-11434 local port is not Ollama
+  assert.equal(isModelHost("svc.internal.example.com:11434"), false); // max-review r3: a REMOTE host on :11434 is NOT Ollama
+  assert.equal(isModelHost("bedrock-backups.s3.amazonaws.com"), false); // r3: an S3 bucket NAMED bedrock is NOT the runtime
+  assert.equal(isModelHost("bedrock.us-east-1.amazonaws.com"), false);  // r3: the Bedrock CONTROL plane is not model inference
   assert.equal(isModelHost(null), false);
 });
 test("modelHostEffects: [Llm] for a model host, [] otherwise (Net added by the caller)", () => {
