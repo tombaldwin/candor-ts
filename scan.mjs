@@ -2712,6 +2712,7 @@ if (baselinePath !== null) {
         + `turning effectful reads as new code and is NOT caught (only an already-effectful fn widening is). `
         + `Regenerate the baseline with --out so the .callgraph.json is written alongside it.`);
     }
+    const unknownOnly = [];   // ⟨0.16 staged⟩ advisory: fns that gained ONLY Unknown vs the baseline
     for (const name of [...inferred.keys()].sort()) {
       const prior = base.get(name);
       // ⟨0.16 staged⟩ Existence ladder: in the baseline REPORT → its recorded inferred set is the prior;
@@ -2723,10 +2724,23 @@ if (baselinePath !== null) {
         : null;                                                 // new function — not a regression
       if (priorSet === null) continue;
       const gained = [...inferred.get(name)].filter((x) => !priorSet.has(x)).sort();
-      if (gained.length) {
-        gateViolations.push({ rule: "AS-EFF-005", fn: name, effects: gained,
-          detail: `\`${name}\` gained effect { ${gained.join(", ")} } not present in the baseline` });
-      }
+      if (!gained.length) continue;
+      // ⟨0.16 staged⟩ the ratchet fires only on gaining a REAL boundary effect. An Unknown-ONLY gain is
+      // the §4 trust marker, not an effect (`pure` policies exclude it), and on version bumps it is
+      // dominated by resolution noise — DISCLOSE it (advisory), never fail the gate on it. Mirrors the
+      // reference engine (candor-scan gate.rs check_baseline).
+      const real = gained.filter((x) => x !== "Unknown");
+      if (!real.length) { unknownOnly.push(name); continue; }
+      gateViolations.push({ rule: "AS-EFF-005", fn: name, effects: real,
+        detail: `\`${name}\` gained effect { ${real.join(", ")} } not present in the baseline` });
+    }
+    if (unknownOnly.length) {
+      unknownOnly.sort();
+      const shown = unknownOnly.slice(0, 3).join(", ");
+      const more = unknownOnly.length > 3 ? ` (+${unknownOnly.length - 3} more)` : "";
+      console.error(`candor-ts: note — ${unknownOnly.length} function(s) gained an unresolved call `
+        + `(Unknown) vs the baseline but no real effect — advisory, NOT a regression (Unknown is the §4 `
+        + `trust marker, dominated by resolution noise on version bumps): ${shown}${more}`);
     }
   }
 }

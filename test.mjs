@@ -3055,6 +3055,40 @@ export function fetch_(h: string): Promise<Response> { readFileSync("/etc/x"); r
   const rNew = run({ CANDOR_BASELINE: bl });
   check("⟨0.16⟩ a genuinely new effectful fn (in neither report nor callgraph) stays exempt (exit 0)",
         rNew.status === 0 && !rNew.stdout.includes("[AS-EFF-005]"), `status=${rNew.status} ${(rNew.stdout + rNew.stderr).slice(0, 200)}`);
+  fs.writeFileSync(path.join(d, "util.ts"), utilPure);   // revert util for the Unknown-only arm below
+
+  // ── ⟨0.16 staged⟩ an Unknown-ONLY gain is ADVISORY, not a regression ──────────────────────────────
+  // Unknown is the §4 trust marker, not an effect (`pure` policies exclude it); on real dependency bumps
+  // a pure→Unknown transition is dominated by resolution noise, so exit-1 on it would break CI on
+  // innocuous bumps. A formerly-pure fmt that now invokes a Function-typed param (an unresolvable call →
+  // Unknown, no real effect) must exit 0 with a stderr NOTE — NOT the [AS-EFF-005] line — and keep
+  // --gate-json ok:true. Mirrors the reference engine (candor-scan gate.rs check_baseline). A REAL
+  // effect gain is still a violation (acceptance 1 above, on Fs), and a REAL+Unknown gain reports the
+  // real set only (Unknown filtered from the shown effects).
+  fs.writeFileSync(path.join(d, "util.ts"),
+    `export function fmt(s: string, cb: Function): string { cb(); return s.toUpperCase(); }`);
+  const guAdv = path.join(d, "gate-adv.json");
+  const rUnk = run({ CANDOR_BASELINE: bl }, "--gate-json", guAdv);
+  check("⟨0.16⟩ Unknown-only gain: a formerly-pure fmt gaining ONLY Unknown exits 0 (advisory, not a regression)",
+        rUnk.status === 0 && !rUnk.stdout.includes("[AS-EFF-005]"), `status=${rUnk.status} ${(rUnk.stdout + rUnk.stderr).slice(0, 200)}`);
+  check("⟨0.16⟩ Unknown-only gain: a stderr NOTE discloses the advisory (names the fn, cites §4 trust marker)",
+        /note — 1 function\(s\) gained an unresolved call \(Unknown\)/.test(rUnk.stderr) && rUnk.stderr.includes("util.fmt") && /advisory, NOT a regression/.test(rUnk.stderr),
+        rUnk.stderr.slice(0, 300));
+  let guv = null; try { guv = JSON.parse(fs.readFileSync(guAdv, "utf8")); } catch { /* null → checks below fail raw */ }
+  check("⟨0.16⟩ Unknown-only gain: --gate-json ok stays true (an advisory must NOT set ok:false)",
+        guv?.ok === true && !(guv?.violations ?? []).some((x) => x.rule === "AS-EFF-005"), JSON.stringify(guv)?.slice(0, 240));
+
+  // a REAL+Unknown gain together → still a violation, but the shown effects are the REAL set (Unknown filtered)
+  fs.writeFileSync(path.join(d, "util.ts"),
+    `import { readFileSync } from "node:fs";
+export function fmt(s: string, cb: Function): string { cb(); readFileSync("/etc/x"); return s.toUpperCase(); }`);
+  const guMix = path.join(d, "gate-mix.json");
+  const rMix = run({ CANDOR_BASELINE: bl }, "--gate-json", guMix);
+  let mv = null; try { mv = JSON.parse(fs.readFileSync(guMix, "utf8")); } catch { /* null */ }
+  const mRec = mv?.violations?.find((x) => x.rule === "AS-EFF-005" && x.fn === "util.fmt");
+  check("⟨0.16⟩ real+Unknown gain: still a violation (exit 1), shown effects are the REAL set with Unknown filtered",
+        rMix.status === 1 && mv?.ok === false && mRec?.effects?.includes("Fs") && !mRec?.effects?.includes("Unknown"),
+        `status=${rMix.status} ${JSON.stringify(mRec)}`);
 }
 
 // ── doc drift gates (TESTING.md §9): the family phrases the docs must carry ────────────────────────
