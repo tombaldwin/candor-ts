@@ -396,6 +396,9 @@ switch (cmd) {
     // written; the paths silently vanished) and dropped Exec `cmds` entirely. Call the shared show so
     // the CLI and the MCP `candor_show` are one implementation that cannot diverge again.
     const { prefix, args: [q] } = resolveReportVerb(args, 1);
+    // A missing/empty <query> is a LOUD usage error (exit 2, like candor-java) — never a silently-empty
+    // `[]` at exit 0, which reads as an authoritative "no such function" over a question never asked.
+    if (!q) { console.error("usage: candor-ts-query show <query> [--report <locator>] [--json]"); process.exit(2); }
     emit(coreShow(loadReportOrDie(prefix), q));
     break;
   }
@@ -404,6 +407,9 @@ switch (cmd) {
     // Hand-copies of core functions in this file have drifted three times (show, callers, diff); the
     // fix each time was the same: delegate, keep query.mjs as arg-parsing + emit + exit codes only.
     const { prefix, args: [eff] } = resolveReportVerb(args, 1);
+    // A missing/empty <Effect> is a LOUD usage error (exit 2, like candor-java's missing-arg path) —
+    // never an authoritative-empty {directly:[],inherited:[]} at exit 0 (a false all-clear shape).
+    if (!eff) { console.error("usage: candor-ts-query where <Effect> [--report <locator>] [--json]"); process.exit(2); }
     emit(coreWhere(loadReportOrDie(prefix), eff));
     break;
   }
@@ -412,6 +418,9 @@ switch (cmd) {
     // it, the byte-for-byte {of,direct,transitive} shape is unchanged (cross-engine parity). Call the
     // shared query-core so the CLI and MCP compute one truth (the prior inline copy had drifted before).
     const { prefix, args: [q], includeUnknown } = resolveReportVerb(args, 1, { includeUnknown: true });
+    // A missing/empty <query> is a LOUD usage error (exit 2, like candor-java) — never an empty
+    // {of:[],direct:[],transitive:[]} at exit 0 (reads as "nothing reaches it" for a fn never named).
+    if (!q) { console.error("usage: candor-ts-query callers <query> [--include-unknown] [--report <locator>] [--json]"); process.exit(2); }
     const cg = loadCallgraph(prefix);
     if (includeUnknown) emit(callersFrontier(cg, loadReportOrDie(prefix), loadHierarchy(prefix), q));
     else emit(coreCallers(cg, q));
@@ -507,6 +516,9 @@ switch (cmd) {
     // blast radius (backward dual of reachable) — reuses the shared query-core, the same logic the
     // MCP server serves. SPEC §3.1: {fn, affectedCount, affected, entryPoints:[{fn,inferred}]}.
     const { prefix, args: [q] } = resolveReportVerb(args, 1);
+    // A missing/empty <query> is a LOUD usage error (exit 2, like candor-java) — never an
+    // affectedCount:0 blast radius at exit 0 for a function that was never named.
+    if (!q) { console.error("usage: candor-ts-query impact <query> [--report <locator>] [--json]"); process.exit(2); }
     emit(coreImpact(loadReportOrDie(prefix), loadCallgraph(prefix), q));
     break;
   }
@@ -629,6 +641,10 @@ switch (cmd) {
     // pinned JSON shape. parseCanonical otherwise swallows --json, so detect it explicitly (as `tour` does).
     const wantJson = args.includes("--json");
     const { prefix, args: [fn, eff] } = resolveReportVerb(args, 2);
+    // BOTH positionals are required (`path <fn> <Effect>`) — a missing/empty one is a LOUD usage error
+    // (exit 2, like candor-java). Before this gate, one arg slid through as `<fn> undefined` and printed
+    // "does not perform undefined" at exit 0 — a false all-clear over a question that was never posed.
+    if (!fn || !eff) { console.error("usage: candor-ts-query path <fn> <Effect> [--report <locator>] [--json]"); process.exit(2); }
     const fns = loadReportOrDie(prefix);
     const cg = loadCallgraph(prefix);
     if (wantJson) emit(corePath(fns, cg, fn, eff));           // conformance PART 5 shape — UNCHANGED

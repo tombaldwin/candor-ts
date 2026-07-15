@@ -2692,6 +2692,84 @@ export { Settings };`,
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── CLI-12. missing required verb-args → usage error (exit 2), never a silent empty answer ─────────
+// `where` (and its siblings) with NO verb argument ran the query over `undefined` and emitted an
+// authoritative-empty shape at exit 0 ({directly:[],inherited:[]}, [], {of:[],direct:[],transitive:[]},
+// an affectedCount:0 blast radius, "does not perform undefined") — a false all-clear over a question
+// never asked. candor-java treats a missing required arg as a usage error (exit 2, usage line); each
+// report-backed single-arg verb now does the same. `path` requires BOTH positionals (arity 2). `fix`
+// already had the guard (pinned here so it can't regress); reachable/map take no verb-arg and are
+// exercised argless in CLI-10.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-missarg-"));
+  fs.writeFileSync(path.join(d, "r.json"), JSON.stringify({ candor: { version: "ttttttt", spec: "0.15" },
+    functions: [{ fn: "app.db.save", inferred: ["Db"], direct: ["Db"], loc: "db.ts:1" }] }));
+  fs.writeFileSync(path.join(d, "r.callgraph.json"), JSON.stringify({ "app.db.save": [] }));
+  const P = path.join(d, "r");
+
+  for (const [verb, usageRe] of [
+    ["where", /usage: candor-ts-query where <Effect>/],
+    ["show", /usage: candor-ts-query show <query>/],
+    ["callers", /usage: candor-ts-query callers <query>/],
+    ["impact", /usage: candor-ts-query impact <query>/],
+    ["path", /usage: candor-ts-query path <fn> <Effect>/],
+  ]) {
+    const r = runQuery(verb, "--report", P);
+    check(`CLI ${verb} with NO verb-arg: usage error (exit 2, usage on stderr, EMPTY stdout)`,
+          r.status === 2 && usageRe.test(r.stderr) && r.stdout.trim() === "",
+          `status=${r.status} stdout=${r.stdout.slice(0, 80)} stderr=${r.stderr.slice(0, 120)}`);
+  }
+  // an EMPTY-string arg is the same missing-arg class (never a silent empty answer)
+  const we = runQuery("where", "", "--report", P);
+  check("CLI where with an EMPTY-string <Effect>: usage error (exit 2)",
+        we.status === 2 && /usage: candor-ts-query where <Effect>/.test(we.stderr),
+        `status=${we.status} ${we.stderr.slice(0, 120)}`);
+  // path arity: ONE arg is still missing its <Effect> — both the human default and --json branch
+  const p1 = runQuery("path", "save", "--report", P);
+  check("CLI path with one arg (missing <Effect>): usage error (exit 2), never `does not perform undefined`",
+        p1.status === 2 && /usage: candor-ts-query path <fn> <Effect>/.test(p1.stderr)
+          && !/does not perform/.test(p1.stdout),
+        `status=${p1.status} ${(p1.stdout + p1.stderr).slice(0, 160)}`);
+  const p1j = runQuery("path", "save", "--json", "--report", P);
+  check("CLI path --json with one arg: usage error (exit 2), never an empty-path all-clear",
+        p1j.status === 2 && /usage: candor-ts-query path <fn> <Effect>/.test(p1j.stderr) && p1j.stdout.trim() === "",
+        `status=${p1j.status} ${(p1j.stdout + p1j.stderr).slice(0, 160)}`);
+  // fix already guarded its args — pinned so the behavior can't regress
+  const fx = runQuery("fix", "--report", P);
+  check("CLI fix with NO verb-args: usage error (exit 2) — the existing guard, pinned",
+        fx.status === 2 && /usage: candor-ts-query fix <fn> <Effect>/.test(fx.stderr),
+        `status=${fx.status} ${fx.stderr.slice(0, 120)}`);
+  // and a PRESENT arg still answers (exit 0) — the guard must not over-fire
+  const wOk = runQuery("where", "Db", "--report", P);
+  check("CLI where with a real <Effect> still answers (exit 0, the guard does not over-fire)",
+        wOk.status === 0 && JSON.parse(wOk.stdout).directly.includes("app.db.save"),
+        `status=${wOk.status} ${wOk.stdout.slice(0, 120)}`);
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── CLI-13. gate FAILURE points at the remedy verb (fix-gate); a clean run is byte-free of it ──────
+// The failing gate printed violations + `candor-ts: N policy violation(s)` but never named the engine's
+// own remedy verb. The pointer is APPEND-ONLY on the failure path, on the summary's stream (stderr):
+// exit code, violation lines and the summary text are conformance-pinned and unchanged; a zero-violation
+// run must not mention it anywhere.
+{
+  const d = project({
+    "src/web.ts": `export function handler(): void { fetch("https://api.example.com/x"); }`,
+    "policy": "deny Net\n",
+  });
+  const r = runScan(d, "--policy", path.join(d, "policy"));
+  check("failing gate: the fix-gate pointer line follows the summary on stderr (exit 1 unchanged)",
+        r.status === 1
+          && r.stderr.includes("candor-ts: 1 policy violation(s)\n→ candor-ts-query fix-gate names the remedy for each"),
+        `status=${r.status} stderr=${JSON.stringify(r.stderr.slice(-220))}`);
+  fs.writeFileSync(path.join(d, "allow.policy"), "allow Net api.example.com\n");
+  const rOk = runScan(d, "--policy", path.join(d, "allow.policy"));
+  check("clean gate: NO pointer line anywhere (zero-violation output unchanged)",
+        rOk.status === 0 && !rOk.stdout.includes("fix-gate names the remedy") && !rOk.stderr.includes("fix-gate names the remedy")
+          && rOk.stderr.includes("candor-ts: policy ✓"),
+        `status=${rOk.status} stderr=${rOk.stderr.slice(-160)}`);
+}
+
 // ── Object.create descriptor accessors (definePropertyAccessor Case B, the create half) ────────────
 // The defineProperty/defineProperties halves are pinned above; the Object.create(proto, {key: desc})
 // form — descriptor getters on the CREATED object, joined through the binding the result is assigned

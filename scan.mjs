@@ -2793,6 +2793,10 @@ if (gateJsonPath) {
 // gateViolations is non-empty only when a gate surface (policy / baseline) was active and fired.
 if (gateViolations.length) {
   console.error(`candor-ts: ${gateViolations.length} policy violation(s)`);
+  // FAILURE-only pointer at the engine's own remedy verb (append-only, same stream as the summary; a
+  // zero-violation run is byte-identical — the exit code, violation lines and summary text are pinned
+  // by the conformance suite and stay untouched).
+  console.error("→ candor-ts-query fix-gate names the remedy for each");
   process.exit(1);
 }
 if (policyPath !== null) console.error("candor-ts: policy ✓");
