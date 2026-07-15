@@ -1477,6 +1477,83 @@ const HOF_INVOKERS = new Set([
   "then", "catch", "finally", "nextTick",
 ]);
 
+// ---- process.env recognition: the direct dot access (`process.env.KEY`) is the JVM System.getenv twin,
+// but the same environment READ is spelled several other ways that all read silent-pure without help:
+// bracket access (`process.env[k]`), a local const-alias (`const env = process.env; env.KEY`),
+// destructuring (`const {KEY} = process.env`), and the `in` operator (`"KEY" in process.env`). Each of
+// these on process.env (or a confirmed direct alias of it) is Env. SOUNDNESS: only process.env and a
+// DIRECT `x = process.env` / `const {env} = process` binding trigger — a bracket/alias/destructure/`in`
+// on any OTHER object stays pure (no fabrication), and a reassigned alias local is cleared.
+//
+// `process` here must be Node's process object, NOT a project-local `const process = {…}` shadow
+// (mirrors the process.hrtime/send guard). It qualifies when it is the ambient GLOBAL (no project
+// declaration) OR a default-import of the `node:process` builtin (`import process from 'node:process'`,
+// as chalk's supports-color does) — the two are the same object.
+const declImportsNodeProcess = (decl) => {
+  // ImportClause default binding or a namespace/named import from 'node:process' | 'process'.
+  let spec = null;
+  if (ts.isImportClause(decl) && decl.parent && ts.isImportDeclaration(decl.parent)) spec = decl.parent.moduleSpecifier;
+  else if (ts.isImportSpecifier(decl)) spec = decl.parent?.parent?.parent?.moduleSpecifier;
+  else if (ts.isNamespaceImport(decl)) spec = decl.parent?.parent?.moduleSpecifier;
+  const text = spec && ts.isStringLiteral(spec) ? spec.text : null;
+  return text === "node:process" || text === "process";
+};
+const identIsGlobalProcess = (id) => {
+  if (!ts.isIdentifier(id) || id.text !== "process") return false;
+  const decls = checker.getSymbolAtLocation(id)?.declarations ?? [];
+  if (decls.some(declImportsNodeProcess)) return true;                       // `import process from 'node:process'`
+  return !decls.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName))); // else the ambient global
+};
+// `process.env` as an expression (PropertyAccess `process.env` where `process` is the global).
+const isProcessEnvExpr = (expr) =>
+  expr && ts.isPropertyAccessExpression(expr) && expr.name.text === "env" && identIsGlobalProcess(expr.expression);
+
+// The set of local-binding SYMBOLS that alias process.env — collected below, one pre-pass over the
+// sources. A symbol lands here iff its ONLY initializer/assignment is `= process.env` (a reassignment
+// to anything else removes it → the alias is cleared, per the spec's reassignment rule).
+const envAliasSymbols = new Set();
+{
+  const aliasCandidates = new Set();   // symbol -> declared `= process.env`
+  const disqualified = new Set();      // symbol assigned to something that is NOT process.env
+  const noteBinding = (symbol, init) => {
+    if (!symbol) return;
+    if (init && isProcessEnvExpr(init)) aliasCandidates.add(symbol);
+    else disqualified.add(symbol);     // bound/assigned to a non-process.env value → not (or no longer) an alias
+  };
+  const collectAliases = (node) => {
+    // `const env = process.env` / `let`/`var` — a name-identifier binding with an initializer.
+    if (ts.isVariableDeclaration(node) && node.name && ts.isIdentifier(node.name)) {
+      noteBinding(checker.getSymbolAtLocation(node.name), node.initializer ?? null);
+    }
+    // `const { env } = process` — destructuring `env` off the global `process` makes `env` an alias too.
+    else if (ts.isVariableDeclaration(node) && node.name && ts.isObjectBindingPattern(node.name)
+             && node.initializer && ts.isIdentifier(node.initializer) && identIsGlobalProcess(node.initializer)) {
+      for (const el of node.name.elements) {
+        // the property picked off `process` must be `env` (`{env}` or `{env: local}`); the bound name is the alias.
+        const propName = el.propertyName ? (ts.isIdentifier(el.propertyName) ? el.propertyName.text : null)
+                                         : (ts.isIdentifier(el.name) ? el.name.text : null);
+        if (propName === "env" && ts.isIdentifier(el.name)) aliasCandidates.add(checker.getSymbolAtLocation(el.name));
+      }
+    }
+    // `env = <expr>` reassignment — a `let`/`var` alias reassigned to a non-process.env value is cleared.
+    else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+             && ts.isIdentifier(node.left)) {
+      noteBinding(checker.getSymbolAtLocation(node.left), node.right);
+    }
+    ts.forEachChild(node, collectAliases);
+  };
+  for (const sf of sources) collectAliases(sf);
+  for (const s of aliasCandidates) if (s && !disqualified.has(s)) envAliasSymbols.add(s);
+}
+// True when `id` is an identifier resolving to a confirmed process.env alias local.
+const identIsEnvAlias = (id) => {
+  if (!id || !ts.isIdentifier(id)) return false;
+  const sym = checker.getSymbolAtLocation(id);
+  return !!sym && envAliasSymbols.has(sym);
+};
+// The receiver expression READS process.env — it is either `process.env` itself or a confirmed alias.
+const readsProcessEnv = (expr) => isProcessEnvExpr(expr) || identIsEnvAlias(expr);
+
 // ---- pass 2: per call site, the (CLASSIFY)/(EDGE)/(UNKNOWN) resolution of SEMANTICS §4 ------------
 function visitCalls(node) {
   if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
@@ -2024,10 +2101,25 @@ function visitCalls(node) {
       }
     }
   }
-  // process.env.X — a property READ, not a call (the JVM's System.getenv twin) → Env
-  if (ts.isPropertyAccessExpression(node) && node.expression.getText() === "process.env") {
-    const owner = enclosing(node);
-    if (owner) fns.get(owner).direct.add("Env");
+  // Reading process.env — the JVM System.getenv twin → Env. All the common idioms count, not just the
+  // direct `process.env.KEY` dot access (see the process.env-recognition note above): dot/bracket access
+  // on process.env or a confirmed alias, destructuring a key off it, and the `in` membership test.
+  {
+    const markEnv = () => { const owner = enclosing(node); if (owner) fns.get(owner).direct.add("Env"); };
+    // `process.env.KEY` / `env.KEY` (dot) and `process.env["KEY"]` / `env[k]` (bracket, literal OR dynamic key).
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && readsProcessEnv(node.expression)) {
+      markEnv();
+    }
+    // `const {KEY} = process.env` / `const {KEY} = env` — the object-binding pattern's initializer reads env.
+    else if (ts.isVariableDeclaration(node) && node.name && ts.isObjectBindingPattern(node.name)
+             && node.initializer && readsProcessEnv(node.initializer)) {
+      markEnv();
+    }
+    // `"KEY" in process.env` / `"KEY" in env` — the `in` operator's right operand reads env.
+    else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InKeyword
+             && readsProcessEnv(node.right)) {
+      markEnv();
+    }
   }
   // Runtime GLOBALS reached as CALLS with no import for the κ resolver to classify: `process.hrtime()`/
   // `.hrtime.bigint()` is a monotonic clock read (Clock); `process.send(...)` is the child↔parent IPC

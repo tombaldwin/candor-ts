@@ -2065,6 +2065,57 @@ export function shadowed(y: string) { return require(y); }`,
         entry(report, "src.shadow.shadowed") === undefined, JSON.stringify(entry(report, "src.shadow.shadowed")));
 }
 
+// ── process.env READ idioms → Env: not just the direct `process.env.KEY` dot access, but bracket access,
+// a local const-alias of process.env, destructuring a key off it, and the `in` membership test. Each of
+// these read SILENT-PURE before (dogfound on chalk/supports-color, which reads env via `const {env} =
+// process; 'FORCE_COLOR' in env; env.TERM`). SOUNDNESS: the same idiom on a NON-process.env object stays
+// pure (no fabrication), and a reassigned alias local is cleared. ──────────────────────────────────────
+{
+  const d = project({
+    "src/pos.ts": `const envA = process.env;
+const { env: envB } = process;
+export function bracket() { return process.env["FOO"]; }
+export function aliasDot() { return envA.FOO; }
+export function aliasBracket() { return envA["FOO"]; }
+export function destr() { const { FOO } = process.env; return FOO; }
+export function inOp() { return "FOO" in process.env; }
+export function inAlias() { return "FOO" in envA; }
+export function destrEnvOffProcess() { return envB.TERM; }
+export function dynKey(k: string) { return envA[k]; }`,
+    "src/neg.ts": `function getConfig(): Record<string, string> { return {}; }
+const cfg = getConfig();
+export function cfgBracket() { return cfg["FOO"]; }
+export function inParam(o: object) { return "FOO" in o; }
+export function destrParam(o: { FOO?: string }) { const { FOO } = o; return FOO; }`,
+    "src/shadow.ts": `const process = { env: { FOO: "x" } as Record<string, string> };
+export function shadowed() { return process.env["FOO"]; }`,
+    "src/reassign.ts": `function other(): Record<string, string> { return {}; }
+let env = process.env;
+env = other();
+export function afterReassign() { return env.FOO; }`,
+  });
+  const { report } = scan(d);
+  const isEnv = (fn) => entry(report, fn)?.inferred.includes("Env");
+  // POSITIVE — all read Env.
+  check("process.env[\"KEY\"] bracket access → Env", isEnv("src.pos.bracket"), JSON.stringify(entry(report, "src.pos.bracket")));
+  check("const env = process.env; env.KEY → Env (alias dot)", isEnv("src.pos.aliasDot"));
+  check("const env = process.env; env[\"KEY\"] → Env (alias bracket)", isEnv("src.pos.aliasBracket"));
+  check("const {KEY} = process.env → Env (destructure)", isEnv("src.pos.destr"));
+  check("\"KEY\" in process.env → Env (in operator)", isEnv("src.pos.inOp"));
+  check("\"KEY\" in env → Env (in operator on alias)", isEnv("src.pos.inAlias"));
+  check("const {env} = process; env.KEY → Env (env destructured off process)", isEnv("src.pos.destrEnvOffProcess"));
+  check("const env = process.env; env[dynamicKey] → Env (dynamic bracket key still reads env)", isEnv("src.pos.dynKey"));
+  // NEGATIVE — fabrication guard: same idioms on a NON-process.env object stay pure.
+  check("cfg[\"KEY\"] where cfg is NOT process.env stays pure (no fabricated Env)",
+        !isEnv("src.neg.cfgBracket"), JSON.stringify(entry(report, "src.neg.cfgBracket")));
+  check("\"KEY\" in <param> stays pure (in on an arbitrary object is not Env)", !isEnv("src.neg.inParam"));
+  check("const {KEY} = <param> stays pure (destructure off an arbitrary object is not Env)", !isEnv("src.neg.destrParam"));
+  check("a project-local `const process` shadow does NOT fabricate Env (process.env[\"K\"] on the shadow)",
+        !isEnv("src.shadow.shadowed"), JSON.stringify(entry(report, "src.shadow.shadowed")));
+  check("a `let env = process.env` REASSIGNED to a non-env value clears the alias (stays pure)",
+        !isEnv("src.reassign.afterReassign"), JSON.stringify(entry(report, "src.reassign.afterReassign")));
+}
+
 // @types/X (DefinitelyTyped) maps to the RUNTIME package X so the curated κ tier (keyed by runtime names)
 // fires — a curated package typed via @types must NOT read silent-pure. Corpus find: `pool.query()` reported
 // pure because the decl resolved to `@types/pg` (not `pg`), so the pg→Db rule never matched. A real TS
