@@ -291,8 +291,12 @@ const TOOLS = {
       // ⟨spec 0.12 staged⟩ baseline callgraph → byFunction[].origin, same as the CLI (parity). The
       // loader's non-enumerable `partial` tag rides along: a corrupt baseline sidecar (edges dropped,
       // disclosed) downgrades origin to "unknown", never a fabricated "new" over a truncated graph.
+      // ⟨0.15 staged⟩ coverage disclosure — the SAME gainsCoverage the CLI verb spreads (the parity
+      // rule): optional `coverage` (current envelope's ledger) + `coverageDelta` (baseline names
+      // differ), both omitted when nothing applies — no other field of the tool result changes.
       return { baseline_version: Q.reportVersion(b) ?? "", engine_version: Q.reportVersion(p) ?? "",
-               ...Q.gains(loadReportLoud(p), loadReportLoud(b), Q.loadCallgraph(b)) };
+               ...Q.gains(loadReportLoud(p), loadReportLoud(b), Q.loadCallgraph(b)),
+               ...Q.gainsCoverage(p, b) };
     },
   },
   candor_activity: {

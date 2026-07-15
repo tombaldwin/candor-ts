@@ -38,7 +38,7 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          containment as coreContainment, diff as coreDiff,
          where as coreWhere, map as coreMap, whatif as coreWhatif,
          fix as coreFix, fixGate as coreFixGate, unverified as coreUnverified,
-         matches as coreMatches,
+         matches as coreMatches, gainsCoverage,
          loadReport, loadCallgraph, reportVersion, reportPackage } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
 
@@ -571,7 +571,14 @@ switch (cmd) {
     // a MISSING sidecar loads {} and a corrupt (matched-but-unparseable) one is tagged `partial`
     // with its edges dropped-and-disclosed: either way "new" is unavailable and origin falls back
     // to "unknown" — the JSON itself discloses, never guessing "new" over a truncated graph.
-    emit({ baseline_version: gbv ?? "", engine_version: gv ?? "", ...coreGains(loadReportOrDie(curPrefix), loadReportOrDie(basePrefix), loadCallgraph(basePrefix)) });
+    // ⟨0.15 staged⟩ coverage disclosure (COVERAGE-DESIGN.md §3): the CURRENT report's `coverage`
+    // envelope rides along (a gained effect in an uncovered dep is invisible — "no gains" must not
+    // read as total), plus `coverageDelta` when the baseline names different blind packages. Both
+    // OMITTED when nothing applies, so a coverage-free comparison is byte-identical to ⟨0.14⟩.
+    // Shared with the MCP `candor_gains` tool (gainsCoverage — the parity rule).
+    emit({ baseline_version: gbv ?? "", engine_version: gv ?? "",
+           ...coreGains(loadReportOrDie(curPrefix), loadReportOrDie(basePrefix), loadCallgraph(basePrefix)),
+           ...gainsCoverage(curPrefix, basePrefix) });
     break;
   }
   case "path": {

@@ -2502,6 +2502,19 @@ for (const [name, rec] of fns) {
 // `functions` is empty (an all-pure package's report is its purity claim, SPEC §2 rule 3).
 const envelope = { candor: { version: ENGINE_VERSION, toolchain: `node-${process.versions.node}`, spec: SPEC_VERSION },
                    package: pkgName, functions };
+// ⟨0.15 staged⟩ the κ-coverage ledger as DATA (COVERAGE-DESIGN.md §1): ONE sorted form (count desc,
+// name asc — exactly the stderr line's order) feeds the envelope field, the stderr receipt below, and
+// the --gate-json advisory, so the three can never tell different stories.
+const uncoveredLedger = [...unlistedSeen.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+// ⟨0.15 staged⟩ `coverage` envelope field — the stderr disclosure travels WITH the artifact, so a
+// report-consuming verb can no longer read a partially-covered report as total. Same names/counts as
+// the stderr line. OMITTED entirely when nothing is uncovered (the `extensions`-field precedent): a
+// fully-covered report stays byte-identical to a ⟨0.14⟩ one, so the rung is wire-compatible. The
+// per-function posture is UNCHANGED: a resolvable-but-uncovered call keeps `invisible`, an
+// unresolvable one keeps the stronger `Unknown` (COVERAGE-DESIGN.md §2 blesses both).
+if (uncoveredLedger.length) {
+  envelope.coverage = { uncovered: uncoveredLedger.map(([name, calls]) => ({ name, calls })) };
+}
 const cg = {};
 for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
 // Write ATOMICALLY (temp + rename): a concurrent reader — the MCP server or another `query` while
@@ -2555,7 +2568,7 @@ if (!wantJson) {
   }
 }
 if (unlistedSeen.size > 0) {
-  const top = [...unlistedSeen.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const top = uncoveredLedger; // ⟨0.15 staged⟩ the shared sorted ledger — same names/counts as envelope `coverage`
   const shown = top.slice(0, 8).map(([p, n]) => `${p} (${n} call${n === 1 ? "" : "s"})`).join(", ");
   const more = top.length > 8 ? ` + ${top.length - 8} more` : "";
   console.error(`candor-ts: candor's classifier doesn't cover ${top.length} package${top.length === 1 ? "" : "s"} this code calls into — `
@@ -2686,7 +2699,17 @@ for (const x of gateViolations) emitViolation(`[${x.rule}] ${x.detail}`);
 // the SAME gateViolations that set the exit code (so it can't disagree). Written whenever the flag is set —
 // ok:true,[] when no gate is configured. Must precede the exit(1) below.
 if (gateJsonPath) {
-  const verdict = JSON.stringify({ spec: SPEC_VERSION, ok: gateViolations.length === 0, violations: gateViolations }, null, 1);
+  const verdictObj = { spec: SPEC_VERSION, ok: gateViolations.length === 0, violations: gateViolations };
+  // ⟨0.15 staged⟩ coverage ADVISORY (COVERAGE-DESIGN.md §3): when the κ ledger is non-empty, the
+  // verdict discloses what the gate could NOT see — VERDICT-PRESERVING (the ⟨0.9⟩ provable-purity
+  // auto-disclosure precedent exactly): ok/violations/exit are computed above and untouched here. A
+  // gate does not fail on uncovered deps (nearly every real scan has some); the policy author sees
+  // the note and decides — `deny Unknown` remains the opt-in strict posture. OMITTED when fully
+  // covered, so a pre-0.15 consumer's verdict is byte-identical.
+  if (uncoveredLedger.length) {
+    verdictObj.coverage = { uncovered: uncoveredLedger.length, packages: uncoveredLedger.map(([p]) => p) };
+  }
+  const verdict = JSON.stringify(verdictObj, null, 1);
   if (gateJsonPath === "-") console.log(verdict);
   else {
     // The verdict is a SURFACING side-output: an unwritable path must be one stderr line, never a raw

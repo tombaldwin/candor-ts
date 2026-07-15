@@ -312,6 +312,32 @@ ok("mcp --root: a MISSING baseline stays a loud, informative error (existence ch
    rootById[6].result.content[0].text.slice(0, 160));
 fs.rmSync(OUTSIDE, { recursive: true, force: true });
 
+// ── ⟨0.15 staged⟩ candor_gains coverage parity: the MCP tool spreads the SAME gainsCoverage the CLI
+// verb does (one code path, the parity rule) — the current envelope's ledger + the name-level delta
+// ride along; a coverage-free comparison carries neither key (the pre-0.15 result, byte-identical).
+{
+  const CV = fs.mkdtempSync("/tmp/candor-covgains-");
+  const doc = (extra) => JSON.stringify({ candor: { version: "eeeeeee", spec: "0.14" },
+    functions: [{ fn: "m.f", inferred: ["Net"], direct: ["Net"] }], ...extra });
+  fs.writeFileSync(`${CV}/cur.json`, doc({ coverage: { uncovered: [{ name: "blinddep", calls: 2 }] } }));
+  fs.writeFileSync(`${CV}/base.json`, doc({}));
+  const covReplies = await mcpSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "candor_gains", arguments: { report: `${CV}/cur`, baseline: `${CV}/base` } } },
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "candor_gains", arguments: { report: `${CV}/base`, baseline: `${CV}/base` } } },
+  ]);
+  const covById = Object.fromEntries(covReplies.map((r) => [r.id, r]));
+  const gCov = JSON.parse(covById[2].result.content[0].text);
+  ok("mcp candor_gains ⟨0.15⟩: the current report's coverage envelope + nowUncovered delta ride along",
+     eq(gCov.coverage, { uncovered: [{ name: "blinddep", calls: 2 }] })
+       && eq(gCov.coverageDelta, { nowUncovered: ["blinddep"], noLongerUncovered: [] }),
+     JSON.stringify(gCov).slice(0, 240));
+  const gPlain = JSON.parse(covById[3].result.content[0].text);
+  ok("mcp candor_gains ⟨0.15⟩: coverage-free reports carry NEITHER coverage key (pre-0.15 result unchanged)",
+     !("coverage" in gPlain) && !("coverageDelta" in gPlain), JSON.stringify(Object.keys(gPlain)));
+  fs.rmSync(CV, { recursive: true, force: true });
+}
+
 // ── the MCP list caps: an over-cap result is TRUNCATED with exact counts + a disclosure flag ────────
 // These caps are the agent-context contract (MCP_LIST_CAP=50): a large repo's where/callers/impact/
 // blindspots answer must stay token-bounded, the COUNT must stay exact, and the truncation must be

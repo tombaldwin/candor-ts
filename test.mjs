@@ -423,6 +423,51 @@ export function place(db: DatabaseSync): void { save(db); }`,
   let v2 = null;
   try { v2 = JSON.parse(fs.readFileSync(gp2, "utf8")); } catch { /* null */ }
   check("--gate-json with no gate → ok:true, []", r2.status === 0 && v2?.ok === true && v2.violations.length === 0, `status=${r2.status} ok=${v2?.ok}`);
+  // ⟨0.15 staged⟩ a fully-covered scan's verdict carries NO coverage key — the pre-0.15 verdict is
+  // byte-compatible, and conformance's cross-engine verdict compare sees the same field set.
+  check("⟨0.15⟩ --gate-json on a fully-covered scan has NO coverage field (verdict unchanged)",
+        v !== null && !("coverage" in v) && !("coverage" in (v2 ?? { coverage: 1 })),
+        JSON.stringify(Object.keys(v ?? {})));
+}
+
+// ── 3c2. ⟨0.15 staged⟩ --gate-json coverage ADVISORY: disclosed, never verdict-affecting ────────────
+// COVERAGE-DESIGN.md §3: when the κ ledger is non-empty the verdict gains `coverage: {uncovered: N,
+// packages: [...]}` — VERDICT-PRESERVING (the ⟨0.9⟩ provable-purity auto-disclosure precedent): ok /
+// violations / exit are identical with or without it, on both a failing and a passing gate.
+{
+  const stub = {
+    "node_modules/blinddep/package.json": `{"name":"blinddep","version":"0.0.0","main":"index.js","types":"index.d.ts"}`,
+    "node_modules/blinddep/index.d.ts": `export declare function poke(): string;`,
+    "node_modules/blinddep/index.js": `module.exports.poke = () => "y";`,
+  };
+  const d = project({
+    ...stub,
+    "src/db.ts": `import { DatabaseSync } from "node:sqlite";
+import { poke } from "blinddep";
+export function save(db: DatabaseSync): void { poke(); db.exec("UPDATE customers SET v = 1"); }`,
+    "deny-db.policy": "deny Db\n",
+    "deny-net.policy": "deny Net\n",
+  });
+  const gate = (policy) => {
+    const gp = path.join(d, `gate-${path.basename(policy)}.json`);
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", path.join(d, policy), "--gate-json", gp], { encoding: "utf8" });
+    let v = null;
+    try { v = JSON.parse(fs.readFileSync(gp, "utf8")); } catch { /* null → checks fail with raw */ }
+    return { r, v };
+  };
+  const bad = gate("deny-db.policy");   // violation + uncovered dep
+  check("⟨0.15⟩ gate advisory: a FAILING verdict carries the coverage note, ok/exit untouched",
+        bad.r.status === 1 && bad.v?.ok === false && bad.v.violations.length === 1
+          && JSON.stringify(bad.v.coverage) === JSON.stringify({ uncovered: 1, packages: ["blinddep"] }),
+        `status=${bad.r.status} ${JSON.stringify(bad.v)}`);
+  const good = gate("deny-net.policy"); // clean gate + uncovered dep
+  check("⟨0.15⟩ gate advisory: a PASSING verdict stays ok:true/exit 0 — the note discloses, never gates",
+        good.r.status === 0 && good.v?.ok === true && good.v.violations.length === 0
+          && JSON.stringify(good.v.coverage) === JSON.stringify({ uncovered: 1, packages: ["blinddep"] }),
+        `status=${good.r.status} ${JSON.stringify(good.v)}`);
+  check("⟨0.15⟩ gate advisory: field ORDER preserves the pinned verdict fields first (spec, ok, violations)",
+        JSON.stringify(Object.keys(bad.v ?? {})) === JSON.stringify(["spec", "ok", "violations", "coverage"]),
+        JSON.stringify(Object.keys(bad.v ?? {})));
 }
 
 // ── 3d. --gate-json robustness: unwritable path never crashes; `-` keeps stdout pure ────────────────
@@ -1441,11 +1486,40 @@ import { chunk } from "lodash";
 import * as fsm from "node:fs";
 export function go(): string { fsm.readFileSync("/x"); chunk("ab"); return pad("hi"); }`,
   });
-  const { r } = scan(d);
+  const { r, report } = scan(d);
   check("coverage ledger names an unlisted package in the receipt",
         /classifier doesn't cover 1 package/.test(r.stderr) && /leftpad \(1 call\)/.test(r.stderr), r.stderr);
   check("coverage ledger stays quiet about reviewed-pure and curated packages",
         !/lodash/.test(r.stderr) && !/node:fs/.test(r.stderr), r.stderr);
+  // ⟨0.15 staged⟩ the ledger travels WITH the artifact (COVERAGE-DESIGN.md §1): the envelope carries the
+  // SAME names/counts the stderr line prints, and per-fn attribution (`invisible`) is unchanged by it.
+  check("⟨0.15⟩ envelope `coverage.uncovered` carries the stderr ledger as data (same names, same counts)",
+        JSON.stringify(report?.coverage) === JSON.stringify({ uncovered: [{ name: "leftpad", calls: 1 }] }),
+        JSON.stringify(report?.coverage));
+  check("⟨0.15⟩ the per-fn posture is untouched: the calling fn still carries `invisible` (no reshape)",
+        entry(report, "src.a.go")?.invisible?.includes("leftpad"), JSON.stringify(entry(report, "src.a.go")));
+}
+// ⟨0.15 staged⟩ the coverage envelope is OMITTED when nothing is uncovered — a fully-covered report is
+// byte-identical to a ⟨0.14⟩ one (the wire-compatibility half of the rung), and an UNRESOLVABLE import
+// keeps the stronger `Unknown` posture without joining the ledger (no node_modules path to count).
+{
+  const d = project({
+    "src/c.ts": `import * as fsm from "node:fs";
+export function covered(): Buffer { return fsm.readFileSync("/x"); }`,
+  });
+  const { report } = scan(d);
+  check("⟨0.15⟩ a fully-covered scan OMITS the coverage envelope key entirely",
+        report !== null && !("coverage" in report)
+          && JSON.stringify(Object.keys(report)) === JSON.stringify(["candor", "package", "functions"]),
+        JSON.stringify(Object.keys(report ?? {})));
+  const d2 = project({
+    "src/u.ts": `import { x } from "not-installed-dep";
+export function f(): string { return x(); }`,
+  });
+  const r2 = scan(d2);
+  check("⟨0.15⟩ an unresolvable import stays Unknown (the stronger posture) and outside the ledger — no coverage key",
+        entry(r2.report, "src.u.f")?.inferred.includes("Unknown") && !("coverage" in r2.report),
+        JSON.stringify({ keys: Object.keys(r2.report ?? {}), f: entry(r2.report, "src.u.f") }));
 }
 
 // ── interface-CHA: a LOCAL interface dispatch resolves to its implementors (the Rust move) ────────
@@ -2467,6 +2541,28 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
           && /callgraph .* failed to parse/.test(gPart.stderr),
         `${JSON.stringify(gP.byFunction)} stderr=${gPart.stderr.slice(0, 120)}`);
   fs.unlinkSync(path.join(d, "obase.callgraph.json"));
+
+  // ⟨0.15 staged⟩ gains coverage disclosure (COVERAGE-DESIGN.md §3): the CURRENT report's `coverage`
+  // envelope rides along + a name-level `coverageDelta` vs the baseline; every OTHER field (gained /
+  // byFunction / provenance) is unchanged by it, and a coverage-free comparison stays byte-identical
+  // to the ⟨0.14⟩ shape (no key at all — the checks above already parse those outputs strictly).
+  fs.writeFileSync(path.join(d, "covcur.json"), JSON.stringify({ candor: { version: "ddddddd", spec: "0.14" },
+    functions: [{ fn: "m.f", inferred: ["Net"], direct: ["Net"] }],
+    coverage: { uncovered: [{ name: "blinddep", calls: 2 }] } }));
+  fs.writeFileSync(path.join(d, "covbase.json"), JSON.stringify({ candor: { version: "ddddddd", spec: "0.14" },
+    functions: [] }));
+  const gCov = JSON.parse(runQuery("gains", path.join(d, "covcur"), path.join(d, "covbase")).stdout);
+  check("⟨0.15⟩ CLI gains: the CURRENT report's coverage envelope rides along (uncovered dep named)",
+        eqJson(gCov.coverage, { uncovered: [{ name: "blinddep", calls: 2 }] }) && eqJson(gCov.gained, ["Net"]),
+        JSON.stringify(gCov));
+  check("⟨0.15⟩ CLI gains: a baseline WITHOUT the ledger yields the nowUncovered delta (java's field names — wire parity)",
+        eqJson(gCov.coverageDelta, { nowUncovered: ["blinddep"], noLongerUncovered: [] }),
+        JSON.stringify(gCov.coverageDelta));
+  const gPlain = JSON.parse(runQuery("gains", path.join(d, "cur2"), path.join(d, "oldbase")).stdout);
+  check("⟨0.15⟩ CLI gains: coverage-free reports carry NEITHER coverage key (byte-identical to ⟨0.14⟩)",
+        !("coverage" in gPlain) && !("coverageDelta" in gPlain)
+          && eqJson(Object.keys(gPlain), ["baseline_version", "engine_version", "gained", "byFunction"]),
+        JSON.stringify(Object.keys(gPlain)));
 
   // the two-locator verbs fail LOUD on a typo'd prefix (the Rust engine's "no report files at …"
   // check, named per side): [] with hardFail=false otherwise emitted an authoritative EMPTY

@@ -18,6 +18,7 @@ import {
   matches, show, where, callers, map, impact, path as provenance, diff, gains, reachable, whatif,
   fix, fixGate, unverified,
   containment, loadReport, loadCallgraph, loadHierarchy, callersFrontier, blindspots, isReport,
+  reportCoverage, gainsCoverage,
 } from "./query-core.mjs";
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
@@ -164,6 +165,53 @@ test("gains: UNIONS effects across same-named rows (a last-wins Map would drop o
 });
 test("gains: a stable surface raises no alarm", () => {
   assert.deepEqual(gains([{ fn: "f", inferred: ["Fs"] }], [{ fn: "f", inferred: ["Fs"] }]).gained, []);
+});
+
+// ── query-core: reportCoverage / gainsCoverage — the ⟨0.15 staged⟩ coverage envelope consumers ─────
+// COVERAGE-DESIGN.md §1/§3: the κ ledger travels with the report; gains discloses the CURRENT ledger
+// and a name-level delta vs the baseline; a coverage-free comparison stays byte-identical to ⟨0.14⟩.
+test("reportCoverage: reads the envelope ledger, sorted count-desc/name-asc; null when absent", () => {
+  const D = fs.mkdtempSync(path.join(os.tmpdir(), "candor-cov-"));
+  fs.writeFileSync(path.join(D, "r.json"), JSON.stringify({
+    functions: [], coverage: { uncovered: [{ name: "a", calls: 1 }, { name: "z", calls: 9 }, { name: "b", calls: 1 }] },
+  }));
+  fs.writeFileSync(path.join(D, "plain.json"), JSON.stringify({ functions: [] }));   // pre-0.15 / fully covered
+  assert.deepEqual(reportCoverage(path.join(D, "r")),
+    [{ name: "z", calls: 9 }, { name: "a", calls: 1 }, { name: "b", calls: 1 }]);
+  assert.equal(reportCoverage(path.join(D, "plain")), null);                          // OMITTED, never []
+  fs.rmSync(D, { recursive: true, force: true });
+});
+test("reportCoverage: multi-report siblings merge (counts summed); malformed entries tolerated", () => {
+  const D = fs.mkdtempSync(path.join(os.tmpdir(), "candor-cov-"));
+  fs.writeFileSync(path.join(D, "r.a.scan.json"), JSON.stringify({
+    functions: [], coverage: { uncovered: [{ name: "dep", calls: 2 }, { calls: 5 }, "junk"] },
+  }));
+  fs.writeFileSync(path.join(D, "r.b.scan.json"), JSON.stringify({
+    functions: [], coverage: { uncovered: [{ name: "dep", calls: 3 }, { name: "other", calls: "NaN" }] },
+  }));
+  assert.deepEqual(reportCoverage(path.join(D, "r")),
+    [{ name: "dep", calls: 5 }, { name: "other", calls: 0 }]);  // a non-numeric count still NAMES the blind spot
+  fs.rmSync(D, { recursive: true, force: true });
+});
+test("gainsCoverage: current ledger rides along; name-level delta vs the baseline; empty case spreads to {}", () => {
+  const D = fs.mkdtempSync(path.join(os.tmpdir(), "candor-cov-"));
+  const w = (f, doc) => fs.writeFileSync(path.join(D, f), JSON.stringify(doc));
+  w("cur.json", { functions: [], coverage: { uncovered: [{ name: "newdep", calls: 2 }, { name: "kept", calls: 1 }] } });
+  w("base.json", { functions: [], coverage: { uncovered: [{ name: "kept", calls: 4 }, { name: "gone", calls: 1 }] } });
+  w("plain.json", { functions: [] });
+  const g = gainsCoverage(path.join(D, "cur"), path.join(D, "base"));
+  assert.deepEqual(g.coverage, { uncovered: [{ name: "newdep", calls: 2 }, { name: "kept", calls: 1 }] });
+  // the delta field names are the java reference engine's exactly (cross-engine wire parity)
+  assert.deepEqual(g.coverageDelta, { nowUncovered: ["newdep"], noLongerUncovered: ["gone"] });
+  // count wobble only (same names) → no delta; identical ledgers → no delta; no coverage anywhere → {}
+  w("wobble.json", { functions: [], coverage: { uncovered: [{ name: "kept", calls: 9 }, { name: "gone", calls: 2 }] } });
+  assert.equal("coverageDelta" in gainsCoverage(path.join(D, "wobble"), path.join(D, "base")), false);
+  assert.deepEqual(gainsCoverage(path.join(D, "plain"), path.join(D, "plain")), {});
+  // baseline-only ledger (a dep is no longer blind): no `coverage` block, the delta names it
+  const g2 = gainsCoverage(path.join(D, "plain"), path.join(D, "base"));
+  assert.equal("coverage" in g2, false);
+  assert.deepEqual(g2.coverageDelta, { nowUncovered: [], noLongerUncovered: ["gone", "kept"] });
+  fs.rmSync(D, { recursive: true, force: true });
 });
 
 // ── query-core: reachable / whatif ────────────────────────────────────────────────────────────────

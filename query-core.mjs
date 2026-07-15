@@ -124,6 +124,57 @@ function packagesLabel(pkgs) {
   return first.slice(0, n).join(".");
 }
 
+/** ⟨0.15 staged⟩ the report's §2 `coverage` envelope field (COVERAGE-DESIGN.md §1) — the κ ledger of
+ *  packages whose effects were INVISIBLE to the scan (absent, NOT a claim they're pure). Returns the
+ *  normalized uncovered list [{name, calls}] (multi-report siblings merged, counts summed, sorted the
+ *  producer's way: count desc, name asc), or null when absent/empty — the pre-0.15 report and the
+ *  fully-covered report look identical here, and null keeps the consumer's output field OMITTED
+ *  (never a fabricated `coverage: []` claim over a report that never carried the field). */
+export function reportCoverage(prefix) {
+  const files = fs.existsSync(`${prefix}.json`) ? [`${prefix}.json`] : siblings(prefix, isReport);
+  const merged = new Map();
+  for (const f of files) {
+    try {
+      const unc = JSON.parse(fs.readFileSync(f, "utf8"))?.coverage?.uncovered;
+      if (!Array.isArray(unc)) continue;   // absent/malformed field → contributes nothing (§2 forward-compat)
+      for (const e of unc) {
+        // Tolerate a foreign/hand-edited entry: a string `name` is required; a non-numeric `calls`
+        // counts as 0 (the entry still NAMES the blind spot — dropping it would under-disclose).
+        if (e && typeof e === "object" && typeof e.name === "string" && e.name) {
+          const n = typeof e.calls === "number" && Number.isFinite(e.calls) ? e.calls : 0;
+          merged.set(e.name, (merged.get(e.name) ?? 0) + n);
+        }
+      }
+    } catch { /* unreadable sibling — the reportVersion posture: keep looking */ }
+  }
+  if (merged.size === 0) return null;
+  return [...merged.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name, calls]) => ({ name, calls }));
+}
+
+/** ⟨0.15 staged⟩ gains' coverage disclosure (COVERAGE-DESIGN.md §3) — the OPTIONAL blocks the gains
+ *  JSON carries, computed from the two reports' envelopes. ONE code path for the CLI verb and the MCP
+ *  `candor_gains` tool (the parity rule). Returns a spreadable object:
+ *   · `coverage: {uncovered:[{name,calls}]}` — the CURRENT report's ledger, when non-empty (a gained
+ *     effect in an uncovered dep is invisible, so "no gains" must not read as total);
+ *   · `coverageDelta: {nowUncovered:[name], noLongerUncovered:[name]}` — whenever the two ledgers
+ *     NAME different packages (a dep becoming uncovered between scans is itself a signal). The field
+ *     names are the java reference engine's exactly (cross-engine wire parity). Keyed on names, not
+ *     counts: a call-count wobble is ordinary code change, a new blind package is the alarm.
+ *  Both omitted when nothing applies — a coverage-free comparison is byte-identical to ⟨0.14⟩. */
+export function gainsCoverage(curPrefix, basePrefix) {
+  const cur = reportCoverage(curPrefix);
+  const base = reportCoverage(basePrefix);
+  const out = {};
+  if (cur) out.coverage = { uncovered: cur };
+  const curNames = new Set((cur ?? []).map((e) => e.name));
+  const baseNames = new Set((base ?? []).map((e) => e.name));
+  const nowUncovered = [...curNames].filter((n) => !baseNames.has(n)).sort();
+  const noLongerUncovered = [...baseNames].filter((n) => !curNames.has(n)).sort();
+  if (nowUncovered.length || noLongerUncovered.length) out.coverageDelta = { nowUncovered, noLongerUncovered };
+  return out;
+}
+
 // The returned array carries a non-enumerable `hardFail` flag: true iff a report file was FOUND but
 // yielded NO trustworthy functions — a parse failure OR a malformed shape (a `null`/array/wrong-typed
 // doc, a non-array `functions`, all-junk entries). The loud CLI wrapper (loadReportOrDie) needs it to
