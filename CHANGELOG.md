@@ -6,6 +6,54 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.15.0] — 2026-07-15
+
+### spec 0.15 — the coverage envelope, plus host-resolution and Env recall
+
+candor-ts now declares **spec `0.15`** (`SPEC_VERSION` in `scan.mjs` + `query.mjs`; the envelope +
+`--gate-json` verdict carry it). **⚠ report bytes change** — a consumer pinning `spec == "0.14"` must
+accept `0.15`; a report over a project with uncovered dependencies gains the `coverage` envelope
+field, and code reaching a const-anchored / literal-head host or an indirect `process.env` read gains
+effects (`Llm`/`Db`/`Env`) it did not carry at 0.14 (regenerate baselines). A fully-covered report
+stays **byte-identical** to a 0.14 one, so the rung is wire-compatible for covered projects.
+
+### ✨ The coverage envelope ⟨0.15⟩ — the κ ledger travels with the report
+
+What the scan could **not** see is now disclosed *in* the report, not only on stderr: the new §2
+`coverage` envelope field carries the uncovered-dependency ledger (omitted when empty — a covered
+report is byte-identical). The `--gate-json` verdict gains a **verdict-preserving** `coverage`
+advisory (key order pinned `[spec, ok, violations, coverage]` — it informs, never flips `ok`), and
+`gains` (the CLI verb and the MCP `candor_gains` tool, via one shared code path) re-discloses the
+current ledger plus a `coverageDelta` — `{ nowUncovered, noLongerUncovered }`, names-only — so a
+version-pair comparison says what went dark and what came back. Both pre-existing per-function
+postures are untouched: resolvable-but-uncovered stays invisible, unresolvable stays `Unknown`.
+Pinned by conformance PART 4s.
+
+### Host-resolution recall — const-string and literal-head hosts now refine
+
+Two common URL shapes that read as bare `Net` now resolve their host and fire the §1 `Llm`/`Db`/`Net`
+refinement exactly like an inline literal:
+
+- **Const-string resolution** (PART 4q): `const API_BASE = "https://api.openai.com/v1";`
+  `` fetch(`${API_BASE}/x`) `` — a const-anchored ref, template head, or const-left concat resolves via
+  the checker only when the symbol's *every* declaration is a const string literal.
+- **Literal-head extraction** (PART 4r): `` fetch(`https://api.openai.com/v1/${p}`) `` — a template or
+  concat whose literal head completes the authority, with interpolation only in the path, extracts
+  the host.
+
+The boundaries are sound, no fabrication: a split authority, whole-host interpolation, interpolated
+port, `let`/`var`, or runtime value stays bare `Net`; a literal-head non-model CDN stays `Net`.
+
+### Env recall fix — indirect `process.env` reads no longer read silent-pure
+
+`Env` was classified only for a direct `process.env.KEY` dot access; bracket access
+(`process.env["K"]`), a local const-alias (`const env = process.env; env.K`), destructuring
+(`const { K } = process.env`), and the `in` operator (`"K" in process.env`) all read **silent-pure**
+— a silent `Env` under-report on common config idioms, found via **real-world corpus testing**
+(chalk / supports-color, which reported 0 `Env`). Symbol-based alias tracking (cleared on
+reassignment), with `import process from 'node:process'` treated as the process global. No
+fabrication: a non-env object, function param, or reassigned local stays pure.
+
 ## [0.14.1] — 2026-07-14
 
 Patch — a soundness/precision fix, still spec `0.14` (reports gain no new field; two unit shapes change).
