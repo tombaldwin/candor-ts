@@ -307,7 +307,7 @@ const SUBCOMMANDS = [
 const usage = () => {
   const w = Math.max(...SUBCOMMANDS.map(([n, a]) => `${n} ${a}`.trimEnd().length));
   const lines = SUBCOMMANDS.map(([n, a, d]) => `  ${`${n} ${a}`.trimEnd().padEnd(w)}  ${d}`);
-  lines.push(`  ${"-V, --version".padEnd(w)}  print the build and spec version (offline)`);
+  lines.push(`  ${"-V, --version".padEnd(w)}  print the installed version + upgrade line (offline)`);
   lines.push(`  ${"-h, --help".padEnd(w)}  show this help`);
   return `USAGE: candor-ts-query <command> [args]\n\n${lines.join("\n")}`;
 };
@@ -321,12 +321,54 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
 }
 
 // -h / --help: a print-and-exit MODE, handled before the switch (so `-h`'s single dash is never
-// mistaken for a command). Banner + USAGE + the full described subcommand list + the github footer.
+// mistaken for a command). House-style page: identity + model paragraph + COMMON/ALL ACTIONS
+// (the action names derived from SUBCOMMANDS, so the list can never go stale) + OPTIONS + footer.
+// The exit-2 error path keeps the denser fully-described usage() above.
 if (process.argv.includes("-h") || process.argv.includes("--help")) {
-  console.log(`candor-ts-query ${PKG_VERSION} — read-only queries over a candor report (candor-spec ${SPEC_VERSION})
+  const names = SUBCOMMANDS.map(([n]) => n);
+  const allActions = [names.slice(0, 9), names.slice(9)].map((row) => `  ${row.join("  ")}`).join("\n");
+  console.log(`candor-ts-query — read-only queries over a candor report.
 
-${usage()}
+Answers come from the report candor-ts wrote — discovered by walking up from the
+cwd to a .candor/ dir (CANDOR_REPORT overrides; --report pins a locator). No
+re-scan, no network. Every engine speaks the same grammar, so these actions and
+flags match the rest of the family.
 
+USAGE
+  candor-ts-query <action> [args] [options]
+
+COMMON ACTIONS
+  where <Effect>            the functions that perform an effect
+  path <fn> <Effect>        the call path by which a function reaches an effect
+  callers <fn>              who calls a function, direct and transitive
+  tour [N]                  the N most surprising transitive reaches (default 10)
+  blindspots                the Unknown sources worth resolving, ranked by reach
+  gains <current> <base>    what a new version newly reaches (the supply-chain diff)
+  fix <fn> <Effect>         the boundary hoist that would clear a violation
+
+ALL ACTIONS
+${allActions}
+
+OPTIONS  (uniform across every engine)
+  --report <locator>        use this report instead of discovering .candor/
+  --policy <file>           evaluate a policy — exit 1 on a violation (whatif, fix, fix-gate,
+                            unverified; CANDOR_POLICY / a .candor/config \`policy\` key when absent)
+  --json                    machine-readable output
+  --include-unknown         callers: also list the unresolved-dispatch frontier
+  --strict                  unverified: exit 1 on an unverified hole (advisory otherwise)
+  -V, --version             print the installed version + upgrade line (offline)
+  -h, --help                show this help
+
+  diff and gains take two positional report locators: <current> <baseline>. Run
+  candor-ts-query with no action for the full per-action argument list.
+
+EXAMPLES
+  candor-ts-query where Db
+  candor-ts-query path app.orders.render Net
+  candor-ts-query gains new/.candor/report.json old/.candor/report.json
+  candor-ts-query fix-gate --policy candor.policy
+
+Docs: candor.poly.io   ·   Verify an install: candor doctor
 See https://github.com/tombaldwin/candor`);
   process.exit(0);
 }

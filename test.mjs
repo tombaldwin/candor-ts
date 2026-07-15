@@ -2275,7 +2275,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   for (const flag of ["--help", "-h"]) {
     const r = runScan(flag);
     check(`scan ${flag} → usage with the real flags, exit 0`,
-          r.status === 0 && /USAGE:/.test(r.stdout) && /--policy/.test(r.stdout) && /--json/.test(r.stdout),
+          r.status === 0 && /USAGE\n/.test(r.stdout) && /--policy/.test(r.stdout) && /--json/.test(r.stdout),
           `status=${r.status} ${r.stdout.slice(0, 120)}`);
   }
 }
@@ -2333,7 +2333,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   }
   for (const flag of ["--help", "-h"]) {
     const r = runQuery(flag);
-    check(`query ${flag} → usage, exit 0`, r.status === 0 && /USAGE: candor-ts-query/.test(r.stdout), `status=${r.status} ${r.stdout.slice(0, 80)}`);
+    check(`query ${flag} → usage, exit 0`, r.status === 0 && /USAGE\n {2}candor-ts-query <action>/.test(r.stdout), `status=${r.status} ${r.stdout.slice(0, 80)}`);
   }
   // unknown command → exit 2 AND the FULL subcommand list (the regression was a stale 6-item hand-list;
   // assert several real subcommands are present so a drift back to a partial list fails here).
@@ -2888,6 +2888,95 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
   check("baseline guard: the config `baseline` key (relative, config-anchored) activates the guard — gain exits 1",
         rCfg.status === 1 && rCfg.stdout.includes("[AS-EFF-005]"), `status=${rCfg.status} ${(rCfg.stdout + rCfg.stderr).slice(0, 240)}`);
   fs.rmSync(path.join(d, ".candor", "config"));
+}
+
+// ── ⟨0.16 staged⟩ callgraph-aware baseline guard (SPEC §7 item 5, the ⟨0.16 staged⟩ paragraph) ──────
+// Reports OMIT pure functions (§2), so a fn that shipped PURE and now performs an effect is absent from
+// the baseline REPORT and reads as exempt "new code" — the sharpest supply-chain shape. The ⟨0.16⟩ fix
+// keys existence on the baseline CALLGRAPH sidecar (<baseline>.callgraph.json, which lists pure leaves),
+// reusing the `gains` origin node-set test. Three sidecar states: PRESENT catches pure→effectful (exit 1),
+// ABSENT degrades to report-only + a stderr note (exit 0 here), PRESENT-but-corrupt fails closed (exit 2).
+{
+  // The acceptance probe: a pure `fmt` (util.ts) + an already-effectful `fetch_` (api.ts).
+  const utilPure = `export function fmt(s: string): string { return s.toUpperCase(); }`;
+  const utilGain = `import { readFileSync } from "node:fs";
+export function fmt(s: string): string { readFileSync("/etc/x"); return s.toUpperCase(); }`;
+  const apiSrc = `export function fetch_(h: string): Promise<Response> { return fetch("https://" + h); }`;
+  const d = project({ "util.ts": utilPure, "api.ts": apiSrc });
+  const run = (env, ...extra) => spawnSync("node", [path.join(HERE, "scan.mjs"), d, ...extra],
+    { encoding: "utf8", env: { ...process.env, ...env } });
+
+  // record the baseline as the report/callgraph PAIR (--out writes <prefix>.json + <prefix>.callgraph.json)
+  const blPrefix = path.join(d, ".candor", "baseline");
+  run({}, "--out", blPrefix);
+  const bl = `${blPrefix}.json`, blCg = `${blPrefix}.callgraph.json`;
+  check("⟨0.16⟩ baseline pair: the callgraph sidecar was written alongside the report",
+        fs.existsSync(bl) && fs.existsSync(blCg), `report=${fs.existsSync(bl)} cg=${fs.existsSync(blCg)}`);
+  // `fmt` is PURE, so it is OMITTED from the baseline report but PRESENT as a callgraph node — the whole point
+  const blReport = JSON.parse(fs.readFileSync(bl, "utf8"));
+  const blCgObj = JSON.parse(fs.readFileSync(blCg, "utf8"));
+  check("⟨0.16⟩ baseline: pure `fmt` is absent from the report but present as a callgraph node",
+        !blReport.functions.some((e) => e.fn === "util.fmt") && ("util.fmt" in blCgObj),
+        `inReport=${blReport.functions.some((e) => e.fn === "util.fmt")} inCg=${"util.fmt" in blCgObj}`);
+
+  // ACCEPTANCE 4 (no-op): rescan unchanged against the pair → exit 0, clean
+  const rNoop = run({ CANDOR_BASELINE: bl });
+  check("⟨0.16⟩ acceptance 4: no-op rescan against the pair exits 0, clean",
+        rNoop.status === 0 && !rNoop.stdout.includes("[AS-EFF-005]"), `status=${rNoop.status} ${(rNoop.stdout + rNoop.stderr).slice(0, 200)}`);
+
+  // ACCEPTANCE 1 (sidecar PRESENT): util.fmt gains Fs → exit 1, fmt flagged. The pure→effectful transition
+  // the pre-⟨0.16⟩ report-only guard MISSED (fmt was absent from the report, read as exempt "new").
+  fs.writeFileSync(path.join(d, "util.ts"), utilGain);
+  const gp = path.join(d, "gate.json");
+  const rGain = run({ CANDOR_BASELINE: bl }, "--gate-json", gp);
+  check("⟨0.16⟩ acceptance 1: sidecar present → formerly-pure fmt gaining Fs exits 1",
+        rGain.status === 1, `status=${rGain.status} ${(rGain.stdout + rGain.stderr).slice(0, 200)}`);
+  check("⟨0.16⟩ acceptance 1: the gain is an [AS-EFF-005] line naming util.fmt + Fs",
+        rGain.stdout.includes("[AS-EFF-005]") && rGain.stdout.includes("util.fmt") && rGain.stdout.includes("Fs"),
+        rGain.stdout.slice(0, 240));
+  let gv = null; try { gv = JSON.parse(fs.readFileSync(gp, "utf8")); } catch { /* null → checks below fail raw */ }
+  const gRec = gv?.violations?.find((x) => x.rule === "AS-EFF-005" && x.fn === "util.fmt");
+  check("⟨0.16⟩ acceptance 1: the pure→effectful gain joins --gate-json (ok:false)",
+        gv?.ok === false && Array.isArray(gRec?.effects) && gRec.effects.includes("Fs"), JSON.stringify(gv)?.slice(0, 240));
+
+  // ACCEPTANCE 2 (sidecar ABSENT): same edit, delete the callgraph → degrade to report-only. fmt was pure,
+  // so report-only reads it as new code → NOT caught → exit 0, plus the stderr note the guard is weaker.
+  const blCgSaved = fs.readFileSync(blCg, "utf8");
+  fs.rmSync(blCg);
+  const rNoCg = run({ CANDOR_BASELINE: bl });
+  check("⟨0.16⟩ acceptance 2: sidecar deleted → report-only degradation exits 0 (pure→effectful not caught)",
+        rNoCg.status === 0 && !rNoCg.stdout.includes("[AS-EFF-005]"), `status=${rNoCg.status} ${(rNoCg.stdout + rNoCg.stderr).slice(0, 200)}`);
+  check("⟨0.16⟩ acceptance 2: a stderr note discloses the guard is WEAKER without the sidecar",
+        /no baseline callgraph sidecar/.test(rNoCg.stderr) && /WEAKER/.test(rNoCg.stderr), rNoCg.stderr.slice(0, 260));
+
+  // ACCEPTANCE 3 (sidecar PRESENT-but-corrupt): truncate to `{` → fail closed (exit 2), like a corrupt
+  // baseline. A broken sidecar must not silently narrow the guard back to report-only.
+  fs.writeFileSync(blCg, "{");
+  const rBadCg = run({ CANDOR_BASELINE: bl });
+  check("⟨0.16⟩ acceptance 3: a corrupt/truncated sidecar fails closed (exit 2)",
+        rBadCg.status === 2 && /baseline callgraph.*could not be parsed/.test(rBadCg.stderr), `status=${rBadCg.status} ${rBadCg.stderr.slice(0, 240)}`);
+  check("⟨0.16⟩ acceptance 3: the corrupt sidecar is NOT narrowed to report-only (no silent exit 0/1 pass)",
+        rBadCg.status === 2 && !rBadCg.stdout.includes("[AS-EFF-005]"), `status=${rBadCg.status} ${(rBadCg.stdout).slice(0, 200)}`);
+  fs.writeFileSync(blCg, blCgSaved);   // restore the good sidecar for the widening arm
+
+  // ACCEPTANCE 5 (already-effectful WIDENING, unchanged behaviour): api.fetch_ is Net in the baseline and
+  // now also does Fs → exit 1, caught the same way with OR without the sidecar (it was in the report).
+  fs.writeFileSync(path.join(d, "util.ts"), utilPure);   // revert fmt so only api widens
+  fs.writeFileSync(path.join(d, "api.ts"),
+    `import { readFileSync } from "node:fs";
+export function fetch_(h: string): Promise<Response> { readFileSync("/etc/x"); return fetch("https://" + h); }`);
+  const rWiden = run({ CANDOR_BASELINE: bl });
+  check("⟨0.16⟩ acceptance 5: an already-effectful fn WIDENING (Net→Net+Fs) exits 1",
+        rWiden.status === 1 && rWiden.stdout.includes("[AS-EFF-005]") && rWiden.stdout.includes("api.fetch_") && rWiden.stdout.includes("Fs"),
+        `status=${rWiden.status} ${rWiden.stdout.slice(0, 240)}`);
+
+  // a genuinely NEW fn (in neither report nor callgraph) stays exempt even with the sidecar present
+  fs.writeFileSync(path.join(d, "api.ts"), apiSrc);   // revert api
+  fs.writeFileSync(path.join(d, "util.ts"),
+    `${utilPure}\nimport { readFileSync } from "node:fs";\nexport function brandnew(): void { readFileSync("/etc/y"); }`);
+  const rNew = run({ CANDOR_BASELINE: bl });
+  check("⟨0.16⟩ a genuinely new effectful fn (in neither report nor callgraph) stays exempt (exit 0)",
+        rNew.status === 0 && !rNew.stdout.includes("[AS-EFF-005]"), `status=${rNew.status} ${(rNew.stdout + rNew.stderr).slice(0, 200)}`);
 }
 
 // ── doc drift gates (TESTING.md §9): the family phrases the docs must carry ────────────────────────

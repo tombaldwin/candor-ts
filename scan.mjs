@@ -55,25 +55,45 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
 // -h / --help: a print-and-exit MODE (like --version), handled before the arg walk so `-h` (a single
 // dash) is never mistaken for the scan target by the positional fallthrough below.
 if (process.argv.includes("-h") || process.argv.includes("--help")) {
-  console.log(`candor-ts ${PKG_VERSION} — TypeScript/JavaScript effect scanner (candor-spec ${SPEC_VERSION})
+  console.log(`candor-ts — the TypeScript/JavaScript effect analyzer.
 
-USAGE: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--allow-js] [--agents] [--version]
+Reads TS/JS source through the TypeScript compiler API — no build needed. Calls
+are resolved through the checker; a call that cannot be resolved reads Unknown,
+never silently pure. The report lands in .candor/, where candor-ts-query and the
+umbrella \`candor\` CLI discover it.
 
-  <target>          a dir, a .ts file, or a tsconfig.json to scan
-  --out <prefix>    write the report to <prefix>.json + <prefix>.callgraph.json
-  --json            print the report as JSON to stdout (instead of writing files)
-  --policy <file>   enforce a policy file (deny/pure/allow/forbid, candor-spec §6.2) — exit 1 on a
-                    violation, 2 if unreadable; honours $CANDOR_POLICY when the flag is absent
-  --gate-json <f>   write the structured gate verdict { spec, ok, violations } as JSON (candor-spec §3.3)
-  --allow-js        also scan plain JS/Node (.js/.mjs/.cjs), not just TypeScript
-  --agents          print the agent contract for this build (AGENTS.md)
-  -V, --version     print the build and spec version (offline)
-  -h, --help        show this help
+USAGE
+  candor-ts <dir | file.ts | tsconfig.json> [flags]
 
-CANDOR_BASELINE=<report.json> (or a .candor/config \`baseline\` key) runs the AS-EFF-005 regression
-guard against a saved same-build report: exit 1 when an existing function gained an effect, exit 2
-on an unparseable or different-build baseline (never evaluated), a stderr note when absent.
+  The target is a project directory, a single .ts file, or a tsconfig.json.
 
+OPTIONS
+  --out <prefix>            write the report to <prefix>.json + <prefix>.callgraph.json
+  --json                    print the report as JSON to stdout (instead of writing files)
+  --policy <file>           enforce a policy file (deny/pure/allow/forbid) — exit 1 on a
+                            violation, 2 if unreadable
+  --gate-json <file>        write the structured gate verdict { spec, ok, violations } as JSON
+  --allow-js                also scan plain JS/Node (.js/.mjs/.cjs), not just TypeScript
+  --agents                  print the agent contract for this build (AGENTS.md)
+  -V, --version             print the installed version + upgrade line (offline)
+  -h, --help                show this help
+
+ENVIRONMENT / CONFIG
+  CANDOR_POLICY=<file>           the policy when --policy is absent (a .candor/config
+                                 \`policy\` key works too)
+  CANDOR_BASELINE=<report.json>  (or a .candor/config \`baseline\` key) runs the AS-EFF-005
+                                 regression guard against a saved same-build report: exit 1
+                                 when an existing function gained an effect, exit 2 on an
+                                 unparseable or different-build baseline (never evaluated),
+                                 a stderr note when absent
+
+EXAMPLES
+  candor-ts .
+  candor-ts src --allow-js
+  candor-ts . --policy candor.policy --gate-json gate.json
+  candor-ts-query where Db          query the report this scan wrote
+
+Docs: candor.poly.io   ·   Verify an install: candor doctor
 See https://github.com/tombaldwin/candor`);
   process.exit(0);
 }
@@ -2616,6 +2636,20 @@ let gateViolations = [];
 //  · Valid + same build → per-fn compare: an EXISTING fn gaining an effect is an [AS-EFF-005]
 //    violation (exit 1, joins --gate-json); a fn absent from the baseline is NEW code, reviewed as
 //    such, not a regression. Baselines omit pure fns (spec §2), so absent-prior means no prior claim.
+//
+// ⟨0.16 staged⟩ Callgraph-aware existence (SPEC §7 item 5). Reports OMIT pure functions, so a fn that
+// shipped PURE and now performs an effect is absent from the baseline report and reads as exempt "new
+// code" — the sharpest supply-chain shape escaping the guard. Fix: key existence on the baseline
+// CALLGRAPH sidecar (<baseline>.callgraph.json, §2.2 — it lists every project fn INCLUDING pure
+// leaves), exactly as `gains`'s `origin` existence test does (query-core.mjs `gains`: a fn is
+// "existing" if it is a baseline-callgraph node — a caller key or a callee):
+//  · sidecar PRESENT + loaded → a fn that is a baseline-callgraph node has baseline effect set ∅
+//    (pure → omitted from the report) and any effect now is a GAIN violation. pure→effectful is caught.
+//    A fn in NEITHER report nor callgraph genuinely did not exist → stays exempt "new".
+//  · sidecar ABSENT → degrade to report-only existence (pre-⟨0.16⟩: a formerly-pure fn reads as new;
+//    still catches an already-effectful fn WIDENING). One stderr note that the guard is weaker.
+//  · sidecar PRESENT-but-CORRUPT → fail closed (exit 2), like a corrupt baseline: a broken sidecar
+//    must not silently NARROW the guard back to report-only.
 if (baselinePath !== null) {
   const shownB = baselinePath === "" ? "(configured empty)" : baselinePath;
   if (baselinePath !== "" && !fs.existsSync(baselinePath)) {
@@ -2647,10 +2681,48 @@ if (baselinePath !== null) {
     for (const e of arr) {
       if (e && typeof e.fn === "string" && e.fn) base.set(e.fn, new Set(Array.isArray(e.inferred) ? e.inferred : []));
     }
+    // ⟨0.16 staged⟩ Load the baseline callgraph sidecar next to the baseline report. The sidecar for a
+    // report at <stem>.json is <stem>.callgraph.json (scan.mjs writes exactly this pair). Three states:
+    //   loaded  — a parsed object → its node set (every key + every callee) keys existence, mirroring
+    //             the `gains` origin test (query-core.mjs). A baseline-callgraph node whose baseline
+    //             effects are ∅ (pure → omitted from the report) that now performs an effect is a GAIN.
+    //   absent  — no sidecar file → degrade to report-only existence + one stderr note (guard weaker).
+    //   corrupt — file present but not parseable / not a plain object → fail closed (exit 2). A broken
+    //             sidecar must not silently narrow the guard (SPEC §7 item 5).
+    // shownB may be "(configured empty)"; the real path is baselinePath here (non-null, exists).
+    const sidecarPath = baselinePath.replace(/\.json$/i, "") + ".callgraph.json";
+    let cgNodes = null;                                     // null = sidecar absent (report-only degrade)
+    if (fs.existsSync(sidecarPath)) {
+      let baseCg = null;
+      try { baseCg = JSON.parse(fs.readFileSync(sidecarPath, "utf8")); } catch { baseCg = undefined; }
+      // A non-object parse (null / array / number) is a corrupt sidecar: it cannot list nodes, and
+      // treating it as "absent" would silently narrow the guard — fail closed like a corrupt baseline.
+      if (baseCg === undefined || baseCg === null || typeof baseCg !== "object" || Array.isArray(baseCg)) {
+        console.error(`candor-ts: the baseline callgraph ${sidecarPath} is present but could not be parsed `
+          + `(corrupt/truncated?) — failing (exit 2); a broken sidecar must not silently narrow the guard to `
+          + `report-only. Regenerate the baseline with this build.`);
+        process.exit(2);
+      }
+      // The node set = every caller key + every callee (a pure leaf appears only as a callee), exactly
+      // as `gains` computes cgNodes. Non-array edge values are tolerated (skipped), matching loadCallgraph.
+      cgNodes = new Set(Object.entries(baseCg).flatMap(([k, vs]) => [k, ...(Array.isArray(vs) ? vs : [])]));
+    } else {
+      console.error(`candor-ts: no baseline callgraph sidecar at ${sidecarPath} — the AS-EFF-005 guard is `
+        + `WEAKER: existence falls back to the report, which omits pure functions, so a formerly-PURE fn `
+        + `turning effectful reads as new code and is NOT caught (only an already-effectful fn widening is). `
+        + `Regenerate the baseline with --out so the .callgraph.json is written alongside it.`);
+    }
     for (const name of [...inferred.keys()].sort()) {
       const prior = base.get(name);
-      if (prior === undefined) continue;                    // new function — not a regression
-      const gained = [...inferred.get(name)].filter((x) => !prior.has(x)).sort();
+      // ⟨0.16 staged⟩ Existence ladder: in the baseline REPORT → its recorded inferred set is the prior;
+      // else a baseline-callgraph NODE (sidecar present) → it existed and was pure, so prior = ∅ (any
+      // effect now is a gain); else genuinely absent → new code, exempt. Without the sidecar (cgNodes
+      // null) only the report path decides, the pre-⟨0.16⟩ semantics.
+      const priorSet = prior !== undefined ? prior
+        : (cgNodes !== null && cgNodes.has(name)) ? new Set()   // baseline-pure node → ∅ prior
+        : null;                                                 // new function — not a regression
+      if (priorSet === null) continue;
+      const gained = [...inferred.get(name)].filter((x) => !priorSet.has(x)).sort();
       if (gained.length) {
         gateViolations.push({ rule: "AS-EFF-005", fn: name, effects: gained,
           detail: `\`${name}\` gained effect { ${gained.join(", ")} } not present in the baseline` });
