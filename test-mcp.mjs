@@ -65,7 +65,7 @@ fs.writeFileSync(`${M}/r.a.scan.callgraph.json`, JSON.stringify({ "a::f": [] }))
 fs.writeFileSync(`${M}/r.b.scan.callgraph.json`, JSON.stringify({ "b::g": [] }));
 // a --gate-json verdict written beside the prefix is NOT a report sibling: merging it disclosed
 // "no functions array — OMITTED" on every query over the recommended CI layout (review find).
-fs.writeFileSync(`${M}/r.gate.json`, JSON.stringify({ spec: "0.15", ok: true, violations: [] }));
+fs.writeFileSync(`${M}/r.gate.json`, JSON.stringify({ spec: "0.16", ok: true, violations: [] }));
 const merged = Q.loadReport(`${M}/r`);
 ok("cross-engine loader: a multi-report prefix merges every sibling (Rust/workspace form)",
    merged.length === 2 && merged.some((e) => e.fn === "a::f") && merged.some((e) => e.fn === "b::g"));
@@ -317,7 +317,7 @@ fs.rmSync(OUTSIDE, { recursive: true, force: true });
 // ride along; a coverage-free comparison carries neither key (the pre-0.15 result, byte-identical).
 {
   const CV = fs.mkdtempSync("/tmp/candor-covgains-");
-  const doc = (extra) => JSON.stringify({ candor: { version: "eeeeeee", spec: "0.15" },
+  const doc = (extra) => JSON.stringify({ candor: { version: "eeeeeee", spec: "0.16" },
     functions: [{ fn: "m.f", inferred: ["Net"], direct: ["Net"] }], ...extra });
   fs.writeFileSync(`${CV}/cur.json`, doc({ coverage: { uncovered: [{ name: "blinddep", calls: 2 }] } }));
   fs.writeFileSync(`${CV}/base.json`, doc({}));
