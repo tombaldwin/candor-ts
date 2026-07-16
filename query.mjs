@@ -714,6 +714,13 @@ switch (cmd) {
       const out = { reaches: finds.map((f) => ({
         effect: f.effect, fn: f.func, hops: f.hops, loc: f.sourceLoc, score: f.score, source: f.source,
       })) };
+      // The MACHINE half of the mostly-Unknown disclosure (Fable-review finding E): a JSON consumer (the
+      // agent loop) got a bare `{"reaches":[]}` and read it as clean — the same false all-clear the text
+      // branch qualifies. ADDITIVE + present only when the ≥⅓-Unknown threshold trips (byte-identical
+      // otherwise). Keys sorted after `reaches` (reaches < unknown) to match Rust's serde output.
+      const teff = fns.filter((e) => (e.inferred ?? []).length > 0).length;
+      const tunk = fns.filter((e) => (e.inferred ?? []).includes("Unknown")).length;
+      if (teff > 0 && tunk * 3 >= teff) out.unknown = { count: tunk, total: teff };
       console.log(JSON.stringify(out));
       break;
     }
