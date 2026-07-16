@@ -403,11 +403,11 @@ const SUBCOMMANDS = [
   ["impact", `<query> ${REPORT_TAIL}`, "blast radius of a function (backward dual of reachable)"],
   ["blindspots", REPORT_TAIL, "the Unknown sources, ranked by blast radius"],
   ["tour", `[<N>] ${REPORT_TAIL}`, "the N most surprising transitive reaches — the guided cold-repo poke (no re-scan)"],
-  ["gains", "<current> <baseline> [--json]", "the supply-chain alarm: what the surface gained between two reports"],
+  ["gains", "<current> <baseline> [--json] [--strict]", "the supply-chain alarm: what the surface gained between two reports (--strict: exit 1 on ANY gain)"],
   ["path", `<fn> <Effect> ${REPORT_TAIL}`, "a call path from a function to where an effect enters"],
   ["whatif", `<fn> <Effect> [--policy <file>] ${REPORT_TAIL}`, "the impact of giving a function an effect, vs a policy (exit 1 on a violation)"],
   ["fix", `<fn> <Effect> [--policy <file>] ${REPORT_TAIL}`, "the boundary fix: where the effect belongs + the hoist refactor"],
-  ["fix-gate", `[--policy <file>] ${REPORT_TAIL}`, "a fix for EVERY boundary crossing — the loop's block-message remedy"],
+  ["fix-gate", `[--policy <file>] [--strict] ${REPORT_TAIL}`, "a fix for EVERY boundary crossing — advisory (--strict: exit 1 while any remains)"],
   ["unverified", `[--policy <file>] [--strict] ${REPORT_TAIL}`, "pure/deny layers that PASS but are Unknown (not PROVABLY clean)"],
   ["agents", "", "print the agent contract for this build (AGENTS.md)"],
 ];
@@ -466,7 +466,9 @@ OPTIONS  (uniform across every engine)
   --json                    machine-readable JSON (the default when output is piped/redirected)
   --text, --human           human-readable prose (the default at a terminal)
   --include-unknown         callers: also list the unresolved-dispatch frontier
-  --strict                  unverified: exit 1 on an unverified hole (advisory otherwise)
+  --strict                  make an advisory verb a CI gate — exit 1 while a finding remains:
+                            unverified (an unverified-purity hole), fix-gate (a boundary
+                            crossing), gains (ANY gained effect). Advisory (exit 0) otherwise.
   -V, --version             print the installed version + upgrade line (offline)
   -h, --help                show this help
 
@@ -748,8 +750,13 @@ switch (cmd) {
     // surface gained between two reports (base → cur), the cross-engine machine-readable form.
     // §3.3.1: like diff, two positional locators <current> <baseline> (no discovery), each resolved by
     // the shared locator rule; --json accepted.
-    const { positionals } = parseCanonical(args, {});
-    if (positionals.length < 2) { console.error("usage: candor-ts-query gains <current> <baseline> [--json]"); process.exit(2); }
+    // gains has no `--policy` of its own: parseCanonical consumes `--policy` for every verb (a valid flag),
+    // which for gains would SILENTLY drop it and exit 0 — a CI author who reaches for `--policy` to gate a
+    // supply-chain diff ships a gate that never fires. Reject it loud and point at the real gate. `--strict`
+    // (below) fails on ANY gained effect; the effect-SPECIFIC gate is a `deny <E> gained` scan policy.
+    if (args.includes("--policy")) { console.error("candor-ts-query gains: unknown flag '--policy' — gains is a diff view; to FAIL CI on a newly-gained effect gate at scan time with a `deny <E> gained` policy (AS-EFF-005), or use `--strict` to fail on ANY gain\n  known flags: --json, --strict"); process.exit(2); }
+    const { positionals, strict } = parseCanonical(args, { strict: true });
+    if (positionals.length < 2) { console.error("usage: candor-ts-query gains <current> <baseline> [--json] [--strict]"); process.exit(2); }
     const [curPrefix, basePrefix] = positionals.map(locatorToPrefix);
     // BOTH locators must name real report files (the Rust engine's no-files check, named per side):
     // a typo'd prefix loaded [] with hardFail=false and emitted an authoritative EMPTY
@@ -768,10 +775,13 @@ switch (cmd) {
     // read as total), plus `coverageDelta` when the baseline names different blind packages. Both
     // OMITTED when nothing applies, so a coverage-free comparison is byte-identical to ⟨0.14⟩.
     // Shared with the MCP `candor_gains` tool (gainsCoverage — the parity rule).
+    const gainsResult = coreGains(loadReportOrDie(curPrefix), loadReportOrDie(basePrefix), loadCallgraph(basePrefix));
     put(args, { baseline_version: gbv ?? "", engine_version: gv ?? "",
-           ...coreGains(loadReportOrDie(curPrefix), loadReportOrDie(basePrefix), loadCallgraph(basePrefix)),
-           ...gainsCoverage(curPrefix, basePrefix) }, P.gains);
-    break;
+           ...gainsResult, ...gainsCoverage(curPrefix, basePrefix) }, P.gains);
+    // Advisory by default (exit 0 — gains is a diff view); `--strict` fails on ANY gained effect so a
+    // supply-chain CI job can require a bump introduce no new capability (mirrors `unverified --strict`).
+    process.exit(strict && (gainsResult.gained?.length ?? 0) > 0 ? 1 : 0);
+    break; // unreachable
   }
   case "path": {
     // BOTH a human default AND a --json form (like the Rust/Java engines). The surface opener suggests
@@ -850,15 +860,19 @@ switch (cmd) {
     // A remedy for EVERY deny/pure crossing — the shape the edit-time loop folds into its block message.
     // §3.3.1: `fix-gate [--policy <file>]`, report discovered / --report. DEPRECATED alias: the old
     // `fix-gate <prefix> <policy-file>` (leading report + positional policy).
-    const { prefix, policyFile } = resolveGateVerb(args);
+    // Advisory by default (exit 0 — the agent fix-loop reads the remedy and edits); `--strict` makes the
+    // exit follow `ok`, so CI can REQUIRE zero outstanding crossings (mirrors `unverified --strict`).
+    const { prefix, policyFile, strict } = resolveGateVerb(args, { strict: true });
     if (!policyFile) { console.error("candor: fix-gate requires a policy file (pass --policy <file>, or set CANDOR_POLICY / a .candor/config `policy` key)"); process.exit(2); }
     let ptext;
     try { ptext = fs.readFileSync(policyFile, "utf8"); }
     catch { console.error(`candor: policy ${policyFile} could not be read — no fix computed`); process.exit(2); }
     const cg = loadCallgraph(prefix);
     if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix-gate needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
-    emit(coreFixGate(cg, loadReportOrDie(prefix), parsePolicy(ptext), scopeMatches));
-    break;
+    const fgr = coreFixGate(cg, loadReportOrDie(prefix), parsePolicy(ptext), scopeMatches);
+    emit(fgr);
+    process.exit(strict && !fgr.ok ? 1 : 0);
+    break; // unreachable
   }
   case "unverified": {
     // PROVABLE-PURITY disclosure: pure/deny layers that PASS but contain Unknown (not provably clean). A
