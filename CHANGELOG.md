@@ -6,6 +6,34 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.16.0] — 2026-07-16
+
+### spec 0.16 — the callgraph-aware baseline guard, with an Unknown-only advisory
+
+candor-ts now declares **spec `0.16`** (`SPEC_VERSION` in `scan.mjs` + `query.mjs`; the report
+envelope + `--gate-json` verdict carry it). A consumer pinning `spec == "0.15"` must accept `0.16`.
+Report bytes for a covered project are otherwise unchanged; the change is in the baseline ratchet, not
+the analysis.
+
+### ✨ Callgraph-aware baseline guard ⟨0.16⟩ — pure→effectful is caught
+
+The AS-EFF-005 baseline ratchet in `scan.mjs` now keys function *existence* on the baseline
+`.callgraph.json` sidecar (the same node-set `origin` uses), not on the report's effect table — which
+OMITS pure functions. A function that was pure in the baseline and is now effectful is therefore a
+genuine gain and fires the ratchet (exit 1), where before it slipped through as "not in the baseline".
+The sidecar loader is a stricter inlined one than `gains`' tolerant reader: an absent sidecar
+degrades to report-only with a note; a **corrupt** sidecar exits 2, so a broken sidecar can never
+silently narrow the guard.
+
+### Unknown-only gains are advisory, not a regression
+
+Corpus testing on real dependency bumps showed the guard firing on gained `Unknown` alone —
+resolution noise, not a capability gain. `Unknown` is the §4 trust marker (pure policies exclude it),
+so failing CI on a pure→Unknown transition breaks innocuous bumps. Now the ratchet (exit 1) fires
+only on gaining a **real** boundary effect; an `Unknown`-only gain is disclosed as one advisory note
+with the exit unchanged. A real+Unknown gain still fails, and the shown effects are the real set with
+`Unknown` filtered out. Pinned by conformance PART 15b/15c.
+
 ## [0.15.0] — 2026-07-15
 
 ### spec 0.15 — the coverage envelope, plus host-resolution and Env recall

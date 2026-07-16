@@ -41,7 +41,7 @@ const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 // literal stamped into the envelope's `spec` field, so the doc lines and the report can never drift.
 // Reused, never re-littered.
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
-const SPEC_VERSION = "0.15";
+const SPEC_VERSION = "0.16";
 
 // --version: a print-and-exit MODE, handled before the main arg walk so it never depends on a target.
 // Fully OFFLINE — candor never phones home. Staying current is the AGENT's job: read the installed
@@ -2637,7 +2637,7 @@ let gateViolations = [];
 //    violation (exit 1, joins --gate-json); a fn absent from the baseline is NEW code, reviewed as
 //    such, not a regression. Baselines omit pure fns (spec §2), so absent-prior means no prior claim.
 //
-// ⟨0.16 staged⟩ Callgraph-aware existence (SPEC §7 item 5). Reports OMIT pure functions, so a fn that
+// ⟨0.16⟩ Callgraph-aware existence (SPEC §7 item 5). Reports OMIT pure functions, so a fn that
 // shipped PURE and now performs an effect is absent from the baseline report and reads as exempt "new
 // code" — the sharpest supply-chain shape escaping the guard. Fix: key existence on the baseline
 // CALLGRAPH sidecar (<baseline>.callgraph.json, §2.2 — it lists every project fn INCLUDING pure
@@ -2681,7 +2681,7 @@ if (baselinePath !== null) {
     for (const e of arr) {
       if (e && typeof e.fn === "string" && e.fn) base.set(e.fn, new Set(Array.isArray(e.inferred) ? e.inferred : []));
     }
-    // ⟨0.16 staged⟩ Load the baseline callgraph sidecar next to the baseline report. The sidecar for a
+    // ⟨0.16⟩ Load the baseline callgraph sidecar next to the baseline report. The sidecar for a
     // report at <stem>.json is <stem>.callgraph.json (scan.mjs writes exactly this pair). Three states:
     //   loaded  — a parsed object → its node set (every key + every callee) keys existence, mirroring
     //             the `gains` origin test (query-core.mjs). A baseline-callgraph node whose baseline
@@ -2712,10 +2712,10 @@ if (baselinePath !== null) {
         + `turning effectful reads as new code and is NOT caught (only an already-effectful fn widening is). `
         + `Regenerate the baseline with --out so the .callgraph.json is written alongside it.`);
     }
-    const unknownOnly = [];   // ⟨0.16 staged⟩ advisory: fns that gained ONLY Unknown vs the baseline
+    const unknownOnly = [];   // ⟨0.16⟩ advisory: fns that gained ONLY Unknown vs the baseline
     for (const name of [...inferred.keys()].sort()) {
       const prior = base.get(name);
-      // ⟨0.16 staged⟩ Existence ladder: in the baseline REPORT → its recorded inferred set is the prior;
+      // ⟨0.16⟩ Existence ladder: in the baseline REPORT → its recorded inferred set is the prior;
       // else a baseline-callgraph NODE (sidecar present) → it existed and was pure, so prior = ∅ (any
       // effect now is a gain); else genuinely absent → new code, exempt. Without the sidecar (cgNodes
       // null) only the report path decides, the pre-⟨0.16⟩ semantics.
@@ -2725,7 +2725,7 @@ if (baselinePath !== null) {
       if (priorSet === null) continue;
       const gained = [...inferred.get(name)].filter((x) => !priorSet.has(x)).sort();
       if (!gained.length) continue;
-      // ⟨0.16 staged⟩ the ratchet fires only on gaining a REAL boundary effect. An Unknown-ONLY gain is
+      // ⟨0.16⟩ the ratchet fires only on gaining a REAL boundary effect. An Unknown-ONLY gain is
       // the §4 trust marker, not an effect (`pure` policies exclude it), and on version bumps it is
       // dominated by resolution noise — DISCLOSE it (advisory), never fail the gate on it. Mirrors the
       // reference engine (candor-scan gate.rs check_baseline).

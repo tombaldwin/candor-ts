@@ -411,7 +411,7 @@ export function place(db: DatabaseSync): void { save(db); }`,
   check("--gate-json + violation still exits 1", r.status === 1, `status=${r.status}`);
   let v = null;
   try { v = JSON.parse(fs.readFileSync(gp, "utf8")); } catch { /* null → checks fail with raw */ }
-  check("--gate-json verdict declares spec 0.15", v?.spec === "0.15", JSON.stringify(v)?.slice(0, 120));
+  check("--gate-json verdict declares spec 0.16", v?.spec === "0.16", JSON.stringify(v)?.slice(0, 120));
   check("--gate-json verdict ok:false on a failing gate", v?.ok === false, `ok=${v?.ok}`);
   const viol = v?.violations?.find((x) => x.fn === "src.domain.place");
   check("--gate-json names the violating fn with its rule", viol?.rule === "AS-EFF-006", JSON.stringify(v?.violations)?.slice(0, 160));
@@ -2968,7 +2968,7 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
   fs.rmSync(path.join(d, ".candor", "config"));
 }
 
-// ── ⟨0.16 staged⟩ callgraph-aware baseline guard (SPEC §7 item 5, the ⟨0.16 staged⟩ paragraph) ──────
+// ── ⟨0.16⟩ callgraph-aware baseline guard (SPEC §7 item 5, the ⟨0.16⟩ paragraph) ──────
 // Reports OMIT pure functions (§2), so a fn that shipped PURE and now performs an effect is absent from
 // the baseline REPORT and reads as exempt "new code" — the sharpest supply-chain shape. The ⟨0.16⟩ fix
 // keys existence on the baseline CALLGRAPH sidecar (<baseline>.callgraph.json, which lists pure leaves),
@@ -3057,7 +3057,7 @@ export function fetch_(h: string): Promise<Response> { readFileSync("/etc/x"); r
         rNew.status === 0 && !rNew.stdout.includes("[AS-EFF-005]"), `status=${rNew.status} ${(rNew.stdout + rNew.stderr).slice(0, 200)}`);
   fs.writeFileSync(path.join(d, "util.ts"), utilPure);   // revert util for the Unknown-only arm below
 
-  // ── ⟨0.16 staged⟩ an Unknown-ONLY gain is ADVISORY, not a regression ──────────────────────────────
+  // ── ⟨0.16⟩ an Unknown-ONLY gain is ADVISORY, not a regression ──────────────────────────────
   // Unknown is the §4 trust marker, not an effect (`pure` policies exclude it); on real dependency bumps
   // a pure→Unknown transition is dominated by resolution noise, so exit-1 on it would break CI on
   // innocuous bumps. A formerly-pure fmt that now invokes a Function-typed param (an unresolvable call →
@@ -3093,14 +3093,14 @@ export function fmt(s: string, cb: Function): string { cb(); readFileSync("/etc/
 
 // ── doc drift gates (TESTING.md §9): the family phrases the docs must carry ────────────────────────
 // README/AGENTS are load-bearing self-descriptions: they must state the CURRENT spec contract
-// ("spec 0.15", no stale generation strings — AGENTS.md shipped "spec 0.7" examples a full generation
+// ("spec 0.16", no stale generation strings — AGENTS.md shipped "spec 0.7" examples a full generation
 // after the 0.8 roll) and, wherever they lean on the reference engine, attribute it (candor-java IS
 // the reference — the family ruling the baseline/pure semantics cite).
 {
   for (const f of ["README.md", "AGENTS.md"]) {
     const doc = fs.readFileSync(path.join(HERE, f), "utf8");
-    check(`${f} states the current spec contract (spec 0.15)`, doc.includes("spec 0.15"));
-    const stale = doc.match(/spec 0\.[0-7]\b|spec 0\.9\b|spec 0\.10\b|spec 0\.11\b|spec 0\.12\b|spec 0\.13\b|spec 0\.14\b/g) ?? [];
+    check(`${f} states the current spec contract (spec 0.16)`, doc.includes("spec 0.16"));
+    const stale = doc.match(/spec 0\.[0-7]\b|spec 0\.9\b|spec 0\.1[0-5]\b/g) ?? [];
     check(`${f} carries no stale spec-generation string`, stale.length === 0, JSON.stringify(stale));
     const refLines = doc.split("\n").filter((l) => /reference engine/i.test(l));
     check(`${f} mentions the reference engine at least once`, refLines.length > 0);

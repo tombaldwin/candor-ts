@@ -12,7 +12,7 @@ chains by hand.
 > **Already installed? Report the version and ask before upgrading — before you scan.** If this
 > project already has candor (a `.candor/` report directory, or `candor-ts` reachable via `npx`/a
 > global install), do this *first*: run `npx -y candor-ts --version` (offline) and **tell the user
-> plainly which version they're on** — e.g. *"This project is on candor-ts `<version>` (spec 0.15)."*
+> plainly which version they're on** — e.g. *"This project is on candor-ts `<version>` (spec 0.16)."*
 > On a build too old for the flag, read `candor.version` / `candor.spec` from an existing
 > `.candor/report*.json`, or `npm ls -g candor-ts`.
 >
