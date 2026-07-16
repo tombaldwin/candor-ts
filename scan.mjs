@@ -41,7 +41,7 @@ const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 // literal stamped into the envelope's `spec` field, so the doc lines and the report can never drift.
 // Reused, never re-littered.
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
-const SPEC_VERSION = "0.16";
+const SPEC_VERSION = "0.17";
 
 // --version: a print-and-exit MODE, handled before the main arg walk so it never depends on a target.
 // Fully OFFLINE — candor never phones home. Staying current is the AGENT's job: read the installed
@@ -1574,6 +1574,32 @@ const identIsEnvAlias = (id) => {
 // The receiver expression READS process.env — it is either `process.env` itself or a confirmed alias.
 const readsProcessEnv = (expr) => isProcessEnvExpr(expr) || identIsEnvAlias(expr);
 
+// A bare-identifier call whose callee is DEFAULT- or NAMED-imported from a known HTTP-client package is a
+// Net call (corpus-audit #13). The κ table lists these packages, but its rule only fires on a MEMBER call
+// (`axios.get(…)`); a default-imported callable invoked bare — the canonical `import fetch from 'node-fetch';
+// fetch(url)` — resolves to no signature when the package isn't installed, so it read Unknown (callback:fetch)
+// instead of Net, the effect users most care about. Resolve the identifier's symbol up to its
+// ImportDeclaration and match the specifier; used both to CLASSIFY the call Net and to SUPPRESS the spurious
+// callback-Unknown for the same node.
+const NET_REQUEST_NAMED = new Set(["fetch", "request", "stream", "pipeline"]); // undici/node-fetch callables
+const importedFromNetPkg = (id) => {
+  if (!id || !ts.isIdentifier(id)) return false;
+  for (const d of checker.getSymbolAtLocation(id)?.declarations ?? []) {
+    let n = d;
+    while (n && !ts.isImportDeclaration(n)) n = n.parent;
+    if (!(n && ts.isImportDeclaration(n) && ts.isStringLiteralLike(n.moduleSpecifier)
+        && /^(node-fetch|undici|axios|got|superagent|phin)$/.test(n.moduleSpecifier.text))) continue;
+    // Only the package's CLIENT CALLABLE is Net: the DEFAULT import (`import fetch from 'node-fetch'`,
+    // `import got from 'got'`) or a NAMED request function (`import { fetch, request } from 'undici'`). A
+    // named CLASS/utility export — `Headers`, `Response`, `Request`, `CookieJar`, `FormData` — is NOT a
+    // request and must not be over-reported as Net (review finding). Namespace imports resolve via κ member
+    // calls elsewhere, not as a bare callable here.
+    if (ts.isImportClause(d)) return true;                                  // default import = the client
+    if (ts.isImportSpecifier(d) && NET_REQUEST_NAMED.has((d.propertyName ?? d.name).text)) return true;
+  }
+  return false;
+};
+
 // ---- pass 2: per call site, the (CLASSIFY)/(EDGE)/(UNKNOWN) resolution of SEMANTICS §4 ------------
 function visitCalls(node) {
   if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
@@ -1630,6 +1656,10 @@ function visitCalls(node) {
           }
           if (kEff) {
             rec.direct.add(kEff); // κ-modeled package reached via an uninstalled namespace import
+          } else if (ts.isCallExpression(node) && importedFromNetPkg(node.expression)) {
+            rec.direct.add("Net"); // bare call to an HTTP-client default/named import whose pkg isn't installed
+                                   // (so its signature didn't resolve) — Net, not Unknown (#13). Host capture
+                                   // happens in the global/builtin arm below, which fires for the same node.
           } else {
             rec.direct.add("Unknown"); // unresolvable call → Unknown, never silent-pure (SPEC §4)
             const callee = (node.expression?.getText?.() ?? "?").replace(/\s+/g, "").slice(0, 60);
@@ -2163,6 +2193,9 @@ function visitCalls(node) {
     };
     if ((ctext === "process.hrtime" || ctext === "process.hrtime.bigint") && processIsGlobal()) geff = "Clock";
     else if (ctext === "process.send" && processIsGlobal()) geff = "Ipc";
+    else if (ts.isIdentifier(callee) && importedFromNetPkg(callee))
+      geff = "Net"; // a bare call to an HTTP-client default/named import (installed → sig resolves here) — #13
+
     else if (ts.isIdentifier(callee) && callee.text === "fetch"
              && !(checker.getSymbolAtLocation(callee)?.declarations ?? [])
                   .some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName))))

@@ -8,7 +8,7 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [0.16.0] — 2026-07-16
 
-### spec 0.16 — the callgraph-aware baseline guard, with an Unknown-only advisory
+### spec 0.17 — the callgraph-aware baseline guard, with an Unknown-only advisory
 
 candor-ts now declares **spec `0.16`** (`SPEC_VERSION` in `scan.mjs` + `query.mjs`; the report
 envelope + `--gate-json` verdict carry it). A consumer pinning `spec == "0.15"` must accept `0.16`.

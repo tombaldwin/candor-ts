@@ -41,6 +41,96 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          matches as coreMatches, gainsCoverage,
          loadReport, loadCallgraph, reportVersion, reportPackage } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
+// The §6 effect vocabulary — used to reject a typo'd effect name in `where` (corpus-audit #3). Kept in step
+// with SPEC §6 / the umbrella's list; an unknown name PRESENT in a report (a spec extension) is still allowed.
+const KNOWN_EFFECTS = ["Net", "Fs", "Db", "Llm", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Unknown"];
+
+// ---- #8 output mode: PROSE at a TTY, JSON when piped or `--json` — so interactive `candor where Db` reads
+// like candor-java/-rust instead of dumping raw JSON, while a pipe/redirect (never a TTY) still yields the
+// pinned JSON untouched. MCP/LSP call query-core directly (not this CLI), so they're unaffected; conformance
+// passes `--json` or captures over a pipe → JSON. `--json` forces JSON; `--text`/`--human` forces prose. -----
+const wantJsonOut = (a) =>
+  a.includes("--json") || (!a.includes("--text") && !a.includes("--human") && !process.stdout.isTTY);
+// Emit the pinned JSON, or render prose via proseFn(data). Returns data so the caller can still exit on it.
+const put = (a, data, proseFn) => { if (!proseFn || wantJsonOut(a)) emit(data); else proseFn(data); return data; };
+const csv = (xs) => (xs && xs.length ? xs.join(", ") : "none");
+const rows = (xs, pre = "    ") => { for (const x of xs) console.log(pre + x); };
+// Per-verb prose renderers. Read the SAME shapes query-core returns (so JSON and prose can't drift); kept
+// terse and scannable, in candor's voice (cf. the existing `tour`/`path` human forms).
+const P = {
+  where: (d) => {
+    const n = d.directly.length + d.inherited.length;
+    if (n === 0) { console.log(`candor: 0 functions perform ${d.effect} in this report.`); return; }
+    console.log(`candor where ${d.effect} — ${n} function${n === 1 ? "" : "s"}:`);
+    if (d.directly.length) { console.log(`  perform it directly (${d.directly.length}):`); rows(d.directly); }
+    if (d.inherited.length) { console.log(`  reach it transitively (${d.inherited.length}):`); rows(d.inherited); }
+  },
+  callers: (d) => {
+    if (!d.of.length) { console.log("candor: no function in the call graph matches that name."); return; }
+    console.log(`candor callers — who reaches \`${d.of.join("`, `")}\`:`);
+    console.log(`  direct callers (${d.direct.length}): ${csv(d.direct)}`);
+    console.log(`  transitive callers (${d.transitive.length}): ${csv(d.transitive)}`);
+  },
+  show: (d) => {
+    if (!d.length) { console.log("candor: no effectful function matches that name (pure functions are omitted from the report)."); return; }
+    d.forEach((e, i) => {
+      if (i) console.log("");
+      console.log(`${e.fn}`);
+      console.log(`  effects: ${csv(e.inferred)}${e.direct && e.direct.length ? `   (direct: ${e.direct.join(", ")})` : ""}`);
+      if (e.hosts?.length)  console.log(`  hosts:   ${e.hosts.join(", ")}`);
+      if (e.cmds?.length)   console.log(`  cmds:    ${e.cmds.join(", ")}`);
+      if (e.paths?.length)  console.log(`  paths:   ${e.paths.join(", ")}`);
+      if (e.tables?.length) console.log(`  tables:  ${e.tables.join(", ")}`);
+    });
+  },
+  map: (d) => {
+    const mods = Object.entries(d);
+    if (!mods.length) { console.log("candor: no effectful modules in this report."); return; }
+    console.log("candor map — effects by module:");
+    for (const [m, v] of mods) console.log(`  ${m} — ${csv(v.effects)}  (${v.functions} fn${v.functions === 1 ? "" : "s"})`);
+  },
+  containment: (d) => {
+    if ("leaks" in d) { // ratchet (a baseline was given)
+      if (!d.leaks.length) console.log("candor containment — no boundary effect reached a new layer vs the baseline. ✓");
+      else { console.log(`candor containment — ${d.leaks.length} boundary effect(s) reached a NEW layer (leak):`); rows(d.leaks); }
+      if (d.cleanups && d.cleanups.length) { console.log(`  no longer present (${d.cleanups.length}):`); rows(d.cleanups); }
+      return;
+    }
+    if (!d.contained.length && !Object.keys(d.ambient).length) { console.log("candor containment — no boundary effects in this report."); return; }
+    console.log("candor containment — how well each boundary effect stays in one layer:");
+    for (const c of d.contained)
+      console.log(`  ${c.effect}: ${c.containmentPct}% in \`${c.owner}\` (spread across ${c.layers} layer${c.layers === 1 ? "" : "s"})`);
+    const amb = Object.entries(d.ambient);
+    if (amb.length) console.log(`  ambient (reported, not scored): ${amb.map(([e, n]) => `${e}×${n}`).join(", ")}`);
+  },
+  reachable: (d) => {
+    const effs = Object.entries(d.effects);
+    console.log(`candor reachable — what the ${d.entryPoints} entry point${d.entryPoints === 1 ? "" : "s"} do at runtime:`);
+    if (!effs.length) { console.log("  no effect reaches an entry point."); return; }
+    for (const [e, v] of effs) console.log(`  ${e}: ${v.count} (via ${csv(v.via)})`);
+  },
+  impact: (d) => {
+    console.log(`candor impact — the blast radius of \`${d.fn}\`:`);
+    console.log(`  ${d.affectedCount} effectful function(s) transitively call it${d.affected.length ? ":" : "."}`);
+    if (d.affected.length) rows(d.affected);
+    if (d.entryPoints.length) { console.log(`  reachable from ${d.entryPoints.length} entry point(s):`); rows(d.entryPoints.map((ep) => `${ep.fn}  [${csv(ep.inferred)}]`)); }
+  },
+  blindspots: (d) => {
+    if (!d.sources.length) { console.log(`candor blindspots — no Unknown sources${d.totalUnknown ? " (all Unknown here is inherited, not rooted in a call)" : ""}. ✓`); return; }
+    console.log(`candor blindspots — ${d.sources.length} Unknown source${d.sources.length === 1 ? "" : "s"} (of ${d.totalUnknown} function(s) carrying Unknown), most-smearing first:`);
+    for (const s of d.sources) console.log(`  \`${s.fn}\` — ${csv(s.why)}; reaches ${s.reaches} caller(s)`);
+  },
+  gains: (d) => {
+    if (!d.gained.length) { console.log("candor gains — no newly-reached effects vs the baseline. ✓"); return; }
+    console.log(`candor gains — the surface newly reaches: ${d.gained.join(", ")}`);
+    for (const g of d.byFunction) console.log(`  \`${g.fn}\` gained ${g.effect}${g.origin ? `  (${g.origin})` : ""}`);
+  },
+  diff: (d) => {
+    if (!d.changes.length) { console.log("candor diff — no effect changes vs the baseline. ✓"); return; }
+    console.log(`candor diff — ${d.changes.length} function(s) changed vs the baseline:`);
+    for (const c of d.changes) console.log(`  \`${c.fn}\`${c.gained.length ? `  +${c.gained.join(",")}` : ""}${c.lost.length ? `  -${c.lost.join(",")}` : ""}`);
+  },
+};
 
 // Render `path` in HUMAN (non-`--json`) form — the indented provenance chain, BYTE-IDENTICAL to the
 // Rust reference (candor-query/src/callers.rs) and the Java port (Query.java). The `--json` shape is
@@ -94,7 +184,7 @@ function renderPathHuman(fns, cg, fnQ, eff) {
 // package.json; SPEC_VERSION is the spec contract this build speaks. Reused, never re-littered.
 const QUERY_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(QUERY_DIR, "package.json"), "utf8")).version;
-const SPEC_VERSION = "0.16";
+const SPEC_VERSION = "0.17";
 
 // ---- the §3.3.1 canonical query grammar (⟨0.10⟩, additive over 0.9) --------------------------------
 // One shape for every verb: `<verb> <verb-args…> [--report <locator>] [--policy <file>] [--json]
@@ -186,7 +276,8 @@ function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknow
       if (i + 1 >= rawArgs.length) { console.error("candor-ts: --policy requires a <file> value"); process.exit(2); }
       policyFile = rawArgs[++i]; continue;
     }
-    if (a === "--json") { continue; }                                // JSON is candor-ts's only output; accept + ignore
+    if (a === "--json" || a === "--text" || a === "--human") { continue; } // output-mode flags (#8) — consumed by
+                                                                            // wantJsonOut(rawArgs), never a positional
     if (strict && a === "--strict") { wantStrict = true; continue; }
     if (includeUnknown && a === "--include-unknown") { wantIncludeUnknown = true; continue; }
     positionals.push(a);
@@ -353,7 +444,8 @@ OPTIONS  (uniform across every engine)
   --report <locator>        use this report instead of discovering .candor/
   --policy <file>           evaluate a policy — exit 1 on a violation (whatif, fix, fix-gate,
                             unverified; CANDOR_POLICY / a .candor/config \`policy\` key when absent)
-  --json                    machine-readable output
+  --json                    machine-readable JSON (the default when output is piped/redirected)
+  --text, --human           human-readable prose (the default at a terminal)
   --include-unknown         callers: also list the unresolved-dispatch frontier
   --strict                  unverified: exit 1 on an unverified hole (advisory otherwise)
   -V, --version             print the installed version + upgrade line (offline)
@@ -399,7 +491,7 @@ switch (cmd) {
     // A missing/empty <query> is a LOUD usage error (exit 2, like candor-java) — never a silently-empty
     // `[]` at exit 0, which reads as an authoritative "no such function" over a question never asked.
     if (!q) { console.error("usage: candor-ts-query show <query> [--report <locator>] [--json]"); process.exit(2); }
-    emit(coreShow(loadReportOrDie(prefix), q));
+    put(args, coreShow(loadReportOrDie(prefix), q), P.show);
     break;
   }
   case "where": {
@@ -410,7 +502,15 @@ switch (cmd) {
     // A missing/empty <Effect> is a LOUD usage error (exit 2, like candor-java's missing-arg path) —
     // never an authoritative-empty {directly:[],inherited:[]} at exit 0 (a false all-clear shape).
     if (!eff) { console.error("usage: candor-ts-query where <Effect> [--report <locator>] [--json]"); process.exit(2); }
-    emit(coreWhere(loadReportOrDie(prefix), eff));
+    // A typo'd / unknown effect NAME is a LOUD error (exit 2) — never a false-empty {directly:[],inherited:[]}
+    // at exit 0, which reads as an authoritative "nothing performs Net" when the user actually typed "Network"
+    // (corpus-audit #3). A KNOWN effect that is simply absent stays a valid 0-result; an unknown name that is
+    // PRESENT in the report (a spec extension effect) is allowed — so error only when the name is NEITHER.
+    const fnsW = loadReportOrDie(prefix);
+    if (!KNOWN_EFFECTS.includes(eff) && !new Set(fnsW.flatMap((e) => e.inferred || [])).has(eff)) {
+      console.error(`candor-ts-query where: unknown effect '${eff}' (known: ${KNOWN_EFFECTS.join(", ")})`); process.exit(2);
+    }
+    put(args, coreWhere(fnsW, eff), P.where);
     break;
   }
   case "callers": {
@@ -422,14 +522,20 @@ switch (cmd) {
     // {of:[],direct:[],transitive:[]} at exit 0 (reads as "nothing reaches it" for a fn never named).
     if (!q) { console.error("usage: candor-ts-query callers <query> [--include-unknown] [--report <locator>] [--json]"); process.exit(2); }
     const cg = loadCallgraph(prefix);
-    if (includeUnknown) emit(callersFrontier(cg, loadReportOrDie(prefix), loadHierarchy(prefix), q));
-    else emit(coreCallers(cg, q));
+    const cres = includeUnknown ? callersFrontier(cg, loadReportOrDie(prefix), loadHierarchy(prefix), q) : coreCallers(cg, q);
+    // A nonexistent function is a LOUD error (exit 2), like path/impact — never an empty {of:[],direct:[],
+    // transitive:[]} at exit 0, which reads as an authoritative "nothing calls it" for a fn that doesn't exist
+    // (corpus-audit #3). Gated on a NON-empty callgraph so a missing sidecar isn't misreported as "no such fn".
+    if (Object.keys(cg).length > 0 && cres.of.length === 0) {
+      console.error(`candor-ts-query callers: no function matching '${q}' in the call graph`); process.exit(2);
+    }
+    put(args, cres, P.callers);
     break;
   }
   case "map": {
     // Shared query-core — the CLI and MCP `candor_map` are one implementation (see `where` above).
     const { prefix } = resolveReportVerb(args, 0);
-    emit(coreMap(loadReportOrDie(prefix)));
+    put(args, coreMap(loadReportOrDie(prefix)), P.map);
     break;
   }
   case "containment": {
@@ -459,10 +565,10 @@ switch (cmd) {
         process.exit(2);
       }
       const r = coreContainment(loadReportOrDie(prefix), baseFns);
-      emit(r);
+      put(args, r, P.containment);
       process.exit(r.leaks.length ? 1 : 0);
     }
-    emit(coreContainment(loadReportOrDie(prefix)));
+    put(args, coreContainment(loadReportOrDie(prefix)), P.containment);
     break;
   }
   case "diff": {
@@ -491,7 +597,7 @@ switch (cmd) {
     const versionMismatch = engineV && baseV && engineV !== baseV;
     if (versionMismatch)
       console.error(`candor-ts: ⚠ baseline @${baseV} ≠ engine @${engineV} — some changes may be the engine reclassifying, not your code. Treat an engine swap as baseline-invalidating: review, then regenerate the baseline.`);
-    emit({ baseline_version: baseV ?? "", engine_version: engineV ?? "", changes });
+    put(args, { baseline_version: baseV ?? "", engine_version: engineV ?? "", changes }, P.diff);
     // diff DISCLOSES (the posture) — it is not a gate. Its gained-effect exit 1 is a convenience for
     // same-build ratchet use; under a version mismatch that signal is BOGUS (unmasking, not regression),
     // so exit 0 and let the ⚠ inform — never deliver the wave as a CI failure (review §2.1: guards fail
@@ -507,9 +613,9 @@ switch (cmd) {
     const roots = fns.filter((e) => e.entryPoint);
     const byEff = {};
     for (const e of roots) for (const x of e.inferred) (byEff[x] ??= []).push(e.fn);
-    emit({ entryPoints: roots.length,
+    put(args, { entryPoints: roots.length,
            effects: Object.fromEntries(Object.entries(byEff).sort()
-             .map(([k, v]) => [k, { count: v.length, via: v.sort() }])) });
+             .map(([k, v]) => [k, { count: v.length, via: v.sort() }])) }, P.reachable);
     break;
   }
   case "impact": {
@@ -519,14 +625,14 @@ switch (cmd) {
     // A missing/empty <query> is a LOUD usage error (exit 2, like candor-java) — never an
     // affectedCount:0 blast radius at exit 0 for a function that was never named.
     if (!q) { console.error("usage: candor-ts-query impact <query> [--report <locator>] [--json]"); process.exit(2); }
-    emit(coreImpact(loadReportOrDie(prefix), loadCallgraph(prefix), q));
+    put(args, coreImpact(loadReportOrDie(prefix), loadCallgraph(prefix), q), P.impact);
     break;
   }
   case "blindspots": {
     // the Unknown SOURCES, ranked by blast radius — the actionable inverse of a widely-propagated
     // Unknown (SPEC §3.1 ⟨0.6⟩): { sources:[{fn,why,reaches,affected}], totalUnknown }.
     const { prefix } = resolveReportVerb(args, 0);
-    emit(coreBlindspots(loadReportOrDie(prefix), loadCallgraph(prefix)));
+    put(args, coreBlindspots(loadReportOrDie(prefix), loadCallgraph(prefix)), P.blindspots);
     break;
   }
   case "tour": {
@@ -630,9 +736,9 @@ switch (cmd) {
     // read as total), plus `coverageDelta` when the baseline names different blind packages. Both
     // OMITTED when nothing applies, so a coverage-free comparison is byte-identical to ⟨0.14⟩.
     // Shared with the MCP `candor_gains` tool (gainsCoverage — the parity rule).
-    emit({ baseline_version: gbv ?? "", engine_version: gv ?? "",
+    put(args, { baseline_version: gbv ?? "", engine_version: gv ?? "",
            ...coreGains(loadReportOrDie(curPrefix), loadReportOrDie(basePrefix), loadCallgraph(basePrefix)),
-           ...gainsCoverage(curPrefix, basePrefix) });
+           ...gainsCoverage(curPrefix, basePrefix) }, P.gains);
     break;
   }
   case "path": {

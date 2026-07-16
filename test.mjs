@@ -411,7 +411,7 @@ export function place(db: DatabaseSync): void { save(db); }`,
   check("--gate-json + violation still exits 1", r.status === 1, `status=${r.status}`);
   let v = null;
   try { v = JSON.parse(fs.readFileSync(gp, "utf8")); } catch { /* null → checks fail with raw */ }
-  check("--gate-json verdict declares spec 0.16", v?.spec === "0.16", JSON.stringify(v)?.slice(0, 120));
+  check("--gate-json verdict declares spec 0.17", v?.spec === "0.17", JSON.stringify(v)?.slice(0, 120));
   check("--gate-json verdict ok:false on a failing gate", v?.ok === false, `ok=${v?.ok}`);
   const viol = v?.violations?.find((x) => x.fn === "src.domain.place");
   check("--gate-json names the violating fn with its rule", viol?.rule === "AS-EFF-006", JSON.stringify(v?.violations)?.slice(0, 160));
@@ -528,9 +528,9 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
 // ── 3f. diff/gains disclose a producing-build mismatch (§2.1 — baseline-invalidation) ──────────────
 {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-basever-"));
-  fs.writeFileSync(path.join(d, "cur.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.16" },
+  fs.writeFileSync(path.join(d, "cur.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.17" },
     functions: [{ fn: "a.leaf", inferred: ["Net", "Log"], direct: ["Net", "Log"] }] }));
-  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.16" },
+  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.17" },
     functions: [{ fn: "a.leaf", inferred: ["Net"], direct: ["Net"] }] }));
   const r = spawnSync("node", [path.join(HERE, "query.mjs"), "diff", path.join(d, "cur"), path.join(d, "base"), "--json"], { encoding: "utf8" });
   const out = JSON.parse(r.stdout);
@@ -539,7 +539,7 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
   check("diff still reports the drift (disclosure, not suppression)", out.changes.length === 1 && out.changes[0].gained.includes("Log"), JSON.stringify(out.changes));
   check("the mismatch note is on stderr", r.stderr.includes("baseline-invalidating") && r.stderr.includes("aaaaaaa"), r.stderr.slice(0, 160));
   // same-build → no note
-  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.16" },
+  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.17" },
     functions: [{ fn: "a.leaf", inferred: ["Net"], direct: ["Net"] }] }));
   const r2 = spawnSync("node", [path.join(HERE, "query.mjs"), "diff", path.join(d, "cur"), path.join(d, "base"), "--json"], { encoding: "utf8" });
   check("same producing build → no mismatch note", !r2.stderr.includes("⚠"), r2.stderr.slice(0, 120));
@@ -966,6 +966,50 @@ export function ctor() { return new Stripe("x"); }`,
           entry(report, "src.s.sess")?.inferred.includes("Net"), JSON.stringify(entry(report, "src.s.sess")));
     check("new Stripe() construction is PURE (no Net fabricated)", entry(report, "src.s.ctor") == null,
           JSON.stringify(entry(report, "src.s.ctor")));
+  }
+  // #13 (corpus-audit): a BARE call to an HTTP-client identifier that is DEFAULT- or NAMED-imported from
+  // node-fetch / got / axios / undici resolves to Net — even when the package is NOT installed (so its
+  // signature doesn't resolve). `import fetch from "node-fetch"; fetch(url)` used to read Unknown
+  // (callback:fetch) instead of Net, the headline effect. Also asserts the URL host is captured and NO
+  // spurious Unknown lingers, and a pure sibling stays pure (no over-fire).
+  {
+    const d = project({
+      "src/n.ts": `import fetch from "node-fetch";
+import got from "got";
+import axios from "axios";
+import { request } from "undici";
+export async function pay() { await fetch("https://api.stripe.com/charge"); }
+export async function g() { await got("https://api.example.com/a"); }
+export async function a() { await axios("https://api.example.com/b"); }
+export async function u() { await request("https://api.example.com/c"); }
+export function pure() { return 1 + 2; }`,
+    });
+    const { report } = scan(d);
+    for (const [fn, host] of [["pay", "api.stripe.com"], ["g", "api.example.com"], ["a", "api.example.com"], ["u", "api.example.com"]]) {
+      const e = entry(report, `src.n.${fn}`);
+      check(`#13 ${fn}: bare HTTP-client import call -> Net`, e?.inferred.includes("Net"), JSON.stringify(e));
+      check(`#13 ${fn}: no spurious Unknown`, !!e && !e.inferred.includes("Unknown"), JSON.stringify(e));
+      check(`#13 ${fn}: host ${host} captured`, e?.hosts?.includes(host), JSON.stringify(e?.hosts));
+    }
+    check("#13 pure sibling stays pure (no over-fire)", entry(report, "src.n.pure") == null,
+          JSON.stringify(entry(report, "src.n.pure")));
+  }
+  // review-fix (#13 over-fire): only the CLIENT CALLABLE of an HTTP package is Net. A named CLASS export
+  // (`Headers`, `Response`) called bare must NOT be Net — the default import + named request fns still are.
+  {
+    const d = project({
+      "src/h.ts": `import fetch, { Headers } from "node-fetch";
+import { request } from "undici";
+export async function real() { await fetch("https://api.stripe.com/x"); }
+export function hdrs() { return Headers(); }
+export async function req() { await request("https://api.example.com/y"); }`,
+    });
+    const { report } = scan(d);
+    check("#13 fetch default import -> Net", entry(report, "src.h.real")?.inferred.includes("Net"));
+    check("#13 undici { request } -> Net", entry(report, "src.h.req")?.inferred.includes("Net"));
+    check("#13 { Headers } class export is NOT over-reported as Net",
+          !(entry(report, "src.h.hdrs")?.inferred || []).includes("Net"),
+          JSON.stringify(entry(report, "src.h.hdrs")));
   }
   // bullmq: queue.add / getJob -> Db (Redis); queue.on (event wiring) -> pure
   {
@@ -2380,7 +2424,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-cliarms-"));
   const eqJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-  const rep = (fns) => JSON.stringify({ candor: { version: "ttttttt", spec: "0.16" }, functions: fns });
+  const rep = (fns) => JSON.stringify({ candor: { version: "ttttttt", spec: "0.17" }, functions: fns });
   fs.writeFileSync(path.join(d, "r.json"), rep([
     { fn: "app.db.save", inferred: ["Db"], direct: ["Db"], loc: "db.ts:1", tables: ["orders"] },
     { fn: "app.web.handler", inferred: ["Db"], direct: [], entryPoint: true, loc: "web.ts:1" },
@@ -2428,6 +2472,58 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
           && impJ.affected.includes("app.web.handler")
           && impJ.entryPoints.some((e) => e.fn === "app.web.handler" && e.inferred.includes("Db")),
         `status=${imp.status} ${imp.stdout.slice(0, 160)}`);
+
+  // #8 output mode (corpus-audit): the DATA verbs (where/callers/show/map/…) default to PROSE at a TTY and
+  // JSON when piped or `--json` — so interactive `candor where Db` reads like candor-java instead of dumping
+  // JSON, while a pipe (this harness) still gets JSON so machine consumers are untouched. `--json` forces
+  // JSON (it used to be silently ignored); `--text`/`--human` forces prose.
+  {
+    const wj = runQuery("where", "Db", "--report", P);              // piped (not a TTY) → JSON default
+    check("#8 where: piped output stays JSON (machine consumers untouched)",
+          wj.status === 0 && JSON.parse(wj.stdout).effect === "Db", wj.stdout.slice(0, 120));
+    const wt = runQuery("where", "Db", "--report", P, "--text");    // forced prose
+    check("#8 where --text: human prose, not JSON",
+          wt.status === 0 && wt.stdout.startsWith("candor where Db —") && !wt.stdout.includes("{"),
+          JSON.stringify(wt.stdout).slice(0, 160));
+    const wjson = runQuery("where", "Db", "--report", P, "--json"); // --json now HONORED (was ignored)
+    check("#8 where --json: JSON selected explicitly",
+          wjson.status === 0 && JSON.parse(wjson.stdout).effect === "Db", wjson.stdout.slice(0, 120));
+    const mt = runQuery("map", "--report", P, "--text");
+    check("#8 map --text: prose header, not JSON",
+          mt.stdout.startsWith("candor map —") && !mt.stdout.includes("{"), JSON.stringify(mt.stdout).slice(0, 120));
+    // review-fix: --text/--human must be STRIPPED from positionals — else `show --text <fn>` treats `--text`
+    // as the query, drops the real fn, and prints a false "no such function" all-clear at exit 0 (cardinal sin).
+    const st = runQuery("show", "--text", "save", "--report", P);   // --text BEFORE the <fn> query
+    check("#8 show --text <fn> (flag before query): finds the real fn, no false all-clear",
+          st.status === 0 && st.stdout.includes("app.db.save") && !/no effectful function/.test(st.stdout),
+          `status=${st.status} ${JSON.stringify(st.stdout).slice(0, 160)}`);
+    const ct = runQuery("callers", "--human", "save", "--report", P);
+    check("#8 callers --human <fn> (flag before query): resolves the real fn",
+          ct.status === 0 && ct.stdout.includes("save"), `status=${ct.status} ${ct.stdout.slice(0, 120)}`);
+  }
+
+  // #3 target validation (corpus-audit): a typo'd EFFECT or a nonexistent FUNCTION is a LOUD error (exit 2),
+  // like path/impact already are — never a false-empty result at exit 0 (reads as an authoritative all-clear
+  // for a question that was never actually posed — the §4 cardinal sin). A VALID effect that's simply absent
+  // stays a legitimate 0-result at exit 0.
+  {
+    const bad = runQuery("where", "Netwerk", "--report", P);
+    check("#3 where <typo effect> → exit 2, names the known set",
+          bad.status === 2 && /unknown effect 'Netwerk'/.test(bad.stderr) && /Net, Fs, Db/.test(bad.stderr),
+          `status=${bad.status} ${bad.stderr.slice(0, 120)}`);
+    const absent = runQuery("where", "Clipboard", "--report", P);   // valid effect, not in this report
+    check("#3 where <valid-but-absent effect> → exit 0 (a real 0-result, NOT an error)",
+          absent.status === 0 && JSON.parse(absent.stdout).effect === "Clipboard"
+            && JSON.parse(absent.stdout).directly.length === 0, `status=${absent.status}`);
+    const noFn = runQuery("callers", "no_such_function_xyz", "--report", P);
+    check("#3 callers <nonexistent fn> → exit 2 (not empty at exit 0)",
+          noFn.status === 2 && /no function matching 'no_such_function_xyz'/.test(noFn.stderr),
+          `status=${noFn.status} ${noFn.stderr.slice(0, 120)}`);
+    const realFn = runQuery("callers", "save", "--report", P);      // app.db.save exists
+    check("#3 callers <real fn> → exit 0, resolves normally",
+          realFn.status === 0 && JSON.parse(realFn.stdout).of.some((f) => f.endsWith("save")),
+          `status=${realFn.status} ${realFn.stdout.slice(0, 120)}`);
+  }
 
   // path --json: forward provenance to the direct source, the §3.1 shape (conformance PART 5 pins it
   // four-way — the human default below must NOT change it). --json is now REQUIRED to select JSON.
@@ -2491,9 +2587,9 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
         `status=${pthNJ.status} ${pthNJ.stdout.slice(0, 160)}`);
 
   // gains: the supply-chain alarm + the §2.1 version-skew disclosure
-  fs.writeFileSync(path.join(d, "oldbase.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.16" },
+  fs.writeFileSync(path.join(d, "oldbase.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.17" },
     functions: [{ fn: "app.db.save", inferred: ["Db"], direct: ["Db"] }] }));
-  fs.writeFileSync(path.join(d, "cur2.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.16" },
+  fs.writeFileSync(path.join(d, "cur2.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.17" },
     functions: [{ fn: "app.db.save", inferred: ["Db", "Exec"], direct: ["Db", "Exec"] }] }));
   const g = runQuery("gains", path.join(d, "cur2"), path.join(d, "oldbase"));
   const gJ = JSON.parse(g.stdout);
@@ -2503,7 +2599,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
         `status=${g.status} ${g.stdout.slice(0, 160)}`);
   check("CLI gains: a producing-build mismatch is DISCLOSED on stderr (reclassify vs regression ambiguity)",
         /⚠/.test(g.stderr) && /reclassifying/.test(g.stderr), g.stderr.slice(0, 160));
-  fs.writeFileSync(path.join(d, "samebase.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.16" },
+  fs.writeFileSync(path.join(d, "samebase.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.17" },
     functions: [{ fn: "app.db.save", inferred: ["Db"], direct: ["Db"] }] }));
   const g2 = runQuery("gains", path.join(d, "cur2"), path.join(d, "samebase"));
   check("CLI gains: same producing build → no mismatch note", g2.status === 0 && !/⚠/.test(g2.stderr),
@@ -2512,10 +2608,10 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   // ⟨spec 0.12 staged⟩ byFunction[].origin, keyed on the BASELINE CALLGRAPH (reports omit pure fns, §2):
   // a baseline-pure fn that now does Net is "existing" (the supply-chain attack signal, a different alarm
   // from a "new" fn); no baseline callgraph at all → "unknown" (undecidable, disclosed not guessed).
-  fs.writeFileSync(path.join(d, "obase.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.16" },
+  fs.writeFileSync(path.join(d, "obase.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.17" },
     functions: [{ fn: "m.g", inferred: ["Fs"], direct: ["Fs"] }] }));
   fs.writeFileSync(path.join(d, "obase.callgraph.json"), JSON.stringify({ "m.f": ["m.g"], "m.g": [] }));
-  fs.writeFileSync(path.join(d, "ocur.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.16" },
+  fs.writeFileSync(path.join(d, "ocur.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.17" },
     functions: [{ fn: "m.f", inferred: ["Net"], direct: ["Net"] }, { fn: "m.g", inferred: ["Fs"], direct: ["Fs"] },
                 { fn: "m.h", inferred: ["Net"], direct: ["Net"] }] }));
   const originOf = (j, fn) => j.byFunction.find((x) => x.fn === fn)?.origin;
@@ -2546,10 +2642,10 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   // envelope rides along + a name-level `coverageDelta` vs the baseline; every OTHER field (gained /
   // byFunction / provenance) is unchanged by it, and a coverage-free comparison stays byte-identical
   // to the ⟨0.14⟩ shape (no key at all — the checks above already parse those outputs strictly).
-  fs.writeFileSync(path.join(d, "covcur.json"), JSON.stringify({ candor: { version: "ddddddd", spec: "0.16" },
+  fs.writeFileSync(path.join(d, "covcur.json"), JSON.stringify({ candor: { version: "ddddddd", spec: "0.17" },
     functions: [{ fn: "m.f", inferred: ["Net"], direct: ["Net"] }],
     coverage: { uncovered: [{ name: "blinddep", calls: 2 }] } }));
-  fs.writeFileSync(path.join(d, "covbase.json"), JSON.stringify({ candor: { version: "ddddddd", spec: "0.16" },
+  fs.writeFileSync(path.join(d, "covbase.json"), JSON.stringify({ candor: { version: "ddddddd", spec: "0.17" },
     functions: [] }));
   const gCov = JSON.parse(runQuery("gains", path.join(d, "covcur"), path.join(d, "covbase")).stdout);
   check("⟨0.15⟩ CLI gains: the CURRENT report's coverage envelope rides along (uncovered dep named)",
@@ -2702,7 +2798,7 @@ export { Settings };`,
 // exercised argless in CLI-10.
 {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-missarg-"));
-  fs.writeFileSync(path.join(d, "r.json"), JSON.stringify({ candor: { version: "ttttttt", spec: "0.16" },
+  fs.writeFileSync(path.join(d, "r.json"), JSON.stringify({ candor: { version: "ttttttt", spec: "0.17" },
     functions: [{ fn: "app.db.save", inferred: ["Db"], direct: ["Db"], loc: "db.ts:1" }] }));
   fs.writeFileSync(path.join(d, "r.callgraph.json"), JSON.stringify({ "app.db.save": [] }));
   const P = path.join(d, "r");
@@ -3093,13 +3189,13 @@ export function fmt(s: string, cb: Function): string { cb(); readFileSync("/etc/
 
 // ── doc drift gates (TESTING.md §9): the family phrases the docs must carry ────────────────────────
 // README/AGENTS are load-bearing self-descriptions: they must state the CURRENT spec contract
-// ("spec 0.16", no stale generation strings — AGENTS.md shipped "spec 0.7" examples a full generation
+// ("spec 0.17", no stale generation strings — AGENTS.md shipped "spec 0.7" examples a full generation
 // after the 0.8 roll) and, wherever they lean on the reference engine, attribute it (candor-java IS
 // the reference — the family ruling the baseline/pure semantics cite).
 {
   for (const f of ["README.md", "AGENTS.md"]) {
     const doc = fs.readFileSync(path.join(HERE, f), "utf8");
-    check(`${f} states the current spec contract (spec 0.16)`, doc.includes("spec 0.16"));
+    check(`${f} states the current spec contract (spec 0.17)`, doc.includes("spec 0.17"));
     const stale = doc.match(/spec 0\.[0-7]\b|spec 0\.9\b|spec 0\.1[0-5]\b/g) ?? [];
     check(`${f} carries no stale spec-generation string`, stale.length === 0, JSON.stringify(stale));
     const refLines = doc.split("\n").filter((l) => /reference engine/i.test(l));
