@@ -6,6 +6,21 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.18.0] — 2026-07-16
+
+### spec 0.18 — the trust-trio
+
+candor-ts now declares **spec `0.18`** (`SPEC_VERSION` in `scan.mjs` + `query.mjs`). A pinned-tool-surface
+rung (no report/verdict change), closing three ways the tool could quietly mislead — all pinned four-way:
+
+- **`--strict` advisory-verb CI gate**: `fix-gate`, `gains`, `unverified` are advisory (exit 0); `--strict`
+  makes each a CI gate (exit 1 while a finding remains). `gains` rejects a swallowed `--policy` (exit 2),
+  naming the scan-time `deny <E> gained` gate (`AS-EFF-005`).
+- **mostly-Unknown disclosure**: the scan opener + `tour` never say "nothing hidden" over a ≥⅓-Unknown graph;
+  `tour --json` carries an additive `unknown: {count, total}`.
+- Hardening from a Fable-model code review (the earlier round already rejected single-dash typos + tolerated
+  `--text` via the shared grammar).
+
 ## [0.16.0] — 2026-07-16
 
 ### spec 0.17 — the callgraph-aware baseline guard, with an Unknown-only advisory

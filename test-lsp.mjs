@@ -343,7 +343,7 @@ fs.mkdirSync(path.join(PERF, ".candor"));
                      loc: `src/f${Math.floor(i / 100)}.ts:${(i % 100) + 1}` });
     cg[nameOf(i)] = i > 0 ? [nameOf(i - 1)] : [];      // one 5000-deep chain: fn_i → fn_{i-1}
   }
-  fs.writeFileSync(path.join(PERF, ".candor", "report.json"), JSON.stringify({ candor: { version: "perf-fixture", spec: "0.17" }, functions }));
+  fs.writeFileSync(path.join(PERF, ".candor", "report.json"), JSON.stringify({ candor: { version: "perf-fixture", spec: "0.18" }, functions }));
   fs.writeFileSync(path.join(PERF, ".candor", "report.callgraph.json"), JSON.stringify(cg));
 }
 const PDOC = pathToFileURL(path.join(PERF, "src", "f0.ts")).href;   // fns 0..99 — the deep end of the chain
