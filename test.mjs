@@ -2785,6 +2785,26 @@ export { Settings };`,
   check("tour 2: a valid positive N works (exit 0, ≤2 reaches)",
         good.status === 0 && (JSON.parse(good.stdout).reaches?.length ?? 99) <= 2, `status=${good.status}`);
 
+  // #1 (re-audit cardinal sin): over a meaningfully-UNKNOWN graph (unresolved calls — a missing tsconfig /
+  // unresolvable imports), tour must NOT reassure "nothing hidden" — the Unknowns ARE the hidden part. ≥⅓ of
+  // effectful fns Unknown → a qualified warning naming the count + `candor blindspots`; a clean graph is
+  // unchanged. (Same gate the scan opener uses in surface.mjs.)
+  const munk = `${d}/munk`; fs.mkdirSync(`${munk}/.candor`, { recursive: true });
+  fs.writeFileSync(`${munk}/.candor/report.json`, JSON.stringify({ candor: { version: "t", toolchain: "node", spec: "0.17" },
+    functions: [ { fn: "a.loadA", inferred: ["Unknown"], unknownWhy: ["callback:x"] },
+                 { fn: "a.loadB", inferred: ["Unknown"], unknownWhy: ["callback:y"] },
+                 { fn: "db.query", inferred: ["Fs"], direct: ["Fs"] } ] }));
+  const mt = runQuery("tour", "--report", munk);
+  check("#1 tour: mostly-Unknown graph → qualified, NOT a false 'nothing hidden'",
+        !/nothing hidden/.test(mt.stdout) && /are Unknown/.test(mt.stdout) && /blindspots/.test(mt.stdout),
+        mt.stdout.slice(0, 180));
+  const clean = `${d}/clean`; fs.mkdirSync(`${clean}/.candor`, { recursive: true });
+  fs.writeFileSync(`${clean}/.candor/report.json`, JSON.stringify({ candor: { version: "t", toolchain: "node", spec: "0.17" },
+    functions: [ { fn: "svc.now", inferred: ["Clock"], direct: ["Clock"] } ] }));
+  const ct = runQuery("tour", "--report", clean);
+  check("#1 tour: a clean effectful graph (no Unknown) still says 'nothing hidden'",
+        /nothing hidden/.test(ct.stdout), ct.stdout.slice(0, 120));
+
   fs.rmSync(d, { recursive: true, force: true });
 }
 

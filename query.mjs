@@ -698,8 +698,21 @@ switch (cmd) {
     }
     if (finds.length === 0) {
       // Effectful-but-nothing-surprising vs genuinely-pure both land here; the honest line is the useful
-      // answer (never a manufactured surprise) — mirrors the scan-note fallback + the Rust engine.
-      console.log("candor: nothing hidden — every effect sits where its name says it should.");
+      // answer (never a manufactured surprise) — mirrors the scan-note fallback + the Rust engine. BUT never
+      // reassure "nothing hidden" over a meaningfully-Unknown graph (unresolved calls — missing tsconfig /
+      // imports): those Unknowns ARE the hidden part, their transitive effects unanalyzed (re-audit cardinal
+      // sin). Same ≥⅓-effectful-Unknown gate as the scan opener (surface.mjs emitSurface).
+      const teff = fns.filter((e) => (e.inferred ?? []).length > 0).length;
+      const tunk = fns.filter((e) => (e.inferred ?? []).includes("Unknown")).length;
+      if (teff > 0 && tunk * 3 >= teff) {
+        console.log(
+          `candor: no surprising reaches — but ${tunk} of ${teff} function(s) are Unknown `
+          + `(unresolved calls; their transitive effects are NOT analyzed). Run \`candor blindspots\`; `
+          + `a missing tsconfig.json or unresolvable imports are the usual cause.`,
+        );
+      } else {
+        console.log("candor: nothing hidden — every effect sits where its name says it should.");
+      }
       break;
     }
     console.log(`candor tour — the ${finds.length} most surprising reach${finds.length === 1 ? "" : "es"} in ${crateName}:`);

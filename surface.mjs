@@ -215,8 +215,26 @@ export function bestFind(inferred, direct, calls, isTest = () => false) {
 // the sink (defaults to console.error). Mirrors surface.rs::emit exactly.
 export function emitSurface(inferred, direct, calls, loc, isTest = () => false, log = console.error) {
   const res = bestFind(inferred, direct, calls, isTest);
-  if (res === null) return; // zero effectful functions — emit nothing
-  if (res.winner === null) {
+  // A real SURPRISING reach is a genuine finding — show it (below), even amid Unknowns.
+  if (res !== null && res.winner !== null) { /* fall through to the surprising-reach message */ }
+  else {
+    // No surprising reach. But do NOT reassure "nothing hidden" over a meaningfully-UNKNOWN graph: those
+    // Unknowns (unresolved calls — e.g. a missing tsconfig.json, unresolvable imports) ARE the hidden part,
+    // and their transitive effects are unanalyzed. "nothing hidden" there is a false all-clear — the
+    // cardinal sin for a tool that sells transitive-reach detection (corpus re-audit). Qualify + point at
+    // blindspots. `bestFind` returns null for BOTH "no effectful fns" and "effectful-but-nothing-surprising
+    // (incl. all-Unknown)", so measure the Unknown fraction from `inferred` directly, not from `res`.
+    const total = [...inferred.values()].filter((s) => s.size > 0).length; // EFFECTFUL fns (pure units excluded)
+    const unknown = [...inferred.values()].filter((s) => s.has("Unknown")).length;
+    if (total > 0 && unknown * 3 >= total) { // ≥ ~1/3 of effectful functions Unknown → meaningfully unresolved
+      log(
+        `candor: no surprising reaches — but ${unknown} of ${total} function(s) are Unknown `
+        + `(unresolved calls; their transitive effects are NOT analyzed). Run \`candor blindspots\`; `
+        + `a missing tsconfig.json or unresolvable imports are the usual cause.`,
+      );
+      return;
+    }
+    if (res === null) return; // genuinely nothing effectful/surprising and few Unknowns — emit nothing
     log("candor: nothing hidden — every effect sits where its name says it should.");
     return;
   }
