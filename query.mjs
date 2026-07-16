@@ -44,6 +44,18 @@ const emit = (v) => console.log(JSON.stringify(v, null, 1));
 // The §6 effect vocabulary — used to reject a typo'd effect name in `where` (corpus-audit #3). Kept in step
 // with SPEC §6 / the umbrella's list; an unknown name PRESENT in a report (a spec extension) is still allowed.
 const KNOWN_EFFECTS = ["Net", "Fs", "Db", "Llm", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Unknown"];
+// Suggest the nearest known flag for a typo (longest shared prefix ≥3): `--polciy` → `--policy` (#2).
+function didYouMeanFlag(unknown) {
+  const known = ["--report", "--policy", "--json", "--text", "--strict", "--include-unknown"];
+  const u = unknown.replace(/^-+/, "").toLowerCase();
+  let best = null, bestLen = 2;
+  for (const k of known) {
+    const kn = k.replace(/^-+/, "");
+    let s = 0; while (s < u.length && s < kn.length && u[s] === kn[s]) s++;
+    if (s >= 3 && s > bestLen) { bestLen = s; best = k; }
+  }
+  return best ? ` — did you mean \`${best}\`?` : "";
+}
 
 // ---- #8 output mode: PROSE at a TTY, JSON when piped or `--json` — so interactive `candor where Db` reads
 // like candor-java/-rust instead of dumping raw JSON, while a pipe/redirect (never a TTY) still yields the
@@ -272,14 +284,21 @@ function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknow
       if (i + 1 >= rawArgs.length) { console.error("candor-ts: --report requires a <locator> value (a directory, a .json report path, or a prefix)"); process.exit(2); }
       reportLocator = rawArgs[++i]; continue;
     }
-    if (policy && a === "--policy") {
+    if (a === "--policy") { // consumed for EVERY verb (a valid candor flag); used only by policy verbs
       if (i + 1 >= rawArgs.length) { console.error("candor-ts: --policy requires a <file> value"); process.exit(2); }
-      policyFile = rawArgs[++i]; continue;
+      const v = rawArgs[++i]; if (policy) policyFile = v; continue;
     }
     if (a === "--json" || a === "--text" || a === "--human") { continue; } // output-mode flags (#8) — consumed by
                                                                             // wantJsonOut(rawArgs), never a positional
-    if (strict && a === "--strict") { wantStrict = true; continue; }
-    if (includeUnknown && a === "--include-unknown") { wantIncludeUnknown = true; continue; }
+    if (a === "--strict") { if (strict) wantStrict = true; continue; }                       // vocabulary — tolerated everywhere,
+    if (a === "--include-unknown") { if (includeUnknown) wantIncludeUnknown = true; continue; } // used only by the verb that reads it
+    if (a.startsWith("-") && a.length > 1) {
+      // An unrecognized flag is a TYPO, not a positional — reject it LOUD (exit 2), never silently swallow.
+      // A swallowed `--polciy` runs the query with NO policy and exits green: a CI author who typos --policy
+      // ships a gate that never fires (corpus re-audit cardinal sin — a loud error, never a silent guess).
+      console.error(`candor-ts-query: unknown flag '${a}'${didYouMeanFlag(a)}\n  known flags: --report, --policy, --json, --text, --strict, --include-unknown`);
+      process.exit(2);
+    }
     positionals.push(a);
   }
   // Deprecated trailing `0|1` JSON sentinel (Rust/TS legacy): if the LAST positional is a bare 0 or 1,
