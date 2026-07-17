@@ -29,7 +29,7 @@ function siblings(prefix, predicate) {
 // sibling is `.encountered-*`/`.calibrated.json` passes the existence check but loads ZERO functions →
 // an authoritative-empty result (silent under-report; review find). `.gate.json` has no functions array,
 // so merging it "disclosed a malformed report" on every query over the recommended CI layout — noisy, excluded.
-export const isReport = (f) => !f.endsWith(".callgraph.json") && !f.endsWith(".hierarchy.json") && !f.includes(".encountered-") && !f.endsWith(".calibrated.json") && !f.endsWith(".gate.json");
+export const isReport = (f) => !f.endsWith(".callgraph.json") && !f.endsWith(".hierarchy.json") && !f.endsWith(".locs.json") && !f.includes(".encountered-") && !f.endsWith(".calibrated.json") && !f.endsWith(".gate.json");
 
 // A report exists at the prefix if there's an exact `<prefix>.json` (candor-ts) OR a sibling
 // `<prefix>.<crate>.scan.json` (the candor-scan/Rust multi-report form) — the loaders read both, so a

@@ -2,3 +2,6 @@ node_modules/
 out.json
 out.callgraph.json
 *.tgz
+
+# candor scan artifacts (generated; the loc index/report/callgraph/hierarchy sidecars)
+.candor/

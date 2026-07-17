@@ -3377,6 +3377,39 @@ main();
     check("verify: an ESM DESTRUCTURED named builtin import is captured (the loader closes the gap)",
       n.status === 1 && njson?.violations?.[0]?.fn === "napp.reads" && njson?.violations?.[0]?.escaped?.includes("Fs"),
       `exit=${n.status} out=${(n.stdout || "").slice(0, 200)}`);
+    // (e) ATTRIBUTION SOUNDNESS — a PURE fn (absent from the §2 report, BETWEEN two effectful fns) that
+    // secretly runs an effect must anchor to ITSELF via the all-fn loc index (<prefix>.locs.json) and surface
+    // as a VIOLATION — not fold into the nearest preceding effectful fn, whose claim would absorb it (the
+    // silent false-all-clear the dogfood found). Scan a SOUND version (computeTotal pure ⇒ absent from the
+    // report, PRESENT in the loc index), then make computeTotal read a file on the SAME line (report + locs
+    // stay valid) and run: the loc index puts the Fs on computeTotal, and candor claims it pure ⇒ VIOLATION.
+    const outTmp = path.join(os.tmpdir(), "papp-out.txt");
+    const pd = project({
+      "papp.ts": `import { readFileSync, writeFileSync } from "node:fs";
+function loadCfg(p: string): string { return readFileSync(p, "utf8"); }
+function saveOut(p: string, s: string): void { writeFileSync(p, s); }
+function computeTotal(): number { const salt = 0; return salt - salt; }
+function run(): void { const c = loadCfg(process.execPath); saveOut(${JSON.stringify(outTmp)}, String(computeTotal()) + c.length); }
+run();
+`,
+      "package.json": '{"name":"papp","version":"0.0.0","type":"module"}',
+    });
+    const { report: prep, prefix: ppfx } = scan(pd);
+    const locs = fs.existsSync(`${ppfx}.locs.json`) ? JSON.parse(fs.readFileSync(`${ppfx}.locs.json`, "utf8")) : {};
+    check("verify: the all-fn loc index is emitted and includes PURE fns (computeTotal)",
+      !!locs["papp.computeTotal"] && !prep.functions.find((e) => e.fn === "papp.computeTotal"),
+      `locs=${JSON.stringify(locs)} effectful=${prep.functions.map((e) => e.fn).join(",")}`);
+    // secretly make the "pure" fn read a file — SAME line, so the scanned report + loc index stay valid.
+    const psrc = fs.readFileSync(path.join(pd, "papp.ts"), "utf8")
+      .replace("const salt = 0;", 'const salt = readFileSync(process.execPath, "utf8").length;');
+    fs.writeFileSync(path.join(pd, "papp.ts"), psrc);
+    const pRun = `node --experimental-strip-types ${JSON.stringify(path.join(pd, "papp.ts"))}`;
+    const pv = spawnSync("node", [path.join(HERE, "verify.mjs"), pd, "--report", ppfx, "--run", pRun, "--json"], { encoding: "utf8" });
+    let pj = null; try { pj = JSON.parse(pv.stdout); } catch { /* below */ }
+    check("verify: a PURE fn that runs an effect is caught via the loc index (not folded into a neighbour)",
+      pv.status === 1 && pj?.metrics.attributionComplete === true
+        && pj?.violations?.some((v) => v.fn === "papp.computeTotal" && v.escaped?.includes("Fs")),
+      `exit=${pv.status} out=${(pv.stdout || "").slice(0, 220)}`);
   }
 }
 

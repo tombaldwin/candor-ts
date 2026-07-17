@@ -29,7 +29,7 @@ import {
   isModelHost, modelHostEffects, isModelSdkPackage, netDestClass,
 } from "./scan-core.mjs";
 import { bestFind, bestFinds, tokenize } from "./surface.mjs";
-import { verify } from "./verify-core.mjs";
+import { verify, verifySites } from "./verify-core.mjs";
 import { netEffects, destOf } from "./verify-emit.mjs";
 import { parseTrace, programCheck } from "./verify-syscall.mjs";
 
@@ -182,6 +182,39 @@ test("verify: disclosure (Unknown) flips the same run to HELD (disclosed-partial
   assert.equal(r.metrics.honestyInvariantHolds, true, "Unknown discloses the hole — the invariant HOLDS");
   assert.equal(r.metrics.cardinalSinViolations, 0);
   assert.equal(r.metrics.disclosedUnknownLoadBearing, 1, "the Unknown was doing real work");
+});
+// ── attribution soundness: a pure fn (no loc in the §2 report) that runs an effect must not fold into a
+// neighbour and vanish. The ALL-FUNCTION loc index closes the hole; its absence must fail CLOSED (disclose).
+test("verify: WITHOUT the loc index, a pure fn's effect folds into the preceding effectful fn — disclosed, not silently HELD", () => {
+  // loadConfig@3 (Fs), saveResult@6 (Fs) are effectful; computeTotal@9 is pure (absent). An Fs at line 10
+  // is INSIDE computeTotal — but with only effectful locs it anchors to saveResult@6 (which claims Fs).
+  const report = { functions: [
+    { fn: "app.loadConfig", inferred: ["Fs"], loc: "app.ts:3:1" },
+    { fn: "app.saveResult", inferred: ["Fs"], loc: "app.ts:6:1" },
+  ] };
+  const sites = [{ file: "app.ts", line: 10, effect: "Fs" }];
+  const r = verifySites(report, sites, "direct", { analyzedCount: 3 }); // 3 analyzed, 2 effectful ⇒ 1 pure unlocated
+  assert.equal(r.metrics.cardinalSinViolations, 0, "the misattribution hides the escape (the bug)…");
+  assert.equal(r.metrics.attributionComplete, false, "…but it is NO LONGER a silent all-clear — disclosed");
+  assert.match(r.metrics.attributionNote, /pure fn/);
+});
+test("verify: WITH the loc index, the same pure-fn effect anchors to itself and is a cardinal-sin VIOLATION", () => {
+  const report = { functions: [
+    { fn: "app.loadConfig", inferred: ["Fs"], loc: "app.ts:3:1" },
+    { fn: "app.saveResult", inferred: ["Fs"], loc: "app.ts:6:1" },
+  ] };
+  const sites = [{ file: "app.ts", line: 10, effect: "Fs" }];
+  const locIndex = { "app.loadConfig": "app.ts:3:1", "app.saveResult": "app.ts:6:1", "app.computeTotal": "app.ts:9:1" };
+  const r = verifySites(report, sites, "direct", { locIndex, analyzedCount: 3 });
+  assert.equal(r.metrics.attributionComplete, true, "the full-universe loc index makes attribution sound");
+  assert.equal(r.metrics.cardinalSinViolations, 1, "computeTotal ran Fs but is claimed pure — the cardinal sin");
+  assert.equal(r.violations[0].fn, "app.computeTotal");
+  assert.deepEqual(r.violations[0].escaped, ["Fs"]);
+});
+test("verify: attribution is complete (no disclosure) when there are no unlocated pure fns", () => {
+  const report = { functions: [{ fn: "app.f", inferred: ["Fs"], loc: "app.ts:1:1" }] };
+  const r = verifySites(report, [{ file: "app.ts", line: 2, effect: "Fs" }], "direct", { analyzedCount: 1 });
+  assert.equal(r.metrics.attributionComplete, true, "analyzed == effectful ⇒ nothing pure to mislocate");
 });
 test("verify: observed ⊆ inferred is sound-complete-ok (no false positive on a truthful signature)", () => {
   const report = { functions: [{ fn: "app.f", inferred: ["Net", "Fs"] }] };

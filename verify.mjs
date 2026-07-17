@@ -61,6 +61,18 @@ if (!fns || fns.length === 0) {
 }
 const report = { functions: fns };
 
+// The ALL-FUNCTION loc index (candor's `<prefix>.locs.json`) — locs for pure fns too, so a runtime effect
+// inside a fn candor called pure anchors to ITSELF (a VIOLATION), not to a neighbouring effectful fn (a
+// silent miss). Plus the analyzed-universe size (the manifest's `analyzed.count`) so that, WITHOUT the index,
+// the oracle can tell whether pure fns even exist and fail closed. Both optional — absent ⇒ disclosed.
+const locsPath = prefix.endsWith(".json") ? prefix.replace(/\.json$/, ".locs.json") : `${prefix}.locs.json`;
+let locIndex = null, analyzedCount = null;
+try { locIndex = JSON.parse(fs.readFileSync(locsPath, "utf8")); } catch { /* no loc index — fail closed below */ }
+try {
+  const envPath = prefix.endsWith(".json") ? prefix : `${prefix}.json`;
+  analyzedCount = JSON.parse(fs.readFileSync(envPath, "utf8"))?.analyzed?.count ?? null;
+} catch { /* no envelope count */ }
+
 // ── SYSCALL mode (mechanism-independent) — check a PRE-CAPTURED syscall trace against the report's effect
 // union (a program-wide false-pure: an effect the kernel saw that candor claims nowhere). Capture recipe:
 //   Linux:  strace -f -e trace=network,file,process -o trace.txt <cmd>   (then --trace-format strace)
@@ -108,7 +120,7 @@ try {
 } catch { /* no trace written — no effectful call recorded */ }
 try { fs.rmSync(traceFile, { force: true }); } catch { /* best-effort cleanup */ }
 
-const { rows, violations, metrics } = verifySites(report, sites, scope);
+const { rows, violations, metrics } = verifySites(report, sites, scope, { locIndex, analyzedCount });
 metrics.analyzedFunctionsTotal = fns.length; // coverage denominator (the static claim's size)
 metrics.programExitCode = run.status;
 
@@ -116,8 +128,12 @@ if (wantJson) {
   console.log(JSON.stringify({ metrics, violations, rows }, null, 2));
 } else {
   const held = metrics.honestyInvariantHolds;
-  console.log(`candor verify [${scope}]: honesty invariant ${held ? "HOLDS ✓" : "VIOLATED ✘"} ` +
+  const tail = held && metrics.attributionComplete === false ? " (attribution INCOMPLETE — see below)" : "";
+  console.log(`candor verify [${scope}]: honesty invariant ${held ? "HOLDS ✓" : "VIOLATED ✘"}${tail} ` +
     `over ${metrics.executedFunctionsChecked} executed fn(s) (of ${fns.length} analyzed)`);
+  if (metrics.attributionComplete === false) {
+    console.log(`  ⚠ ${metrics.attributionNote}`);
+  }
   console.log(`  sound-complete ok       : ${metrics.soundCompleteOk}`);
   console.log(`  disclosed-partial       : ${metrics.disclosedPartial} (${metrics.disclosedUnknownLoadBearing} Unknown-load-bearing)`);
   console.log(`  cardinal-sin violations : ${metrics.cardinalSinViolations}`);

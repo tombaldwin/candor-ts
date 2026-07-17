@@ -103,27 +103,45 @@ export function honestyCheck(reportMap, observedMap, scope) {
   return { rows, violations, metrics };
 }
 
+/** Parse a candor `loc` string (`file:line:col`) → `{ file, line }` (or null). */
+function parseLoc(loc) {
+  if (!loc) return null;
+  const i = loc.lastIndexOf(":", loc.lastIndexOf(":") - 1); // split off `:line:col`
+  const file = loc.slice(0, i);
+  const line = Number(loc.slice(i + 1).split(":")[0]);
+  return Number.isFinite(line) ? { file, line } : null;
+}
+
 /**
  * ATTRIBUTION: map raw capture sites `{file, line, effect}` (the runtime call-site) to the candor function
- * that ENCLOSES them, using the report's per-fn `loc` (file:line:col). The enclosing fn is the one whose
- * declaration line is the greatest ≤ the site line in the same file (the innermost declaration above the
- * call). An event with no project file (a dependency's own effect, `file: null`) is unattributed — dropped
- * from the per-fn check (it is not the target's code). Returns `[{fn, effect}]` for honestyCheck.
+ * that ENCLOSES them. The enclosing fn is the one whose declaration line is the greatest ≤ the site line in
+ * the same file (the innermost declaration above the call). An event with no project file (a dependency's own
+ * effect, `file: null`) is unattributed — dropped (it is not the target's code). Returns `[{fn, effect}]`.
  *
- * Slice-1 imprecision (disclosed): module-top-level code AFTER a function can misattribute to that function
- * (no end-line in the report). Effects inside named functions — the common + seeded case — attribute cleanly.
+ * SOUNDNESS — the anchor universe matters. The §2 report carries locs for EFFECTFUL fns only; if we anchor
+ * against those alone, an effect executed inside a fn candor called PURE (report-absent, no loc) lands on the
+ * nearest *preceding effectful* fn, whose claim usually already covers it — so a cardinal-sin escape silently
+ * vanishes. Passing `locIndex` (fn → loc for the FULL analyzed universe, pure fns included; candor's
+ * `<prefix>.locs.json`) closes that hole: a pure fn that runs an effect then anchors to ITSELF and, being
+ * absent from the effectful set, surfaces as a VIOLATION. Without locIndex we fall back to the effectful-only
+ * locs and the caller must disclose the attribution is not sound (see verifySites `attributionComplete`).
+ *
+ * Residual imprecision (disclosed): module-top-level code AFTER a fn can still misattribute to it (no
+ * end-line). Effects inside named fns — the common + seeded case — attribute cleanly once locIndex is present.
  */
-export function attribute(events, report) {
+export function attribute(events, report, locIndex = null) {
   const byFile = new Map();
-  const fns = Array.isArray(report) ? report : (report.functions ?? []);
-  for (const e of fns) {
-    if (!e.loc) continue;
-    const i = e.loc.lastIndexOf(":", e.loc.lastIndexOf(":") - 1); // split off `:line:col`
-    const file = e.loc.slice(0, i);
-    const line = Number(e.loc.slice(i + 1).split(":")[0]);
-    if (!Number.isFinite(line)) continue;
-    if (!byFile.has(file)) byFile.set(file, []);
-    byFile.get(file).push({ line, fn: e.fn });
+  const push = (loc, fn) => {
+    const p = parseLoc(loc);
+    if (!p) return;
+    if (!byFile.has(p.file)) byFile.set(p.file, []);
+    byFile.get(p.file).push({ line: p.line, fn });
+  };
+  if (locIndex) {
+    for (const [fn, loc] of Object.entries(locIndex)) push(loc, fn);
+  } else {
+    const fns = Array.isArray(report) ? report : (report.functions ?? []);
+    for (const e of fns) push(e.loc, e.fn);
   }
   for (const arr of byFile.values()) arr.sort((a, b) => a.line - b.line);
   const out = [];
@@ -143,7 +161,28 @@ export function verify(report, events, scope = "direct") {
   return honestyCheck(reportEffects(report), observedByFn(events, scope), scope);
 }
 
-/** Run the full pipeline from a report doc + raw CAPTURE SITES `{file, line, effect}`: attribute then check. */
-export function verifySites(report, sites, scope = "direct") {
-  return honestyCheck(reportEffects(report), observedByFn(attribute(sites, report), scope), scope);
+/**
+ * Run the full pipeline from a report doc + raw CAPTURE SITES `{file, line, effect}`: attribute then check.
+ * `opts.locIndex` = fn → loc for the FULL analyzed universe (candor's `<prefix>.locs.json`) — REQUIRED for
+ * sound attribution (see `attribute`). `opts.analyzedCount` = |analyzed universe| (the manifest's
+ * `analyzed.count`) — used to detect unlocated pure fns when locIndex is absent. When attribution is NOT
+ * provably complete, the result carries `metrics.attributionComplete = false` + `metrics.attributionNote`
+ * so the caller can DISCLOSE (fail closed) rather than present a HOLDS as a sound all-clear.
+ */
+export function verifySites(report, sites, scope = "direct", opts = {}) {
+  const { locIndex = null, analyzedCount = null } = opts;
+  const result = honestyCheck(reportEffects(report), observedByFn(attribute(sites, report, locIndex), scope), scope);
+  const effectfulCount = (Array.isArray(report) ? report : (report.functions ?? [])).length;
+  // Attribution is sound when we anchored against the full universe (locIndex present). Without it, it is
+  // sound ONLY if there are no pure fns to mislocate (analyzedCount ≤ effectful count) — otherwise a hidden
+  // effect inside a pure fn could have been silently folded into a neighbour, so we fail closed (disclose).
+  const pureUnlocated = locIndex ? 0
+    : (analyzedCount != null ? Math.max(0, analyzedCount - effectfulCount) : null);
+  result.metrics.attributionComplete = locIndex != null || pureUnlocated === 0;
+  if (!result.metrics.attributionComplete) {
+    result.metrics.attributionNote = pureUnlocated == null
+      ? "no loc index and analyzed-universe size unknown — a pure fn that ran an effect may have been credited to a neighbouring function; not a sound all-clear (re-scan to emit <prefix>.locs.json)"
+      : `${pureUnlocated} pure fn(s) have no location — an effect executed inside one is credited to the nearest preceding effectful fn, so a cardinal-sin escape can be silently missed; not a sound all-clear (re-scan to emit <prefix>.locs.json)`;
+  }
+  return result;
 }

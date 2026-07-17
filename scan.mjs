@@ -365,7 +365,7 @@ const depCoveredPkgs = new Set();
   for (const tok of spec.split(/[\s:,]+/).filter(Boolean)) {
     try {
       if (fs.statSync(tok).isDirectory())
-        for (const f of fs.readdirSync(tok)) if (f.endsWith(".json") && !f.endsWith(".callgraph.json")) files.push(path.join(tok, f));
+        for (const f of fs.readdirSync(tok)) if (f.endsWith(".json") && !f.endsWith(".callgraph.json") && !f.endsWith(".hierarchy.json") && !f.endsWith(".locs.json")) files.push(path.join(tok, f));
       if (fs.statSync(tok).isFile()) files.push(tok);
     } catch { console.error(`candor-ts: CANDOR_DEPS entry unreadable, skipped: ${tok}`); }
   }
@@ -2695,6 +2695,16 @@ if (wantJson) {
 } else {
   writeAtomic(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
   writeAtomic(`${outPrefix}.callgraph.json`, JSON.stringify(cg, null, 1));
+  // ⟨verify⟩ ALL-FUNCTION loc index — the declaration loc of EVERY analyzed fn, pure ones INCLUDED (the §2
+  // report carries locs for effectful fns only). The dynamic honesty oracle (candor-ts-verify) maps a
+  // runtime effect site to its enclosing fn by nearest-declaration-below; WITHOUT the pure fns' locs, an
+  // effect executed inside a fn candor called pure would anchor to the nearest *preceding effectful* fn and
+  // its cardinal-sin escape would silently vanish. This sidecar closes that hole (the oracle attributes over
+  // the full universe, so a pure fn that runs an effect surfaces as a VIOLATION). Additive — no consumer of
+  // the §2 report or the callgraph reads it; the oracle fails CLOSED (discloses unsound attribution) without it.
+  const locs = {};
+  for (const [name, rec] of fns) if (rec.loc) locs[name] = rec.loc;
+  writeAtomic(`${outPrefix}.locs.json`, JSON.stringify(locs, null, 1));
 }
 // Type-hierarchy sidecar (SPEC §4 / 0.7): each project class/interface (qualified `mod.Name`, matching
 // the `mod.Class.member` fn quals) -> its qualified direct supertypes/interfaces. Compact (O(types)),
