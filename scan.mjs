@@ -396,6 +396,28 @@ const checker = program.getTypeChecker();
 const projectFiles = new Set(fileNames.map((f) => path.resolve(f)));
 const sources = program.getSourceFiles().filter((f) => projectFiles.has(path.resolve(f.fileName)));
 
+// ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the TARGET's own source candor could NOT analyze — a .ts that
+// FAILED TO PARSE (a syntax error). getSyntacticDiagnostics() reports lexer/parser failures; the source
+// was only PARTIALLY seen, so its effects are absent because unseen, NOT because pure. We disclose it to a
+// MACHINE (report + gate verdict) so a green gate over it is impossible (a false-pure channel — matches
+// the java reference + rust's had_parse_failure). Restrict to PROJECT files (not node_modules/libs — the
+// scan doesn't analyze those). LinkedHashMap-style: disclosure order = discovery order, deduped by path.
+const unanalyzedUnits = [];
+{
+  const seen = new Set();
+  for (const diag of program.getSyntacticDiagnostics()) {
+    const sf = diag.file;
+    if (!sf) continue;
+    const abs = path.resolve(sf.fileName);
+    if (!projectFiles.has(abs) || seen.has(abs)) continue;
+    seen.add(abs);
+    unanalyzedUnits.push({ path: path.relative(rootDir, abs), reason: "source failed to parse" });
+  }
+  // The loud human channel (rust does this too): a green report must not quietly hide the incompleteness.
+  if (unanalyzedUnits.length)
+    console.error(`candor-ts: ${unanalyzedUnits.length} source file(s) failed to parse — NOT analyzed (see the report's \`unanalyzed\`); a gate cannot be green over unanalyzed code`);
+}
+
 
 // The module a declaration came from: a project file → "<local>", @types/node → the builtin name,
 // node_modules/<pkg> → the package name, the ES lib → "<es-lib>".
@@ -2611,6 +2633,26 @@ for (const [name, rec] of fns) {
   else if (rec.isCjsExport) entry.unitKind = "export"; // spec 0.5 draft, informative — per-unit, not by name
   functions.push(entry);
 }
+// ⟨0.21⟩ An opaque, within-engine-stable fingerprint of a sorted qual set — FNV-1a 64-bit over the
+// newline-terminated UTF-8 quals, lowercase hex zero-padded to 16. BigInt (JS numbers can't hold 64 bits),
+// masked to 64 bits each step so it matches the java reference byte-for-byte (one algorithm the spec can
+// describe). Dependency-free + deterministic: it changes iff the set changes, so a same-engine re-scan of
+// unchanged input agrees. NOT cryptographic and NOT cross-engine comparable (quals differ `::` vs `.`).
+function fnv1aHex(sortedQuals) {
+  const MASK = 0xFFFFFFFFFFFFFFFFn;
+  const PRIME = 0x100000001b3n;
+  let h = 0xcbf29ce484222325n; // FNV offset basis
+  for (const q of sortedQuals) {
+    for (const b of Buffer.from(q, "utf8")) {
+      h = (h ^ BigInt(b)) & MASK;
+      h = (h * PRIME) & MASK;
+    }
+    h = (h ^ 0x0an) & MASK; // '\n' terminator (matches the java reference)
+    h = (h * PRIME) & MASK;
+  }
+  return h.toString(16).padStart(16, "0");
+}
+
 // `package` names what this report COVERS — a consumer chaining it registers coverage even when
 // `functions` is empty (an all-pure package's report is its purity claim, SPEC §2 rule 3).
 const envelope = { candor: { version: ENGINE_VERSION, toolchain: `node-${process.versions.node}`, spec: SPEC_VERSION },
@@ -2628,6 +2670,18 @@ const uncoveredLedger = [...unlistedSeen.entries()].sort((a, b) => b[1] - a[1] |
 if (uncoveredLedger.length) {
   envelope.coverage = { uncovered: uncoveredLedger.map(([name, calls]) => ({ name, calls })) };
 }
+// ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 1): the analyzed universe = every fn candor formed an effect judgment
+// for = the minted `fns` Map (effectful + pure leaves — NOT the effectful-only `functions` array), so a
+// bare-envelope consumer computes the pure count = analyzed.count − |functions| and tells analyzed-pure
+// from never-seen. `digest` = an opaque within-engine-stable FNV-1a-64 fingerprint over the SORTED analyzed
+// quals: it changes iff the set changes, so a same-input re-scan agrees (a re-scan check, NOT cryptographic
+// and NOT cross-engine comparable — qualifiers differ). ALWAYS present.
+const analyzedQuals = [...fns.keys()].sort();
+envelope.analyzed = { count: fns.size, digest: fnv1aHex(analyzedQuals) };
+// ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the target's own source candor could NOT analyze (unparsed .ts).
+// OMITTED when empty — a complete scan stays byte-identical to a pre-rung report — so a MACHINE reading
+// --json sees the incompleteness the stderr warning alone used to hide.
+if (unanalyzedUnits.length) envelope.unanalyzed = unanalyzedUnits.map((u) => ({ path: u.path, reason: u.reason }));
 const cg = {};
 for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
 // Write ATOMICALLY (temp + rename): a concurrent reader — the MCP server or another `query` while
@@ -2904,7 +2958,21 @@ for (const x of gateViolations) emitViolation(`[${x.rule}] ${x.detail}`);
 // the SAME gateViolations that set the exit code (so it can't disagree). Written whenever the flag is set —
 // ok:true,[] when no gate is configured. Must precede the exit(1) below.
 if (gateJsonPath) {
-  const verdictObj = { spec: SPEC_VERSION, ok: gateViolations.length === 0, violations: gateViolations };
+  // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a gate over code candor could NOT fully analyze (unparsed .ts)
+  // must NOT read green — those effects are invisible, so a `deny`/`pure` that "passes" over them is a
+  // false-pure. `ok` requires BOTH no violation AND a complete analysis. `analyzed:{count}` (Gap 1) mirrors
+  // the report envelope so a --gate-json consumer sees the scan's scope from the verdict alone.
+  const incomplete = unanalyzedUnits.length > 0;
+  const verdictObj = { spec: SPEC_VERSION, ok: gateViolations.length === 0 && !incomplete,
+                       analyzed: { count: fns.size }, violations: gateViolations };
+  // ⟨0.21⟩ (Gap 2) the machine-legible incompleteness: the units candor couldn't analyze, so a CI/agent
+  // reading the JSON learns WHY the gate can't certify (the stderr warning alone used to hide this from a
+  // machine). `incomplete:true` + the list; the run exits 2 (could-not-fully-evaluate) below. ok:false +
+  // incomplete:true is honest — never a fabricated pass. OMITTED when complete (byte-compatible verdict).
+  if (incomplete) {
+    verdictObj.incomplete = true;
+    verdictObj.unanalyzed = unanalyzedUnits.map((u) => ({ path: u.path, reason: u.reason }));
+  }
   // ⟨0.15 staged⟩ coverage ADVISORY (COVERAGE-DESIGN.md §3): when the κ ledger is non-empty, the
   // verdict discloses what the gate could NOT see — VERDICT-PRESERVING (the ⟨0.9⟩ provable-purity
   // auto-disclosure precedent exactly): ok/violations/exit are computed above and untouched here. A
@@ -2931,6 +2999,16 @@ if (gateViolations.length) {
   // by the conformance suite and stay untouched).
   console.error("→ candor-ts-query fix-gate names the remedy for each");
   process.exit(1);
+}
+// ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a CONFIGURED gate over code candor could NOT fully analyze (unparsed
+// .ts) cannot certify — exit 2 (could-not-evaluate), the fail-closed posture (matches candor-scan's
+// had_parse_failure + the java reference). A real violation (exit 1, above) dominates. A BARE scan with NO
+// gate does not exit 2 — it discloses `unanalyzed` in the report and stays exit 0. This is the cardinal-sin
+// fix: a broken .ts is no longer silently PARTIALLY analyzed and certified green.
+const gateConfigured = policyPath !== null || baselinePath !== null;
+if (gateConfigured && unanalyzedUnits.length) {
+  console.error(`candor-ts: gate NOT certified — ${unanalyzedUnits.length} source file(s) could not be analyzed (see above); a gate cannot be green over unanalyzed code`);
+  process.exit(2);
 }
 if (policyPath !== null) console.error("candor-ts: policy ✓");
 if (baselinePath !== null && fs.existsSync(baselinePath)) console.error("candor-ts: baseline ✓"); // absent = inactive (noted above)

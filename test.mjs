@@ -487,9 +487,67 @@ export function save(db: DatabaseSync): void { poke(); db.exec("UPDATE customers
         good.r.status === 0 && good.v?.ok === true && good.v.violations.length === 0
           && JSON.stringify(good.v.coverage) === JSON.stringify({ uncovered: 1, packages: ["blinddep"] }),
         `status=${good.r.status} ${JSON.stringify(good.v)}`);
-  check("⟨0.15⟩ gate advisory: field ORDER preserves the pinned verdict fields first (spec, ok, violations)",
-        JSON.stringify(Object.keys(bad.v ?? {})) === JSON.stringify(["spec", "ok", "violations", "coverage"]),
+  // ⟨0.21⟩ the completeness manifest inserts `analyzed:{count}` after `ok` (mirrors the java reference
+  // verdict order + the report envelope); the pinned spec/ok/…/violations/coverage order is otherwise intact.
+  check("⟨0.15⟩ gate advisory: field ORDER preserves the pinned verdict fields first (spec, ok, analyzed, violations)",
+        JSON.stringify(Object.keys(bad.v ?? {})) === JSON.stringify(["spec", "ok", "analyzed", "violations", "coverage"]),
         JSON.stringify(Object.keys(bad.v ?? {})));
+}
+
+// ── 3c3. ⟨0.21⟩ COMPLETENESS MANIFEST: analyzed universe + fail-closed gate over unparsed source ─────
+// The tier-1 rung ported from the java reference: (a) `analyzed:{count,digest}` counts the WHOLE analyzed
+// universe (pure leaves included), so a consumer computes the pure count = analyzed.count − |functions|;
+// (b) a syntactically-broken .ts is disclosed in the report's `unanalyzed` (was stderr-only); (c) a
+// CONFIGURED gate over it fails closed — verdict {ok:false, incomplete:true, unanalyzed:[…]} + exit 2 (a
+// real violation still dominates at exit 1); (d) the digest is stable across a same-input re-scan.
+{
+  const d = project({
+    "src/good.ts": `export function pureAdd(x: number, y: number): number { return x + y; }
+export async function fetchIt(u: string): Promise<Response> { return fetch(u); }`,
+    "src/broken.ts": `export function oops( {\n  const x =\n`, // a syntax error — TS cannot parse it
+    "deny-db.policy": "deny Db\n",  // the app performs Net, not Db → no real violation
+    "deny-net.policy": "deny Net\n", // fetchIt performs Net → a real violation
+  });
+  // (a) the analyzed universe includes the pure fn the report omits.
+  const { r: bareR } = scan(d, "--json");
+  const env = JSON.parse(bareR.stdout);
+  check("⟨0.21⟩ analyzed.count > |functions| (pure fn is analyzed but omitted from the report)",
+        env.analyzed?.count > env.functions.length && env.analyzed.count - env.functions.length >= 1,
+        `count=${env.analyzed?.count} |functions|=${env.functions.length}`);
+  check("⟨0.21⟩ analyzed.digest is 16 lowercase hex chars",
+        /^[0-9a-f]{16}$/.test(env.analyzed?.digest ?? ""), env.analyzed?.digest);
+  // (b) the broken source is machine-legible in `unanalyzed`.
+  check("⟨0.21⟩ a syntactically-broken .ts is disclosed in the report's `unanalyzed`",
+        Array.isArray(env.unanalyzed) && env.unanalyzed.length === 1
+          && env.unanalyzed[0].path.includes("broken") && env.unanalyzed[0].reason === "source failed to parse",
+        JSON.stringify(env.unanalyzed));
+  check("⟨0.21⟩ a BARE scan over unparsed source still exits 0 (disclosure, not a gate)", bareR.status === 0,
+        `status=${bareR.status}`);
+  // (d) the digest is stable across a same-input re-scan.
+  const env2 = JSON.parse(scan(d, "--json").r.stdout);
+  check("⟨0.21⟩ the analyzed-set digest is stable across a same-input re-scan",
+        env.analyzed.digest === env2.analyzed.digest, `${env.analyzed.digest} vs ${env2.analyzed.digest}`);
+  // (c) a CONFIGURED gate with NO real violation cannot certify → exit 2, verdict incomplete.
+  const gp = path.join(d, "v.json");
+  const gated = spawnSync("node", [path.join(HERE, "scan.mjs"), d,
+    "--policy", path.join(d, "deny-db.policy"), "--gate-json", gp], { encoding: "utf8" });
+  const v = JSON.parse(fs.readFileSync(gp, "utf8"));
+  check("⟨0.21⟩ a gate over unparsed source cannot be green → exit 2 (could-not-evaluate)",
+        gated.status === 2, `status=${gated.status}`);
+  check("⟨0.21⟩ the verdict is {ok:false, incomplete:true, unanalyzed:[…]} (a machine learns WHY)",
+        v.ok === false && v.incomplete === true && Array.isArray(v.unanalyzed) && v.unanalyzed.length === 1
+          && v.unanalyzed[0].path.includes("broken"), JSON.stringify(v));
+  check("⟨0.21⟩ the verdict mirrors the report's analyzed:{count}",
+        v.analyzed?.count === env.analyzed.count, JSON.stringify(v.analyzed));
+  // (c-cont) a real violation still DOMINATES (exit 1) and the incompleteness is still disclosed.
+  const gp2 = path.join(d, "v2.json");
+  const gated2 = spawnSync("node", [path.join(HERE, "scan.mjs"), d,
+    "--policy", path.join(d, "deny-net.policy"), "--gate-json", gp2], { encoding: "utf8" });
+  const v2 = JSON.parse(fs.readFileSync(gp2, "utf8"));
+  check("⟨0.21⟩ a real violation outranks the incompleteness (exit 1)", gated2.status === 1,
+        `status=${gated2.status}`);
+  check("⟨0.21⟩ the incompleteness is still disclosed on a violating run",
+        v2.ok === false && v2.incomplete === true && v2.violations.length >= 1, JSON.stringify(v2).slice(0, 160));
 }
 
 // ── 3d. --gate-json robustness: unwritable path never crashes; `-` keeps stdout pure ────────────────
@@ -1574,9 +1632,12 @@ export function go(): string { fsm.readFileSync("/x"); chunk("ab"); return pad("
 export function covered(): Buffer { return fsm.readFileSync("/x"); }`,
   });
   const { report } = scan(d);
+  // ⟨0.21⟩ the completeness manifest ALWAYS appends `analyzed:{count,digest}`; a fully-covered/complete
+  // scan still omits `coverage` and `unanalyzed` (both empty), so the wire stays byte-compatible bar the
+  // additive `analyzed` sibling.
   check("⟨0.15⟩ a fully-covered scan OMITS the coverage envelope key entirely",
-        report !== null && !("coverage" in report)
-          && JSON.stringify(Object.keys(report)) === JSON.stringify(["candor", "package", "functions"]),
+        report !== null && !("coverage" in report) && !("unanalyzed" in report)
+          && JSON.stringify(Object.keys(report)) === JSON.stringify(["candor", "package", "functions", "analyzed"]),
         JSON.stringify(Object.keys(report ?? {})));
   const d2 = project({
     "src/u.ts": `import { x } from "not-installed-dep";
