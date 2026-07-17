@@ -846,12 +846,13 @@ export function unverifiedHoleRule(fn, inferred, policyParsed, scopeMatches) {
   return null;
 }
 
-export function unverified(fns, policyParsed, scopeMatches) {
+export function unverified(fns, policyParsed, scopeMatches, classSpec = null) {
+  const cf = parseClassFilter(classSpec);   // ⟨0.20⟩ --class: keep only holes of a matching reason class
   const holes = [];
   for (const e of fns) {
     // Same predicate + upgrade as the gate note (scan.mjs) — one source of truth for a hole.
     const r = unverifiedHoleRule(e.fn, e.inferred, policyParsed, scopeMatches);
-    if (!r) continue;
+    if (!r || !classMatches(cf, e.unknownWhy)) continue;
     const [rule, upgrade] = ruleUpgrade(r);
     holes.push({ fn: e.fn, rule, unknownWhy: e.unknownWhy ?? [], upgrade });
   }

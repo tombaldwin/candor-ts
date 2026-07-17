@@ -371,6 +371,11 @@ test("unverified: flags an Unknown fn in a pure/deny scope + names the deny-Unkn
   assert.equal(r.unverified.length, 1);
   assert.equal(r.unverified[0].fn, "domain.price");
   assert.equal(r.unverified[0].upgrade, "deny Unknown domain");
+  // ⟨0.20⟩ --class: the hole is callback→indirect, so `indirect` keeps it, `reflect` drops it (ok:true).
+  assert.equal(unverified(fns, parsePolicy("pure domain"), scopeMatches, "indirect").unverified.length, 1);
+  const none = unverified(fns, parsePolicy("pure domain"), scopeMatches, "reflect");
+  assert.equal(none.unverified.length, 0);
+  assert.equal(none.ok, true, "no matching-class hole ⇒ ok (the class-scoped view is clean)");
 });
 test("fix-gate: no crossing → ok:true, empty remedies", () => {
   const r = fixGate(ofCg, ofFns, parsePolicy("deny Net nonesuch"), scopeMatches);

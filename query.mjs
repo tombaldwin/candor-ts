@@ -911,7 +911,8 @@ switch (cmd) {
     let ptext;
     try { ptext = fs.readFileSync(policyFile, "utf8"); }
     catch { console.error(`candor: policy ${policyFile} could not be read`); process.exit(2); }
-    const r = coreUnverified(loadReportOrDie(prefix), parsePolicy(ptext), scopeMatches);
+    const uci = args.indexOf("--class");   // ⟨0.20⟩ drill-down by reason class
+    const r = coreUnverified(loadReportOrDie(prefix), parsePolicy(ptext), scopeMatches, uci >= 0 ? args[uci + 1] : null);
     emit(r);
     process.exit(strict && !r.ok ? 1 : 0);
     break; // unreachable
