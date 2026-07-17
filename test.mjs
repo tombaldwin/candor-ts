@@ -3413,5 +3413,23 @@ run();
   }
 }
 
+// ── the SEEDED-VIOLATION SENSITIVITY BATTERY as a gate (RQ1 Part C) ───────────────────────────────
+// The honesty oracle is only worth its verdict if it is SENSITIVE. sensitivity.mjs plants a real Fs effect
+// behind each of N dynamic mechanisms (eval, Function ctor, computed require, callback-in-collection, async
+// continuation, computed-key dispatch, deserialization hook, property getter) and measures BOTH sides: candor
+// disclosed (Fs/Unknown), and — with candor's disclosure stripped — the oracle still caught it. No mechanism
+// may ESCAPE (run yet be caught by neither), and every mechanism that runs must be oracle-caught (full recall).
+{
+  const r = spawnSync("node", [path.join(HERE, "sensitivity.mjs"), "--json"], { encoding: "utf8" });
+  let s = null; try { s = JSON.parse(r.stdout).summary; } catch { /* below */ }
+  check("sensitivity: no dynamic mechanism ESCAPES the honesty invariant (exit 0)",
+    r.status === 0 && s && s.escaped === 0, `exit=${r.status} out=${(r.stdout || "").slice(0, 200)} err=${(r.stderr || "").slice(0, 200)}`);
+  check("sensitivity: candor discloses Fs/Unknown for every dynamic mechanism (full disclosure)",
+    s && s.candorDisclosureRate === `${s.total}/${s.total}`, JSON.stringify(s));
+  check("sensitivity: the oracle catches every executed effect with disclosure stripped (full recall)",
+    s && (() => { const [a, b] = s.oracleRecall.split("/"); return a === b && Number(b) >= 6; })(),
+    `oracleRecall=${s?.oracleRecall} inconclusive=${s?.inconclusive}`);
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
