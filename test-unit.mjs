@@ -124,6 +124,7 @@ test("parsePolicy + netDestClass: Net destination-class parses and classifies", 
   assert.deepEqual(parsePolicy("deny Net[nope] dom").deny[0].netClasses, [], "unknown class dropped ⇒ all");
   const none = new Set();
   assert.equal(netDestClass("sentry.io", none), "known-telemetry");
+  assert.equal(netDestClass("us.i.posthog.com", none), "known-telemetry"); // 0.20.1 corpus-grown
   assert.equal(netDestClass("o1.ingest.sentry.io", none), "known-telemetry", "subdomain-aware");
   assert.equal(netDestClass("api.openai.com", none), "known-partner", "a model host is known-partner");
   assert.equal(netDestClass("evil.example.com", none), "unknown-host");

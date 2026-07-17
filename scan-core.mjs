@@ -310,6 +310,11 @@ export const TELEMETRY_HOSTS = new Set([
   "newrelic.com", "nr-data.net",
   "honeycomb.io",
   "logtail.com",
+  // ⟨0.20.1⟩ corpus-grown (a real-repo dogfood): more single-purpose analytics / session-replay / RUM
+  // providers — vendor-specific product domains only (no general-purpose host), so no under-gate risk.
+  "posthog.com", "plausible.io", "usefathom.com", "heapanalytics.com",
+  "fullstory.com", "hotjar.com", "logrocket.com",
+  "cloudflareinsights.com",
 ]);
 // Normalize a `host[:port]` literal to a bare lowercase hostname (the MODEL_HOSTS stripping), for the
 // destination-class membership tests.
