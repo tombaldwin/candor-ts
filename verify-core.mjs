@@ -114,44 +114,54 @@ function parseLoc(loc) {
 
 /**
  * ATTRIBUTION: map raw capture sites `{file, line, effect}` (the runtime call-site) to the candor function
- * that ENCLOSES them. The enclosing fn is the one whose declaration line is the greatest ≤ the site line in
- * the same file (the innermost declaration above the call). An event with no project file (a dependency's own
- * effect, `file: null`) is unattributed — dropped (it is not the target's code). Returns `[{fn, effect}]`.
+ * that ENCLOSES them. An event with no project file (a dependency's own effect, `file: null`) is unattributed
+ * — dropped (it is not the target's code). Returns `[{fn, effect}]`.
  *
- * SOUNDNESS — the anchor universe matters. The §2 report carries locs for EFFECTFUL fns only; if we anchor
- * against those alone, an effect executed inside a fn candor called PURE (report-absent, no loc) lands on the
- * nearest *preceding effectful* fn, whose claim usually already covers it — so a cardinal-sin escape silently
- * vanishes. Passing `locIndex` (fn → loc for the FULL analyzed universe, pure fns included; candor's
- * `<prefix>.locs.json`) closes that hole: a pure fn that runs an effect then anchors to ITSELF and, being
- * absent from the effectful set, surfaces as a VIOLATION. Without locIndex we fall back to the effectful-only
- * locs and the caller must disclose the attribution is not sound (see verifySites `attributionComplete`).
- *
- * Residual imprecision (disclosed): module-top-level code AFTER a fn can still misattribute to it (no
- * end-line). Effects inside named fns — the common + seeded case — attribute cleanly once locIndex is present.
+ * SOUNDNESS — the anchor universe and the containment test both matter.
+ * · UNIVERSE: the §2 report carries a start loc for EFFECTFUL fns only. Anchoring against those alone lets an
+ *   effect run inside a fn candor called PURE (report-absent) fold onto the nearest preceding effectful fn,
+ *   whose claim covers it — a silent MISS. `locIndex` (candor's `<prefix>.locs.json`, EVERY analyzed fn incl.
+ *   pure) closes that: a pure fn's effect anchors to ITSELF and, absent from the effectful set, is a VIOLATION.
+ * · CONTAINMENT: a start-only "nearest declaration below" rule misattributes a site that sits AFTER a nested
+ *   fn but INSIDE the effectful outer fn to that nested (often pure) fn — a FALSE violation (found corpus-
+ *   testing: an fs.readFileSync deep in `run()` bucketed onto a pure callback arrow declared earlier). So when
+ *   the index carries SPANS ({loc, end}), attribute to the INNERMOST fn whose [start,end] CONTAINS the site
+ *   (greatest start among containers). Start-only entries fall back to nearest-declaration-below (disclosed).
  */
 export function attribute(events, report, locIndex = null) {
   const byFile = new Map();
-  const push = (loc, fn) => {
+  const push = (loc, end, fn) => {
     const p = parseLoc(loc);
     if (!p) return;
     if (!byFile.has(p.file)) byFile.set(p.file, []);
-    byFile.get(p.file).push({ line: p.line, fn });
+    byFile.get(p.file).push({ start: p.line, end: (typeof end === "number" ? end : null), fn });
   };
   if (locIndex) {
-    for (const [fn, loc] of Object.entries(locIndex)) push(loc, fn);
+    for (const [fn, v] of Object.entries(locIndex)) {
+      if (v && typeof v === "object") push(v.loc, v.end, fn);  // span form {loc, end}
+      else push(v, null, fn);                                  // legacy start-only string
+    }
   } else {
     const fns = Array.isArray(report) ? report : (report.functions ?? []);
-    for (const e of fns) push(e.loc, e.fn);
+    for (const e of fns) push(e.loc, e.endLine ?? null, e.fn);
   }
-  for (const arr of byFile.values()) arr.sort((a, b) => a.line - b.line);
   const out = [];
   for (const ev of events) {
     if (!ev || !ev.file) continue;
     const arr = byFile.get(ev.file);
     if (!arr) continue;
-    let fn = null;
-    for (const c of arr) { if (c.line <= ev.line) fn = c.fn; else break; }
-    if (fn) out.push({ fn, effect: ev.effect });
+    // Prefer SPAN containment: the innermost fn (greatest start) whose [start,end] contains the site line.
+    // Fall back to nearest-declaration-below among start-only (no-end) entries when nothing spanned contains.
+    let best = null, fallback = null;
+    for (const c of arr) {
+      if (c.end != null) {
+        if (c.start <= ev.line && ev.line <= c.end && (!best || c.start > best.start)) best = c;
+      } else if (c.start <= ev.line && (!fallback || c.start > fallback.start)) {
+        fallback = c;
+      }
+    }
+    const pick = best ?? fallback;
+    if (pick) out.push({ fn: pick.fn, effect: ev.effect });
   }
   return out;
 }

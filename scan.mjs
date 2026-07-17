@@ -1010,7 +1010,8 @@ for (const sf of sources) {
         fns.set(ctorQual, { local: `${node.name.text}.constructor`, direct: new Set(), edges: new Set(),
                             hosts: new Set(), tables: new Set(), cmds: new Set(), paths: new Set(),
                             blind: new Set(), incomplete: new Set(), why: new Set(), entry: false,
-                            loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
+                            loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}`,
+                            endLine: sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1 });
       }
       nodeName.set(node, ctorQual);
     }
@@ -1032,7 +1033,8 @@ for (const sf of sources) {
       const qual = isFunctionScoped(node) ? `${mod}.${nsp}${n}#${line + 1}:${character + 1}` : `${mod}.${nsp}${n}`;
       fns.set(qual, { local: n, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
                       cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(), entry: false, isCjsExport,
-                      loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}` });
+                      loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}`,
+                      endLine: sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1 });
       nodeName.set(node, qual);
       if ((ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)) && node.initializer)
         nodeName.set(node.initializer, qual);
@@ -1309,7 +1311,8 @@ function moduleUnit(sf) {
     rec = { local: "<module>", direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
             cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(),
             entry: false, unitKind: "initializer",
-            loc: `${path.relative(rootDir, sf.fileName)}:1:1` };
+            loc: `${path.relative(rootDir, sf.fileName)}:1:1`,
+            endLine: sf.getLineAndCharacterOfPosition(sf.getEnd()).line + 1 };
     fns.set(qual, rec);
   }
   return qual;
@@ -1331,7 +1334,8 @@ function staticBlockUnit(node) {
     rec = { local: "<static-init>", direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
             cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(),
             entry: false, unitKind: "initializer",
-            loc: `${path.relative(rootDir, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart()).line + 1}:1` };
+            loc: `${path.relative(rootDir, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart()).line + 1}:1`,
+            endLine: sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1 };
     fns.set(qual, rec);
   }
   return qual;
@@ -2695,15 +2699,18 @@ if (wantJson) {
 } else {
   writeAtomic(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
   writeAtomic(`${outPrefix}.callgraph.json`, JSON.stringify(cg, null, 1));
-  // ⟨verify⟩ ALL-FUNCTION loc index — the declaration loc of EVERY analyzed fn, pure ones INCLUDED (the §2
-  // report carries locs for effectful fns only). The dynamic honesty oracle (candor-ts-verify) maps a
-  // runtime effect site to its enclosing fn by nearest-declaration-below; WITHOUT the pure fns' locs, an
-  // effect executed inside a fn candor called pure would anchor to the nearest *preceding effectful* fn and
-  // its cardinal-sin escape would silently vanish. This sidecar closes that hole (the oracle attributes over
-  // the full universe, so a pure fn that runs an effect surfaces as a VIOLATION). Additive — no consumer of
-  // the §2 report or the callgraph reads it; the oracle fails CLOSED (discloses unsound attribution) without it.
+  // ⟨verify⟩ ALL-FUNCTION SPAN index — the [start, end] line SPAN of EVERY analyzed fn, pure ones INCLUDED
+  // (the §2 report carries a start loc for effectful fns only). The dynamic honesty oracle (candor-ts-verify)
+  // maps a runtime effect site to its enclosing fn; it needs SPANS, not just starts, for two reasons: (1) a
+  // pure fn omitted from §2 has no anchor, so its effect would fold onto the nearest preceding effectful fn
+  // and its cardinal-sin escape would vanish (a silent MISS); (2) a start-only "nearest declaration below"
+  // rule misattributes a site that sits AFTER a nested fn but INSIDE the effectful outer fn to that nested
+  // (often pure) fn — manufacturing a FALSE violation (found corpus-testing a real app: an fs.readFileSync in
+  // a big `run()` bucketed onto a pure test-callback arrow declared earlier). With spans the oracle picks the
+  // INNERMOST fn whose [start,end] CONTAINS the site — correct in both cases. Format `{fn: {loc, end}}`;
+  // additive (no §2/callgraph consumer reads it); the oracle fails CLOSED (discloses) without it.
   const locs = {};
-  for (const [name, rec] of fns) if (rec.loc) locs[name] = rec.loc;
+  for (const [name, rec] of fns) if (rec.loc) locs[name] = { loc: rec.loc, end: rec.endLine ?? null };
   writeAtomic(`${outPrefix}.locs.json`, JSON.stringify(locs, null, 1));
 }
 // Type-hierarchy sidecar (SPEC §4 / 0.7): each project class/interface (qualified `mod.Name`, matching

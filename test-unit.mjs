@@ -211,6 +211,25 @@ test("verify: WITH the loc index, the same pure-fn effect anchors to itself and 
   assert.equal(r.violations[0].fn, "app.computeTotal");
   assert.deepEqual(r.violations[0].escaped, ["Fs"]);
 });
+test("verify: SPAN containment — an effect after a nested pure fn but INSIDE the effectful outer fn attributes to the OUTER (no false violation)", () => {
+  // The corpus-found false positive: `run` (effectful, Fs) spans [1,20]; a pure callback `cb` (absent from
+  // the report) is a nested arrow spanning [5,6]. An Fs site at line 10 is INSIDE run but AFTER cb. A start-
+  // only "nearest declaration below" rule would blame cb (pure) → false VIOLATION; span containment blames run.
+  const report = { functions: [{ fn: "app.run", inferred: ["Fs"], loc: "app.ts:1:1", endLine: 20 }] };
+  const sites = [{ file: "app.ts", line: 10, effect: "Fs" }];
+  const locIndex = { "app.run": { loc: "app.ts:1:1", end: 20 }, "app.cb": { loc: "app.ts:5:1", end: 6 } };
+  const r = verifySites(report, sites, "direct", { locIndex, analyzedCount: 2 });
+  assert.equal(r.metrics.cardinalSinViolations, 0, "the site is inside run (Fs), not the pure nested cb");
+  assert.equal(r.rows.find((x) => x.observed.includes("Fs"))?.fn, "app.run", "attributed to the innermost CONTAINING span");
+});
+test("verify: SPAN containment still catches a real escape inside the nested pure fn itself", () => {
+  // Same shape, but the Fs site is at line 5 — INSIDE cb's own span [5,6]. cb is claimed pure ⇒ VIOLATION.
+  const report = { functions: [{ fn: "app.run", inferred: ["Fs"], loc: "app.ts:1:1", endLine: 20 }] };
+  const locIndex = { "app.run": { loc: "app.ts:1:1", end: 20 }, "app.cb": { loc: "app.ts:5:1", end: 6 } };
+  const r = verifySites(report, [{ file: "app.ts", line: 5, effect: "Fs" }], "direct", { locIndex, analyzedCount: 2 });
+  assert.equal(r.metrics.cardinalSinViolations, 1);
+  assert.equal(r.violations[0].fn, "app.cb", "the innermost span containing line 5 is cb");
+});
 test("verify: attribution is complete (no disclosure) when there are no unlocated pure fns", () => {
   const report = { functions: [{ fn: "app.f", inferred: ["Fs"], loc: "app.ts:1:1" }] };
   const r = verifySites(report, [{ file: "app.ts", line: 2, effect: "Fs" }], "direct", { analyzedCount: 1 });
