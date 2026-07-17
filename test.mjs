@@ -3359,6 +3359,24 @@ main();
     check("verify: disclosure (Unknown) flips the same run to HELD (disclosed-partial, load-bearing)",
       c.status === 0 && cj?.metrics.honestyInvariantHolds === true && cj?.metrics.disclosedUnknownLoadBearing === 1,
       `exit=${c.status} out=${(c.stdout || "").slice(0, 200)}`);
+    // (d) ESM DESTRUCTURED named import of a builtin — the capture path the module.register loader closes
+    // (the preload's default-object patch alone would miss it, since node:fs's named `statSync` is a distinct
+    // binding). A seeded miss on it must still be caught, proving the loader wrapped the named export.
+    const nd = project({
+      "napp.ts": `import { statSync } from "node:fs";\nfunction reads(): number { return statSync(process.execPath).size; }\nfunction main(): void { reads(); }\nmain();\n`,
+      "package.json": '{"name":"nvapp","version":"0.0.0","type":"module"}',
+    });
+    const { report: nrep } = scan(nd);
+    const nSeedDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-verify-nseed-"));
+    const nseeded = structuredClone(nrep);
+    for (const e of nseeded.functions) if (e.fn === "napp.reads") e.inferred = [];
+    fs.writeFileSync(path.join(nSeedDir, "n.seed.scan.json"), JSON.stringify(nseeded));
+    const nRun = `node --experimental-strip-types ${JSON.stringify(path.join(nd, "napp.ts"))}`;
+    const n = spawnSync("node", [path.join(HERE, "verify.mjs"), nd, "--report", path.join(nSeedDir, "n"), "--run", nRun, "--json"], { encoding: "utf8" });
+    let njson = null; try { njson = JSON.parse(n.stdout); } catch { /* below */ }
+    check("verify: an ESM DESTRUCTURED named builtin import is captured (the loader closes the gap)",
+      n.status === 1 && njson?.violations?.[0]?.fn === "napp.reads" && njson?.violations?.[0]?.escaped?.includes("Fs"),
+      `exit=${n.status} out=${(n.stdout || "").slice(0, 200)}`);
   }
 }
 

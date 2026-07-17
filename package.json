@@ -59,7 +59,9 @@
     "lsp.mjs",
     "verify.mjs",
     "verify-core.mjs",
-    "verify-preload.mjs"
+    "verify-preload.mjs",
+    "verify-emit.mjs",
+    "verify-loader.mjs"
   ],
   "devDependencies": {
     "@eslint/js": "^9.39.4",
