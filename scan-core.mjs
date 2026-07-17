@@ -293,7 +293,7 @@ export function isModelHost(hostLiteral) {
 export function modelHostEffects(hostLiteral) {
   return isModelHost(hostLiteral) ? ["Llm"] : [];
 }
-// ⟨0.21⟩ Curated telemetry / analytics / APM hosts — the `Net` destination-class `known-telemetry` set
+// ⟨0.20⟩ Curated telemetry / analytics / APM hosts — the `Net` destination-class `known-telemetry` set
 // (NET-DESTINATION-CLASS-DESIGN.md), shared VERBATIM with the sibling engines (java Literals.TELEMETRY_HOSTS
 // / rust TELEMETRY_HOSTS), like MODEL_HOSTS. A benign observability endpoint. Matched by host,
 // case-insensitive; a SUBDOMAIN of a listed host counts. Tight, high-precision STARTER set — mis-including
@@ -328,7 +328,7 @@ function hostInSet(hostLiteral, set) {
   return false;
 }
 export function isTelemetryHost(hostLiteral) { return hostInSet(hostLiteral, TELEMETRY_HOSTS); }
-// ⟨0.21⟩ The `Net` DESTINATION CLASS of a host literal (NET-DESTINATION-CLASS-DESIGN.md): `known-telemetry`
+// ⟨0.20⟩ The `Net` DESTINATION CLASS of a host literal (NET-DESTINATION-CLASS-DESIGN.md): `known-telemetry`
 // (curated), `known-partner` (config `net-partner` OR a model host — a declared-ish external API), else
 // `unknown-host` — the HONEST default (candor makes no claim; the security gate bites this). `partners` is a
 // per-project Set (config-declared). Never fabricated: a null/unresolved host is unknown-host. Mirrors java
@@ -340,9 +340,9 @@ export function netDestClass(hostLiteral, partners) {
   if (partnerMatch || isModelHost(hostLiteral)) return "known-partner";
   return "unknown-host";
 }
-// ⟨0.21⟩ The closed `Net` destination-class vocabulary, for the `deny Net[<dest…>]` policy filter.
+// ⟨0.20⟩ The closed `Net` destination-class vocabulary, for the `deny Net[<dest…>]` policy filter.
 export const NET_DEST_CLASSES = ["known-telemetry", "known-partner", "unknown-host"];
-// ⟨0.21⟩ The `Net` destination classes an fn reaches — the SINGLE derivation shared by the report's
+// ⟨0.20⟩ The `Net` destination classes an fn reaches — the SINGLE derivation shared by the report's
 // `netClass` field (scan.mjs) and the gate (policy.mjs), so they can never drift: an exact host-literal
 // match (netDestClass) for the visible (transitive) hosts, plus the fail-closed `unknown-host` when the Net
 // surface is masked (`netIncomplete`) OR carries no visible host (a runtime endpoint). `hostsArr` is an

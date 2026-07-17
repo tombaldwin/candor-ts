@@ -41,7 +41,7 @@ const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 // literal stamped into the envelope's `spec` field, so the doc lines and the report can never drift.
 // Reused, never re-littered.
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
-const SPEC_VERSION = "0.19";
+const SPEC_VERSION = "0.20";
 
 // --version: a print-and-exit MODE, handled before the main arg walk so it never depends on a target.
 // Fully OFFLINE — candor never phones home. Staying current is the AGENT's job: read the installed
@@ -2563,7 +2563,7 @@ for (const m of ["hosts", "tables", "cmds", "paths", "blind", "incomplete"]) {
 }
 
 // ---- emit: the §2 envelope (effect-free items omitted) + the §2.2 sidecar (EVERY fn a key) --------
-// ⟨0.21⟩ Net destination-class partners from `.candor/config` — read ONCE here, used by the report's per-fn
+// ⟨0.20⟩ Net destination-class partners from `.candor/config` — read ONCE here, used by the report's per-fn
 // `netClass` field (below) and the gate (deny Net[unknown-host]); the SAME set both surfaces resolve.
 const netPartners = parseNetPartners(discoverConfigText(target));
 const functions = [];
@@ -2589,7 +2589,7 @@ for (const [name, rec] of fns) {
   // entries carry `calls`); omitted when a fn has no outgoing edges to keep pure leaves lean.
   if (rec.edges.size) entry.calls = [...rec.edges].sort();
   if (inf.includes("Net") && rec.hosts.size) entry.hosts = [...rec.hosts].sort();
-  // ⟨0.21⟩ Net destination-class (NET-DESTINATION-CLASS-DESIGN.md): the classes present in this fn's
+  // ⟨0.20⟩ Net destination-class (NET-DESTINATION-CLASS-DESIGN.md): the classes present in this fn's
   // transitive Net surface — exact host-literal match, fail-closed unknown-host on a masked surface (rec
   // .incomplete has Net) OR a Net with no visible host. The class travels the call graph like the effect.
   if (inf.includes("Net")) entry.netClass = netClassesOf([...rec.hosts], rec.incomplete.has("Net"), netPartners);

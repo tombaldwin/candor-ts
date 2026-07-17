@@ -188,7 +188,7 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
   const out = [];
   // `Llm` ⟨0.13⟩ reaches the SAME hosts surface as Net (an Llm host WAS captured as a Net host literal).
   const surfaces = { Net: "hosts", Llm: "hosts", Exec: "cmds", Fs: "paths", Db: "tables" };
-  // §6.2 ⟨0.19⟩: `reasonClass` (all classes on the fn) rides an AS-EFF-006 Unknown violation; ⟨0.21⟩ `netClass`
+  // §6.2 ⟨0.19⟩: `reasonClass` (all classes on the fn) rides an AS-EFF-006 Unknown violation; ⟨0.20⟩ `netClass`
   // (all destination classes on the fn) rides a Net violation. Both omitted when empty (byte-identical verdict).
   const push = (rule, fn, effects, detail, reasonClass, netClass) => {
     const rec = { rule, fn, effects, detail };
@@ -246,7 +246,7 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       if (kept.length) {
         // When Unknown is denied, report ALL reason classes on the fn (transitive) — every reason the gate bit.
         const rc = kept.includes("Unknown") ? [...(reasonAcc.get(f.fn) ?? [])].sort() : undefined;
-        // ⟨0.21⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
+        // ⟨0.20⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
         const ncv = kept.includes("Net")
           ? netClassesOf(f.hosts ?? [], incomplete.get(f.fn)?.has("Net") ?? false, partners)
           : undefined;
@@ -366,7 +366,7 @@ export function parseUnknownAliases(configText) {
   return out;
 }
 
-// ⟨0.21⟩ Parse `net-partner <host>` lines (NET-DESTINATION-CLASS-DESIGN.md) into a Set of host-normalized
+// ⟨0.20⟩ Parse `net-partner <host>` lines (NET-DESTINATION-CLASS-DESIGN.md) into a Set of host-normalized
 // partner hosts — the per-project `known-partner` set for the Net destination-class classifier. Multi-value
 // (repeatable key); the value's `:port` is stripped + lowercased like MODEL_HOSTS. Case-insensitive key,
 // mirroring parseUnknownAliases + the java/rust config loaders. A partner is per-project — never universal.
