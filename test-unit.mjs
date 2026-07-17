@@ -22,7 +22,7 @@ import {
 } from "./query-core.mjs";
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
-  discoverConfigPolicy,
+  discoverConfigPolicy, evaluatePolicy, reasonClass,
 } from "./policy.mjs";
 import {
   isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
@@ -62,6 +62,44 @@ test("show: omits an absent surface", () => {
   const [o] = show([{ fn: "p", inferred: ["Clock"], direct: ["Clock"], unresolved: false }], "p");
   assert.equal("paths" in o, false);
   assert.equal("hosts" in o, false);
+});
+
+// ── reason-scoped Unknown (REASON-SCOPED-UNKNOWN-DESIGN.md — four-way with java/rust) ────────────────
+test("reasonClass: raw unknownWhy tokens map to normative classes", () => {
+  assert.equal(reasonClass("reflect:eval"), "reflect");
+  assert.equal(reasonClass("native:extern"), "native");
+  assert.equal(reasonClass("callback:fetch"), "indirect");
+  assert.equal(reasonClass("dispatch:Foo.bar"), "dispatch");
+  assert.equal(reasonClass("ambiguous:same-name"), "dispatch");
+  assert.equal(reasonClass("unresolved"), "unresolved");
+  assert.equal(reasonClass("brand-new-token"), "unresolved"); // conservative catch-all
+});
+test("parsePolicy: Unknown[class…] / * / dynamic", () => {
+  const r = parsePolicy("deny Net Unknown[dispatch,indirect] dom\n").deny[0];
+  assert.deepEqual(r.effects, ["Net", "Unknown"]);
+  assert.equal(r.scope, "dom");
+  assert.deepEqual(r.unknownClasses, ["dispatch", "indirect"]);
+  assert.deepEqual(parsePolicy("deny Net Unknown dom\n").deny[0].unknownClasses, []); // bare ⇒ all
+  assert.deepEqual(parsePolicy("deny Net Unknown[*] dom\n").deny[0].unknownClasses, []); // * ⇒ all
+  assert.deepEqual(parsePolicy("deny Net Unknown[dynamic] dom\n").deny[0].unknownClasses,
+    ["dispatch", "indirect", "native", "reflect", "unresolved"]);
+});
+test("evaluatePolicy: reason class propagates transitively to callers", () => {
+  // caller inherits Unknown from a reflect-caused callee; only the callee has the direct reason.
+  const functions = [
+    { fn: "dom.caller", inferred: ["Unknown"] },
+    { fn: "dom.callee", inferred: ["Unknown"], unknownWhy: ["reflect:eval"] },
+  ];
+  const cg = { "dom.caller": ["dom.callee"], "dom.callee": [] };
+  const fire = (pol) => evaluatePolicy(parsePolicy(pol), functions, cg).filter((v) => v.rule === "AS-EFF-006").map((v) => v.fn).sort();
+  assert.deepEqual(fire("deny Net Unknown[reflect]\n"), ["dom.callee", "dom.caller"], "reflect fires on caller + callee");
+  assert.deepEqual(fire("deny Net Unknown[native]\n"), [], "native tolerates a reflect-class Unknown");
+  assert.deepEqual(fire("deny Net Unknown\n"), ["dom.callee", "dom.caller"], "bare Unknown fires on any");
+  // an Unknown with no recorded reason ⇒ unresolved (conservative)
+  const noReason = [{ fn: "x.f", inferred: ["Unknown"] }];
+  const fire2 = (pol) => evaluatePolicy(parsePolicy(pol), noReason, { "x.f": [] }).filter((v) => v.rule === "AS-EFF-006").length;
+  assert.equal(fire2("deny Net Unknown[unresolved]\n"), 1, "no reason ⇒ unresolved matches");
+  assert.equal(fire2("deny Net Unknown[reflect]\n"), 0, "no reason ⇒ not a specific class");
 });
 
 // ── query-core: where / callers / map ─────────────────────────────────────────────────────────────
@@ -444,10 +482,10 @@ test("discoverConfigPolicy: a config WITHOUT a `policy` key is null, not a crash
 // ── policy: the DSL grammar (positional, mirroring the Rust/JVM parsers) ───────────────────────────
 test("parsePolicy: deny is POSITIONAL — first non-effect token ends the effect list (= scope)", () => {
   const p = parsePolicy("deny Net foo Db");
-  assert.deepEqual(p.deny, [{ effects: ["Net"], scope: "foo", raw: "deny Net foo Db" }]); // Db NOT captured
+  assert.deepEqual(p.deny, [{ effects: ["Net"], scope: "foo", unknownClasses: [], raw: "deny Net foo Db" }]); // Db NOT captured
 });
 test("parsePolicy: pure → an empty-effect deny (any effect forbidden)", () => {
-  assert.deepEqual(parsePolicy("pure svc").deny, [{ effects: [], scope: "svc", raw: "pure svc" }]);
+  assert.deepEqual(parsePolicy("pure svc").deny, [{ effects: [], scope: "svc", unknownClasses: [], raw: "pure svc" }]);
 });
 test("parsePolicy: allow with `in <scope>` and values", () => {
   assert.deepEqual(parsePolicy("allow Net in api a.com b.com").allow,
@@ -459,7 +497,7 @@ test("parsePolicy: forbid needs a standalone `->` token", () => {
 });
 test("parsePolicy: comments stripped, blank lines + malformed rules dropped", () => {
   const p = parsePolicy("deny Fs   # trailing comment\n\n  \ndeny\ngarbage line\nUnknown");
-  assert.deepEqual(p.deny, [{ effects: ["Fs"], scope: "", raw: "deny Fs" }]); // bare `deny`, `garbage`, `Unknown` all dropped
+  assert.deepEqual(p.deny, [{ effects: ["Fs"], scope: "", unknownClasses: [], raw: "deny Fs" }]); // bare `deny`, `garbage`, `Unknown` all dropped
 });
 test("parsePolicy: dedups repeated tokens (a set, matching rust/java)", () => {
   // ts kept `deny Net Net` → [Net,Net] while rust/java dedup — a canonical-form divergence (adversarial review)

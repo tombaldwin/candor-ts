@@ -5,6 +5,23 @@
  */
 
 export const EFFECTS = ["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Llm"];
+
+// Reason-scoped Unknown (REASON-SCOPED-UNKNOWN-DESIGN.md): the CLOSED, cross-engine reason-class set a
+// `deny E Unknown[class…]` rule quantifies over. Must be IDENTICAL to candor-java's ReasonClass and
+// candor-rust's — the mapping below mirrors java's prefix-based ReasonClass.classify(String).
+export const REASON_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved", "setup"];
+// `dynamic` = every GENUINE blind-spot class (excludes `setup`), incl. `unresolved` so it never under-gates.
+const DYNAMIC_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved"];
+/** Map a raw `unknownWhy` token (e.g. `reflect:eval`, `callback:fetch`) to its normative reason class. */
+export function reasonClass(why) {
+  const w = String(why).trim().toLowerCase();
+  if (w.startsWith("reflect") || w === "dynamicmemberlookup") return "reflect";
+  if (w.startsWith("native")) return "native";
+  if (w.startsWith("callback") || w.startsWith("closure") || w.startsWith("task-handoff")) return "indirect";
+  if (w.startsWith("dispatch") || w.startsWith("indy") || w.startsWith("ambiguous")) return "dispatch";
+  if (w.startsWith("missing-config") || w.startsWith("no-tsconfig") || w.startsWith("no-node_modules")) return "setup";
+  return "unresolved"; // conservative catch-all
+}
 // The literal surfaces `allow` can restrict. `Llm` ⟨0.13⟩ rides Net's host literal (SPEC §1) —
 // `allow Llm <host…>` restricts which MODEL hosts a scope may reach, matched by hostname like Net.
 const ALLOW_EFFECTS = new Set(["Net", "Exec", "Fs", "Db", "Llm"]);
@@ -28,14 +45,39 @@ export function parsePolicy(text) {
     if (t[0] === "deny") {
       const effects = [];
       let scope = "";
+      // Reason-class filter on an `Unknown` membership: empty ⇒ `Unknown[*]` (any reason — the bare
+      // form); non-empty ⇒ only those classes. `*` = all; `dynamic` = every genuine class.
+      const unknownClasses = new Set();
+      let unknownStar = false;
       for (const tok of t.slice(1)) {
-        if (EFFECTS.includes(tok) || tok === "Unknown") effects.push(tok);
-        else { scope = tok; break; }
+        const m = /^Unknown\[(.*)\]$/.exec(tok);
+        if (m) {
+          effects.push("Unknown");
+          for (let cn of m[1].split(",")) {
+            cn = cn.trim();
+            if (!cn) continue;
+            if (cn === "*") unknownStar = true;
+            else if (cn === "dynamic") DYNAMIC_CLASSES.forEach((c) => unknownClasses.add(c));
+            else if (REASON_CLASSES.includes(cn)) unknownClasses.add(cn);
+            else warn(`unknown reason-class \`${cn}\` (known: ${REASON_CLASSES.join(",")}; aliases: dynamic,*)`);
+          }
+          continue;
+        }
+        if (EFFECTS.includes(tok) || tok === "Unknown") {
+          effects.push(tok);
+          if (tok === "Unknown") unknownStar = true; // bare Unknown ⇒ all classes
+        } else { scope = tok; break; }
       }
       if (effects.length === 0) { warn("deny names no known effect"); continue; }
-      deny.push({ effects: [...new Set(effects)].sort(), scope, raw: line }); // dedup: a set, like rust/java
+      // `*` (or bare Unknown) means all classes ⇒ empty filter (matches any Unknown).
+      let uc = unknownStar ? [] : [...unknownClasses].sort();
+      // A2 under-gating lint: a narrowed scope omitting `unresolved` (the catch-all for holes the engine
+      // couldn't classify) may silently tolerate exactly those — flag it (advisory, non-fatal).
+      if (uc.length && !uc.includes("unresolved"))
+        console.error(`candor: policy rule narrows \`Unknown[…]\` but omits \`unresolved\` — may UNDER-gate on holes the engine couldn't classify; add \`unresolved\` (or use \`dynamic\`): ${line}`);
+      deny.push({ effects: [...new Set(effects)].sort(), scope, unknownClasses: uc, raw: line }); // dedup: a set, like rust/java
     } else if (t[0] === "pure") {
-      deny.push({ effects: [], scope: t[1] ?? "", raw: line });
+      deny.push({ effects: [], scope: t[1] ?? "", unknownClasses: [], raw: line });
     } else if (t[0] === "allow") {
       if (t.length < 3) { warn("allow names no values"); continue; }
       if (!ALLOW_EFFECTS.has(t[1])) { warn("allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables"); continue; }
@@ -122,6 +164,27 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
   // `Llm` ⟨0.13⟩ reaches the SAME hosts surface as Net (an Llm host WAS captured as a Net host literal).
   const surfaces = { Net: "hosts", Llm: "hosts", Exec: "cmds", Fs: "paths", Db: "tables" };
   const push = (rule, fn, effects, detail) => out.push({ rule, fn, effects, detail });
+  // Reason-scoped Unknown: the Unknown reason CLASS must travel the call graph the same way the Unknown
+  // EFFECT does (unknownWhy in the report is direct-only). Classify each fn's DIRECT reasons to class
+  // tokens, then propagate transitively over `callgraph` to a fixpoint — so `deny E Unknown[reflect]` at a
+  // caller inheriting Unknown from a reflect-caused callee still fires (matches java/rust reasonClassAcc).
+  const reasonAcc = new Map();
+  for (const f of functions) {
+    const cs = new Set((f.unknownWhy ?? []).map(reasonClass));
+    if (cs.size) reasonAcc.set(f.fn, cs);
+  }
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const [caller, callees] of Object.entries(callgraph)) {
+      for (const callee of callees) {
+        const cc = reasonAcc.get(callee);
+        if (!cc) continue;
+        let set = reasonAcc.get(caller);
+        if (!set) { set = new Set(); reasonAcc.set(caller, set); }
+        for (const c of cc) if (!set.has(c)) { set.add(c); changed = true; }
+      }
+    }
+  }
   for (const f of functions) {
     for (const r of pol.deny) {
       if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
@@ -132,7 +195,15 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       const hits = r.effects.length === 0
         ? f.inferred.filter((e) => e !== "Unknown")
         : f.inferred.filter((e) => r.effects.includes(e));
-      if (hits.length) push("AS-EFF-006", f.fn, hits, `\`${f.fn}\` performs { ${hits.join(", ")} }, forbidden by policy: \`${r.raw}\``);
+      // Reason-scoped Unknown: a `deny E Unknown[classes]` keeps its Unknown hit only for a fn whose
+      // TRANSITIVE reason classes include one of those; an Unknown with no recorded reason ⇒ `unresolved`.
+      let kept = hits;
+      if (hits.includes("Unknown") && (r.unknownClasses?.length)) {
+        const cs = reasonAcc.get(f.fn);
+        const fnClasses = cs && cs.size ? [...cs] : ["unresolved"];
+        if (!fnClasses.some((c) => r.unknownClasses.includes(c))) kept = hits.filter((e) => e !== "Unknown");
+      }
+      if (kept.length) push("AS-EFF-006", f.fn, kept, `\`${f.fn}\` performs { ${kept.join(", ")} }, forbidden by policy: \`${r.raw}\``);
     }
     for (const r of pol.allow) {
       if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
