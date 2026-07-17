@@ -52,8 +52,16 @@ export function observedByFn(events, scope) {
   return obs;
 }
 
-const subset = (a, b) => [...a].every((x) => b.has(x)); // a ⊆ b
-const diff = (a, b) => [...a].filter((x) => !b.has(x)); // a ∖ b
+// Effect REFINEMENTS: `Llm` and `Db` (as observed by this oracle — always a network destination: a model
+// host / a database port) are refinements of `Net` — an Llm/Db call IS a Net call. So candor honestly
+// declaring `Net` (it couldn't resolve the model host / db-ness) is SATISFIED by an observed Llm/Db: the
+// BASE effect was reported, which is what the honesty invariant (and any Net gate) turns on. A missing
+// REFINEMENT is not a false-pure; only a missing BASE effect is the cardinal sin. So an observed refinement
+// is "covered" if the refinement OR its base is inferred.
+const BASE = { Llm: "Net", Db: "Net" };
+const covered = (e, inferred) => inferred.has(e) || (BASE[e] && inferred.has(BASE[e]));
+const subset = (obs, inferred) => [...obs].every((e) => covered(e, inferred)); // obs ⊆ inferred (up to refinement)
+const diff = (obs, inferred) => [...obs].filter((e) => !covered(e, inferred)); // the genuinely-escaped effects
 
 /**
  * The invariant check. `report`/`observed` are Maps (fn → Set). Returns { rows, violations, metrics }.

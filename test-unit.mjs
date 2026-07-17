@@ -30,6 +30,7 @@ import {
 } from "./scan-core.mjs";
 import { bestFind, bestFinds, tokenize } from "./surface.mjs";
 import { verify } from "./verify-core.mjs";
+import { netEffects, destOf } from "./verify-emit.mjs";
 
 // ── query-core: the §3.1 match ladder (exact > segment-suffix > substring) ────────────────────────
 test("matches: exact beats substring cousins", () => {
@@ -195,6 +196,29 @@ test("verify: the observability SCOPE is enforced — an out-of-scope effect is 
   const trace = [{ fn: "app.f", effect: "Env" }];
   assert.equal(verify(report, trace, "direct").metrics.cardinalSinViolations, 0, "Env out of `direct` scope");
   assert.equal(verify(report, trace, "all").metrics.cardinalSinViolations, 1, "Env in `all` scope");
+});
+
+test("verify: Llm/Db are refinements of Net — an honest Net claim is NOT a violation when refined at runtime", () => {
+  // candor honestly said `Net` (couldn't resolve the model host); the run refined it to Llm. HOLDS.
+  const r = verify({ functions: [{ fn: "app.f", inferred: ["Net"] }] }, [{ fn: "app.f", effect: "Llm" }, { fn: "app.f", effect: "Net" }], "all");
+  assert.equal(r.metrics.cardinalSinViolations, 0, "a missing REFINEMENT (Llm over a reported Net) is not a false-pure");
+  // but a missing BASE effect still is: ran Llm, declared complete-pure → the base Net escaped.
+  const v = verify({ functions: [{ fn: "app.f", inferred: [] }] }, [{ fn: "app.f", effect: "Llm" }], "all");
+  assert.equal(v.metrics.cardinalSinViolations, 1, "an Llm over a pure claim IS a violation (neither Llm nor its base Net)");
+});
+test("verify: Net destination classifier refines Llm (model host) + Db (db port), else bare Net", () => {
+  assert.deepEqual(netEffects("api.openai.com", 443), ["Net", "Llm"], "a model host → Llm");
+  assert.deepEqual(netEffects("eu.api.openai.com", null), ["Net", "Llm"], "a model-host subdomain → Llm");
+  assert.deepEqual(netEffects("db.internal", 5432), ["Net", "Db"], "a Postgres port → Db");
+  assert.deepEqual(netEffects("example.com", 443), ["Net"], "an ordinary host → bare Net");
+  assert.deepEqual(netEffects("", null), ["Net"], "an unresolved destination → bare Net (never fabricated)");
+});
+test("verify: destOf extracts host/port from each Net entry-point arg shape", () => {
+  assert.deepEqual(destOf("http", "fetch", ["https://api.openai.com/v1/chat"]), { host: "api.openai.com", port: null });
+  assert.deepEqual(destOf("http", "request", [{ hostname: "h.example.com", port: 8080 }]), { host: "h.example.com", port: 8080 });
+  assert.deepEqual(destOf("net", "connect", [5432, "db.local"]), { host: "db.local", port: 5432 });
+  assert.deepEqual(destOf("net", "connect", [{ host: "x", port: 6379 }]), { host: "x", port: 6379 });
+  assert.deepEqual(destOf("dns", "lookup", ["host.example.com"]), { host: "host.example.com", port: null });
 });
 
 // ── query-core: where / callers / map ─────────────────────────────────────────────────────────────

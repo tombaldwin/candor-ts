@@ -39,17 +39,23 @@ export async function load(url, context, next) {
   const { effectOf } = await import(EMIT_URL);
   const real = await import(ORIG + base);
   const names = Object.keys(real).filter((n) => n !== "default" && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(n));
+  const B = JSON.stringify(base);
   let src = `import * as __o from ${JSON.stringify(ORIG + base)};\n`;
-  src += `import { emit as __emit } from ${JSON.stringify(EMIT_URL)};\n`;
+  // Route through the SAME re-entrancy-guarded helpers as the preload, so a named-export call's internal
+  // wrapped calls don't fabricate an escape (and a Net destination is classified → Net/Llm/Db).
+  src += `import { traced as __t, tracedNet as __tn } from ${JSON.stringify(EMIT_URL)};\n`;
   src += "export default __o.default ?? __o;\n";
   for (const n of names) {
     const eff = effectOf(base, n);
-    if (eff && typeof real[n] === "function") {
-      // wrap: emit the effect, then delegate to the real named export (preserving this/args/return).
-      src += `const __f_${n} = __o[${JSON.stringify(n)}];\n`;
-      src += `export const ${n} = function (...a) { __emit(${JSON.stringify(eff)}); return __f_${n}.apply(this, a); };\n`;
+    const N = JSON.stringify(n);
+    if (eff === "Net" && typeof real[n] === "function") {
+      src += `const __f_${n} = __o[${N}];\n`;
+      src += `export const ${n} = function (...a) { return __tn(${B}, ${N}, this, __f_${n}, a); };\n`;
+    } else if (eff && typeof real[n] === "function") {
+      src += `const __f_${n} = __o[${N}];\n`;
+      src += `export const ${n} = function (...a) { return __t(${JSON.stringify(eff)}, this, __f_${n}, a); };\n`;
     } else {
-      src += `export const ${n} = __o[${JSON.stringify(n)}];\n`;
+      src += `export const ${n} = __o[${N}];\n`;
     }
   }
   return { format: "module", source: src, shortCircuit: true };
