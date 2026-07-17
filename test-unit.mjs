@@ -22,7 +22,7 @@ import {
 } from "./query-core.mjs";
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
-  discoverConfigPolicy, evaluatePolicy, reasonClass,
+  discoverConfigPolicy, evaluatePolicy, reasonClass, parseUnknownAliases,
 } from "./policy.mjs";
 import {
   isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
@@ -83,6 +83,16 @@ test("parsePolicy: Unknown[class…] / * / dynamic", () => {
   assert.deepEqual(parsePolicy("deny Net Unknown[*] dom\n").deny[0].unknownClasses, []); // * ⇒ all
   assert.deepEqual(parsePolicy("deny Net Unknown[dynamic] dom\n").deny[0].unknownClasses,
     ["dispatch", "indirect", "native", "reflect", "unresolved"]);
+});
+test("config unknown-alias: resolves a user name, rejects a reserved one", () => {
+  const aliases = parseUnknownAliases(
+    "unknown-alias risky = reflect,native\nunknown-alias telemetry = indirect\nunknown-alias reflect = native\n");
+  assert.deepEqual([...aliases.get("risky")].sort(), ["native", "reflect"]);
+  assert.deepEqual([...aliases.get("telemetry")], ["indirect"]);
+  assert.equal(aliases.has("reflect"), false, "a config alias may not shadow a class token");
+  assert.deepEqual(parsePolicy("deny Net Unknown[risky] api\n", aliases).deny[0].unknownClasses, ["native", "reflect"]);
+  // an UNDEFINED alias name is dropped-with-warning → empty filter (behaves like bare Unknown[*])
+  assert.deepEqual(parsePolicy("deny Net Unknown[nope] api\n", aliases).deny[0].unknownClasses, []);
 });
 test("evaluatePolicy: reason class propagates transitively to callers", () => {
   // caller inherits Unknown from a reflect-caused callee; only the callee has the direct reason.

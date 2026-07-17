@@ -26,7 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { parsePolicy, evaluatePolicy, scopeMatches } from "./policy.mjs";
+import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, discoverConfigText } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
@@ -2796,11 +2796,13 @@ if (policyPath !== null) {
   // java/rust engines (not a report field) — passed to the gate so an incomplete surface fails closed.
   const incompleteMap = new Map();
   for (const [name, rec] of fns) if (rec.incomplete.size) incompleteMap.set(name, rec.incomplete);
-  gateViolations = gateViolations.concat(evaluatePolicy(parsePolicy(text), functions, cg, incompleteMap));
+  // ⟨0.19⟩ reason-class aliases (SPEC §6.2) from `.candor/config`, so `Unknown[<alias>]` resolves at the gate.
+  const unknownAliases = parseUnknownAliases(discoverConfigText(target));
+  gateViolations = gateViolations.concat(evaluatePolicy(parsePolicy(text, unknownAliases), functions, cg, incompleteMap));
   // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
   // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
   // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).
-  const disclosePolicy = parsePolicy(text);
+  const disclosePolicy = parsePolicy(text, unknownAliases);
   const purityHoles = [];
   for (const f of functions) {
     // Same predicate + upgrade as `candor-ts-query unverified` (query-core.mjs) — one source of truth.

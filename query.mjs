@@ -23,7 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parsePolicy, scopeMatches, discoverConfigPolicy } from "./policy.mjs";
+import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, discoverConfigText } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
@@ -501,7 +501,10 @@ switch (cmd) {
       console.error(`candor: policy ${args[0] ?? "(no file given)"} could not be read`);
       process.exit(2);
     }
-    emit(parsePolicy(text));
+    // ⟨0.19⟩ config-aware: resolve `Unknown[<alias>]` via a checked-in `unknown-alias`, anchored to the
+    // policy file (or CANDOR_CONFIG) — the dump reflects real gate resolution + pins the four-way expansion.
+    const aliases = parseUnknownAliases(discoverConfigText(path.dirname(path.resolve(args[0]))));
+    emit(parsePolicy(text, aliases));
     break;
   }
   case "show": {

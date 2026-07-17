@@ -31,7 +31,10 @@ const ALLOW_EFFECTS = new Set(["Net", "Exec", "Fs", "Db", "Llm"]);
 // (adversarial DSL review). A non-ASCII space stays part of its token → the rule is malformed, dropped.
 const ASCII_WS = /[ \t\n\v\f\r]+/;
 const ASCII_WS_TRIM = /^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g;
-export function parsePolicy(text) {
+// ⟨0.19⟩ `aliases` (a Map name→class-token[], from `.candor/config` `unknown-alias`) lets an `Unknown[<name>]`
+// filter resolve a user-defined name (SPEC §6.2). A config alias never changes what bare `deny E Unknown`
+// means (always `Unknown[*]`), so a rule's denied set stays legible from the policy alone.
+export function parsePolicy(text, aliases = null) {
   const deny = [], allow = [], forbid = [];
   // Split LINES on \n / \r\n / bare \r — the three forms Java's Files.readAllLines (the reference parser)
   // breaks on. Splitting on \n ONLY let a classic-Mac (bare-\r) file collapse to one line: \r is also an
@@ -59,7 +62,8 @@ export function parsePolicy(text) {
             if (cn === "*") unknownStar = true;
             else if (cn === "dynamic") DYNAMIC_CLASSES.forEach((c) => unknownClasses.add(c));
             else if (REASON_CLASSES.includes(cn)) unknownClasses.add(cn);
-            else warn(`unknown reason-class \`${cn}\` (known: ${REASON_CLASSES.join(",")}; aliases: dynamic,*)`);
+            else if (aliases && aliases.has(cn)) aliases.get(cn).forEach((c) => unknownClasses.add(c)); // ⟨0.19⟩ config unknown-alias
+            else warn(`unknown reason-class/alias \`${cn}\` (known: ${REASON_CLASSES.join(",")}; aliases: dynamic,*, or a config \`unknown-alias\`)`);
           }
           continue;
         }
@@ -275,4 +279,51 @@ export function discoverConfigPolicy(fromDir) {
     if (parent === dir) return null;
     dir = parent;
   }
+}
+
+// ⟨0.19⟩ Discover `.candor/config` TEXT anchored at `fromDir`: $CANDOR_CONFIG if set + readable, else the
+// nearest `.candor/config` walking UP, else null. Read-only + lenient (the caller decides fail-closed).
+export function discoverConfigText(fromDir) {
+  const env = process.env.CANDOR_CONFIG;
+  if (env) { try { return fs.readFileSync(env, "utf8"); } catch { return null; } }
+  let dir = nodePath.resolve(fromDir);
+  for (;;) {
+    const cand = nodePath.join(dir, ".candor", "config");
+    if (fs.existsSync(cand)) { try { return fs.readFileSync(cand, "utf8"); } catch { return null; } }
+    const parent = nodePath.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+// ⟨0.19⟩ Parse `unknown-alias <name> = <class,…>` lines (SPEC §6.2) into a Map name→class-token[]. A name
+// that shadows a built-in (`*`/`dynamic`/a class token) is warned-and-skipped, as is a no-valid-class def.
+// Byte-shape with the java `Config.addAlias` / rust `parse_unknown_aliases`.
+export function parseUnknownAliases(configText) {
+  const out = new Map();
+  if (!configText) return out;
+  for (const raw of configText.split(/\r?\n/)) {
+    const line = raw.split("#", 1)[0].trim();
+    if (!line) continue;
+    const m = line.match(/^(\S+)\s+(.*)$/);
+    if (!m || m[1].toLowerCase() !== "unknown-alias") continue;
+    const eq = m[2].indexOf("=");
+    if (eq < 0) { console.error(`candor: ignoring \`unknown-alias\` (want \`unknown-alias <name> = <class,…>\`): ${m[2]}`); continue; }
+    const name = m[2].slice(0, eq).trim();
+    if (!name || name === "*" || name === "dynamic" || REASON_CLASSES.includes(name)) {
+      console.error(`candor: ignoring \`unknown-alias\` with reserved/empty name \`${name}\` (may not shadow \`*\`/\`dynamic\`/a class token)`);
+      continue;
+    }
+    const classes = new Set();
+    for (let cn of m[2].slice(eq + 1).split(",")) {
+      cn = cn.trim();
+      if (!cn) continue;
+      if (cn === "dynamic") DYNAMIC_CLASSES.forEach((c) => classes.add(c));
+      else if (REASON_CLASSES.includes(cn)) classes.add(cn);
+      else console.error(`candor: \`unknown-alias ${name}\` names unknown reason-class \`${cn}\` — skipped`);
+    }
+    if (classes.size === 0) console.error(`candor: ignoring \`unknown-alias ${name}\` — no valid reason-class`);
+    else out.set(name, [...classes]);
+  }
+  return out;
 }
