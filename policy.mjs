@@ -163,7 +163,9 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
   const out = [];
   // `Llm` ⟨0.13⟩ reaches the SAME hosts surface as Net (an Llm host WAS captured as a Net host literal).
   const surfaces = { Net: "hosts", Llm: "hosts", Exec: "cmds", Fs: "paths", Db: "tables" };
-  const push = (rule, fn, effects, detail) => out.push({ rule, fn, effects, detail });
+  // §6.2 ⟨0.19⟩: `reasonClass` (all classes on the fn) rides an AS-EFF-006 Unknown violation; omitted otherwise.
+  const push = (rule, fn, effects, detail, reasonClass) =>
+    out.push(reasonClass && reasonClass.length ? { rule, fn, effects, detail, reasonClass } : { rule, fn, effects, detail });
   // Reason-scoped Unknown: the Unknown reason CLASS must travel the call graph the same way the Unknown
   // EFFECT does (unknownWhy in the report is direct-only). Classify each fn's DIRECT reasons to class
   // tokens, then propagate transitively over `callgraph` to a fixpoint — so `deny E Unknown[reflect]` at a
@@ -203,7 +205,11 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
         const fnClasses = cs && cs.size ? [...cs] : ["unresolved"];
         if (!fnClasses.some((c) => r.unknownClasses.includes(c))) kept = hits.filter((e) => e !== "Unknown");
       }
-      if (kept.length) push("AS-EFF-006", f.fn, kept, `\`${f.fn}\` performs { ${kept.join(", ")} }, forbidden by policy: \`${r.raw}\``);
+      if (kept.length) {
+        // When Unknown is denied, report ALL reason classes on the fn (transitive) — every reason the gate bit.
+        const rc = kept.includes("Unknown") ? [...(reasonAcc.get(f.fn) ?? [])].sort() : undefined;
+        push("AS-EFF-006", f.fn, kept, `\`${f.fn}\` performs { ${kept.join(", ")} }, forbidden by policy: \`${r.raw}\``, rc);
+      }
     }
     for (const r of pol.allow) {
       if (r.scope && !scopeMatches(f.fn, r.scope)) continue;

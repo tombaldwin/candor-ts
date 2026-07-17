@@ -92,6 +92,9 @@ test("evaluatePolicy: reason class propagates transitively to callers", () => {
   ];
   const cg = { "dom.caller": ["dom.callee"], "dom.callee": [] };
   const fire = (pol) => evaluatePolicy(parsePolicy(pol), functions, cg).filter((v) => v.rule === "AS-EFF-006").map((v) => v.fn).sort();
+  // §6.2 ⟨0.19⟩: the verdict carries reasonClass on the Unknown denial — on the caller too (transitive).
+  const rc = evaluatePolicy(parsePolicy("deny Net Unknown[reflect]\n"), functions, cg).filter((v) => v.rule === "AS-EFF-006");
+  for (const v of rc) assert.deepEqual(v.reasonClass, ["reflect"], `reasonClass rides the Unknown verdict for ${v.fn}`);
   assert.deepEqual(fire("deny Net Unknown[reflect]\n"), ["dom.callee", "dom.caller"], "reflect fires on caller + callee");
   assert.deepEqual(fire("deny Net Unknown[native]\n"), [], "native tolerates a reflect-class Unknown");
   assert.deepEqual(fire("deny Net Unknown\n"), ["dom.callee", "dom.caller"], "bare Unknown fires on any");
