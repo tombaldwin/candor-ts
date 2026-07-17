@@ -29,6 +29,7 @@ import {
   isModelHost, modelHostEffects, isModelSdkPackage, netDestClass,
 } from "./scan-core.mjs";
 import { bestFind, bestFinds, tokenize } from "./surface.mjs";
+import { verify } from "./verify-core.mjs";
 
 // ── query-core: the §3.1 match ladder (exact > segment-suffix > substring) ────────────────────────
 test("matches: exact beats substring cousins", () => {
@@ -158,6 +159,42 @@ test("evaluatePolicy: Net destination-class gate fires on unknown-host, tolerate
     .filter((x) => x.rule === "AS-EFF-006").length, 1, "a masked surface fails closed even with a telemetry host");
   // bare `deny Net` still denies ALL destinations (backward-compat).
   assert.deepEqual(fire("deny Net\n"), ["d.caller", "d.exfil", "d.partner", "d.runtime", "d.tel"]);
+});
+
+// ── candor verify: the dynamic honesty oracle (RQ1) ───────────────────────────────────────────────
+test("verify: a hidden effect (ran Net, declared complete-pure) is a cardinal-sin VIOLATION", () => {
+  const report = { functions: [{ fn: "app.f", inferred: [] }] };       // candor claimed f pure (complete)
+  const trace = [{ fn: "app.f", effect: "Net" }];                       // …but it ran Net
+  const r = verify(report, trace, "direct");
+  assert.equal(r.metrics.honestyInvariantHolds, false);
+  assert.equal(r.metrics.cardinalSinViolations, 1);
+  assert.deepEqual(r.violations[0].escaped, ["Net"]);
+});
+test("verify: an ABSENT fn is a purity claim — a runtime effect from it is a VIOLATION", () => {
+  const r = verify({ functions: [] }, [{ fn: "app.dropped", effect: "Fs" }], "direct");
+  assert.equal(r.metrics.cardinalSinViolations, 1, "a silently-dropped effectful fn surfaces as a violation");
+});
+test("verify: disclosure (Unknown) flips the same run to HELD (disclosed-partial, load-bearing)", () => {
+  const report = { functions: [{ fn: "app.f", inferred: ["Unknown"] }] };
+  const r = verify(report, [{ fn: "app.f", effect: "Net" }], "direct");
+  assert.equal(r.metrics.honestyInvariantHolds, true, "Unknown discloses the hole — the invariant HOLDS");
+  assert.equal(r.metrics.cardinalSinViolations, 0);
+  assert.equal(r.metrics.disclosedUnknownLoadBearing, 1, "the Unknown was doing real work");
+});
+test("verify: observed ⊆ inferred is sound-complete-ok (no false positive on a truthful signature)", () => {
+  const report = { functions: [{ fn: "app.f", inferred: ["Net", "Fs"] }] };
+  const r = verify(report, [{ fn: "app.f", effect: "Net" }], "direct");
+  assert.equal(r.metrics.soundCompleteOk, 1);
+  assert.equal(r.metrics.cardinalSinViolations, 0);
+});
+test("verify: the observability SCOPE is enforced — an out-of-scope effect is not asserted over", () => {
+  // Env is invisible to the `direct` (syscall-parity) scope, so a ran-Env-declared-pure fn is NOT a
+  // violation under `direct` (the oracle must not claim soundness over effects it doesn't assert on);
+  // under `all` (the language-level capture wraps process.env) it IS.
+  const report = { functions: [{ fn: "app.f", inferred: [] }] };
+  const trace = [{ fn: "app.f", effect: "Env" }];
+  assert.equal(verify(report, trace, "direct").metrics.cardinalSinViolations, 0, "Env out of `direct` scope");
+  assert.equal(verify(report, trace, "all").metrics.cardinalSinViolations, 1, "Env in `all` scope");
 });
 
 // ── query-core: where / callers / map ─────────────────────────────────────────────────────────────

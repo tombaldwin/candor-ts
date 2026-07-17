@@ -3309,5 +3309,58 @@ export function fmt(s: string, cb: Function): string { cb(); readFileSync("/etc/
   }
 }
 
+// ── candor verify: the dynamic honesty oracle, end to end (scan → run → check) ────────────────────
+{
+  const d = project({
+    "app.ts": `import fs from "node:fs";
+function reads(): number { return fs.statSync(process.execPath).size; }
+function pure(x: number): number { return x + 1; }
+function main(): void { reads(); pure(2); }
+main();
+`,
+    "package.json": '{"name":"vapp","version":"0.0.0","type":"module"}',
+  });
+  const { report } = scan(d);
+  const canStripTypes = spawnSync("node", ["--experimental-strip-types", "-e", "0"], { encoding: "utf8" }).status === 0;
+  if (!canStripTypes) {
+    check("verify: end-to-end (SKIPPED — node lacks --experimental-strip-types)", true);
+  } else {
+    const runCmd = `node --experimental-strip-types ${JSON.stringify(path.join(d, "app.ts"))}`;
+    const verify = (prefix) => spawnSync("node",
+      [path.join(HERE, "verify.mjs"), d, "--report", prefix, "--run", runCmd, "--json"],
+      { encoding: "utf8" });
+    // (a) HAPPY PATH — candor is sound, so the invariant HOLDS (the effectful `reads` declared Fs).
+    const h = verify(path.join(d, ".candor", "report"));
+    let hj = null; try { hj = JSON.parse(h.stdout); } catch { /* parse below */ }
+    check("verify: a sound scan HOLDS the honesty invariant (exit 0)",
+      h.status === 0 && hj?.metrics.honestyInvariantHolds === true && hj?.metrics.cardinalSinViolations === 0,
+      `exit=${h.status} out=${(h.stdout || "").slice(0, 200)} err=${(h.stderr || "").slice(0, 200)}`);
+    check("verify: the effectful fn is attributed + checked (observed Fs ⊆ inferred Fs)",
+      hj?.metrics.soundCompleteOk >= 1, JSON.stringify(hj?.metrics));
+    // (b) SEEDED MISS — a report that (wrongly) declares `reads` complete-pure. verify must catch the
+    // escaped Fs the run exhibits and exit 1: the cardinal-sin falsifier working.
+    const seedDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-verify-seed-"));
+    const seeded = structuredClone(report);
+    for (const e of seeded.functions) if (e.fn === "app.reads") e.inferred = [];
+    fs.writeFileSync(path.join(seedDir, "s.seed.scan.json"), JSON.stringify(seeded));
+    const s = verify(path.join(seedDir, "s"));
+    let sj = null; try { sj = JSON.parse(s.stdout); } catch { /* below */ }
+    check("verify: a SEEDED silent miss (declared pure, ran Fs) is a VIOLATION (exit 1)",
+      s.status === 1 && sj?.metrics.cardinalSinViolations === 1
+        && sj?.violations?.[0]?.fn === "app.reads" && sj?.violations?.[0]?.escaped?.includes("Fs"),
+      `exit=${s.status} out=${(s.stdout || "").slice(0, 200)}`);
+    // (c) DISCLOSURE FLIPS IT — the same run under an `Unknown` disclosure HOLDS (disclosed-partial).
+    const discDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-verify-disc-"));
+    const disc = structuredClone(report);
+    for (const e of disc.functions) if (e.fn === "app.reads") e.inferred = ["Unknown"];
+    fs.writeFileSync(path.join(discDir, "d.disc.scan.json"), JSON.stringify(disc));
+    const c = verify(path.join(discDir, "d"));
+    let cj = null; try { cj = JSON.parse(c.stdout); } catch { /* below */ }
+    check("verify: disclosure (Unknown) flips the same run to HELD (disclosed-partial, load-bearing)",
+      c.status === 0 && cj?.metrics.honestyInvariantHolds === true && cj?.metrics.disclosedUnknownLoadBearing === 1,
+      `exit=${c.status} out=${(c.stdout || "").slice(0, 200)}`);
+  }
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

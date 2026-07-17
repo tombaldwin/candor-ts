@@ -1,7 +1,7 @@
 {
   "name": "candor-ts",
   "version": "0.21.0",
-  "description": "candor for TypeScript — per-function side effects, transitively, with a policy gate (candor-spec 0.21)",
+  "description": "candor for TypeScript \u2014 per-function side effects, transitively, with a policy gate (candor-spec 0.21)",
   "type": "module",
   "dependencies": {
     "@types/node": "^25.9.2",
@@ -13,7 +13,8 @@
     "candor-ts-mcp": "./mcp.mjs",
     "candor-ts-watch": "./watch.mjs",
     "candor-mcp": "./mcp.mjs",
-    "candor-lsp": "./lsp.mjs"
+    "candor-lsp": "./lsp.mjs",
+    "candor-ts-verify": "./verify.mjs"
   },
   "scripts": {
     "lint": "eslint *.mjs",
@@ -55,7 +56,10 @@
     "surface.mjs",
     "mcp.mjs",
     "watch.mjs",
-    "lsp.mjs"
+    "lsp.mjs",
+    "verify.mjs",
+    "verify-core.mjs",
+    "verify-preload.mjs"
   ],
   "devDependencies": {
     "@eslint/js": "^9.39.4",
