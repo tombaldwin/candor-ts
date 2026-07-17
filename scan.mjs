@@ -26,7 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, discoverConfigText } from "./policy.mjs";
+import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, discoverConfigText, reasonClass } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
@@ -294,6 +294,13 @@ if (!wantJson) fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: 
 // A target with declared dependencies but no node_modules resolves almost nothing — the scan
 // would "succeed" with a near-total-Unknown report a fresh user could ship (CTA-dogfood finding).
 // Warn LOUDLY; the report is still written (it is sound), but the cause must be visible.
+// ⟨0.19⟩ Also compute `declaredButUninstalled` (SPEC §6.2 §3, the setup/genuine split): a declared dep
+// whose `node_modules/<dep>` is absent. An `Unknown` caused by a call into one of these is a SETUP hole
+// (`no-node_modules:<pkg>` → reason class `setup`), NOT a genuine dynamic blind spot — the fix is
+// `npm install`, not a policy decision. Tagging them separates the fatigue-vector (the referee's
+// week-two-uninstall) from real dynamism, so a team can `Unknown[dynamic]` a strict gate AND be told
+// exactly what to configure to shrink the rest.
+const declaredButUninstalled = new Set();
 {
   // Find the nearest package.json AT OR ABOVE the scan root: scanning a `src/` subdirectory must still see
   // the project manifest one level up, else the warning stays silent and a deps-less scan reads as a
@@ -303,14 +310,16 @@ if (!wantJson) fs.mkdirSync(path.dirname(path.resolve(outPrefix)), { recursive: 
     if (fs.existsSync(path.join(d, "package.json"))) { projDir = d; break; }
     if (path.dirname(d) === d) break;                       // filesystem root
   }
-  if (projDir && !fs.existsSync(path.join(projDir, "node_modules"))) {
+  if (projDir) {
     try {
       // BOTH dependency kinds: `npm install` installs devDependencies too, and a project can import a
       // dev/vendored package in its source (zx imports `chalk` as a devDependency) — a `dependencies`-only
       // check left exactly that case unwarned.
       const pj = JSON.parse(fs.readFileSync(path.join(projDir, "package.json"), "utf8"));
       const deps = { ...(pj.dependencies ?? {}), ...(pj.devDependencies ?? {}) };
-      if (Object.keys(deps).length > 0)
+      for (const dep of Object.keys(deps))
+        if (!fs.existsSync(path.join(projDir, "node_modules", dep))) declaredButUninstalled.add(dep);
+      if (Object.keys(deps).length > 0 && !fs.existsSync(path.join(projDir, "node_modules")))
         console.error("candor-ts: WARNING — the project declares dependencies but has no node_modules; " +
                       "imports won't resolve, so calls into those packages can't be analyzed (they read " +
                       "`Unknown`, and their types don't resolve). Run `npm install` in the project first.");
@@ -405,6 +414,33 @@ function declModule(decl) {
     return m[1];
   }
   return f;
+}
+
+// ⟨0.19⟩ The bare-package ROOT of an import specifier: `@scope/pkg/sub` → `@scope/pkg`, `pkg/sub` → `pkg`,
+// a relative/absolute path → null (not a package). Used to match an import against `declaredButUninstalled`.
+function pkgRoot(spec) {
+  if (!spec || spec.startsWith(".") || spec.startsWith("/")) return null;
+  const seg = spec.split("/");
+  return spec.startsWith("@") ? seg.slice(0, 2).join("/") : seg[0];
+}
+
+// ⟨0.19⟩ The import module a call's HEAD identifier binds to (`winston.info()` → head `winston`; `chalk()` →
+// `chalk`) via its import declaration — resolvable even when the package ISN'T installed, because the import
+// statement is syntactically present in the local file. Mirrors the specifier extraction at the κ seam.
+// Returns the bare-package root, or null when the head isn't an imported binding.
+function importPkgOfHead(expr) {
+  let head = expr;
+  while (head && ts.isPropertyAccessExpression(head)) head = head.expression;
+  if (!head || !ts.isIdentifier(head)) return null;
+  const sym = checker.getSymbolAtLocation(head);
+  for (const d of sym?.declarations ?? []) {
+    let spec = null;
+    if (ts.isNamespaceImport(d)) spec = d.parent?.parent?.moduleSpecifier;
+    else if (ts.isImportClause(d)) spec = d.parent?.moduleSpecifier;              // default import
+    else if (ts.isImportSpecifier(d)) spec = d.parent?.parent?.parent?.moduleSpecifier; // named import
+    if (spec && ts.isStringLiteralLike(spec)) return pkgRoot(spec.text);
+  }
+  return null;
 }
 
 // SPEC §5.1 — the effect manifest. An uncurated package MAY declare its effect surface in its
@@ -1662,8 +1698,16 @@ function visitCalls(node) {
                                    // happens in the global/builtin arm below, which fires for the same node.
           } else {
             rec.direct.add("Unknown"); // unresolvable call → Unknown, never silent-pure (SPEC §4)
-            const callee = (node.expression?.getText?.() ?? "?").replace(/\s+/g, "").slice(0, 60);
-            rec.why.add(`callback:${callee}`); // an `any`-typed/indeterminate callee (a function VALUE) — canonical `callback:`
+            // ⟨0.19⟩ SETUP split (SPEC §6.2 §3): if the callee binds to a DECLARED-but-UNINSTALLED package,
+            // this Unknown is a mis-configuration (the pkg isn't `npm install`ed), not a genuine dynamic hole
+            // — tag `no-node_modules:<pkg>` (reason class `setup`) so it's SEPARABLE + `npm install`-fixable.
+            const setupPkg = declaredButUninstalled.size ? importPkgOfHead(node.expression) : null;
+            if (setupPkg && declaredButUninstalled.has(setupPkg)) {
+              rec.why.add(`no-node_modules:${setupPkg}`);
+            } else {
+              const callee = (node.expression?.getText?.() ?? "?").replace(/\s+/g, "").slice(0, 60);
+              rec.why.add(`callback:${callee}`); // an `any`-typed/indeterminate callee (a function VALUE) — canonical `callback:`
+            }
           }
         }
       } else {
@@ -2618,6 +2662,30 @@ if (!wantJson) {
   const unknown = counts.Unknown || 0;
   if (breakdown || unknown) {
     console.error(`  ${breakdown}${unknown ? `${breakdown ? "   ·   " : ""}Unknown ${unknown} (disclosed)` : ""}`);
+  }
+}
+{
+  // ⟨0.19⟩ SETUP diagnostic (SPEC §6.2 §3, the setup/genuine split): functions that read Unknown ONLY
+  // because the scan isn't configured (a declared dep not installed → `no-node_modules:<pkg>`, reason class
+  // `setup`) are a FIXABLE mis-configuration, not a genuine dynamic blind spot. Surface them LOUDLY with the
+  // fix and separate from real dynamism — so a team runs `npm install` instead of disabling a strict gate on
+  // unconfigured analysis (the referee's week-two-uninstall). `Unknown[dynamic]` EXCLUDES `setup`, so a
+  // strict gate can bite genuine dynamism while tolerating these until the config is fixed.
+  const setupPkgs = new Set();
+  let setupFns = 0;
+  for (const e of functions) {
+    const why = e.unknownWhy ?? [];
+    if (!why.some((w) => reasonClass(w) === "setup")) continue;
+    setupFns++;
+    for (const w of why) { const m = /^no-node_modules:(.+)$/.exec(w); if (m) setupPkgs.add(m[1]); }
+  }
+  if (setupFns > 0) {
+    const pkgs = [...setupPkgs].sort();
+    const shown = pkgs.slice(0, 6).join(", ") + (pkgs.length > 6 ? `, +${pkgs.length - 6} more` : "");
+    console.error(`candor-ts: SETUP — ${setupFns} function(s) read Unknown ONLY because ${pkgs.length} declared `
+      + `package(s) aren't installed (${shown}); run \`npm install\`, then re-scan. These are unconfigured `
+      + `analysis, NOT real blind spots — a strict gate can still bite genuine dynamism with `
+      + `\`deny E Unknown[dynamic]\` (which tolerates \`setup\`), then shrink to zero once installed.`);
   }
 }
 if (unlistedSeen.size > 0) {

@@ -67,6 +67,28 @@ export const wrap = () => readIt("y");`,
   check("path literal captured", entry(report, "src.a.readIt")?.paths?.includes("/etc/app/x"));
 }
 
+// ── 2b. SETUP split (⟨0.19⟩, SPEC §6.2 §3): a declared-but-uninstalled dep tags no-node_modules (setup) ──
+{
+  const d = project({
+    "package.json": `{ "name": "demo", "dependencies": { "left-pad": "^1.0.0" } }`,
+    "src/app.ts": `import leftPad from "left-pad";
+import * as lp from "left-pad";
+export function pad(s: string) { return leftPad(s, 10); }
+export function pad2(s: string) { return lp.default(s, 10); }`,
+  });
+  const { report, r } = scan(d);
+  check("uninstalled declared dep tags no-node_modules (setup)",
+        entry(report, "src.app.pad")?.unknownWhy?.includes("no-node_modules:left-pad"), JSON.stringify(entry(report, "src.app.pad")));
+  check("namespace import of an uninstalled dep tags setup too",
+        entry(report, "src.app.pad2")?.unknownWhy?.includes("no-node_modules:left-pad"));
+  check("SETUP diagnostic names the package + the fix", /SETUP —.*left-pad.*npm install/s.test(r.stderr), r.stderr);
+  // Unknown[dynamic] EXCLUDES setup → tolerates the mis-config; Unknown[setup] fires on it.
+  fs.writeFileSync(path.join(d, "dyn.pol"), "deny Net Unknown[dynamic]\n");
+  fs.writeFileSync(path.join(d, "setup.pol"), "deny Net Unknown[setup]\n");
+  check("Unknown[dynamic] tolerates a setup hole (exit 0)", scan(d, "--policy", path.join(d, "dyn.pol")).r.status === 0);
+  check("Unknown[setup] fires on a setup hole (exit 1)", scan(d, "--policy", path.join(d, "setup.pol")).r.status === 1);
+}
+
 // ── 2c. a FUNCTION-SCOPED local fn sharing a module unit's name must NOT fabricate (collision fix) ──
 // `const persist = arrow` at module scope + a same-named PURE local `const persist` inside another fn
 // minted the SAME `mod.persist` key; the second `fns.set` clobbered the first, and the checker-resolved
