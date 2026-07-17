@@ -19,30 +19,36 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadReport } from "./query-core.mjs";
 import { verifySites } from "./verify-core.mjs";
+import { parseTrace, programCheck } from "./verify-syscall.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 function usage(msg) {
   if (msg) console.error(`candor verify: ${msg}`);
   console.error('usage: candor-ts-verify [<dir>] --run "<cmd>" [--report <prefix>] [--scope direct|all] [--json]');
+  console.error('   or: candor-ts-verify [<dir>] --syscall-trace <file> [--trace-format strace|dtruss] [--report <prefix>] [--json]');
   process.exit(2);
 }
 
 const argv = process.argv.slice(2);
 let dir = null, runCmd = null, reportPrefix = null, scope = "direct", wantJson = false;
+let syscallTrace = null, traceFormat = "strace";
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--run") runCmd = argv[++i];
   else if (a === "--report") reportPrefix = argv[++i];
   else if (a === "--scope") scope = argv[++i];
+  else if (a === "--syscall-trace") syscallTrace = argv[++i];
+  else if (a === "--trace-format") traceFormat = argv[++i];
   else if (a === "--json") wantJson = true;
   else if (a === "-h" || a === "--help") usage();
   else if (a.startsWith("-")) usage(`unknown flag ${a}`);
   else if (dir === null) dir = a;
   else usage(`unexpected argument ${a}`);
 }
-if (!runCmd) usage("missing --run <cmd> (the command that exercises the code)");
+if (!runCmd && !syscallTrace) usage("missing --run <cmd> (or --syscall-trace <file> for the mechanism-independent syscall oracle)");
 if (scope !== "direct" && scope !== "all") usage(`--scope must be direct|all (got ${scope})`);
+if (traceFormat !== "strace" && traceFormat !== "dtruss") usage(`--trace-format must be strace|dtruss (got ${traceFormat})`);
 
 const rootDir = path.resolve(dir ?? ".");
 if (!fs.existsSync(rootDir)) usage(`no such directory: ${rootDir}`);
@@ -54,6 +60,29 @@ if (!fns || fns.length === 0) {
   usage(`no report at ${prefix} — scan the project first (candor-ts ${rootDir}) so verify has a claim to check`);
 }
 const report = { functions: fns };
+
+// ── SYSCALL mode (mechanism-independent) — check a PRE-CAPTURED syscall trace against the report's effect
+// union (a program-wide false-pure: an effect the kernel saw that candor claims nowhere). Capture recipe:
+//   Linux:  strace -f -e trace=network,file,process -o trace.txt <cmd>   (then --trace-format strace)
+//   macOS:  sudo dtruss -f <cmd> 2> trace.txt                            (--trace-format dtruss; SIP-limited)
+if (syscallTrace) {
+  let text;
+  try { text = fs.readFileSync(syscallTrace, "utf8"); }
+  catch { usage(`could not read --syscall-trace ${syscallTrace}`); }
+  const observed = parseTrace(text, traceFormat);
+  const union = new Set(fns.flatMap((e) => e.inferred ?? []));
+  const r = programCheck(union, observed);
+  if (wantJson) {
+    console.log(JSON.stringify({ mode: "syscall", format: traceFormat, ...r, analyzedFunctionsTotal: fns.length }, null, 2));
+  } else {
+    console.log(`candor verify [syscall/${traceFormat}]: program honesty ${r.honestyInvariantHolds ? "HOLDS ✓" : "VIOLATED ✘"} ` +
+      `(mechanism-independent, scope ${r.scope})`);
+    console.log(`  effects the kernel observed : { ${r.observed.join(", ") || "none"} }`);
+    console.log(`  effects candor reports       : { ${r.reportUnion.join(", ") || "none"} }${r.disclosedUnknown ? "  (+ Unknown disclosed)" : ""}`);
+    if (r.escaped.length) console.log(`  ✘ ESCAPED (ran, candor claims nowhere): { ${r.escaped.join(", ")} }`);
+  }
+  process.exit(r.escaped.length ? 1 : 0);
+}
 
 // A fresh trace file + the capture preload wired via NODE_OPTIONS so EVERY node subprocess of --run
 // (including `npm test`'s workers) records. The preload attributes to the nearest frame under rootDir.

@@ -31,6 +31,7 @@ import {
 import { bestFind, bestFinds, tokenize } from "./surface.mjs";
 import { verify } from "./verify-core.mjs";
 import { netEffects, destOf } from "./verify-emit.mjs";
+import { parseTrace, programCheck } from "./verify-syscall.mjs";
 
 // ── query-core: the §3.1 match ladder (exact > segment-suffix > substring) ────────────────────────
 test("matches: exact beats substring cousins", () => {
@@ -219,6 +220,31 @@ test("verify: destOf extracts host/port from each Net entry-point arg shape", ()
   assert.deepEqual(destOf("net", "connect", [5432, "db.local"]), { host: "db.local", port: 5432 });
   assert.deepEqual(destOf("net", "connect", [{ host: "x", port: 6379 }]), { host: "x", port: 6379 });
   assert.deepEqual(destOf("dns", "lookup", ["host.example.com"]), { host: "host.example.com", port: null });
+});
+
+test("verify/syscall: parses strace + dtruss traces to the effect set (mechanism-independent)", () => {
+  const strace = [
+    "openat(AT_FDCWD, \"/etc/hosts\", O_RDONLY) = 3",
+    "[pid 4211] connect(3, {sa_family=AF_INET, sin_port=htons(443)}, 16) = 0",
+    "read(3, \"...\", 4096) = 512",
+    "clock_gettime(CLOCK_MONOTONIC, ...) = 0",   // Clock is INVISIBLE to the direct scope — not counted
+    "brk(NULL) = 0x55…",                          // non-effect syscall — ignored
+  ].join("\n");
+  assert.deepEqual([...parseTrace(strace, "strace")].sort(), ["Fs", "Net"]);
+  const dtruss = "  stat64(\"/tmp/x\", 0x7ff, 0x0)\t\t = 0 0\n  execve(\"/bin/ls\", 0x7ff, 0x0)\t\t = 0 0\n";
+  assert.deepEqual([...parseTrace(dtruss, "dtruss")].sort(), ["Exec", "Fs"]);
+});
+test("verify/syscall: an effect the kernel saw that candor claims NOWHERE is a program-wide escape", () => {
+  // candor's report union has only Fs; the kernel trace shows Net → a program-wide false-pure.
+  const held = programCheck(new Set(["Fs", "Net"]), new Set(["Fs", "Net"]));
+  assert.equal(held.honestyInvariantHolds, true);
+  const esc = programCheck(new Set(["Fs"]), new Set(["Fs", "Net"]));
+  assert.deepEqual(esc.escaped, ["Net"]);
+  assert.equal(esc.honestyInvariantHolds, false);
+  // an Unknown ANYWHERE in the report discloses candor couldn't see everything → no escape asserted.
+  const disc = programCheck(new Set(["Fs", "Unknown"]), new Set(["Fs", "Net"]));
+  assert.equal(disc.honestyInvariantHolds, true);
+  assert.equal(disc.disclosedUnknown, true);
 });
 
 // ── query-core: where / callers / map ─────────────────────────────────────────────────────────────

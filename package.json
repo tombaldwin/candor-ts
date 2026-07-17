@@ -61,7 +61,8 @@
     "verify-core.mjs",
     "verify-preload.mjs",
     "verify-emit.mjs",
-    "verify-loader.mjs"
+    "verify-loader.mjs",
+    "verify-syscall.mjs"
   ],
   "devDependencies": {
     "@eslint/js": "^9.39.4",
