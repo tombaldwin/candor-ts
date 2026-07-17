@@ -202,7 +202,7 @@ function renderPathHuman(fns, cg, fnQ, eff) {
 // package.json; SPEC_VERSION is the spec contract this build speaks. Reused, never re-littered.
 const QUERY_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(QUERY_DIR, "package.json"), "utf8")).version;
-const SPEC_VERSION = "0.20";
+const SPEC_VERSION = "0.21";
 
 // ---- the §3.3.1 canonical query grammar (⟨0.10⟩, additive over 0.9) --------------------------------
 // One shape for every verb: `<verb> <verb-args…> [--report <locator>] [--policy <file>] [--json]
