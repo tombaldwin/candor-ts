@@ -202,7 +202,7 @@ read the Rust source".
 
 ## Status
 
-0.18.x, speaking candor-spec 0.19: the analysis core, the gate (`--policy` / `--gate-json` /
+0.19.x, speaking candor-spec 0.19: the analysis core, the gate (`--policy` / `--gate-json` /
 `.candor/config`), the full §3.1 query surface (including `containment`, `blindspots`, the
 `--include-unknown` dispatch frontier), the MCP server, the LSP server, and the watch loop are
 real, behaviorally tested (`npm test` — the behavioral suite across six harnesses), **soundness-fuzzed
