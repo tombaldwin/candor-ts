@@ -293,6 +293,65 @@ export function isModelHost(hostLiteral) {
 export function modelHostEffects(hostLiteral) {
   return isModelHost(hostLiteral) ? ["Llm"] : [];
 }
+// ⟨0.21⟩ Curated telemetry / analytics / APM hosts — the `Net` destination-class `known-telemetry` set
+// (NET-DESTINATION-CLASS-DESIGN.md), shared VERBATIM with the sibling engines (java Literals.TELEMETRY_HOSTS
+// / rust TELEMETRY_HOSTS), like MODEL_HOSTS. A benign observability endpoint. Matched by host,
+// case-insensitive; a SUBDOMAIN of a listed host counts. Tight, high-precision STARTER set — mis-including
+// an exfil-capable host would under-gate `deny Net[unknown-host]`.
+export const TELEMETRY_HOSTS = new Set([
+  "sentry.io",
+  "bugsnag.com",
+  "rollbar.com",
+  "segment.io", "segment.com",
+  "mixpanel.com",
+  "amplitude.com",
+  "google-analytics.com", "analytics.google.com",
+  "datadoghq.com", "datadoghq.eu",
+  "newrelic.com", "nr-data.net",
+  "honeycomb.io",
+  "logtail.com",
+]);
+// Normalize a `host[:port]` literal to a bare lowercase hostname (the MODEL_HOSTS stripping), for the
+// destination-class membership tests.
+function normHost(hostLiteral) {
+  if (hostLiteral == null) return "";
+  let host = hostLiteral;
+  if (host.startsWith("[")) { const e = host.indexOf("]"); if (e >= 0) host = host.slice(1, e); }
+  else if ((host.match(/:/g) ?? []).length === 1) host = host.split(":")[0];
+  return host.toLowerCase();
+}
+// Subdomain-aware membership of `hostLiteral` in a host `set` (mirrors java Literals.hostInSet).
+function hostInSet(hostLiteral, set) {
+  const host = normHost(hostLiteral);
+  if (set.has(host)) return true;
+  for (const e of set) if (host.endsWith("." + e)) return true;
+  return false;
+}
+export function isTelemetryHost(hostLiteral) { return hostInSet(hostLiteral, TELEMETRY_HOSTS); }
+// ⟨0.21⟩ The `Net` DESTINATION CLASS of a host literal (NET-DESTINATION-CLASS-DESIGN.md): `known-telemetry`
+// (curated), `known-partner` (config `net-partner` OR a model host — a declared-ish external API), else
+// `unknown-host` — the HONEST default (candor makes no claim; the security gate bites this). `partners` is a
+// per-project Set (config-declared). Never fabricated: a null/unresolved host is unknown-host. Mirrors java
+// Literals.netDestClass.
+export function netDestClass(hostLiteral, partners) {
+  if (isTelemetryHost(hostLiteral)) return "known-telemetry";
+  const host = normHost(hostLiteral);
+  const partnerMatch = partners && (partners.has(host) || [...partners].some((p) => host.endsWith("." + p)));
+  if (partnerMatch || isModelHost(hostLiteral)) return "known-partner";
+  return "unknown-host";
+}
+// ⟨0.21⟩ The closed `Net` destination-class vocabulary, for the `deny Net[<dest…>]` policy filter.
+export const NET_DEST_CLASSES = ["known-telemetry", "known-partner", "unknown-host"];
+// ⟨0.21⟩ The `Net` destination classes an fn reaches — the SINGLE derivation shared by the report's
+// `netClass` field (scan.mjs) and the gate (policy.mjs), so they can never drift: an exact host-literal
+// match (netDestClass) for the visible (transitive) hosts, plus the fail-closed `unknown-host` when the Net
+// surface is masked (`netIncomplete`) OR carries no visible host (a runtime endpoint). `hostsArr` is an
+// array; call only for an fn with Net. Returns sorted. Mirrors java Policy.netClassesOf / rust net_classes_of.
+export function netClassesOf(hostsArr, netIncomplete, partners) {
+  const classes = new Set(hostsArr.map((h) => netDestClass(h, partners)));
+  if (netIncomplete || hostsArr.length === 0) classes.add("unknown-host");
+  return [...classes].sort();
+}
 // Table-position identifiers in a SQL string literal (SPEC §2 `tables`). Mirrors the Rust
 // tables_in_sql exactly: must open with a statement keyword; FROM/JOIN/INTO anywhere,
 // statement-leading UPDATE/TRUNCATE, TABLE (skipping ONLY/IF NOT EXISTS); a FOR UPDATE locking

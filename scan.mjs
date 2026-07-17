@@ -26,11 +26,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, discoverConfigText, reasonClass } from "./policy.mjs";
+import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText, reasonClass } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
-         modelHostEffects, isModelHost, isModelSdkPackage } from "./scan-core.mjs";
+         modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -2563,6 +2563,9 @@ for (const m of ["hosts", "tables", "cmds", "paths", "blind", "incomplete"]) {
 }
 
 // ---- emit: the §2 envelope (effect-free items omitted) + the §2.2 sidecar (EVERY fn a key) --------
+// ⟨0.21⟩ Net destination-class partners from `.candor/config` — read ONCE here, used by the report's per-fn
+// `netClass` field (below) and the gate (deny Net[unknown-host]); the SAME set both surfaces resolve.
+const netPartners = parseNetPartners(discoverConfigText(target));
 const functions = [];
 for (const [name, rec] of fns) {
   const inf = [...inferred.get(name)].sort();
@@ -2586,6 +2589,10 @@ for (const [name, rec] of fns) {
   // entries carry `calls`); omitted when a fn has no outgoing edges to keep pure leaves lean.
   if (rec.edges.size) entry.calls = [...rec.edges].sort();
   if (inf.includes("Net") && rec.hosts.size) entry.hosts = [...rec.hosts].sort();
+  // ⟨0.21⟩ Net destination-class (NET-DESTINATION-CLASS-DESIGN.md): the classes present in this fn's
+  // transitive Net surface — exact host-literal match, fail-closed unknown-host on a masked surface (rec
+  // .incomplete has Net) OR a Net with no visible host. The class travels the call graph like the effect.
+  if (inf.includes("Net")) entry.netClass = netClassesOf([...rec.hosts], rec.incomplete.has("Net"), netPartners);
   if (inf.includes("Db") && rec.tables.size) entry.tables = [...rec.tables].sort();
   if (inf.includes("Exec") && rec.cmds.size) entry.cmds = [...rec.cmds].sort();
   if (inf.includes("Fs") && rec.paths.size) entry.paths = [...rec.paths].sort();
@@ -2875,7 +2882,7 @@ if (policyPath !== null) {
   for (const [name, rec] of fns) if (rec.incomplete.size) incompleteMap.set(name, rec.incomplete);
   // ⟨0.19⟩ reason-class aliases (SPEC §6.2) from `.candor/config`, so `Unknown[<alias>]` resolves at the gate.
   const unknownAliases = parseUnknownAliases(discoverConfigText(target));
-  gateViolations = gateViolations.concat(evaluatePolicy(parsePolicy(text, unknownAliases), functions, cg, incompleteMap));
+  gateViolations = gateViolations.concat(evaluatePolicy(parsePolicy(text, unknownAliases), functions, cg, incompleteMap, netPartners));
   // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
   // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
   // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).

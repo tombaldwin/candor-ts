@@ -22,11 +22,11 @@ import {
 } from "./query-core.mjs";
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
-  discoverConfigPolicy, evaluatePolicy, reasonClass, parseUnknownAliases,
+  discoverConfigPolicy, evaluatePolicy, reasonClass, parseUnknownAliases, parseNetPartners,
 } from "./policy.mjs";
 import {
   isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
-  isModelHost, modelHostEffects, isModelSdkPackage,
+  isModelHost, modelHostEffects, isModelSdkPackage, netDestClass,
 } from "./scan-core.mjs";
 import { bestFind, bestFinds, tokenize } from "./surface.mjs";
 
@@ -113,6 +113,50 @@ test("evaluatePolicy: reason class propagates transitively to callers", () => {
   const fire2 = (pol) => evaluatePolicy(parsePolicy(pol), noReason, { "x.f": [] }).filter((v) => v.rule === "AS-EFF-006").length;
   assert.equal(fire2("deny Net Unknown[unresolved]\n"), 1, "no reason ⇒ unresolved matches");
   assert.equal(fire2("deny Net Unknown[reflect]\n"), 0, "no reason ⇒ not a specific class");
+});
+
+test("parsePolicy + netDestClass: Net destination-class parses and classifies", () => {
+  // `Net[unknown-host,known-telemetry]` narrows the Net membership; bare/`*` ⇒ all; unknown class dropped.
+  assert.deepEqual(parsePolicy("deny Net[unknown-host,known-telemetry] dom").deny[0].netClasses,
+    ["known-telemetry", "unknown-host"]);
+  assert.deepEqual(parsePolicy("deny Net dom").deny[0].netClasses, [], "bare Net ⇒ all");
+  assert.deepEqual(parsePolicy("deny Net[*] dom").deny[0].netClasses, [], "Net[*] ⇒ all");
+  assert.deepEqual(parsePolicy("deny Net[nope] dom").deny[0].netClasses, [], "unknown class dropped ⇒ all");
+  const none = new Set();
+  assert.equal(netDestClass("sentry.io", none), "known-telemetry");
+  assert.equal(netDestClass("o1.ingest.sentry.io", none), "known-telemetry", "subdomain-aware");
+  assert.equal(netDestClass("api.openai.com", none), "known-partner", "a model host is known-partner");
+  assert.equal(netDestClass("evil.example.com", none), "unknown-host");
+  assert.equal(netDestClass("api.stripe.com", new Set(["api.stripe.com"])), "known-partner", "config partner");
+  assert.equal(netDestClass("api.stripe.com", none), "unknown-host", "partner is config-only");
+  assert.deepEqual([...parseNetPartners("net-partner Api.Stripe.com:443\nNET-PARTNER hooks.stripe.com\n")].sort(),
+    ["api.stripe.com", "hooks.stripe.com"]);
+});
+test("evaluatePolicy: Net destination-class gate fires on unknown-host, tolerates asserted-safe", () => {
+  const functions = [
+    { fn: "d.tel", inferred: ["Net"], hosts: ["sentry.io"] },
+    { fn: "d.exfil", inferred: ["Net"], hosts: ["evil.example.com"] },
+    { fn: "d.runtime", inferred: ["Net"], hosts: [] },       // Net, no visible host → fail-closed unknown-host
+    { fn: "d.partner", inferred: ["Net"], hosts: ["api.stripe.com"] },
+    { fn: "d.caller", inferred: ["Net"], hosts: ["evil.example.com"] }, // reaches exfil transitively (hosts propagated)
+  ];
+  const cg = { "d.caller": ["d.exfil"] };
+  const partners = new Set(["api.stripe.com"]);
+  const fire = (pol) => evaluatePolicy(parsePolicy(pol), functions, cg, new Map(), partners)
+    .filter((v) => v.rule === "AS-EFF-006").map((v) => v.fn).sort();
+  assert.deepEqual(fire("deny Net[unknown-host]\n"), ["d.caller", "d.exfil", "d.runtime"],
+    "unknown-host + runtime + the caller reaching exfil fire; telemetry + config-partner tolerated");
+  // the verdict carries the fn's destination classes.
+  const v = evaluatePolicy(parsePolicy("deny Net[unknown-host]\n"), functions, cg, new Map(), partners)
+    .find((x) => x.fn === "d.exfil");
+  assert.deepEqual(v.netClass, ["unknown-host"]);
+  // fail-closed on a masked surface: a visible telemetry host with an incomplete Net surface → unknown-host.
+  const masked = [{ fn: "m", inferred: ["Net"], hosts: ["sentry.io"] }];
+  const inc = new Map([["m", new Set(["Net"])]]);
+  assert.equal(evaluatePolicy(parsePolicy("deny Net[unknown-host]\n"), masked, {}, inc, partners)
+    .filter((x) => x.rule === "AS-EFF-006").length, 1, "a masked surface fails closed even with a telemetry host");
+  // bare `deny Net` still denies ALL destinations (backward-compat).
+  assert.deepEqual(fire("deny Net\n"), ["d.caller", "d.exfil", "d.partner", "d.runtime", "d.tel"]);
 });
 
 // ── query-core: where / callers / map ─────────────────────────────────────────────────────────────
@@ -521,10 +565,10 @@ test("discoverConfigPolicy: a config WITHOUT a `policy` key is null, not a crash
 // ── policy: the DSL grammar (positional, mirroring the Rust/JVM parsers) ───────────────────────────
 test("parsePolicy: deny is POSITIONAL — first non-effect token ends the effect list (= scope)", () => {
   const p = parsePolicy("deny Net foo Db");
-  assert.deepEqual(p.deny, [{ effects: ["Net"], scope: "foo", unknownClasses: [], raw: "deny Net foo Db" }]); // Db NOT captured
+  assert.deepEqual(p.deny, [{ effects: ["Net"], scope: "foo", unknownClasses: [], netClasses: [], raw: "deny Net foo Db" }]); // Db NOT captured
 });
 test("parsePolicy: pure → an empty-effect deny (any effect forbidden)", () => {
-  assert.deepEqual(parsePolicy("pure svc").deny, [{ effects: [], scope: "svc", unknownClasses: [], raw: "pure svc" }]);
+  assert.deepEqual(parsePolicy("pure svc").deny, [{ effects: [], scope: "svc", unknownClasses: [], netClasses: [], raw: "pure svc" }]);
 });
 test("parsePolicy: allow with `in <scope>` and values", () => {
   assert.deepEqual(parsePolicy("allow Net in api a.com b.com").allow,
@@ -536,7 +580,7 @@ test("parsePolicy: forbid needs a standalone `->` token", () => {
 });
 test("parsePolicy: comments stripped, blank lines + malformed rules dropped", () => {
   const p = parsePolicy("deny Fs   # trailing comment\n\n  \ndeny\ngarbage line\nUnknown");
-  assert.deepEqual(p.deny, [{ effects: ["Fs"], scope: "", unknownClasses: [], raw: "deny Fs" }]); // bare `deny`, `garbage`, `Unknown` all dropped
+  assert.deepEqual(p.deny, [{ effects: ["Fs"], scope: "", unknownClasses: [], netClasses: [], raw: "deny Fs" }]); // bare `deny`, `garbage`, `Unknown` all dropped
 });
 test("parsePolicy: dedups repeated tokens (a set, matching rust/java)", () => {
   // ts kept `deny Net Net` → [Net,Net] while rust/java dedup — a canonical-form divergence (adversarial review)

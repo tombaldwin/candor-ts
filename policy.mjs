@@ -4,6 +4,8 @@
  * engines follow (candor-classify::policy), so the TS gate can never disagree with its own whatif.
  */
 
+import { NET_DEST_CLASSES, netClassesOf } from "./scan-core.mjs";
+
 export const EFFECTS = ["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Llm"];
 
 // Reason-scoped Unknown (REASON-SCOPED-UNKNOWN-DESIGN.md): the CLOSED, cross-engine reason-class set a
@@ -52,7 +54,23 @@ export function parsePolicy(text, aliases = null) {
       // form); non-empty ⇒ only those classes. `*` = all; `dynamic` = every genuine class.
       const unknownClasses = new Set();
       let unknownStar = false;
+      // Destination-class filter on a `Net` membership (NET-DESTINATION-CLASS-DESIGN.md): empty ⇒ `Net[*]`
+      // (any destination — the bare form); non-empty ⇒ only those classes. `*` = all.
+      const netClasses = new Set();
+      let netStar = false;
       for (const tok of t.slice(1)) {
+        const nm = /^Net\[(.*)\]$/.exec(tok);
+        if (nm) {
+          effects.push("Net");
+          for (let cn of nm[1].split(",")) {
+            cn = cn.trim();
+            if (!cn) continue;
+            if (cn === "*") netStar = true;
+            else if (NET_DEST_CLASSES.includes(cn)) netClasses.add(cn);
+            else warn(`unknown Net destination-class \`${cn}\` (known: ${NET_DEST_CLASSES.join(",")}, or *)`);
+          }
+          continue;
+        }
         const m = /^Unknown\[(.*)\]$/.exec(tok);
         if (m) {
           effects.push("Unknown");
@@ -70,18 +88,21 @@ export function parsePolicy(text, aliases = null) {
         if (EFFECTS.includes(tok) || tok === "Unknown") {
           effects.push(tok);
           if (tok === "Unknown") unknownStar = true; // bare Unknown ⇒ all classes
+          if (tok === "Net") netStar = true;         // bare Net ⇒ all destinations
         } else { scope = tok; break; }
       }
       if (effects.length === 0) { warn("deny names no known effect"); continue; }
       // `*` (or bare Unknown) means all classes ⇒ empty filter (matches any Unknown).
       let uc = unknownStar ? [] : [...unknownClasses].sort();
+      // `*` (or bare Net) means all destinations ⇒ empty filter (matches any Net).
+      const nc = netStar ? [] : [...netClasses].sort();
       // A2 under-gating lint: a narrowed scope omitting `unresolved` (the catch-all for holes the engine
       // couldn't classify) may silently tolerate exactly those — flag it (advisory, non-fatal).
       if (uc.length && !uc.includes("unresolved"))
         console.error(`candor: policy rule narrows \`Unknown[…]\` but omits \`unresolved\` — may UNDER-gate on holes the engine couldn't classify; add \`unresolved\` (or use \`dynamic\`): ${line}`);
-      deny.push({ effects: [...new Set(effects)].sort(), scope, unknownClasses: uc, raw: line }); // dedup: a set, like rust/java
+      deny.push({ effects: [...new Set(effects)].sort(), scope, unknownClasses: uc, netClasses: nc, raw: line }); // dedup: a set, like rust/java
     } else if (t[0] === "pure") {
-      deny.push({ effects: [], scope: t[1] ?? "", unknownClasses: [], raw: line });
+      deny.push({ effects: [], scope: t[1] ?? "", unknownClasses: [], netClasses: [], raw: line });
     } else if (t[0] === "allow") {
       if (t.length < 3) { warn("allow names no values"); continue; }
       if (!ALLOW_EFFECTS.has(t[1])) { warn("allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables"); continue; }
@@ -163,13 +184,18 @@ export function literalAllowed(effect, reached, values) {
 // is the specific denied/allowed effect set the violation concerns ([] for the 009 layer-flow, which has
 // no single effect); `detail` is the message BODY (no `[AS-EFF-00x]` prefix — the rule carries the code).
 // The console gate renders `[${rule}] ${detail}`; --gate-json emits the records verbatim.
-export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()) {
+export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map(), partners = new Set()) {
   const out = [];
   // `Llm` ⟨0.13⟩ reaches the SAME hosts surface as Net (an Llm host WAS captured as a Net host literal).
   const surfaces = { Net: "hosts", Llm: "hosts", Exec: "cmds", Fs: "paths", Db: "tables" };
-  // §6.2 ⟨0.19⟩: `reasonClass` (all classes on the fn) rides an AS-EFF-006 Unknown violation; omitted otherwise.
-  const push = (rule, fn, effects, detail, reasonClass) =>
-    out.push(reasonClass && reasonClass.length ? { rule, fn, effects, detail, reasonClass } : { rule, fn, effects, detail });
+  // §6.2 ⟨0.19⟩: `reasonClass` (all classes on the fn) rides an AS-EFF-006 Unknown violation; ⟨0.21⟩ `netClass`
+  // (all destination classes on the fn) rides a Net violation. Both omitted when empty (byte-identical verdict).
+  const push = (rule, fn, effects, detail, reasonClass, netClass) => {
+    const rec = { rule, fn, effects, detail };
+    if (reasonClass && reasonClass.length) rec.reasonClass = reasonClass;
+    if (netClass && netClass.length) rec.netClass = netClass;
+    out.push(rec);
+  };
   // Reason-scoped Unknown: the Unknown reason CLASS must travel the call graph the same way the Unknown
   // EFFECT does (unknownWhy in the report is direct-only). Classify each fn's DIRECT reasons to class
   // tokens, then propagate transitively over `callgraph` to a fixpoint — so `deny E Unknown[reflect]` at a
@@ -209,10 +235,22 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
         const fnClasses = cs && cs.size ? [...cs] : ["unresolved"];
         if (!fnClasses.some((c) => r.unknownClasses.includes(c))) kept = hits.filter((e) => e !== "Unknown");
       }
+      // Net destination-class: a `deny Net[dest…]` keeps its Net hit only for a fn reaching one of those
+      // destination classes; else tolerate (only asserted-safe destinations). Fail-closed: a masked surface /
+      // a Net with no visible host is unknown-host (netClassesOf). The class travels the call graph via
+      // f.hosts + f.incomplete, both propagated transitively before the gate (scan.mjs).
+      if (kept.includes("Net") && (r.netClasses?.length)) {
+        const fnNet = netClassesOf(f.hosts ?? [], incomplete.get(f.fn)?.has("Net") ?? false, partners);
+        if (!fnNet.some((c) => r.netClasses.includes(c))) kept = kept.filter((e) => e !== "Net");
+      }
       if (kept.length) {
         // When Unknown is denied, report ALL reason classes on the fn (transitive) — every reason the gate bit.
         const rc = kept.includes("Unknown") ? [...(reasonAcc.get(f.fn) ?? [])].sort() : undefined;
-        push("AS-EFF-006", f.fn, kept, `\`${f.fn}\` performs { ${kept.join(", ")} }, forbidden by policy: \`${r.raw}\``, rc);
+        // ⟨0.21⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
+        const ncv = kept.includes("Net")
+          ? netClassesOf(f.hosts ?? [], incomplete.get(f.fn)?.has("Net") ?? false, partners)
+          : undefined;
+        push("AS-EFF-006", f.fn, kept, `\`${f.fn}\` performs { ${kept.join(", ")} }, forbidden by policy: \`${r.raw}\``, rc, ncv);
       }
     }
     for (const r of pol.allow) {
@@ -324,6 +362,24 @@ export function parseUnknownAliases(configText) {
     }
     if (classes.size === 0) console.error(`candor: ignoring \`unknown-alias ${name}\` — no valid reason-class`);
     else out.set(name, [...classes]);
+  }
+  return out;
+}
+
+// ⟨0.21⟩ Parse `net-partner <host>` lines (NET-DESTINATION-CLASS-DESIGN.md) into a Set of host-normalized
+// partner hosts — the per-project `known-partner` set for the Net destination-class classifier. Multi-value
+// (repeatable key); the value's `:port` is stripped + lowercased like MODEL_HOSTS. Case-insensitive key,
+// mirroring parseUnknownAliases + the java/rust config loaders. A partner is per-project — never universal.
+export function parseNetPartners(configText) {
+  const out = new Set();
+  if (!configText) return out;
+  for (const raw of configText.split(/\r?\n/)) {
+    const line = raw.split("#", 1)[0].trim();
+    if (!line) continue;
+    const m = line.match(/^(\S+)\s+(.*)$/);
+    if (!m || m[1].toLowerCase() !== "net-partner") continue;
+    const val = m[2].trim();
+    if (val) out.add(hostPart(val).toLowerCase());
   }
   return out;
 }
