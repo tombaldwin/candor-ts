@@ -98,9 +98,9 @@ function stripDisclosure(prefix) {
 
 function runVerify(dir, prefix, appPath, outPath) {
   try { fs.rmSync(outPath, { force: true }); } catch { /* fresh */ }
-  const canStrip = spawnSync("node", ["--experimental-strip-types", "-e", "0"]).status === 0;
-  const runCmd = `node ${canStrip ? "--experimental-strip-types " : ""}${JSON.stringify(appPath)}`;
-  const r = spawnSync("node", [path.join(HERE, "verify.mjs"), dir, "--report", prefix, "--run", runCmd, "--json"], { encoding: "utf8" });
+  // The fixtures are plain ESM (.mjs, no TS syntax), so they run on ANY node — no --experimental-strip-types
+  // dependency (which would make the whole battery INCONCLUSIVE on a node build lacking it and red the gate).
+  const r = spawnSync("node", [path.join(HERE, "verify.mjs"), dir, "--report", prefix, "--run", `node ${JSON.stringify(appPath)}`, "--json"], { encoding: "utf8" });
   let j = null; try { j = JSON.parse(r.stdout); } catch { /* leave null */ }
   const ran = fs.existsSync(outPath); // OUT-OF-BAND witness: the planted write landed ⇒ the effect executed
   return { j, ran, raw: r };
@@ -112,7 +112,7 @@ for (const mech of MECHANISMS) {
   const dir = path.join(root, mech.id);
   fs.mkdirSync(dir, { recursive: true });
   const outPath = path.join(dir, "OUT.marker");
-  fs.writeFileSync(path.join(dir, "app.ts"), FIXTURE(mech).replace("__OUT__", outPath));
+  fs.writeFileSync(path.join(dir, "app.mjs"), FIXTURE(mech).replace("__OUT__", outPath));
   fs.writeFileSync(path.join(dir, "package.json"), '{"name":"sens","version":"0.0.0","type":"module"}');
 
   const prefix = path.join(dir, ".candor", "report");
@@ -121,7 +121,7 @@ for (const mech of MECHANISMS) {
   const disc = candorDiscloses(rep);                       // side 1: did candor pre-emptively disclose?
   // side 2 (oracle recall): strip candor's disclosure → does verify still catch the runtime effect?
   const stripped = stripDisclosure(prefix);
-  const { j, ran } = runVerify(dir, stripped, path.join(dir, "app.ts"), outPath);
+  const { j, ran } = runVerify(dir, stripped, path.join(dir, "app.mjs"), outPath);
 
   const oracleCaught = !!j?.violations?.some((v) => v.escaped?.includes("Fs"));
   let verdict;

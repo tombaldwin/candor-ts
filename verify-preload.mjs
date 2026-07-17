@@ -87,6 +87,14 @@ try {
     // a process.env READ is Env — but only the app's OWN read (depth 0); a read INSIDE a wrapped stdlib call
     // is that call's business. `traced` gates it: the app's direct read is outermost (recorded), a nested one skipped.
     get(t, k) { return typeof k === "string" && k in t ? traced("Env", t, () => t[k], []) : t[k]; },
+    // Enumeration/membership are ALSO Env reads that a get-only trap would miss: `KEY in process.env`,
+    // `Object.keys(process.env)`, and spread `{...process.env}` go through has/ownKeys/getOwnPropertyDescriptor,
+    // not get — so a config loader that enumerates env would escape capture with no disclosure. Wrap them too
+    // (traced + nearestSite mean only the app's OWN outermost enumeration with a project frame is recorded;
+    // Node's internal env probing has no project frame and is dropped).
+    has(t, k) { return traced("Env", t, () => k in t, []); },
+    ownKeys(t) { return traced("Env", t, () => Reflect.ownKeys(t), []); },
+    getOwnPropertyDescriptor(t, k) { return traced("Env", t, () => Reflect.getOwnPropertyDescriptor(t, k), []); },
   });
   Object.defineProperty(process, "env", { value: proxied, configurable: true });
 } catch { /* process.env not reconfigurable — Env capture unavailable, disclosed by absence */ }

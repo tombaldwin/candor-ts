@@ -60,6 +60,10 @@ if (!fns || fns.length === 0) {
   usage(`no report at ${prefix} — scan the project first (candor-ts ${rootDir}) so verify has a claim to check`);
 }
 const report = { functions: fns };
+// loadReport tags the array `hardFail` when a report file was FOUND but failed to parse (its functions were
+// dropped, disclosed only on scan-load stderr). Verifying the surviving subset would treat the dropped fns as
+// claimed-pure — a silently under-approximated universe. Surface it and fail closed (exit 2) below.
+const reportHardFail = !!fns.hardFail;
 
 // The ALL-FUNCTION loc index (candor's `<prefix>.locs.json`) — locs for pure fns too, so a runtime effect
 // inside a fn candor called pure anchors to ITSELF (a VIOLATION), not to a neighbouring effectful fn (a
@@ -112,17 +116,40 @@ if (!wantJson) console.error(`candor verify: running \`${runCmd}\` under the hon
 const run = spawnSync(runCmd, { shell: true, stdio: wantJson ? ["inherit", "ignore", "inherit"] : "inherit", env });
 if (run.error) usage(`could not run \`${runCmd}\`: ${run.error.message}`);
 
-// Read the capture (NDJSON sites). An absent/empty trace means nothing effectful ran (or nothing was
-// captured) — a vacuous HOLD, disclosed by the executed-fn count.
-let sites = [];
+// Read the capture (NDJSON sites), line by line. An absent/empty trace means nothing effectful ran (or
+// nothing was captured) — a vacuous HOLD, disclosed by the executed-fn count. CRUCIAL: parse each line
+// INDEPENDENTLY — a single torn/interleaved line (two concurrent subprocesses appending to the same trace)
+// must NOT throw away the whole trace and print HOLDS over zero effects (the cardinal-sin all-clear). A
+// dropped line means a captured effect was lost → attribution is incomplete → fail closed below.
+let sites = [], tornLines = 0;
 try {
-  sites = fs.readFileSync(traceFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  for (const line of fs.readFileSync(traceFile, "utf8").split("\n")) {
+    if (!line) continue;
+    try { sites.push(JSON.parse(line)); } catch { tornLines++; }
+  }
 } catch { /* no trace written — no effectful call recorded */ }
 try { fs.rmSync(traceFile, { force: true }); } catch { /* best-effort cleanup */ }
 
 const { rows, violations, metrics } = verifySites(report, sites, scope, { locIndex, analyzedCount });
 metrics.analyzedFunctionsTotal = fns.length; // coverage denominator (the static claim's size)
 metrics.programExitCode = run.status;
+
+// Fold the CLI-level incompleteness signals into the same disclosure: torn trace lines (captured effects
+// lost) and a partially-corrupt report (dropped fns treated as pure) both mean the all-clear is not sound.
+if (tornLines > 0 || reportHardFail) {
+  const extra = [
+    tornLines > 0 ? `${tornLines} trace line(s) were unparseable (torn/interleaved) — those captured effects are lost` : null,
+    reportHardFail ? "the report is partially corrupt (a sibling failed to parse; its functions are treated as pure)" : null,
+  ].filter(Boolean).join("; ");
+  metrics.attributionComplete = false;
+  metrics.attributionNote = metrics.attributionNote ? `${metrics.attributionNote}; also: ${extra}` : `${extra} — not a sound all-clear`;
+  metrics.tornTraceLines = tornLines;
+  metrics.reportHardFail = reportHardFail;
+}
+// A run whose all-clear is provably NOT sound must not be certified green by the exit code. A real violation
+// dominates (exit 1); otherwise incomplete attribution / lost capture / corrupt report is a fail-CLOSED exit 2
+// (the completeness-manifest convention: never a bogus exit-0 pass over an under-checked run).
+const attributionIncomplete = metrics.attributionComplete === false;
 
 if (wantJson) {
   console.log(JSON.stringify({ metrics, violations, rows }, null, 2));
@@ -145,4 +172,4 @@ if (wantJson) {
   }
 }
 
-process.exit(violations.length ? 1 : 0);
+process.exit(violations.length ? 1 : (attributionIncomplete ? 2 : 0));

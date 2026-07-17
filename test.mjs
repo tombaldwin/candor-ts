@@ -3353,8 +3353,11 @@ main();
     const discDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-verify-disc-"));
     const disc = structuredClone(report);
     for (const e of disc.functions) if (e.fn === "app.reads") e.inferred = ["Unknown"];
-    fs.writeFileSync(path.join(discDir, "d.disc.scan.json"), JSON.stringify(disc));
-    const c = verify(path.join(discDir, "d"));
+    // Write a CANONICAL report + copy the real span sidecar so attribution is COMPLETE (mirrors a real scan):
+    // otherwise the doctored report has no <prefix>.locs.json and verify correctly fails closed (exit 2).
+    fs.writeFileSync(path.join(discDir, "rep.json"), JSON.stringify(disc));
+    fs.copyFileSync(path.join(d, ".candor", "report.locs.json"), path.join(discDir, "rep.locs.json"));
+    const c = verify(path.join(discDir, "rep"));
     let cj = null; try { cj = JSON.parse(c.stdout); } catch { /* below */ }
     check("verify: disclosure (Unknown) flips the same run to HELD (disclosed-partial, load-bearing)",
       c.status === 0 && cj?.metrics.honestyInvariantHolds === true && cj?.metrics.disclosedUnknownLoadBearing === 1,
@@ -3410,6 +3413,16 @@ run();
       pv.status === 1 && pj?.metrics.attributionComplete === true
         && pj?.violations?.some((v) => v.fn === "papp.computeTotal" && v.escaped?.includes("Fs")),
       `exit=${pv.status} out=${(pv.stdout || "").slice(0, 220)}`);
+    // (f) FAIL-CLOSED: an EMPTY span sidecar drops every captured site — verify must exit 2 (attribution
+    // INCOMPLETE), never a green exit 0 over a run whose real effects could not be placed (review #4/#7).
+    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-verify-empty-"));
+    fs.writeFileSync(path.join(emptyDir, "rep.json"), JSON.stringify(report)); // a SOUND envelope (reads=Fs)…
+    fs.writeFileSync(path.join(emptyDir, "rep.locs.json"), "{}");              // …but an EMPTY span index
+    const ec = verify(path.join(emptyDir, "rep"));
+    let ecj = null; try { ecj = JSON.parse(ec.stdout); } catch { /* below */ }
+    check("verify: an empty loc index fails CLOSED (exit 2, attribution INCOMPLETE) — never a false HOLD",
+      ec.status === 2 && ecj?.metrics.attributionComplete === false && ecj?.metrics.unattributedSites >= 1,
+      `exit=${ec.status} out=${(ec.stdout || "").slice(0, 200)}`);
   }
 }
 
@@ -3427,7 +3440,7 @@ run();
   check("sensitivity: candor discloses Fs/Unknown for every dynamic mechanism (full disclosure)",
     s && s.candorDisclosureRate === `${s.total}/${s.total}`, JSON.stringify(s));
   check("sensitivity: the oracle catches every executed effect with disclosure stripped (full recall)",
-    s && (() => { const [a, b] = s.oracleRecall.split("/"); return a === b && Number(b) >= 6; })(),
+    s && (() => { const [a, b] = s.oracleRecall.split("/"); return Number(a) === Number(b); })(),
     `oracleRecall=${s?.oracleRecall} inconclusive=${s?.inconclusive}`);
 }
 

@@ -204,9 +204,9 @@ test("verify: WITH the loc index, the same pure-fn effect anchors to itself and 
     { fn: "app.saveResult", inferred: ["Fs"], loc: "app.ts:6:1" },
   ] };
   const sites = [{ file: "app.ts", line: 10, effect: "Fs" }];
-  const locIndex = { "app.loadConfig": "app.ts:3:1", "app.saveResult": "app.ts:6:1", "app.computeTotal": "app.ts:9:1" };
+  const locIndex = { "app.loadConfig": { loc: "app.ts:3:1", end: 5 }, "app.saveResult": { loc: "app.ts:6:1", end: 8 }, "app.computeTotal": { loc: "app.ts:9:1", end: 11 } };
   const r = verifySites(report, sites, "direct", { locIndex, analyzedCount: 3 });
-  assert.equal(r.metrics.attributionComplete, true, "the full-universe loc index makes attribution sound");
+  assert.equal(r.metrics.attributionComplete, true, "the full-universe span index makes attribution sound");
   assert.equal(r.metrics.cardinalSinViolations, 1, "computeTotal ran Fs but is claimed pure — the cardinal sin");
   assert.equal(r.violations[0].fn, "app.computeTotal");
   assert.deepEqual(r.violations[0].escaped, ["Fs"]);
@@ -229,6 +229,20 @@ test("verify: SPAN containment still catches a real escape inside the nested pur
   const r = verifySites(report, [{ file: "app.ts", line: 5, effect: "Fs" }], "direct", { locIndex, analyzedCount: 2 });
   assert.equal(r.metrics.cardinalSinViolations, 1);
   assert.equal(r.violations[0].fn, "app.cb", "the innermost span containing line 5 is cb");
+});
+test("verify: an UNPLACED project effect (a captured site the index can't anchor) makes attribution INCOMPLETE", () => {
+  // The decisive invariant: a real observed effect that lands on no analyzed fn (empty/stale/mismatched index,
+  // code candor never analyzed, a path-separator mismatch) must NOT be silently dropped into a HOLD.
+  const report = { functions: [{ fn: "app.f", inferred: ["Fs"], loc: "app.ts:1:1", endLine: 20 }] };
+  const locIndex = { "app.f": { loc: "app.ts:1:1", end: 20 } };
+  const r = verifySites(report, [{ file: "other.ts", line: 3, effect: "Fs" }], "direct", { locIndex, analyzedCount: 1 });
+  assert.equal(r.metrics.attributionComplete, false, "an unplaceable project effect ⇒ not a sound all-clear");
+  assert.equal(r.metrics.unattributedSites, 1);
+});
+test("verify: an EMPTY loc index does NOT certify attribution complete (else it drops all sites → false HOLD)", () => {
+  const report = { functions: [{ fn: "app.f", inferred: ["Fs"], loc: "app.ts:1:1", endLine: 20 }] };
+  const r = verifySites(report, [{ file: "app.ts", line: 3, effect: "Fs" }], "direct", { locIndex: {}, analyzedCount: 1 });
+  assert.equal(r.metrics.attributionComplete, false, "empty index ⇒ every site unattributed ⇒ incomplete");
 });
 test("verify: attribution is complete (no disclosure) when there are no unlocated pure fns", () => {
   const report = { functions: [{ fn: "app.f", inferred: ["Fs"], loc: "app.ts:1:1" }] };

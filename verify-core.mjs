@@ -103,11 +103,15 @@ export function honestyCheck(reportMap, observedMap, scope) {
   return { rows, violations, metrics };
 }
 
-/** Parse a candor `loc` string (`file:line:col`) → `{ file, line }` (or null). */
+/** Parse a candor `loc` string (`file:line:col`) → `{ file, line }` (or null). The file is normalized to
+ *  forward slashes: scan.mjs writes `loc` with the raw OS separator (a backslash on Windows) while the
+ *  runtime capture (verify-emit) forward-slashes its site paths, so without this NO site matches on Windows
+ *  and every effect is dropped (a whole-platform false all-clear). candor's `loc` is a project-RELATIVE path
+ *  (no `C:` drive), so a bare `\`→`/` is safe. */
 function parseLoc(loc) {
   if (!loc) return null;
   const i = loc.lastIndexOf(":", loc.lastIndexOf(":") - 1); // split off `:line:col`
-  const file = loc.slice(0, i);
+  const file = loc.slice(0, i).replace(/\\/g, "/");
   const line = Number(loc.slice(i + 1).split(":")[0]);
   return Number.isFinite(line) ? { file, line } : null;
 }
@@ -146,24 +150,28 @@ export function attribute(events, report, locIndex = null) {
     for (const e of fns) push(e.loc, e.endLine ?? null, e.fn);
   }
   const out = [];
+  let unattributed = 0; // captured PROJECT effects (ev.file non-null) we could NOT place on any function
   for (const ev of events) {
-    if (!ev || !ev.file) continue;
+    if (!ev || !ev.file) continue; // node-internal / a dependency's own I/O — not the target's code
     const arr = byFile.get(ev.file);
-    if (!arr) continue;
-    // Prefer SPAN containment: the innermost fn (greatest start) whose [start,end] contains the site line.
-    // Fall back to nearest-declaration-below among start-only (no-end) entries when nothing spanned contains.
-    let best = null, fallback = null;
-    for (const c of arr) {
-      if (c.end != null) {
-        if (c.start <= ev.line && ev.line <= c.end && (!best || c.start > best.start)) best = c;
-      } else if (c.start <= ev.line && (!fallback || c.start > fallback.start)) {
-        fallback = c;
+    let pick = null;
+    if (arr) {
+      // Prefer SPAN containment: the innermost fn (greatest start) whose [start,end] contains the site line.
+      // Fall back to nearest-declaration-below among start-only (no-end) entries when nothing spanned contains.
+      let best = null, fallback = null;
+      for (const c of arr) {
+        if (c.end != null) {
+          if (c.start <= ev.line && ev.line <= c.end && (!best || c.start > best.start)) best = c;
+        } else if (c.start <= ev.line && (!fallback || c.start > fallback.start)) {
+          fallback = c;
+        }
       }
+      pick = best ?? fallback;
     }
-    const pick = best ?? fallback;
     if (pick) out.push({ fn: pick.fn, effect: ev.effect });
+    else unattributed++; // the effect ran in the target's code but landed on no analyzed fn — see verifySites
   }
-  return out;
+  return { events: out, unattributed };
 }
 
 /** Convenience: run the check from a raw report doc + raw trace events (already `{fn, effect}`). */
@@ -181,18 +189,38 @@ export function verify(report, events, scope = "direct") {
  */
 export function verifySites(report, sites, scope = "direct", opts = {}) {
   const { locIndex = null, analyzedCount = null } = opts;
-  const result = honestyCheck(reportEffects(report), observedByFn(attribute(sites, report, locIndex), scope), scope);
-  const effectfulCount = (Array.isArray(report) ? report : (report.functions ?? [])).length;
-  // Attribution is sound when we anchored against the full universe (locIndex present). Without it, it is
-  // sound ONLY if there are no pure fns to mislocate (analyzedCount ≤ effectful count) — otherwise a hidden
-  // effect inside a pure fn could have been silently folded into a neighbour, so we fail closed (disclose).
-  const pureUnlocated = locIndex ? 0
-    : (analyzedCount != null ? Math.max(0, analyzedCount - effectfulCount) : null);
-  result.metrics.attributionComplete = locIndex != null || pureUnlocated === 0;
+  const { events, unattributed } = attribute(sites, report, locIndex);
+  const result = honestyCheck(reportEffects(report), observedByFn(events, scope), scope);
+
+  const fns = Array.isArray(report) ? report : (report.functions ?? []);
+  const effectfulWithLoc = fns.filter((f) => parseLoc(f.loc)).length; // only fns we can actually ANCHOR
+  const locEntries = locIndex ? Object.keys(locIndex).length : 0;
+  const locHasSpans = !!locIndex && Object.values(locIndex).every((v) => v && typeof v === "object" && typeof v.end === "number");
+  // The index certifies sound attribution ONLY when it is present, NON-EMPTY, all-spans, and COVERS the
+  // analyzed universe (an empty/truncated/start-only <prefix>.locs.json must NOT count as complete — else it
+  // silently drops every site and prints HOLDS). If analyzedCount is unknown, require at least the anchorable
+  // effectful set.
+  const indexCovers = !!locIndex && locEntries > 0 && locHasSpans
+    && (analyzedCount == null ? locEntries >= effectfulWithLoc : locEntries >= analyzedCount);
+  // Without an index: sound only if no pure fn could be mislocated (analyzedCount ≤ the ANCHORABLE effectful
+  // count — counting only entries that actually carry a parseable loc, so a report whose effectful entries lack
+  // loc cannot masquerade as fully-anchored).
+  const pureUnlocated = analyzedCount != null ? Math.max(0, analyzedCount - effectfulWithLoc) : null;
+  const universeSound = indexCovers || (locIndex == null && pureUnlocated === 0);
+
+  // THE DECISIVE INVARIANT: every captured project effect was placed on a function. A single unplaced site
+  // (empty/stale/mismatched index, a file candor never analyzed, a path-separator mismatch) means a real
+  // observed effect went unchecked — the all-clear is not sound regardless of the index's shape.
+  result.metrics.attributionComplete = universeSound && unattributed === 0;
+  result.metrics.unattributedSites = unattributed;
   if (!result.metrics.attributionComplete) {
-    result.metrics.attributionNote = pureUnlocated == null
-      ? "no loc index and analyzed-universe size unknown — a pure fn that ran an effect may have been credited to a neighbouring function; not a sound all-clear (re-scan to emit <prefix>.locs.json)"
-      : `${pureUnlocated} pure fn(s) have no location — an effect executed inside one is credited to the nearest preceding effectful fn, so a cardinal-sin escape can be silently missed; not a sound all-clear (re-scan to emit <prefix>.locs.json)`;
+    result.metrics.attributionNote = unattributed > 0
+      ? `${unattributed} captured effect-site(s) could not be attributed to any analyzed function (an empty/stale/mismatched loc index, or code candor did not analyze) — those effects are NOT checked; not a sound all-clear (re-scan to emit a complete <prefix>.locs.json)`
+      : (locIndex != null && !indexCovers)
+        ? "the loc index does not cover the analyzed universe (empty, truncated, or start-only) — a pure fn's effect could fold into a neighbour; not a sound all-clear (re-scan)"
+        : pureUnlocated == null
+          ? "no loc index and analyzed-universe size unknown — a pure fn that ran an effect may have been credited to a neighbouring function; not a sound all-clear (re-scan to emit <prefix>.locs.json)"
+          : `${pureUnlocated} pure fn(s) have no location — an effect executed inside one is credited to the nearest preceding effectful fn, so a cardinal-sin escape can be silently missed; not a sound all-clear (re-scan to emit <prefix>.locs.json)`;
   }
   return result;
 }
