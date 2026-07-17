@@ -33,7 +33,7 @@ import { isTestPath } from "./scan-core.mjs";
 // a `matchTier` missing `#` (so the SAME query resolved differently between `impact` and `callers` on a
 // JVM `Type#method` report). Importing the shared functions removes all three divergences (review find).
 import { impact as coreImpact, path as corePath, gains as coreGains,
-         show as coreShow, blindspots as coreBlindspots,
+         show as coreShow, blindspots as coreBlindspots, blindspotsStats as coreBlindspotsStats,
          callers as coreCallers, callersFrontier, loadHierarchy,
          containment as coreContainment, diff as coreDiff,
          where as coreWhere, map as coreMap, whatif as coreWhatif,
@@ -46,7 +46,7 @@ const emit = (v) => console.log(JSON.stringify(v, null, 1));
 const KNOWN_EFFECTS = ["Net", "Fs", "Db", "Llm", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Unknown"];
 // Suggest the nearest known flag for a typo (longest shared prefix ≥3): `--polciy` → `--policy` (#2).
 function didYouMeanFlag(unknown) {
-  const known = ["--report", "--policy", "--json", "--text", "--strict", "--include-unknown"];
+  const known = ["--report", "--policy", "--json", "--text", "--strict", "--include-unknown", "--stats"];
   const u = unknown.replace(/^-+/, "").toLowerCase();
   let best = null, bestLen = 2;
   for (const k of known) {
@@ -131,6 +131,12 @@ const P = {
     if (!d.sources.length) { console.log(`candor blindspots — no Unknown sources${d.totalUnknown ? " (all Unknown here is inherited, not rooted in a call)" : ""}. ✓`); return; }
     console.log(`candor blindspots — ${d.sources.length} Unknown source${d.sources.length === 1 ? "" : "s"} (of ${d.totalUnknown} function(s) carrying Unknown), most-smearing first:`);
     for (const s of d.sources) console.log(`  \`${s.fn}\` — ${csv(s.why)}; reaches ${s.reaches} caller(s)`);
+  },
+  blindspotsStats: (d) => {
+    if (!d.sources) { console.log("candor blindspots --stats — no Unknown sources (nothing to classify). ✓"); return; }
+    console.log(`candor blindspots --stats — ${d.sources} Unknown source(s) by reason class (of ${d.totalUnknown} function(s) carrying Unknown) — size the blind-spot cost before \`deny E Unknown[…]\`:`);
+    Object.entries(d.byClass).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1])
+      .forEach(([k, v]) => console.log(`  ${k.padEnd(12)} ${String(v).padStart(4)}${k === "setup" ? "   ← fixable: the scan isn't configured, not a real blind spot" : ""}`));
   },
   gains: (d) => {
     if (!d.gained.length) { console.log("candor gains — no newly-reached effects vs the baseline. ✓"); return; }
@@ -292,11 +298,12 @@ function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknow
                                                                             // wantJsonOut(rawArgs), never a positional
     if (a === "--strict") { if (strict) wantStrict = true; continue; }                       // vocabulary — tolerated everywhere,
     if (a === "--include-unknown") { if (includeUnknown) wantIncludeUnknown = true; continue; } // used only by the verb that reads it
+    if (a === "--stats") { continue; }   // ⟨0.20⟩ tolerated everywhere; read by the `blindspots` case via args.includes
     if (a.startsWith("-") && a.length > 1) {
       // An unrecognized flag is a TYPO, not a positional — reject it LOUD (exit 2), never silently swallow.
       // A swallowed `--polciy` runs the query with NO policy and exits green: a CI author who typos --policy
       // ships a gate that never fires (corpus re-audit cardinal sin — a loud error, never a silent guess).
-      console.error(`candor-ts-query: unknown flag '${a}'${didYouMeanFlag(a)}\n  known flags: --report, --policy, --json, --text, --strict, --include-unknown`);
+      console.error(`candor-ts-query: unknown flag '${a}'${didYouMeanFlag(a)}\n  known flags: --report, --policy, --json, --text, --strict, --include-unknown, --stats`);
       process.exit(2);
     }
     positionals.push(a);
@@ -401,7 +408,7 @@ const SUBCOMMANDS = [
   ["diff", "<current> <baseline> [--json]", "per-function effect delta vs a baseline: {changes:[{fn,gained,lost}]} (exit 1 on a gain)"],
   ["reachable", REPORT_TAIL, "effects unioned over the entry points: what the app DOES at runtime"],
   ["impact", `<query> ${REPORT_TAIL}`, "blast radius of a function (backward dual of reachable)"],
-  ["blindspots", REPORT_TAIL, "the Unknown sources, ranked by blast radius"],
+  ["blindspots", `${REPORT_TAIL} [--stats]`, "the Unknown sources ranked by blast radius; --stats: the reason-class distribution"],
   ["tour", `[<N>] ${REPORT_TAIL}`, "the N most surprising transitive reaches — the guided cold-repo poke (no re-scan)"],
   ["gains", "<current> <baseline> [--json] [--strict]", "the supply-chain alarm: what the surface gained between two reports (--strict: exit 1 on ANY gain)"],
   ["path", `<fn> <Effect> ${REPORT_TAIL}`, "a call path from a function to where an effect enters"],
@@ -656,7 +663,11 @@ switch (cmd) {
     // the Unknown SOURCES, ranked by blast radius — the actionable inverse of a widely-propagated
     // Unknown (SPEC §3.1 ⟨0.6⟩): { sources:[{fn,why,reaches,affected}], totalUnknown }.
     const { prefix } = resolveReportVerb(args, 0);
-    put(args, coreBlindspots(loadReportOrDie(prefix), loadCallgraph(prefix)), P.blindspots);
+    if (args.includes("--stats")) {   // ⟨0.20⟩ the reason-class distribution, not the source list
+      put(args, coreBlindspotsStats(loadReportOrDie(prefix)), P.blindspotsStats);
+    } else {
+      put(args, coreBlindspots(loadReportOrDie(prefix), loadCallgraph(prefix)), P.blindspots);
+    }
     break;
   }
   case "tour": {

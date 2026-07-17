@@ -17,7 +17,7 @@ import path from "node:path";
 import {
   matches, show, where, callers, map, impact, path as provenance, diff, gains, reachable, whatif,
   fix, fixGate, unverified,
-  containment, loadReport, loadCallgraph, loadHierarchy, callersFrontier, blindspots, isReport,
+  containment, loadReport, loadCallgraph, loadHierarchy, callersFrontier, blindspots, blindspotsStats, isReport,
   reportCoverage, gainsCoverage,
 } from "./query-core.mjs";
 import {
@@ -461,6 +461,21 @@ test("blindspots: sources ranked by Unknown blast radius, exact reaches/affected
   assert.deepEqual(r.sources[0].affected, ["m.mid", "m.one", "m.top"]);
   assert.deepEqual(r.sources[0].why, ["reflect:eval"]);
   assert.deepEqual(r.sources[1], { fn: "m.narrow", why: ["dispatch:m.B.x"], reaches: 1, affected: ["m.one"] });
+});
+test("blindspots --stats: reason-class distribution over the Unknown sources (⟨0.20⟩)", () => {
+  const fns = [
+    { fn: "m.a", inferred: ["Unknown"], unknownWhy: ["reflect:eval"] },
+    { fn: "m.b", inferred: ["Unknown"], unknownWhy: ["reflect:require", "callback:cb"] }, // two classes → both count
+    { fn: "m.c", inferred: ["Unknown"], unknownWhy: ["no-node_modules:left-pad"] },       // setup
+    { fn: "m.d", inferred: ["Unknown"] },  // transitive-only → NOT a source
+  ];
+  const r = blindspotsStats(fns);
+  assert.deepEqual(Object.keys(r.byClass), ["reflect", "dispatch", "indirect", "native", "unresolved", "setup"]);
+  assert.equal(r.byClass.reflect, 2);   // m.a + m.b
+  assert.equal(r.byClass.indirect, 1);  // m.b's callback
+  assert.equal(r.byClass.setup, 1);     // m.c
+  assert.equal(r.sources, 3);           // m.a/m.b/m.c carry a direct reason; m.d is transitive-only
+  assert.equal(r.totalUnknown, 4);
 });
 test("blindspots: equal blast radii tie-break by name (stable worklist order)", () => {
   const fns = [

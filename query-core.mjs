@@ -10,6 +10,7 @@
  */
 import fs from "node:fs";
 import nodePath from "node:path";
+import { reasonClass } from "./policy.mjs";
 
 // Sibling report/callgraph files of a multi-report prefix (candor-scan writes <prefix>.<crate>.scan.json,
 // one per workspace member) — so the loaders read ANY engine's output, not just candor-ts's <prefix>.json.
@@ -517,6 +518,25 @@ export function blindspots(fns, cg) {
   }
   sources.sort((a, b) => b.reaches - a.reaches || a.fn.localeCompare(b.fn)); // most-smearing first, stable
   return { sources, totalUnknown };
+}
+
+// `blindspots --stats` (SPEC §3.1 ⟨0.20⟩): the reason-class DISTRIBUTION over the Unknown SOURCES — how
+// much Unknown, by class {reflect,dispatch,indirect,native,unresolved,setup} — so a team can SIZE the
+// blind-spot cost (and separate genuine dynamism from `setup` mis-config) BEFORE `deny E Unknown`. Counts
+// SOURCE functions per class (a multi-reason fn counts in each class it has). Matches candor-java/rust/swift.
+export function blindspotsStats(fns) {
+  const ORDER = ["reflect", "dispatch", "indirect", "native", "unresolved", "setup"];
+  const byClass = Object.fromEntries(ORDER.map((c) => [c, 0]));
+  const totalUnknown = fns.filter((e) => (e.inferred ?? []).includes("Unknown")).length;
+  let sources = 0;
+  for (const e of fns) {
+    const why = e.unknownWhy ?? [];
+    if (why.length === 0) continue;
+    sources++;
+    const classes = new Set(why.map(reasonClass));
+    for (const c of classes) byClass[c]++;
+  }
+  return { byClass, sources, totalUnknown };
 }
 
 // path: the FORWARD provenance — a shortest BFS over the calls graph from `fn` to the nearest unit
