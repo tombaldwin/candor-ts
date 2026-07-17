@@ -499,13 +499,32 @@ export function impact(fns, cg, q) {
 // Unknown through it). The actionable inverse of a widely-propagated Unknown: a report can read mostly
 // Unknown from a handful of root causes — this names them, ranked, to declare/resolve/accept. Matches
 // candor-java/candor-query: { sources:[{fn,why,reaches,affected}], totalUnknown }.
-export function blindspots(fns, cg) {
+// ⟨0.20⟩ `--class <c,…>` filter: the six reason classes, `dynamic` (every genuine class), or `*` (all).
+// null spec ⇒ no filter; an unknown token warns; an all-unknown spec ⇒ an empty set that matches nothing.
+const ALL_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved", "setup"];
+export function parseClassFilter(spec) {
+  if (!spec) return null;
+  const out = new Set();
+  for (let t of spec.split(",")) {
+    t = t.trim();
+    if (!t) continue;
+    if (t === "*") return new Set(ALL_CLASSES);
+    if (t === "dynamic") { for (const c of ALL_CLASSES) if (c !== "setup") out.add(c); continue; }
+    if (ALL_CLASSES.includes(t)) out.add(t);
+    else console.error(`candor-ts: --class ignores unknown reason-class \`${t}\` (known: ${ALL_CLASSES.join(",")}; aliases: dynamic,*)`);
+  }
+  return out;
+}
+const classMatches = (cf, why) => cf === null || (why ?? []).some((w) => cf.has(reasonClass(w)));
+
+export function blindspots(fns, cg, classSpec = null) {
+  const cf = parseClassFilter(classSpec);
   const rev = reverseGraph(cg);
   const totalUnknown = fns.filter((e) => (e.inferred ?? []).includes("Unknown")).length;
   const sources = [];
   for (const e of fns) {
     const why = e.unknownWhy ?? [];
-    if (why.length === 0) continue; // a SOURCE carries its own unknownWhy; a purely-transitive Unknown does not
+    if (why.length === 0 || !classMatches(cf, why)) continue; // a SOURCE of a matching reason class
     const reached = new Set();
     const queue = [e.fn];
     const seen = new Set([e.fn]);
@@ -524,14 +543,15 @@ export function blindspots(fns, cg) {
 // much Unknown, by class {reflect,dispatch,indirect,native,unresolved,setup} — so a team can SIZE the
 // blind-spot cost (and separate genuine dynamism from `setup` mis-config) BEFORE `deny E Unknown`. Counts
 // SOURCE functions per class (a multi-reason fn counts in each class it has). Matches candor-java/rust/swift.
-export function blindspotsStats(fns) {
+export function blindspotsStats(fns, classSpec = null) {
+  const cf = parseClassFilter(classSpec);
   const ORDER = ["reflect", "dispatch", "indirect", "native", "unresolved", "setup"];
   const byClass = Object.fromEntries(ORDER.map((c) => [c, 0]));
   const totalUnknown = fns.filter((e) => (e.inferred ?? []).includes("Unknown")).length;
   let sources = 0;
   for (const e of fns) {
     const why = e.unknownWhy ?? [];
-    if (why.length === 0) continue;
+    if (why.length === 0 || !classMatches(cf, why)) continue;
     sources++;
     const classes = new Set(why.map(reasonClass));
     for (const c of classes) byClass[c]++;

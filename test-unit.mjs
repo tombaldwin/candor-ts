@@ -476,6 +476,12 @@ test("blindspots --stats: reason-class distribution over the Unknown sources (�
   assert.equal(r.byClass.setup, 1);     // m.c
   assert.equal(r.sources, 3);           // m.a/m.b/m.c carry a direct reason; m.d is transitive-only
   assert.equal(r.totalUnknown, 4);
+  // --class filter: reflect → m.a + m.b (m.b has reflect+indirect); setup → m.c only; dynamic excludes setup
+  assert.equal(blindspotsStats(fns, "reflect").sources, 2);
+  assert.equal(blindspotsStats(fns, "setup").sources, 1);
+  assert.equal(blindspotsStats(fns, "dynamic").sources, 2, "dynamic excludes setup → m.a + m.b, not m.c");
+  const cg = { "m.a": [], "m.b": [], "m.c": [], "m.d": [] };
+  assert.deepEqual(blindspots(fns, cg, "setup").sources.map((s) => s.fn), ["m.c"]); // drill-down to the setup source
 });
 test("blindspots: equal blast radii tie-break by name (stable worklist order)", () => {
   const fns = [

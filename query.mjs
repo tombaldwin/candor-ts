@@ -46,7 +46,7 @@ const emit = (v) => console.log(JSON.stringify(v, null, 1));
 const KNOWN_EFFECTS = ["Net", "Fs", "Db", "Llm", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Unknown"];
 // Suggest the nearest known flag for a typo (longest shared prefix ≥3): `--polciy` → `--policy` (#2).
 function didYouMeanFlag(unknown) {
-  const known = ["--report", "--policy", "--json", "--text", "--strict", "--include-unknown", "--stats"];
+  const known = ["--report", "--policy", "--json", "--text", "--strict", "--include-unknown", "--stats", "--class"];
   const u = unknown.replace(/^-+/, "").toLowerCase();
   let best = null, bestLen = 2;
   for (const k of known) {
@@ -299,6 +299,10 @@ function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknow
     if (a === "--strict") { if (strict) wantStrict = true; continue; }                       // vocabulary — tolerated everywhere,
     if (a === "--include-unknown") { if (includeUnknown) wantIncludeUnknown = true; continue; } // used only by the verb that reads it
     if (a === "--stats") { continue; }   // ⟨0.20⟩ tolerated everywhere; read by the `blindspots` case via args.includes
+    if (a === "--class") { // ⟨0.20⟩ value flag; the value is read by the `blindspots` case
+      if (i + 1 >= rawArgs.length) { console.error("candor-ts: --class requires a <class,…> value (reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*)"); process.exit(2); }
+      i++; continue;
+    }
     if (a.startsWith("-") && a.length > 1) {
       // An unrecognized flag is a TYPO, not a positional — reject it LOUD (exit 2), never silently swallow.
       // A swallowed `--polciy` runs the query with NO policy and exits green: a CI author who typos --policy
@@ -408,7 +412,7 @@ const SUBCOMMANDS = [
   ["diff", "<current> <baseline> [--json]", "per-function effect delta vs a baseline: {changes:[{fn,gained,lost}]} (exit 1 on a gain)"],
   ["reachable", REPORT_TAIL, "effects unioned over the entry points: what the app DOES at runtime"],
   ["impact", `<query> ${REPORT_TAIL}`, "blast radius of a function (backward dual of reachable)"],
-  ["blindspots", `${REPORT_TAIL} [--stats]`, "the Unknown sources ranked by blast radius; --stats: the reason-class distribution"],
+  ["blindspots", `${REPORT_TAIL} [--stats] [--class <c,…>]`, "the Unknown sources ranked by blast radius; --stats: reason-class distribution; --class: drill down"],
   ["tour", `[<N>] ${REPORT_TAIL}`, "the N most surprising transitive reaches — the guided cold-repo poke (no re-scan)"],
   ["gains", "<current> <baseline> [--json] [--strict]", "the supply-chain alarm: what the surface gained between two reports (--strict: exit 1 on ANY gain)"],
   ["path", `<fn> <Effect> ${REPORT_TAIL}`, "a call path from a function to where an effect enters"],
@@ -663,10 +667,12 @@ switch (cmd) {
     // the Unknown SOURCES, ranked by blast radius — the actionable inverse of a widely-propagated
     // Unknown (SPEC §3.1 ⟨0.6⟩): { sources:[{fn,why,reaches,affected}], totalUnknown }.
     const { prefix } = resolveReportVerb(args, 0);
+    const ci = args.indexOf("--class");
+    const classFilter = ci >= 0 ? args[ci + 1] : null;   // ⟨0.20⟩ drill-down by reason class
     if (args.includes("--stats")) {   // ⟨0.20⟩ the reason-class distribution, not the source list
-      put(args, coreBlindspotsStats(loadReportOrDie(prefix)), P.blindspotsStats);
+      put(args, coreBlindspotsStats(loadReportOrDie(prefix), classFilter), P.blindspotsStats);
     } else {
-      put(args, coreBlindspots(loadReportOrDie(prefix), loadCallgraph(prefix)), P.blindspots);
+      put(args, coreBlindspots(loadReportOrDie(prefix), loadCallgraph(prefix), classFilter), P.blindspots);
     }
     break;
   }
