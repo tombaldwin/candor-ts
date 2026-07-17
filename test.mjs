@@ -3290,6 +3290,76 @@ export function fmt(s: string, cb: Function): string { cb(); readFileSync("/etc/
         `status=${rMix.status} ${JSON.stringify(mRec)}`);
 }
 
+// ── ⟨unknown-ratchet⟩ the OPT-IN that flips an Unknown-ONLY gain from advisory to a FAILURE ─────────
+// (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET, default OFF). This is what makes `deny E Unknown`
+// adoptable on legacy DI/reflection code: the CURRENT Unknown surface is GRANDFATHERED (a fn ALREADY
+// Unknown in the baseline shows no gain ⇒ never flagged), and only a NEWLY-introduced Unknown fails.
+// Default OFF must leave the ⟨0.16⟩ advisory posture BYTE-IDENTICAL (exit 0, a stderr note). Mirrors the
+// reference engine (candor-java Policy.checkBaseline under ctx().unknownRatchet). require(<var>) is the
+// deterministic Unknown-ONLY source (an opaque module load, no real effect).
+{
+  // baseline: X (already Unknown via require(var)) + Y (pure) + Z (already effectful, Fs) — a real anchor
+  const baseSrc = `export function x(m: string) { return require(m); }
+export function y(s: string): string { return s.toUpperCase(); }
+import { readFileSync } from "node:fs";
+export function z(): void { readFileSync("/etc/z"); }`;
+  // current: X STILL Unknown (grandfathered), Y NOW Unknown (a NEW blind spot), Z unchanged
+  const curSrc = `export function x(m: string) { return require(m); }
+export function y(m: string) { return require(m); }
+import { readFileSync } from "node:fs";
+export function z(): void { readFileSync("/etc/z"); }`;
+  const d = project({ "src/a.ts": baseSrc });
+  const run = (env, ...extra) => spawnSync("node", [path.join(HERE, "scan.mjs"), d, ...extra],
+    { encoding: "utf8", env: { ...process.env, ...env } });
+  // record the baseline PAIR (report + callgraph) with the same build, then move to the current shape
+  const blPrefix = path.join(d, ".candor", "ur-baseline");
+  run({}, "--out", blPrefix);
+  const bl = `${blPrefix}.json`;
+  const blReport = JSON.parse(fs.readFileSync(bl, "utf8"));
+  check("unknown-ratchet: the baseline records src.a.x as ALREADY Unknown (the grandfathered surface)",
+        blReport.functions.find((e) => e.fn === "src.a.x")?.inferred.includes("Unknown"),
+        JSON.stringify(blReport.functions.find((e) => e.fn === "src.a.x")));
+  fs.writeFileSync(path.join(d, "src", "a.ts"), curSrc);
+
+  // OFF (default): both X (grandfathered) and Y (new Unknown) are Unknown-only gains → advisory, exit 0,
+  // ZERO violations. This is the BYTE-IDENTICAL ⟨0.16⟩ posture — the ratchet is opt-in.
+  const goff = path.join(d, "ur-off.json");
+  const rOff = run({ CANDOR_BASELINE: bl }, "--gate-json", goff);
+  let ov = null; try { ov = JSON.parse(fs.readFileSync(goff, "utf8")); } catch { /* null → checks below fail raw */ }
+  const offViol = (ov?.violations ?? []).filter((v) => v.rule === "AS-EFF-005");
+  check("unknown-ratchet OFF: an Unknown-only gain stays advisory — exit 0, ZERO AS-EFF-005 violations",
+        rOff.status === 0 && !rOff.stdout.includes("[AS-EFF-005]") && ov?.ok === true && offViol.length === 0,
+        `status=${rOff.status} ${JSON.stringify(offViol)} ${rOff.stderr.slice(0, 160)}`);
+
+  // ON (env CANDOR_UNKNOWN_RATCHET): X is GRANDFATHERED (already Unknown in the baseline → no gain), only
+  // the NEWLY-introduced Unknown on Y fails → exit 1, EXACTLY ONE AS-EFF-005 violation naming src.a.y.
+  const gon = path.join(d, "ur-on.json");
+  const rOn = run({ CANDOR_BASELINE: bl, CANDOR_UNKNOWN_RATCHET: "1" }, "--gate-json", gon);
+  let nv = null; try { nv = JSON.parse(fs.readFileSync(gon, "utf8")); } catch { /* null */ }
+  const onViol = (nv?.violations ?? []).filter((v) => v.rule === "AS-EFF-005");
+  check("unknown-ratchet ON (env): a NEWLY-introduced Unknown fails — exit 1, EXACTLY 1 AS-EFF-005 (src.a.y)",
+        rOn.status === 1 && nv?.ok === false && onViol.length === 1 && onViol[0].fn === "src.a.y"
+          && onViol[0].effects?.includes("Unknown"),
+        `status=${rOn.status} ${JSON.stringify(onViol)}`);
+  check("unknown-ratchet ON: the already-Unknown src.a.x is GRANDFATHERED (never flagged)",
+        !onViol.some((v) => v.fn === "src.a.x"), JSON.stringify(onViol));
+  check("unknown-ratchet ON: the [AS-EFF-005] line names src.a.y + cites the ratchet as a NEW blind spot",
+        rOn.stdout.includes("[AS-EFF-005]") && rOn.stdout.includes("src.a.y") && /NEW blind spot \(unknown-ratchet\)/.test(rOn.stdout),
+        rOn.stdout.slice(0, 260));
+
+  // ON via the config `unknown-ratchet` key (a bare key, no value → truthy) — same failure, no env var
+  fs.mkdirSync(path.join(d, ".candor"), { recursive: true });
+  fs.writeFileSync(path.join(d, ".candor", "config"), "baseline .candor/ur-baseline.json\nunknown-ratchet\n");
+  const rCfg = spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8", cwd: os.tmpdir() });
+  check("unknown-ratchet ON (config `unknown-ratchet` bare key): the new Unknown fails — exit 1",
+        rCfg.status === 1 && rCfg.stdout.includes("[AS-EFF-005]") && rCfg.stdout.includes("src.a.y"),
+        `status=${rCfg.status} ${(rCfg.stdout + rCfg.stderr).slice(0, 240)}`);
+  // the config key is KNOWN — no "ignoring unknown config key" warning (it must not warn inert)
+  check("unknown-ratchet: the config key is KNOWN (never warned inert)",
+        !/ignoring unknown config key 'unknown-ratchet'/.test(rCfg.stderr), rCfg.stderr.slice(0, 200));
+  fs.rmSync(path.join(d, ".candor", "config"));
+}
+
 // ── doc drift gates (TESTING.md §9): the family phrases the docs must carry ────────────────────────
 // README/AGENTS are load-bearing self-descriptions: they must state the CURRENT spec contract
 // ("spec 0.21", no stale generation strings — AGENTS.md shipped "spec 0.7" examples a full generation

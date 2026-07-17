@@ -86,6 +86,11 @@ ENVIRONMENT / CONFIG
                                  when an existing function gained an effect, exit 2 on an
                                  unparseable or different-build baseline (never evaluated),
                                  a stderr note when absent
+  CANDOR_UNKNOWN_RATCHET         (or a .candor/config \`unknown-ratchet\` key) opt-in: flip an
+                                 Unknown-ONLY gain vs the baseline from advisory to an
+                                 AS-EFF-005 FAILURE (exit 1). A fn already Unknown in the
+                                 baseline is grandfathered; only a NEW Unknown fails — so
+                                 \`deny E Unknown\` becomes adoptable on legacy code
 
 EXAMPLES
   candor-ts .
@@ -138,7 +143,7 @@ if (target === null) { console.error(usage); process.exit(2); }
 // Keys are the shared vocabulary (policy/baseline/strict/no-ambient/closed-world/taint/deps); candor-ts
 // implements `policy` + `deps` — the others are inert here (they drive other engines' gates), and a key
 // OUTSIDE the vocabulary warns (typo protection: a misspelt `policy` must not silently drop the gate).
-const CONFIG_KEYS = new Set(["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps"]);
+const CONFIG_KEYS = new Set(["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-ratchet"]);
 // The ANCHOR a config file's RELATIVE path values (policy/deps) resolve against: the repo the config
 // belongs to — the parent of its `.candor/` directory (the standard layout; candor-init scaffolds
 // `policy arch.policy` meaning the repo root's), else the config file's own directory. NEVER the
@@ -202,6 +207,15 @@ if (policyPath === null && candorConfig.policy !== undefined) policyPath = cando
 // candor-java, the reference engine (env/config only). A BARE `baseline` line ("") fails loud below.
 let baselinePath = process.env.CANDOR_BASELINE ?? null;
 if (baselinePath === null && candorConfig.baseline !== undefined) baselinePath = candorConfig.baseline;
+// ⟨unknown-ratchet⟩ OPT-IN (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET, default OFF): flip an
+// Unknown-ONLY gain vs the baseline from advisory to an AS-EFF-005 failure (exit 1). Env-override truthy
+// semantics mirror candor-java's Config.flag exactly — env var PRESENCE means on (env can't express off);
+// else the config value is truthy (empty/true/1/yes, case-insensitive). Default OFF keeps the ⟨0.16⟩
+// advisory posture BYTE-IDENTICAL. See the baseline guard below + candor-java Policy.checkBaseline.
+const unknownRatchet = process.env.CANDOR_UNKNOWN_RATCHET != null
+  || (candorConfig["unknown-ratchet"] !== undefined
+    && (candorConfig["unknown-ratchet"] === ""
+      || /^(true|1|yes)$/i.test(candorConfig["unknown-ratchet"])));
 
 // ---- project discovery (a dir, a single file, or a tsconfig) --------------------------------------
 let rootDir, fileNames, compilerOptions = {
@@ -2824,6 +2838,9 @@ let gateViolations = [];
 //  · Valid + same build → per-fn compare: an EXISTING fn gaining an effect is an [AS-EFF-005]
 //    violation (exit 1, joins --gate-json); a fn absent from the baseline is NEW code, reviewed as
 //    such, not a regression. Baselines omit pure fns (spec §2), so absent-prior means no prior claim.
+//    An Unknown-ONLY gain is ADVISORY (a note, exit 0) UNLESS the ⟨unknown-ratchet⟩ opt-in is on
+//    (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET) — then a NEWLY-introduced Unknown FAILS
+//    (exit 1) while a fn already Unknown in the baseline is grandfathered (see the gain loop below).
 //
 // ⟨0.16⟩ Callgraph-aware existence (SPEC §7 item 5). Reports OMIT pure functions, so a fn that
 // shipped PURE and now performs an effect is absent from the baseline report and reads as exempt "new
@@ -2918,7 +2935,24 @@ if (baselinePath !== null) {
       // dominated by resolution noise — DISCLOSE it (advisory), never fail the gate on it. Mirrors the
       // reference engine (candor-scan gate.rs check_baseline).
       const real = gained.filter((x) => x !== "Unknown");
-      if (!real.length) { unknownOnly.push(name); continue; }
+      if (!real.length) {
+        // ⟨unknown-ratchet⟩ OPT-IN (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET, default OFF).
+        // This is what makes `deny E Unknown` adoptable on legacy DI/reflection-heavy code: the CURRENT
+        // Unknown surface is GRANDFATHERED (a fn already Unknown in the baseline shows no gain ⇒ never
+        // flagged), and only a NEWLY-introduced Unknown — a blind spot the baseline did not have — fails.
+        // A team freezes today's report as the baseline and the strict gate ratchets the Unknown surface
+        // DOWN instead of failing everywhere on day one; grandfather one by regenerating the baseline.
+        // Default OFF preserves the ⟨0.16⟩ advisory posture (Unknown-gains = resolution noise). Mirrors
+        // the reference engine (candor-java Policy.checkBaseline).
+        if (unknownRatchet) {
+          gateViolations.push({ rule: "AS-EFF-005", fn: name, effects: ["Unknown"],
+            detail: `\`${name}\` gained an unresolved call (Unknown) not in the baseline — a NEW blind spot `
+              + `(unknown-ratchet); resolve it, or regenerate the baseline to grandfather it` });
+        } else {
+          unknownOnly.push(name);
+        }
+        continue;
+      }
       gateViolations.push({ rule: "AS-EFF-005", fn: name, effects: real,
         detail: `\`${name}\` gained effect { ${real.join(", ")} } not present in the baseline` });
     }
