@@ -6,6 +6,17 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.19.0] — 2026-07-17
+
+Reason-scoped `Unknown` policies (SPEC §6.2): `deny E Unknown[reflect,dispatch,indirect,native,unresolved,setup]`
+narrows the `Unknown` part of a deny to a fixed reason-class vocabulary, with the `dynamic`/`*` aliases and
+config `.candor/config` `unknown-alias <name> = <class…>` names. Bare `deny E Unknown` is unchanged
+(`Unknown[*]`); an unrecognized reason maps to `unresolved`; the class propagates transitively. An AS-EFF-006
+`--gate-json` verdict whose `effects` include `Unknown` carries a **`reasonClass`** array. Report bytes
+unchanged. Also: the **SETUP diagnostic** — a call into a declared-but-uninstalled npm dependency is tagged
+`no-node_modules:<pkg>` (reason class `setup`), and a scan-time line names the `npm install` fix; because
+`Unknown[dynamic]` excludes `setup`, a strict gate bites genuine dynamism while tolerating the fixable holes.
+
 ## [0.18.0] — 2026-07-16
 
 ### spec 0.18 — the trust-trio
