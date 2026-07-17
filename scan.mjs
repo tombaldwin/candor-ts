@@ -317,8 +317,17 @@ const declaredButUninstalled = new Set();
       // check left exactly that case unwarned.
       const pj = JSON.parse(fs.readFileSync(path.join(projDir, "package.json"), "utf8"));
       const deps = { ...(pj.dependencies ?? {}), ...(pj.devDependencies ?? {}) };
-      for (const dep of Object.keys(deps))
-        if (!fs.existsSync(path.join(projDir, "node_modules", dep))) declaredButUninstalled.add(dep);
+      // "Installed?" follows node resolution: node_modules is searched at projDir AND every ANCESTOR, so a
+      // dep HOISTED to a monorepo/workspace root counts as installed. Checking only projDir wrongly named a
+      // hoisted-but-resolvable package in the SETUP diagnostic (review-found; cosmetic — the gate was already
+      // safe via the resolve-first ordering, but the message must not cry wolf).
+      const installed = (dep) => {
+        for (let d = projDir; ; d = path.dirname(d)) {
+          if (fs.existsSync(path.join(d, "node_modules", dep))) return true;
+          if (path.dirname(d) === d) return false;
+        }
+      };
+      for (const dep of Object.keys(deps)) if (!installed(dep)) declaredButUninstalled.add(dep);
       if (Object.keys(deps).length > 0 && !fs.existsSync(path.join(projDir, "node_modules")))
         console.error("candor-ts: WARNING — the project declares dependencies but has no node_modules; " +
                       "imports won't resolve, so calls into those packages can't be analyzed (they read " +
