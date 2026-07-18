@@ -2591,63 +2591,112 @@ for (const [fnName, idxs] of paramInvokes) {
   }
 }
 
-// ---- pass 2c: the effect-polymorphism fix (process.env aliased THROUGH a parameter) ----------------
-// A leaf that writes `param[k] = v` is pure in isolation — mutating a caller's object is not an external
-// effect. But when a caller passes `process.env` (or a confirmed alias) INTO that parameter, the write lands
-// on the real environment, an Env effect. candor's per-fn syntactic classifier cannot see the alias at the
-// leaf, so it read the leaf pure — a genuine per-function false all-clear (found on the public corpus: dotenv's
-// `populate(processEnv, …)`, called by `config` with `let processEnv = process.env`). We reconcile it along the
-// callgraph, the same way pass 2b resolves callback parameters: collect the parameter positions a unit WRITES
-// as an object, and the argument positions a call SITE fills with an env read; where they meet, the callee IS
-// Env. Scoped to `process.env` — the one MUTABLE effectful global candor models as Env — so it fires on the
-// rare effect-polymorphic leaf (a corpus census: ~1 unit / 806 fns), NOT the benign argument-mutating majority.
-const paramObjWrites = new Map();  // fnQual -> Set(paramIndex): the unit writes `param[k]=v` on that parameter
-const envAliasArgs = new Map();    // calleeQual -> Map(argIndex -> "env"|"unknown"): a call passed process.env here
-const noteEnvArg = (callee, i, kind) => {
-  if (!envAliasArgs.has(callee)) envAliasArgs.set(callee, new Map());
-  const m = envAliasArgs.get(callee);
-  if (m.get(i) !== "env") m.set(i, kind); // a proven ("env") arg at this position wins over a merely-possible one
+// ---- pass 2c: the effect-polymorphism fix — process.env aliased THROUGH parameters (transitive) ------
+// A function that writes `x[k] = v` is pure in isolation (mutating a caller's object is not an external
+// effect). But when the caller passes `process.env` (or a confirmed alias) in as that object, the write lands
+// on the real environment — an Env effect the per-fn syntactic classifier cannot see at the leaf (the classic
+// false all-clear; found on dotenv's `config(){ let pe=process.env; populate(pe) }` → `populate(pe){ pe[k]=v }`).
+// We close it soundly by tracking, to a fixpoint, which VARIABLE SYMBOLS are env-fed — a parameter a call fills
+// with an env source, a parameter fed a forwarded env-fed argument (transitive), and any local `= env-fed` alias
+// — then attributing the env effect to the INNERMOST unit whose body writes an env-fed symbol (its own parameter
+// OR one it captures), through ANY assignment operator. It stays GATED on a real process.env source, so it fires
+// only on the rare effect-polymorphic write, never the benign argument-mutating majority. A must-source
+// (process.env / an unreassigned alias) → Env; a may-source (a reassignable union) → Unknown (disclose, never
+// fabricate). Direct `process.env[k]=v` / `envAlias[k]=v` are already Env via the process.env pass above.
+const envFed = new Map();  // variable Symbol -> "env" (proven) | "unknown" (possible)
+const setFed = (sym, kind) => {
+  if (!sym) return false;
+  const cur = envFed.get(sym);
+  if (cur === kind || cur === "env") return false; // no change / already the stronger kind
+  envFed.set(sym, kind); return true;              // new, or upgrade "unknown" -> "env"
 };
-function scanEnvPoly(node) {
-  // (1) a write to a parameter object: `p.x = v` / `p[k] = v` where `p` is a formal parameter of THIS unit.
-  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
-      && (ts.isPropertyAccessExpression(node.left) || ts.isElementAccessExpression(node.left))) {
-    const owner = enclosing(node);
-    if (owner) {
-      let root = node.left.expression;
-      while (ts.isPropertyAccessExpression(root) || ts.isElementAccessExpression(root)) root = root.expression;
-      if (ts.isIdentifier(root)) {
-        const d = realDecl(checker.getSymbolAtLocation(root));
-        if (d && ts.isParameter(d) && d.parent && nodeName.get(d.parent) === owner) {
-          const idx = d.parent.parameters.indexOf(d);
-          if (idx >= 0) { if (!paramObjWrites.has(owner)) paramObjWrites.set(owner, new Set()); paramObjWrites.get(owner).add(idx); }
+// The env-source kind an expression denotes, or null: process.env / a MUST-alias → "env"; a MAY-alias
+// (ever-`=process.env`, reassignable) → "unknown"; an identifier already known env-fed → its recorded kind.
+const envSourceKind = (expr) => {
+  if (isProcessEnvExpr(expr) || identIsEnvAlias(expr)) return "env";
+  if (ts.isIdentifier(expr)) {
+    if (identIsEnvMayAlias(expr)) return "unknown";
+    const k = envFed.get(checker.getSymbolAtLocation(expr));
+    if (k) return k;
+  }
+  return null;
+};
+// the ROOT symbol of a mutation target: `a.b[c] = …` / `a[k] = …` → the symbol of `a`.
+const rootSymbolOf = (lhs) => {
+  let n = lhs;
+  while (ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)) n = n.expression;
+  return ts.isIdentifier(n) ? checker.getSymbolAtLocation(n) : null;
+};
+const isAssignOp = (k) => k >= ts.SyntaxKind.FirstAssignment && k <= ts.SyntaxKind.LastAssignment;
+
+// (A) FIXPOINT: seed env-fed variables from call-argument flow and local aliases until stable.
+//  - a call `f(…, src, …)` where `src` is an env source (or already env-fed) → f's MATCHING PARAMETER is env-fed,
+//    positional up to the first spread. An env source AT/AFTER a spread has an indeterminate parameter position,
+//    so every plain parameter of the callee is conservatively marked "unknown" (disclose, never a precise-but-
+//    wrong Env). A spread/rest DESTINATION receives values off the object, not the object itself → never env-fed.
+//    Callee parameters are resolved as SYMBOLS via the checker, so an overload/renamed callee still joins (no
+//    name-key mismatch); the write rule below likewise keys on symbols.
+//  - a binding `const t = <env source>` / `t = <env source>` → t is env-fed (captures aliases + alias chains).
+const propagateOnce = () => {
+  let changed = false;
+  const visit = (node) => {
+    if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+      const params = checker.getResolvedSignature(node)?.declaration?.parameters;
+      if (params) {
+        let pos = 0, sawSpread = false;
+        for (const arg of node.arguments ?? []) {
+          if (ts.isSpreadElement(arg)) { sawSpread = true; continue; } // spread consumes ≥0 params; later positions unknown
+          const kind = envSourceKind(arg);
+          if (kind) {
+            if (!sawSpread && pos < params.length) {
+              const p = params[pos];
+              if (!p.dotDotDotToken && ts.isIdentifier(p.name)) changed = setFed(checker.getSymbolAtLocation(p.name), kind) || changed;
+            } else { // env source at an indeterminate position → mark every plain param "unknown" (sound over-approx)
+              for (const p of params) if (!p.dotDotDotToken && ts.isIdentifier(p.name)) changed = setFed(checker.getSymbolAtLocation(p.name), "unknown") || changed;
+            }
+          }
+          pos++;
         }
       }
     }
+    if (ts.isVariableDeclaration(node) && node.name && ts.isIdentifier(node.name) && node.initializer) {
+      const kind = envSourceKind(node.initializer);
+      if (kind) changed = setFed(checker.getSymbolAtLocation(node.name), kind) || changed;
+    } else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(node.left)) {
+      const kind = envSourceKind(node.right);
+      if (kind) changed = setFed(checker.getSymbolAtLocation(node.left), kind) || changed;
+    }
+    ts.forEachChild(node, visit);
+  };
+  for (const sf of sources) visit(sf);
+  return changed;
+};
+let envRounds = 0;
+while (propagateOnce() && envRounds++ < 64) { /* to fixpoint (bounded — chain depth + 1 in practice) */ }
+
+// (B) WRITE rule: a unit whose body writes an env-fed variable (own param OR captured) performs its env effect.
+//     Attributed to the INNERMOST enclosing unit — the frame the runtime oracle witnesses the write in, so a
+//     write inside a closure lands on that closure's own unit (matching attribution). Any assignment operator
+//     (`=`, `||=`, `+=`, …) counts, and a `delete env.k` mutation counts too.
+const flagEnvWrite = (node, root) => {
+  const kind = envFed.get(root);
+  if (!kind) return;
+  const rec = fns.get(enclosing(node) ?? "");
+  if (!rec) return;
+  if (kind === "env") { rec.direct.add("Env"); rec.why.add("env-write"); }
+  else { rec.direct.add("Unknown"); rec.why.add("env-maybe-write"); }
+};
+const scanEnvWrites = (node) => {
+  if (ts.isBinaryExpression(node) && isAssignOp(node.operatorToken.kind)
+      && (ts.isPropertyAccessExpression(node.left) || ts.isElementAccessExpression(node.left))) {
+    const r = rootSymbolOf(node.left); if (r) flagEnvWrite(node, r);
+  } else if (ts.isDeleteExpression(node)
+      && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))) {
+    const r = rootSymbolOf(node.expression); if (r) flagEnvWrite(node, r);
   }
-  // (2) a call passing `process.env` at argument i → record (callee unit, i, kind): a PROVEN env read
-  // (`process.env`/a MUST-alias) → "env"; a merely-possible one (a MAY-alias, reassignable union) → "unknown".
-  if (ts.isCallExpression(node)) {
-    const decl = checker.getResolvedSignature(node)?.declaration;
-    const callee = decl && nodeName.get(decl);
-    if (callee) node.arguments.forEach((arg, i) => {
-      if (readsProcessEnv(arg)) noteEnvArg(callee, i, "env");
-      else if (identIsEnvMayAlias(arg)) noteEnvArg(callee, i, "unknown");
-    });
-  }
-  ts.forEachChild(node, scanEnvPoly);
-}
-for (const sf of sources) scanEnvPoly(sf);
-for (const [fnName, writtenIdx] of paramObjWrites) {
-  const envIdx = envAliasArgs.get(fnName);
-  const rec = fns.get(fnName);
-  if (!envIdx || !rec) continue;
-  for (const i of writtenIdx) {
-    const kind = envIdx.get(i);
-    if (kind === "env") { rec.direct.add("Env"); rec.why.add(`env-alias-param#${i}`); }        // proven env write
-    else if (kind === "unknown") { rec.direct.add("Unknown"); rec.why.add(`env-maybe-param#${i}`); } // may-be env → disclose
-  }
-}
+  ts.forEachChild(node, scanEnvWrites);
+};
+for (const sf of sources) scanEnvWrites(sf);
 
 // ---- pass 3: the least fixpoint (SEMANTICS §5a), effects + the literal surfaces -------------------
 const inferred = new Map([...fns.keys()].map((k) => [k, new Set(fns.get(k).direct)]));

@@ -2352,6 +2352,51 @@ export function callRead() { return readParam(process.env); }`,
         entry(report, "src.read.readParam") == null, JSON.stringify(entry(report, "src.read.readParam")));
 }
 
+// ── EFFECT-POLYMORPHISM, the TRANSITIVE closure (a max code review found pass 2c's one-hop/direct model leaked):
+// env-fed-ness flows to a FIXPOINT over parameters, and the env effect is attributed to the INNERMOST unit that
+// writes an env-fed variable — its own parameter OR a captured one — through ANY assignment operator. So a
+// forwarding hop, a local alias, a closure that captures the parameter, and a compound assignment are all caught;
+// a benign argument-mutation with NO process.env inflow stays pure (still gated on a real env source). ─────────
+{
+  const d = project({
+    "src/hop.ts": `function inner(t: Record<string,string>) { t.FOO = 'x'; }
+function outer(p: Record<string,string>) { inner(p); }
+const env = process.env;
+export function go() { outer(env); }`,                                    // env forwarded one hop → INNER is the writer
+    "src/alias.ts": `function wAlias(p: Record<string,string>) { const t = p; t.FOO = 'x'; }
+const env = process.env;
+export function go() { wAlias(env); }`,                                   // write through a local alias of the param
+    "src/closure.ts": `function fillU(target: Record<string,string>) { const cb = () => { target.FOO = 'x'; }; [1].forEach(cb); }
+const env = process.env;
+export function go() { fillU(env); }`,                                    // write inside a closure that CAPTURES the param
+    "src/compound.ts": `function seedC(t: Record<string,string>) { t.PATH ||= '/x'; }
+const env = process.env;
+export function go() { seedC(env); }`,                                    // compound assignment (||=) to an env-fed param
+    "src/benign.ts": `function w2(t: Record<string,string>) { t.Z = '1'; }
+function fwd(p: Record<string,string>) { w2(p); }
+export function use() { fwd({ a: 'b' }); }`,                              // two hops, NO env inflow → must stay pure
+    "src/inline.ts": `function fillInline(target: Record<string,string>) { [1].forEach(() => { target.FOO = 'x'; }); }
+const env = process.env;
+export function go() { fillInline(env); }`,                               // ANON inline callback = NOT a minted unit → write folds onto fillInline (matches the oracle's span attribution)
+  });
+  const { report } = scan(d);
+  const inf = (fn) => entry(report, fn)?.inferred ?? [];
+  check("TRANSITIVE: env forwarded one hop → the actual writer (inner) is Env, not silently pure",
+        inf("src.hop.inner").includes("Env"), JSON.stringify(entry(report, "src.hop.inner")));
+  check("ALIAS: a write through `const t = param` on an env-fed param → Env",
+        inf("src.alias.wAlias").includes("Env"), JSON.stringify(entry(report, "src.alias.wAlias")));
+  check("CLOSURE: a write inside a closure capturing an env-fed param → that closure unit is Env",
+        report.functions.some((f) => /src\.closure\.(cb|fillU)/.test(f.fn) && f.inferred.includes("Env")),
+        JSON.stringify(report.functions.filter((f) => f.fn.startsWith("src.closure"))));
+  check("COMPOUND: a compound assignment (`||=`) to an env-fed param → Env (not only `=` is a write)",
+        inf("src.compound.seedC").includes("Env"), JSON.stringify(entry(report, "src.compound.seedC")));
+  check("BENIGN: an argument-mutation reached by two hops with NO env inflow stays PURE (no over-disclosure)",
+        entry(report, "src.benign.w2") == null && entry(report, "src.benign.fwd") == null,
+        JSON.stringify([entry(report, "src.benign.w2"), entry(report, "src.benign.fwd")]));
+  check("INLINE CLOSURE: an ANONYMOUS callback (not a minted unit) writing an env-fed param folds onto the enclosing unit → Env",
+        inf("src.inline.fillInline").includes("Env"), JSON.stringify(entry(report, "src.inline.fillInline")));
+}
+
 // @types/X (DefinitelyTyped) maps to the RUNTIME package X so the curated κ tier (keyed by runtime names)
 // fires — a curated package typed via @types must NOT read silent-pure. Corpus find: `pool.query()` reported
 // pure because the decl resolved to `@types/pg` (not `pg`), so the pg→Db rule never matched. A real TS
