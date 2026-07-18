@@ -2535,6 +2535,27 @@ export function unrelated(o: { process: { env: Record<string,string> } }) { retu
         JSON.stringify([entry(report, "src.neg.shadowed"), entry(report, "src.neg.unrelated")]));
 }
 
+// ── the SAME globalThis.process gap for the process.* global CALLS: `globalThis.process.hrtime()` → Clock,
+// `global.process.send()` → Ipc (a project `const process` shadow stays pure). ───────────────────────────────
+{
+  const d = project({
+    "src/g.ts": `export function hr() { return globalThis.process.hrtime(); }
+export function hrBig() { return globalThis.process.hrtime.bigint(); }
+export function snd(m: unknown) { return (global as any).process.send(m); }`,
+    "src/neg.ts": `const process = { hrtime: () => [0, 0], send: (_: unknown) => true };
+export function shadowHr() { return process.hrtime(); }
+export function shadowSend(m: unknown) { return process.send(m); }`,
+  });
+  const { report } = scan(d);
+  const has = (fn, e) => (entry(report, fn)?.inferred ?? []).includes(e);
+  check("globalThis.process.hrtime() → Clock", has("src.g.hr", "Clock"), JSON.stringify(entry(report, "src.g.hr")));
+  check("globalThis.process.hrtime.bigint() → Clock", has("src.g.hrBig", "Clock"));
+  check("global.process.send() → Ipc", has("src.g.snd", "Ipc"), JSON.stringify(entry(report, "src.g.snd")));
+  check("GUARD: a project-local `const process` shadow does NOT fabricate Clock/Ipc",
+        !has("src.neg.shadowHr", "Clock") && !has("src.neg.shadowSend", "Ipc"),
+        JSON.stringify([entry(report, "src.neg.shadowHr"), entry(report, "src.neg.shadowSend")]));
+}
+
 // @types/X (DefinitelyTyped) maps to the RUNTIME package X so the curated κ tier (keyed by runtime names)
 // fires — a curated package typed via @types must NOT read silent-pure. Corpus find: `pool.query()` reported
 // pure because the decl resolved to `@types/pg` (not `pg`), so the pg→Db rule never matched. A real TS

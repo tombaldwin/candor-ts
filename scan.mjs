@@ -2357,19 +2357,24 @@ function visitCalls(node) {
     const callee = node.expression;
     const ctext = callee.getText().replace(/\s+/g, "");
     let geff = null;
-    // `process.*` is matched by exact text, so a project's OWN `const process = {…}` shadow would
-    // fabricate Clock/Ipc on a pure local method (sweep [31]) — guard it like the `fetch` arm: resolve the
-    // ROOT `process` identifier and fire only when it is NOT a project-local declaration (i.e. the global).
-    const processIsGlobal = () => {
-      if (!ts.isPropertyAccessExpression(callee)) return false;
-      let root = callee.expression;
-      while (ts.isPropertyAccessExpression(root)) root = root.expression; // process.hrtime.bigint → process
-      if (!ts.isIdentifier(root) || root.text !== "process") return false;
-      return !(checker.getSymbolAtLocation(root)?.declarations ?? [])
-        .some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+    // The member path AFTER the global `process` object, or null: `process.hrtime` → "hrtime",
+    // `globalThis.process.hrtime.bigint` → "hrtime.bigint", `(global as any).process.send` → "send". Reuses
+    // `identIsGlobalProcess` (which handles bare `process` AND `globalThis`/`global.process`, unwrapping casts,
+    // and rejects a project-local `const process = {…}` shadow so a pure local method never fabricates Clock/Ipc).
+    const processMemberPath = () => {
+      if (!ts.isPropertyAccessExpression(callee)) return null;
+      const outer = [];
+      let n = callee;
+      while (ts.isPropertyAccessExpression(n)) {
+        if (identIsGlobalProcess(n.expression)) return [n.name.text, ...outer.reverse()].join(".");
+        outer.push(n.name.text);
+        n = n.expression;
+      }
+      return null;
     };
-    if ((ctext === "process.hrtime" || ctext === "process.hrtime.bigint") && processIsGlobal()) geff = "Clock";
-    else if (ctext === "process.send" && processIsGlobal()) geff = "Ipc";
+    const pmp = processMemberPath();
+    if (pmp === "hrtime" || pmp === "hrtime.bigint") geff = "Clock"; // a monotonic clock read
+    else if (pmp === "send") geff = "Ipc";                          // the child↔parent IPC channel
     else if (ts.isIdentifier(callee) && importedFromNetPkg(callee))
       geff = "Net"; // a bare call to an HTTP-client default/named import (installed → sig resolves here) — #13
 
