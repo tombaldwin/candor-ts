@@ -1671,6 +1671,32 @@ const identIsEnvMayAlias = (id) => {
   return !!sym && envMayAliasSymbols.has(sym);
 };
 
+// ---- whole-object process.env access via builtins/spread ------------------------------------------------
+// `process.env.KEY` is caught above, but the WHOLE env object handed to a builtin that enumerates or mutates it
+// is the same Env effect and read silent-pure: `Object.assign(process.env, o)` / `Object.defineProperty(...)` /
+// `Reflect.set(process.env, …)` WRITE the environment; `{...process.env}` / `Object.keys|entries|assign(_, env)`
+// / `JSON.stringify(env)` READ every key. Each of these fires the same runtime trap the oracle observes. The
+// callee here is a GLOBAL `Object`/`Reflect`/`JSON` builtin — a project-local shadow must not match (mirrors the
+// process/fetch guards). A USER function receiving process.env is NOT handled here — that is the env-fed
+// parameter analysis (pass 2c) — so this stays scoped to builtins that touch the object in THIS frame.
+const ENV_TOUCHING_BUILTIN = new Set([
+  "Object.assign", "Object.keys", "Object.values", "Object.entries", "Object.fromEntries",
+  "Object.getOwnPropertyNames", "Object.getOwnPropertyDescriptors", "Object.getOwnPropertyDescriptor",
+  "Object.defineProperty", "Object.defineProperties",
+  "Reflect.set", "Reflect.get", "Reflect.has", "Reflect.ownKeys", "Reflect.deleteProperty",
+  "Reflect.defineProperty", "Reflect.getOwnPropertyDescriptor",
+  "JSON.stringify",
+]);
+// True when `node` is a call to a global Object.*/Reflect.*/JSON.* builtin that reads/writes every key of an
+// object argument (so any env-object argument makes the enclosing fn Env). Guarded against a project shadow.
+const envTouchingBuiltinCall = (node) => {
+  if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) return false;
+  const pa = node.expression;
+  if (!ts.isIdentifier(pa.expression) || !ENV_TOUCHING_BUILTIN.has(`${pa.expression.text}.${pa.name.text}`)) return false;
+  const decls = checker.getSymbolAtLocation(pa.expression)?.declarations ?? [];
+  return !decls.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName))); // the ambient global, not a shadow
+};
+
 // A bare-identifier call whose callee is DEFAULT- or NAMED-imported from a known HTTP-client package is a
 // Net call (corpus-audit #13). The κ table lists these packages, but its rule only fires on a MEMBER call
 // (`axios.get(…)`); a default-imported callable invoked bare — the canonical `import fetch from 'node-fetch';
@@ -2275,6 +2301,15 @@ function visitCalls(node) {
              && readsProcessEnv(node.right)) {
       markEnv();
     }
+    // `{...process.env}` / `[...process.env]` / `f(...process.env)` — spreading env enumerates every key.
+    else if ((ts.isSpreadAssignment(node) || ts.isSpreadElement(node)) && readsProcessEnv(node.expression)) {
+      markEnv();
+    }
+    // `Object.assign(process.env, …)` / `Object.keys(env)` / `Reflect.set(process.env, …)` / `JSON.stringify(env)`
+    // — a builtin that reads/writes every key of an env-object argument. Any such argument being env → Env.
+    else if (envTouchingBuiltinCall(node) && node.arguments.some((a) => readsProcessEnv(a))) {
+      markEnv();
+    }
   }
   // Runtime GLOBALS reached as CALLS with no import for the κ resolver to classify: `process.hrtime()`/
   // `.hrtime.bigint()` is a monotonic clock read (Clock); `process.send(...)` is the child↔parent IPC
@@ -2693,6 +2728,12 @@ const scanEnvWrites = (node) => {
   } else if (ts.isDeleteExpression(node)
       && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))) {
     const r = rootSymbolOf(node.expression); if (r) flagEnvWrite(node, r);
+  } else if (envTouchingBuiltinCall(node)) {
+    // an env-fed variable handed to a whole-object builtin (`Object.assign(t, o)`, `Object.keys(t)`, …) has its
+    // keys read/written — the same env effect through the parameter, attributed to the innermost unit.
+    for (const a of node.arguments) { const r = ts.isIdentifier(a) ? checker.getSymbolAtLocation(a) : null; if (r && envFed.has(r)) { flagEnvWrite(node, r); break; } }
+  } else if ((ts.isSpreadAssignment(node) || ts.isSpreadElement(node)) && ts.isIdentifier(node.expression)) {
+    const r = checker.getSymbolAtLocation(node.expression); if (r && envFed.has(r)) flagEnvWrite(node, r); // `{...envFedParam}`
   }
   ts.forEachChild(node, scanEnvWrites);
 };

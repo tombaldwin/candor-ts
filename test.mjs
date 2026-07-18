@@ -2397,6 +2397,44 @@ export function go() { fillInline(env); }`,                               // ANO
         inf("src.inline.fillInline").includes("Env"), JSON.stringify(entry(report, "src.inline.fillInline")));
 }
 
+// ── WHOLE-OBJECT process.env access via BUILTINS/SPREAD (a corpus-hunt find — `process.env.KEY` was caught but
+// the env object handed WHOLE to a builtin that enumerates/mutates it read silent-pure): `Object.assign(env, o)` /
+// `Object.defineProperty(env, …)` / `Reflect.set(env, …)` WRITE the environment; `{...env}` / `Object.keys(env)` /
+// `Object.assign(_, env)` / `JSON.stringify(env)` READ every key. All are Env; a builtin on a NON-env object, and a
+// project-local `Object`/`Reflect` SHADOW, stay pure (no fabrication). Direct and through an env-fed parameter. ──
+{
+  const d = project({
+    "src/w.ts": `export function wAssign(o: Record<string,string>) { Object.assign(process.env, o); }
+export function wDefine(k: string) { Object.defineProperty(process.env, k, { value: 'x' }); }
+export function wReflect(k: string, v: string) { Reflect.set(process.env, k, v); }`,
+    "src/r.ts": `export function rSpread() { return { ...process.env }; }
+export function rKeys() { return Object.keys(process.env); }
+export function rAssignSrc() { const o: any = {}; Object.assign(o, process.env); return o; }`,
+    "src/thru.ts": `function assignInto(t: Record<string,string>, o: Record<string,string>) { Object.assign(t, o); }
+function dumpKeys(t: Record<string,string>) { return Object.keys(t); }
+const env = process.env;
+export function loadEnv(o: Record<string,string>) { assignInto(env, o); }
+export function dumpEnv() { return dumpKeys(env); }`,
+    "src/neg.ts": `export function benignAssign() { return Object.assign({}, { a: 1 }); }
+export function benignKeys(o: Record<string,unknown>) { return Object.keys(o); }`,
+    "src/shadow.ts": `const Shadow = { assign: (a: any) => a };
+export function shadowed() { const Object = Shadow; return Object.assign(process.env, {}); }`,
+  });
+  const { report } = scan(d);
+  const isEnv = (fn) => (entry(report, fn)?.inferred ?? []).includes("Env");
+  for (const [fn, label] of [["src.w.wAssign", "Object.assign(process.env, o) WRITE"], ["src.w.wDefine", "Object.defineProperty(process.env) WRITE"],
+                             ["src.w.wReflect", "Reflect.set(process.env) WRITE"], ["src.r.rSpread", "{...process.env} READ"],
+                             ["src.r.rKeys", "Object.keys(process.env) READ"], ["src.r.rAssignSrc", "Object.assign(_, process.env) READ"]])
+    check(`whole-env builtin: ${label} → Env`, isEnv(fn), JSON.stringify(entry(report, fn)));
+  check("whole-env builtin THROUGH a param: assignInto(env, o) → Env (write via Object.assign on an env-fed param)", isEnv("src.thru.assignInto"));
+  check("whole-env builtin THROUGH a param: dumpKeys(env) → Env (read via Object.keys on an env-fed param)", isEnv("src.thru.dumpKeys"));
+  check("GUARD: Object.assign/keys on a NON-env object stays PURE (no fabrication)",
+        entry(report, "src.neg.benignAssign") == null && entry(report, "src.neg.benignKeys") == null,
+        JSON.stringify([entry(report, "src.neg.benignAssign"), entry(report, "src.neg.benignKeys")]));
+  check("GUARD: a project-local `Object` SHADOW does NOT fabricate Env on `Object.assign(process.env, …)`",
+        entry(report, "src.shadow.shadowed") == null, JSON.stringify(entry(report, "src.shadow.shadowed")));
+}
+
 // @types/X (DefinitelyTyped) maps to the RUNTIME package X so the curated κ tier (keyed by runtime names)
 // fires — a curated package typed via @types must NOT read silent-pure. Corpus find: `pool.query()` reported
 // pure because the decl resolved to `@types/pg` (not `pg`), so the pg→Db rule never matched. A real TS
