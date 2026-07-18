@@ -1059,22 +1059,38 @@ for (const sf of sources) {
       // The interface-CHA universe (the Rust engine's local-trait move): `class PgStore
       // implements Store` is the edge a `store.save()` dispatch on the INTERFACE type resolves
       // through. Local interfaces only — flagging the lib.dom/lib.es surfaces would flood.
+      // Register `node` (the class) under a LOCAL interface declaration AND its transitive SUPER-interfaces:
+      // a `s.base()` on a `Sub`-typed value resolves `base` to whichever super-interface DECLARES it, so
+      // `class Impl implements Sub` (where `interface Sub extends Sup`) must be in Sup's CHA universe too —
+      // else the super-method dispatch read disclosed-`Unknown` instead of the precise impl (R47, the ts
+      // sibling of the rust/swift supertrait dispatch). Cycle-guarded; local interfaces only.
+      const registerImpl = (iface) => {
+        if (!interfaceImpls.has(iface)) interfaceImpls.set(iface, []);
+        const arr = interfaceImpls.get(iface);
+        if (!arr.includes(node)) arr.push(node);
+      };
+      const localInterfaceDecls = (typeExpr) => {
+        const sym = checker.getSymbolAtLocation(typeExpr);
+        const tgt = sym && sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
+        return (tgt?.declarations ?? []).filter((d) =>
+          ts.isInterfaceDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+      };
+      const climbSeen = new Set();
+      const climb = (iface) => {
+        if (climbSeen.has(iface)) return;
+        climbSeen.add(iface);
+        registerImpl(iface);
+        for (const eh of iface.heritageClauses ?? []) {
+          if (eh.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+          for (const st of eh.types) for (const sdecl of localInterfaceDecls(st.expression)) climb(sdecl);
+        }
+      };
       for (const h of node.heritageClauses ?? []) {
         if (h.token !== ts.SyntaxKind.ImplementsKeyword) continue;
-        for (const t of h.types) {
-          // Register under EVERY declaration of the interface symbol: a merged interface (two
-          // `interface Store` blocks / module augmentation) resolves a method to whichever block
-          // declares it, and keying only declarations[0] silently missed the others (/code-review).
-          const sym = checker.getSymbolAtLocation(t.expression);
-          const target = sym && sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
-          for (const idecl of target?.declarations ?? []) {
-            if (ts.isInterfaceDeclaration(idecl)
-                && projectFiles.has(path.resolve(idecl.getSourceFile().fileName))) {
-              if (!interfaceImpls.has(idecl)) interfaceImpls.set(idecl, []);
-              interfaceImpls.get(idecl).push(node);
-            }
-          }
-        }
+        // Register under EVERY declaration of the interface symbol: a merged interface (two `interface
+        // Store` blocks / module augmentation) resolves a method to whichever block declares it, and keying
+        // only declarations[0] silently missed the others (/code-review).
+        for (const t of h.types) for (const idecl of localInterfaceDecls(t.expression)) climb(idecl);
       }
       const ctorQual = `${mod}.${namespacePrefixOf(node)}${node.name.text}.constructor`;
       if (!fns.has(ctorQual)) {

@@ -1674,6 +1674,30 @@ export function orphan(k: Sink): void { k.flush(); }`,
         JSON.stringify(entry(report, "src.app.orphan")));
 }
 
+// ── super-interface CHA (R47): a SUPER-method on a sub-interface value resolves precisely ──────────
+{
+  const d = project({
+    "src/store.ts": `import * as fsm from "node:fs";
+export interface Sup { base(): void; }
+export interface Sub extends Sup { extra(): void; }
+export class Impl implements Sub {
+  base(): void { fsm.writeFileSync("/b", "x"); }
+  extra(): void { fsm.writeFileSync("/e", "x"); }
+}`,
+    "src/app.ts": `import { Sub } from "./store.js";
+export function callsSuper(s: Sub): void { s.base(); }
+export function callsOwn(s: Sub): void { s.extra(); }`,
+  });
+  const { report } = scan(d);
+  check("a SUPER-interface method on a sub-interface value resolves to the impl (Fs, not Unknown) — R47",
+        entry(report, "src.app.callsSuper")?.inferred.includes("Fs")
+        && !entry(report, "src.app.callsSuper")?.inferred.includes("Unknown"),
+        JSON.stringify(entry(report, "src.app.callsSuper")));
+  check("the sub-interface's OWN method still resolves",
+        entry(report, "src.app.callsOwn")?.inferred.includes("Fs"),
+        JSON.stringify(entry(report, "src.app.callsOwn")));
+}
+
 // ── 11b. the CJS dist chain: a require()-style dep scanned with --allow-js chains the same way ────
 {
   // the DEPENDENCY ships CJS: exports via assignment, not declarations (the jsonwebtoken shape).
