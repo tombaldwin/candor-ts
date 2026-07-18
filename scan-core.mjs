@@ -109,6 +109,11 @@ export const KAPPA_RULES = [
    /^(capture|captureImmediate|identify|identifyImmediate|alias|groupIdentify|flush|shutdown|isFeatureEnabled|getFeatureFlag|getFeatureFlagPayload|getAllFlags|getAllFlagsAndPayloads|getRemoteConfigPayload|reloadFeatureFlags)$/,
    "Net"],
   [/^(pg|mysql2?|mongodb|ioredis|redis|sqlite3|better-sqlite3|knex)$/, null, "Db"],
+  // Template-literal SQL clients that EXECUTE the query through a `sql`…`` tag: postgres.js (porsager),
+  // @vercel/postgres, slonik. Whole-module Db (the client factory + the tag both reach the connection, like
+  // pg's `new Pool()`). NOT `sql-template-tag` — that only BUILDS a query object (executed via pg), so it is
+  // a pure builder and stays uncurated. The tag call is classified through the TaggedTemplateExpression arm.
+  [/^(postgres|@vercel\/postgres|slonik)$/, null, "Db"],
   // bull/bullmq are Redis-backed job queues — the queue/worker/job ops issue Redis commands (Db). Their
   // surface is almost entirely I/O, but be VERB-precise (the I/O ops) so inert event-wiring
   // (`queue.on(...)`) and `new Queue()`/`new Worker()` construction (which only opens a lazy connection)

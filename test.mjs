@@ -2482,6 +2482,37 @@ module.exports.viaProjCall = (p) => doWrite.call(null, p);`,   // a PROJECT fn v
   check("a PROJECT function invoked via `.call` still edges (its Fs propagates)", inf("src.proj.viaProjCall").includes("Fs"));
 }
 
+// ── TAGGED-TEMPLATE calls (`sql`…``): a corpus-probe find. The template-literal SQL clients (postgres.js /
+// @vercel/postgres / slonik) EXECUTE via the tag → Db; the tagged-template arm previously only edged a LOCAL tag,
+// so an external tag got neither its κ effect nor the κ-ledger `invisible` disclosure a regular external call gets
+// (silent-pure). Now it classifies the external tag exactly like a regular call; a builtin tag (String.raw) is
+// pure (no fabrication). ─────────────────────────────────────────────────────────────────────────────────────
+{
+  const d = project({
+    "node_modules/postgres/package.json": JSON.stringify({ name: "postgres", version: "3.4.0", main: "index.js", types: "index.d.ts" }),
+    "node_modules/postgres/index.d.ts": `declare function postgres(url?: string): postgres.Sql;
+declare namespace postgres { interface Sql { (strings: TemplateStringsArray, ...values: unknown[]): Promise<any[]>; end(): Promise<void>; } }
+export = postgres;`,
+    "node_modules/postgres/index.js": "module.exports = () => () => Promise.resolve([]);",
+    "node_modules/mytag/package.json": JSON.stringify({ name: "mytag", version: "1.0.0", main: "i.js", types: "i.d.ts" }),
+    "node_modules/mytag/i.d.ts": "export declare function mytag(s: TemplateStringsArray, ...v: unknown[]): string;",
+    "node_modules/mytag/i.js": "module.exports.mytag = (s) => s.join('');",
+    "src/db.ts": `import postgres from 'postgres';
+const sql = postgres(process.env.DB_URL);
+export function q(id: number) { return sql\`SELECT * FROM users WHERE id = \${id}\`; }`,
+    "src/tag.ts": `import { mytag } from 'mytag';
+export function unmodeledTag(x: number) { return mytag\`hi \${x}\`; }
+export function rawTag(x: number) { return String.raw\`hi \${x}\`; }`,
+  });
+  const { report } = scan(d);
+  check("tagged-template SQL client (postgres.js `sql`…``) → Db, not silent-pure",
+        (entry(report, "src.db.q")?.inferred ?? []).includes("Db"), JSON.stringify(entry(report, "src.db.q")));
+  check("an UNMODELED tagged template → κ-ledger `invisible` disclosure, never silent-pure",
+        (entry(report, "src.tag.unmodeledTag")?.invisible ?? []).includes("mytag"), JSON.stringify(entry(report, "src.tag.unmodeledTag")));
+  check("a builtin tag (`String.raw`) stays PURE (no fabrication)",
+        entry(report, "src.tag.rawTag") == null, JSON.stringify(entry(report, "src.tag.rawTag")));
+}
+
 // @types/X (DefinitelyTyped) maps to the RUNTIME package X so the curated κ tier (keyed by runtime names)
 // fires — a curated package typed via @types must NOT read silent-pure. Corpus find: `pool.query()` reported
 // pure because the decl resolved to `@types/pg` (not `pg`), so the pg→Db rule never matched. A real TS

@@ -2623,9 +2623,32 @@ function visitCalls(node) {
   if (ts.isTaggedTemplateExpression(node)) {
     const owner = enclosing(node);
     if (owner) {
+      const rec = fns.get(owner);
       const sig = checker.getResolvedSignature(node);
       const decl = sig && sig.declaration;
-      if (decl && declIsLocal(decl)) edgeToTargets(fns.get(owner), [decl]);
+      if (decl && declIsLocal(decl)) edgeToTargets(rec, [decl]);
+      else if (decl) {
+        // An EXTERNAL tag — a template-literal SQL client's `sql`…`` (postgres.js/@vercel/postgres/slonik),
+        // `String.raw`, etc. The CallExpression walk never visits this node, so classify it exactly as a regular
+        // external call: κ effect if modeled; otherwise the κ-ledger `invisible`/`blind` disclosure an unmodeled
+        // call gets (never silent-pure). A pure builtin tag (String.raw, from the TS lib, not node_modules) adds
+        // nothing — no fabrication.
+        const mod = declModule(decl);
+        const member = decl.name ? decl.name.getText() : "";
+        const eff = kappa(mod, member);
+        if (eff) { rec.direct.add(eff); if (eff === "Unknown") rec.why.add(`reflect:${mod.replace(/^node:/, "")}.${member}`); }
+        else {
+          const file = decl.getSourceFile().fileName;
+          const pkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
+          const declared = packageManifestEffects(file);
+          if (declared !== null) { for (const e of declared) rec.direct.add(e); }
+          else if (!mod.startsWith("<") && !kappaKnows(pkg) && !depCoveredPkgs.has(pkg)
+              && /node_modules\//.test(file) && !/node_modules\/(@types\/node|typescript)\//.test(file)) {
+            unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
+            rec.blind.add(pkg);
+          }
+        }
+      }
     }
   }
   ts.forEachChild(node, visitCalls);
