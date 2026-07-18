@@ -2317,6 +2317,41 @@ export function afterReassign() { return env.FOO; }`,
         !isEnv("src.reassign.afterReassign"), JSON.stringify(entry(report, "src.reassign.afterReassign")));
 }
 
+// ── EFFECT-POLYMORPHISM (the dotenv `populate` boundary): process.env aliased THROUGH a parameter into a leaf
+// that WRITES it is a real Env effect the leaf reads pure in isolation (its body has no lexical process.env).
+// Reconciled along the callgraph: a MUST-alias arg into a written parameter → Env (proven); a MAY-alias (a
+// reassignable union — dotenv's `let pe = process.env; if (opts.pe) pe = opts.pe`) → Unknown (possible, so
+// disclose, never fabricate Env). FABRICATION GUARD: a non-env arg, or a param only READ not written, stays
+// pure — the census shows this fires on ~1 leaf per corpus, not the benign argument-mutating majority. ──
+{
+  const d = project({
+    "src/must.ts": `function writeEnv(target: Record<string,string>) { target.FOO = "x"; }
+const env = process.env;
+export function callMust() { writeEnv(env); }`,
+    "src/may.ts": `function writeMay(target: Record<string,string>) { target.FOO = "x"; }
+export function callMay(opts: { pe?: Record<string,string> }) {
+  let pe = process.env;
+  if (opts.pe) pe = opts.pe;   // reassignable union → pe is only a MAY-alias of process.env
+  writeMay(pe);
+}`,
+    "src/neg.ts": `function writePlain(target: Record<string,string>) { target.FOO = "x"; }
+export function callPlain() { writePlain({}); }`,
+    "src/read.ts": `function readParam(src: Record<string,string>) { return src.FOO; }
+export function callRead() { return readParam(process.env); }`,
+  });
+  const { report } = scan(d);
+  const inf = (fn) => entry(report, fn)?.inferred ?? [];
+  check("param-write leaf called with a MUST env-alias → Env (proven env write through the parameter)",
+        inf("src.must.writeEnv").includes("Env"), JSON.stringify(entry(report, "src.must.writeEnv")));
+  check("param-write leaf called with a MAY env-alias (reassignable union) → Unknown, NOT fabricated Env",
+        inf("src.may.writeMay").includes("Unknown") && !inf("src.may.writeMay").includes("Env"),
+        JSON.stringify(entry(report, "src.may.writeMay")));
+  check("param-write leaf called with a NON-env object stays PURE (no over-disclosure — the 27:1 guard)",
+        entry(report, "src.neg.writePlain") == null, JSON.stringify(entry(report, "src.neg.writePlain")));
+  check("a leaf that only READS its parameter (no write) is NOT tainted by an env arg (stays pure)",
+        entry(report, "src.read.readParam") == null, JSON.stringify(entry(report, "src.read.readParam")));
+}
+
 // @types/X (DefinitelyTyped) maps to the RUNTIME package X so the curated κ tier (keyed by runtime names)
 // fires — a curated package typed via @types must NOT read silent-pure. Corpus find: `pool.query()` reported
 // pure because the decl resolved to `@types/pg` (not `pg`), so the pg→Db rule never matched. A real TS

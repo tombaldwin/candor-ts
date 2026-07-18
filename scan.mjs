@@ -1617,6 +1617,11 @@ const isProcessEnvExpr = (expr) =>
 // sources. A symbol lands here iff its ONLY initializer/assignment is `= process.env` (a reassignment
 // to anything else removes it → the alias is cleared, per the spec's reassignment rule).
 const envAliasSymbols = new Set();
+// MAY-alias: symbols that were EVER bound `= process.env`, INCLUDING ones later reassigned (a union like
+// dotenv's `let processEnv = process.env; if (opts.processEnv) processEnv = opts.processEnv`). A MUST-alias
+// (envAliasSymbols) is a proven env read → Env; a MAY-alias is only POSSIBLY env → the effect-polymorphism
+// pass (2c) discloses Unknown, never fabricates Env, for one passed into a written parameter.
+const envMayAliasSymbols = new Set();
 {
   const aliasCandidates = new Set();   // symbol -> declared `= process.env`
   const disqualified = new Set();      // symbol assigned to something that is NOT process.env
@@ -1649,6 +1654,7 @@ const envAliasSymbols = new Set();
   };
   for (const sf of sources) collectAliases(sf);
   for (const s of aliasCandidates) if (s && !disqualified.has(s)) envAliasSymbols.add(s);
+  for (const s of aliasCandidates) if (s) envMayAliasSymbols.add(s); // the MAY set: ever-bound `= process.env`
 }
 // True when `id` is an identifier resolving to a confirmed process.env alias local.
 const identIsEnvAlias = (id) => {
@@ -1658,6 +1664,12 @@ const identIsEnvAlias = (id) => {
 };
 // The receiver expression READS process.env — it is either `process.env` itself or a confirmed alias.
 const readsProcessEnv = (expr) => isProcessEnvExpr(expr) || identIsEnvAlias(expr);
+// MAY-read: process.env, a MUST-alias, or a MAY-alias (ever-bound to process.env but reassignable).
+const identIsEnvMayAlias = (id) => {
+  if (!id || !ts.isIdentifier(id)) return false;
+  const sym = checker.getSymbolAtLocation(id);
+  return !!sym && envMayAliasSymbols.has(sym);
+};
 
 // A bare-identifier call whose callee is DEFAULT- or NAMED-imported from a known HTTP-client package is a
 // Net call (corpus-audit #13). The κ table lists these packages, but its rule only fires on a MEMBER call
@@ -2576,6 +2588,64 @@ for (const [fnName, idxs] of paramInvokes) {
       rec.direct.add("Unknown");
       rec.why.add(`callback:param#${idx}`); // an opaque (or externally-callable) callback parameter
     }
+  }
+}
+
+// ---- pass 2c: the effect-polymorphism fix (process.env aliased THROUGH a parameter) ----------------
+// A leaf that writes `param[k] = v` is pure in isolation — mutating a caller's object is not an external
+// effect. But when a caller passes `process.env` (or a confirmed alias) INTO that parameter, the write lands
+// on the real environment, an Env effect. candor's per-fn syntactic classifier cannot see the alias at the
+// leaf, so it read the leaf pure — a genuine per-function false all-clear (found on the public corpus: dotenv's
+// `populate(processEnv, …)`, called by `config` with `let processEnv = process.env`). We reconcile it along the
+// callgraph, the same way pass 2b resolves callback parameters: collect the parameter positions a unit WRITES
+// as an object, and the argument positions a call SITE fills with an env read; where they meet, the callee IS
+// Env. Scoped to `process.env` — the one MUTABLE effectful global candor models as Env — so it fires on the
+// rare effect-polymorphic leaf (a corpus census: ~1 unit / 806 fns), NOT the benign argument-mutating majority.
+const paramObjWrites = new Map();  // fnQual -> Set(paramIndex): the unit writes `param[k]=v` on that parameter
+const envAliasArgs = new Map();    // calleeQual -> Map(argIndex -> "env"|"unknown"): a call passed process.env here
+const noteEnvArg = (callee, i, kind) => {
+  if (!envAliasArgs.has(callee)) envAliasArgs.set(callee, new Map());
+  const m = envAliasArgs.get(callee);
+  if (m.get(i) !== "env") m.set(i, kind); // a proven ("env") arg at this position wins over a merely-possible one
+};
+function scanEnvPoly(node) {
+  // (1) a write to a parameter object: `p.x = v` / `p[k] = v` where `p` is a formal parameter of THIS unit.
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && (ts.isPropertyAccessExpression(node.left) || ts.isElementAccessExpression(node.left))) {
+    const owner = enclosing(node);
+    if (owner) {
+      let root = node.left.expression;
+      while (ts.isPropertyAccessExpression(root) || ts.isElementAccessExpression(root)) root = root.expression;
+      if (ts.isIdentifier(root)) {
+        const d = realDecl(checker.getSymbolAtLocation(root));
+        if (d && ts.isParameter(d) && d.parent && nodeName.get(d.parent) === owner) {
+          const idx = d.parent.parameters.indexOf(d);
+          if (idx >= 0) { if (!paramObjWrites.has(owner)) paramObjWrites.set(owner, new Set()); paramObjWrites.get(owner).add(idx); }
+        }
+      }
+    }
+  }
+  // (2) a call passing `process.env` at argument i → record (callee unit, i, kind): a PROVEN env read
+  // (`process.env`/a MUST-alias) → "env"; a merely-possible one (a MAY-alias, reassignable union) → "unknown".
+  if (ts.isCallExpression(node)) {
+    const decl = checker.getResolvedSignature(node)?.declaration;
+    const callee = decl && nodeName.get(decl);
+    if (callee) node.arguments.forEach((arg, i) => {
+      if (readsProcessEnv(arg)) noteEnvArg(callee, i, "env");
+      else if (identIsEnvMayAlias(arg)) noteEnvArg(callee, i, "unknown");
+    });
+  }
+  ts.forEachChild(node, scanEnvPoly);
+}
+for (const sf of sources) scanEnvPoly(sf);
+for (const [fnName, writtenIdx] of paramObjWrites) {
+  const envIdx = envAliasArgs.get(fnName);
+  const rec = fns.get(fnName);
+  if (!envIdx || !rec) continue;
+  for (const i of writtenIdx) {
+    const kind = envIdx.get(i);
+    if (kind === "env") { rec.direct.add("Env"); rec.why.add(`env-alias-param#${i}`); }        // proven env write
+    else if (kind === "unknown") { rec.direct.add("Unknown"); rec.why.add(`env-maybe-param#${i}`); } // may-be env → disclose
   }
 }
 
