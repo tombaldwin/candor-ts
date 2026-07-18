@@ -1604,6 +1604,18 @@ const declImportsNodeProcess = (decl) => {
   return text === "node:process" || text === "process";
 };
 const identIsGlobalProcess = (id) => {
+  if (!id) return false;
+  // `globalThis.process` / `global.process` — the SAME process object reached off the global (isomorphic code:
+  // `globalThis.process?.env`, often `(globalThis as any).process.env`). Unwrap parens/`as` casts around the
+  // root; the `globalThis`/`global` root must be the ambient global, not a project shadow.
+  if (ts.isPropertyAccessExpression(id) && id.name.text === "process") {
+    let root = id.expression;
+    while (ts.isParenthesizedExpression(root) || ts.isAsExpression(root) || ts.isNonNullExpression(root)) root = root.expression;
+    if (ts.isIdentifier(root) && (root.text === "globalThis" || root.text === "global")) {
+      const gd = checker.getSymbolAtLocation(root)?.declarations ?? [];
+      return !gd.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+    }
+  }
   if (!ts.isIdentifier(id) || id.text !== "process") return false;
   const decls = checker.getSymbolAtLocation(id)?.declarations ?? [];
   if (decls.some(declImportsNodeProcess)) return true;                       // `import process from 'node:process'`

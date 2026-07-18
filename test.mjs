@@ -2513,6 +2513,28 @@ export function rawTag(x: number) { return String.raw\`hi \${x}\`; }`,
         entry(report, "src.tag.rawTag") == null, JSON.stringify(entry(report, "src.tag.rawTag")));
 }
 
+// ── `globalThis.process.env` / `global.process.env` — the SAME env object reached off the global (isomorphic
+// code, often `(globalThis as any).process.env`). Read AND write are Env; a project-local `globalThis` shadow or
+// an unrelated `obj.process.env` stays pure (no fabrication). ─────────────────────────────────────────────────
+{
+  const d = project({
+    "src/g.ts": `export function readGT() { return globalThis.process.env.HOME; }
+export function writeGT(k: string) { globalThis.process.env[k] = 'x'; }
+export function castGlobal() { return (global as any).process.env.HOME; }`,
+    "src/neg.ts": `const gt = { process: { env: { HOME: '/x' } } };
+export function shadowed() { const globalThis = gt; return globalThis.process.env.HOME; }
+export function unrelated(o: { process: { env: Record<string,string> } }) { return o.process.env.HOME; }`,
+  });
+  const { report } = scan(d);
+  const isEnv = (fn) => (entry(report, fn)?.inferred ?? []).includes("Env");
+  check("globalThis.process.env READ → Env", isEnv("src.g.readGT"), JSON.stringify(entry(report, "src.g.readGT")));
+  check("globalThis.process.env WRITE → Env", isEnv("src.g.writeGT"), JSON.stringify(entry(report, "src.g.writeGT")));
+  check("(global as any).process.env → Env (cast unwrapped)", isEnv("src.g.castGlobal"), JSON.stringify(entry(report, "src.g.castGlobal")));
+  check("GUARD: a project-local `globalThis` shadow does NOT fabricate Env, nor an unrelated `obj.process.env`",
+        entry(report, "src.neg.shadowed") == null && entry(report, "src.neg.unrelated") == null,
+        JSON.stringify([entry(report, "src.neg.shadowed"), entry(report, "src.neg.unrelated")]));
+}
+
 // @types/X (DefinitelyTyped) maps to the RUNTIME package X so the curated κ tier (keyed by runtime names)
 // fires — a curated package typed via @types must NOT read silent-pure. Corpus find: `pool.query()` reported
 // pure because the decl resolved to `@types/pg` (not `pg`), so the pg→Db rule never matched. A real TS
