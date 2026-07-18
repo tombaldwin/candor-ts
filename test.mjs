@@ -2456,6 +2456,32 @@ export function cloneObj(o: unknown) { return structuredClone(o); }`,
         JSON.stringify([entry(report, "src.neg.forInPlain"), entry(report, "src.neg.cloneObj")]));
 }
 
+// ── REFLECTIVE INVOKE of a κ-EFFECTFUL builtin — `fn.call`/`fn.apply`/`Reflect.apply(fn,…)` reach the invoked
+// function's effect (a corpus-probe find: these read silent-pure while `.bind`/alias/computed-member were caught).
+// The invoked ref is classified through the SAME κ table a direct call uses, so an EFFECTFUL builtin gets its
+// effect and a PURE builtin (`[].slice.call(args)`, `hasOwnProperty.call`) stays pure — no over-disclosure. ──
+{
+  const d = project({
+    "src/eff.js": `const fs = require('fs');
+module.exports.viaCall = (p) => fs.writeFileSync.call(null, p, 'x');
+module.exports.viaApply = (p) => fs.writeFileSync.apply(null, [p, 'x']);
+module.exports.viaReflect = (p) => Reflect.apply(fs.writeFileSync, null, [p, 'x']);`,
+    "src/pure.js": `module.exports.sliceCall = function() { return Array.prototype.slice.call(arguments); };
+module.exports.hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+module.exports.mapCall = (o) => Array.prototype.map.call(o, (x) => x);`,
+    "src/proj.js": `function doWrite(p) { require('fs').writeFileSync(p, 'x'); }
+module.exports.viaProjCall = (p) => doWrite.call(null, p);`,   // a PROJECT fn via .call → edge, effect propagates
+  });
+  const { report } = scan(d, "--allow-js");
+  const inf = (fn) => entry(report, fn)?.inferred ?? [];
+  for (const fn of ["src.eff.viaCall", "src.eff.viaApply", "src.eff.viaReflect"])
+    check(`reflective invoke of fs.writeFileSync (${fn.split(".").pop()}) → Fs`, inf(fn).includes("Fs"), JSON.stringify(entry(report, fn)));
+  check("reflective invoke of a PURE builtin (`[].slice.call`, `hasOwnProperty.call`, `[].map.call`) stays PURE — no over-disclosure",
+        entry(report, "src.pure.sliceCall") == null && entry(report, "src.pure.hasOwn") == null && entry(report, "src.pure.mapCall") == null,
+        JSON.stringify([entry(report, "src.pure.sliceCall"), entry(report, "src.pure.hasOwn"), entry(report, "src.pure.mapCall")]));
+  check("a PROJECT function invoked via `.call` still edges (its Fs propagates)", inf("src.proj.viaProjCall").includes("Fs"));
+}
+
 // @types/X (DefinitelyTyped) maps to the RUNTIME package X so the curated κ tier (keyed by runtime names)
 // fires — a curated package typed via @types must NOT read silent-pure. Corpus find: `pool.query()` reported
 // pure because the decl resolved to `@types/pg` (not `pg`), so the pg→Db rule never matched. A real TS

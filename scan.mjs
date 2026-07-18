@@ -1869,15 +1869,30 @@ function visitCalls(node) {
             // edge silent-pure. `resolveFnRefUnit` chases the initializer alias to the real fn.
             const t = (d2 && nodeName.get(d2)) || resolveFnRefUnit(invokedRef);
             if (t) rec.edges.add(t);
-            // HONESTY: the receiver IS a local variable/parameter (it resolved to a value declaration)
-            // but we could NOT pin it to a function unit — e.g. bound to a param, a reassigned/branched
-            // value, an `any`-typed holder. The `.call`/`.apply` still INVOKES whatever it holds, so a
-            // silent-pure verdict would be the cardinal sin. Disclose Unknown instead. (A direct fn
-            // identifier / known fn always resolves above, so this never fires for the precise forms; a
-            // non-value receiver — a type, a literal — resolves to no decl and stays out, no fabrication.)
-            else if (d2 && (ts.isVariableDeclaration(d2) || ts.isBindingElement(d2) || ts.isParameter(d2))) {
-              rec.direct.add("Unknown");
-              rec.why.add(`callback:${recvText.slice(0, 40)}.${m}`); // method on an indeterminate-valued receiver (no resolvable owner TYPE) — canonical `callback:`, not the frontier's `dispatch:OWNER.member`
+            else {
+              // Not a project unit — but the invoked reference may be a κ-modeled BUILTIN function
+              // (`fs.writeFileSync.call(…)` / `Reflect.apply(fs.writeFileSync, …)`): the reflective invoke reaches
+              // the SAME effect a direct call would. Classify the invoked function's DECLARATION through the same
+              // κ table (module + member), exactly as the (CLASSIFY) arm does. A PURE builtin — `[].slice.call`,
+              // `Array.prototype.map.call`, `Function.prototype.bind` — matches no κ rule and stays pure (no
+              // over-disclosure); an EFFECTFUL one (`fs.writeFileSync` → Fs, `dns.resolve` → Net) gets its effect.
+              const kMod = d2 && declModule(d2);
+              const kMember = d2?.name?.getText?.()
+                ?? (ts.isPropertyAccessExpression(invokedRef) ? invokedRef.name.text : ts.isIdentifier(invokedRef) ? invokedRef.text : null);
+              const kEff = kMod && kMember ? kappa(kMod, kMember) : null;
+              if (kEff) {
+                rec.direct.add(kEff);
+                if (kEff === "Unknown") rec.why.add(`reflect:${kMod.replace(/^node:/, "")}.${kMember}`);
+              }
+              // HONESTY: the receiver IS a local variable/parameter (a value declaration) that we could NOT pin
+              // to a function unit (bound to a param, a reassigned/branched value, an `any`-typed holder). The
+              // `.call`/`.apply` still INVOKES whatever it holds, so a silent-pure verdict would be the cardinal
+              // sin — disclose Unknown. (A direct fn identifier / known fn resolved above; a non-value receiver
+              // — a type, a literal — resolves to no decl and stays out, no fabrication.)
+              else if (d2 && (ts.isVariableDeclaration(d2) || ts.isBindingElement(d2) || ts.isParameter(d2))) {
+                rec.direct.add("Unknown");
+                rec.why.add(`callback:${recvText.slice(0, 40)}.${m}`); // method on an indeterminate-valued receiver (no resolvable owner TYPE) — canonical `callback:`, not the frontier's `dispatch:OWNER.member`
+              }
             }
           }
           // EXPLICIT iterator force: `it.next()` / `it.return()` / `it.throw()` on an OPAQUE iterator
