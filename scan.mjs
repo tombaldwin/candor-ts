@@ -1687,14 +1687,20 @@ const ENV_TOUCHING_BUILTIN = new Set([
   "Reflect.defineProperty", "Reflect.getOwnPropertyDescriptor",
   "JSON.stringify",
 ]);
-// True when `node` is a call to a global Object.*/Reflect.*/JSON.* builtin that reads/writes every key of an
-// object argument (so any env-object argument makes the enclosing fn Env). Guarded against a project shadow.
+// BARE-identifier global builtins that enumerate every key of an object argument (deep-clone reads them all).
+const ENV_TOUCHING_GLOBAL = new Set(["structuredClone"]);
+const identIsGlobal = (id) => // an identifier that is the ambient global (no project-local declaration shadows it)
+  !(checker.getSymbolAtLocation(id)?.declarations ?? []).some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+// True when `node` is a call to a global builtin that reads/writes every key of an object argument (so any
+// env-object argument makes the enclosing fn Env): `Object.*`/`Reflect.*`/`JSON.stringify` (member) or
+// `structuredClone` (bare). Guarded against a project-local shadow of the callee.
 const envTouchingBuiltinCall = (node) => {
-  if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) return false;
-  const pa = node.expression;
-  if (!ts.isIdentifier(pa.expression) || !ENV_TOUCHING_BUILTIN.has(`${pa.expression.text}.${pa.name.text}`)) return false;
-  const decls = checker.getSymbolAtLocation(pa.expression)?.declarations ?? [];
-  return !decls.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName))); // the ambient global, not a shadow
+  if (!ts.isCallExpression(node)) return false;
+  const c = node.expression;
+  if (ts.isPropertyAccessExpression(c) && ts.isIdentifier(c.expression))
+    return ENV_TOUCHING_BUILTIN.has(`${c.expression.text}.${c.name.text}`) && identIsGlobal(c.expression);
+  if (ts.isIdentifier(c)) return ENV_TOUCHING_GLOBAL.has(c.text) && identIsGlobal(c);
+  return false;
 };
 
 // A bare-identifier call whose callee is DEFAULT- or NAMED-imported from a known HTTP-client package is a
@@ -2306,8 +2312,12 @@ function visitCalls(node) {
       markEnv();
     }
     // `Object.assign(process.env, …)` / `Object.keys(env)` / `Reflect.set(process.env, …)` / `JSON.stringify(env)`
-    // — a builtin that reads/writes every key of an env-object argument. Any such argument being env → Env.
+    // / `structuredClone(env)` — a builtin that reads/writes every key of an env-object argument.
     else if (envTouchingBuiltinCall(node) && node.arguments.some((a) => readsProcessEnv(a))) {
+      markEnv();
+    }
+    // `for (const k in process.env)` — the for-in loop enumerates every key of the environment.
+    else if (ts.isForInStatement(node) && readsProcessEnv(node.expression)) {
       markEnv();
     }
   }
@@ -2734,6 +2744,8 @@ const scanEnvWrites = (node) => {
     for (const a of node.arguments) { const r = ts.isIdentifier(a) ? checker.getSymbolAtLocation(a) : null; if (r && envFed.has(r)) { flagEnvWrite(node, r); break; } }
   } else if ((ts.isSpreadAssignment(node) || ts.isSpreadElement(node)) && ts.isIdentifier(node.expression)) {
     const r = checker.getSymbolAtLocation(node.expression); if (r && envFed.has(r)) flagEnvWrite(node, r); // `{...envFedParam}`
+  } else if (ts.isForInStatement(node) && ts.isIdentifier(node.expression)) {
+    const r = checker.getSymbolAtLocation(node.expression); if (r && envFed.has(r)) flagEnvWrite(node, r); // `for (k in envFedParam)`
   }
   ts.forEachChild(node, scanEnvWrites);
 };

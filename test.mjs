@@ -2435,6 +2435,27 @@ export function shadowed() { const Object = Shadow; return Object.assign(process
         entry(report, "src.shadow.shadowed") == null, JSON.stringify(entry(report, "src.shadow.shadowed")));
 }
 
+// ── the same whole-env class via for-in and the `structuredClone` bare global (a further corpus-probe pass). ──
+{
+  const d = project({
+    "src/fi.ts": `export function forInEnv() { let n = 0; for (const k in process.env) n++; return n; }
+export function cloneEnv() { return structuredClone(process.env); }`,
+    "src/thru.ts": `function iter(t: Record<string,string>) { let n = 0; for (const k in t) n++; return n; }
+const env = process.env;
+export function go() { return iter(env); }`,
+    "src/neg.ts": `export function forInPlain(o: Record<string,string>) { let n = 0; for (const k in o) n++; return n; }
+export function cloneObj(o: unknown) { return structuredClone(o); }`,
+  });
+  const { report } = scan(d);
+  const isEnv = (fn) => (entry(report, fn)?.inferred ?? []).includes("Env");
+  check("for-in over process.env → Env (`for (k in process.env)` enumerates every key)", isEnv("src.fi.forInEnv"));
+  check("structuredClone(process.env) → Env (deep-clone reads every key; bare global builtin)", isEnv("src.fi.cloneEnv"));
+  check("for-in over an env-fed PARAMETER → Env (through the pass-2c env-fed analysis)", isEnv("src.thru.iter"));
+  check("GUARD: for-in / structuredClone over a NON-env object stays PURE (no fabrication)",
+        entry(report, "src.neg.forInPlain") == null && entry(report, "src.neg.cloneObj") == null,
+        JSON.stringify([entry(report, "src.neg.forInPlain"), entry(report, "src.neg.cloneObj")]));
+}
+
 // @types/X (DefinitelyTyped) maps to the RUNTIME package X so the curated κ tier (keyed by runtime names)
 // fires — a curated package typed via @types must NOT read silent-pure. Corpus find: `pool.query()` reported
 // pure because the decl resolved to `@types/pg` (not `pg`), so the pg→Db rule never matched. A real TS

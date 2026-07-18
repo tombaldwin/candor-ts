@@ -95,6 +95,15 @@ try {
     has(t, k) { return traced("Env", t, () => k in t, []); },
     ownKeys(t) { return traced("Env", t, () => Reflect.ownKeys(t), []); },
     getOwnPropertyDescriptor(t, k) { return traced("Env", t, () => Reflect.getOwnPropertyDescriptor(t, k), []); },
+    // A process.env WRITE is Env too, and a get/read-only trap misses the mutation forms that DON'T route through
+    // [[Get]]/[[GetOwnProperty]]: `Object.defineProperty(process.env, …)` reaches the proxy's defineProperty trap,
+    // never getOwnPropertyDescriptor. Trap set/defineProperty/deleteProperty so the oracle WITNESSES every env
+    // mutation the classifier flags (`process.env[k]=v`, `Object.assign`/`Object.defineProperty`/`Reflect.*`,
+    // `delete process.env[k]`) — aligning the two on the write forms. String keys only (env vars are string-keyed;
+    // a symbol key is Node-internal, not an env var). The mutation is performed on the RAW target, so no re-trap.
+    set(t, k, v) { if (typeof k === "string") return traced("Env", t, () => { t[k] = v; return true; }, []); t[k] = v; return true; },
+    defineProperty(t, k, d) { if (typeof k === "string") return traced("Env", t, () => { Object.defineProperty(t, k, d); return true; }, []); Object.defineProperty(t, k, d); return true; },
+    deleteProperty(t, k) { if (typeof k === "string") return traced("Env", t, () => { delete t[k]; return true; }, []); delete t[k]; return true; },
   });
   Object.defineProperty(process, "env", { value: proxied, configurable: true });
 } catch { /* process.env not reconfigurable — Env capture unavailable, disclosed by absence */ }
