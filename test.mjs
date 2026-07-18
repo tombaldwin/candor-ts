@@ -3282,6 +3282,33 @@ export function dispatch(b: Base): void { b.m(); }`;
         JSON.stringify(overD));
 }
 
+// ── R32: node:stream provided method → the subclass's `_write`/`_read` override ────────────────────
+// A Writable's public `.write()`/`.end()` drive the user's `_write` INSIDE node core (invisible), so a
+// custom effectful stream reached only via the public API read silent-pure. The fix edges the driver to
+// the local override. resolve-or-skip: an inert override / a non-stream class / a std stream adds nothing.
+{
+  const d = project({
+    "src/s.ts": `import { Writable, Readable } from "stream";
+import * as fs from "fs";
+class FileSink extends Writable { _write(c: any, e: string, cb: () => void) { fs.writeFileSync("/tmp/x", c); cb(); } }
+export function viaWrite(s: FileSink) { s.write("d"); }
+export function viaEnd(s: FileSink) { s.end("d"); }
+class FeedReader extends Readable { _read() { fs.readFileSync("/tmp/x"); } }
+export function viaRead(r: FeedReader) { r.read(); }
+class InertSink extends Writable { _write(c: any, e: string, cb: () => void) { const x = 1; } }
+export function viaInert(s: InertSink) { s.write("d"); }
+class Logger { write(s: string) {} _write(x: any) { fs.writeFileSync("/tmp/z", x); } }
+export function viaLogger(l: Logger) { l.write("x"); }`,
+  });
+  const { report } = scan(d);
+  const inf = (fn) => (report.functions.find((e) => e.fn === fn)?.inferred) ?? [];
+  check("node stream .write() drives the local _write override (Fs recovered)", inf("src.s.viaWrite").includes("Fs"), JSON.stringify(inf("src.s.viaWrite")));
+  check("node stream .end() drives _write too", inf("src.s.viaEnd").includes("Fs"), JSON.stringify(inf("src.s.viaEnd")));
+  check("node stream .read() drives the local _read override", inf("src.s.viaRead").includes("Fs"), JSON.stringify(inf("src.s.viaRead")));
+  check("an INERT _write is not fabricated onto the .write() caller", !inf("src.s.viaInert").includes("Fs"), JSON.stringify(inf("src.s.viaInert")));
+  check("a non-stream class with a write() method gets NO _write edge", !inf("src.s.viaLogger").includes("Fs"), JSON.stringify(inf("src.s.viaLogger")));
+}
+
 // ── Object.assign getter enumeration: copying a source's props invokes its getters ─────────────────
 // `Object.assign(t, src)` reads every own enumerable prop of src — an effectful getter RUNS (the
 // object-spread twin). Both recordAccessorHit branches pinned: a CLASS-typed source's getter is a

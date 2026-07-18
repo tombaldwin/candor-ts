@@ -793,6 +793,64 @@ function classInSubtree(cls, root) {
   }
   return false;
 }
+// node:stream PROVIDED-method → the subclass's `_`-prefixed impl override (R32 — the node sibling of
+// the Writer/Reader vein). A Writable's public `.write()`/`.end()` drive the user's `_write`/`_writev`/
+// `_final`/`_transform`/`_flush`; a Readable's `.read()` drives `_read` — INSIDE node core (invisible),
+// so a CUSTOM effectful stream impl reached ONLY via the public API read silent-pure. The base is matched
+// SYNTACTICALLY (a canonical stream-base name that is NOT a local class), so it resolves WITHOUT
+// @types/node installed; a local `class Writable` shadows (never a false positive on project code).
+const STREAM_BASES = new Set(["Writable", "Readable", "Duplex", "Transform", "PassThrough"]);
+const STREAM_WRITE_DRIVERS = new Set(["write", "end"]);
+const STREAM_READ_DRIVERS = new Set(["read"]);
+const STREAM_WRITE_IMPL = ["_write", "_writev", "_final", "_transform", "_flush"];
+const STREAM_READ_IMPL = ["_read"];
+function classExtendsNodeStream(cls) {
+  let cur = cls, guard = 0;
+  while (cur && guard++ < 64) {
+    for (const h of cur.heritageClauses ?? []) {
+      if (h.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+      const t = h.types?.[0];
+      const expr = t?.expression;
+      if (!expr) continue;
+      const baseName = ts.isIdentifier(expr) ? expr.text
+        : ts.isPropertyAccessExpression(expr) ? expr.name.text : null; // `stream.Writable`
+      if (baseName && STREAM_BASES.has(baseName)) {
+        let sym = checker.getSymbolAtLocation(expr);
+        if (sym && sym.flags & ts.SymbolFlags.Alias) { try { sym = checker.getAliasedSymbol(sym); } catch { /* keep */ } }
+        const localDecl = (sym?.declarations ?? []).find((d) =>
+          ts.isClassDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+        if (!localDecl) return true; // an EXTERNAL stream base of a canonical name — a project class of that name shadows
+      }
+    }
+    cur = localBaseClassOf(cur); // climb LOCAL bases; the external stream base is caught above
+  }
+  return false;
+}
+// The local `_write`/`_read`/… override unit(s) a node-stream driver method reaches on `recv`'s class,
+// or [] (a non-stream receiver, an external stream, or no local override → contributes nothing).
+function streamImplOverrides(recv, method) {
+  const wantWrite = STREAM_WRITE_DRIVERS.has(method);
+  const wantRead = STREAM_READ_DRIVERS.has(method);
+  if (!wantWrite && !wantRead) return [];
+  const rt = checker.getTypeAtLocation(recv);
+  const cls = (rt?.symbol?.declarations ?? []).find((d) =>
+    ts.isClassDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+  if (!cls || !classExtendsNodeStream(cls)) return [];
+  const want = wantWrite ? STREAM_WRITE_IMPL : STREAM_READ_IMPL;
+  const out = [];
+  let cur = cls, guard = 0;
+  while (cur && guard++ < 64) {
+    for (const mem of cur.members ?? []) {
+      if ((ts.isMethodDeclaration(mem) || ts.isPropertyDeclaration(mem)) && mem.name
+          && want.includes(mem.name.getText())) {
+        const un = nodeName.get(mem);
+        if (un) out.push(un);
+      }
+    }
+    cur = localBaseClassOf(cur);
+  }
+  return out;
+}
 function moduleOf(sf) {
   const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?[tj]sx?$/, "");
   return rel.split(path.sep).join(".");
@@ -1869,6 +1927,10 @@ function visitCalls(node) {
           const m = node.expression.name.text;
           const recv = node.expression.expression;
           const recvText = recv.getText().replace(/\s+/g, "");
+          // R32 — a node:stream driver (`s.write()`/`s.end()`/`s.read()`) on a CONCRETE local stream
+          // subclass drives its `_write`/`_read`/… override, invisibly inside node core. Edge to the local
+          // override (resolve-or-skip: a non-stream receiver / external stream / pure override adds nothing).
+          for (const un of streamImplOverrides(recv, m)) rec.edges.add(un);
           let invokedRef = null;
           if ((m === "call" || m === "apply") && recvText !== "Reflect") invokedRef = recv;
           else if (recvText === "Reflect" && (m === "apply" || m === "construct"))
