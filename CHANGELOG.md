@@ -6,6 +6,17 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.22.0] — 2026-07-18
+
+Spec floor → **0.22** (the `verify` oracle rung; report/verdict schema unchanged from 0.21). candor-ts folds in
+the **effect-polymorphism fix** (`scan.mjs` pass 2c): `process.env` aliased through a parameter into a helper that
+writes it — e.g. dotenv's `populate(processEnv){ processEnv[k]=v }`, called by `config` with
+`let processEnv = process.env` — is no longer read silently pure. Reconciled along the callgraph: a **must**-alias
+argument into a written parameter yields `Env`; a reassignable **may**-alias yields `Unknown` (disclosed, never
+fabricated). Scoped to `process.env`; a corpus census showed the two conditions coincide on ~1 leaf per 806
+functions, so the benign argument-mutating majority is untouched. Found on the public corpus (dotenv). ⚠ may add
+`Env`/`Unknown` to a function previously reported pure.
+
 ## [0.19.0] — 2026-07-17
 
 Reason-scoped `Unknown` policies (SPEC §6.2): `deny E Unknown[reflect,dispatch,indirect,native,unresolved,setup]`

@@ -433,7 +433,7 @@ export function place(db: DatabaseSync): void { save(db); }`,
   check("--gate-json + violation still exits 1", r.status === 1, `status=${r.status}`);
   let v = null;
   try { v = JSON.parse(fs.readFileSync(gp, "utf8")); } catch { /* null → checks fail with raw */ }
-  check("--gate-json verdict declares spec 0.21", v?.spec === "0.21", JSON.stringify(v)?.slice(0, 120));
+  check("--gate-json verdict declares spec 0.22", v?.spec === "0.22", JSON.stringify(v)?.slice(0, 120));
   check("--gate-json verdict ok:false on a failing gate", v?.ok === false, `ok=${v?.ok}`);
   const viol = v?.violations?.find((x) => x.fn === "src.domain.place");
   check("--gate-json names the violating fn with its rule", viol?.rule === "AS-EFF-006", JSON.stringify(v?.violations)?.slice(0, 160));
@@ -487,14 +487,14 @@ export function save(db: DatabaseSync): void { poke(); db.exec("UPDATE customers
         good.r.status === 0 && good.v?.ok === true && good.v.violations.length === 0
           && JSON.stringify(good.v.coverage) === JSON.stringify({ uncovered: 1, packages: ["blinddep"] }),
         `status=${good.r.status} ${JSON.stringify(good.v)}`);
-  // ⟨0.21⟩ the completeness manifest inserts `analyzed:{count}` after `ok` (mirrors the java reference
+  // ⟨0.22⟩ the completeness manifest inserts `analyzed:{count}` after `ok` (mirrors the java reference
   // verdict order + the report envelope); the pinned spec/ok/…/violations/coverage order is otherwise intact.
   check("⟨0.15⟩ gate advisory: field ORDER preserves the pinned verdict fields first (spec, ok, analyzed, violations)",
         JSON.stringify(Object.keys(bad.v ?? {})) === JSON.stringify(["spec", "ok", "analyzed", "violations", "coverage"]),
         JSON.stringify(Object.keys(bad.v ?? {})));
 }
 
-// ── 3c3. ⟨0.21⟩ COMPLETENESS MANIFEST: analyzed universe + fail-closed gate over unparsed source ─────
+// ── 3c3. ⟨0.22⟩ COMPLETENESS MANIFEST: analyzed universe + fail-closed gate over unparsed source ─────
 // The tier-1 rung ported from the java reference: (a) `analyzed:{count,digest}` counts the WHOLE analyzed
 // universe (pure leaves included), so a consumer computes the pure count = analyzed.count − |functions|;
 // (b) a syntactically-broken .ts is disclosed in the report's `unanalyzed` (was stderr-only); (c) a
@@ -511,42 +511,42 @@ export async function fetchIt(u: string): Promise<Response> { return fetch(u); }
   // (a) the analyzed universe includes the pure fn the report omits.
   const { r: bareR } = scan(d, "--json");
   const env = JSON.parse(bareR.stdout);
-  check("⟨0.21⟩ analyzed.count > |functions| (pure fn is analyzed but omitted from the report)",
+  check("⟨0.22⟩ analyzed.count > |functions| (pure fn is analyzed but omitted from the report)",
         env.analyzed?.count > env.functions.length && env.analyzed.count - env.functions.length >= 1,
         `count=${env.analyzed?.count} |functions|=${env.functions.length}`);
-  check("⟨0.21⟩ analyzed.digest is 16 lowercase hex chars",
+  check("⟨0.22⟩ analyzed.digest is 16 lowercase hex chars",
         /^[0-9a-f]{16}$/.test(env.analyzed?.digest ?? ""), env.analyzed?.digest);
   // (b) the broken source is machine-legible in `unanalyzed`.
-  check("⟨0.21⟩ a syntactically-broken .ts is disclosed in the report's `unanalyzed`",
+  check("⟨0.22⟩ a syntactically-broken .ts is disclosed in the report's `unanalyzed`",
         Array.isArray(env.unanalyzed) && env.unanalyzed.length === 1
           && env.unanalyzed[0].path.includes("broken") && env.unanalyzed[0].reason === "source failed to parse",
         JSON.stringify(env.unanalyzed));
-  check("⟨0.21⟩ a BARE scan over unparsed source still exits 0 (disclosure, not a gate)", bareR.status === 0,
+  check("⟨0.22⟩ a BARE scan over unparsed source still exits 0 (disclosure, not a gate)", bareR.status === 0,
         `status=${bareR.status}`);
   // (d) the digest is stable across a same-input re-scan.
   const env2 = JSON.parse(scan(d, "--json").r.stdout);
-  check("⟨0.21⟩ the analyzed-set digest is stable across a same-input re-scan",
+  check("⟨0.22⟩ the analyzed-set digest is stable across a same-input re-scan",
         env.analyzed.digest === env2.analyzed.digest, `${env.analyzed.digest} vs ${env2.analyzed.digest}`);
   // (c) a CONFIGURED gate with NO real violation cannot certify → exit 2, verdict incomplete.
   const gp = path.join(d, "v.json");
   const gated = spawnSync("node", [path.join(HERE, "scan.mjs"), d,
     "--policy", path.join(d, "deny-db.policy"), "--gate-json", gp], { encoding: "utf8" });
   const v = JSON.parse(fs.readFileSync(gp, "utf8"));
-  check("⟨0.21⟩ a gate over unparsed source cannot be green → exit 2 (could-not-evaluate)",
+  check("⟨0.22⟩ a gate over unparsed source cannot be green → exit 2 (could-not-evaluate)",
         gated.status === 2, `status=${gated.status}`);
-  check("⟨0.21⟩ the verdict is {ok:false, incomplete:true, unanalyzed:[…]} (a machine learns WHY)",
+  check("⟨0.22⟩ the verdict is {ok:false, incomplete:true, unanalyzed:[…]} (a machine learns WHY)",
         v.ok === false && v.incomplete === true && Array.isArray(v.unanalyzed) && v.unanalyzed.length === 1
           && v.unanalyzed[0].path.includes("broken"), JSON.stringify(v));
-  check("⟨0.21⟩ the verdict mirrors the report's analyzed:{count}",
+  check("⟨0.22⟩ the verdict mirrors the report's analyzed:{count}",
         v.analyzed?.count === env.analyzed.count, JSON.stringify(v.analyzed));
   // (c-cont) a real violation still DOMINATES (exit 1) and the incompleteness is still disclosed.
   const gp2 = path.join(d, "v2.json");
   const gated2 = spawnSync("node", [path.join(HERE, "scan.mjs"), d,
     "--policy", path.join(d, "deny-net.policy"), "--gate-json", gp2], { encoding: "utf8" });
   const v2 = JSON.parse(fs.readFileSync(gp2, "utf8"));
-  check("⟨0.21⟩ a real violation outranks the incompleteness (exit 1)", gated2.status === 1,
+  check("⟨0.22⟩ a real violation outranks the incompleteness (exit 1)", gated2.status === 1,
         `status=${gated2.status}`);
-  check("⟨0.21⟩ the incompleteness is still disclosed on a violating run",
+  check("⟨0.22⟩ the incompleteness is still disclosed on a violating run",
         v2.ok === false && v2.incomplete === true && v2.violations.length >= 1, JSON.stringify(v2).slice(0, 160));
 }
 
@@ -608,9 +608,9 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
 // ── 3f. diff/gains disclose a producing-build mismatch (§2.1 — baseline-invalidation) ──────────────
 {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-basever-"));
-  fs.writeFileSync(path.join(d, "cur.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.21" },
+  fs.writeFileSync(path.join(d, "cur.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.22" },
     functions: [{ fn: "a.leaf", inferred: ["Net", "Log"], direct: ["Net", "Log"] }] }));
-  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.21" },
+  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.22" },
     functions: [{ fn: "a.leaf", inferred: ["Net"], direct: ["Net"] }] }));
   const r = spawnSync("node", [path.join(HERE, "query.mjs"), "diff", path.join(d, "cur"), path.join(d, "base"), "--json"], { encoding: "utf8" });
   const out = JSON.parse(r.stdout);
@@ -619,7 +619,7 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
   check("diff still reports the drift (disclosure, not suppression)", out.changes.length === 1 && out.changes[0].gained.includes("Log"), JSON.stringify(out.changes));
   check("the mismatch note is on stderr", r.stderr.includes("baseline-invalidating") && r.stderr.includes("aaaaaaa"), r.stderr.slice(0, 160));
   // same-build → no note
-  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.21" },
+  fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.22" },
     functions: [{ fn: "a.leaf", inferred: ["Net"], direct: ["Net"] }] }));
   const r2 = spawnSync("node", [path.join(HERE, "query.mjs"), "diff", path.join(d, "cur"), path.join(d, "base"), "--json"], { encoding: "utf8" });
   check("same producing build → no mismatch note", !r2.stderr.includes("⚠"), r2.stderr.slice(0, 120));
@@ -1632,7 +1632,7 @@ export function go(): string { fsm.readFileSync("/x"); chunk("ab"); return pad("
 export function covered(): Buffer { return fsm.readFileSync("/x"); }`,
   });
   const { report } = scan(d);
-  // ⟨0.21⟩ the completeness manifest ALWAYS appends `analyzed:{count,digest}`; a fully-covered/complete
+  // ⟨0.22⟩ the completeness manifest ALWAYS appends `analyzed:{count,digest}`; a fully-covered/complete
   // scan still omits `coverage` and `unanalyzed` (both empty), so the wire stays byte-compatible bar the
   // additive `analyzed` sibling.
   check("⟨0.15⟩ a fully-covered scan OMITS the coverage envelope key entirely",
@@ -2542,7 +2542,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-cliarms-"));
   const eqJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-  const rep = (fns) => JSON.stringify({ candor: { version: "ttttttt", spec: "0.21" }, functions: fns });
+  const rep = (fns) => JSON.stringify({ candor: { version: "ttttttt", spec: "0.22" }, functions: fns });
   fs.writeFileSync(path.join(d, "r.json"), rep([
     { fn: "app.db.save", inferred: ["Db"], direct: ["Db"], loc: "db.ts:1", tables: ["orders"] },
     { fn: "app.web.handler", inferred: ["Db"], direct: [], entryPoint: true, loc: "web.ts:1" },
@@ -2705,9 +2705,9 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
         `status=${pthNJ.status} ${pthNJ.stdout.slice(0, 160)}`);
 
   // gains: the supply-chain alarm + the §2.1 version-skew disclosure
-  fs.writeFileSync(path.join(d, "oldbase.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.21" },
+  fs.writeFileSync(path.join(d, "oldbase.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.22" },
     functions: [{ fn: "app.db.save", inferred: ["Db"], direct: ["Db"] }] }));
-  fs.writeFileSync(path.join(d, "cur2.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.21" },
+  fs.writeFileSync(path.join(d, "cur2.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.22" },
     functions: [{ fn: "app.db.save", inferred: ["Db", "Exec"], direct: ["Db", "Exec"] }] }));
   const g = runQuery("gains", path.join(d, "cur2"), path.join(d, "oldbase"));
   const gJ = JSON.parse(g.stdout);
@@ -2717,7 +2717,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
         `status=${g.status} ${g.stdout.slice(0, 160)}`);
   check("CLI gains: a producing-build mismatch is DISCLOSED on stderr (reclassify vs regression ambiguity)",
         /⚠/.test(g.stderr) && /reclassifying/.test(g.stderr), g.stderr.slice(0, 160));
-  fs.writeFileSync(path.join(d, "samebase.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.21" },
+  fs.writeFileSync(path.join(d, "samebase.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.22" },
     functions: [{ fn: "app.db.save", inferred: ["Db"], direct: ["Db"] }] }));
   const g2 = runQuery("gains", path.join(d, "cur2"), path.join(d, "samebase"));
   check("CLI gains: same producing build → no mismatch note", g2.status === 0 && !/⚠/.test(g2.stderr),
@@ -2726,10 +2726,10 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   // ⟨spec 0.12 staged⟩ byFunction[].origin, keyed on the BASELINE CALLGRAPH (reports omit pure fns, §2):
   // a baseline-pure fn that now does Net is "existing" (the supply-chain attack signal, a different alarm
   // from a "new" fn); no baseline callgraph at all → "unknown" (undecidable, disclosed not guessed).
-  fs.writeFileSync(path.join(d, "obase.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.21" },
+  fs.writeFileSync(path.join(d, "obase.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.22" },
     functions: [{ fn: "m.g", inferred: ["Fs"], direct: ["Fs"] }] }));
   fs.writeFileSync(path.join(d, "obase.callgraph.json"), JSON.stringify({ "m.f": ["m.g"], "m.g": [] }));
-  fs.writeFileSync(path.join(d, "ocur.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.21" },
+  fs.writeFileSync(path.join(d, "ocur.json"), JSON.stringify({ candor: { version: "ccccccc", spec: "0.22" },
     functions: [{ fn: "m.f", inferred: ["Net"], direct: ["Net"] }, { fn: "m.g", inferred: ["Fs"], direct: ["Fs"] },
                 { fn: "m.h", inferred: ["Net"], direct: ["Net"] }] }));
   const originOf = (j, fn) => j.byFunction.find((x) => x.fn === fn)?.origin;
@@ -2760,10 +2760,10 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
   // envelope rides along + a name-level `coverageDelta` vs the baseline; every OTHER field (gained /
   // byFunction / provenance) is unchanged by it, and a coverage-free comparison stays byte-identical
   // to the ⟨0.14⟩ shape (no key at all — the checks above already parse those outputs strictly).
-  fs.writeFileSync(path.join(d, "covcur.json"), JSON.stringify({ candor: { version: "ddddddd", spec: "0.21" },
+  fs.writeFileSync(path.join(d, "covcur.json"), JSON.stringify({ candor: { version: "ddddddd", spec: "0.22" },
     functions: [{ fn: "m.f", inferred: ["Net"], direct: ["Net"] }],
     coverage: { uncovered: [{ name: "blinddep", calls: 2 }] } }));
-  fs.writeFileSync(path.join(d, "covbase.json"), JSON.stringify({ candor: { version: "ddddddd", spec: "0.21" },
+  fs.writeFileSync(path.join(d, "covbase.json"), JSON.stringify({ candor: { version: "ddddddd", spec: "0.22" },
     functions: [] }));
   const gCov = JSON.parse(runQuery("gains", path.join(d, "covcur"), path.join(d, "covbase")).stdout);
   check("⟨0.15⟩ CLI gains: the CURRENT report's coverage envelope rides along (uncovered dep named)",
@@ -2908,7 +2908,7 @@ export { Settings };`,
   // effectful fns Unknown → a qualified warning naming the count + `candor blindspots`; a clean graph is
   // unchanged. (Same gate the scan opener uses in surface.mjs.)
   const munk = `${d}/munk`; fs.mkdirSync(`${munk}/.candor`, { recursive: true });
-  fs.writeFileSync(`${munk}/.candor/report.json`, JSON.stringify({ candor: { version: "t", toolchain: "node", spec: "0.21" },
+  fs.writeFileSync(`${munk}/.candor/report.json`, JSON.stringify({ candor: { version: "t", toolchain: "node", spec: "0.22" },
     functions: [ { fn: "a.loadA", inferred: ["Unknown"], unknownWhy: ["callback:x"] },
                  { fn: "a.loadB", inferred: ["Unknown"], unknownWhy: ["callback:y"] },
                  { fn: "db.query", inferred: ["Fs"], direct: ["Fs"] } ] }));
@@ -2917,7 +2917,7 @@ export { Settings };`,
         !/nothing hidden/.test(mt.stdout) && /are Unknown/.test(mt.stdout) && /blindspots/.test(mt.stdout),
         mt.stdout.slice(0, 180));
   const clean = `${d}/clean`; fs.mkdirSync(`${clean}/.candor`, { recursive: true });
-  fs.writeFileSync(`${clean}/.candor/report.json`, JSON.stringify({ candor: { version: "t", toolchain: "node", spec: "0.21" },
+  fs.writeFileSync(`${clean}/.candor/report.json`, JSON.stringify({ candor: { version: "t", toolchain: "node", spec: "0.22" },
     functions: [ { fn: "svc.now", inferred: ["Clock"], direct: ["Clock"] } ] }));
   const ct = runQuery("tour", "--report", clean);
   check("#1 tour: a clean effectful graph (no Unknown) still says 'nothing hidden'",
@@ -2936,7 +2936,7 @@ export { Settings };`,
 // exercised argless in CLI-10.
 {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-missarg-"));
-  fs.writeFileSync(path.join(d, "r.json"), JSON.stringify({ candor: { version: "ttttttt", spec: "0.21" },
+  fs.writeFileSync(path.join(d, "r.json"), JSON.stringify({ candor: { version: "ttttttt", spec: "0.22" },
     functions: [{ fn: "app.db.save", inferred: ["Db"], direct: ["Db"], loc: "db.ts:1" }] }));
   fs.writeFileSync(path.join(d, "r.callgraph.json"), JSON.stringify({ "app.db.save": [] }));
   const P = path.join(d, "r");
@@ -3397,13 +3397,13 @@ export function z(): void { readFileSync("/etc/z"); }`;
 
 // ── doc drift gates (TESTING.md §9): the family phrases the docs must carry ────────────────────────
 // README/AGENTS are load-bearing self-descriptions: they must state the CURRENT spec contract
-// ("spec 0.21", no stale generation strings — AGENTS.md shipped "spec 0.7" examples a full generation
+// ("spec 0.22", no stale generation strings — AGENTS.md shipped "spec 0.7" examples a full generation
 // after the 0.8 roll) and, wherever they lean on the reference engine, attribute it (candor-java IS
 // the reference — the family ruling the baseline/pure semantics cite).
 {
   for (const f of ["README.md", "AGENTS.md"]) {
     const doc = fs.readFileSync(path.join(HERE, f), "utf8");
-    check(`${f} states the current spec contract (spec 0.21)`, doc.includes("spec 0.21"));
+    check(`${f} states the current spec contract (spec 0.22)`, doc.includes("spec 0.22"));
     const stale = doc.match(/spec 0\.[0-7]\b|spec 0\.9\b|spec 0\.1[0-5]\b/g) ?? [];
     check(`${f} carries no stale spec-generation string`, stale.length === 0, JSON.stringify(stale));
     const refLines = doc.split("\n").filter((l) => /reference engine/i.test(l));
