@@ -168,8 +168,14 @@ export const KAPPA_RULES = [
   // builders; `createQueryBuilder` is pure, its `getMany`/`execute` is the I/O). Found on the
   // first framework-APP scan: a TypeORM/Nest application — Db-heavy by construction — read zero
   // Db because the ORM resolved into an unlisted package (the JVM's Spring-Data lesson, replayed).
+  // The verb set is the QUERY surface PLUS the DataSource lifecycle that performs connection/DDL I/O:
+  // `initialize`/`connect` OPEN the pool (a real round-trip to the server), and
+  // `synchronize`/`runMigrations`/`undoLastMigration`/`dropDatabase` execute DDL/migration SQL — all Db.
+  // (Found dogfooding ukri-tfs: `buildPostgresDataSource` did `new DataSource(o).initialize()` and read
+  // PURE — a false all-clear on a fn that opens a database connection.) Still module-gated to typeorm, so
+  // these generic-looking verbs only fire on a typeorm-typed receiver; the pure builder heads stay pure.
   [/^(typeorm|@nestjs\/typeorm)$/,
-   /^(find|save|remove|softRemove|recover|insert|update|upsert|delete|restore|count|exist|sum|average|minimum|maximum|query|clear|increment|decrement|getMany|getOne|getOneOrFail|getRawMany|getRawOne|getCount|getExists|execute|stream|transaction)/,
+   /^(find|save|remove|softRemove|recover|insert|update|upsert|delete|restore|count|exist|sum|average|minimum|maximum|query|clear|increment|decrement|getMany|getOne|getOneOrFail|getRawMany|getRawOne|getCount|getExists|execute|stream|transaction|initialize|connect|synchronize|runMigrations|undoLastMigration|dropDatabase)/,
    "Db"],
   [/^(@prisma\/client|\.prisma|\.prisma\/client)$/,
    /^(\$?(queryRaw|executeRaw|transaction)|find(Many|Unique|First)|create|createMany|update|updateMany|upsert|delete|deleteMany|aggregate|count|groupBy)/,

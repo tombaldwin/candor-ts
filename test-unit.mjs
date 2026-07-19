@@ -815,6 +815,11 @@ test("kappa: the precision carve-outs (never fabricate)", () => {
   assert.equal(kappa("crypto", "createHash"), null); // not the entropy surface
   assert.equal(kappa("node:dns", "new"), null);      // `new dns.Resolver()` is inert
   assert.equal(kappa("typeorm", "createQueryBuilder"), null); // a builder, not the I/O verb
+  assert.equal(kappa("typeorm", "initialize"), "Db");    // DataSource.initialize() OPENS the pool — real Db I/O
+  assert.equal(kappa("typeorm", "connect"), "Db");       // legacy Connection.connect() — opens the connection
+  assert.equal(kappa("typeorm", "synchronize"), "Db");   // runs schema DDL against the server
+  assert.equal(kappa("typeorm", "runMigrations"), "Db"); // executes migration SQL
+  assert.equal(kappa("typeorm", "getMetadata"), null);   // in-memory metadata lookup, NOT connection I/O (no fab)
   assert.equal(kappa("drizzle-orm", "select"), null);    // drizzle select/insert/... are BUILDERS (no fab)
   assert.equal(kappa("drizzle-orm", "insert"), null);
   assert.equal(kappa("drizzle-orm", "execute"), "Db");   // only the terminal execution verb
