@@ -26,6 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { execFileSync } from "node:child_process";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText, reasonClass } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
@@ -74,6 +75,9 @@ OPTIONS
                             violation, 2 if unreadable
   --gate-json <file>        write the structured gate verdict { spec, ok, violations } as JSON
   --allow-js                also scan plain JS/Node (.js/.mjs/.cjs), not just TypeScript
+  --workspace  (--deps)     auto-discover the target's symlinked monorepo (workspace) dependencies,
+                            scan each into .candor/deps/, and chain them so a cross-package call
+                            discloses the sibling package's effects instead of reading pure
   --agents                  print the agent contract for this build (AGENTS.md)
   -V, --version             print the installed version + upgrade line (offline)
   -h, --help                show this help
@@ -108,14 +112,18 @@ See https://github.com/tombaldwin/candor`);
 // missing/flag-shaped value; an unknown flag fails; flags may precede the target. `--agents` is a
 // flag (a print-and-exit MODE) — it must NOT fire when it is the VALUE of --out/--policy, which the
 // value-consuming skip handles, nor produce a "lying unknown flag" error for a real flag given first.
-const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--allow-js] [--agents] [--version] [--help]";
+const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--allow-js] [--workspace] [--agents] [--version] [--help]";
 const argv = process.argv.slice(2);
-let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, gateJsonPath = null, allowJs = false, wantAgents = false, wantJson = false;
+let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, gateJsonPath = null, allowJs = false, wantAgents = false, wantJson = false, wantWorkspace = false;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--agents") wantAgents = true;
   else if (a === "--json") wantJson = true;
   else if (a === "--allow-js") allowJs = true;
+  // --workspace: auto-discover the target's symlinked WORKSPACE (monorepo) dependencies, scan each into
+  // .candor/deps/ with interface-CHA union entries, and chain them so a cross-package call discloses the
+  // sibling's effects instead of reading pure (the candor-ts analog of rust `--deps`, SPEC §2).
+  else if (a === "--workspace" || a === "--deps") wantWorkspace = true;
   else if (a === "--out" || a === "--policy" || a === "--gate-json") {
     const v = argv[i + 1];
     if (v === undefined || v.startsWith("--")) { console.error(`candor-ts: ${a} requires a value (${usage})`); process.exit(2); }
@@ -357,6 +365,47 @@ const declaredButUninstalled = new Set();
                   "db calls will not resolve. Run `npx prisma generate` in the target first.");
   }
 }
+// ⟨workspace chain⟩ --workspace: auto-discover the target's symlinked monorepo deps (a workspace link
+// points OUT of node_modules to the package's real source), scan each into `.candor/deps/` with
+// interface-CHA union entries (CANDOR_WORKSPACE_CHAIN), and feed that dir into the CANDOR_DEPS spec below —
+// so a cross-package call (`client.get()` into `@ukri-tfs/common`) discloses the sibling's effects instead
+// of reading pure. The candor-ts analog of rust `--deps`; direct deps only (a dep's own workspace deps are
+// a follow-on). The child scan is spawned WITHOUT --workspace, so there is no recursion.
+let workspaceDepsDir = null;
+if (wantWorkspace) {
+  const selfPath = fileURLToPath(import.meta.url);
+  workspaceDepsDir = path.join(rootDir, ".candor", "deps");
+  fs.mkdirSync(workspaceDepsDir, { recursive: true });
+  const seen = new Set();       // real path -> scanned once (a hoisted dep appears under several node_modules)
+  const scanned = [];
+  for (let d = rootDir; ; d = path.dirname(d)) {
+    const nm = path.join(d, "node_modules");
+    if (fs.existsSync(nm)) {
+      const entries = [];
+      for (const e of fs.readdirSync(nm)) {
+        if (e.startsWith("@")) { try { for (const s of fs.readdirSync(path.join(nm, e))) entries.push(path.join(nm, e, s)); } catch { /* unreadable scope dir */ } }
+        else entries.push(path.join(nm, e));
+      }
+      for (const ent of entries) {
+        let isLink = false;
+        try { isLink = fs.lstatSync(ent).isSymbolicLink(); } catch { /* gone */ }
+        if (!isLink) continue;                          // a workspace dep is a SYMLINK; a published dep is a real dir
+        let real; try { real = fs.realpathSync(ent); } catch { continue; }
+        if (seen.has(real) || !fs.existsSync(path.join(real, "package.json"))) continue;
+        seen.add(real);
+        try {
+          const out = execFileSync(process.execPath, [selfPath, real, "--json"],
+            { env: { ...process.env, CANDOR_WORKSPACE_CHAIN: "1" }, maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
+          const name = (JSON.parse(out.toString()).package) || path.basename(real);
+          fs.writeFileSync(path.join(workspaceDepsDir, `${name.replace(/[/@]/g, "_")}.json`), out);
+          scanned.push(name);
+        } catch { /* a dep that fails to scan is skipped — its calls stay Unknown/invisible, still sound */ }
+      }
+    }
+    if (path.dirname(d) === d) break;
+  }
+  console.error(`candor-ts: --workspace chained ${scanned.length} workspace dep report(s)${scanned.length ? ": " + scanned.sort().join(", ") : " (no symlinked workspace deps found)"}`);
+}
 // CANDOR_DEPS (SPEC §2): sibling/dependency reports whose effects a call into that package
 // inherits — the cross-package join the workspace probe measured as missing (trpc client → server:
 // zero edges). The key is the report's `hash` (`package#LocalName` — derivable from BOTH a source
@@ -374,7 +423,8 @@ const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:
 // the envelope's `package` field (works for an all-pure EMPTY report) and from entry hash prefixes.
 const depCoveredPkgs = new Set();
 {
-  const spec = process.env.CANDOR_DEPS ?? candorConfig.deps ?? "";   // env overrides the config `deps` key
+  // --workspace's auto-scanned deps dir is prepended to the explicit CANDOR_DEPS/config spec (both chain).
+  const spec = [workspaceDepsDir, process.env.CANDOR_DEPS ?? candorConfig.deps ?? ""].filter(Boolean).join(":");
   const files = [];
   for (const tok of spec.split(/[\s:,]+/).filter(Boolean)) {
     try {
