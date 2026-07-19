@@ -3074,9 +3074,20 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
   const localEffs = new Map(); // rec.local -> {inferred:Set, blind:Set}
   for (const [name, rec] of fns) localEffs.set(rec.local, { inferred: inferred.get(name) ?? new Set(), blind: rec.blind });
   const emittedHashes = new Set(functions.map((e) => e.hash));
+  // interface-NAME ambiguity: two `interface I` decls (different files/scopes) both key the union hash on
+  // `pkg#I.m`, so first-wins would emit ONE I's union under a name a consumer of the OTHER I resolves to (a
+  // fabrication). Count decls per name and skip an ambiguous one — the family's never-guess rule, matching
+  // the candor-scan `lt.count > 1` / candor-swift ownersByTail guards.
+  const ifaceNameCounts = new Map();
+  for (const [ifaceDecl] of interfaceImpls) {
+    const n = ifaceDecl.name?.text;
+    if (n) ifaceNameCounts.set(n, (ifaceNameCounts.get(n) ?? 0) + 1);
+  }
   for (const [ifaceDecl, implClasses] of interfaceImpls) {
     const ifaceName = ifaceDecl.name?.text;
     if (!ifaceName || !implClasses.length) continue;
+    if (ifaceNameCounts.get(ifaceName) > 1) continue; // ambiguous interface name — never guess which I
+
     for (const member of ifaceDecl.members ?? []) {
       if (!member.name || !(ts.isMethodSignature(member) || ts.isMethodDeclaration(member))) continue;
       const m = member.name.getText();
