@@ -101,7 +101,7 @@ if (syscallTrace) {
 }
 
 // A fresh trace file + the capture preload wired via NODE_OPTIONS so EVERY node subprocess of --run
-// (including `npm test`'s workers) records. The preload attributes to the nearest frame under rootDir.
+// (including `npm test`'s workers) records. The preload attributes TRANSITIVELY to every project frame under rootDir.
 const traceFile = path.join(os.tmpdir(), `candor-verify-${process.pid}-${Date.now()}.ndjson`);
 try { fs.rmSync(traceFile, { force: true }); } catch { /* fresh */ }
 const preload = path.join(HERE, "verify-preload.mjs");
