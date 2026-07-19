@@ -394,8 +394,13 @@ const depCoveredPkgs = new Set();
         if (!e.hash) continue;
         const hashPkg = e.hash.split("#")[0];
         if (hashPkg) depCoveredPkgs.add(hashPkg);
-        const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), hosts: [], cmds: [], paths: [], tables: [] };
+        const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), invisible: new Set(), hosts: [], cmds: [], paths: [], tables: [] };
         for (const x of stale ? ["Unknown"] : e.inferred ?? []) cell.inferred.add(x);
+        // A chained dep's OWN blind boundary (an uncovered package IT calls into) travels to a consumer as
+        // that consumer's `invisible` — the transitive disclosure the workspace chain exists to carry (a
+        // sibling package's `SnsTopic.publish → invisible:[@aws-sdk/client-sns]` must not read pure across
+        // the boundary). A stale report is already downgraded to Unknown above, so its blind is not trusted.
+        if (!stale) for (const b of e.invisible ?? []) cell.invisible.add(b);
         if (!stale) for (const m of ["hosts", "cmds", "paths", "tables"])
           for (const v of e[m] ?? []) if (!cell[m].includes(v)) cell[m].push(v);
         crossDeps.set(e.hash, cell);
@@ -458,7 +463,37 @@ function declModule(decl) {
     if (tm) return tm[1].includes("__") ? "@" + tm[1].replace("__", "/") : tm[1];
     return m[1];
   }
+  // WORKSPACE-SYMLINK: a monorepo dep (`@ukri-tfs/message-handling`) is symlinked into node_modules, so its
+  // .d.ts resolves to its REAL path (`…/packages/message-handling/dist/…`) with NO `node_modules/` segment —
+  // the node_modules regex misses and the raw absolute path leaked as the module name (an unmatchable κ key
+  // AND an ugly `invisible:[/abs/path]`; the cross-package chain never joined). Walk up to the nearest
+  // package.json and use its `name` — the same identity the dep's own report hashes under. (Found dogfooding
+  // ukri-tfs: `channels.X.publish()` on a symlinked `OutboundChannel` never matched the chained report.)
+  const wsName = nearestPackageName(f);
+  if (wsName) return wsName;
   return f;
+}
+// Nearest `package.json` `name` at or above a file — memoized per directory. For workspace-symlinked deps
+// whose real path has no `node_modules/` segment (declModule above).
+const pkgNameCache = new Map();
+function nearestPackageName(file) {
+  let dir = path.dirname(file);
+  const seen = [];
+  while (dir && dir !== path.dirname(dir)) {
+    if (pkgNameCache.has(dir)) { const v = pkgNameCache.get(dir); for (const d of seen) pkgNameCache.set(d, v); return v; }
+    seen.push(dir);
+    try {
+      const pj = path.join(dir, "package.json");
+      if (fs.existsSync(pj)) {
+        const name = (JSON.parse(fs.readFileSync(pj, "utf8")).name) || null;
+        for (const d of seen) pkgNameCache.set(d, name);
+        return name;
+      }
+    } catch { /* unreadable package.json — keep climbing */ }
+    dir = path.dirname(dir);
+  }
+  for (const d of seen) pkgNameCache.set(d, null);
+  return null;
 }
 
 // ⟨0.19⟩ The bare-package ROOT of an import specifier: `@scope/pkg/sub` → `@scope/pkg`, `pkg/sub` → `pkg`,
@@ -2339,6 +2374,9 @@ function visitCalls(node) {
             if (hit) {
               inheritedFromDep = true;
               for (const x of hit.inferred) rec.direct.add(x);
+              // inherit the dep fn's OWN blind boundary as this call's invisible — the transitive
+              // disclosure crosses the package edge (else a sibling's SNS reach reads pure here).
+              for (const b of hit.invisible ?? []) rec.blind.add(b);
               for (const v of hit.hosts) rec.hosts.add(v);
               for (const v of hit.cmds) rec.cmds.add(v);
               for (const v of hit.paths) rec.paths.add(v);
@@ -2955,6 +2993,46 @@ for (const [name, rec] of fns) {
   if (rec.unitKind) entry.unitKind = rec.unitKind;
   else if (rec.isCjsExport) entry.unitKind = "export"; // spec 0.5 draft, informative — per-unit, not by name
   functions.push(entry);
+}
+// ⟨workspace-chain prototype — opt-in via CANDOR_WORKSPACE_CHAIN⟩ INTERFACE-CHA union entries for
+// cross-package dispatch. A consumer of THIS package that calls an interface method (`ch.publish()` on an
+// imported `OutboundChannel`) resolves the call to the interface METHOD SIGNATURE — which has no body, so
+// no report entry, so the chain reads it pure even though every implementation reaches an effect. Emit a
+// synthetic `Iface.method` entry = the UNION over each local class implementing the interface of that
+// class's method effects (inferred + invisible), reusing the same `interfaceImpls` CHA universe the
+// in-package dispatch already uses. Sound over-approximation (union of impls); omitted when the union is
+// pure (silence = purity, SPEC §2 rule 3). GATED behind an env flag because it adds report entries a
+// standalone consumer doesn't expect (and four-way conformance compares report shape) — a producer scans
+// its workspace deps with the flag ON to emit chainable reports; default scans stay byte-identical.
+if (process.env.CANDOR_WORKSPACE_CHAIN) {
+  const localEffs = new Map(); // rec.local -> {inferred:Set, blind:Set}
+  for (const [name, rec] of fns) localEffs.set(rec.local, { inferred: inferred.get(name) ?? new Set(), blind: rec.blind });
+  const emittedHashes = new Set(functions.map((e) => e.hash));
+  for (const [ifaceDecl, implClasses] of interfaceImpls) {
+    const ifaceName = ifaceDecl.name?.text;
+    if (!ifaceName || !implClasses.length) continue;
+    for (const member of ifaceDecl.members ?? []) {
+      if (!member.name || !(ts.isMethodSignature(member) || ts.isMethodDeclaration(member))) continue;
+      const m = member.name.getText();
+      const infU = new Set(), blindU = new Set();
+      for (const cls of implClasses) {
+        const clsName = cls.name?.text;
+        if (!clsName) continue;
+        const e = localEffs.get(`${clsName}.${m}`);
+        if (e) { for (const x of e.inferred) infU.add(x); for (const b of e.blind) blindU.add(b); }
+      }
+      if (infU.size === 0 && blindU.size === 0) continue; // pure across all impls — silence = purity
+      const hash = `${pkgName}#${ifaceName}.${m}`;
+      if (emittedHashes.has(hash)) continue; // a real entry already claims this hash
+      emittedHashes.add(hash);
+      const sfIface = ifaceDecl.getSourceFile();
+      const { line, character } = sfIface.getLineAndCharacterOfPosition(ifaceDecl.getStart());
+      const un = { fn: `${ifaceName}.${m}`, loc: `${path.relative(rootDir, sfIface.fileName)}:${line + 1}:${character + 1}`,
+                   hash, inferred: [...infU].sort(), interfaceUnion: true };
+      if (blindU.size) un.invisible = [...blindU].sort();
+      functions.push(un);
+    }
+  }
 }
 // ⟨0.21⟩ An opaque, within-engine-stable fingerprint of a sorted qual set — FNV-1a 64-bit over the
 // newline-terminated UTF-8 quals, lowercase hex zero-padded to 16. BigInt (JS numbers can't hold 64 bits),
