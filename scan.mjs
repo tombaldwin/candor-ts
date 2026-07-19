@@ -369,15 +369,18 @@ const declaredButUninstalled = new Set();
 // points OUT of node_modules to the package's real source), scan each into `.candor/deps/` with
 // interface-CHA union entries (CANDOR_WORKSPACE_CHAIN), and feed that dir into the CANDOR_DEPS spec below —
 // so a cross-package call (`client.get()` into `@ukri-tfs/common`) discloses the sibling's effects instead
-// of reading pure. The candor-ts analog of rust `--deps`; direct deps only (a dep's own workspace deps are
-// a follow-on). The child scan is spawned WITHOUT --workspace, so there is no recursion.
+// of reading pure. The candor-ts analog of rust `--deps`. The child scan is spawned WITHOUT --workspace, so
+// there is no re-discovery recursion. TRANSITIVE: a dep's calls into ITS OWN workspace deps must also
+// resolve, so we scan every dep repeatedly WITH the accumulating deps dir chained, to a fixpoint (effects
+// are monotone → a few rounds converge; bounded by MAX_ROUNDS = workspace dep-graph depth).
 let workspaceDepsDir = null;
 if (wantWorkspace) {
   const selfPath = fileURLToPath(import.meta.url);
   workspaceDepsDir = path.join(rootDir, ".candor", "deps");
   fs.mkdirSync(workspaceDepsDir, { recursive: true });
-  const seen = new Set();       // real path -> scanned once (a hoisted dep appears under several node_modules)
-  const scanned = [];
+  // 1. DISCOVER: every symlinked package real-path resolvable from rootDir (a workspace link is a symlink;
+  //    a published dep is a real dir). Dedup — a hoisted dep appears under several ancestor node_modules.
+  const depPaths = new Set();
   for (let d = rootDir; ; d = path.dirname(d)) {
     const nm = path.join(d, "node_modules");
     if (fs.existsSync(nm)) {
@@ -389,22 +392,35 @@ if (wantWorkspace) {
       for (const ent of entries) {
         let isLink = false;
         try { isLink = fs.lstatSync(ent).isSymbolicLink(); } catch { /* gone */ }
-        if (!isLink) continue;                          // a workspace dep is a SYMLINK; a published dep is a real dir
+        if (!isLink) continue;
         let real; try { real = fs.realpathSync(ent); } catch { continue; }
-        if (seen.has(real) || !fs.existsSync(path.join(real, "package.json"))) continue;
-        seen.add(real);
-        try {
-          const out = execFileSync(process.execPath, [selfPath, real, "--json"],
-            { env: { ...process.env, CANDOR_WORKSPACE_CHAIN: "1" }, maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
-          const name = (JSON.parse(out.toString()).package) || path.basename(real);
-          fs.writeFileSync(path.join(workspaceDepsDir, `${name.replace(/[/@]/g, "_")}.json`), out);
-          scanned.push(name);
-        } catch { /* a dep that fails to scan is skipped — its calls stay Unknown/invisible, still sound */ }
+        if (fs.existsSync(path.join(real, "package.json"))) depPaths.add(real);
       }
     }
     if (path.dirname(d) === d) break;
   }
-  console.error(`candor-ts: --workspace chained ${scanned.length} workspace dep report(s)${scanned.length ? ": " + scanned.sort().join(", ") : " (no symlinked workspace deps found)"}`);
+  // 2. SCAN to a FIXPOINT: each round re-scans every dep WITH the deps dir chained (CANDOR_DEPS), so a dep's
+  //    calls into a sibling dep resolve. A dep chaining its OWN prior report is harmless (its internal calls
+  //    resolve locally, never via crossDeps). Stop when a round changes no report, or at the depth cap.
+  const names = new Set();
+  const MAX_ROUNDS = 6;
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    let anyChanged = false;
+    for (const real of depPaths) {
+      try {
+        const out = execFileSync(process.execPath, [selfPath, real, "--json"],
+          { env: { ...process.env, CANDOR_WORKSPACE_CHAIN: "1", CANDOR_DEPS: workspaceDepsDir },
+            maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
+        const name = (JSON.parse(out.toString()).package) || path.basename(real);
+        names.add(name);
+        const file = path.join(workspaceDepsDir, `${name.replace(/[/@]/g, "_")}.json`);
+        const prev = fs.existsSync(file) ? fs.readFileSync(file) : null;
+        if (!prev || !prev.equals(out)) { fs.writeFileSync(file, out); anyChanged = true; }
+      } catch { /* a dep that fails to scan is skipped — its calls stay Unknown/invisible, still sound */ }
+    }
+    if (!anyChanged) break;   // fixpoint reached: transitive effects fully propagated
+  }
+  console.error(`candor-ts: --workspace chained ${names.size} workspace dep report(s), transitive${names.size ? ": " + [...names].sort().join(", ") : " (none found)"}`);
 }
 // CANDOR_DEPS (SPEC §2): sibling/dependency reports whose effects a call into that package
 // inherits — the cross-package join the workspace probe measured as missing (trpc client → server:
