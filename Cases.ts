@@ -32,6 +32,10 @@ class Holder { cb: () => void = () => {}; }
 const h = new Holder();
 export function unknown_dyn(): void { const cb = h.cb; cb(); }
 
+// An OPAQUE callback handed to a SYNCHRONOUS invoker (forEach) is an unresolvable call -> Unknown,
+// never silently pure (four-way sync-callback-invoker rung).
+export function sync_callback_opaque(xs: number[], cb: (x: number) => void): void { xs.forEach(cb); }
+
 // --- multi-effect union in one body ---
 export function combined(): void { try { fsm.readFileSync("/tmp/x"); netm.connect(1, "h"); } catch {} }
 
