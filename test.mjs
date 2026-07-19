@@ -2111,6 +2111,92 @@ export function invokesMap(xs: number[]) { return xs.map(eff); }`,
         entry(report, "src.h.invokesMap")?.inferred.includes("Fs"));
 }
 
+// ── sync-callback-invoker: an OPAQUE callback to a sync HOF (forEach/map/…) must disclose Unknown ────
+// A `(x)=>void` PARAMETER (or an `any`-typed callable) handed to `Array.prototype.forEach` & friends is
+// INVOKED by the HOF — but the es-lib signature resolved the CALLEE, so the reference dropped silent-pure
+// (`arr.forEach(cb)` read PURE though `cb` runs caller-supplied code — the cardinal sin). This is the TS
+// arm of a four-way sync-callback-invoker parity fix (candor-java shipped it as c755acd / SYNC_CALLBACK_
+// INVOKERS). CRUCIAL GUARD: only OPAQUE callbacks disclose — an INLINE arrow keeps its analyzed effect and
+// a resolvable NAMED fn keeps its resolved effect (no flood of the overwhelming-majority inline shape).
+{
+  const d = project({
+    "src/cb.ts": `import * as fs from "fs";
+export function knownPure(x: number): number { return x + 1; }
+export function knownEffect(): void { fs.writeFileSync("/tmp/x", "y"); }
+// BUG fixed: opaque callback to a sync HOF → Unknown (was silent-pure).
+export function opaqueForEach(cb: (x: number) => void): void { [1, 2, 3].forEach(cb); }
+export function opaqueMap(cb: (x: number) => number): number[] { return [1, 2, 3].map(cb); }
+export function opaqueReduce(cb: (a: number, x: number) => number): number { return [1, 2, 3].reduce(cb, 0); }
+export function anyCallback(cb: any): void { [1, 2, 3].forEach(cb); }
+// NO-OVER-DISCLOSURE controls: inline arrow keeps its real effect (Fs), a pure inline stays pure,
+// a resolvable named callback keeps its resolved effect, and a non-callback arg (reduce's initial value,
+// sort with no callback) never fabricates.
+export function inlineEffect(): void { [1, 2, 3].forEach((x) => fs.writeFileSync("/tmp/x", String(x))); }
+export function inlinePure(): void { [1, 2, 3].forEach((x) => { const y = x + 1; void y; }); }
+export function namedResolvable(): void {
+  function helper(x: number) { fs.writeFileSync("/tmp/x", String(x)); }
+  [1, 2, 3].forEach(helper);
+}
+export function sortNoCallback(): number[] { return [3, 1, 2].sort(); }`,
+  });
+  const { report } = scan(d);
+  // THE FIX — opaque callbacks disclose Unknown (never silent-pure).
+  check("sync-HOF: opaque forEach callback discloses Unknown (was silent-pure)",
+        entry(report, "src.cb.opaqueForEach")?.inferred.includes("Unknown"),
+        JSON.stringify(entry(report, "src.cb.opaqueForEach")));
+  check("sync-HOF: opaque map callback discloses Unknown",
+        entry(report, "src.cb.opaqueMap")?.inferred.includes("Unknown"),
+        JSON.stringify(entry(report, "src.cb.opaqueMap")));
+  check("sync-HOF: opaque reduce callback discloses Unknown (the `0` initial value is NOT a callback)",
+        entry(report, "src.cb.opaqueReduce")?.inferred.includes("Unknown"),
+        JSON.stringify(entry(report, "src.cb.opaqueReduce")));
+  check("sync-HOF: an `any`-typed callback discloses Unknown (could hold a function)",
+        entry(report, "src.cb.anyCallback")?.inferred.includes("Unknown"),
+        JSON.stringify(entry(report, "src.cb.anyCallback")));
+  // THE GUARD — no over-disclosure (must NOT trade the cardinal sin for its fabrication mirror).
+  check("sync-HOF: an INLINE-arrow forEach still carries its real effect (Fs, not flooded to Unknown)",
+        entry(report, "src.cb.inlineEffect")?.inferred.includes("Fs")
+        && !entry(report, "src.cb.inlineEffect")?.inferred.includes("Unknown"),
+        JSON.stringify(entry(report, "src.cb.inlineEffect")));
+  check("sync-HOF: a PURE inline-arrow forEach stays pure (no over-disclosure)",
+        entry(report, "src.cb.inlinePure") === undefined, JSON.stringify(entry(report, "src.cb.inlinePure")));
+  check("sync-HOF: a RESOLVABLE named callback keeps its resolved effect (Fs), not Unknown",
+        entry(report, "src.cb.namedResolvable")?.inferred.includes("Fs")
+        && !entry(report, "src.cb.namedResolvable")?.inferred.includes("Unknown"),
+        JSON.stringify(entry(report, "src.cb.namedResolvable")));
+  check("sync-HOF: sort() with NO callback stays pure (no fabrication)",
+        entry(report, "src.cb.sortNoCallback") === undefined, JSON.stringify(entry(report, "src.cb.sortNoCallback")));
+}
+
+// ── sync-callback-invoker: over-disclosure guards found by A/B on real code (zod) ────────────────────
+// Two false-positive shapes the first cut hit on zod, both now gated: a pure GLOBAL builtin passed as the
+// callback (`.filter(Boolean)` / `.map(String)` — coercion globals are pure, decl in lib.es5.d.ts, not
+// opaque), and a NON-callback positional whose type is `any` (`path.reduce(fn, obj)` — the `obj` SEED is
+// arg 1, never the invoked fn). Both must stay PURE; a genuine opaque callback in the SAME file still fires.
+{
+  const d = project({
+    "src/g.ts": `import * as fs from "fs";
+// pure global builtins as callbacks — must stay pure (not Unknown).
+export function filterBoolean(xs: (string | undefined)[]): string[] { return xs.filter(Boolean) as string[]; }
+export function mapString(xs: number[]): string[] { return xs.map(String); }
+export function mapNumber(xs: string[]): number[] { return xs.map(Number); }
+// reduce with an \`any\`-typed SEED at arg 1 (inline callback at arg 0) — seed is NOT the invoked fn.
+export function reduceAnySeed(obj: any, path: string[]): any { return path.reduce((acc, k) => acc?.[k], obj); }
+// CONTROL — a genuine opaque callback param in the same file STILL discloses Unknown.
+export function stillFires(cb: (x: number) => void): void { [1, 2].forEach(cb); }`,
+  });
+  const { report } = scan(d);
+  check("sync-HOF: .filter(Boolean) stays pure (pure global builtin, not opaque)",
+        entry(report, "src.g.filterBoolean") === undefined, JSON.stringify(entry(report, "src.g.filterBoolean")));
+  check("sync-HOF: .map(String) / .map(Number) stay pure (coercion globals)",
+        entry(report, "src.g.mapString") === undefined && entry(report, "src.g.mapNumber") === undefined,
+        JSON.stringify([entry(report, "src.g.mapString"), entry(report, "src.g.mapNumber")]));
+  check("sync-HOF: reduce's `any`-typed SEED (arg 1) is NOT flagged as a callback",
+        entry(report, "src.g.reduceAnySeed") === undefined, JSON.stringify(entry(report, "src.g.reduceAnySeed")));
+  check("sync-HOF: a genuine opaque callback in the same file STILL fires (guards didn't over-suppress)",
+        entry(report, "src.g.stillFires")?.inferred.includes("Unknown"), JSON.stringify(entry(report, "src.g.stillFires")));
+}
+
 // ── Object.defineProperty runtime-accessor: a descriptor get/set is invisible to the TS checker (it
 // types target.key as a DATA prop), so a forcing site `target.key` read silent-pure — the cardinal sin.
 // FIX = mint the descriptor body as a unit + edge the forcing site to it (precise when target+key pin),

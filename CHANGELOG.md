@@ -6,6 +6,23 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [Unreleased]
+
+⚠ **Sync callback-invoker: an OPAQUE callback handed to a synchronous HOF (`forEach`/`map`/`filter`/`some`/
+`every`/`find`/`flatMap`/`reduce`/…) is no longer read silently pure** (`scan.mjs`, the `HOF_INVOKERS` arm).
+`arr.forEach(cb)` where `cb` is a parameter (or any callable the checker can't resolve to a body) is INVOKED
+by the HOF — but the es-lib signature resolved the CALLEE, so the callback reference was dropped ⇒ the function
+read PURE though it runs caller-supplied code (the cardinal sin; the direct `cb()` form was already `Unknown`).
+It now discloses `Unknown` (`callback:<cb>`), matching the direct-call posture. This is the **TS arm of a four-way
+sync-callback-invoker parity fix** (candor-java shipped it as `c755acd`, `Rules.SYNC_CALLBACK_INVOKERS`).
+**OPAQUE-ONLY guards** keep over-disclosure at the floor — an INLINE arrow (`arr.forEach(x => …)`, the
+overwhelming majority) keeps its lexically-analyzed effect; a RESOLVABLE named/local callback keeps its resolved
+effect; a PURE global builtin (`.filter(Boolean)`, `.map(String)`) stays pure; and only the callback POSITION
+(arg 0) is considered, so `reduce(cb, initialValue)`'s seed is never mistaken for the callback. A/B on real code
+(fp-ts) added `Unknown` to 10 genuine opaque-callback sites with **zero** concrete-effect fabrication and **zero**
+lost effects; zod/p-map/ky/p-queue showed zero delta (all inline-arrow / pure-global). ⚠ may add `Unknown` to a
+function previously reported pure.
+
 ## [0.22.0] — 2026-07-18
 
 Spec floor → **0.22** (the `verify` oracle rung; report/verdict schema unchanged from 0.21). candor-ts folds in

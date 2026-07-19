@@ -1746,6 +1746,29 @@ function noteOpaqueIteration(node, iterExpr, localResolved) {
   rec.why.add(why);
 }
 
+// An argument node that is a FUNCTION-typed VALUE (has ≥1 call signature) — a callback — regardless of
+// whether we can pin it to a local fn unit. Used to gate the HOF-invoker Unknown disclosure below to the
+// CALLBACK argument only: `reduce(fn, 0)`'s `0`, `sort(cmp)`'s absent extra arg, and any non-function
+// positional (a `thisArg`, an initial value) are NOT callables → never disclose. A param typed
+// `(x)=>void`, an `any`/unconstrained-generic holder, or an unresolvable ref all read as callable here
+// (an `any`/`unknown` value COULD be a function the HOF invokes — the sound side; matches the direct
+// `cb()` → Unknown posture). A concrete non-function type (number/string/object without a call sig) is not.
+const argIsCallable = (a) => {
+  if (!a) return false;
+  if (ts.isArrowFunction(a) || ts.isFunctionExpression(a)) return true; // inline literal — always callable
+  const t = checker.getTypeAtLocation(a);
+  if (!t) return false;
+  // `any`/`unknown` — could hold a function; treat as callable (sound over-approx, mirrors direct-call path).
+  if (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return true;
+  if (t.getCallSignatures?.().length > 0) return true;
+  // A bare type parameter (`<T>(cb: T)`) with no constraint could be instantiated to a function.
+  if (t.flags & ts.TypeFlags.TypeParameter) {
+    const c = checker.getBaseConstraintOfType(t);
+    if (!c || (c.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) || c.getCallSignatures?.().length > 0) return true;
+  }
+  return false;
+};
+
 // Callee names that INVOKE a function/method argument (so a fn-reference passed to one is reachable
 // through it). Array/iterable HOFs, the timer/microtask schedulers, and Promise continuations. A
 // STORE/compare/log sink (`set`/`push`/`add`/`includes`/`indexOf`/`concat`/`log`/`stringify`/…) is
@@ -2009,7 +2032,7 @@ function visitCalls(node) {
         const calleeName = ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text
           : ts.isIdentifier(node.expression) ? node.expression.text : null;
         if (mod !== "<local>" && calleeName && HOF_INVOKERS.has(calleeName)) {
-          for (const a of node.arguments ?? []) {
+          node.arguments?.forEach((a, argIdx) => {
             // A `<ref>.bind(…)` partial-application is a CallExpression (skipped by the id/property-access
             // gate below) but the INVOKING HOF calls the bound fn → its effects are reachable. Unwrap the
             // `.bind` chain to the root receiver and resolve it like a bare ref (`resolveFnRefUnit` follows
@@ -2025,13 +2048,44 @@ function visitCalls(node) {
                 rec.direct.add("Unknown");
                 rec.why.add(`callback:bind:${(bref ?? a).getText().replace(/\s+/g, "").slice(0, 40)}`); // `.bind(...)` yields a function VALUE — canonical `callback:`
               }
-              continue;
+              return;
             }
-            if (!ts.isIdentifier(a) && !ts.isPropertyAccessExpression(a)) continue;
+            // An INLINE arrow/function literal is charged lexically (its own unit) — never disclose here
+            // (would flood the overwhelming-majority `arr.forEach(x => …)` shape). It is not an id/property-
+            // access anyway, so it skips the ref arm below; guarded explicitly for clarity.
+            if (ts.isArrowFunction(a) || ts.isFunctionExpression(a)) return;
+            if (!ts.isIdentifier(a) && !ts.isPropertyAccessExpression(a)) return;
             const d2 = realDecl(checker.getSymbolAtLocation(a));
-            const t = d2 && nodeName.get(d2);
-            if (t) rec.edges.add(t);
-          }
+            const t = (d2 && nodeName.get(d2)) || resolveFnRefUnit(a); // pin direct fn OR a local alias chain
+            if (t) { rec.edges.add(t); return; } // resolvable named/local callback — keep its analyzed effect
+            // OPAQUE callback → Unknown (the cardinal-sin guard): a callback the es-lib signature resolved to
+            // the CALLEE (`forEach`) so its reference was dropped silent-pure — `arr.forEach(cb)` read pure
+            // though `cb` runs caller-supplied code. Disclose Unknown, the same posture as the direct
+            // `cb()` → `callback:param#i` path. THREE guards keep over-disclosure at floor:
+            //  (1) POSITION — only the callback slot (arg 0). Every HOF here takes its callback FIRST
+            //      (`reduce(cb, init)`, `forEach(cb, thisArg)`); a later positional is an init value / thisArg,
+            //      never the invoked fn — flagging it fabricated (the zod `path.reduce(fn, obj)` `obj` seed).
+            //  (2) OPACITY — the ref must resolve to a VALUE HOLDER (a parameter / local variable / binding
+            //      element) or to nothing. That is a genuinely unresolvable callback. A ref resolving to a
+            //      concrete function/ctor DECLARATION — a pure global builtin (`.filter(Boolean)`,
+            //      `.map(String)`) or an imported dep fn — is NOT opaque: globals are pure and dep calls flow
+            //      through the κ/invisible channel, so blanket-Unknown here would over-disclose them.
+            //  (3) CALLABILITY — `argIsCallable` (has a call signature, or `any`/`unknown`/unconstrained
+            //      generic that COULD hold a function).
+            if (argIdx !== 0) return;
+            // A value holder the CALLER controls (a project param / local var / binding element) is genuinely
+            // opaque. A holder declared in a LIB/dep file — the global `Boolean`/`String`/`Number` constructors
+            // (`declare var Boolean: BooleanConstructor` in lib.es5.d.ts) or an imported dep binding — is a known
+            // callable, NOT opaque: the coercion globals are pure and dep calls flow through κ, so excluding
+            // them here keeps `.filter(Boolean)`/`.map(String)` pure. `!d2` (nothing resolved) stays opaque.
+            const holderIsProjectValue = d2 && (ts.isParameter(d2) || ts.isVariableDeclaration(d2) || ts.isBindingElement(d2))
+              && projectFiles.has(path.resolve(d2.getSourceFile().fileName));
+            if (!(holderIsProjectValue || !d2)) return;
+            if (argIsCallable(a)) {
+              rec.direct.add("Unknown");
+              rec.why.add(`callback:${a.getText().replace(/\s+/g, "").slice(0, 40)}`); // opaque callable invoked by a sync HOF — canonical `callback:`
+            }
+          });
         }
         // `fn.call(thisArg, …)` / `fn.apply(thisArg, args)` INVOKE the receiver function reference, and
         // `Reflect.apply(fn, …)` / `Reflect.construct(Ctor, …)` invoke their FIRST ARGUMENT. The resolved
