@@ -25,40 +25,51 @@ function relIfProject(src) {
 }
 
 const FRAME = /\((?:(.+):(\d+):(\d+))\)$|at (?:(.+):(\d+):(\d+))$/;
-function nearestSite() {
+// TRANSITIVE attribution: EVERY project frame on the stack (nearest-first, deduped), not only the nearest.
+// candor's report is transitive — a function that REACHES an effect is effectful — so each project frame's
+// call-site line, mapped downstream (verify-core `attribute`) to the function that ENCLOSES it, attributes the
+// effect to the leaf function AND every caller of it, exactly as the report claims. A single nearest-frame
+// site (the earlier behaviour) attributes only to the leaf, so a CALLER that reaches an effect through a
+// dropped/dynamic edge and is reported pure is never tested (its observed set is empty ⇒ H holds vacuously) —
+// the transitive cardinal sin the oracle must falsify.
+function projectSites() {
   const stack = new Error().stack || "";
+  const sites = [];
+  const seenHere = new Set();
   for (const lineStr of stack.split("\n").slice(1)) {
     const m = FRAME.exec(lineStr.trim());
     if (!m) continue;
     const rel = relIfProject(m[1] ?? m[4]);
-    if (rel) return { file: rel, line: Number(m[2] ?? m[5]) };
+    if (!rel) continue;
+    const line = Number(m[2] ?? m[5]);
+    const key = rel + ":" + line;
+    if (!seenHere.has(key)) { seenHere.add(key); sites.push({ file: rel, line }); }
   }
-  return null;
+  return sites;
 }
 
 let traceFd = null;
-let last = "";
+const written = new Set();
 function write(site, effect) {
   const rec = JSON.stringify({ file: site.file, line: site.line, effect });
-  if (rec === last) return; // collapse consecutive identical sites (one stdlib call fans out internally)
-  last = rec;
+  if (written.has(rec)) return; // set-based oracle: write each (site,effect) once (bounds the trace to distinct sites)
+  written.add(rec);
   try {
     if (traceFd === null) traceFd = fs.openSync(TRACE, "a");
     fs.writeSync(traceFd, rec + "\n");
   } catch { /* a trace-write failure must never crash the app under test */ }
 }
-/** Record an effect at the nearest PROJECT call-site. Un-attributed effects (node internals, a dependency's
- *  own I/O — no project frame below) are dropped, not written: they aren't the target's code. */
+/** Record an effect at EVERY project call-site on the stack (transitive: the leaf and every caller). Effects
+ *  with no project frame (node internals, a dependency's own I/O) attribute nowhere and are dropped. */
 export function emit(effect) {
   if (!TRACE) return;
-  const site = nearestSite();
-  if (site) write(site, effect);
+  for (const site of projectSites()) write(site, effect);
 }
-/** Record SEVERAL effects at one site (one call = one site): a `Net` refined to `Net`+`Llm`/`Db`. */
+/** Record SEVERAL effects transitively (a `Net` refined to `Net`+`Llm`/`Db`): each effect at every site. */
 export function emitMany(effects) {
   if (!TRACE || !effects.length) return;
-  const site = nearestSite();
-  if (site) for (const e of effects) write(site, e);
+  const sites = projectSites();
+  for (const site of sites) for (const e of effects) write(site, e);
 }
 
 // RE-ENTRANCY GUARD: a wrapped stdlib call (e.g. net.connect) internally calls OTHER wrapped stdlib calls

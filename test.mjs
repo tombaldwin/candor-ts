@@ -3709,6 +3709,43 @@ main();
       s.status === 1 && sj?.metrics.cardinalSinViolations === 1
         && sj?.violations?.[0]?.fn === "app.reads" && sj?.violations?.[0]?.escaped?.includes("Fs"),
       `exit=${s.status} out=${(s.stdout || "").slice(0, 200)}`);
+    // (b2) TRANSITIVE-CALLER MISS — candor's report is transitive, so a CALLER that reaches an effect through
+    // a callee is itself effectful. The oracle must attribute the effect to that caller (via the FULL stack,
+    // not just the nearest/leaf frame) and catch it when the report wrongly declares the caller pure. Fixture
+    // main → middle → leaf(fs): seed `middle` pure, leave the leaf correct → a VIOLATION on the CALLER.
+    const td = project({
+      "t.ts": `import fs from "node:fs";
+function leaf(): number { return fs.statSync(process.execPath).size; }
+function middle(): number { return leaf(); }
+function main(): void { middle(); }
+main();
+`,
+      "package.json": '{"name":"tvapp","version":"0.0.0","type":"module"}',
+    });
+    const { report: trep } = scan(td);
+    check("verify: candor's report is transitive (a caller of an Fs leaf is itself Fs)",
+      trep.functions.some((e) => e.fn === "t.middle" && (e.inferred || []).includes("Fs"))
+        && trep.functions.some((e) => e.fn === "t.main" && (e.inferred || []).includes("Fs")),
+      JSON.stringify(trep.functions.map((e) => [e.fn, e.inferred])));
+    const tRun = `node --experimental-strip-types ${JSON.stringify(path.join(td, "t.ts"))}`;
+    const tVerify = (prefix) => spawnSync("node",
+      [path.join(HERE, "verify.mjs"), td, "--report", prefix, "--run", tRun, "--json"], { encoding: "utf8" });
+    // sound report → holds, and transitive attribution witnesses the whole chain (leaf + middle + main).
+    const th = tVerify(path.join(td, ".candor", "report"));
+    let thj = null; try { thj = JSON.parse(th.stdout); } catch { /* below */ }
+    check("verify: transitive attribution witnesses the caller chain (≥3 fns checked), HOLDS",
+      th.status === 0 && thj?.metrics.honestyInvariantHolds === true && thj?.metrics.executedFunctionsChecked >= 3,
+      `exit=${th.status} m=${JSON.stringify(thj?.metrics)}`);
+    // seed the miss at the CALLER `middle` (leave the leaf correct) → must VIOLATE on t.middle, not only t.leaf.
+    const tSeedDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-verify-tseed-"));
+    const tseeded = structuredClone(trep);
+    for (const e of tseeded.functions) if (e.fn === "t.middle") e.inferred = [];
+    fs.writeFileSync(path.join(tSeedDir, "t.seed.scan.json"), JSON.stringify(tseeded));
+    const ts = tVerify(path.join(tSeedDir, "t"));
+    let tsj = null; try { tsj = JSON.parse(ts.stdout); } catch { /* below */ }
+    check("verify: a TRANSITIVE-caller miss (caller declared pure, reaches Fs through a callee) VIOLATES on the caller",
+      ts.status === 1 && (tsj?.violations || []).some((v) => v.fn === "t.middle" && v.escaped?.includes("Fs")),
+      `exit=${ts.status} out=${(ts.stdout || "").slice(0, 300)}`);
     // (c) DISCLOSURE FLIPS IT — the same run under an `Unknown` disclosure HOLDS (disclosed-partial).
     const discDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-verify-disc-"));
     const disc = structuredClone(report);

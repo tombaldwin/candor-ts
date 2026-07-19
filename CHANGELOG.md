@@ -17,6 +17,19 @@ fabricated). Scoped to `process.env`; a corpus census showed the two conditions 
 functions, so the benign argument-mutating majority is untouched. Found on the public corpus (dotenv). ⚠ may add
 `Env`/`Unknown` to a function previously reported pure.
 
+⚠ **`candor verify` now attributes effects TRANSITIVELY — the oracle falsifies candor's core (transitive) claim,
+not only leaf classifications.** candor's report is transitive (a function that *reaches* an effect is effectful),
+but the runtime capture (`verify-emit.mjs`) attributed each observed effect only to the **nearest** project frame
+(the leaf). It was therefore structurally blind to a transitive cardinal sin: a CALLER that reaches an effect
+through a dropped/dynamic edge and is reported `pure` was never tested (the effect landed on the leaf; the caller's
+observed set was empty ⇒ H held vacuously). `emit` now records the effect at **every** project frame on the stack
+(`projectSites()`), and the downstream span-attribution (`verify-core` `attribute`) maps each frame's call-site line
+to the function enclosing it — so a caller-level miss is caught (`t.middle: ran {Fs} declared {pure}`). A distinct
+`(site,effect)` is written once (global set), bounding the trace. This brings the Node arm to the candor-java
+`-javaagent` oracle's transitive attribution. Regression-gated by three new `verify:` transitive checks in `test.mjs`
+(report-is-transitive, caller-chain-witnessed-holds, transitive-caller-miss-violates). Verify-only; report/verdict
+bytes unchanged.
+
 ## [0.19.0] — 2026-07-17
 
 Reason-scoped `Unknown` policies (SPEC §6.2): `deny E Unknown[reflect,dispatch,indirect,native,unresolved,setup]`
