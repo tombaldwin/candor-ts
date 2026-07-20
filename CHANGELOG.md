@@ -23,6 +23,15 @@ effect; a PURE global builtin (`.filter(Boolean)`, `.map(String)`) stays pure; a
 lost effects; zod/p-map/ky/p-queue showed zero delta (all inline-arrow / pure-global). ⚠ may add `Unknown` to a
 function previously reported pure.
 
+## [0.23.0] — 2026-07-20
+
+Spec floor → **0.23**. Soundness-increasing, report-shape-neutral:
+- **cross-package interface dispatch** (interfaceUnion, the 0.23 rung): a chained consumer's interface
+  method resolves to the impl's effect across packages (gated behind `CANDOR_WORKSPACE_CHAIN`). PART 18.
+- **⚠ opaque callback → synchronous invoker** (`arr.forEach(cb)`/`map`/`filter`/… with an opaque callback
+  the checker cannot pin to a body) discloses `Unknown` — the four-way sync-callback rung (PART 1
+  `sync_callback_opaque`). Inline arrows and resolvable callbacks keep their analyzed effect (no flood).
+
 ## [0.22.0] — 2026-07-18
 
 Spec floor → **0.22** (the `verify` oracle rung; report/verdict schema unchanged from 0.21). candor-ts folds in
