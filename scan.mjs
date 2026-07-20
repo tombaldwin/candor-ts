@@ -3043,25 +3043,48 @@ const scanEnvWrites = (node) => {
 for (const sf of sources) scanEnvWrites(sf);
 
 // ---- pass 3: the least fixpoint (SEMANTICS §5a), effects + the literal surfaces -------------------
+// WORKLIST least-fixpoint. The old `while (changed) { for [,rec] of fns }` swept every function on every
+// pass, so its pass count equalled the longest back-to-front call chain — O(V²) on deep whole-project
+// graphs. Instead, when a function's set grows, re-enqueue only its callers (the functions whose union
+// reads it) via a callee→callers reverse index. Same monotone set-union (confluent) least fixpoint →
+// order-independent → identical result. The `edges` are fixed, so the reverse index is shared by every
+// sweep below (effects + each literal surface).
+const callersOf = new Map();
+for (const [name, rec] of fns)
+  for (const callee of rec.edges) {
+    let cs = callersOf.get(callee);
+    if (!cs) callersOf.set(callee, (cs = []));
+    cs.push(name);
+  }
 const inferred = new Map([...fns.keys()].map((k) => [k, new Set(fns.get(k).direct)]));
-let changed = true;
-while (changed) {
-  changed = false;
-  for (const [name, rec] of fns) {
+{
+  const queue = [...fns.keys()];
+  const queued = new Set(queue);
+  for (let head = 0; head < queue.length; head++) {
+    const name = queue[head];
+    queued.delete(name);
     const mine = inferred.get(name);
-    for (const callee of rec.edges)
-      for (const e of inferred.get(callee) ?? [])
-        if (!mine.has(e)) { mine.add(e); changed = true; }
+    const before = mine.size;
+    for (const callee of fns.get(name).edges)
+      for (const e of inferred.get(callee) ?? []) mine.add(e);
+    if (mine.size !== before)
+      for (const c of callersOf.get(name) ?? [])
+        if (!queued.has(c)) { queued.add(c); queue.push(c); }
   }
 }
 for (const m of ["hosts", "tables", "cmds", "paths", "blind", "incomplete"]) {
-  let moved = true;
-  while (moved) {
-    moved = false;
-    for (const [, rec] of fns)
-      for (const callee of rec.edges)
-        for (const v of fns.get(callee)?.[m] ?? [])
-          if (!rec[m].has(v)) { rec[m].add(v); moved = true; }
+  const queue = [...fns.keys()];
+  const queued = new Set(queue);
+  for (let head = 0; head < queue.length; head++) {
+    const name = queue[head];
+    queued.delete(name);
+    const rec = fns.get(name);
+    const before = rec[m].size;
+    for (const callee of rec.edges)
+      for (const v of fns.get(callee)?.[m] ?? []) rec[m].add(v);
+    if (rec[m].size !== before)
+      for (const c of callersOf.get(name) ?? [])
+        if (!queued.has(c)) { queued.add(c); queue.push(c); }
   }
 }
 

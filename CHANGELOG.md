@@ -8,6 +8,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**Performance — the pass-3 least-fixpoint is no longer O(V²) on deep call graphs (no output change).**
+Both fixpoint sweeps (effects + the literal surfaces) used `while (changed) { for [,rec] of fns }`, which
+re-swept every function on every pass, so the pass count equalled the longest back-to-front call chain —
+O(V²) on deep whole-project graphs (a 6000-deep chain took ~8.9s). Replaced with a worklist over a shared
+callee→callers reverse index: a function is reprocessed only when a callee actually gained an effect. Same
+monotone set-union (confluent) least fixpoint → order-independent → **report byte-for-byte identical**
+(verified via `--json` across a 6000-deep chain (1.6 MB report) and a depth-30 layered project; `npm test`
+green). ~1.4× on the deep chain, ~1.05× on realistic-depth projects; trivial graphs unaffected. Mirrors the
+worklist fix in the Java engine (both are whole-project analyzers).
+
 ⚠ **Sync callback-invoker: an OPAQUE callback handed to a synchronous HOF (`forEach`/`map`/`filter`/`some`/
 `every`/`find`/`flatMap`/`reduce`/…) is no longer read silently pure** (`scan.mjs`, the `HOF_INVOKERS` arm).
 `arr.forEach(cb)` where `cb` is a parameter (or any callable the checker can't resolve to a body) is INVOKED
