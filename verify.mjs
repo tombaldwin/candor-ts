@@ -130,7 +130,7 @@ try {
 } catch { /* no trace written — no effectful call recorded */ }
 try { fs.rmSync(traceFile, { force: true }); } catch { /* best-effort cleanup */ }
 
-const { rows, violations, metrics } = verifySites(report, sites, scope, { locIndex, analyzedCount });
+const { rows, violations, blame, metrics } = verifySites(report, sites, scope, { locIndex, analyzedCount });
 metrics.analyzedFunctionsTotal = fns.length; // coverage denominator (the static claim's size)
 metrics.programExitCode = run.status;
 
@@ -152,7 +152,7 @@ if (tornLines > 0 || reportHardFail) {
 const attributionIncomplete = metrics.attributionComplete === false;
 
 if (wantJson) {
-  console.log(JSON.stringify({ metrics, violations, rows }, null, 2));
+  console.log(JSON.stringify({ metrics, violations, blame, rows }, null, 2));
 } else {
   const held = metrics.honestyInvariantHolds;
   const tail = held && metrics.attributionComplete === false ? " (attribution INCOMPLETE — see below)" : "";
@@ -163,6 +163,12 @@ if (wantJson) {
   }
   console.log(`  sound-complete ok       : ${metrics.soundCompleteOk}`);
   console.log(`  disclosed-partial       : ${metrics.disclosedPartial} (${metrics.disclosedUnknownLoadBearing} Unknown-load-bearing)`);
+  // BLAME: for each load-bearing Unknown, name the exact unresolved edge (`unknownWhy`) to resolve for a
+  // precise, non-Unknown answer — the disclosure held the invariant, but this is what would tighten it.
+  for (const b of blame) {
+    const why = b.why?.length ? b.why.join(", ") : "unresolved";
+    console.log(`    → ${b.fn}: Unknown held { ${b.escaped.join(", ")} } — resolve: ${why}`);
+  }
   console.log(`  cardinal-sin violations : ${metrics.cardinalSinViolations}`);
   for (const v of violations) {
     console.log(`    ✘ ${v.fn}: ran { ${v.observed.join(", ")} } but candor declared complete { ${v.inferred.join(", ") || "pure"} } → escaped { ${v.escaped.join(", ")} }`);

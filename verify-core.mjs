@@ -39,6 +39,17 @@ export function reportEffects(report) {
   return m;
 }
 
+/** report → Map fn → sorted array of the fn's `unknownWhy` reasons (the reason-scoped-Unknown ⟨0.19⟩
+ *  vocabulary: `dispatch:`/`reflect:*`/`callback:`/`unresolved`/…). Absent/empty ⇒ omitted. This is the
+ *  BLAME source: when the oracle finds a disclosed Unknown doing real work at runtime, `unknownWhy` names the
+ *  exact unresolved edge to resolve for a precise (non-Unknown) answer. */
+export function reportReasons(report) {
+  const fns = Array.isArray(report) ? report : (report.functions ?? []);
+  const m = new Map();
+  for (const e of fns) if (e.unknownWhy?.length) m.set(e.fn, [...e.unknownWhy].sort());
+  return m;
+}
+
 /** trace events [{fn, effect}] → Map fn → Set(observed effects in scope). Executed-but-effect-free fns
  *  still appear (∅) so they count toward coverage. */
 export function observedByFn(events, scope) {
@@ -64,23 +75,33 @@ const subset = (obs, inferred) => [...obs].every((e) => covered(e, inferred)); /
 const diff = (obs, inferred) => [...obs].filter((e) => !covered(e, inferred)); // the genuinely-escaped effects
 
 /**
- * The invariant check. `report`/`observed` are Maps (fn → Set). Returns { rows, violations, metrics }.
- * A VIOLATION is a fn that ran effects its COMPLETE (no-Unknown) signature didn't include — the cardinal sin.
+ * The invariant check. `report`/`observed` are Maps (fn → Set). `reasonsMap` (fn → array of `unknownWhy`
+ * reasons, from `reportReasons`) is optional — when present, a LOAD-BEARING disclosed-partial row carries a
+ * `blame` field naming the exact unresolved edge(s) to resolve for a precise answer. Returns { rows,
+ * violations, metrics }. A VIOLATION is a fn that ran effects its COMPLETE (no-Unknown) signature didn't
+ * include — the cardinal sin.
  */
-export function honestyCheck(reportMap, observedMap, scope) {
+export function honestyCheck(reportMap, observedMap, scope, reasonsMap = null) {
   const allowed = scopeSet(scope);
   const rows = [];
   const violations = [];
+  const blame = []; // load-bearing-Unknown rows → the unknownWhy edge(s) to resolve for precision
   let clean = 0, disclosed = 0, loadBearing = 0;
   for (const fn of [...observedMap.keys()].sort()) {
     const inferred = reportMap.get(fn) ?? new Set(); // absent ⇒ ∅ (claimed pure)
     const obs = new Set([...observedMap.get(fn)].filter((e) => allowed.has(e)));
-    let verdict;
+    let verdict, rowBlame = null;
     if (inferred.has(UNKNOWN)) {
       verdict = "disclosed-partial";
       disclosed++;
       const tight = new Set([...inferred].filter((e) => e !== UNKNOWN));
-      if (!subset(obs, tight)) loadBearing++; // the Unknown was doing real work
+      if (!subset(obs, tight)) {
+        loadBearing++; // the Unknown was doing real work
+        // BLAME: the disclosure ACTUALLY mattered (observed escapes the non-Unknown signature). Attribute it to
+        // the fn's own `unknownWhy` reason(s) — the precise unresolved edge to resolve to eliminate the Unknown.
+        rowBlame = { fn, escaped: diff(obs, tight).sort(), why: reasonsMap?.get(fn) ?? [] };
+        blame.push(rowBlame);
+      }
     } else if (subset(obs, inferred)) {
       verdict = "sound-complete-ok";
       clean++;
@@ -88,7 +109,9 @@ export function honestyCheck(reportMap, observedMap, scope) {
       verdict = "VIOLATION";
       violations.push({ fn, observed: [...obs].sort(), inferred: [...inferred].sort(), escaped: diff(obs, inferred).sort() });
     }
-    rows.push({ fn, verdict, observed: [...obs].sort(), inferred: [...inferred].sort() });
+    const row = { fn, verdict, observed: [...obs].sort(), inferred: [...inferred].sort() };
+    if (rowBlame) row.blame = rowBlame.why; // the load-bearing row names its own unresolved edge(s)
+    rows.push(row);
   }
   const metrics = {
     scope,
@@ -100,7 +123,7 @@ export function honestyCheck(reportMap, observedMap, scope) {
     cardinalSinViolations: violations.length,
     honestyInvariantHolds: violations.length === 0,
   };
-  return { rows, violations, metrics };
+  return { rows, violations, blame, metrics };
 }
 
 /** Parse a candor `loc` string (`file:line:col`) → `{ file, line }` (or null). The file is normalized to
@@ -176,7 +199,7 @@ export function attribute(events, report, locIndex = null) {
 
 /** Convenience: run the check from a raw report doc + raw trace events (already `{fn, effect}`). */
 export function verify(report, events, scope = "direct") {
-  return honestyCheck(reportEffects(report), observedByFn(events, scope), scope);
+  return honestyCheck(reportEffects(report), observedByFn(events, scope), scope, reportReasons(report));
 }
 
 /**
@@ -190,7 +213,7 @@ export function verify(report, events, scope = "direct") {
 export function verifySites(report, sites, scope = "direct", opts = {}) {
   const { locIndex = null, analyzedCount = null } = opts;
   const { events, unattributed } = attribute(sites, report, locIndex);
-  const result = honestyCheck(reportEffects(report), observedByFn(events, scope), scope);
+  const result = honestyCheck(reportEffects(report), observedByFn(events, scope), scope, reportReasons(report));
 
   const fns = Array.isArray(report) ? report : (report.functions ?? []);
   const effectfulWithLoc = fns.filter((f) => parseLoc(f.loc)).length; // only fns we can actually ANCHOR

@@ -1997,6 +1997,11 @@ export function effNetConnect(): void { const x = net.connect(80, "h"); void x; 
 export function effCreateServer(): void { const x = net.createServer(); void x; }
 export function effTlsConnect(): void { const x = tls.connect(443, "h"); void x; }
 export function effSocketConnect(s: net.Socket): void { const x = s.connect(80, "h"); void x; }
+// RAW-SOCKET regression pins (four-way): the low-level socket surface must classify Net. The chained
+// \`new net.Socket().connect()\` form (construction is inert, but the .connect() I/O verb is the network
+// boundary) and net.createConnection (an alias of net.connect) — both are the raw socket, both are Net.
+export function effRawSocketConnect(): void { const x = new net.Socket().connect(80, "h"); void x; }
+export function effCreateConnection(): void { const x = net.createConnection(80, "h"); void x; }
 export function effServerListen(srv: http.Server): void { const x = srv.listen(80); void x; }
 // CONNECTING constructor — NOT inert: new http.ClientRequest(url) performs the network I/O on
 // construction (it is what http.request() returns and dispatches). The blanket new-exemption once
@@ -2027,6 +2032,9 @@ export function effClientRequest(): void { const x = new http.ClientRequest("htt
   check("net-cluster: net.createServer() reports Net", isNet("src.n.effCreateServer"), JSON.stringify(entry(report, "src.n.effCreateServer")));
   check("net-cluster: tls.connect() reports Net", isNet("src.n.effTlsConnect"), JSON.stringify(entry(report, "src.n.effTlsConnect")));
   check("net-cluster: socket.connect() (I/O verb) reports Net", isNet("src.n.effSocketConnect"), JSON.stringify(entry(report, "src.n.effSocketConnect")));
+  // raw-socket regression pins — the low-level socket surface must never silently regress off Net.
+  check("net-cluster: new net.Socket().connect() (raw socket) reports Net", isNet("src.n.effRawSocketConnect"), JSON.stringify(entry(report, "src.n.effRawSocketConnect")));
+  check("net-cluster: net.createConnection() (raw socket) reports Net", isNet("src.n.effCreateConnection"), JSON.stringify(entry(report, "src.n.effCreateConnection")));
   check("net-cluster: server.listen() (I/O verb) reports Net", isNet("src.n.effServerListen"), JSON.stringify(entry(report, "src.n.effServerListen")));
   // the connecting-ctor control: the regression that motivated the connecting-ctor carve-out — and
   // that the inert ctors above MUST stay pure alongside it (the fix removes the bug, not the feature).

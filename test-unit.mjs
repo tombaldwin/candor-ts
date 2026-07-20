@@ -183,6 +183,25 @@ test("verify: disclosure (Unknown) flips the same run to HELD (disclosed-partial
   assert.equal(r.metrics.cardinalSinViolations, 0);
   assert.equal(r.metrics.disclosedUnknownLoadBearing, 1, "the Unknown was doing real work");
 });
+test("verify: a load-bearing Unknown is BLAMED to its unknownWhy reason (the edge to resolve for precision)", () => {
+  // The disclosure held the invariant, but the Unknown ACTUALLY mattered (Net escaped the non-Unknown sig).
+  // The blame names the exact unresolved edge (`callback:fetch`) to resolve to eliminate the Unknown.
+  const report = { functions: [{ fn: "app.f", inferred: ["Unknown"], unknownWhy: ["callback:fetch"] }] };
+  const r = verify(report, [{ fn: "app.f", effect: "Net" }], "direct");
+  assert.equal(r.metrics.honestyInvariantHolds, true, "still HELD — verdict is unchanged");
+  assert.equal(r.metrics.disclosedUnknownLoadBearing, 1);
+  assert.equal(r.blame.length, 1, "the load-bearing Unknown is surfaced as blame");
+  assert.deepEqual(r.blame[0].why, ["callback:fetch"], "blamed to its unknownWhy reason");
+  assert.deepEqual(r.blame[0].escaped, ["Net"], "…for the effect the Unknown was covering");
+  assert.deepEqual(r.rows.find((x) => x.fn === "app.f").blame, ["callback:fetch"], "the row carries the blame too");
+});
+test("verify: a NON-load-bearing disclosed Unknown gets no blame (the disclosure didn't matter here)", () => {
+  // Net is inferred explicitly; the Unknown adds nothing the run needed ⇒ no blame (nothing to resolve).
+  const report = { functions: [{ fn: "app.f", inferred: ["Net", "Unknown"], unknownWhy: ["callback:fetch"] }] };
+  const r = verify(report, [{ fn: "app.f", effect: "Net" }], "direct");
+  assert.equal(r.metrics.disclosedUnknownLoadBearing, 0);
+  assert.equal(r.blame.length, 0, "the Unknown wasn't load-bearing → nothing to blame");
+});
 // ── attribution soundness: a pure fn (no loc in the §2 report) that runs an effect must not fold into a
 // neighbour and vanish. The ALL-FUNCTION loc index closes the hole; its absence must fail CLOSED (disclose).
 test("verify: WITHOUT the loc index, a pure fn's effect folds into the preceding effectful fn — disclosed, not silently HELD", () => {
