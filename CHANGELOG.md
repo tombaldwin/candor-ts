@@ -6,7 +6,7 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
-## [Unreleased]
+## [0.23.1] — 2026-07-20
 
 **Performance — the pass-3 least-fixpoint is no longer O(V²) on deep call graphs (no output change).**
 Both fixpoint sweeps (effects + the literal surfaces) used `while (changed) { for [,rec] of fns }`, which
