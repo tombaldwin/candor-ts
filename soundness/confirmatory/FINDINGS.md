@@ -25,16 +25,25 @@ assignments; **zero `Fs` at module-init time**. The `Fs` fires later, inside `li
 dynamic extent**. candor correctly inferred `index.<module>` pure; the oracle mis-charged a
 later-firing effect to it.
 
-## 3. `node-tar` — oracle synthesised a frame candor never analysed
+## 3. `node-tar` — a GENUINE (A0) consumer-level false all-clear (RECLASSIFIED)
 Flagged frame: `WriteEntrySync.constructor`, observed `{Env,Fs}`, declared `∅`. `new WriteEntrySync()`
 *genuinely* performs `Env` (the base `WriteEntry` constructor reads `process.getuid`/`process.env.USER`/
 `process.cwd()`) and `Fs` (its `super()` calls `this[LSTAT]()`, which dispatches to the sync override
-`fs.lstatSync`). **But candor-ts `0.23.1` emits no `WriteEntrySync.constructor` function row at all** —
-verified by scanning the frozen `tar@6.2.1` package directly: only the *methods* (`[LSTAT]`/`[OPENFILE]`/
-`[READ]`/`[CLOSE]`) are emitted, each correctly `['Fs','Unknown']`; there is no constructor row, and the
-construction path is `Unknown`-disclosed at call sites (`pack.<module>` escapes `Env` via
-`callback:this[WRITEENTRYCLASS]`). So the `inferred: []` in the verify.json is **the oracle defaulting an
-un-emitted frame to pure**, not a classifier claim. No candor signature is violated.
+`fs.lstatSync`). candor-ts `0.23.1` emits **no `WriteEntrySync.constructor` row at all** — the class is
+defined inside a `warner(class … )` decorator call and its constructor is never enumerated (verified by
+scanning `tar@6.2.1`: only the *methods* are emitted, each `['Fs','Unknown']`).
+
+**This is NOT an oracle artifact — an earlier pass mislabelled it as one.** The report's completeness manifest
+is `{count:183, digest}` + a list of uncovered *packages* (`minipass`); it does **not** enumerate the
+analyzed *function* set, so the un-emitted constructor appears NOWHERE. Under the consumer convention
+`absent ⇒ (∅,∅)`, a machine consumer reads `new WriteEntrySync()` as **provably pure** — which is false. So
+it is a **genuine consumer-level false all-clear**: not a classifier *misclassification* (candor emitted no
+*wrong* signature) but an **(A0) coverage gap that reads as a purity claim** because the manifest lacks
+function granularity. It is the Node analog of the JVM's R8 (there (A3), here (A0)); reported, not fixed.
+Caught by the adversarial red-team lens + this manifest check — vindicating "trace every flag to ground
+truth." REPAIRS: (a) function-granularity completeness manifest so `absent ⇒ (∅,∅)` is sound only for listed
+functions; (b) enumerate constructors of decorator-wrapped classes; (c) oracle: attribute an un-analysed
+frame to its nearest analysed ancestor, not a pure default.
 
 ## The oracle bug (reported, not fixed under freeze) — two sub-forms
 `verify-core.attribute()`:
