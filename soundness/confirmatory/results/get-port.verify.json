@@ -1,0 +1,89 @@
+{
+  "metrics": {
+    "scope": "all",
+    "effectsInScope": [
+      "Clipboard",
+      "Clock",
+      "Db",
+      "Env",
+      "Exec",
+      "Fs",
+      "Ipc",
+      "Llm",
+      "Log",
+      "Net",
+      "Rand"
+    ],
+    "executedFunctionsChecked": 4,
+    "soundCompleteOk": 1,
+    "disclosedPartial": 2,
+    "disclosedUnknownLoadBearing": 0,
+    "cardinalSinViolations": 1,
+    "honestyInvariantHolds": false,
+    "attributionComplete": true,
+    "unattributedSites": 0,
+    "analyzedFunctionsTotal": 6,
+    "programExitCode": 1
+  },
+  "violations": [
+    {
+      "fn": "test.<module>",
+      "observed": [
+        "Fs",
+        "Net"
+      ],
+      "inferred": [
+        "Net"
+      ],
+      "escaped": [
+        "Fs"
+      ]
+    }
+  ],
+  "blame": [],
+  "rows": [
+    {
+      "fn": "index.checkAvailablePort",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Net"
+      ],
+      "inferred": [
+        "Net",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "index.getAvailablePort",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Net"
+      ],
+      "inferred": [
+        "Net",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "test.<module>",
+      "verdict": "VIOLATION",
+      "observed": [
+        "Fs",
+        "Net"
+      ],
+      "inferred": [
+        "Net"
+      ]
+    },
+    {
+      "fn": "test.bindPort",
+      "verdict": "sound-complete-ok",
+      "observed": [
+        "Net"
+      ],
+      "inferred": [
+        "Net"
+      ]
+    }
+  ]
+}

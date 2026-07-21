@@ -1,0 +1,9 @@
+name	disposition	analyzed	checked	sound_complete	disclosed	violations	sha
+tmp	no-in-scope-effect	53	0	0	0	0	5f0b2525ed6f6a977ea0cc272d4903d9d2216059
+node-tar	VIOLATION	192	47	4	42	1	bef7b1e4ffab822681fea2a9b22187192ed14717
+get-port	VIOLATION	13	4	1	2	1	5c3cfe828bac345fb30b13211164708d97cb033a
+write-file-atomic	vacuous(attr-incomplete)	10	3	0	3	0	042cff721108a0c1d8a831ba9fa8dca2e5e390da
+node-which	vacuous(attr-incomplete)	10	4	0	4	0	3038155822c2e6f38694843ede2ca03ee841a2e8
+proper-lockfile	VIOLATION	27	20	0	19	1	9f8c303c91998e8404a911dc11c54029812bca69
+mkdirp	no-in-scope-effect	18	0	0	0	0	6fc29774a008f41d96b34523d6aae543ecb46cd1
+graceful-fs	vacuous(attr-incomplete)	58	7	0	7	0	514861c372899df14beb7aaecca4cdbb498d7d11

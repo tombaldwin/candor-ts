@@ -1,0 +1,519 @@
+{
+  "metrics": {
+    "scope": "all",
+    "effectsInScope": [
+      "Clipboard",
+      "Clock",
+      "Db",
+      "Env",
+      "Exec",
+      "Fs",
+      "Ipc",
+      "Llm",
+      "Log",
+      "Net",
+      "Rand"
+    ],
+    "executedFunctionsChecked": 20,
+    "soundCompleteOk": 0,
+    "disclosedPartial": 19,
+    "disclosedUnknownLoadBearing": 18,
+    "cardinalSinViolations": 1,
+    "honestyInvariantHolds": false,
+    "attributionComplete": false,
+    "unattributedSites": 246,
+    "attributionNote": "246 captured effect-site(s) could not be attributed to any analyzed function (an empty/stale/mismatched loc index, or code candor did not analyze) — those effects are NOT checked; not a sound all-clear (re-scan to emit a complete <prefix>.locs.json)",
+    "analyzedFunctionsTotal": 22,
+    "programExitCode": 0
+  },
+  "violations": [
+    {
+      "fn": "index.<module>",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [],
+      "escaped": [
+        "Fs"
+      ]
+    }
+  ],
+  "blame": [
+    {
+      "fn": "index.check",
+      "escaped": [
+        "Fs"
+      ],
+      "why": []
+    },
+    {
+      "fn": "index.checkSync",
+      "escaped": [
+        "Fs"
+      ],
+      "why": []
+    },
+    {
+      "fn": "index.lock",
+      "escaped": [
+        "Fs"
+      ],
+      "why": []
+    },
+    {
+      "fn": "index.lockSync",
+      "escaped": [
+        "Fs"
+      ],
+      "why": []
+    },
+    {
+      "fn": "index.unlock",
+      "escaped": [
+        "Fs"
+      ],
+      "why": []
+    },
+    {
+      "fn": "index.unlockSync",
+      "escaped": [
+        "Fs"
+      ],
+      "why": []
+    },
+    {
+      "fn": "lib.adapter.createSyncFs",
+      "escaped": [
+        "Clock",
+        "Fs"
+      ],
+      "why": [
+        "callback:callback",
+        "callback:fs[`${method}Sync`]",
+        "callback:opaque-iterable:any"
+      ]
+    },
+    {
+      "fn": "lib.adapter.toPromise",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:method",
+        "callback:param#0",
+        "callback:reject",
+        "callback:resolve"
+      ]
+    },
+    {
+      "fn": "lib.adapter.toSync",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:method",
+        "callback:param#0"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.<module>",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:onExit",
+        "callback:options.fs.rmdirSync"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.acquireLock",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:callback",
+        "callback:opaque-iterable:any",
+        "callback:options.fs.mkdir",
+        "callback:options.fs.rmdir",
+        "callback:options.fs.stat",
+        "callback:param#2"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.check",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:callback",
+        "callback:opaque-iterable:any",
+        "callback:options.fs.stat",
+        "callback:param#2"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.lock",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:callback",
+        "callback:opaque-iterable:any",
+        "callback:operation.attempt",
+        "callback:operation.mainError",
+        "callback:operation.retry",
+        "callback:param#2",
+        "callback:releasedCallback",
+        "callback:retry.operation"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.removeLock",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:callback",
+        "callback:options.fs.rmdir",
+        "callback:param#2"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.resolveCanonicalPath",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:callback",
+        "callback:options.fs.realpath",
+        "callback:param#2"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.unlock",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:callback",
+        "callback:opaque-iterable:any",
+        "callback:param#2"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.updateLock",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:lock.mtime.getTime",
+        "callback:lock.updateTimeout.unref",
+        "callback:options.fs.stat",
+        "callback:options.fs.utimes",
+        "callback:stat.mtime.getTime"
+      ]
+    },
+    {
+      "fn": "lib.mtime-precision.probe",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:callback",
+        "callback:fs.stat",
+        "callback:fs.utimes",
+        "callback:param#2",
+        "callback:stat.mtime.getTime"
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "fn": "index.<module>",
+      "verdict": "VIOLATION",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": []
+    },
+    {
+      "fn": "index.check",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": []
+    },
+    {
+      "fn": "index.checkSync",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": []
+    },
+    {
+      "fn": "index.lock",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": []
+    },
+    {
+      "fn": "index.lockSync",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": []
+    },
+    {
+      "fn": "index.unlock",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": []
+    },
+    {
+      "fn": "index.unlockSync",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": []
+    },
+    {
+      "fn": "lib.adapter.createSyncFs",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Clock",
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:callback",
+        "callback:fs[`${method}Sync`]",
+        "callback:opaque-iterable:any"
+      ]
+    },
+    {
+      "fn": "lib.adapter.toPromise",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:method",
+        "callback:param#0",
+        "callback:reject",
+        "callback:resolve"
+      ]
+    },
+    {
+      "fn": "lib.adapter.toSync",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:method",
+        "callback:param#0"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.<module>",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:onExit",
+        "callback:options.fs.rmdirSync"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.acquireLock",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Clock",
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Unknown"
+      ],
+      "blame": [
+        "callback:callback",
+        "callback:opaque-iterable:any",
+        "callback:options.fs.mkdir",
+        "callback:options.fs.rmdir",
+        "callback:options.fs.stat",
+        "callback:param#2"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.check",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Unknown"
+      ],
+      "blame": [
+        "callback:callback",
+        "callback:opaque-iterable:any",
+        "callback:options.fs.stat",
+        "callback:param#2"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.isLockStale",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Clock"
+      ],
+      "inferred": [
+        "Clock",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.lock",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Clock",
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Unknown"
+      ],
+      "blame": [
+        "callback:callback",
+        "callback:opaque-iterable:any",
+        "callback:operation.attempt",
+        "callback:operation.mainError",
+        "callback:operation.retry",
+        "callback:param#2",
+        "callback:releasedCallback",
+        "callback:retry.operation"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.removeLock",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:callback",
+        "callback:options.fs.rmdir",
+        "callback:param#2"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.resolveCanonicalPath",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:callback",
+        "callback:options.fs.realpath",
+        "callback:param#2"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.unlock",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:callback",
+        "callback:opaque-iterable:any",
+        "callback:param#2"
+      ]
+    },
+    {
+      "fn": "lib.lockfile.updateLock",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Clock",
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Unknown"
+      ],
+      "blame": [
+        "callback:lock.mtime.getTime",
+        "callback:lock.updateTimeout.unref",
+        "callback:options.fs.stat",
+        "callback:options.fs.utimes",
+        "callback:stat.mtime.getTime"
+      ]
+    },
+    {
+      "fn": "lib.mtime-precision.probe",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Clock",
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Unknown"
+      ],
+      "blame": [
+        "callback:callback",
+        "callback:fs.stat",
+        "callback:fs.utimes",
+        "callback:param#2",
+        "callback:stat.mtime.getTime"
+      ]
+    }
+  ]
+}

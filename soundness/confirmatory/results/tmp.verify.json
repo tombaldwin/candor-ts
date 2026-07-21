@@ -1,0 +1,32 @@
+{
+  "metrics": {
+    "scope": "all",
+    "effectsInScope": [
+      "Clipboard",
+      "Clock",
+      "Db",
+      "Env",
+      "Exec",
+      "Fs",
+      "Ipc",
+      "Llm",
+      "Log",
+      "Net",
+      "Rand"
+    ],
+    "executedFunctionsChecked": 0,
+    "soundCompleteOk": 0,
+    "disclosedPartial": 0,
+    "disclosedUnknownLoadBearing": 0,
+    "cardinalSinViolations": 0,
+    "honestyInvariantHolds": true,
+    "attributionComplete": false,
+    "unattributedSites": 4,
+    "attributionNote": "4 captured effect-site(s) could not be attributed to any analyzed function (an empty/stale/mismatched loc index, or code candor did not analyze) — those effects are NOT checked; not a sound all-clear (re-scan to emit a complete <prefix>.locs.json)",
+    "analyzedFunctionsTotal": 40,
+    "programExitCode": 1
+  },
+  "violations": [],
+  "blame": [],
+  "rows": []
+}

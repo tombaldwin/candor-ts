@@ -1,0 +1,890 @@
+{
+  "metrics": {
+    "scope": "all",
+    "effectsInScope": [
+      "Clipboard",
+      "Clock",
+      "Db",
+      "Env",
+      "Exec",
+      "Fs",
+      "Ipc",
+      "Llm",
+      "Log",
+      "Net",
+      "Rand"
+    ],
+    "executedFunctionsChecked": 47,
+    "soundCompleteOk": 4,
+    "disclosedPartial": 42,
+    "disclosedUnknownLoadBearing": 11,
+    "cardinalSinViolations": 1,
+    "honestyInvariantHolds": false,
+    "attributionComplete": false,
+    "unattributedSites": 530,
+    "attributionNote": "530 captured effect-site(s) could not be attributed to any analyzed function (an empty/stale/mismatched loc index, or code candor did not analyze) — those effects are NOT checked; not a sound all-clear (re-scan to emit a complete <prefix>.locs.json)",
+    "analyzedFunctionsTotal": 130,
+    "programExitCode": 0
+  },
+  "violations": [
+    {
+      "fn": "lib.write-entry.WriteEntrySync.constructor",
+      "observed": [
+        "Env",
+        "Fs"
+      ],
+      "inferred": [],
+      "escaped": [
+        "Env",
+        "Fs"
+      ]
+    }
+  ],
+  "blame": [
+    {
+      "fn": "lib.pack.<module>",
+      "escaped": [
+        "Env"
+      ],
+      "why": [
+        "callback:WriteEntryTar",
+        "callback:Yallist",
+        "callback:job.entry.on",
+        "callback:job.readdir.forEach",
+        "callback:job.stat.isDirectory",
+        "callback:newthis[WRITEENTRYCLASS](job.path,this[ENTRYOPT](job)).on",
+        "callback:newthis[WRITEENTRYCLASS](job.path,this[ENTRYOPT](job)).on('e",
+        "callback:p.replace",
+        "callback:p.resume",
+        "callback:source.on",
+        "callback:source.pause",
+        "callback:this.filter",
+        "callback:this.readdirCache.get",
+        "callback:this.readdirCache.has",
+        "callback:this.readdirCache.set",
+        "callback:this.statCache.get",
+        "callback:this.statCache.has",
+        "callback:this.statCache.set",
+        "callback:this.warn",
+        "callback:this.zip.end",
+        "callback:this.zip.on",
+        "callback:this.zip.pause",
+        "callback:this.zip.resume",
+        "callback:this[ADDFSENTRY]",
+        "callback:this[ADDTARENTRY]",
+        "callback:this[CURRENT].entry.resume",
+        "callback:this[ENTRYOPT]",
+        "callback:this[ENTRY]",
+        "callback:this[JOBDONE]",
+        "callback:this[ONDRAIN]",
+        "callback:this[ONREADDIR]",
+        "callback:this[ONSTAT]",
+        "callback:this[PIPE]",
+        "callback:this[PROCESSJOB]",
+        "callback:this[PROCESS]",
+        "callback:this[QUEUE].push",
+        "callback:this[QUEUE].removeNode",
+        "callback:this[QUEUE].shift",
+        "callback:this[READDIR]",
+        "callback:this[STAT]",
+        "callback:this[WRITEENTRYCLASS]",
+        "callback:zip.write",
+        "callback:zlib.BrotliCompress",
+        "callback:zlib.Gzip",
+        "dispatch:lib.pack.Pack.write"
+      ]
+    },
+    {
+      "fn": "lib.parse.<module>",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:Yallist",
+        "callback:chunk.slice",
+        "callback:entry.end",
+        "callback:entry.on",
+        "callback:entry.write",
+        "callback:opt.file.endsWith",
+        "callback:re.once",
+        "callback:this.filter",
+        "callback:this.warn",
+        "callback:this[BUFFERCONCAT]",
+        "callback:this[CLOSESTREAM]",
+        "callback:this[CONSUMEBODY]",
+        "callback:this[CONSUMECHUNKSUB]",
+        "callback:this[CONSUMECHUNK]",
+        "callback:this[CONSUMEHEADER]",
+        "callback:this[CONSUMEMETA]",
+        "callback:this[EMITMETA]",
+        "callback:this[EMIT]",
+        "callback:this[MAYBEEND]",
+        "callback:this[META].replace",
+        "callback:this[NEXTENTRY]",
+        "callback:this[PROCESSENTRY]",
+        "callback:this[QUEUE].push",
+        "callback:this[QUEUE].shift",
+        "callback:this[READENTRY].once",
+        "callback:this[UNZIP].end",
+        "callback:this[UNZIP].on",
+        "callback:this[UNZIP].write",
+        "callback:this[UNZIP][ended?'end':'write']",
+        "callback:zlib.BrotliDecompress",
+        "callback:zlib.Unzip",
+        "dispatch:lib.parse.Parser.abort",
+        "dispatch:lib.parse.Parser.write",
+        "dispatch:lib.read-entry.ReadEntry.member"
+      ]
+    },
+    {
+      "fn": "lib.path-reservations.clear#74:9",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:dirs.forEach",
+        "callback:paths.forEach",
+        "callback:q.shift",
+        "callback:q[0].forEach"
+      ]
+    },
+    {
+      "fn": "lib.path-reservations.reserve#117:9",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:a.concat",
+        "callback:paths.forEach",
+        "callback:paths.map",
+        "callback:paths.map(path=>getDirs(path)).reduce",
+        "callback:q.push",
+        "callback:q[q.length-1].add",
+        "callback:stripSlashes(join(normalize(p))).toLowerCase"
+      ]
+    },
+    {
+      "fn": "lib.path-reservations.run#65:9",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:fn",
+        "callback:param#0"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.[MAYBECLOSE]",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:this.emit"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.[ONERROR]",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "callback:entry.resume",
+        "callback:this.emit"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.[UNPEND]",
+      "escaped": [
+        "Fs"
+      ],
+      "why": []
+    },
+    {
+      "fn": "lib.unpack.Unpack.warn",
+      "escaped": [
+        "Fs"
+      ],
+      "why": [
+        "dispatch:type.warn"
+      ]
+    },
+    {
+      "fn": "lib.unpack.callSync",
+      "escaped": [
+        "Fs",
+        "Rand"
+      ],
+      "why": [
+        "callback:fn",
+        "callback:param#0"
+      ]
+    },
+    {
+      "fn": "lib.warn-mixin.warn-mixin",
+      "escaped": [
+        "Env",
+        "Fs"
+      ],
+      "why": [
+        "callback:this.emit"
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "fn": "lib.mkdir.checkCwd",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.mkdir.checkCwdSync",
+      "verdict": "sound-complete-ok",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "lib.mkdir.done#173:9",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.mkdir.done#69:9",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.mkdir.mkdir",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.mkdir.mkdir_",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.mkdir.onmkdir",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.mkdir.sync",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.normalize-windows-path.<module>",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Env"
+      ],
+      "inferred": [
+        "Env",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.pack.<module>",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Env",
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ],
+      "blame": [
+        "callback:WriteEntryTar",
+        "callback:Yallist",
+        "callback:job.entry.on",
+        "callback:job.readdir.forEach",
+        "callback:job.stat.isDirectory",
+        "callback:newthis[WRITEENTRYCLASS](job.path,this[ENTRYOPT](job)).on",
+        "callback:newthis[WRITEENTRYCLASS](job.path,this[ENTRYOPT](job)).on('e",
+        "callback:p.replace",
+        "callback:p.resume",
+        "callback:source.on",
+        "callback:source.pause",
+        "callback:this.filter",
+        "callback:this.readdirCache.get",
+        "callback:this.readdirCache.has",
+        "callback:this.readdirCache.set",
+        "callback:this.statCache.get",
+        "callback:this.statCache.has",
+        "callback:this.statCache.set",
+        "callback:this.warn",
+        "callback:this.zip.end",
+        "callback:this.zip.on",
+        "callback:this.zip.pause",
+        "callback:this.zip.resume",
+        "callback:this[ADDFSENTRY]",
+        "callback:this[ADDTARENTRY]",
+        "callback:this[CURRENT].entry.resume",
+        "callback:this[ENTRYOPT]",
+        "callback:this[ENTRY]",
+        "callback:this[JOBDONE]",
+        "callback:this[ONDRAIN]",
+        "callback:this[ONREADDIR]",
+        "callback:this[ONSTAT]",
+        "callback:this[PIPE]",
+        "callback:this[PROCESSJOB]",
+        "callback:this[PROCESS]",
+        "callback:this[QUEUE].push",
+        "callback:this[QUEUE].removeNode",
+        "callback:this[QUEUE].shift",
+        "callback:this[READDIR]",
+        "callback:this[STAT]",
+        "callback:this[WRITEENTRYCLASS]",
+        "callback:zip.write",
+        "callback:zlib.BrotliCompress",
+        "callback:zlib.Gzip",
+        "dispatch:lib.pack.Pack.write"
+      ]
+    },
+    {
+      "fn": "lib.pack.PackSync.[READDIR]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.pack.PackSync.[STAT]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.parse.<module>",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:Yallist",
+        "callback:chunk.slice",
+        "callback:entry.end",
+        "callback:entry.on",
+        "callback:entry.write",
+        "callback:opt.file.endsWith",
+        "callback:re.once",
+        "callback:this.filter",
+        "callback:this.warn",
+        "callback:this[BUFFERCONCAT]",
+        "callback:this[CLOSESTREAM]",
+        "callback:this[CONSUMEBODY]",
+        "callback:this[CONSUMECHUNKSUB]",
+        "callback:this[CONSUMECHUNK]",
+        "callback:this[CONSUMEHEADER]",
+        "callback:this[CONSUMEMETA]",
+        "callback:this[EMITMETA]",
+        "callback:this[EMIT]",
+        "callback:this[MAYBEEND]",
+        "callback:this[META].replace",
+        "callback:this[NEXTENTRY]",
+        "callback:this[PROCESSENTRY]",
+        "callback:this[QUEUE].push",
+        "callback:this[QUEUE].shift",
+        "callback:this[READENTRY].once",
+        "callback:this[UNZIP].end",
+        "callback:this[UNZIP].on",
+        "callback:this[UNZIP].write",
+        "callback:this[UNZIP][ended?'end':'write']",
+        "callback:zlib.BrotliDecompress",
+        "callback:zlib.Unzip",
+        "dispatch:lib.parse.Parser.abort",
+        "dispatch:lib.parse.Parser.write",
+        "dispatch:lib.read-entry.ReadEntry.member"
+      ]
+    },
+    {
+      "fn": "lib.path-reservations.<module>",
+      "verdict": "sound-complete-ok",
+      "observed": [
+        "Env"
+      ],
+      "inferred": [
+        "Env"
+      ]
+    },
+    {
+      "fn": "lib.path-reservations.clear#74:9",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:dirs.forEach",
+        "callback:paths.forEach",
+        "callback:q.shift",
+        "callback:q[0].forEach"
+      ]
+    },
+    {
+      "fn": "lib.path-reservations.reserve#117:9",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:a.concat",
+        "callback:paths.forEach",
+        "callback:paths.map",
+        "callback:paths.map(path=>getDirs(path)).reduce",
+        "callback:q.push",
+        "callback:q[q.length-1].add",
+        "callback:stripSlashes(join(normalize(p))).toLowerCase"
+      ]
+    },
+    {
+      "fn": "lib.path-reservations.run#65:9",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:fn",
+        "callback:param#0"
+      ]
+    },
+    {
+      "fn": "lib.unpack.<module>",
+      "verdict": "sound-complete-ok",
+      "observed": [
+        "Env"
+      ],
+      "inferred": [
+        "Env"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.[CHECKFS2]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Rand",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.[CHECKFS]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Rand",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.[DIRECTORY]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.[FILE]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.[MAKEFS]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.[MAYBECLOSE]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:this.emit"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.[MKDIR]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.[ONENTRY]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs",
+        "Rand"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Rand",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.[ONERROR]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:entry.resume",
+        "callback:this.emit"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.[UNPEND]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": []
+    },
+    {
+      "fn": "lib.unpack.Unpack.constructor",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs",
+        "Rand"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Rand",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.Unpack.warn",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "dispatch:type.warn"
+      ]
+    },
+    {
+      "fn": "lib.unpack.UnpackSync.[CHECKFS]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs",
+        "Rand"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Rand",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.UnpackSync.[DIRECTORY]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.UnpackSync.[FILE]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.UnpackSync.[MAKEFS]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.UnpackSync.[MKDIR]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.afterChmod#655:19",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.afterMakeParent#639:11",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Rand",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.callSync",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs",
+        "Rand"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:fn",
+        "callback:param#0"
+      ]
+    },
+    {
+      "fn": "lib.unpack.checkCwd#610:11",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Rand",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.done#438:11",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.start#622:11",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Clock",
+        "Fs",
+        "Rand",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.unlinkFile",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Rand",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.unpack.unlinkFileSync",
+      "verdict": "sound-complete-ok",
+      "observed": [
+        "Fs",
+        "Rand"
+      ],
+      "inferred": [
+        "Fs",
+        "Rand"
+      ]
+    },
+    {
+      "fn": "lib.warn-mixin.warn-mixin",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Env",
+        "Fs"
+      ],
+      "inferred": [
+        "Unknown"
+      ],
+      "blame": [
+        "callback:this.emit"
+      ]
+    },
+    {
+      "fn": "lib.write-entry.<module>",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Env",
+        "Fs"
+      ],
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.write-entry.WriteEntrySync.[OPENFILE]",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.write-entry.WriteEntrySync.constructor",
+      "verdict": "VIOLATION",
+      "observed": [
+        "Env",
+        "Fs"
+      ],
+      "inferred": []
+    }
+  ]
+}

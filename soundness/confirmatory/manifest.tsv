@@ -1,0 +1,28 @@
+# Pre-registered confirmatory corpus — Node/TypeScript arm. Committed BEFORE the run (see FROZEN.md).
+# The Node analog of the JVM arm (~/git/candor-java/eval/corpus-confirmatory) and the Rust/Swift syscall
+# arms (~/git/candor-{rust,swift}/soundness/confirmatory): a HELD-OUT, version-pinned corpus, a frozen
+# classifier, one run, whatever it reports is the result — reported, not repaired.
+#
+# Columns: name<TAB>git_url<TAB>tag<TAB>testbin<TAB>testargs<TAB>role+why
+#   testbin/testargs = the node_modules/.bin test runner invoked DIRECTLY (bypassing the package's own
+#   `npm test`, which usually front-runs a linter/tsd step that has nothing to do with H and would abort
+#   the suite). run_frozen.sh runs `node --import <preload> <testbin> <testargs>` in ONE node process, the
+#   analog of the JVM arm driving JUnit's ConsoleLauncher in ONE JVM.
+#
+# role ∈ {H-test: performs effects in its OWN scanned functions (drives sound-complete/disclosed frames) |
+#         vacuous-control: candor degrades EVERY frame to Unknown (dynamic fs-method reassignment) — a
+#         disclosed-partial-only row with 0 sound-complete frames; included to SHOW where the Node arm's
+#         check goes vacuous, not to inflate it}.
+#
+# EXCLUDED (developmental — used to calibrate / A-B / corpus-drive candor-ts; see FROZEN.md §Held-out):
+#   the eval/sweep.sh set  — rimraf execa got ky zod p-queue globby del conf nanoid commander chalk
+#   the corpus-round drivers (candor-ts-corpus memory) — prisma pg axios ioredis
+# Every package below is a FRESH repo the classifier was never tuned against.
+tmp	https://github.com/raszi/node-tmp.git	v0.2.3	node_modules/.bin/mocha	-u exports -R spec test/*-test.js	H-test: makes real temp files/dirs itself (fs.open/mkdir) + crypto/Math.random for names — Fs+Rand in its own functions; mocha runs IN-PROCESS
+node-tar	https://github.com/isaacs/node-tar.git	v6.2.1	node_modules/.bin/tap	--no-coverage --timeout=120 test/pack.js test/unpack.js test/read-entry.js	H-test: archives/extracts to real files (fs open/read/write), tmpdir + rng names — Fs/Rand/Env; tap FORKS each test file (attribution weaker — reported)
+get-port	https://github.com/sindresorhus/get-port.git	v7.1.0	node_modules/.bin/ava	--serial	H-test: BINDS a real TCP socket (net.createServer().listen) to probe a free port — Net in its own function
+write-file-atomic	https://github.com/npm/write-file-atomic.git	v5.0.1	node_modules/.bin/tap	--no-coverage --timeout=120	H-test: writes to a temp path then rename()s — real Fs in its own function; tap forks
+node-which	https://github.com/npm/node-which.git	v4.0.0	node_modules/.bin/tap	--no-coverage --timeout=120	H-test: stat/access-walks PATH to resolve a binary — real Fs in its own function; tap forks
+proper-lockfile	https://github.com/moxystudio/node-proper-lockfile.git	v4.1.2	node_modules/.bin/jest	--env node --runInBand	H-test: mkdir-based lockfile with staleness via Date.now() — Clock+Fs in its own functions; jest in-band
+mkdirp	https://github.com/isaacs/node-mkdirp.git	v3.0.1	node_modules/.bin/tap	--no-coverage --timeout=120	H-test: recursively mkdir()s real directories + reads env for tmp — Fs/Env; tap forks
+graceful-fs	https://github.com/isaacs/node-graceful-fs.git	v4.2.11	node_modules/.bin/tap	--no-coverage --timeout=120 test/open.js test/read-write-stream.js test/readdir-sort.js	vacuous-control: REASSIGNS fs methods dynamically → candor degrades all 42 fns to Unknown → 0 sound-complete frames; shows where the Node arm's H-check is vacuous (disclosed-partial only)
