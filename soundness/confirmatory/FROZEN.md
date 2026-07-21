@@ -40,8 +40,9 @@ disclosed-partial verdict is by-design acceptable. The falsifiable frames are th
 
 ## Held-out justification (why this is confirmatory, not developmental)
 
-The corpus **excludes every package used to develop / calibrate / A-B candor-ts**, so the classifier has not
-been tuned against it:
+The corpus **excludes every package used to develop / calibrate / A-B candor-ts** — with one flagged,
+deliberate exception (`graceful-fs`, the reused vacuous control; see below) — so the falsifiable rows are
+ones the classifier has not been tuned against:
 
 - **The `eval/sweep.sh` calibration set** (the TS analog of the Rust 1,294-crate calibration):
   `rimraf, execa, got, ky, zod, p-queue, globby, del, conf, nanoid, commander, chalk`.
@@ -49,8 +50,13 @@ been tuned against it:
   fixes* — the `@types/pg`→`pg` mapping fix, the `node:vm`/`require(dynamic)` Unknown fixes, etc.):
   `prisma, pg, axios, ioredis`.
 
-Every package in `manifest.tsv` is a fresh repo, cloned at a release tag, that the classifier was never
-tuned against. This over-samples the exact shapes where a false all-clear would live: libraries that open
+**One deliberate exception: `graceful-fs`.** It also appears in the developmental Node B.1 slice, so it is
+**not** held out. It is included as a **deliberately-reused vacuous control**: its dynamic `fs`-method
+reassignment degrades every frame to `Unknown` — 0 sound-complete (`D = ∅`) frames, no falsifiable frame —
+so it can neither hold nor violate H; it is here to exhibit exactly where the Node H-check goes vacuous (see
+"Where this arm goes VACUOUS", below). The held-out claim is therefore: **7 fresh packages + `graceful-fs`
+(reused control)** — 7 fresh repos, cloned at release tags, that the classifier was never tuned against.
+This over-samples the exact shapes where a false all-clear would live: libraries that open
 real files / bind real sockets / spawn real subprocesses / read the clock **in their own functions**.
 
 ## Protocol (per package, executed by `run_frozen.sh`)
