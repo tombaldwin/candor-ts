@@ -603,6 +603,33 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
   // (c) a set-but-unusable CANDOR_CONFIG fails closed (exit 2), never silently gateless
   const rc = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "src")], { encoding: "utf8", env: { ...process.env, CANDOR_CONFIG: path.join(d, "no-such-config") } });
   check("typo'd CANDOR_CONFIG fails closed (exit 2)", rc.status === 2, `status=${rc.status}`);
+  // (d) INERT-KEY DISCLOSURE (§config, the 2026-07-09 amendment; candor-scan's config.rs is the twin): a
+  // key in the FAMILY vocabulary that this engine does not wire (strict/no-ambient/closed-world/taint)
+  // SAYS SO — a checked-in `closed-world` that changes behaviour on the JVM engine and silently nothing
+  // here is a declared-gate-silently-off. Disclosure is stderr-only: exit code, stdout, report untouched.
+  const dInert = project({
+    "src/p.ts": `export function f(): void { /* pure */ }`,
+    ".candor/config": "closed-world true\nstrict\n",
+  });
+  const rInert = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(dInert, "src"), "--json"], { encoding: "utf8" });
+  for (const k of ["closed-world", "strict"]) {
+    check(`a recognized-but-unimplemented config key '${k}' is DISCLOSED (never silently ignored)`,
+          new RegExp(`config key '${k}' is recognized by the candor family but not implemented by candor-ts`).test(rInert.stderr),
+          rInert.stderr.slice(0, 300));
+    check(`an inert config key '${k}' is NOT reported as an UNKNOWN key (a typo and a coverage gap are different cases)`,
+          !rInert.stderr.includes(`ignoring unknown config key '${k}'`), rInert.stderr.slice(0, 300));
+  }
+  let inertReport = null;
+  try { inertReport = JSON.parse(rInert.stdout); } catch { /* null → fails below with the raw stdout */ }
+  check("inert-key disclosure is stderr-only: exit 0 and stdout stays PURE report JSON",
+        rInert.status === 0 && Array.isArray(inertReport?.functions), `status=${rInert.status} ${rInert.stdout.slice(0, 160)}`);
+  // The OTHER half of the gate: an IMPLEMENTED key must NOT warn — without this the fix degenerates into
+  // "warn about everything" and the disclosure stops meaning anything. `policy` here drives a real gate.
+  const rLive = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "src")], { encoding: "utf8" });
+  check("an IMPLEMENTED config key ('policy') is never disclosed as inert",
+        !/config key 'policy' is recognized by the candor family/.test(rLive.stderr), rLive.stderr.slice(0, 300));
+  check("the implemented key still drives its mode (the config `policy` gate fires, exit 1)",
+        rLive.status === 1 && rLive.stdout.includes("[AS-EFF-006]"), `status=${rLive.status} ${rLive.stdout.slice(0, 120)}`);
 }
 
 // ── 3f. diff/gains disclose a producing-build mismatch (§2.1 — baseline-invalidation) ──────────────

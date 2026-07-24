@@ -148,10 +148,16 @@ if (target === null) { console.error(usage); process.exit(2); }
 // CANDOR_* env → this file → default. FAIL-CLOSED: a configured-but-unusable file (a set CANDOR_CONFIG
 // naming a missing path; a discovered file that exists but can't be read) exits 2 — a gate source must
 // never vanish silently (the §6.2 unreadable-policy posture). Only genuine absence is an empty config.
-// Keys are the shared vocabulary (policy/baseline/strict/no-ambient/closed-world/taint/deps); candor-ts
-// implements `policy` + `deps` — the others are inert here (they drive other engines' gates), and a key
-// OUTSIDE the vocabulary warns (typo protection: a misspelt `policy` must not silently drop the gate).
-const CONFIG_KEYS = new Set(["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-ratchet"]);
+// Keys are the shared FAMILY vocabulary; a key OUTSIDE it warns (typo protection: a misspelt `policy`
+// must not silently drop the gate).
+const CONFIG_KEYS = new Set(["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "net-partner", "unknown-ratchet"]);
+// The subset this engine actually wires to a mode — `policy` (the gate), `baseline` (AS-EFF-005),
+// `deps` (the cross-package report chain) and `unknown-ratchet` (the baseline guard's opt-in). The rest
+// of the vocabulary is spec-inert HERE: it drives other engines' gates. But a checked-in enforcement key
+// that silently does nothing is a DECLARED-GATE-SILENTLY-OFF — the reader believes the gate is on — so
+// an inert recognized key DISCLOSES loudly (stderr only; verdict/report/exit code untouched) instead of
+// staying mute. Same posture + message shape as candor-scan's CONFIG_KEYS_IMPLEMENTED.
+const CONFIG_KEYS_IMPLEMENTED = new Set(["policy", "baseline", "deps", "unknown-ratchet"]);
 // The ANCHOR a config file's RELATIVE path values (policy/deps) resolve against: the repo the config
 // belongs to — the parent of its `.candor/` directory (the standard layout; candor-init scaffolds
 // `policy arch.policy` meaning the repo root's), else the config file's own directory. NEVER the
@@ -194,6 +200,21 @@ function loadCandorConfig(targetPath) {
     const key = m[1].toLowerCase(), val = (m[2] ?? "").trim();
     if (!CONFIG_KEYS.has(key)) {
       console.error(`candor-ts: ignoring unknown config key '${key}' in ${file}`);
+      continue;
+    }
+    // MULTI-VALUE keys this engine DOES implement, but reads from the config TEXT rather than this
+    // single-value map (which cannot hold many names): `unknown-alias` via parseUnknownAliases and
+    // `net-partner` via parseNetPartners, both over discoverConfigText. Neither was in CONFIG_KEYS, so
+    // setting either printed "ignoring unknown config key" WHILE THE VALUE WAS HONOURED — an actively
+    // FALSE disclosure, worse than a missing one in a tool whose contract is that its statements about
+    // itself are true. Recognized above, and skipped here so they are not mislabelled inert instead.
+    if (key === "unknown-alias" || key === "net-partner") continue;
+    // RECOGNIZED but not wired here: disclose that the gate/mode is off rather than accepting the key
+    // into `cfg` and dropping it — silence would read as "understood and applied" to the author who
+    // checked it in. Two DIFFERENT cases, both kept: outside-the-vocabulary is a typo, this is a
+    // per-engine coverage gap.
+    if (!CONFIG_KEYS_IMPLEMENTED.has(key)) {
+      console.error(`candor-ts: config key '${key}' is recognized by the candor family but not implemented by candor-ts — that gate/mode is NOT active on this scan (the nightly lint / another engine enforces it)`);
       continue;
     }
     cfg[key] = val;
