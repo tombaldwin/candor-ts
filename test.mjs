@@ -1649,6 +1649,48 @@ export function f(): string { return x(); }`,
         JSON.stringify({ keys: Object.keys(r2.report ?? {}), f: entry(r2.report, "src.u.f") }));
 }
 
+// ── scan-completeness nudge: a high CALL VOLUME into unscanned packages means a missing input ─────
+// A scan that sees the app but none of its dependencies leaves their effects invisible — indistinguishable
+// in the report from "there is nothing there". The trigger is call VOLUME, not package count (candor-java's
+// own build output: 519 calls into 4 packages), so the threshold is pinned at its literal boundary here: a
+// drift of the constant must break this test, not slip through. Advisory ONLY — stderr, never the verdict.
+{
+  const stub = (name, member) => ({
+    [`node_modules/${name}/package.json`]: `{"name":"${name}","version":"0.0.0","main":"index.js","types":"index.d.ts"}`,
+    [`node_modules/${name}/index.d.ts`]: `export declare function ${member}(s: string): string;`,
+    [`node_modules/${name}/index.js`]: `module.exports.${member} = (s) => s;`,
+  });
+  // n distinct call SITES into one uncovered package — the ledger counts calls, so n is the trigger value.
+  const callsInto = (n) => project({
+    ...stub("blindpkg", "touch"),
+    "src/a.ts": `import { touch } from "blindpkg";
+export function go(): void {
+${Array.from({ length: n }, (_, i) => `  touch("x${i}");`).join("\n")}
+}`,
+  });
+  const below = scan(callsInto(49));
+  check("scan-completeness nudge: JUST BELOW the threshold (49 calls) is SILENT",
+        /blindpkg \(49 calls\)/.test(below.r.stderr) && !/hint — /.test(below.r.stderr), below.r.stderr);
+  const at = scan(callsInto(50));
+  check("scan-completeness nudge: AT the threshold (50 calls) it fires, naming the volume + package count",
+        /hint — 50 calls go into 1 package that is not scanned/.test(at.r.stderr), at.r.stderr);
+  check("scan-completeness nudge: it names the remedy (chain the dependencies' reports) and promises VISIBILITY",
+        /CANDOR_DEPS/.test(at.r.stderr) && /--workspace/.test(at.r.stderr)
+          && /DETERMINED effects instead of being absent/.test(at.r.stderr), at.r.stderr);
+  check("scan-completeness nudge: the conformance-matched ledger line is UNCHANGED beneath it",
+        /classifier doesn't cover 1 package this code calls into/.test(at.r.stderr), at.r.stderr);
+  // VERDICT-NEUTRALITY: the advisory is stderr-only, so a `--json` pipe stays pure JSON and the exit code
+  // is whatever the analysis said (0 here — no gate configured). An advisory that broke `… | jq` would be
+  // a worse bug than the blind spot it reports.
+  const j = scan(callsInto(50), "--json");
+  let env = null;
+  try { env = JSON.parse(j.r.stdout); } catch { /* null → the check fails with the raw stdout */ }
+  check("scan-completeness nudge: stdout stays PURE JSON while the advisory prints (stderr only)",
+        env !== null && Array.isArray(env.functions) && !j.r.stdout.includes("hint — ")
+          && /hint — 50 calls/.test(j.r.stderr) && j.r.status === 0,
+        `status=${j.r.status} stdout=${j.r.stdout.slice(0, 120)}`);
+}
+
 // ── interface-CHA: a LOCAL interface dispatch resolves to its implementors (the Rust move) ────────
 {
   const d = project({

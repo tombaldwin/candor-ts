@@ -3326,12 +3326,37 @@ if (!wantJson) {
       + `\`deny E Unknown[dynamic]\` (which tolerates \`setup\`), then shrink to zero once installed.`);
   }
 }
+// Total CALLS into unscanned packages above which the scan is assumed to be MISSING ITS DEPENDENCIES —
+// pointed at the app's own sources with nothing chained — and so earns the scan-completeness nudge below.
+// VOLUME, not package COUNT: count is the wrong metric. candor-java's own build output makes 519 such
+// calls into just 4 uncovered packages — the textbook "you pointed it at your code, not the whole
+// dependency tree" scan, which any count threshold misses entirely — while a small app touching 5 tiny
+// util packages would be nudged for nothing. A scan with its dependency reports chained sits at or near
+// zero. Advisory only: never touches the report, the verdict, or the exit code.
+const UNCOVERED_CALLS_NUDGE_MIN = 50;
 if (unlistedSeen.size > 0) {
   const top = uncoveredLedger; // ⟨0.15 staged⟩ the shared sorted ledger — same names/counts as envelope `coverage`
   const shown = top.slice(0, 8).map(([p, n]) => `${p} (${n} call${n === 1 ? "" : "s"})`).join(", ");
   const more = top.length > 8 ? ` + ${top.length - 8} more` : "";
   console.error(`candor-ts: candor's classifier doesn't cover ${top.length} package${top.length === 1 ? "" : "s"} this code calls into — `
     + `their effects are INVISIBLE to the scan (absent from the report, NOT a claim they're pure): ${shown}${more}`);
+  // SCAN-COMPLETENESS NUDGE. A scan that sees the app but none of its dependencies leaves those
+  // dependencies' effects INVISIBLE (the ledger above) — a MISSING INPUT, not a precision defect, and the
+  // two read identically in the report. Measured on the JVM engine against a real 18.7k-fn webapp: scanned
+  // app-only it could PROVE Net on 465 functions; re-scanned as the deployed artifact (app + its 222
+  // dependency jars) the same gate proved Net on 5,865 — the library reaches became DETERMINED effects
+  // rather than nothing. Here the equivalent input is the dependencies' own reports: scan them and chain
+  // them (`--workspace` for symlinked monorepo deps, `CANDOR_DEPS` for any directory of sibling reports),
+  // and a call into a chained package inherits its recorded effects instead of joining this ledger.
+  // The nudge deliberately promises VISIBILITY, not dispatch resolution — a broad dispatch over the app's
+  // OWN hierarchy discloses Unknown for reasons more dependency code cannot fix.
+  const uncoveredCalls = uncoveredLedger.reduce((sum, [, n]) => sum + n, 0);
+  if (uncoveredCalls >= UNCOVERED_CALLS_NUDGE_MIN)
+    console.error(`candor-ts: hint — ${uncoveredCalls} calls go into ${top.length} package${top.length === 1 ? "" : "s"} `
+      + `that ${top.length === 1 ? "is" : "are"} not scanned, so their effects are invisible here. If you scanned only your own `
+      + `code, point candor at the full dependency set too — scan those packages and chain their reports `
+      + `(\`--workspace\` for monorepo links, \`CANDOR_DEPS=<dir>\` otherwise): those reaches then resolve to `
+      + `DETERMINED effects instead of being absent.`);
 }
 
 // ---- the cold-repo hook: surface the single most SURPRISING transitive reach (surface.mjs) ---------
