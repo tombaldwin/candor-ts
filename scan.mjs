@@ -1738,7 +1738,9 @@ function edgeToTargets(rec, decls) {
 // join), then the §5.1 package manifest, then the κ-coverage ledger's `invisible`. Nothing is fabricated:
 // a member declared in the ES lib / a project file / an unnameable package resolves to nothing and adds
 // nothing, and a chained report that omits the entry is making its purity claim (SPEC §2 rule 3).
-function chargeExternalDecl(rec, decl) {
+// `tailOverride` names the dep report's local tail explicitly when the declaration cannot supply it — a
+// CONSTRUCTOR has no `name`, and the producer hashed it as `<Class>.constructor`.
+function chargeExternalDecl(rec, decl, tailOverride) {
   if (!rec || !decl) return;
   const mod = declModule(decl);
   if (!mod || mod.startsWith("<")) return;             // project source / the ES lib — not a package reach
@@ -1747,8 +1749,9 @@ function chargeExternalDecl(rec, decl) {
   // Owner-prefixed first (`Owner.member` — how the dep's own scan hashes a method), bare member as the
   // fallback (a CJS dist scan hashes a top-level export under its bare name). Identical to the call arm.
   const owner = decl.parent?.name?.getText?.();
-  const hit = member && ((owner ? crossDeps.get(`${pkg}#${owner}.${member}`) : undefined)
-    ?? crossDeps.get(`${pkg}#${member}`));
+  const hit = tailOverride ? crossDeps.get(`${pkg}#${tailOverride}`)
+    : member && ((owner ? crossDeps.get(`${pkg}#${owner}.${member}`) : undefined)
+      ?? crossDeps.get(`${pkg}#${member}`));
   if (hit) {
     for (const x of hit.inferred) rec.direct.add(x);
     for (const b of hit.invisible ?? []) rec.blind.add(b);
@@ -2232,19 +2235,16 @@ function visitCalls(node) {
           // whether a library declares its ctor must not change the verdict.
           else if (cd && ts.isClassDeclaration(cd) && !projectFiles.has(path.resolve(cd.getSourceFile().fileName))) {
             externalClass = true;
-            // …but the construction DOES reach the class's package — disclose it as `invisible` (sweep
-            // [13]) so the pure verdict is qualified, exactly like an unmodeled METHOD call below. Without
-            // this, `new Pool()` from an unmodeled pkg read plain pure with no disclosure, no κ-ledger.
-            const cfile = cd.getSourceFile().fileName;
-            const cmod = declModule(cd);
-            const cpkg = cmod.startsWith("@types/") ? cmod.slice("@types/".length) : cmod;
-            const cdeclared = packageManifestEffects(cfile);
-            if (cdeclared !== null) { for (const e of cdeclared) rec.direct.add(e); }
-            else if (!cmod.startsWith("<") && !kappaKnows(cpkg) && !depCoveredPkgs.has(cpkg)
-                && crossesPackageBoundary(cfile)) {
-              unlistedSeen.set(cpkg, (unlistedSeen.get(cpkg) ?? 0) + 1);
-              rec.blind.add(cpkg);
-            }
+            // …but the construction DOES reach the class's package — run it through the same decision
+            // procedure an unmodeled external call gets, so the pure verdict is at worst qualified.
+            // Without this, `new Pool()` from an unmodeled pkg read plain pure with no disclosure, no
+            // κ-ledger (sweep [13]). The CHAINED half matters just as much: the dependency's report holds
+            // the construction's effects under `<pkg>#<Class>.constructor` (every scan mints that unit,
+            // explicit ctor or not, because field initializers run at construction) and nothing looked for
+            // it — candor-spec SOUNDNESS-VEIN-crossing-the-scan-boundary.md. Name the key the way the
+            // producer hashed it; with no chained report this falls through to the disclosure exactly as
+            // before.
+            chargeExternalDecl(rec, cd, cd.name?.text ? `${cd.name.text}.constructor` : null);
           }
         }
         if (!edged && !externalClass) {
@@ -2755,6 +2755,14 @@ function visitCalls(node) {
             const owner3 = decl.parent && decl.parent.name ? decl.parent.name.getText() : null;
             if (localTail && owner3 && (ts.isMethodSignature(decl) || ts.isMethodDeclaration(decl) || ts.isPropertySignature(decl)))
               localTail = `${owner3}.${localTail}`;
+            // `new DepClass()` — a CONSTRUCTOR declaration has NO name, so `localTail` stayed null and the
+            // join was skipped entirely, even though the dependency's report carries the entry under
+            // `<pkg>#<Class>.constructor` (every scan mints a `Class.constructor` unit, explicit ctor or
+            // not, because field initializers run at construction). An effectful dependency constructor
+            // was therefore absorbed silently at every `new` across the boundary — candor-spec
+            // SOUNDNESS-VEIN-crossing-the-scan-boundary.md. Name it the way the producer hashed it.
+            else if (!localTail && owner3 && ts.isConstructorDeclaration(decl))
+              localTail = `${owner3}.constructor`;
             // A typed consumer resolves into `@types/<pkg>`; the dep's report hashes under `<pkg>`.
             const depMod = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
             // Owner-prefixed first (Owner.member), bare member as the fallback: a CJS dist scan

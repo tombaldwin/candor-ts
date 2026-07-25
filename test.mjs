@@ -475,6 +475,54 @@ export declare class Plain { label(): string; }`,
           `chained=${JSON.stringify(ceff(`src.m.${fn}`))} control=${JSON.stringify(entry(ctlrep, `src.m.${fn}`)?.inferred)}`);
 }
 
+// ── 2f-quinquies. `new DepClass()` ACROSS the scan boundary ───────────────────────────────────────
+// Same vein, second mechanism. Every scan mints a `Class.constructor` unit — explicit ctor or not,
+// because field initializers execute at construction — so a dependency's report DOES carry
+// `<pkg>#<Class>.constructor`. The consumer never asked for it: the cross-package join keys on
+// `decl.name`, and a ConstructorDeclaration has no name, so the tail was null and the lookup skipped;
+// the implicit-ctor arm (no resolved declaration at all) never consulted the chain either. An effectful
+// dependency constructor was absorbed silently at every `new` across the boundary.
+{
+  const depSrc = `import * as fsm from "node:fs";
+export class Boot { constructor() { fsm.appendFileSync("/tmp/x", "b"); } }
+export class Lazy { x: string = fsm.readFileSync("/tmp/y", "utf8"); }
+export class Idle { label(): string { return "i"; } }`;
+  const depDir = project({ "package.json": `{"name":"ctorkit","version":"1.0.0"}`, "src/index.ts": depSrc });
+  const { prefix: depPrefix } = scan(depDir);
+  const appFiles = {
+    "package.json": `{"name":"capp","version":"1.0.0"}`,
+    "src/m.ts": `import { Boot, Lazy, Idle } from "ctorkit";
+export function boot(): Boot { return new Boot(); }
+export function lazy(): Lazy { return new Lazy(); }
+export function idle(): Idle { return new Idle(); }`,
+    "node_modules/ctorkit/package.json": `{"name":"ctorkit","version":"1.0.0","types":"dist/index.d.ts","main":"dist/index.js"}`,
+    // Boot declares its ctor (the named-declaration arm); Lazy and Idle do not (the implicit-ctor arm).
+    "node_modules/ctorkit/dist/index.d.ts": `export declare class Boot { constructor(); }
+export declare class Lazy { x: string; }
+export declare class Idle { label(): string; }`,
+    "node_modules/ctorkit/dist/index.js": `exports.Boot = class {}; exports.Lazy = class {}; exports.Idle = class {};`,
+  };
+  const app = project(appFiles);
+  fs.writeFileSync(path.join(app, "deny.policy"), "deny Fs\n");
+  const chained = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", path.join(app, "deny.policy")],
+                            { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: `${depPrefix}.json` } });
+  const crep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  const ceff = (fn) => entry(crep, fn)?.inferred ?? [];
+  check("boundary: `new DepClass()` with a DECLARED ctor inherits the dep's constructor effects",
+        ceff("src.m.boot").includes("Fs"), JSON.stringify(crep.functions));
+  check("boundary: ...and with an IMPLICIT ctor (a dep field initializer) too",
+        ceff("src.m.lazy").includes("Fs"), JSON.stringify(ceff("src.m.lazy")));
+  check("no-fabrication: constructing a PURE dep class stays pure",
+        entry(crep, "src.m.idle") == null, JSON.stringify(entry(crep, "src.m.idle")));
+  check("boundary: the `deny Fs` gate is exit 1 again for `new DepClass()`",
+        chained.status === 1, `status=${chained.status} ${chained.stdout}`);
+  // Unchained the construction is unknowable, and must stay DISCLOSED rather than confidently pure —
+  // the behaviour that was already correct here, pinned so the join did not quietly replace it.
+  const { report: urep } = scan(project(appFiles));
+  check("boundary, unchained: `new DepClass()` still discloses the package",
+        entry(urep, "src.m.boot")?.invisible?.includes("ctorkit"), JSON.stringify(urep.functions));
+}
+
 // ── 2b. `show` SURFACES the literal Fs paths + Exec cmds (the regression that shipped) ─────────────
 // scan writes the surface under report keys `paths`/`cmds`; `show` once read a nonexistent `e.fs`, so
 // it silently dropped every file path even though the MCP `candor_show` doc promises "paths". The CLI
