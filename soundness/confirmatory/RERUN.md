@@ -68,7 +68,20 @@ goes 1 violation → 0 — because the edge resolves intra-project down to a mod
 No `Unknown` was invented and nothing flooded; `sound-complete` drops 5 → 4 for the same reason, a frame
 correctly moving from *claimed complete* to *disclosed*.
 
-`write-file-atomic` still flags: its `Rand` reaches through `node_modules`, which is the **external half**
-of the vein and remains open. That the two findings separated exactly along the line the analysis predicted
-is the useful part — the fix is scoped to what it can determine, and the residue is named rather than
-papered over.
+`write-file-atomic` still flagged at that point: its `Rand` reaches through `node_modules`, the **external
+half** of the vein. That the two findings separated exactly along the line the analysis predicted was the
+useful part.
+
+### Both findings are now resolved — the second by chaining (candor-ts `3643cd9`)
+
+The external half landed too, and it closes `write-file-atomic` on the same principle: determination, not
+disclosure. Scanning its two dependencies and chaining their reports:
+
+    signal-exit                     dist.cjs.index.<module> -> ['Rand', 'Unknown']
+    write-file-atomic  (unchained)  lib.index.<module>      -> pure          <- the finding
+                       (chained)    lib.index.<module>      -> ['Rand','Unknown']
+
+The signature now carries `Rand`, so the frame moves from a violation to a disclosed hold. Neither finding
+was repaired by weakening a check or widening `Unknown`: `proper-lockfile` resolved intra-project, and this
+one resolves as soon as the dependency's own report is available. What stays undisclosed is a dependency
+nobody has scanned — deliberately, since blanket-disclosing those measured at 60-100% of modules.
