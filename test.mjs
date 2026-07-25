@@ -1062,6 +1062,21 @@ export function make(): Implicit { return new Implicit(); }`,
     spawnSync("node", [path.join(HERE, "scan.mjs"), d2],
               { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: `${depPrefix}.json` } });
     const r2 = JSON.parse(fs.readFileSync(path.join(d2, ".candor", "report.json"), "utf8"));
+    // ...and `--dep-inits` produces that chain automatically: node_modules is on disk, so the packages the
+  // project imports at top level get scanned and chained without the user staging reports by hand. Bounded
+  // to DIRECT dependencies (a bare specifier at file scope), and anything not installed is skipped and
+  // reported as such rather than silently counted.
+  {
+    const app = project({ "src/a.ts": `import { t } from "dep-with-init";\nexport const v = t;` });
+    const nm = path.join(app, "node_modules", "dep-with-init");
+    fs.mkdirSync(nm, { recursive: true });
+    fs.writeFileSync(path.join(nm, "package.json"),
+                     JSON.stringify({ name: "dep-with-init", version: "0.0.0", main: "index.js" }));
+    fs.writeFileSync(path.join(nm, "index.js"), `const t = Date.now();\nmodule.exports = { t };`);
+    const { report: r3 } = scan(app, "--allow-js", "--dep-inits");
+    check("--dep-inits scans an installed dep and its initializer reaches the importer",
+          entry(r3, "src.a.<module>")?.inferred.includes("Clock"), JSON.stringify(r3?.functions));
+  }
     check("a CHAINED external dep's initializer effects reach the importing <module>",
           entry(r2, "src.uses.<module>")?.inferred.includes("Clock"), JSON.stringify(r2?.functions));
   }

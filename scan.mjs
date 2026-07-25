@@ -75,6 +75,9 @@ OPTIONS
                             violation, 2 if unreadable
   --gate-json <file>        write the structured gate verdict { spec, ok, violations } as JSON
   --allow-js                also scan plain JS/Node (.js/.mjs/.cjs), not just TypeScript
+  --dep-inits               scan the packages this project imports at TOP LEVEL and chain their
+                            reports, so an import that RUNS an effectful dependency initializer is
+                            disclosed instead of reading pure. One child scan per direct dependency.
   --workspace  (--deps)     auto-discover the target's symlinked monorepo (workspace) dependencies,
                             scan each into .candor/deps/, and chain them so a cross-package call
                             discloses the sibling package's effects instead of reading pure
@@ -114,7 +117,7 @@ See https://github.com/tombaldwin/candor`);
 // value-consuming skip handles, nor produce a "lying unknown flag" error for a real flag given first.
 const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--allow-js] [--workspace] [--agents] [--version] [--help]";
 const argv = process.argv.slice(2);
-let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, gateJsonPath = null, allowJs = false, wantAgents = false, wantJson = false, wantWorkspace = false;
+let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, gateJsonPath = null, allowJs = false, wantAgents = false, wantJson = false, wantWorkspace = false, wantDepInits = false;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--agents") wantAgents = true;
@@ -124,6 +127,7 @@ for (let i = 0; i < argv.length; i++) {
   // .candor/deps/ with interface-CHA union entries, and chain them so a cross-package call discloses the
   // sibling's effects instead of reading pure (the candor-ts analog of rust `--deps`, SPEC §2).
   else if (a === "--workspace" || a === "--deps") wantWorkspace = true;
+  else if (a === "--dep-inits") wantDepInits = true;
   else if (a === "--out" || a === "--policy" || a === "--gate-json") {
     const v = argv[i + 1];
     if (v === undefined || v.startsWith("--")) { console.error(`candor-ts: ${a} requires a value (${usage})`); process.exit(2); }
@@ -443,6 +447,50 @@ if (wantWorkspace) {
   }
   console.error(`candor-ts: --workspace chained ${names.size} workspace dep report(s), transitive${names.size ? ": " + [...names].sort().join(", ") : " (none found)"}`);
 }
+// ⟨dep initializers⟩ --dep-inits: importing a package RUNS its entry module, so the importer reaches
+// whatever that initializer does — and with the module-import edge in place, a chained dep report resolves
+// it exactly. The blocker was never analysis, it was that nobody had scanned the dependency. `node_modules`
+// is on disk, so scan it: bounded to the packages this project actually imports AT TOP LEVEL (a bare
+// specifier in an import/require at file scope), which is its direct dependency surface rather than the
+// whole tree. Anything unresolvable or unscannable is skipped and stays exactly as it is today — the
+// alternative, disclosing `Unknown` for every external import, measured at 60-100% of modules and would make
+// the initializer unit uninformative (candor-spec SOUNDNESS-VEIN-initializer-edge.md).
+// Opt-in: this spawns one child scan per direct dependency.
+let depInitsDir = null;
+if (wantDepInits) {
+  const selfPath2 = fileURLToPath(import.meta.url);
+  depInitsDir = path.join(rootDir, ".candor", "dep-inits");
+  fs.mkdirSync(depInitsDir, { recursive: true });
+  const SPEC_RE = /(?:^|\n)\s*(?:import\s[^;'"]*from\s*|import\s*|export\s[^;'"]*from\s*)['"]([^'"]+)['"]|(?:^|\n)[^\n]*\brequire\(\s*['"]([^'"]+)['"]\s*\)/g;
+  const wanted = new Set();
+  for (const f of fileNames) {
+    let src; try { src = fs.readFileSync(f, "utf8"); } catch { continue; }
+    for (const m of src.matchAll(SPEC_RE)) {
+      const spec = m[1] ?? m[2];
+      if (!spec || spec.startsWith(".") || spec.startsWith("node:")) continue;
+      const seg = spec.split("/");
+      wanted.add(spec.startsWith("@") ? seg.slice(0, 2).join("/") : seg[0]);
+    }
+  }
+  const scanned = [];
+  for (const pkg of wanted) {
+    let dir = null;
+    for (let d = rootDir; ; d = path.dirname(d)) {
+      const c = path.join(d, "node_modules", pkg);
+      if (fs.existsSync(path.join(c, "package.json"))) { dir = c; break; }
+      if (path.dirname(d) === d) break;
+    }
+    if (!dir) continue;                       // not installed, or a builtin/type-only import
+    try {
+      const out = execFileSync(process.execPath, [selfPath2, dir, "--json", "--allow-js"],
+        { env: { ...process.env, CANDOR_WORKSPACE_CHAIN: "1" },
+          maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
+      fs.writeFileSync(path.join(depInitsDir, `${pkg.replace(/[/@]/g, "_")}.json`), out);
+      scanned.push(pkg);
+    } catch { /* a dep that fails to scan is skipped — its initializer stays undisclosed, as today */ }
+  }
+  console.error(`candor-ts: --dep-inits scanned ${scanned.length} of ${wanted.size} direct dependenc${wanted.size === 1 ? "y" : "ies"}${scanned.length ? ": " + scanned.sort().join(", ") : ""}`);
+}
 // CANDOR_DEPS (SPEC §2): sibling/dependency reports whose effects a call into that package
 // inherits — the cross-package join the workspace probe measured as missing (trpc client → server:
 // zero edges). The key is the report's `hash` (`package#LocalName` — derivable from BOTH a source
@@ -461,7 +509,7 @@ const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:
 const depCoveredPkgs = new Set();
 {
   // --workspace's auto-scanned deps dir is prepended to the explicit CANDOR_DEPS/config spec (both chain).
-  const spec = [workspaceDepsDir, process.env.CANDOR_DEPS ?? candorConfig.deps ?? ""].filter(Boolean).join(":");
+  const spec = [workspaceDepsDir, depInitsDir, process.env.CANDOR_DEPS ?? candorConfig.deps ?? ""].filter(Boolean).join(":");
   const files = [];
   for (const tok of spec.split(/[\s:,]+/).filter(Boolean)) {
     try {
