@@ -272,6 +272,125 @@ export function plainJson(): string { return JSON.stringify({ a: 1 }); }`,
         eff("src.a.plainJson").length === 0, JSON.stringify(eff("src.a.plainJson")));
 }
 
+// ── 2f-bis. IMPLICIT STRINGIFICATION reached through DISPATCH or a SINK ────────────────────────────
+// The four-way common-mode vein (candor-spec SOUNDNESS-VEIN-implicit-stringify.md), found on HikariCP
+// by the dynamic oracle and reproduced in all four engines. §2f above resolves the coercion member on
+// the operand's DECLARED type, which stays silent in the two shapes that actually occur in real code:
+//   (1) DISPATCH — the operand is typed by an INTERFACE (or a base class) that declares no `toString`,
+//       so the checker lands on the pure lib.es `Object.prototype.toString` and edges nowhere, even
+//       though the only runtime implementor's `toString` performs an effect.
+//   (2) SINK — the stringification happens INSIDE a library (`console.log("%s", e)`, a logger's
+//       parameterized level-method, `Array.prototype.join`). There is no coercion node at the call
+//       site at all; statically the site resolves cleanly to the log/join call, so the fn looks fully
+//       accounted for while the argument's own effect is absorbed silently.
+// FIX = CHA-dispatch the coercion member over the type's LOCAL implementors/subclasses (reusing the
+// interfaceImpls / classDescendants indexes ordinary dispatch already uses), and model the named
+// stringifying sinks. NO FABRICATION: a string/number/plain-object/library-typed operand, or a type
+// with no LOCAL coercion member, resolves to nothing and contributes nothing.
+{
+  const d = project({
+    "src/a.ts": `import * as fsm from "node:fs";
+interface Entry { state(): number; }
+class EffEntry implements Entry {
+  state(): number { return 1; }
+  toString(): string { fsm.appendFileSync("/tmp/x", "s"); return "e"; }
+  toJSON(): object { fsm.appendFileSync("/tmp/x", "j"); return {}; }
+}
+interface PureEntry { state(): number; }
+class PureImpl implements PureEntry { state(): number { return 1; } toString(): string { return "p"; } }
+abstract class Base { abstract kind(): string; }
+class EffSub extends Base { kind(): string { return "k"; } toString(): string { fsm.appendFileSync("/tmp/x", "b"); return "s"; } }
+
+// (1) DISPATCH: the operand is INTERFACE-typed; the effectful toString lives on the implementor.
+export function ifaceTemplate(e: Entry): string { return \`entry: \${e}\`; }
+export function ifaceConcat(e: Entry): string { return "entry: " + e; }
+export function ifaceString(e: Entry): string { return String(e); }
+export function ifaceJson(e: Entry): string { return JSON.stringify(e); }
+export function baseTemplate(b: Base): string { return \`b: \${b}\`; }
+
+// (2) SINK: the library stringifies the argument internally.
+export function consoleFmt(e: Entry): void { console.log("entry: %s", e); }
+export function consoleBare(e: Entry): void { console.error(e); }
+export function joinElems(es: Entry[]): string { return es.join(", "); }
+export function templateArray(es: Entry[]): string { return \`all: \${es}\`; }
+export function jsonArray(es: Entry[]): string { return JSON.stringify(es); }
+
+// NO FABRICATION.
+export function purePlainTemplate(s: string): string { return \`hi \${s}\`; }
+export function pureNumTemplate(n: number): string { return \`n=\${n}\`; }
+export function pureIfaceTemplate(p: PureEntry): string { return \`p: \${p}\`; }
+export function pureConsoleString(s: string): void { console.log("x %s", s); }
+export function pureConsoleLib(dt: Date): void { console.log("d %s", dt); }
+export function pureJoinStrings(xs: string[]): string { return xs.join("/"); }`,
+  });
+  const { report } = scan(d);
+  const eff = (fn) => entry(report, fn)?.inferred ?? [];
+  // (1) DISPATCH — CHA over the interface's/base's LOCAL implementors.
+  check("stringify-vein: template over an INTERFACE-typed operand carries the impl's Fs",
+        eff("src.a.ifaceTemplate").includes("Fs"), JSON.stringify(eff("src.a.ifaceTemplate")));
+  check("stringify-vein: concat over an INTERFACE-typed operand carries Fs",
+        eff("src.a.ifaceConcat").includes("Fs"), JSON.stringify(eff("src.a.ifaceConcat")));
+  check("stringify-vein: String() over an INTERFACE-typed operand carries Fs",
+        eff("src.a.ifaceString").includes("Fs"), JSON.stringify(eff("src.a.ifaceString")));
+  check("stringify-vein: JSON.stringify over an INTERFACE-typed operand carries the impl's toJSON Fs",
+        eff("src.a.ifaceJson").includes("Fs"), JSON.stringify(eff("src.a.ifaceJson")));
+  check("stringify-vein: template over a BASE-CLASS-typed operand carries the subclass override's Fs",
+        eff("src.a.baseTemplate").includes("Fs"), JSON.stringify(eff("src.a.baseTemplate")));
+  // (2) SINK — the HikariCP/SLF4J shape, and the array-element shape.
+  check("stringify-vein: console.log(\"%s\", e) carries the argument's toString Fs (the HikariCP shape)",
+        eff("src.a.consoleFmt").includes("Fs"), JSON.stringify(eff("src.a.consoleFmt")));
+  check("stringify-vein: console.error(e) with an object argument carries Fs",
+        eff("src.a.consoleBare").includes("Fs"), JSON.stringify(eff("src.a.consoleBare")));
+  check("stringify-vein: arr.join() carries the ELEMENT's toString Fs",
+        eff("src.a.joinElems").includes("Fs"), JSON.stringify(eff("src.a.joinElems")));
+  check("stringify-vein: a template over an ARRAY carries the element's toString Fs",
+        eff("src.a.templateArray").includes("Fs"), JSON.stringify(eff("src.a.templateArray")));
+  check("stringify-vein: JSON.stringify(arr) carries the element's toJSON Fs",
+        eff("src.a.jsonArray").includes("Fs"), JSON.stringify(eff("src.a.jsonArray")));
+  // NO FABRICATION — the mechanism must be inert on the overwhelming majority of real sites.
+  check("no-fabrication: a plain template over a STRING stays pure",
+        eff("src.a.purePlainTemplate").length === 0, JSON.stringify(eff("src.a.purePlainTemplate")));
+  check("no-fabrication: a template over a NUMBER stays pure",
+        eff("src.a.pureNumTemplate").length === 0, JSON.stringify(eff("src.a.pureNumTemplate")));
+  check("no-fabrication: a PURE toString reached by interface-CHA contributes nothing",
+        eff("src.a.pureIfaceTemplate").length === 0, JSON.stringify(eff("src.a.pureIfaceTemplate")));
+  check("no-fabrication: console.log of a string stays pure",
+        eff("src.a.pureConsoleString").length === 0, JSON.stringify(eff("src.a.pureConsoleString")));
+  check("no-fabrication: console.log of a LIBRARY-typed value (Date) stays pure",
+        eff("src.a.pureConsoleLib").length === 0, JSON.stringify(eff("src.a.pureConsoleLib")));
+  check("no-fabrication: joining an array of strings stays pure",
+        eff("src.a.pureJoinStrings").length === 0, JSON.stringify(eff("src.a.pureJoinStrings")));
+}
+
+// ── 2f-ter. The stringifying-SINK table on an EXTERNAL logger (the direct SLF4J analogue) ──────────
+// A logging level-method on an EXTERNAL receiver (pino/winston/bunyan) formats its arguments, running
+// the argument's toString/toJSON inside the library — the exact shape the vein was found on. A LOCAL
+// logger is NOT treated as a sink: its body is walked, so its stringification is already ordinary code.
+{
+  const d = project({
+    "src/a.ts": `import * as fsm from "node:fs";
+import { logger } from "extlogger";
+interface Entry { state(): number; }
+class EffEntry implements Entry {
+  state(): number { return 1; }
+  toString(): string { fsm.appendFileSync("/tmp/x", "s"); return "e"; }
+}
+export function viaExternalLogger(e: Entry): void { logger.info("entry %s", e); }
+export function viaExternalLoggerPrimitive(n: number): void { logger.info("n %s", n); }`,
+    "node_modules/extlogger/package.json": `{"name":"extlogger","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/extlogger/index.d.ts": `export interface Logger { info(msg: string, ...rest: unknown[]): void; }
+export declare const logger: Logger;`,
+    "node_modules/extlogger/index.js": `exports.logger = { info(){} };`,
+  });
+  const { report } = scan(d);
+  const eff = (fn) => entry(report, fn)?.inferred ?? [];
+  check("stringify-vein: an EXTERNAL logger level-method carries the argument's toString Fs",
+        eff("src.a.viaExternalLogger").includes("Fs"), JSON.stringify(eff("src.a.viaExternalLogger")));
+  check("no-fabrication: an external logger call with a primitive argument gains no Fs",
+        !eff("src.a.viaExternalLoggerPrimitive").includes("Fs"),
+        JSON.stringify(eff("src.a.viaExternalLoggerPrimitive")));
+}
+
 // ── 2b. `show` SURFACES the literal Fs paths + Exec cmds (the regression that shipped) ─────────────
 // scan writes the surface under report keys `paths`/`cmds`; `show` once read a nonexistent `e.fs`, so
 // it silently dropped every file path even though the MCP `candor_show` doc promises "paths". The CLI

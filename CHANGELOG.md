@@ -6,6 +6,42 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [Unreleased]
+
+⚠ **Implicit STRINGIFICATION reached through dispatch or a formatting sink is no longer read silently
+pure** (`scan.mjs`, the coercion-desugaring arm). Closes the four-way common-mode vein recorded in
+candor-spec `SOUNDNESS-VEIN-implicit-stringify.md` — found on HikariCP by the dynamic syscall oracle
+(`ConcurrentBag.remove` inferred `[Log]`, observed `[Clock]`) and reproduced in all four engines.
+
+The engine already desugared the JS coercion protocol (`` `${x}` `` / `"s" + x` / `String(x)` /
+`JSON.stringify(x)` → the operand's `toString`/`valueOf`/`toJSON`/`[Symbol.toPrimitive]`), but resolved
+the member on the operand's **declared** type only. Two shapes stayed silent:
+
+- **Dispatch.** An INTERFACE- or BASE-CLASS-typed operand whose type declares no `toString` resolved to
+  the pure lib.es `Object.prototype.toString` and edged nowhere — even when the only local implementor's
+  `toString` performs I/O. Now CHA-dispatched over the type's local implementors/subclasses, reusing the
+  `interfaceImpls` index ordinary dispatch already uses plus a new `classDescendants` sibling of
+  `classOverrides`. No `Unknown` fallback and no ≤12 family bound are needed here (unlike ordinary
+  dispatch): the coercion protocol has a **known-pure terminal**, so "no local member" is a genuine pure
+  resolution rather than a dropped target — which is what keeps this from turning every template literal
+  in every program into an `Unknown`.
+- **Sinks.** The stringification happening INSIDE a library, with no coercion node at the call site:
+  `console.*` with an object argument, a logging level-method on an external logger
+  (`logger.warn("%s", e)` — the direct analogue of the SLF4J parameterized call the vein was found on),
+  and `Array.prototype.join`/`toString` plus array elements under
+  `` `${arr}` ``/`String(arr)`/`JSON.stringify(arr)`, which coerce every element.
+
+No fabrication: the mechanism edges only where the operand's type genuinely declares a LOCAL
+`toString`/`valueOf`/`toJSON`, so string/number/plain-object/library-typed operands contribute nothing.
+A/B over ~17,000 analyzed functions in 8 real repos (ukri-tfs 9,178 · nest · typeorm · zod · graphql-js ·
+ts-node · winston · pino): **0 changed effect sets, 1 new call-graph edge**
+(`printSchema.printUnion → GraphQLObjectType.toString`, a genuine `types.join(' | ')` over an object
+array; the target is pure, so no effect moved). Scan time unchanged.
+
+Residual, disclosed: `JSON.stringify` is not recursed through named object PROPERTIES
+(`JSON.stringify({ wrapped: e })` does not reach `e.toJSON`) — only array elements. Recursing arbitrary
+object graphs is where flood risk lives, so the precise subset shipped instead.
+
 ## [0.23.1] — 2026-07-20
 
 **Performance — the pass-3 least-fixpoint is no longer O(V²) on deep call graphs (no output change).**

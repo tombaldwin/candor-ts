@@ -875,6 +875,7 @@ const nodeName = new WeakMap();  // declaration node -> qualified name
 const entityTables = new Map();    // ClassDeclaration node -> table name
 const interfaceImpls = new Map();  // InterfaceDeclaration node -> implementing ClassDeclarations (CHA universe)
 const classOverrides = new Map();  // base-method MemberDeclaration node -> overriding subclass member nodes (class-CHA)
+const classDescendants = new Map();// base ClassDeclaration -> transitive LOCAL subclass ClassDeclarations (coercion-CHA)
 // `Object.defineProperty(target, key, { get/set })` runtime accessors (the silent-pure defineProperty
 // hole): the TS checker types `target.key` as a plain DATA property (defineProperty is a runtime
 // construct), so `accessorAt` finds no get-accessor and the forcing site `target.key` reads
@@ -1290,6 +1291,18 @@ for (const sf of sources) {
   for (const sf of sources) {
     (function scan(node) {
       if (ts.isClassDeclaration(node)) {
+        // Local-DESCENDANT index (the coercion-CHA universe, below). classOverrides is keyed by an
+        // ANCESTOR MEMBER, so it only sees an override whose base ALSO declares the name. The coercion
+        // protocol's members are the opposite shape: `class Sub extends Base { toString(){…} }` where
+        // `Base` declares NO toString (it inherits the pure `Object.prototype.toString`) has no
+        // classOverrides entry at all, yet a `Base`-typed operand can be a `Sub` at runtime and run its
+        // effectful toString. Index every local class under each of its local ancestors so
+        // coercionTargets can fan out over the receiver's subtree.
+        for (let anc = localBaseClassOf(node), guard = 0; anc && guard++ < 64; anc = localBaseClassOf(anc)) {
+          if (!classDescendants.has(anc)) classDescendants.set(anc, []);
+          const arr = classDescendants.get(anc);
+          if (!arr.includes(node)) arr.push(node);
+        }
         for (const m of node.members ?? []) {
           const name = memberName(m);
           if (!name) continue;
@@ -1658,36 +1671,132 @@ function edgeToTargets(rec, decls) {
 // (contributes nothing). NEVER a fabricated edge: a non-object operand, or a type with no such member,
 // resolves to nothing.
 
+// Is `m` a member shape whose BODY we can charge (a method, or a function-valued property) — not a
+// getter/data field of an unrelated shape?
+function isCoercionMemberDecl(m) {
+  return m && (ts.isMethodDeclaration(m) || ts.isMethodSignature(m)
+    || ts.isPropertyDeclaration(m) || ts.isPropertyAssignment(m)
+    || ts.isFunctionDeclaration(m) || ts.isFunctionExpression(m) || ts.isArrowFunction(m));
+}
+// Find member `name` declared on LOCAL class `cls` or the nearest local ancestor that declares it.
+function localClassMember(cls, name) {
+  for (let cur = cls, guard = 0; cur && guard++ < 64; cur = localBaseClassOf(cur)) {
+    const m = (cur.members ?? []).find((x) => x.name?.getText?.() === name && isCoercionMemberDecl(x));
+    if (m && declIsLocal(m)) return m;
+  }
+  return null;
+}
+// The CHA universe for a coercion operand's type: the LOCAL classes a value of this type can actually
+// be at runtime. An INTERFACE-typed operand (`e: Entry`) reaches its local implementors; a BASE-CLASS-
+// typed operand (`b: Base`) reaches its local subclasses. Both indexes are the ones ordinary dispatch
+// already uses (interfaceImpls / the classDescendants sibling of classOverrides) — no parallel machinery.
+function coercionChaClasses(part) {
+  const out = [];
+  const sym = part.getSymbol?.() ?? part.aliasSymbol;
+  for (const d of sym?.declarations ?? []) {
+    if (!declIsLocal(d)) continue;
+    if (ts.isInterfaceDeclaration(d)) for (const c of interfaceImpls.get(d) ?? []) { if (!out.includes(c)) out.push(c); }
+    else if (ts.isClassDeclaration(d)) for (const c of classDescendants.get(d) ?? []) { if (!out.includes(c)) out.push(c); }
+  }
+  return out;
+}
+// A call that hands its arguments to a formatter which stringifies them INSIDE the library. Two
+// populations, both named (the SITE table is an allowlist by necessity — treating every external call
+// as a stringifying sink would charge every argument of every call and flood; the denylist rule is
+// applied to the TARGETS instead, in coercionTargets, where a forgotten case over-discloses).
+const LOG_LEVEL_METHODS = new Set(["log", "info", "warn", "error", "debug", "trace", "fatal", "verbose", "silly"]);
+function isStringifyingSink(call) {
+  const ex = call.expression;
+  if (!ts.isPropertyAccessExpression(ex)) return false;
+  const member = ex.name?.getText?.();
+  // (a) `console.*` — every console method runs its arguments through util.format/inspect.
+  if (ts.isIdentifier(ex.expression) && ex.expression.getText() === "console") {
+    const d = declOfSym(checker.getSymbolAtLocation(ex.expression));
+    return !d || !declIsLocal(d);   // the GLOBAL console; a local `const console = …` shadow is not a sink
+  }
+  // (b) a logging LEVEL-method on an EXTERNAL receiver — pino/winston/bunyan/log4js/debug, the direct
+  // analogue of the SLF4J parameterized call this vein was found on. A LOCAL logger is excluded: its
+  // body is walked, so whatever stringification it does is already visible as ordinary code and
+  // modelling it as a sink too would double-charge (and would charge a `log()` that never formats).
+  if (!LOG_LEVEL_METHODS.has(member)) return false;
+  const decl = checker.getResolvedSignature(call)?.declaration;
+  return !(decl && declIsLocal(decl));
+}
 // Resolve coercion members of `expr`'s type to their LOCAL decls. `names` is the ordered set of plain
 // member names to try; `withPrimitive` also consults the well-known `[Symbol.toPrimitive]` (which JS
 // prefers over toString/valueOf when present). A union operand is widened to its constituents so a
 // `A | B` value edges to whichever side declares a LOCAL coercion member. Returns LOCAL member decls.
+//
+// CHA (the implicit-stringification vein, four-way common-mode — candor-spec
+// SOUNDNESS-VEIN-implicit-stringify.md): the checker resolves the member on the operand's DECLARED
+// type. For `describe(e: Entry)` where `Entry` is an interface declaring only `state()`,
+// `getProperty("toString")` lands on lib.es `Object.prototype.toString` — external, no edge, silent
+// PURE — even though the only runtime `Entry` is a class whose `toString` reads the clock. So we also
+// dispatch the coercion member over the type's LOCAL implementors/subclasses, exactly as the
+// CallExpression path does for ordinary virtual dispatch.
+//
+// Why this needs NO `Unknown` fallback and NO ≤12 family bound (unlike ordinary dispatch): the
+// coercion protocol has a KNOWN-PURE terminal. A class that declares no `toString` does not leave the
+// call unresolved — it inherits `Object.prototype.toString`, a builtin that provably does nothing.
+// So "no local member found" is a genuine PURE resolution here, not a dropped target, and there is no
+// allResolved gate to satisfy and nothing to bound away. That is what keeps this from turning every
+// template literal in every program into an Unknown. (Residual, disclosed: an EXTERNAL class
+// implementing a local interface is outside `interfaceImpls` — the same node_modules opacity the whole
+// engine carries, covered by the κ ledger, not newly introduced here.)
 function coercionTargets(expr, names, withPrimitive) {
   const t = checker.getTypeAtLocation(expr);
   if (!t) return [];
+  const out = [];
+  const push = (d) => { if (d && declIsLocal(d) && isCoercionMemberDecl(d) && !out.includes(d)) out.push(d); };
+  const seen = new Set();
   // Widen unions/intersections so each branch's coercion member is considered (a `Foo | string` operand
   // can be a Foo at runtime → its local toString runs). A primitive/literal constituent has no LOCAL
   // member and contributes nothing.
-  const parts = t.isUnionOrIntersection?.() ? t.types : [t];
-  const out = [];
-  for (const part of parts) {
-    if (!part || !part.getProperty) continue;
-    if (withPrimitive) {
-      const pd = declOfSym(wellKnownSymbolMember(part, ["__@toPrimitive"]));
-      if (pd && declIsLocal(pd) && !out.includes(pd)) out.push(pd);
+  const visit = (ty, depth) => {
+    if (!ty || depth > 3) return;
+    const parts = ty.isUnionOrIntersection?.() ? ty.types : [ty];
+    for (const part of parts) {
+      if (!part || !part.getProperty || seen.has(part)) continue;
+      seen.add(part);
+      if (withPrimitive) {
+        const pd = declOfSym(wellKnownSymbolMember(part, ["__@toPrimitive"]));
+        if (pd && declIsLocal(pd) && !out.includes(pd)) out.push(pd);
+      }
+      for (const n of names) push(declOfSym(part.getProperty(n)));
+      // CHA fan-out over the LOCAL runtime classes of this type.
+      for (const cls of coercionChaClasses(part)) {
+        if (withPrimitive) {
+          const ct = checker.getTypeAtLocation(cls);
+          const pd = ct && declOfSym(wellKnownSymbolMember(ct, ["__@toPrimitive"]));
+          if (pd && declIsLocal(pd) && !out.includes(pd)) out.push(pd);
+        }
+        for (const n of names) push(localClassMember(cls, n));
+      }
+      // A member resolved on a LOCAL BASE class that local subclasses OVERRIDE: the base-typed operand
+      // can be any subclass at runtime. Reuse the ordinary-dispatch override index.
+      for (const n of names) {
+        const md = declOfSym(part.getProperty(n));
+        if (md) for (const ov of classOverrides.get(md) ?? []) push(ov);
+      }
+      // ELEMENT recursion. Stringifying an ARRAY is not a leaf: `Array.prototype.toString` delegates to
+      // `join`, which coerces EVERY ELEMENT — so `` `${entries}` ``/`entries.join(", ")`/`String(entries)`
+      // all run each element's `toString`, and `JSON.stringify(entries)` runs each element's `toJSON`.
+      // The array's OWN member resolves to the pure es-lib builtin, so without this the whole element
+      // population is silently absorbed. Bounded depth (nested arrays) + a seen-set (recursive types).
+      // Only the numeric index type is followed: named PROPERTIES are deliberately NOT recursed, because
+      // `Object.prototype.toString` does not look at them — see the residual note at the call site.
+      const el = checker.getIndexTypeOfType?.(part, ts.IndexKind.Number);
+      if (el) visit(el, depth + 1);
     }
-    for (const n of names) {
-      const md = declOfSym(part.getProperty(n));
-      // A METHOD (or function-valued property) member — not a getter/data field of an unrelated shape.
-      if (md && declIsLocal(md)
-          && (ts.isMethodDeclaration(md) || ts.isMethodSignature(md)
-              || ts.isPropertyDeclaration(md) || ts.isPropertyAssignment(md)
-              || ts.isFunctionDeclaration(md) || ts.isFunctionExpression(md) || ts.isArrowFunction(md))
-          && !out.includes(md))
-        out.push(md);
-    }
-  }
+  };
+  visit(t, 0);
   return out;
+}
+// The numeric-element type of an array-like — the gate for treating a `.join()`/`.toString()` receiver
+// as an array stringification rather than an ordinary method call on a local object.
+function arrayElementTypeOf(expr) {
+  const t = checker.getTypeAtLocation(expr);
+  return t && checker.getIndexTypeOfType?.(t, ts.IndexKind.Number);
 }
 // True when `expr`'s type is an OBJECT type that could carry a coercion method (so `a + b` may trigger
 // one). A pure primitive operand (string/number/boolean/bigint/null/undefined) never invokes
@@ -2874,6 +2983,16 @@ function visitCalls(node) {
         if (mayCoerceObject(span.expression))
           edgeToTargets(recOf(), coercionTargets(span.expression, ["toString", "valueOf"], true));
     }
+    // 5. ARRAY stringification through an EXPLICIT es-lib call: `parts.join("/")` /
+    // `entries.toString()` / `entries.toLocaleString()`. Resolution lands on the pure `Array.prototype`
+    // builtin, so the ELEMENTS' `toString` — which join genuinely invokes on each one — is never walked.
+    // Gated on the receiver having a NUMERIC INDEX type, so a `.join()`/`.toString()` on an ordinary
+    // local object (already resolved by the normal call path) is not re-charged with its own coercion.
+    if (ts.isCallExpression(node) && owner && ts.isPropertyAccessExpression(node.expression)
+        && ["join", "toString", "toLocaleString"].includes(node.expression.name?.getText?.())
+        && arrayElementTypeOf(node.expression.expression)) {
+      edgeToTargets(recOf(), coercionTargets(node.expression.expression, ["toString", "valueOf"], true));
+    }
     // 1+4. CALL forms `String(x)` (→ toString) and `JSON.stringify(x)` (→ toJSON). These resolve to the
     // es-lib `StringConstructor`/`JSON.stringify` signature (not the user method), so the CallExpression
     // walk above never follows the coercion. Edge to the argument's LOCAL toString / toJSON.
@@ -2882,6 +3001,31 @@ function visitCalls(node) {
       const arg0 = node.arguments[0];
       if (callee === "String" && ts.isIdentifier(node.expression) && mayCoerceObject(arg0))
         edgeToTargets(recOf(), coercionTargets(arg0, ["toString", "valueOf"], true));
+      // 4. STRINGIFYING SINK: a call that hands its arguments to a formatter which invokes
+      // `toString`/`toJSON` INSIDE the library — `console.log("entry: %s", e)`, `logger.warn("{}", e)`.
+      // This is the shape the four-way vein was found on (HikariCP → SLF4J `MessageFormatter` →
+      // `PoolEntry.toString` → the clock): statically the site resolves cleanly to the LOG call, so the
+      // Log effect lands and everything looks accounted for, while the argument's own effect is absorbed
+      // silently. No coercion node exists at the call site for the AST walk to see.
+      //
+      // The SITE table is deliberately small and named (console + the logging level-methods, mirroring
+      // the candor-java reference fix); the DENYLIST-over-allowlist rule applies to the TARGETS, which is
+      // where a forgotten case must land on the safe side: we never enumerate which `toString`s are
+      // effectful, we edge to whatever local one exists and let the effect analysis decide. A sink whose
+      // argument is a string/number/plain-object/library type resolves to no local member and therefore
+      // contributes NOTHING — the mechanism is inert on the overwhelming majority of log calls.
+      //
+      // Over-approximation, disclosed: Node only runs a user `toString` for a `%s` specifier position
+      // (a bare extra argument goes through `util.inspect`, which does not). We charge every object-typed
+      // argument rather than parsing the format string, because the format string is frequently not a
+      // literal and an under-charge here is the cardinal sin while an over-charge is merely conservative.
+      else if (isStringifyingSink(node)) {
+        for (const arg of node.arguments) {
+          if (mayCoerceObject(arg)) edgeToTargets(recOf(), coercionTargets(arg, ["toString", "valueOf"], true));
+          // A structured logger (pino/bunyan/winston) JSON-serializes its argument → `toJSON`.
+          edgeToTargets(recOf(), coercionTargets(arg, ["toJSON"], false));
+        }
+      }
       // `"" + x` is covered by the binary arm; `String(x)` is the explicit conversion form.
       else if (callee === "JSON.stringify")
         // toJSON is consulted regardless of operand shape (JSON.stringify checks for it on any value);
