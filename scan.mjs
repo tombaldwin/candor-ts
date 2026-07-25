@@ -3207,6 +3207,65 @@ const scanEnvWrites = (node) => {
 };
 for (const sf of sources) scanEnvWrites(sf);
 
+// ---- pass 2f: the MODULE-IMPORT edge (spec §2 initializer unit) -----------------------------------
+// Importing a module RUNS its top level, so whatever imports it reaches whatever that module's
+// initializer does. candor-ts modelled the initializer UNIT (⟨0.14⟩) but never the EDGE INTO it: `app.js`
+// requiring an effectful `dep.js` read sound-complete pure while `dep.<module>` correctly read {Env} two
+// lines away — a false all-clear, found on real code (candor-spec SOUNDNESS-VEIN-initializer-edge.md).
+// candor-java has the equivalent edge already (a GETSTATIC forces the owner's `<clinit>`) and is the
+// reference for the shape.
+//
+// Only specifiers that resolve INSIDE the scanned set get an edge. Both ends are then analyzed, so the
+// answer is exact and needs no `Unknown` — and it cannot flood, because an edge into a PURE initializer
+// yields a pure unit and pure units are omitted from the report. A bare specifier (an external package) is
+// left exactly as it was: that half of the vein needs a dependency's own report, and blanket-disclosing it
+// measured at 60-100% of modules, which would make the initializer unit useless rather than honest.
+//
+// The edge attributes to `enclosing`, not unconditionally to `<module>`: a top-level import is the module
+// initializer's business, while a `require()` inside a function is that FUNCTION's reach. Node caches
+// modules so the top level runs once, but `S` is an all-paths over-approximation (§3.3) — some execution
+// does perform it, and charging every site that could be the first is the sound direction.
+const MODULE_EXTS = ["", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs",
+                     "/index.ts", "/index.tsx", "/index.js", "/index.mjs", "/index.cjs"];
+function resolveProjectModule(spec, fromFile) {
+  if (!spec.startsWith(".")) return null;            // bare specifier: external, not this edge
+  const base = path.resolve(path.dirname(fromFile), spec);
+  for (const e of MODULE_EXTS) if (projectFiles.has(base + e)) return base + e;
+  return null;
+}
+{
+  const pending = [];                                 // [fromNode, targetQual]
+  const collect = (node) => {
+    let spec = null;
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
+        && node.moduleSpecifier && ts.isStringLiteralLike(node.moduleSpecifier)) spec = node.moduleSpecifier.text;
+    else if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "require"
+             && node.arguments.length === 1 && ts.isStringLiteralLike(node.arguments[0])) spec = node.arguments[0].text;
+    if (spec) {
+      const target = resolveProjectModule(spec, node.getSourceFile().fileName);
+      if (target) {
+        const rel = path.relative(rootDir, target).replace(/\.[mc]?[tj]sx?$/, "").split(path.sep).join(".");
+        pending.push([node, `${rel}.<module>`]);
+      }
+    }
+    ts.forEachChild(node, collect);
+  };
+  for (const sf of sources) collect(sf);
+  // A target unit is minted lazily, so `A -> B -> C(effectful)` needs more than one sweep: B's unit does
+  // not exist until B's own edge is added. Iterate until quiet rather than depending on file order, which
+  // would make the result depend on how the project happens to be laid out.
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const [node, to] of pending) {
+      if (!fns.has(to)) continue;                     // no unit ⇔ that top level is pure: nothing to reach
+      const from = enclosing(node);
+      if (!from || from === to) continue;             // a module importing itself adds nothing
+      const rec = fns.get(from);
+      if (rec && !rec.edges.has(to)) { rec.edges.add(to); changed = true; }
+    }
+  }
+}
+
 // ---- pass 3: the least fixpoint (SEMANTICS §5a), effects + the literal surfaces -------------------
 // WORKLIST least-fixpoint. The old `while (changed) { for [,rec] of fns }` swept every function on every
 // pass, so its pass count equalled the longest back-to-front call chain — O(V²) on deep whole-project

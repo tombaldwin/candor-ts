@@ -1010,6 +1010,46 @@ export function make(): Implicit { return new Implicit(); }`,
         JSON.stringify(report.functions));
 }
 
+
+// ── 8b-i. The MODULE-IMPORT EDGE: importing a module RUNS its top level, so the importer reaches
+// whatever that initializer does. candor-ts had the initializer UNIT (8b) but not the EDGE INTO it, so
+// `app` requiring an effectful `dep` read sound-complete pure while `dep.<module>` read {Env} two lines
+// away — a false all-clear found on real code (candor-spec SOUNDNESS-VEIN-initializer-edge.md); the JVM
+// engine has had the equivalent GETSTATIC→<clinit> edge all along. Only specifiers resolving INSIDE the
+// scanned set get an edge, so both ends are analyzed and no `Unknown` is invented. ──────────────────
+{
+  const d = project({
+    "src/dep.ts": `export const dbg = process.env.NODE_DEBUG || "";`,
+    "src/app.ts": `import { dbg } from "./dep";\nexport const n = 1;`,
+    "src/cjs.ts": `const d = require("./dep");\nexport const m = 2;`,
+    "src/deep.ts": `import { n } from "./app";\nexport const q = n;`,
+    "src/purelib.ts": `export const k = 1 + 2;`,
+    "src/usespure.ts": `import { k } from "./purelib";\nexport const z = k;`,
+    "src/infn.ts": `export function load() { const d = require("./dep"); return d.dbg; }`,
+    "src/ext.ts": `import { x } from "some-external-pkg";\nexport const e = x;`,
+  });
+  const { report } = scan(d);
+  check("ESM import of an effectful module → the importer's <module> reaches Env",
+        entry(report, "src.app.<module>")?.inferred.includes("Env"), JSON.stringify(report.functions));
+  check("CJS require of an effectful module → same edge",
+        entry(report, "src.cjs.<module>")?.inferred.includes("Env"), JSON.stringify(report.functions));
+  check("the edge is TRANSITIVE across a chain of importers (deep → app → dep)",
+        entry(report, "src.deep.<module>")?.inferred.includes("Env"), JSON.stringify(report.functions));
+  // The anti-flood property, and the reason this fix needs no Unknown: an edge into a PURE initializer
+  // produces a pure unit, and pure units are omitted. Importing must not manufacture a report entry.
+  check("importing a PURE module mints no <module> unit (no flood)",
+        entry(report, "src.usespure.<module>") == null, JSON.stringify(report.functions));
+  // A require() inside a function body is that FUNCTION's reach, not the module initializer's.
+  check("require() inside a function charges the FUNCTION, not <module>",
+        entry(report, "src.infn.load")?.inferred.includes("Env")
+          && entry(report, "src.infn.<module>") == null, JSON.stringify(report.functions));
+  // A bare specifier is an external package: out of the scanned set, so deliberately unchanged here —
+  // blanket-disclosing it measured at 60-100% of modules (see the vein doc). Guards against the fix
+  // quietly widening into the flood it was designed to avoid.
+  check("a bare (external) specifier does NOT mint an initializer unit",
+        entry(report, "src.ext.<module>") == null, JSON.stringify(report.functions));
+}
+
 // ── 9. ambient builtins + crypto tier + the missing-deps warning (CTA dogfood) ───────────────────
 {
   const d = project({
