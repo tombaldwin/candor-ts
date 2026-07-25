@@ -25,6 +25,9 @@ function relIfProject(src) {
 }
 
 const FRAME = /\((?:(.+):(\d+):(\d+))\)$|at (?:(.+):(\d+):(\d+))$/;
+// Our own capture path, skipped when deciding who CALLED the wrapped builtin.
+const OWN_FRAME = /verify-(emit|preload|loader|syscall)\.mjs/;
+const MODULE_LOADER = /^node:internal\/modules\//;
 // TRANSITIVE attribution: EVERY project frame on the stack (nearest-first, deduped), not only the nearest.
 // candor's report is transitive — a function that REACHES an effect is effectful — so each project frame's
 // call-site line, mapped downstream (verify-core `attribute`) to the function that ENCLOSES it, attributes the
@@ -32,20 +35,102 @@ const FRAME = /\((?:(.+):(\d+):(\d+))\)$|at (?:(.+):(\d+):(\d+))$/;
 // site (the earlier behaviour) attributes only to the leaf, so a CALLER that reaches an effect through a
 // dropped/dynamic edge and is reported pure is never tested (its observed set is empty ⇒ H holds vacuously) —
 // the transitive cardinal sin the oracle must falsify.
-function projectSites() {
-  const stack = new Error().stack || "";
+// V8 captures at most `Error.stackTraceLimit` frames, and the default is TEN. The patched builtin, the
+// emit path and Node's own internals occupy several of those before app code is reached, so on a deep chain
+// the OUTERMOST project frames are silently dropped — and a caller the trace never mentions is a caller
+// whose false all-clear this oracle cannot catch. Measured before the fix: a 16-deep synchronous chain
+// charged 5 of its 16 frames. Raise the limit for the duration of our own capture and restore it, so the
+// application's Error behaviour is untouched. CAPTURE_DEPTH bounds the cost; a chain deeper than this is
+// truncated as before, which is why the limit is stated rather than assumed infinite.
+const CAPTURE_DEPTH = 256;
+function liveProjectSites() {
+  const prevLimit = Error.stackTraceLimit;
+  Error.stackTraceLimit = CAPTURE_DEPTH;
+  let stack;
+  try { stack = new Error().stack || ""; } finally { Error.stackTraceLimit = prevLimit; }
   const sites = [];
   const seenHere = new Set();
+  let firstForeign = null;   // the nearest frame below our own capture machinery
   for (const lineStr of stack.split("\n").slice(1)) {
     const m = FRAME.exec(lineStr.trim());
     if (!m) continue;
-    const rel = relIfProject(m[1] ?? m[4]);
+    const src = m[1] ?? m[4];
+    if (firstForeign === null && !OWN_FRAME.test(src)) firstForeign = src;
+    const rel = relIfProject(src);
     if (!rel) continue;
     const line = Number(m[2] ?? m[5]);
     const key = rel + ":" + line;
     if (!seenHere.has(key)) { seenHere.add(key); sites.push({ file: rel, line }); }
   }
+  // MODULE-LOADER READS ARE NOT THE PROGRAM'S EFFECTS. Loading a CommonJS module reads its file, and that
+  // read is performed BY the loader while every module in the require chain is still on the stack — so
+  // without this guard a program whose only "effect" is `require()` is charged Fs at every require site, and
+  // each enclosing module reads as a violation. Verified: two pure modules and a pure entry point emitted
+  // three Fs sites. That is the fabrication mirror, in the instrument whose job is to catch its opposite.
+  //
+  // The test is the CALLER, not the stack: a read the loader issues has a node:internal/modules frame
+  // immediately beneath our machinery, whereas an fs call the program makes at module top level has the
+  // program's own frame there. Keying on "is a loader frame anywhere on the stack" would instead silence
+  // genuine top-level I/O during module initialization — an under-report, the sin this oracle exists to find.
+  if (firstForeign && MODULE_LOADER.test(firstForeign)) return [];
   return sites;
+}
+
+// ── OPT-IN: continuation tracking across asynchronous boundaries ──────────────────────────────────────
+// A JavaScript stack is cut at every async boundary, so a caller suspended across one is gone by the time
+// the effect fires and cannot be charged. V8 rebuilds the chain for plain `await`, but not for a timer, an
+// emitter, or a stored callback. With CANDOR_VERIFY_ASYNC_STACKS=1 we record the project frames live at each
+// async resource's CREATION and, at effect time, walk the resource's trigger chain to recover them.
+//
+// This is OFF by default and deliberately so. It costs a stack capture per async resource, and — more
+// importantly — trigger-chain inheritance cannot distinguish a caller that is SUSPENDED AWAITING the work
+// from one that SCHEDULED it and returned. The second has left the dynamic extent, so charging it would
+// fabricate an effect on a function that is genuinely pure. Turning it on trades a gap in the falsifier for
+// a defect in it; the battery's fire-and-forget control measures that trade rather than assuming it away.
+let asyncSites = null;      // Map<asyncId, {trigger, sites}>
+let currentAsyncId = null;
+let capturing = false;      // re-entrancy guard: our own capture must not recurse through init
+if (process.env.CANDOR_VERIFY_ASYNC_STACKS === "1") {
+  try {
+    const ah = await import("node:async_hooks");
+    asyncSites = new Map();
+    currentAsyncId = ah.executionAsyncId;
+    ah.createHook({
+      init(asyncId, _type, triggerAsyncId) {
+        if (capturing) return;
+        capturing = true;
+        try {
+          const sites = liveProjectSites();
+          if (sites.length || asyncSites.has(triggerAsyncId)) asyncSites.set(asyncId, { trigger: triggerAsyncId, sites });
+        } finally { capturing = false; }
+      },
+      destroy(asyncId) { asyncSites.delete(asyncId); },
+    }).enable();
+  } catch { asyncSites = null; /* no async_hooks: fall back to live frames, never crash the app */ }
+}
+
+const CHAIN_LIMIT = 64;     // a runaway trigger chain must not turn one effect into an unbounded walk
+function inheritedSites(seen) {
+  if (!asyncSites) return [];
+  const out = [];
+  let id = currentAsyncId();
+  for (let hops = 0; id && hops < CHAIN_LIMIT; hops++) {
+    const rec = asyncSites.get(id);
+    if (!rec) break;
+    for (const s of rec.sites) {
+      const key = s.file + ":" + s.line;
+      if (!seen.has(key)) { seen.add(key); out.push(s); }
+    }
+    id = rec.trigger;
+  }
+  return out;
+}
+
+function projectSites() {
+  const live = liveProjectSites();
+  if (!asyncSites) return live;
+  const seen = new Set(live.map((s) => s.file + ":" + s.line));
+  return live.concat(inheritedSites(seen));
 }
 
 let traceFd = null;

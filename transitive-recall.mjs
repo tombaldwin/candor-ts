@@ -177,12 +177,48 @@ function stripDisclosure(prefix) {
   return stripped;
 }
 
-function runVerify(dir, prefix, appPath, outPath) {
+function runVerify(dir, prefix, appPath, outPath, asyncStacks = false) {
   try { fs.rmSync(outPath, { force: true }); } catch { /* fresh */ }
+  const env = { ...process.env };
+  if (asyncStacks) env.CANDOR_VERIFY_ASYNC_STACKS = "1"; else delete env.CANDOR_VERIFY_ASYNC_STACKS;
+  const t0 = Date.now();
   const r = spawnSync("node", [path.join(HERE, "verify.mjs"), dir, "--report", prefix,
-    "--run", `node ${JSON.stringify(appPath)}`, "--json"], { encoding: "utf8" });
+    "--run", `node ${JSON.stringify(appPath)}`, "--json"], { encoding: "utf8", env });
   let j = null; try { j = JSON.parse(r.stdout); } catch { /* leave null */ }
-  return { j, ran: fs.existsSync(outPath), raw: r };
+  return { j, ran: fs.existsSync(outPath), ms: Date.now() - t0, raw: r };
+}
+
+/** Which frames did the oracle charge with Fs, given a verify --json result? */
+function chargedFrames(j) {
+  return new Set((j?.violations ?? []).filter((v) => v.escaped?.includes("Fs")).map((v) => v.fn.split(".").pop()));
+}
+
+// ── DEPTH probe ───────────────────────────────────────────────────────────────────────────────────────
+// Orthogonal to the boundary shapes and the reason they were all measuring the wrong thing at first: V8
+// captures at most `Error.stackTraceLimit` frames and the default is TEN, several of which the patched
+// builtin and Node's internals consume before app code. A deep SYNCHRONOUS chain therefore loses its
+// outermost callers with no boundary crossed at all. Before the fix a 16-deep chain charged 5 of 16 frames.
+// This probe is a standing gate on that, because the failure is silent in both directions: nothing in the
+// oracle's output says "your outer callers were truncated away".
+const DEPTH = 16;
+function depthProbe(root) {
+  const dir = path.join(root, "depth");
+  fs.mkdirSync(dir, { recursive: true });
+  const outPath = path.join(dir, "OUT.marker");
+  const src = ['import fs from "node:fs";', `const OUT = ${JSON.stringify(outPath)};`,
+    'export function f0() { fs.writeFileSync(OUT, "ran"); }'];
+  for (let i = 1; i < DEPTH; i++) src.push(`export function f${i}() { f${i - 1}(); }`);
+  src.push(`f${DEPTH - 1}();`);
+  fs.writeFileSync(path.join(dir, "app.mjs"), src.join("\n") + "\n");
+  fs.writeFileSync(path.join(dir, "package.json"), '{"name":"depth","version":"0.0.0","type":"module"}');
+  const prefix = path.join(dir, ".candor", "report");
+  fs.mkdirSync(path.dirname(prefix), { recursive: true });
+  scan(dir, prefix);
+  const { j, ran } = runVerify(dir, stripDisclosure(prefix), path.join(dir, "app.mjs"), outPath, false);
+  const charged = chargedFrames(j);
+  const reached = [];
+  for (let i = 0; i < DEPTH; i++) if (charged.has(`f${i}`)) reached.push(i);
+  return { depth: DEPTH, reached: reached.length, ran, deepest: reached.length ? Math.max(...reached) : -1 };
 }
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "candor-transitive-recall-"));
@@ -199,10 +235,17 @@ for (const shape of SHAPES) {
   const { rep } = scan(dir, prefix);
   const claims = Object.fromEntries(FRAMES.map((f) => [f, staticClaim(rep, f)]));
 
-  const { j, ran } = runVerify(dir, stripDisclosure(prefix), path.join(dir, "app.mjs"), outPath);
-  const charged = new Set((j?.violations ?? [])
-    .filter((v) => v.escaped?.includes("Fs"))
-    .map((v) => v.fn.split(".").pop()));
+  const stripped = stripDisclosure(prefix);
+  const base = runVerify(dir, stripped, path.join(dir, "app.mjs"), outPath, false);
+  const { j, ran } = base;
+  const charged = chargedFrames(j);
+
+  // The same run with continuation tracking on. Two things are measured, not one: how many previously
+  // unreachable callers it recovers, and whether it charges a caller that had already RETURNED — which the
+  // fire-and-forget control is built to expose, since charging there is a fabricated effect on a pure
+  // function. A capture mode that buys reach with fabrication has not closed the gap, it has moved it.
+  const asyncRun = runVerify(dir, stripped, path.join(dir, "app.mjs"), outPath, true);
+  const chargedAsync = chargedFrames(asyncRun.j);
 
   const frames = {};
   for (const f of FRAMES) {
@@ -215,8 +258,20 @@ for (const shape of SHAPES) {
       : claims[f].honest ? "UNCORROBORATED"
       : "BLIND";
   }
-  results.push({ shape: shape.id, desc: shape.desc, awaited: shape.awaited, effectRan: ran, frames, claims: Object.fromEntries(FRAMES.map((f) => [f, claims[f].how])) });
+  // With continuation tracking on, a caller frame is either RECOVERED (it was out of reach and now is) or,
+  // on the control, FABRICATED (charged although it left the dynamic extent before the effect fired).
+  const asyncFrames = {};
+  for (const f of FRAMES) {
+    asyncFrames[f] = !ran ? "INCONCLUSIVE"
+      : chargedAsync.has(f) ? (charged.has(f) ? "CHARGED" : (shape.awaited || f === "leaf" ? "RECOVERED" : "FABRICATED"))
+      : frames[f];
+  }
+  results.push({ shape: shape.id, desc: shape.desc, awaited: shape.awaited, effectRan: ran, frames, asyncFrames,
+    ms: { base: base.ms, async: asyncRun.ms },
+    claims: Object.fromEntries(FRAMES.map((f) => [f, claims[f].how])) });
 }
+
+const depth = depthProbe(root);
 
 if (!keep) fs.rmSync(root, { recursive: true, force: true });
 
@@ -235,6 +290,16 @@ const callerFrames = onPath.length * 2; // mid + entry per shape
 const callersCharged = onPath
   .reduce((n, r) => n + ["mid", "entry"].filter((f) => r.frames[f] === "CHARGED").length, 0);
 
+// The two numbers that decide whether continuation tracking is worth turning on.
+const recovered = [];
+const fabricated = [];
+for (const r of results) for (const f of FRAMES) {
+  if (r.asyncFrames[f] === "RECOVERED") recovered.push(`${r.shape}:${f}`);
+  if (r.asyncFrames[f] === "FABRICATED") fabricated.push(`${r.shape}:${f}`);
+}
+const totBase = results.reduce((n, r) => n + r.ms.base, 0);
+const totAsync = results.reduce((n, r) => n + r.ms.async, 0);
+
 const summary = {
   shapes: results.length,
   inconclusive,
@@ -242,6 +307,8 @@ const summary = {
   callerFramesCharged: callersCharged,
   uncorroboratedFrames: uncorroborated,
   blindFrames: blind,
+  asyncStacks: { recovered, fabricated, overhead: totBase ? +(totAsync / totBase).toFixed(2) : null },
+  depth,
   results,
 };
 
@@ -261,6 +328,12 @@ if (wantJson) {
   for (const r of results) {
     console.log(`  ${r.shape.padEnd(w)}  ${r.frames.leaf.padEnd(16)}${r.frames.mid.padEnd(16)}${r.frames.entry.padEnd(16)}${r.effectRan ? "yes" : "NO"}`);
   }
+  console.log(`\n  with CANDOR_VERIFY_ASYNC_STACKS=1 (continuation tracking, opt-in):`);
+  console.log(`  ${"shape".padEnd(w)}  ${"leaf".padEnd(16)}${"mid".padEnd(16)}${"entry".padEnd(16)}overhead`);
+  for (const r of results) {
+    const ov = r.ms.base > 0 ? `${(r.ms.async / r.ms.base).toFixed(2)}x` : "-";
+    console.log(`  ${r.shape.padEnd(w)}  ${r.asyncFrames.leaf.padEnd(16)}${r.asyncFrames.mid.padEnd(16)}${r.asyncFrames.entry.padEnd(16)}${ov}`);
+  }
   console.log(`\n  caller frames on the causal path : ${callerFrames}`);
   console.log(`  of those, reachable by the oracle: ${callersCharged}`);
   if (inconclusive.length) console.log(`  INCONCLUSIVE shapes     : ${inconclusive.join(", ")} (effect did not run — no evidence either way)`);
@@ -270,6 +343,26 @@ if (wantJson) {
     console.log("  oracle's transitive reach stops at the innermost asynchronous boundary — it charges the");
     console.log("  function that lexically CONTAINS the continuation, and nothing above it, because those");
     console.log("  callers are suspended and off the stack when the effect fires. Report the boundary, not a rate.");
+  }
+  console.log(`\n  continuation tracking recovers ${recovered.length} frame(s) previously out of reach` +
+    (recovered.length ? `: ${recovered.join(", ")}` : ""));
+  if (fabricated.length) {
+    console.log(`  but FABRICATES on ${fabricated.length} frame(s): ${fabricated.join(", ")}`);
+    console.log("  Those callers scheduled the work and RETURNED — they had left the dynamic extent before the");
+    console.log("  effect fired, so charging them invents an effect on a genuinely pure function. Trigger-chain");
+    console.log("  inheritance cannot tell a caller that is SUSPENDED AWAITING the work from one that is merely");
+    console.log("  its ancestor. That is why the mode stays OFF by default: it buys reach with the cardinal");
+    console.log("  sin's mirror, and the whole point of the falsifier is not to trade one for the other.");
+  } else {
+    console.log("  and fabricates on none — the control's returned callers stayed uncharged.");
+  }
+  console.log(`  overhead: ${totBase ? (totAsync / totBase).toFixed(2) + "x" : "-"} wall-clock across the battery`);
+  console.log(`\n  depth probe: ${depth.reached}/${depth.depth} frames of a plain synchronous chain charged` +
+    (depth.reached < depth.depth ? "  <-- TRUNCATED" : ""));
+  if (depth.reached < depth.depth) {
+    console.log("  The capture is dropping outer callers with no async boundary crossed — Error.stackTraceLimit.");
+    console.log("  Nothing in the oracle's output announces this, so a false all-clear on a truncated-away");
+    console.log("  caller is invisible and every 'H held' below this depth is weaker than it reads.");
   }
   if (blind.length) {
     console.log(`\n  BLIND frames (${blind.length}): ${blind.join(", ")}`);
@@ -287,4 +380,6 @@ if (wantJson) {
 //     claim there is a false all-clear that no oracle in this arm could catch — the cardinal sin, arriving
 //     in the one place the falsifier cannot see it.
 //   · an INCONCLUSIVE shape. A fixture whose effect never ran measured nothing, and must not read clean.
-process.exit(blind.length || inconclusive.length ? 1 : 0);
+//   · a truncated DEPTH probe. A plain synchronous chain has no boundary to excuse a missing caller, so any
+//     shortfall there is the capture silently losing frames — the defect this battery was built on top of.
+process.exit(blind.length || inconclusive.length || depth.reached < depth.depth ? 1 : 0);

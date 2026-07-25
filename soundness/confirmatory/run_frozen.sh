@@ -12,13 +12,16 @@ ENGINE="${ENGINE:-$(cd "$HERE/../.." && pwd)}"
 SCOPE="${SCOPE:-all}"          # all = Fs/Net/Exec + Env/Clock/Rand/… (the language-level set the preload sees)
 SUITE_TIMEOUT="${SUITE_TIMEOUT:-240}"
 WORK="${WORK:-$(mktemp -d)}"
-RESULTS="$HERE/results"; mkdir -p "$RESULTS"
+RESULTS="${RESULTS_DIR:-$HERE/results}"; mkdir -p "$RESULTS"
 
 # ── FREEZE GATE: the classifier + oracle sources are hashed; abort on drift. candor-ts is a set of .mjs
 # files (not a compiled jar), so the "frozen binary" is the sha256 of the concatenated engine sources.
 ENGINE_FILES=(scan.mjs scan-core.mjs query-core.mjs policy.mjs surface.mjs \
   verify.mjs verify-core.mjs verify-preload.mjs verify-emit.mjs verify-loader.mjs verify-syscall.mjs)
-EXPECT="27b0fe3901bea6aa47ebf80bb9e8665594843dbd0cc98fdbc958e88bf5753293"
+# The frozen pin. A RE-RUN under a corrected instrument passes EXPECT_SHA + RESULTS_DIR rather than editing
+# this line: the frozen record stands as what was actually run, and the re-run is filed beside it. Amending
+# the pin in place would quietly restate a pre-registered result as though the original had never happened.
+EXPECT="${EXPECT_SHA:-27b0fe3901bea6aa47ebf80bb9e8665594843dbd0cc98fdbc958e88bf5753293}"
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"|cut -d' ' -f1; else shasum -a 256 "$1"|cut -d' ' -f1; fi; }
 GOT="$( (cd "$ENGINE" && cat "${ENGINE_FILES[@]}") | (command -v sha256sum >/dev/null && sha256sum || shasum -a 256) | cut -d' ' -f1)"
 if [ "$GOT" != "$EXPECT" ]; then

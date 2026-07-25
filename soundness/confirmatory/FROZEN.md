@@ -157,3 +157,21 @@ over-capture (the artifact class above). The Node arm is per-function *by design
 arms' program-level check — but this frozen corpus did not produce a large body of clean `D = ∅` frames, and
 the container-span weakness must be fixed (a real, reported oracle bug) before the per-function claim is as
 crisp as the JVM arm's. Reported as-is; not repaired under the freeze.
+
+## POST-RUN NOTE (2026-07-25) — two defects found in the ORACLE, not the classifier
+
+Nothing above is amended; this records that the instrument that produced `results/` has since been
+corrected, so those numbers must be read with a caveat rather than at face value.
+
+- **The capture was truncated at ten stack frames** (V8's default `Error.stackTraceLimit`), so transitive
+  attribution silently lost the OUTERMOST project frames. A 16-deep synchronous chain charged 5 of 16. This
+  biases in the dangerous direction only: truncation loses checked frames and misses violations, it cannot
+  invent them. **So the frozen `checked` counts are lower bounds and the clean packages are weaker evidence
+  than they read** — a false all-clear on a truncated-away caller was not merely unfound, it was unfindable.
+- **CommonJS module-loader reads were charged to the program.** `require()` reads a file, the loader performs
+  that read with every module in the chain still on the stack, and the effect landed on app frames. This
+  direction is the fabrication mirror, so it can only have produced FALSE violations, never hidden real ones.
+
+Both are fixed in candor-ts; the slice is re-run under the corrected engine and filed beside this record —
+see `RERUN.md` and `results-corrected/`. Neither defect is in the classifier, so no `(S,D)` signature in
+`results/` is called into question by them; what changes is which frames the oracle was able to adjudicate.
