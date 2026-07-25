@@ -391,6 +391,90 @@ export declare const logger: Logger;`,
         JSON.stringify(eff("src.a.viaExternalLoggerPrimitive")));
 }
 
+// ── 2f-quater. IMPLICIT COERCION ACROSS THE SCAN BOUNDARY ─────────────────────────────────────────
+// candor-spec SOUNDNESS-VEIN-crossing-the-scan-boundary.md. §2f/§2f-bis close the vein INSIDE one
+// project; split the same code across a package boundary and scan the dependency separately — the
+// arrangement candor's own docs recommend — and it reappeared. A coercion is not a CallExpression, and
+// the cross-package join + κ ledger both live in the CallExpression handler, so `` `${e}` `` on a
+// DEPENDENCY class whose `toString` writes a file yielded NOTHING: no effect, no Unknown, no
+// `invisible`. The dep's report already carried the answer under `depkit#Entry.toString`.
+//
+// It was GATE-level, not report-level: `deny Fs` went exit 1 (correct) → exit 0 (a false all-clear) on
+// identical source. Both halves are pinned here: the chained join recovers the effect, and the
+// UNCHAINED scan discloses the package instead of claiming purity.
+{
+  const depSrc = `import * as fsm from "node:fs";
+export class Entry {
+  toString(): string { fsm.appendFileSync("/tmp/x", "s"); return "e"; }
+  toJSON(): object { fsm.appendFileSync("/tmp/x", "j"); return {}; }
+}
+export class Plain { label(): string { return "p"; } }`;
+  // the dependency, scanned on its own — its report hashes under `depkit#Entry.toString`
+  const depDir = project({ "package.json": `{"name":"depkit","version":"1.0.0"}`, "src/index.ts": depSrc });
+  const { prefix: depPrefix } = scan(depDir);
+  const depReport = JSON.parse(fs.readFileSync(`${depPrefix}.json`, "utf8"));
+  check("the DEPENDENCY's own report holds the answer under `depkit#Entry.toString`",
+        depReport.functions.some((e) => e.hash === "depkit#Entry.toString" && e.inferred.includes("Fs")),
+        JSON.stringify(depReport.functions));
+
+  const appFiles = {
+    "package.json": `{"name":"app","version":"1.0.0"}`,
+    "src/m.ts": `import { Entry, Plain } from "depkit";
+export function describe(e: Entry): string { return \`\${e}\`; }
+export function stringify(e: Entry): string { return String(e); }
+export function jsonify(e: Entry): string { return JSON.stringify(e); }
+export function joinAll(es: Entry[]): string { return es.join(", "); }
+export function plainly(p: Plain): string { return \`\${p}\`; }
+export function strs(a: string, b: string): string { return a + b; }`,
+    "node_modules/depkit/package.json": `{"name":"depkit","version":"1.0.0","types":"dist/index.d.ts","main":"dist/index.js"}`,
+    "node_modules/depkit/dist/index.d.ts": `export declare class Entry { toString(): string; toJSON(): object; }
+export declare class Plain { label(): string; }`,
+    "node_modules/depkit/dist/index.js": `exports.Entry = class {}; exports.Plain = class {};`,
+  };
+  // (a) CHAINED — the dep's report is available, so the boundary must be transparent.
+  const app = project(appFiles);
+  fs.writeFileSync(path.join(app, "deny.policy"), "deny Fs\n");
+  const chained = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", path.join(app, "deny.policy")],
+                            { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: `${depPrefix}.json` } });
+  const crep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  const ceff = (fn) => entry(crep, fn)?.inferred ?? [];
+  check("boundary: a chained dep's toString reaches a TEMPLATE LITERAL",
+        ceff("src.m.describe").includes("Fs"), JSON.stringify(crep.functions));
+  check("boundary: ...and String(x)", ceff("src.m.stringify").includes("Fs"), JSON.stringify(ceff("src.m.stringify")));
+  check("boundary: ...and JSON.stringify(x) via toJSON",
+        ceff("src.m.jsonify").includes("Fs"), JSON.stringify(ceff("src.m.jsonify")));
+  check("boundary: ...and Array.join, which coerces every ELEMENT",
+        ceff("src.m.joinAll").includes("Fs"), JSON.stringify(ceff("src.m.joinAll")));
+  check("boundary: the `deny Fs` gate is exit 1 again (was exit 0 — a false all-clear)",
+        chained.status === 1, `status=${chained.status} ${chained.stdout}`);
+  // NO FABRICATION: a dep class that declares NO coercion member inherits the provably-pure es-lib
+  // `Object.prototype.toString`, so it resolves to nothing — the property that keeps this from turning
+  // every template literal over every dependency type into a finding.
+  check("no-fabrication: a dep type declaring no toString stays pure",
+        entry(crep, "src.m.plainly") == null, JSON.stringify(entry(crep, "src.m.plainly")));
+  check("no-fabrication: string+string stays pure", entry(crep, "src.m.strs") == null,
+        JSON.stringify(entry(crep, "src.m.strs")));
+
+  // (b) UNCHAINED — no dep report, so the effect is genuinely unknowable here; it must be DISCLOSED as
+  // a blind package, never absorbed into a confident pure verdict.
+  const app2 = project(appFiles);
+  const { report: urep } = scan(app2);
+  check("boundary, unchained: the coercion discloses the dep package as invisible",
+        entry(urep, "src.m.describe")?.invisible?.includes("depkit"), JSON.stringify(urep.functions));
+  check("boundary, unchained: ...and it reaches the κ-coverage ledger",
+        urep.coverage?.uncovered?.some((u) => u.name === "depkit"), JSON.stringify(urep.coverage));
+
+  // (c) the CONTROL the whole vein is defined against: the same code in ONE project. The chained result
+  // must equal it — that equality IS the property, not the effect list in isolation.
+  const ctl = project({ "package.json": `{"name":"ctl","version":"1.0.0"}`, "src/depkit.ts": depSrc,
+    "src/m.ts": appFiles["src/m.ts"].replace(`"depkit"`, `"./depkit"`) });
+  const { report: ctlrep } = scan(ctl);
+  for (const fn of ["describe", "stringify", "jsonify", "joinAll"])
+    check(`boundary: split+chained matches the one-project control for ${fn}`,
+          JSON.stringify(ceff(`src.m.${fn}`)) === JSON.stringify(entry(ctlrep, `src.m.${fn}`)?.inferred ?? []),
+          `chained=${JSON.stringify(ceff(`src.m.${fn}`))} control=${JSON.stringify(entry(ctlrep, `src.m.${fn}`)?.inferred)}`);
+}
+
 // ── 2b. `show` SURFACES the literal Fs paths + Exec cmds (the regression that shipped) ─────────────
 // scan writes the surface under report keys `paths`/`cmds`; `show` once read a nonexistent `e.fs`, so
 // it silently dropped every file path even though the MCP `candor_show` doc promises "paths". The CLI

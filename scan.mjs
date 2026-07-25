@@ -1732,6 +1732,41 @@ function edgeToTargets(rec, decls) {
   for (const d of decls) { const t = nodeName.get(d); if (t) rec.edges.add(t); }
 }
 
+// Charge `rec` for reaching a resolved EXTERNAL declaration through a DESUGARED site — one that is not a
+// CallExpression, so the (CLASSIFY)/join/ledger arm of the call path never sees it. This is the same
+// decision procedure that arm runs, in the same order: the chained sibling report (the SPEC §2 `hash`
+// join), then the §5.1 package manifest, then the κ-coverage ledger's `invisible`. Nothing is fabricated:
+// a member declared in the ES lib / a project file / an unnameable package resolves to nothing and adds
+// nothing, and a chained report that omits the entry is making its purity claim (SPEC §2 rule 3).
+function chargeExternalDecl(rec, decl) {
+  if (!rec || !decl) return;
+  const mod = declModule(decl);
+  if (!mod || mod.startsWith("<")) return;             // project source / the ES lib — not a package reach
+  const pkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
+  const member = decl.name?.getText?.();
+  // Owner-prefixed first (`Owner.member` — how the dep's own scan hashes a method), bare member as the
+  // fallback (a CJS dist scan hashes a top-level export under its bare name). Identical to the call arm.
+  const owner = decl.parent?.name?.getText?.();
+  const hit = member && ((owner ? crossDeps.get(`${pkg}#${owner}.${member}`) : undefined)
+    ?? crossDeps.get(`${pkg}#${member}`));
+  if (hit) {
+    for (const x of hit.inferred) rec.direct.add(x);
+    for (const b of hit.invisible ?? []) rec.blind.add(b);
+    for (const v of hit.hosts) rec.hosts.add(v);
+    for (const v of hit.cmds) rec.cmds.add(v);
+    for (const v of hit.paths) rec.paths.add(v);
+    for (const v of hit.tables) rec.tables.add(v);
+    return;
+  }
+  const file = decl.getSourceFile().fileName;
+  const declared = packageManifestEffects(file);
+  if (declared !== null) { for (const e of declared) rec.direct.add(e); return; } // [] = declared pure
+  if (!kappaKnows(pkg) && !depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
+    unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
+    rec.blind.add(pkg);
+  }
+}
+
 // ---- implicit VALUE-COERCION desugaring (the silent-pure holes where the JS coercion protocol calls a
 // user method the AST walk never visits) ----------------------------------------------------------
 // JS coerces an object to a primitive by INVOKING a method on it: `a + b`/`` `${x}` ``/`String(x)` call
@@ -1817,11 +1852,33 @@ function isStringifyingSink(call) {
 // template literal in every program into an Unknown. (Residual, disclosed: an EXTERNAL class
 // implementing a local interface is outside `interfaceImpls` — the same node_modules opacity the whole
 // engine carries, covered by the κ ledger, not newly introduced here.)
-function coercionTargets(expr, names, withPrimitive) {
+//
+// CROSSING THE SCAN BOUNDARY (candor-spec SOUNDNESS-VEIN-crossing-the-scan-boundary.md): the residual in
+// the paragraph above is NOT covered by the κ ledger, measured. A coercion is not a CallExpression, and
+// the ledger lives in the CallExpression handler — so `` `${e}` `` on a DEPENDENCY class whose `toString`
+// writes a file emitted nothing at all: no effect, no Unknown, no `invisible`. The dependency's own
+// report holds the answer under `depkit#Entry.toString` and nothing looked for it. The same code in ONE
+// project is analysed correctly, so this is a boundary effect, not a general limitation — and it was
+// gate-level, not report-level (`deny Fs` went 1 → 0 on identical source). `outExternal`, when supplied,
+// collects the members that resolve ACROSS the boundary so the caller can run them through
+// `chargeExternalDecl` (the dep-report join, then the manifest, then the ledger).
+//
+// This stays tight rather than blanket: only a type that EXPLICITLY DECLARES `toString`/`valueOf`/
+// `toJSON`/`[Symbol.toPrimitive]` in a dependency's typings reaches it. `${aString}` and `${plainDepObj}`
+// resolve to the es-lib `Object.prototype.toString` — a provably-pure terminal, excluded by
+// `chargeExternalDecl`'s `<es-lib>` guard — so the overwhelming majority of template literals are
+// untouched, exactly as before.
+function coercionTargets(expr, names, withPrimitive, outExternal) {
   const t = checker.getTypeAtLocation(expr);
   if (!t) return [];
   const out = [];
   const push = (d) => { if (d && declIsLocal(d) && isCoercionMemberDecl(d) && !out.includes(d)) out.push(d); };
+  // The far side of the boundary: a coercion member DECLARED in another package. Same shape gate as
+  // `push` (a member whose body could be charged), inverted on locality.
+  const pushExt = (d) => {
+    if (!outExternal || !d || declIsLocal(d) || !isCoercionMemberDecl(d) || outExternal.includes(d)) return;
+    outExternal.push(d);
+  };
   const seen = new Set();
   // Widen unions/intersections so each branch's coercion member is considered (a `Foo | string` operand
   // can be a Foo at runtime → its local toString runs). A primitive/literal constituent has no LOCAL
@@ -1835,8 +1892,9 @@ function coercionTargets(expr, names, withPrimitive) {
       if (withPrimitive) {
         const pd = declOfSym(wellKnownSymbolMember(part, ["__@toPrimitive"]));
         if (pd && declIsLocal(pd) && !out.includes(pd)) out.push(pd);
+        else pushExt(pd);
       }
-      for (const n of names) push(declOfSym(part.getProperty(n)));
+      for (const n of names) { const md = declOfSym(part.getProperty(n)); push(md); pushExt(md); }
       // CHA fan-out over the LOCAL runtime classes of this type.
       for (const cls of coercionChaClasses(part)) {
         if (withPrimitive) {
@@ -1865,6 +1923,16 @@ function coercionTargets(expr, names, withPrimitive) {
   };
   visit(t, 0);
   return out;
+}
+// Charge `rec` for COERCING `expr`: an edge to every LOCAL coercion member (as before), plus the
+// cross-package treatment of every member that resolves into a DEPENDENCY. One helper so no coercion
+// site can be wired to only half of it — the boundary half went missing at all ten sites at once
+// precisely because the two halves lived apart.
+function chargeCoercion(rec, expr, names, withPrimitive) {
+  if (!rec) return;
+  const ext = [];
+  edgeToTargets(rec, coercionTargets(expr, names, withPrimitive, ext));
+  for (const d of ext) chargeExternalDecl(rec, d);
 }
 // The numeric-element type of an array-like — the gate for treating a `.join()`/`.toString()` receiver
 // as an array stringification rather than an ordinary method call on a local object.
@@ -3031,12 +3099,12 @@ function visitCalls(node) {
         // number+number have only primitive operands → mayCoerceObject false → no edge (pure).
         for (const operand of [node.left, node.right]) {
           if (mayCoerceObject(operand))
-            edgeToTargets(recOf(), coercionTargets(operand, ["valueOf", "toString"], true));
+            chargeCoercion(recOf(), operand, ["valueOf", "toString"], true);
         }
       } else if (ARITH.has(op) || COMPOUND_ARITH.has(op)) {
         for (const operand of [node.left, node.right]) {
           if (mayCoerceObject(operand))
-            edgeToTargets(recOf(), coercionTargets(operand, ["valueOf", "toString"], true));
+            chargeCoercion(recOf(), operand, ["valueOf", "toString"], true);
         }
       }
     }
@@ -3046,7 +3114,7 @@ function visitCalls(node) {
         && (node.operator === ts.SyntaxKind.MinusToken || node.operator === ts.SyntaxKind.PlusToken
             || node.operator === ts.SyntaxKind.TildeToken)
         && mayCoerceObject(node.operand)) {
-      edgeToTargets(recOf(), coercionTargets(node.operand, ["valueOf", "toString"], true));
+      chargeCoercion(recOf(), node.operand, ["valueOf", "toString"], true);
     }
     // 1. TEMPLATE expression `` `${x}` ``: each interpolated substitution is string-coerced → toString
     // (then [Symbol.toPrimitive]/valueOf). (A TaggedTemplate is handled separately below — the tag fn
@@ -3054,7 +3122,7 @@ function visitCalls(node) {
     if (ts.isTemplateExpression(node) && owner && !ts.isTaggedTemplateExpression(node.parent)) {
       for (const span of node.templateSpans)
         if (mayCoerceObject(span.expression))
-          edgeToTargets(recOf(), coercionTargets(span.expression, ["toString", "valueOf"], true));
+          chargeCoercion(recOf(), span.expression, ["toString", "valueOf"], true);
     }
     // 5. ARRAY stringification through an EXPLICIT es-lib call: `parts.join("/")` /
     // `entries.toString()` / `entries.toLocaleString()`. Resolution lands on the pure `Array.prototype`
@@ -3064,7 +3132,7 @@ function visitCalls(node) {
     if (ts.isCallExpression(node) && owner && ts.isPropertyAccessExpression(node.expression)
         && ["join", "toString", "toLocaleString"].includes(node.expression.name?.getText?.())
         && arrayElementTypeOf(node.expression.expression)) {
-      edgeToTargets(recOf(), coercionTargets(node.expression.expression, ["toString", "valueOf"], true));
+      chargeCoercion(recOf(), node.expression.expression, ["toString", "valueOf"], true);
     }
     // 1+4. CALL forms `String(x)` (→ toString) and `JSON.stringify(x)` (→ toJSON). These resolve to the
     // es-lib `StringConstructor`/`JSON.stringify` signature (not the user method), so the CallExpression
@@ -3073,7 +3141,7 @@ function visitCalls(node) {
       const callee = node.expression.getText().replace(/\s+/g, "");
       const arg0 = node.arguments[0];
       if (callee === "String" && ts.isIdentifier(node.expression) && mayCoerceObject(arg0))
-        edgeToTargets(recOf(), coercionTargets(arg0, ["toString", "valueOf"], true));
+        chargeCoercion(recOf(), arg0, ["toString", "valueOf"], true);
       // 4. STRINGIFYING SINK: a call that hands its arguments to a formatter which invokes
       // `toString`/`toJSON` INSIDE the library — `console.log("entry: %s", e)`, `logger.warn("{}", e)`.
       // This is the shape the four-way vein was found on (HikariCP → SLF4J `MessageFormatter` →
@@ -3094,9 +3162,9 @@ function visitCalls(node) {
       // literal and an under-charge here is the cardinal sin while an over-charge is merely conservative.
       else if (isStringifyingSink(node)) {
         for (const arg of node.arguments) {
-          if (mayCoerceObject(arg)) edgeToTargets(recOf(), coercionTargets(arg, ["toString", "valueOf"], true));
+          if (mayCoerceObject(arg)) chargeCoercion(recOf(), arg, ["toString", "valueOf"], true);
           // A structured logger (pino/bunyan/winston) JSON-serializes its argument → `toJSON`.
-          edgeToTargets(recOf(), coercionTargets(arg, ["toJSON"], false));
+          chargeCoercion(recOf(), arg, ["toJSON"], false);
         }
       }
       // `"" + x` is covered by the binary arm; `String(x)` is the explicit conversion form.
@@ -3104,7 +3172,7 @@ function visitCalls(node) {
         // toJSON is consulted regardless of operand shape (JSON.stringify checks for it on any value);
         // a plain object with no LOCAL toJSON resolves to nothing → pure (no fabrication). NO Symbol-
         // toPrimitive here — JSON.stringify uses toJSON only, not the primitive-coercion protocol.
-        edgeToTargets(recOf(), coercionTargets(arg0, ["toJSON"], false));
+        chargeCoercion(recOf(), arg0, ["toJSON"], false);
     }
   }
   // TAGGED TEMPLATE (LOW): `` tag`…` `` calls `tag(strings, ...subs)`. getResolvedSignature resolves
