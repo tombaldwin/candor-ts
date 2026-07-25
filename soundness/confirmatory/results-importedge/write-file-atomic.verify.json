@@ -1,0 +1,103 @@
+{
+  "metrics": {
+    "scope": "all",
+    "effectsInScope": [
+      "Clipboard",
+      "Clock",
+      "Db",
+      "Env",
+      "Exec",
+      "Fs",
+      "Ipc",
+      "Llm",
+      "Log",
+      "Net",
+      "Rand"
+    ],
+    "executedFunctionsChecked": 4,
+    "soundCompleteOk": 0,
+    "disclosedPartial": 3,
+    "disclosedUnknownLoadBearing": 1,
+    "cardinalSinViolations": 1,
+    "honestyInvariantHolds": false,
+    "attributionComplete": false,
+    "unattributedSites": 124,
+    "attributionNote": "124 captured effect-site(s) could not be attributed to any analyzed function (an empty/stale/mismatched loc index, or code candor did not analyze) — those effects are NOT checked; not a sound all-clear (re-scan to emit a complete <prefix>.locs.json)",
+    "analyzedFunctionsTotal": 7,
+    "programExitCode": 0
+  },
+  "violations": [
+    {
+      "fn": "lib.index.<module>",
+      "observed": [
+        "Rand"
+      ],
+      "inferred": [],
+      "escaped": [
+        "Rand"
+      ]
+    }
+  ],
+  "blame": [
+    {
+      "fn": "lib.index.writeFile",
+      "escaped": [
+        "Clock",
+        "Env"
+      ],
+      "why": [
+        "callback:callback",
+        "callback:param#3"
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "fn": "lib.index.<module>",
+      "verdict": "VIOLATION",
+      "observed": [
+        "Rand"
+      ],
+      "inferred": []
+    },
+    {
+      "fn": "lib.index.writeFile",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Clock",
+        "Env",
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ],
+      "blame": [
+        "callback:callback",
+        "callback:param#3"
+      ]
+    },
+    {
+      "fn": "lib.index.writeFileAsync",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "lib.index.writeFileSync",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Fs"
+      ],
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ]
+    }
+  ]
+}

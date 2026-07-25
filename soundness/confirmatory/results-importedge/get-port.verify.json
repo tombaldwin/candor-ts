@@ -1,0 +1,143 @@
+{
+  "metrics": {
+    "scope": "all",
+    "effectsInScope": [
+      "Clipboard",
+      "Clock",
+      "Db",
+      "Env",
+      "Exec",
+      "Fs",
+      "Ipc",
+      "Llm",
+      "Log",
+      "Net",
+      "Rand"
+    ],
+    "executedFunctionsChecked": 5,
+    "soundCompleteOk": 1,
+    "disclosedPartial": 3,
+    "disclosedUnknownLoadBearing": 3,
+    "cardinalSinViolations": 1,
+    "honestyInvariantHolds": false,
+    "attributionComplete": true,
+    "unattributedSites": 0,
+    "analyzedFunctionsTotal": 6,
+    "programExitCode": 1
+  },
+  "violations": [
+    {
+      "fn": "test.<module>",
+      "observed": [
+        "Env",
+        "Fs",
+        "Net"
+      ],
+      "inferred": [
+        "Net"
+      ],
+      "escaped": [
+        "Env",
+        "Fs"
+      ]
+    }
+  ],
+  "blame": [
+    {
+      "fn": "index.checkAvailablePort",
+      "escaped": [
+        "Env"
+      ],
+      "why": [
+        "callback:resolve"
+      ]
+    },
+    {
+      "fn": "index.getAvailablePort",
+      "escaped": [
+        "Env"
+      ],
+      "why": [
+        "callback:opaque-iterable:any"
+      ]
+    },
+    {
+      "fn": "index.getPorts",
+      "escaped": [
+        "Env"
+      ],
+      "why": [
+        "callback:opaque-iterable:any"
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "fn": "index.checkAvailablePort",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Env",
+        "Net"
+      ],
+      "inferred": [
+        "Net",
+        "Unknown"
+      ],
+      "blame": [
+        "callback:resolve"
+      ]
+    },
+    {
+      "fn": "index.getAvailablePort",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Env",
+        "Net"
+      ],
+      "inferred": [
+        "Net",
+        "Unknown"
+      ],
+      "blame": [
+        "callback:opaque-iterable:any"
+      ]
+    },
+    {
+      "fn": "index.getPorts",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Env",
+        "Net"
+      ],
+      "inferred": [
+        "Net",
+        "Unknown"
+      ],
+      "blame": [
+        "callback:opaque-iterable:any"
+      ]
+    },
+    {
+      "fn": "test.<module>",
+      "verdict": "VIOLATION",
+      "observed": [
+        "Env",
+        "Fs",
+        "Net"
+      ],
+      "inferred": [
+        "Net"
+      ]
+    },
+    {
+      "fn": "test.bindPort",
+      "verdict": "sound-complete-ok",
+      "observed": [
+        "Net"
+      ],
+      "inferred": [
+        "Net"
+      ]
+    }
+  ]
+}

@@ -37,11 +37,11 @@ of frames, so its checked counts are lower bounds and its clean packages are wea
 
 ### Result: `results-corrected/` vs `results/`
 
-| | frozen (truncating) | depth fix only | corrected (both) |
-|---|---|---|---|
-| checked | 85 | 96 | **92** |
-| sound-complete | 5 | 3 | **5** |
-| violations | 3 | 9 | **4** |
+| | frozen (truncating) | depth fix only | corrected (both) | + import edge |
+|---|---|---|---|---|
+| checked | 85 | 96 | 92 | **92** |
+| sound-complete | 5 | 3 | 5 | **4** |
+| violations | 3 | 9 | 4 | **3** |
 
 Seven more frames adjudicated than the frozen run, the same five sound-complete frames, and **four**
 violations. Two are dispositions already on the record: `node-tar`'s
@@ -57,3 +57,18 @@ were invisible before the truncation fix because the frames that carry them are 
 
 **Recorded, not repaired** — per the pre-registration discipline. Adjudicating the class and deciding what
 the classifier should say about a top-level `require` of an unanalyzed dependency is separate work.
+
+### `results-importedge/` — one of the two closed, by determination rather than disclosure
+
+Investigating the class showed the vein was **not** about unanalyzed dependencies: candor-ts did not model
+the import edge at all, **not even between two modules inside the scanned project**, where nothing is
+unanalyzed and the answer is simply computable. Modelling it (candor-ts `70553c3`, the shape candor-java has
+always had) closes `proper-lockfile`: `index.<module>` moves from **VIOLATION to disclosed** — the package
+goes 1 violation → 0 — because the edge resolves intra-project down to a module that already discloses.
+No `Unknown` was invented and nothing flooded; `sound-complete` drops 5 → 4 for the same reason, a frame
+correctly moving from *claimed complete* to *disclosed*.
+
+`write-file-atomic` still flags: its `Rand` reaches through `node_modules`, which is the **external half**
+of the vein and remains open. That the two findings separated exactly along the line the analysis predicted
+is the useful part — the fix is scoped to what it can determine, and the residue is named rather than
+papered over.
