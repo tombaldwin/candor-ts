@@ -24,6 +24,13 @@ jobs:
       # gate added locally can't be silently missing here (the probe + mcp/watch suites used to be).
       - name: Full test battery (behavioral + probe + fuzzer)
         run: npm test
+      # How far UP a call chain can this arm's oracle actually see? It walks the stack at the effect and
+      # charges every project frame, so a synchronous caller is checked — but a JS stack is cut at each
+      # asynchronous boundary, and callers suspended above one are gone when the effect fires. The battery
+      # measures where that line falls and reds only on a BLIND frame: a caller provably on the causal path
+      # that candor claims complete-pure and no oracle in this arm could contradict.
+      - name: Transitive-recall battery (how far up a chain the oracle can falsify)
+        run: npm run test:transitive-recall
       - name: Effect-set oracle (the 20 shared cases)
         run: |
           git clone --depth 1 https://github.com/tombaldwin/candor-spec /tmp/spec
