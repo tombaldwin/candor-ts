@@ -1,0 +1,31 @@
+{
+  "metrics": {
+    "scope": "all",
+    "effectsInScope": [
+      "Clipboard",
+      "Clock",
+      "Db",
+      "Env",
+      "Exec",
+      "Fs",
+      "Ipc",
+      "Llm",
+      "Log",
+      "Net",
+      "Rand"
+    ],
+    "executedFunctionsChecked": 0,
+    "soundCompleteOk": 0,
+    "disclosedPartial": 0,
+    "disclosedUnknownLoadBearing": 0,
+    "cardinalSinViolations": 0,
+    "honestyInvariantHolds": true,
+    "attributionComplete": true,
+    "unattributedSites": 0,
+    "analyzedFunctionsTotal": 12,
+    "programExitCode": 1
+  },
+  "violations": [],
+  "blame": [],
+  "rows": []
+}

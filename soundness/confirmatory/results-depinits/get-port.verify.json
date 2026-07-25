@@ -1,0 +1,133 @@
+{
+  "metrics": {
+    "scope": "all",
+    "effectsInScope": [
+      "Clipboard",
+      "Clock",
+      "Db",
+      "Env",
+      "Exec",
+      "Fs",
+      "Ipc",
+      "Llm",
+      "Log",
+      "Net",
+      "Rand"
+    ],
+    "executedFunctionsChecked": 5,
+    "soundCompleteOk": 1,
+    "disclosedPartial": 4,
+    "disclosedUnknownLoadBearing": 3,
+    "cardinalSinViolations": 0,
+    "honestyInvariantHolds": true,
+    "attributionComplete": true,
+    "unattributedSites": 0,
+    "analyzedFunctionsTotal": 6,
+    "programExitCode": 1
+  },
+  "violations": [],
+  "blame": [
+    {
+      "fn": "index.checkAvailablePort",
+      "escaped": [
+        "Env"
+      ],
+      "why": [
+        "callback:resolve"
+      ]
+    },
+    {
+      "fn": "index.getAvailablePort",
+      "escaped": [
+        "Env"
+      ],
+      "why": [
+        "callback:opaque-iterable:any"
+      ]
+    },
+    {
+      "fn": "index.getPorts",
+      "escaped": [
+        "Env"
+      ],
+      "why": [
+        "callback:opaque-iterable:any"
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "fn": "index.checkAvailablePort",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Env",
+        "Net"
+      ],
+      "inferred": [
+        "Net",
+        "Unknown"
+      ],
+      "blame": [
+        "callback:resolve"
+      ]
+    },
+    {
+      "fn": "index.getAvailablePort",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Env",
+        "Net"
+      ],
+      "inferred": [
+        "Net",
+        "Unknown"
+      ],
+      "blame": [
+        "callback:opaque-iterable:any"
+      ]
+    },
+    {
+      "fn": "index.getPorts",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Env",
+        "Net"
+      ],
+      "inferred": [
+        "Net",
+        "Unknown"
+      ],
+      "blame": [
+        "callback:opaque-iterable:any"
+      ]
+    },
+    {
+      "fn": "test.<module>",
+      "verdict": "disclosed-partial",
+      "observed": [
+        "Env",
+        "Fs",
+        "Net"
+      ],
+      "inferred": [
+        "Clock",
+        "Env",
+        "Exec",
+        "Fs",
+        "Ipc",
+        "Net",
+        "Unknown"
+      ]
+    },
+    {
+      "fn": "test.bindPort",
+      "verdict": "sound-complete-ok",
+      "observed": [
+        "Net"
+      ],
+      "inferred": [
+        "Net"
+      ]
+    }
+  ]
+}

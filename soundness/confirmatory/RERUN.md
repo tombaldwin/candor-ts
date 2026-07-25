@@ -37,11 +37,11 @@ of frames, so its checked counts are lower bounds and its clean packages are wea
 
 ### Result: `results-corrected/` vs `results/`
 
-| | frozen (truncating) | depth fix only | corrected (both) | + import edge |
-|---|---|---|---|---|
-| checked | 85 | 96 | 92 | **92** |
-| sound-complete | 5 | 3 | 5 | **4** |
-| violations | 3 | 9 | 4 | **3** |
+| | frozen (truncating) | depth fix only | corrected (both) | + import edge | **+ `--dep-inits`** |
+|---|---|---|---|---|---|
+| checked | 85 | 96 | 92 | 92 | **92** |
+| sound-complete | 5 | 3 | 5 | 4 | **4** |
+| violations | 3 | 9 | 4 | 3 | **1** |
 
 Seven more frames adjudicated than the frozen run, the same five sound-complete frames, and **four**
 violations. Two are dispositions already on the record: `node-tar`'s
@@ -85,3 +85,34 @@ The signature now carries `Rand`, so the frame moves from a violation to a discl
 was repaired by weakening a check or widening `Unknown`: `proper-lockfile` resolved intra-project, and this
 one resolves as soon as the dependency's own report is available. What stays undisclosed is a dependency
 nobody has scanned — deliberately, since blanket-disclosing those measured at 60-100% of modules.
+
+### `results-depinits/` — the flag closes two more, by determination
+
+Re-run with `--dep-inits` on the per-package scans (scratch copy of the runner; the committed script is
+untouched). All eight packages cloned, installed, scanned and ran their suites — **no attrition**, so every
+delta below is the flag and not a timeout.
+
+**Checked and sound-complete are identical frame-for-frame** (92 / 4): the flag adds disclosure without
+removing adjudicated frames and without moving any frame out of *claimed-complete* — the cost the
+intra-project import edge did pay (5 → 4).
+
+Two violations resolve, both traced rather than counted:
+
+- **`write-file-atomic` `lib.index.<module>`** — `ran{Rand}` vs `decl{pure}` becomes `decl{Rand,Unknown}`.
+  `lib/index.js:9` requires `signal-exit`, whose `dist/cjs/index.js:252` runs `new SignalExit(process)` at
+  module top level, whose field initializer hits `Math.random()`. The flag scans signal-exit and the import
+  edge attaches it. This is the finding `3643cd9` closed by hand-chaining; the flag now builds the chain.
+- **`get-port` `test.<module>`** — `ran{Env,Fs,Net}` vs `decl{Net}` becomes disclosed-partial. The escaped
+  `Env,Fs` was the **ava** harness's own module-init work, previously adjudicated in `FINDINGS.md` §1 as an
+  oracle-side artifact to be fixed *by protocol* (scan library sources only). It is now closed by
+  **determination** instead: the test module really does import ava, and ava's initializer really does that.
+
+`node-tar`'s `WriteEntrySync.constructor` remains, correctly — it is the (A0) enumeration gap of
+`FINDINGS.md` §3 (a `warner(class …)`-decorated class never enumerated, so absent ⇒ `(∅,∅)`), which import
+edges do not touch.
+
+**One precision cost, worth fixing.** All of a package's module units share the hash `<pkg>#<module>`, so
+importing a package charges the union of *every* file's top level rather than the entry's. `proper-lockfile`
+picked up `Net` from `retry`'s **`example/dns.js`** — a file no consumer loads. Sound direction, no verdict
+changed, but on a package with many example/bin files the union is materially wider than the real
+initializer. Narrowing the dep-init cell to the resolved entry would remove it.
