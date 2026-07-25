@@ -3235,6 +3235,7 @@ function resolveProjectModule(spec, fromFile) {
 }
 {
   const pending = [];                                 // [fromNode, targetQual]
+  const depInits = [];                                // [fromNode, chained dep's initializer cell]
   const collect = (node) => {
     let spec = null;
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
@@ -3246,6 +3247,19 @@ function resolveProjectModule(spec, fromFile) {
       if (target) {
         const rel = path.relative(rootDir, target).replace(/\.[mc]?[tj]sx?$/, "").split(path.sep).join(".");
         pending.push([node, `${rel}.<module>`]);
+      } else if (!spec.startsWith(".") && crossDeps.size > 0) {
+        // EXTERNAL specifier with a CHAINED report: importing a package runs its entry module, so the
+        // importer reaches whatever that initializer does. The dep's module units already hash under
+        // `<pkg>#<module>` — a package's initializers share the one key — so the effects are sitting in
+        // `crossDeps` and the edge simply never consulted them. This is the DETERMINED half of the
+        // external case: no `Unknown` is invented, and an unchained dependency stays exactly as it was,
+        // because blanket-disclosing every external import measured at 60-100% of modules and would make
+        // the initializer unit useless rather than honest (candor-spec
+        // SOUNDNESS-VEIN-initializer-edge.md).
+        const seg = spec.split("/");
+        const pkg = spec.startsWith("@") ? seg.slice(0, 2).join("/") : seg[0];
+        const cell = crossDeps.get(`${pkg}#<module>`);
+        if (cell && cell.inferred.size) depInits.push([node, cell]);
       }
     }
     ts.forEachChild(node, collect);
@@ -3254,6 +3268,15 @@ function resolveProjectModule(spec, fromFile) {
   // A target unit is minted lazily, so `A -> B -> C(effectful)` needs more than one sweep: B's unit does
   // not exist until B's own edge is added. Iterate until quiet rather than depending on file order, which
   // would make the result depend on how the project happens to be laid out.
+  // A chained dependency's initializer effects attach DIRECTLY (its unit lives in another report, so there
+  // is no local node to edge to) — the same way a chained dep's call effects are applied elsewhere.
+  for (const [node, cell] of depInits) {
+    const from = enclosing(node);
+    const rec = from && fns.get(from);
+    if (!rec) continue;
+    for (const e of cell.inferred) rec.direct.add(e);
+    for (const b of cell.invisible) rec.blind.add(b);
+  }
   for (let changed = true; changed; ) {
     changed = false;
     for (const [node, to] of pending) {

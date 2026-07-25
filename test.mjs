@@ -1046,7 +1046,26 @@ export function make(): Implicit { return new Implicit(); }`,
   // A bare specifier is an external package: out of the scanned set, so deliberately unchanged here —
   // blanket-disclosing it measured at 60-100% of modules (see the vein doc). Guards against the fix
   // quietly widening into the flood it was designed to avoid.
-  check("a bare (external) specifier does NOT mint an initializer unit",
+  // ...and when the dependency's report IS chained, the same edge becomes DETERMINED rather than absent:
+  // importing a package runs its entry module, and the dep's initializers already hash under `<pkg>#<module>`.
+  // This is the external half of the vein, and it invents no `Unknown` — an UNCHAINED dependency is still
+  // left exactly alone (the check above), because blanket-disclosing every external import measured at
+  // 60-100% of modules.
+  {
+    // the dependency, scanned on its own — its top level performs a Clock read
+    const depDir = project({ "index.ts": `export const t = Date.now();` });
+    fs.writeFileSync(path.join(depDir, "package.json"),
+                     JSON.stringify({ name: "some-external-pkg", version: "0.0.0" }));
+    const { prefix: depPrefix } = scan(depDir);
+    const d2 = project({ "src/uses.ts": `import { x } from "some-external-pkg";\nexport const e = x;` });
+    // chaining is CANDOR_DEPS / config (`--deps` is the --workspace alias), so spawn with the env set
+    spawnSync("node", [path.join(HERE, "scan.mjs"), d2],
+              { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: `${depPrefix}.json` } });
+    const r2 = JSON.parse(fs.readFileSync(path.join(d2, ".candor", "report.json"), "utf8"));
+    check("a CHAINED external dep's initializer effects reach the importing <module>",
+          entry(r2, "src.uses.<module>")?.inferred.includes("Clock"), JSON.stringify(r2?.functions));
+  }
+    check("a bare (external) specifier does NOT mint an initializer unit",
         entry(report, "src.ext.<module>") == null, JSON.stringify(report.functions));
 }
 
