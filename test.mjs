@@ -1084,6 +1084,52 @@ export function make(): Implicit { return new Implicit(); }`,
         entry(report, "src.ext.<module>") == null, JSON.stringify(report.functions));
 }
 
+// ── 8c. the MONOREPO shape discloses exactly like the published shape ─────────────────────────────
+// candor-spec SOUNDNESS-VEIN-crossing-the-scan-boundary.md, "ts, monorepo shape": a workspace dep is a
+// SYMLINK into node_modules and the checker resolves it to its REAL path, which carries no
+// `node_modules/` segment. Every κ-ledger / `invisible` arm was gated on that segment, so a symlinked
+// sibling package produced NO disclosure at all — no `invisible`, no `coverage.uncovered`, no stderr
+// advisory — while the PUBLISHED-package form of the SAME code disclosed correctly. In a monorepo that
+// made every cross-package reach read confidently pure. Both shapes are asserted side by side so they
+// can never drift apart again.
+{
+  const wsdepSrc = { "package.json": JSON.stringify({ name: "wsdep", version: "0.0.0", main: "dist/index.js", types: "dist/index.d.ts" }),
+                     "dist/index.d.ts": `export declare class Entry { toString(): string; }\nexport declare function writeIt(x: string): void;\n`,
+                     "dist/index.js": `"use strict";\nconst fs = require("fs");\nexports.writeIt = (x) => fs.writeFileSync("/tmp/w", x);\n` };
+  const appSrc = `import { writeIt } from "wsdep";\nexport function go(): void { writeIt("x"); }\n`;
+  // (a) SYMLINKED workspace dep — the sibling package lives outside the scanned tree.
+  const sib = project(wsdepSrc);
+  const mono = project({ "src/m.ts": appSrc });
+  fs.mkdirSync(path.join(mono, "node_modules"), { recursive: true });
+  fs.symlinkSync(sib, path.join(mono, "node_modules", "wsdep"), "dir");
+  const { report: mrep, r: mr } = scan(mono);
+  // (b) the same code with the dep INSTALLED as a real directory (the published-package shape).
+  const pub = project({ "src/m.ts": appSrc });
+  for (const [rel, content] of Object.entries(wsdepSrc)) {
+    const p = path.join(pub, "node_modules", "wsdep", rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, content);
+  }
+  const { report: prep } = scan(pub);
+  check("a SYMLINKED workspace dep is disclosed as invisible (not silently pure)",
+        entry(mrep, "src.m.go")?.invisible?.includes("wsdep"), JSON.stringify(mrep.functions));
+  check("...and it reaches the κ-coverage ledger (coverage.uncovered)",
+        mrep.coverage?.uncovered?.some((u) => u.name === "wsdep"), JSON.stringify(mrep.coverage));
+  check("...and the loud stderr advisory names it",
+        /wsdep/.test(mr.stderr), mr.stderr);
+  check("the monorepo shape discloses IDENTICALLY to the published-package shape",
+        JSON.stringify(entry(mrep, "src.m.go")?.invisible) === JSON.stringify(entry(prep, "src.m.go")?.invisible),
+        `${JSON.stringify(entry(mrep, "src.m.go"))} vs ${JSON.stringify(entry(prep, "src.m.go"))}`);
+  // The anti-flood counterpart: the scan's OWN package is never a foreign package. A file of ours that
+  // the target simply didn't include (our own `dist/` typings) must not make us blind to ourselves.
+  const self = project({ "package.json": JSON.stringify({ name: "selfpkg", version: "0.0.0" }),
+                         "types/shape.d.ts": `export declare function helper(): void;\n`,
+                         "src/u.ts": `import { helper } from "../types/shape";\nexport function call(): void { helper(); }\n` });
+  const { report: srep } = scan(path.join(self, "src"));
+  check("the scan's OWN package is not disclosed as an external blind spot",
+        !(entry(srep, "u.call")?.invisible ?? []).includes("selfpkg"), JSON.stringify(srep.functions));
+}
+
 // ── 9. ambient builtins + crypto tier + the missing-deps warning (CTA dogfood) ───────────────────
 {
   const d = project({

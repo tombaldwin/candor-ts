@@ -630,6 +630,32 @@ function nearestPackageName(file) {
   for (const d of seen) pkgNameCache.set(d, null);
   return null;
 }
+// Does reaching this declaration CROSS A PACKAGE BOUNDARY the scan cannot see into? This is the gate on
+// every κ-ledger / `invisible` disclosure arm (the unmodeled-external-call, the `new ExternalClass()`, the
+// external tagged template). It used to be spelled `/node_modules\//.test(file)` — true only of an
+// INSTALLED-COPY dependency. A monorepo WORKSPACE dep is a SYMLINK, and the checker resolves it to its
+// REAL path (`…/packages/depkit/dist/index.d.ts`) with no `node_modules/` segment, so every disclosure arm
+// silently declined to fire: a symlinked sibling package produced NO disclosure at all — no `invisible`,
+// no `coverage.uncovered`, no stderr advisory — while the PUBLISHED-package shape of the SAME code
+// disclosed correctly (candor-spec SOUNDNESS-VEIN-crossing-the-scan-boundary.md, "ts, monorepo shape").
+// That is the worst form: in a monorepo every cross-package reach read confidently pure until someone
+// remembered `--workspace`. `declModule` already resolves such a file to its package NAME through
+// `nearestPackageName`; this asks the same question for the disclosure gate.
+//
+// Exclusions preserved exactly: the two builtin trees (`@types/node`, `typescript`) stay out, and so does
+// the scan's OWN package — a file of ours the scan simply didn't include (our own `dist/` typings, a
+// `types/` dir outside the target) is not a foreign package and must not make us blind to ourselves.
+// A file under no package.json at all resolves to no name and stays out, as before.
+//
+// "our own package" is BOTH `pkgName` and `rootOwnerPkg`, because they differ: `pkgName` falls back to the
+// directory basename when the target has no package.json of its own (`candor-ts ./src`), which would make
+// the enclosing package look foreign to itself and disclose us as blind to our own code.
+const rootOwnerPkg = nearestPackageName(path.join(rootDir, "_"));
+function crossesPackageBoundary(file) {
+  if (/node_modules\//.test(file)) return !/node_modules\/(@types\/node|typescript)\//.test(file);
+  const own = nearestPackageName(file);
+  return !!own && own !== pkgName && own !== rootOwnerPkg;
+}
 
 // ⟨0.19⟩ The bare-package ROOT of an import specifier: `@scope/pkg/sub` → `@scope/pkg`, `pkg/sub` → `pkg`,
 // a relative/absolute path → null (not a package). Used to match an import against `declaredButUninstalled`.
@@ -2147,7 +2173,7 @@ function visitCalls(node) {
             const cdeclared = packageManifestEffects(cfile);
             if (cdeclared !== null) { for (const e of cdeclared) rec.direct.add(e); }
             else if (!cmod.startsWith("<") && !kappaKnows(cpkg) && !depCoveredPkgs.has(cpkg)
-                && /node_modules\//.test(cfile) && !/node_modules\/(@types\/node|typescript)\//.test(cfile)) {
+                && crossesPackageBoundary(cfile)) {
               unlistedSeen.set(cpkg, (unlistedSeen.get(cpkg) ?? 0) + 1);
               rec.blind.add(cpkg);
             }
@@ -2699,8 +2725,7 @@ function visitCalls(node) {
             const declared = packageManifestEffects(file);
             if (declared !== null) {
               for (const e of declared) rec.direct.add(e); // [] = declared pure: covered, adds nothing
-            } else if (!kappaKnows(pkg) && !depCoveredPkgs.has(pkg)
-                && /node_modules\//.test(file) && !/node_modules\/(@types\/node|typescript)\//.test(file)) {
+            } else if (!kappaKnows(pkg) && !depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
               unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
               // Per-fn HONESTY: this fn calls into a genuinely-blind package (κ-unknown, not dep-covered).
               // Recorded per fn, propagated transitively, emitted as `invisible` — so `inferred` is never an
@@ -3109,7 +3134,7 @@ function visitCalls(node) {
           const declared = packageManifestEffects(file);
           if (declared !== null) { for (const e of declared) rec.direct.add(e); }
           else if (!mod.startsWith("<") && !kappaKnows(pkg) && !depCoveredPkgs.has(pkg)
-              && /node_modules\//.test(file) && !/node_modules\/(@types\/node|typescript)\//.test(file)) {
+              && crossesPackageBoundary(file)) {
             unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
             rec.blind.add(pkg);
           }
