@@ -8,6 +8,46 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+⚠ **Four mechanisms that died at the SCAN BOUNDARY** (`scan.mjs`). Take code candor analyses soundly,
+split it across a package boundary, scan the dependency separately and chain its report — the arrangement
+candor's own docs recommend — and the effect disappeared. The dependency's report held the right answer
+under the right key and nothing looked for it. Recorded four-way in candor-spec
+`SOUNDNESS-VEIN-crossing-the-scan-boundary.md`; this closes the four ts mechanisms. Three of them were
+**gate-level, not report-level** — `deny Fs` went exit 1 (correct) → exit 0 (a false all-clear) on
+identical source, and is back to exit 1.
+
+- **Implicit coercion into a dependency.** `` `${e}` `` / `String(e)` / `JSON.stringify(e)` / `arr.join()`
+  where `e`'s `toString`/`toJSON` lives in a chained dep emitted *nothing* — no effect, no `Unknown`, no
+  `invisible`. `coercionTargets` collected LOCAL members only, and the design note there argued the κ
+  ledger covered the rest; measured, it does not, because a coercion is not a CallExpression and the
+  ledger lives in the CallExpression handler.
+- **`new DepClass()`.** Every scan mints a `Class.constructor` unit (field initializers run at
+  construction), so the dep's report carries `<pkg>#<Class>.constructor` — but the join keys on
+  `decl.name`, and a constructor declaration has none, so the lookup was skipped; the implicit-ctor arm
+  never consulted the chain at all.
+- **A dep function passed BY REFERENCE to an invoking HOF** (`xs.forEach(depWrite)`,
+  `setTimeout(depWrite, 0)`). Neither an edge nor an `Unknown`: the opaque-callback guard excluded it
+  because "dep calls flow through the κ/invisible channel" — a channel a by-reference pass never enters.
+- **The MONOREPO shape.** A symlinked workspace dep produced **no disclosure at all** — no `invisible`,
+  no `coverage.uncovered`, no stderr advisory — because every disclosure arm was gated on a
+  `node_modules/` path segment, which a symlink's REAL path does not have. The published-package shape of
+  the same code disclosed correctly, so in a monorepo every cross-package reach read confidently pure
+  until someone remembered `--workspace`. Pure disclosure fix; no effect attributed, no verdict moved.
+
+Following the rust template (`candor-rust 1623a07`), none of these adds a resolution path: each routes
+its declaration through the decision procedure the call path already runs — chained sibling report (SPEC
+§2 `hash` join), then the §5.1 manifest, then the κ-coverage ledger.
+
+No fabrication. A/B over 13 real targets (candor-ts, 8 published npm packages, 4 ukri-tfs monorepo
+packages/services), unchained: **0 effect gains, 0 effect losses**, 166 `invisible` gains (all in the
+three monorepo targets, each naming a real symlinked sibling). CHAINED (`--workspace`) over 4 ukri-tfs
+services: **7 effect gains, 0 losses**, every one traced to
+`@ukri-tfs/common#ServiceHostNamesFromAwsServiceDiscovery.constructor → ['Clock','Env']` reaching
+`createServiceHostNamesForDsApi`. The coercion arm is entered a few hundred times across the corpus and
+correctly contributes nothing every time (ES-lib / `@types/node` terminals) — the anti-flood property
+holding under load rather than an unexercised path. ⚠ may add effects/`invisible` to functions previously
+reported pure when a dependency report is chained.
+
 ⚠ **Implicit STRINGIFICATION reached through dispatch or a formatting sink is no longer read silently
 pure** (`scan.mjs`, the coercion-desugaring arm). Closes the four-way common-mode vein recorded in
 candor-spec `SOUNDNESS-VEIN-implicit-stringify.md` — found on HikariCP by the dynamic syscall oracle
