@@ -2083,6 +2083,15 @@ const argIsCallable = (a) => {
 // through it). Array/iterable HOFs, the timer/microtask schedulers, and Promise continuations. A
 // STORE/compare/log sink (`set`/`push`/`add`/`includes`/`indexOf`/`concat`/`log`/`stringify`/…) is
 // deliberately ABSENT — edging there would fabricate the fn's effects on a pure path (the precision failure).
+// Argument positions each invoking HOF actually CALLS. Almost every one takes its callback first, which
+// is why a blanket `argIdx !== 0` guard reads as correct — but `then(onFulfilled, onRejected)` invokes its
+// SECOND argument too, on rejection. Moving the by-reference dependency charge below the blanket guard
+// (8ee89f5, itself fixing an over-charge) therefore dropped a genuine reach: a dep `onErr` performing Fs
+// went from ['Fs'] to pure. Encode the positions rather than assume them.
+const HOF_CALLBACK_POSITIONS = new Map([["then", new Set([0, 1])]]);
+const hofInvokesArg = (name, i) => (HOF_CALLBACK_POSITIONS.get(name) ?? DEFAULT_CB_POS).has(i);
+const DEFAULT_CB_POS = new Set([0]);
+
 const HOF_INVOKERS = new Set([
   "map", "forEach", "filter", "reduce", "reduceRight", "find", "findIndex", "findLast", "findLastIndex",
   "some", "every", "flatMap", "sort", "group", "groupBy", "partition", "mapValues", "flatMapDeep",
@@ -2390,7 +2399,7 @@ function visitCalls(node) {
             //      through the κ/invisible channel, so blanket-Unknown here would over-disclose them.
             //  (3) CALLABILITY — `argIsCallable` (has a call signature, or `any`/`unknown`/unconstrained
             //      generic that COULD hold a function).
-            if (argIdx !== 0) return;
+            if (!hofInvokesArg(calleeName, argIdx)) return;
             // The BY-REFERENCE dependency charge belongs BELOW guard (1), not above it. It was placed
             // first and returned early, so it ran at EVERY argument position: `xs.reduce(dep.merge,
             // dep.makeSeed)` and `promise.then(dep.onOk, dep.onErr)` charged the non-callback argument's
