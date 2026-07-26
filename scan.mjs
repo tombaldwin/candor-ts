@@ -3675,20 +3675,150 @@ for (const [name, rec] of fns) {
 // pure (silence = purity, SPEC §2 rule 3). GATED behind an env flag because it adds report entries a
 // standalone consumer doesn't expect (and four-way conformance compares report shape) — a producer scans
 // its workspace deps with the flag ON to emit chainable reports; default scans stay byte-identical.
+//
+// A PUBLISHED package is the shape the chain actually meets, and there the CHA universe above is EMPTY:
+// npm ships compiled `dist` JS beside `.d.ts`, and `implements` survives only in the typings. Measured on
+// `dist/index.js` + `dist/index.d.ts`: the emitter walks the CLASS's `heritageClauses`, `class FileStore {
+// save(){} }` has none, so no interface is ever consulted and the package publishes `depkit#FileStore.save
+// ['Fs']` with no union — a consumer dispatching on `Store` can never resolve it. Two probes settled where
+// the relation still lives: the checker does NOT merge `exports.FileStore = FileStore` with the sibling
+// `declare class FileStore implements Store` (the .js class symbol has exactly ONE declaration, its own,
+// with zero heritage clauses), so no symbol walk reaches it — but the typings MODULE's exports do carry it.
+// So: resolve the package's OWN typings module, walk its exports, and register each exported class that
+// carries an `implements` clause under that interface, pairing the typings declaration to the scanned dist
+// class BY EXPORTED NAME WITHIN THE SAME PACKAGE.
+//
+// THE PACKAGE BOUNDARY IS LOAD-BEARING, not a tidiness rule. Within one package `exports.FileStore` and
+// `declare class FileStore` are the same public symbol by construction, so the pairing is authoritative.
+// A cross-package name match would be the leaf-name join this vein has produced confirmed fabrications
+// with, so BOTH the class and the interface declaration must sit inside rootDir, and an interface owned by
+// another package is dropped rather than re-keyed under ours (its union belongs under ITS `pkg#` prefix).
+// Honestly: only the INTERFACE-side half of that is shown load-bearing — mutating it out fabricates
+// `depkit2#Store.save` from another package's interface and a named test fails. Mutating the CLASS-side
+// half out breaks nothing, and no fixture could be built that makes it fire: a published foreign class
+// cannot implement an interface it has no way to import, so the interface-side check already declines
+// every case that reaches it. It is kept as a bound on a join by name, not claimed to be necessary.
+// The interface NAME must also be unambiguous, the guard the in-scan arm already had. The remaining
+// name-join hazard — several scanned units sharing the tail `Class.member` — is handled by UNIONING them
+// (see `localEffs` below) rather than by dropping the class: dropping is the under-report this queue's
+// item 0 keeps producing, and the dominant real cause of the collision is a package built twice to
+// `dist/cjs` and `dist/esm`, where the two units are the same class and the union is exact.
+//
+// Typings already inside the scan are SKIPPED: a package scanned from its TypeScript source has real
+// heritage clauses, so the in-scan arm above already holds the relation and this would only duplicate it.
+function typingsInterfaceImpls() {
+  const out = [];
+  let typings = null;
+  try {
+    const pj = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
+    const exp = pj.exports?.["."] ?? pj.exports;
+    const cand = pj.types ?? pj.typings ?? (typeof exp === "object" && exp !== null ? exp.types ?? exp.default?.types : null)
+      ?? (typeof pj.main === "string" ? pj.main.replace(/\.[mc]?jsx?$/, ".d.ts") : null) ?? "index.d.ts";
+    if (typeof cand === "string") typings = path.resolve(rootDir, cand);
+  } catch { return out; }
+  if (!typings || !typings.endsWith(".d.ts") || !fs.existsSync(typings) || projectFiles.has(typings)) return out;
+  // Its own program: adding the .d.ts as a root of the MAIN program would let a global augmentation in the
+  // typings change how the .js itself types, i.e. move ordinary entries under the flag. Isolated here, the
+  // only thing that can cross is the [interface, class-name] relation.
+  let tsf, tck;
+  try {
+    const tprog = ts.createProgram([typings], compilerOptions);
+    tck = tprog.getTypeChecker();
+    tsf = tprog.getSourceFile(typings);
+  } catch { return out; }
+  const mod = tsf && tck.getSymbolAtLocation(tsf);
+  if (!mod) return out;
+  // "belongs to the scanned PACKAGE" — two conditions, and each one was wrong on its own first:
+  //   * compared through REALPATHS, because TypeScript resolves module imports through symlinks. A
+  //     workspace package reached at `node_modules/pkg -> ../packages/pkg` (the monorepo shape this vein
+  //     already had to fix once, `6fb2560`) hands its typings back at their real location, and a textual
+  //     prefix test then rejects the package's OWN files — the guard turning into an under-report.
+  //   * a nested `node_modules` under rootDir is a DIFFERENT package, however deep. "Under rootDir" alone
+  //     admits `node_modules/other/index.d.ts`, i.e. exactly the cross-package name join this must refuse.
+  //     The fixture for that refusal PASSED before this line existed, purely because macOS `os.tmpdir()`
+  //     hands back `/var/...` while the compiler reports `/private/var/...`, so the prefix test failed for
+  //     an unrelated reason. Adding realpath removed the accident and exposed the missing check.
+  const real = (f) => { try { return fs.realpathSync(path.resolve(f)); } catch { return path.resolve(f); } };
+  const rootReal = real(rootDir);
+  const inPkg = (f) => {
+    const r = real(f);
+    if (r !== rootReal && !r.startsWith(rootReal + path.sep)) return false;
+    return !r.slice(rootReal.length).split(path.sep).includes("node_modules");
+  };
+  const deAlias = (s) => (s && s.flags & ts.SymbolFlags.Alias ? tck.getAliasedSymbol(s) : s);
+  const byIface = new Map(); // InterfaceDeclaration -> class names
+  const register = (idecl, clsName) => {
+    if (!byIface.has(idecl)) byIface.set(idecl, []);
+    const arr = byIface.get(idecl);
+    if (!arr.includes(clsName)) arr.push(clsName);
+  };
+  const ifaceDeclsOf = (typeExpr) => (deAlias(tck.getSymbolAtLocation(typeExpr))?.declarations ?? [])
+    .filter((d) => ts.isInterfaceDeclaration(d) && inPkg(d.getSourceFile().fileName));
+  let exports_;
+  try { exports_ = tck.getExportsOfModule(mod); } catch { return out; }
+  for (const ex of exports_) {
+    for (const d of deAlias(ex)?.declarations ?? []) {
+      if (!ts.isClassDeclaration(d) || !d.name || !inPkg(d.getSourceFile().fileName)) continue;
+      const clsName = d.name.text;
+      // Climb super-interfaces too, matching the in-scan arm: `class C implements Sub` where
+      // `interface Sub extends Sup` must be in Sup's universe, since `s.base()` on a Sub-typed value
+      // resolves `base` to whichever interface DECLARES it.
+      const seen = new Set();
+      const climb = (idecl) => {
+        if (seen.has(idecl)) return;
+        seen.add(idecl);
+        register(idecl, clsName);
+        for (const h of idecl.heritageClauses ?? []) {
+          if (h.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+          for (const t of h.types) for (const s of ifaceDeclsOf(t.expression)) climb(s);
+        }
+      };
+      for (const h of d.heritageClauses ?? []) {
+        if (h.token !== ts.SyntaxKind.ImplementsKeyword) continue;
+        for (const t of h.types) for (const idecl of ifaceDeclsOf(t.expression)) climb(idecl);
+      }
+    }
+  }
+  for (const [idecl, clsNames] of byIface) if (clsNames.length) out.push([idecl, clsNames]);
+  return out;
+}
 if (process.env.CANDOR_WORKSPACE_CHAIN) {
-  const localEffs = new Map(); // rec.local -> {inferred:Set, blind:Set}
-  for (const [name, rec] of fns) localEffs.set(rec.local, { inferred: inferred.get(name) ?? new Set(), blind: rec.blind });
+  // rec.local -> {inferred:Set, blind:Set}, UNIONED over every unit sharing the tail rather than last-wins.
+  // A dist package is routinely built twice (`dist/cjs/…/CucumberExpression.js` and `dist/esm/…` are the
+  // same class), so a class name maps to several units; last-wins silently published ONE build's effects
+  // as the whole answer. Union is the same posture the entry itself takes over implementers — and it is
+  // what lets the typings arm below join by NAME without having to guess which unit the name meant.
+  const localEffs = new Map();
+  for (const [name, rec] of fns) {
+    const cell = localEffs.get(rec.local) ?? { inferred: new Set(), blind: new Set() };
+    for (const x of inferred.get(name) ?? []) cell.inferred.add(x);
+    for (const b of rec.blind) cell.blind.add(b);
+    localEffs.set(rec.local, cell);
+  }
   const emittedHashes = new Set(functions.map((e) => e.hash));
   // interface-NAME ambiguity: two `interface I` decls (different files/scopes) both key the union hash on
   // `pkg#I.m`, so first-wins would emit ONE I's union under a name a consumer of the OTHER I resolves to (a
   // fabrication). Count decls per name and skip an ambiguous one — the family's never-guess rule, matching
   // the candor-scan `lt.count > 1` / candor-swift ownersByTail guards.
+  // The union arms, normalised to [InterfaceDeclaration, implementing class NAMES]: the in-scan CHA
+  // universe, plus the same relation read out of a PUBLISHED package's own typings (see below).
+  const unionArms = [];
+  for (const [ifaceDecl, implClasses] of interfaceImpls)
+    unionArms.push([ifaceDecl, implClasses.map((c) => c.name?.text).filter(Boolean)]);
+  const inScanIfaceNames = new Set(unionArms.map(([d]) => d.name?.text).filter(Boolean));
+  // The IN-SCAN arm wins a name collision, and does not become ambiguous because of one. A package built
+  // to `dist` keeps a `types` entry that is the GENERATED SHADOW of the very source being scanned
+  // (@ukri-tfs/common: src/ scanned, `types: dist/lib/index.d.ts`), so both arms describe the same
+  // `interface Logger` — and counting them as two competing declarations silently deleted SEVEN real union
+  // entries from that package's report, an under-report introduced by a fabrication guard. Measured in the
+  // A/B, which is the only reason it was seen.
+  for (const arm of typingsInterfaceImpls()) if (!inScanIfaceNames.has(arm[0].name?.text)) unionArms.push(arm);
   const ifaceNameCounts = new Map();
-  for (const [ifaceDecl] of interfaceImpls) {
+  for (const [ifaceDecl] of unionArms) {
     const n = ifaceDecl.name?.text;
     if (n) ifaceNameCounts.set(n, (ifaceNameCounts.get(n) ?? 0) + 1);
   }
-  for (const [ifaceDecl, implClasses] of interfaceImpls) {
+  for (const [ifaceDecl, implClasses] of unionArms) {
     const ifaceName = ifaceDecl.name?.text;
     if (!ifaceName || !implClasses.length) continue;
     if (ifaceNameCounts.get(ifaceName) > 1) continue; // ambiguous interface name — never guess which I
@@ -3697,9 +3827,7 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
       if (!member.name || !(ts.isMethodSignature(member) || ts.isMethodDeclaration(member))) continue;
       const m = member.name.getText();
       const infU = new Set(), blindU = new Set();
-      for (const cls of implClasses) {
-        const clsName = cls.name?.text;
-        if (!clsName) continue;
+      for (const clsName of implClasses) {
         const e = localEffs.get(`${clsName}.${m}`);
         if (e) { for (const x of e.inferred) infU.add(x); for (const b of e.blind) blindU.add(b); }
       }

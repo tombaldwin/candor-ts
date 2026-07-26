@@ -4555,6 +4555,156 @@ run();
   }
 }
 
+// ── the DIST-PACKAGE interface union (scan-boundary vein) ─────────────────────────────────────────
+// A published package ships compiled `dist` JS beside its `.d.ts`, and `implements` survives ONLY in the
+// typings — so the interface-union emitter, which walks the CLASS's heritage clauses, found nothing and a
+// chained consumer dispatching on the interface could never resolve. The relation is recovered from the
+// package's OWN typings module's exports, paired to the scanned dist class by exported name.
+{
+  const CHAIN = { ...process.env, CANDOR_WORKSPACE_CHAIN: "1" };
+  const distDep = () => project({
+    "package.json": `{"name":"depkit","main":"dist/index.js","types":"dist/index.d.ts"}`,
+    "dist/index.js": `"use strict";
+const fs = require("node:fs");
+class FileStore { save(k, v) { fs.writeFileSync("/tmp/" + k, v); } }
+exports.FileStore = FileStore;
+function build() { return new FileStore(); }
+exports.build = build;`,
+    "dist/index.d.ts": `export interface Store { save(k: string, v: string): void; }
+export declare class FileStore implements Store { save(k: string, v: string): void; }
+export declare function build(): Store;`,
+  });
+  const chainScan = (dir, ...extra) => {
+    const rp = path.join(dir, ".candor", "report");
+    fs.rmSync(`${rp}.json`, { force: true }); // never read a stale arm back (standing bar item 8)
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), dir, ...extra], { encoding: "utf8", env: CHAIN });
+    return { r, report: fs.existsSync(`${rp}.json`) ? JSON.parse(fs.readFileSync(`${rp}.json`, "utf8")) : null, prefix: rp };
+  };
+
+  const dep = distDep();
+  const ds = chainScan(dep, "--allow-js");
+  const union = ds.report?.functions.find((e) => e.hash === "depkit#Store.save");
+  check("a dist package publishes the union for an interface declared only in its TYPINGS",
+        union?.interfaceUnion === true && union?.inferred.includes("Fs"),
+        JSON.stringify(ds.report?.functions.map((e) => [e.hash, e.inferred])));
+
+  // the consumer: dispatch on the interface type across the boundary. Before this, half 1 disclosed
+  // `Unknown[dispatch:depkit.Store.save]` — a key formed that no report could ever answer.
+  const app = project({
+    "package.json": `{"name":"shopapp","dependencies":{"depkit":"1.0.0"}}`,
+    "node_modules/depkit/package.json": `{"name":"depkit","main":"dist/index.js","types":"dist/index.d.ts"}`,
+    "node_modules/depkit/dist/index.js": ``,
+    "node_modules/depkit/dist/index.d.ts": `export interface Store { save(k: string, v: string): void; }
+export declare class FileStore implements Store { save(k: string, v: string): void; }
+export declare function build(): Store;`,
+    "src/use.ts": `import { Store } from "depkit";
+export function go(s: Store): void { s.save("a", "b"); }`,
+    "fs.pol": `deny Fs\n`,
+  });
+  fs.rmSync(path.join(app, ".candor", "report.json"), { force: true });
+  const ar = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", path.join(app, "fs.pol")],
+                       { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(dep, ".candor", "report.json") } });
+  const arep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  check("the chained consumer RESOLVES the dist package's interface dispatch (was Unknown[dispatch])",
+        entry(arep, "src.use.go")?.inferred.join() === "Fs", JSON.stringify(arep.functions));
+  check("…and the two-tree `deny Fs` gate fires again (exit 1)", ar.status === 1, `exit=${ar.status}`);
+  // the single-tree control: identical source in ONE project. This is what proves it is a BOUNDARY defect.
+  const ctl = project({
+    "package.json": `{"name":"ctl"}`,
+    "src/dep.ts": `import * as fs from "node:fs";
+export interface Store { save(k: string, v: string): void; }
+export class FileStore implements Store { save(k: string, v: string): void { fs.writeFileSync("/tmp/" + k, v); } }`,
+    "src/use.ts": `import { Store } from "./dep.js";
+export function go(s: Store): void { s.save("a", "b"); }`,
+    "fs.pol": `deny Fs\n`,
+  });
+  check("single-tree control: the same dispatch fails the same gate (exit 1)",
+        scan(ctl, "--policy", path.join(ctl, "fs.pol")).r.status === 1);
+
+  // flag OFF: a default scan of the same package emits no union entry at all.
+  const off = scan(dep, "--allow-js");
+  check("without CANDOR_WORKSPACE_CHAIN a dist package emits NO union entry",
+        !off.report?.functions.some((e) => e.interfaceUnion), JSON.stringify(off.report?.functions.map((e) => e.hash)));
+
+  // FABRICATION control: the interface belongs to ANOTHER package. Pairing by name is authoritative only
+  // WITHIN a package; re-keying a foreign interface under ours is the leaf-name join this vein has been
+  // burned by, so the arm must decline.
+  const foreign = project({
+    "package.json": `{"name":"depkit2","main":"dist/index.js","types":"dist/index.d.ts"}`,
+    "node_modules/other/package.json": `{"name":"other","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/other/index.js": ``,
+    "node_modules/other/index.d.ts": `export interface Store { save(k: string, v: string): void; }`,
+    "dist/index.js": `"use strict";
+const fs = require("node:fs");
+class FileStore { save(k, v) { fs.writeFileSync("/tmp/" + k, v); } }
+exports.FileStore = FileStore;`,
+    "dist/index.d.ts": `import { Store } from "other";
+export declare class FileStore implements Store { save(k: string, v: string): void; }`,
+  });
+  const fr = chainScan(foreign, "--allow-js");
+  check("an interface owned by ANOTHER package is never re-keyed under this one (no cross-package name join)",
+        !fr.report?.functions.some((e) => e.hash.endsWith("#Store.save")),
+        JSON.stringify(fr.report?.functions.map((e) => e.hash)));
+
+  // THE SECOND FIXTURE (standing bar item 0): the arm must not COST anything. A package built to `dist`
+  // keeps a `types` entry that is the generated SHADOW of the very source being scanned, so both arms carry
+  // `interface Store` — and treating that as an ambiguous name deleted the real in-scan union entries. This
+  // is not hypothetical: it removed seven from @ukri-tfs/common's report before the A/B caught it.
+  const shadowed = project({
+    "package.json": `{"name":"shadowed","main":"dist/index.js","types":"dist/index.d.ts"}`,
+    "tsconfig.json": `{"include":["src"]}`,
+    "src/index.ts": `import * as fs from "node:fs";
+export interface Store { save(k: string): void; }
+export class FileStore implements Store { save(k: string): void { fs.writeFileSync(k, "x"); } }`,
+    "dist/index.d.ts": `export interface Store { save(k: string): void; }
+export declare class FileStore implements Store { save(k: string): void; }`,
+  });
+  const sh = chainScan(shadowed);
+  check("a package whose TYPINGS shadow its scanned source KEEPS its in-scan union entry",
+        sh.report?.functions.find((e) => e.hash === "shadowed#Store.save")?.inferred.includes("Fs"),
+        JSON.stringify(sh.report?.functions.map((e) => [e.hash, e.inferred])));
+
+  // the union's class-name join UNIONS every unit sharing the tail rather than picking one last-wins: a
+  // package built twice (dist/cjs + dist/esm, or src + dist) has two units per class, and publishing one
+  // build's effects as the whole answer is a silent under-report of the other's.
+  const dual = project({
+    "package.json": `{"name":"dual","main":"dist/cjs/index.js","types":"dist/cjs/index.d.ts"}`,
+    "dist/cjs/index.js": `"use strict";
+const fs = require("node:fs");
+class FileStore { save(k) { fs.writeFileSync(k, "x"); } }
+exports.FileStore = FileStore;`,
+    "dist/cjs/index.d.ts": `export interface Store { save(k: string): void; }
+export declare class FileStore implements Store { save(k: string): void; }`,
+    "dist/esm/index.js": `export class FileStore { save(k) { /* pure in this build */ } }`,
+  });
+  const du = chainScan(dual, "--allow-js");
+  check("the union covers EVERY build of a doubly-compiled class (not just the last one seen)",
+        du.report?.functions.find((e) => e.hash === "dual#Store.save")?.inferred.includes("Fs"),
+        JSON.stringify(du.report?.functions.map((e) => [e.hash, e.inferred])));
+
+  // the same-package test compares REALPATHS. A workspace package is reached through a node_modules
+  // symlink (the monorepo shape this vein already had to fix once), and TypeScript resolves a bare
+  // self-reference to the symlink TARGET — so a textual prefix test rejects the package's own typings and
+  // the guard becomes an under-report. Verified to catch: with the textual test, no union is emitted here.
+  const ws = project({
+    "packages/symkit/package.json": `{"name":"symkit","main":"dist/index.js","types":"dist/index.d.ts"}`,
+    "packages/symkit/dist/types.d.ts": `export interface Store { save(k: string): void; }`,
+    "packages/symkit/dist/index.d.ts": `import { Store } from "symkit/dist/types.js";
+export { Store };
+export declare class FileStore implements Store { save(k: string): void; }`,
+    "packages/symkit/dist/index.js": `"use strict";
+const fs = require("node:fs");
+class FileStore { save(k) { fs.writeFileSync(k, "x"); } }
+exports.FileStore = FileStore;`,
+  });
+  fs.mkdirSync(path.join(ws, "node_modules"), { recursive: true });
+  fs.symlinkSync(path.join(ws, "packages", "symkit"), path.join(ws, "node_modules", "symkit"), "dir");
+  const wr = chainScan(path.join(ws, "node_modules", "symkit"), "--allow-js");
+  check("a workspace package reached through a node_modules SYMLINK still emits its union",
+        wr.report?.functions.find((e) => e.hash === "symkit#Store.save")?.interfaceUnion === true,
+        JSON.stringify(wr.report?.functions.map((e) => [e.hash, e.inferred])));
+}
+
 // ── the SEEDED-VIOLATION SENSITIVITY BATTERY as a gate (RQ1 Part C) ───────────────────────────────
 // The honesty oracle is only worth its verdict if it is SENSITIVE. sensitivity.mjs plants a real Fs effect
 // behind each of N dynamic mechanisms (eval, Function ctor, computed require, callback-in-collection, async
