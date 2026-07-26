@@ -542,8 +542,15 @@ const staleDepPkgs = new Set();
         if (!e.hash) continue;
         const hashPkg = e.hash.split("#")[0];
         if (hashPkg) covers.add(hashPkg);
-        const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), invisible: new Set(), hosts: [], cmds: [], paths: [], tables: [] };
+        const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [] };
         for (const x of stale ? ["Unknown"] : e.inferred ?? []) cell.inferred.add(x);
+        // ⟨0.19⟩ THE REASON CLASS TRAVELS WITH THE UNKNOWN. Without this the join copied `inferred` and
+        // `invisible` only, so a dependency's `Unknown[reflect:eval]` arrived at the consumer as a bare
+        // Unknown and fell back to the generic `unresolved` — and `deny Net Unknown[reflect]`, a rule
+        // written to bite exactly that hole, stopped biting one package boundary away. The ts sibling of
+        // candor-java `6ab26e4`. A STALE report keeps the bare Unknown: its reasons are assertions from a
+        // build we do not trust, and `unresolved` is the honest class for "we cannot say why".
+        if (!stale) for (const w of e.unknownWhy ?? []) cell.why.add(w);
         // A chained dep's OWN blind boundary (an uncovered package IT calls into) travels to a consumer as
         // that consumer's `invisible` — the transitive disclosure the workspace chain exists to carry (a
         // sibling package's `SnsTopic.publish → invisible:[@aws-sdk/client-sns]` must not read pure across
@@ -1801,6 +1808,22 @@ function memberSigOf(decl) {
   return decl && (ts.isFunctionTypeNode(decl) || ts.isCallSignatureDeclaration(decl)) && decl.parent
     && (ts.isPropertySignature(decl.parent) || ts.isMethodSignature(decl.parent)) ? decl.parent : decl;
 }
+// Apply ONE chained-dependency entry to the calling unit. There is exactly one of these because there used
+// to be two, drifted: the CallExpression arm and the desugared-declaration arm each spelled the copy out,
+// and the ⟨0.19⟩ reason class was added to neither. That is the same root cause candor-java's `6ab26e4`
+// found ("crossDepJoin reproduced inheritDepFn line for line instead of calling it"), and deleting the copy
+// is most of the fix there too. The dep's `invisible` travels as this call's own — the transitive
+// disclosure has to cross the package edge, or a sibling's SNS reach reads pure here — and so does its
+// `unknownWhy`, so `deny E Unknown[<class>]` keeps its scope one boundary along.
+function applyDepHit(rec, hit) {
+  for (const x of hit.inferred) rec.direct.add(x);
+  for (const b of hit.invisible ?? []) rec.blind.add(b);
+  for (const w of hit.why ?? []) rec.why.add(w);
+  for (const v of hit.hosts ?? []) rec.hosts.add(v);
+  for (const v of hit.cmds ?? []) rec.cmds.add(v);
+  for (const v of hit.paths ?? []) rec.paths.add(v);
+  for (const v of hit.tables ?? []) rec.tables.add(v);
+}
 function unanswerableKey(decl) {
   if (!decl) return null;
   if (ts.isMethodSignature(decl) || ts.isPropertySignature(decl)) return decl;      // interface / type-literal member
@@ -1832,15 +1855,7 @@ function chargeExternalDecl(rec, decl, tailOverride) {
   const hit = tailOverride ? crossDeps.get(`${pkg}#${tailOverride}`)
     : member && ((owner ? crossDeps.get(`${pkg}#${owner}.${member}`) : undefined)
       ?? crossDeps.get(`${pkg}#${member}`));
-  if (hit) {
-    for (const x of hit.inferred) rec.direct.add(x);
-    for (const b of hit.invisible ?? []) rec.blind.add(b);
-    for (const v of hit.hosts) rec.hosts.add(v);
-    for (const v of hit.cmds) rec.cmds.add(v);
-    for (const v of hit.paths) rec.paths.add(v);
-    for (const v of hit.tables) rec.tables.add(v);
-    return;
-  }
+  if (hit) { applyDepHit(rec, hit); return; }
   const file = decl.getSourceFile().fileName;
   const declared = packageManifestEffects(file);
   if (declared !== null) { for (const e of declared) rec.direct.add(e); return; } // [] = declared pure
@@ -2947,17 +2962,7 @@ function visitCalls(node) {
             // fallback exactly the typed-consumer shape the chain targets never joined.
             const hit = localTail && (crossDeps.get(`${depMod}#${localTail}`)
               ?? (nameDecl.name ? crossDeps.get(`${depMod}#${nameDecl.name.getText()}`) : undefined));
-            if (hit) {
-              inheritedFromDep = true;
-              for (const x of hit.inferred) rec.direct.add(x);
-              // inherit the dep fn's OWN blind boundary as this call's invisible — the transitive
-              // disclosure crosses the package edge (else a sibling's SNS reach reads pure here).
-              for (const b of hit.invisible ?? []) rec.blind.add(b);
-              for (const v of hit.hosts) rec.hosts.add(v);
-              for (const v of hit.cmds) rec.cmds.add(v);
-              for (const v of hit.paths) rec.paths.add(v);
-              for (const v of hit.tables) rec.tables.add(v);
-            }
+            if (hit) { inheritedFromDep = true; applyDepHit(rec, hit); }
           }
           // unmatched external = (OPAQUE): contributes nothing — the curated-κ caveat C1. The
           // κ-coverage LEDGER makes the caveat per-scan evidence instead of a doc footnote: count
@@ -3630,9 +3635,10 @@ function depInitCell(pkg, subpath) {
   let cell = null;
   for (const [h, c] of crossDeps) {
     if (!h.startsWith(`${pkg}#`) || !h.endsWith(".<module>")) continue;
-    cell ??= { inferred: new Set(), invisible: new Set(), hosts: [], cmds: [], paths: [], tables: [] };
+    cell ??= { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [] };
     for (const e of c.inferred) cell.inferred.add(e);
     for (const b of c.invisible) cell.invisible.add(b);
+    for (const w of c.why ?? []) cell.why.add(w);
   }
   return cell;
 }

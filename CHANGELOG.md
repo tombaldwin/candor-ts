@@ -8,6 +8,23 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+⚠ **⟨0.19⟩ A chained dependency's Unknown keeps its REASON CLASS at the consumer** (`scan.mjs`). The dep
+join copied `inferred` and `invisible` only, so a dependency's `Unknown[reflect:eval]` arrived as a bare
+`Unknown` and fell back to the generic `unresolved` — and `deny Net Unknown[reflect]`, a rule written to
+bite exactly that hole, stopped biting one package boundary away. The ts sibling of candor-java `6ab26e4`,
+and the root cause was the same **duplication**: the CallExpression arm and the desugared-declaration arm
+each spelled the apply-a-dep-entry copy out, drifted, and the reason class was added to neither. There is
+one `applyDepHit` now. A report failing the §2.1 version check keeps the bare `Unknown`: its reasons are
+assertions from a build we do not trust, and `unresolved` is the honest class for "we cannot say why".
+
+Measured, chained over four `@ukri-tfs` services against five workspace packages: **0 effect gains, 0
+losses, entry counts identical, and 606 functions gain a real reason class** where they read `unresolved`
+(`callback:value.trim` ×570, `dispatch:…` the rest). Producer reports byte-identical — this is
+consumer-side only. ⚠ a narrowed `deny E Unknown[<class>]` rule may newly fire on a chained consumer; that
+is the rule finally seeing what it was written for. Five tests, the second fixture (a rule naming a
+*different* class must still pass, so "the class travels" has not become "every narrowed rule matches")
+written to pin the direction; both guards mutated out with their named failing tests.
+
 ⚠ **A union entry carrying `Unknown` now carries the trust marker too** (`scan.mjs`). `unresolved` was set
 on the `broad` arm only, so an `interfaceUnion` entry that *inherited* `Unknown` from an implementer's body
 published `inferred: ['Unknown']` with `unresolved` absent — telling a machine consumer in one field that

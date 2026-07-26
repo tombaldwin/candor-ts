@@ -5432,6 +5432,68 @@ net.connect(53, "8.8.8.8");`,
         JSON.stringify(c5.report?.functions));
 }
 
+// ── ⟨0.19⟩ THE REASON CLASS TRAVELS ACROSS THE DEP JOIN ───────────────────────────────────────────
+// The join copied `inferred` and `invisible` only, so a dependency's `Unknown[reflect:eval]` arrived as a
+// bare Unknown and fell back to the generic `unresolved` — and `deny Net Unknown[reflect]`, a rule written
+// to bite exactly that hole, stopped biting one package boundary away. The ts sibling of candor-java
+// `6ab26e4`, whose root cause was the same DUPLICATION: two copies of the apply path, drifted, and the
+// reason class added to neither.
+{
+  const dep = project({
+    "package.json": `{"name":"reflkit","main":"index.js","types":"index.d.ts"}`,
+    "src/index.ts": `export function run(name: string): void { (0, eval)(name); }`,
+  });
+  const ds = scan(dep);
+  check("the dependency discloses its own reason class",
+        entry(ds.report, "src.index.run")?.unknownWhy?.join() === "reflect:eval",
+        JSON.stringify(ds.report?.functions));
+  const app = (pol) => {
+    const a = project({
+      "package.json": `{"name":"reflapp","dependencies":{"reflkit":"1.0.0"}}`,
+      "node_modules/reflkit/package.json": `{"name":"reflkit","main":"index.js","types":"index.d.ts"}`,
+      "node_modules/reflkit/index.js": ``,
+      "node_modules/reflkit/index.d.ts": `export declare function run(name: string): void;`,
+      "src/use.ts": `import { run } from "reflkit";
+export function go(): void { run("x"); }`,
+      "p.pol": pol,
+    });
+    fs.rmSync(path.join(a, ".candor", "report.json"), { force: true });   // standing bar item 7
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), a, "--policy", path.join(a, "p.pol")],
+                        { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: `${ds.prefix}.json` } });
+    return { r, rep: JSON.parse(fs.readFileSync(path.join(a, ".candor", "report.json"), "utf8")) };
+  };
+  const refl = app("deny Net Unknown[reflect]\n");
+  check("…and the consumer inherits it, instead of falling back to the generic `unresolved`",
+        entry(refl.rep, "src.use.go")?.unknownWhy?.join() === "reflect:eval",
+        JSON.stringify(entry(refl.rep, "src.use.go")));
+  check("…so `deny Net Unknown[reflect]` bites one package boundary along (exit 0 -> 1)",
+        refl.r.status === 1, `exit=${refl.r.status}`);
+  // THE SECOND FIXTURE. Carrying the reason must not make the scope WIDER: a rule naming a DIFFERENT class
+  // has to keep passing, or "the class travels" has quietly become "every narrowed rule now matches".
+  check("…while a rule naming a different class still passes — the scoping still discriminates",
+        app("deny Net Unknown[native]\n").r.status === 0);
+  // And a report from another build keeps the BARE Unknown: its reasons are assertions from an engine we
+  // have just decided not to trust, and `unresolved` is the honest class for "we cannot say why".
+  const staleDep = JSON.parse(fs.readFileSync(`${ds.prefix}.json`, "utf8"));
+  staleDep.candor.version += "-other";
+  const stalePath = path.join(dep, ".candor", "other.json");
+  fs.writeFileSync(stalePath, JSON.stringify(staleDep));
+  const a2 = project({
+    "package.json": `{"name":"reflapp2","dependencies":{"reflkit":"1.0.0"}}`,
+    "node_modules/reflkit/package.json": `{"name":"reflkit","main":"index.js","types":"index.d.ts"}`,
+    "node_modules/reflkit/index.js": ``,
+    "node_modules/reflkit/index.d.ts": `export declare function run(name: string): void;`,
+    "src/use.ts": `import { run } from "reflkit";
+export function go(): void { run("x"); }`,
+  });
+  fs.rmSync(path.join(a2, ".candor", "report.json"), { force: true });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), a2], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: stalePath } });
+  const staleRep = JSON.parse(fs.readFileSync(path.join(a2, ".candor", "report.json"), "utf8"));
+  check("an UNTRUSTED report's reason class is not repeated — the Unknown stays bare",
+        !(entry(staleRep, "src.use.go")?.unknownWhy ?? []).includes("reflect:eval"),
+        JSON.stringify(entry(staleRep, "src.use.go")));
+}
+
 // ── §2.1 STALENESS: an UNTRUSTED report's SILENCE is not a purity claim ───────────────────────────
 // §2.1 downgrades a chained report from another engine build to `Unknown`. It did that to the entries the
 // report CARRIES — while registering the package as covered anyway, so every key the report did NOT contain
