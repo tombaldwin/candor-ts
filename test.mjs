@@ -4847,6 +4847,95 @@ exports.FileStore = FileStore;`,
   check("a typings census truncated by the cap publishes NOTHING from the typings, not half of it",
         !chainScan(project(bigFiles), "--allow-js").report?.functions.some((e) => e.interfaceUnion));
 
+  // ── A TRUNCATED CENSUS REFUSES TO PUBLISH, NOT TO LOOK ──────────────────────────────────────────
+  // The check above passes for a package whose ONLY arm is the typings one, so it could not tell "the
+  // typings arm was dropped" from "nothing was published". Dropping the arm lands the refusal on the
+  // EVIDENCE side — and the evidence is the only thing that can say a name means two different things.
+  // With an IN-SCAN arm present, a truncated census made the in-scan `Store` look UNIQUE: the ambiguity
+  // counter read 1 instead of 2, the never-guess guard did not fire, and the package published its
+  // INTERNAL `Store` (whose implementer does Net) as the answer for the PUBLIC one (whose implementer
+  // writes to disk) — `mixkit#Store.save -> ['Net'] unresolved:false`, the exact fabrication `d7060ca`
+  // measured and closed, restored for precisely the packages big enough to hit the cap.
+  const CAPKIT_PKG = `{"name":"capkit","main":"dist/index.js","types":"dist/index.d.ts","exports":{".":{"types":"./dist/index.d.ts","default":"./dist/index.js"},"./*":{"types":"./dist/*.d.ts","default":"./dist/*.js"}}}`;
+  const CAPKIT_DTS = `export interface Store { save(k: string): void; }
+export declare class FileStore implements Store { save(k: string): void; }`;
+  const capkit = (nFillers) => {
+    const files = {
+      "package.json": CAPKIT_PKG,
+      // the INTERNAL `Store`: a different interface that happens to share the public one's name.
+      "src/internal.ts": `import * as https from "node:https";
+export interface Store { save(k: string): void; }
+export class MemStore implements Store { save(k: string): void { https.get("http://telemetry.example.com/" + k); } }`,
+      "dist/index.js": `"use strict";
+const fs = require("node:fs");
+class FileStore { save(k) { fs.writeFileSync(k, "x"); } }
+exports.FileStore = FileStore;`,
+      "dist/index.d.ts": CAPKIT_DTS,
+    };
+    for (let i = 0; i < nFillers; i++) files[`dist/g${i}.d.ts`] = `export declare const y${i}: number;\n`;
+    return project(files);
+  };
+  // THE SECOND FIXTURE, WRITTEN FIRST (standing bar item 0). This makes the emitter publish LESS, so the
+  // failure mode to look for is a refusal that swallows the cases it was never about: a census that
+  // COMPLETES — even a big one, right up under the cap — must still publish exactly what it did before.
+  const capSmall = chainScan(capkit(100), "--allow-js").report;
+  check("a big-but-COMPLETE typings census still publishes: the refusal is scoped to truncation",
+        capSmall?.functions.some((e) => e.hash === "capkit#FileStore.save")
+          && !capSmall?.functions.some((e) => e.hash === "capkit#Store.save"),
+        JSON.stringify(capSmall?.functions.map((e) => [e.hash, e.inferred])));
+  const capBig = chainScan(capkit(200), "--allow-js").report;
+  check("…and a TRUNCATED one publishes no union at all, rather than the in-scan arm's confident answer",
+        !capBig?.functions.some((e) => e.hash === "capkit#Store.save"),
+        JSON.stringify(capBig?.functions.map((e) => [e.hash, e.inferred, e.interfaceUnion])));
+
+  // The consumer arms, which are where the fabrication was cashed: a confident `Net` on a dispatch that
+  // cannot reach the network, and a dropped `Fs` on one that writes to disk.
+  const capapp = (producer, pol) => {
+    const app = project({
+      "package.json": `{"name":"capapp","dependencies":{"capkit":"1.0.0"}}`,
+      "node_modules/capkit/package.json": CAPKIT_PKG,
+      "node_modules/capkit/dist/index.js": ``,
+      "node_modules/capkit/dist/index.d.ts": CAPKIT_DTS,
+      "src/use.ts": `import { Store } from "capkit";
+export function go(s: Store): void { s.save("a"); }`,
+      "p.pol": pol,
+    });
+    fs.rmSync(path.join(app, ".candor", "report.json"), { force: true });   // standing bar item 7
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", path.join(app, "p.pol")],
+                        { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(producer, ".candor", "report.json") } });
+    return { r, rep: JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8")) };
+  };
+  const bigProducer = capkit(200);
+  chainScan(bigProducer, "--allow-js");
+  const capNet = capapp(bigProducer, "deny Net\n");
+  check("a consumer of the truncated producer discloses the dispatch instead of inheriting a fabricated Net",
+        entry(capNet.rep, "src.use.go")?.inferred.join() === "Unknown"
+          && entry(capNet.rep, "src.use.go")?.unknownWhy?.includes("dispatch:capkit.Store.save"),
+        JSON.stringify(entry(capNet.rep, "src.use.go")));
+  check("…the fabricated `deny Net` catch is gone (exit 1 -> 0)", capNet.r.status === 0, `exit=${capNet.r.status}`);
+  check("…and `deny Unknown[dispatch]` bites where the confident wrong answer sat (exit 0 -> 1)",
+        capapp(bigProducer, "deny Unknown[dispatch,unresolved]\n").r.status === 1);
+  // The single-tree control. Same two interfaces, one project, no boundary: the dispatch resolves to the
+  // PUBLIC implementer's Fs. That is what makes the split arm's confident `Net` a boundary defect rather
+  // than a limit of the analysis — and it is exit 1 on `deny Fs` in both arms, where the split arm sat
+  // green at exit 0 while publishing an answer from the wrong interface entirely.
+  const capctl = project({
+    "package.json": `{"name":"capctl"}`,
+    "src/internal.ts": `import * as https from "node:https";
+export interface Store { save(k: string): void; }
+export class MemStore implements Store { save(k: string): void { https.get("http://telemetry.example.com/" + k); } }`,
+    "src/pub.ts": `import * as fs from "node:fs";
+export interface PublicStore { save(k: string): void; }
+export class FileStore implements PublicStore { save(k: string): void { fs.writeFileSync(k, "x"); } }`,
+    "src/use.ts": `import { PublicStore } from "./pub.js";
+export function go(s: PublicStore): void { s.save("a"); }`,
+    "fs.pol": `deny Fs\n`,
+  });
+  const capc = scan(capctl, "--policy", path.join(capctl, "fs.pol"));
+  check("single-tree control: the same dispatch resolves to Fs, never to the other interface's Net",
+        entry(capc.report, "src.use.go")?.inferred.join() === "Fs" && capc.r.status === 1,
+        JSON.stringify(entry(capc.report, "src.use.go")));
+
   // ── A NAME COLLISION IS EVIDENCE, NOT NOISE ─────────────────────────────────────────────────────
   // "The in-scan arm wins" dropped the typings arm on the NAME alone, throwing away the one piece of
   // evidence the engine had that the name means two different things. A package with an INTERNAL

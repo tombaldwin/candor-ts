@@ -978,7 +978,12 @@ const interfaceImpls = new Map();  // InterfaceDeclaration node -> implementing 
 // complete — and `closedWorldResolvable` is deliberately not copied, since asserting the scanned classes
 // are the whole world is exactly what publishing for a chained consumer contradicts.)
 const CHA_FANOUT_LIMIT = 12;
-const classOverrides = new Map();  // base-method MemberDeclaration node -> overriding subclass member nodes (class-CHA)
+// How many `.d.ts` files the published-typings census will walk before giving up. It is a COST bound, not a
+// soundness one — the union emitter refuses to publish anything at all once it is hit, because a census
+// that stopped early cannot prove an interface name is unique in the package (see `typingsRoots`). Named
+// rather than inlined for the reason `CHA_FANOUT_LIMIT` was: two literals for one rule is how they drift.
+const TYPINGS_CENSUS_CAP = 128;
+const classOverrides = new Map();// base-method MemberDeclaration node -> overriding subclass member nodes (class-CHA)
 const classDescendants = new Map();// base ClassDeclaration -> transitive LOCAL subclass ClassDeclarations (coercion-CHA)
 // `Object.defineProperty(target, key, { get/set })` runtime accessors (the silent-pure defineProperty
 // hole): the TS checker types `target.key` as a plain DATA property (defineProperty is a runtime
@@ -3886,7 +3891,7 @@ for (const [name, rec] of fns) {
 // `.d.ts` reached from two entry points yields the SAME declaration node, and the counter is over nodes.
 function typingsRoots() {
   let pj;
-  try { pj = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8")); } catch { return []; }
+  try { pj = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8")); } catch { return { roots: [], truncated: false }; }
   const pats = new Set();
   const isDts = (v) => typeof v === "string" && /\.d\.[cm]?ts$/.test(v);
   const walk = (v, d = 0) => {
@@ -3911,8 +3916,10 @@ function typingsRoots() {
   // A `*` cannot be enumerated from the manifest, so collect the `.d.ts` files under the pattern's static
   // prefix instead. OVER-matching is the safe direction here: an extra declaration can only make a name
   // ambiguous (refused) or add an arm under a key no consumer can form. UNDER-matching is what re-opens
-  // the fabrication, so a truncated collection refuses the whole typings arm rather than censusing half.
-  const CAP = 128;
+  // the fabrication — so `truncated` travels OUT of here, and the caller refuses to PUBLISH rather than
+  // censusing half. Discarding the typings arm on its own was the wrong place to refuse: it lands the
+  // refusal on the EVIDENCE side, and the evidence is what makes a colliding name ambiguous.
+  const CAP = TYPINGS_CENSUS_CAP;
   const files = new Set();
   let truncated = false;
   const under = (dir) => {
@@ -3933,13 +3940,13 @@ function typingsRoots() {
     }
     under(path.resolve(rootDir, pat.slice(0, star).replace(/[^/]*$/, "")));
   }
-  if (truncated || files.size > CAP) return null;
-  return [...files];
+  return { roots: [...files], truncated: truncated || files.size > CAP };
 }
 function typingsInterfaceImpls() {
   const out = [];
-  const roots = (typingsRoots() ?? []).filter((f) => !projectFiles.has(f));
-  if (!roots.length) return out;
+  const census = typingsRoots();
+  const roots = census.roots.filter((f) => !projectFiles.has(f));
+  if (census.truncated || !roots.length) return { arms: out, truncated: census.truncated };
   // ONE program, its own: adding the .d.ts files as roots of the MAIN program would let a global
   // augmentation in the typings change how the .js itself types, i.e. move ordinary entries under the
   // flag. Isolated here, the only thing that can cross is the [interface, class-name] relation.
@@ -3947,7 +3954,7 @@ function typingsInterfaceImpls() {
   try {
     tprog = ts.createProgram(roots, compilerOptions);
     tck = tprog.getTypeChecker();
-  } catch { return out; }
+  } catch { return { arms: out, truncated: true }; }   // no census at all is the widest truncation there is
   // "belongs to the scanned PACKAGE" — two conditions, and each one was wrong on its own first:
   //   * compared through REALPATHS, because TypeScript resolves module imports through symlinks. A
   //     workspace package reached at `node_modules/pkg -> ../packages/pkg` (the monorepo shape this vein
@@ -4005,7 +4012,7 @@ function typingsInterfaceImpls() {
     }
   }
   for (const [idecl, clsNames] of byIface) if (clsNames.length) out.push([idecl, clsNames]);
-  return out;
+  return { arms: out, truncated: false };
 }
 if (process.env.CANDOR_WORKSPACE_CHAIN) {
   // rec.local -> {inferred:Set, blind:Set}, UNIONED over every unit sharing the tail rather than last-wins.
@@ -4061,13 +4068,33 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
   // Redundant-drop can still leave the in-scan union over-approximating for a consumer that meant the
   // other interface, since the in-scan set is a superset by construction. That is unchanged behaviour of
   // the in-scan arm, not something this rule introduces: no key that was precise becomes wider.
-  for (const arm of typingsInterfaceImpls()) {
+  const typings = typingsInterfaceImpls();
+  for (const arm of typings.arms) {
     const n = arm[0].name?.text;
     if (!n) continue;
     const inScan = inScanClassesByName.get(n);
     if (inScan && arm[1].every((c) => inScan.has(c))) continue;
     unionArms.push(arm);
   }
+  // A TRUNCATED typings census refuses the PUBLICATION, and it has to be here rather than at the census.
+  // Dropping the typings arm on its own lands the refusal on the EVIDENCE side — and the evidence is the
+  // only thing that can tell the engine a name means two things. The comment beside the cap argued that
+  // over-matching is safe because "an extra declaration can only make a name ambiguous (refused)": true of
+  // the files the walk COLLECTS, false of the arm it discards wholesale. Measured on a package whose `.d.ts`
+  // tree holds 128+ declarations — routine for any `dist/**` build: the census stops, `ifaceNameCounts` for
+  // `Store` reads 1 instead of 2, the ambiguity guard does not fire, and the package publishes its INTERNAL
+  // `mixkit#Store.save -> ['Net'] unresolved:false` as the answer for the PUBLIC `Store` whose implementer
+  // writes to disk. A consumer then inherits a fabricated Net (`deny Net` exit 0 -> 1 on a dispatch that
+  // cannot reach the network) and a dropped Fs (`deny Fs` green at exit 0 on one that does) — exactly the
+  // defect `d7060ca` measured and closed, restored for precisely the packages big enough to hit the cap.
+  //
+  // So every name REFUSES, routed through the never-guess guard the emitter already has rather than a
+  // second refusal mechanism beside it: the declarations the walk did not reach could each be a second
+  // `Store`, so no name in the package can be vouched for. Half 1's unanswerable-key arm is the floor under
+  // this at the consumer, which is why refusing costs disclosure rather than honesty.
+  if (typings.truncated)
+    console.error(`candor-ts: this package's typings census exceeded ${TYPINGS_CENSUS_CAP} declaration files — `
+      + `publishing NO interface-CHA union entries (an incomplete census cannot tell a colliding interface name from a unique one)`);
   const ifaceNameCounts = new Map();
   for (const [ifaceDecl] of unionArms) {
     const n = ifaceDecl.name?.text;
@@ -4076,7 +4103,9 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
   for (const [ifaceDecl, implClasses] of unionArms) {
     const ifaceName = ifaceDecl.name?.text;
     if (!ifaceName || !implClasses.length) continue;
-    if (ifaceNameCounts.get(ifaceName) > 1) continue; // ambiguous interface name — never guess which I
+    // Never guess which `I` a name means: two declarations of it, or a census that cannot prove there is
+    // only one, are the same evidential position and take the same answer.
+    if (ifaceNameCounts.get(ifaceName) > 1 || typings.truncated) continue;
     // BOUNDED CHA — the same `CHA_FANOUT_LIMIT` the in-scan dispatch site applies. The union emitter
     // shipped without it, so the producer PUBLISHED what its own dispatch refuses to resolve: rxjs's
     // `Operator` has 70 implementers, sixteen of which reach Net, and rxjs's own `Observable.subscribe`

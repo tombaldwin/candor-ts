@@ -8,6 +8,32 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+⚠ **A truncated typings census refuses to PUBLISH, not to look** (`scan.mjs`). The published-typings walk
+gives up past 128 declaration files, and it discarded the typings arm when it did — landing the refusal on
+the *evidence* side, when the evidence is the only thing that can tell the engine an interface name means
+two different things. The comment beside the cap argued over-matching is safe because "an extra declaration
+can only make a name ambiguous (refused)": true of the files the walk collects, false of the arm it throws
+away whole. For a package whose `.d.ts` tree is big enough, the ambiguity counter read 1 instead of 2, the
+never-guess guard did not fire, and the package published its **internal** `Store` (implementer does `Net`)
+as the answer for the **public** one (implementer writes to disk) — `pkg#Store.save -> ['Net']` with
+`unresolved: false`. A consumer then inherited a fabricated `Net` (`deny Net` catching a dispatch that
+cannot reach the network) and a dropped `Fs` (`deny Fs` green at exit 0 on one that does): the exact defect
+`d7060ca` measured and closed, restored for precisely the packages big enough to hit the cap.
+
+Now a truncated census makes **every** name refuse, routed through the never-guess guard the emitter already
+has — two declarations of a name, and a census that cannot prove there is only one, are the same evidential
+position. Half 1's unanswerable-key arm is the floor under it at the consumer, so refusing costs disclosure
+rather than honesty. A census that *completes*, however large, publishes exactly what it did before.
+
+Measured. The cap bites **3 packages in 3 213** across eight real `node_modules` trees (88 of them declare a
+wildcard typings pattern at all): `rxjs` twice and `@angular/common`. `@angular/common` published no unions
+either way; `rxjs` loses **7, every one of them a bare `['Unknown']`** — no concrete effect is lost anywhere,
+and a consumer dispatching on `rxjs.Observer.next` comes out *better*, `Unknown[dispatch:rxjs.Observer.next]`
+where it previously read `Unknown[unresolved]` (the union's reason class does not survive the dep join —
+still open). Seventeen other published packages and seven workspace producers carrying 13 union entries:
+**byte-identical**. Six regression tests, the second fixture (a big-but-complete census must still publish)
+written first, and the guard mutated out with its four named failing tests recorded.
+
 **Build id moved to 0.23.2, and an untrusted chained report no longer licenses silence** (`scan.mjs`,
 `package.json`). The per-file module unit key landed without a version bump, so a build with the *new* key
 shape and a build with the *old* one both called themselves `candor-ts-0.23.1` and §2.1 could not tell them
