@@ -22,10 +22,27 @@ ENGINE_FILES=(scan.mjs scan-core.mjs query-core.mjs policy.mjs surface.mjs \
 # this line: the frozen record stands as what was actually run, and the re-run is filed beside it. Amending
 # the pin in place would quietly restate a pre-registered result as though the original had never happened.
 EXPECT="${EXPECT_SHA:-27b0fe3901bea6aa47ebf80bb9e8665594843dbd0cc98fdbc958e88bf5753293}"
+# The commit those sources hash to (FROZEN.md). Named here so the abort below can carry its remedy.
+FROZEN_COMMIT="13e760fefca7cabb6b9f462f64d9843853d110d8"
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"|cut -d' ' -f1; else shasum -a 256 "$1"|cut -d' ' -f1; fi; }
 GOT="$( (cd "$ENGINE" && cat "${ENGINE_FILES[@]}") | (command -v sha256sum >/dev/null && sha256sum || shasum -a 256) | cut -d' ' -f1)"
 if [ "$GOT" != "$EXPECT" ]; then
-  echo "FROZEN ABORT: engine source hash mismatch"; echo "  got  $GOT"; echo "  want $EXPECT (FROZEN.md)"; exit 1
+  echo "FROZEN ABORT: engine source hash mismatch"
+  echo "  got  $GOT"
+  echo "  want $EXPECT (FROZEN.md)"
+  # A failure has to carry its remedy. The engine sources are a LIVE directory, so this mismatch is the
+  # expected state on any working checkout — every landed fix moves the hash. Without the commit named
+  # here, a reproducer reads "mismatch" and has to go hunting in FROZEN.md for what to check out.
+  echo
+  echo "  This is expected on a working checkout: the pin is over LIVE engine sources, so every"
+  echo "  landed change moves the hash. To reproduce the frozen run:"
+  echo "      git -C \"\$(git rev-parse --show-toplevel)\" worktree add /tmp/candor-ts-frozen $FROZEN_COMMIT"
+  echo "      ln -s \"\$(git rev-parse --show-toplevel)/node_modules\" /tmp/candor-ts-frozen/node_modules"
+  echo "      ENGINE=/tmp/candor-ts-frozen bash \"\$0\""
+  echo "  To file a RE-RUN under the current engine instead (kept beside the frozen record, never"
+  echo "  overwriting it — see the EXPECT_SHA note above):"
+  echo "      EXPECT_SHA=$GOT RESULTS_DIR=results-<what-changed> bash \"\$0\""
+  exit 1
 fi
 echo "FROZEN: engine hash verified ($EXPECT)"
 echo "engine: $ENGINE   scope: $SCOPE   work: $WORK"
