@@ -3788,28 +3788,81 @@ for (const [name, rec] of fns) {
 //
 // Typings already inside the scan are SKIPPED: a package scanned from its TypeScript source has real
 // heritage clauses, so the in-scan arm above already holds the relation and this would only duplicate it.
+//
+// EVERY typings entry point the package declares, not just `.`. The union hash is `pkg#Iface.member` —
+// package name plus a BARE interface name — so every interface named `Iface` anywhere in the package maps
+// to the one key, whichever subpath a consumer imported it from. Reading only `.` left the ambiguity
+// COUNTER blind to the others: `subkit` exporting an effectful `Store` from `.` and an unrelated pure
+// `Store` from `./sub` published the `.` one's `Fs` as the answer for both, and a consumer of
+// `subkit/sub` — whose only implementer cannot touch the disk — failed `deny Fs`. Measured on a fixture:
+// exit 0 → 1 against the pre-5057026 engine, which disclosed `Unknown[dispatch:subkit.Store.save]`
+// instead. That is the fabrication half of this vein, so the census has to cover what the KEY covers.
+// Note the shape that must NOT become ambiguous: re-exports. One program over all the roots means a
+// `.d.ts` reached from two entry points yields the SAME declaration node, and the counter is over nodes.
+function typingsRoots() {
+  let pj;
+  try { pj = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8")); } catch { return []; }
+  const pats = new Set();
+  const isDts = (v) => typeof v === "string" && /\.d\.[cm]?ts$/.test(v);
+  const walk = (v, d = 0) => {
+    if (v == null || d > 8) return;
+    if (typeof v === "string") { if (isDts(v)) pats.add(v); return; }
+    if (Array.isArray(v)) { for (const x of v) walk(x, d + 1); return; }
+    if (typeof v === "object") for (const x of Object.values(v)) walk(x, d + 1);
+  };
+  walk(pj.types); walk(pj.typings); walk(pj.exports);
+  // `typesVersions` names files WITHOUT the extension (`{"*": {"*": ["dist/*"]}}`), so put it back or the
+  // pattern matches nothing — 8 of 343 packages in the measured corpus declare one, 7 with a wildcard.
+  const tv = [];
+  (function collect(v, d = 0) {
+    if (v == null || d > 8) return;
+    if (typeof v === "string") { tv.push(v); return; }
+    if (Array.isArray(v)) { for (const x of v) collect(x, d + 1); return; }
+    if (typeof v === "object") for (const x of Object.values(v)) collect(x, d + 1);
+  })(pj.typesVersions);
+  for (const s of tv) pats.add(isDts(s) ? s : s.replace(/(\.[mc]?jsx?)?$/, ".d.ts"));
+  if (typeof pj.main === "string") walk(pj.main.replace(/\.[mc]?jsx?$/, ".d.ts"));
+  pats.add("index.d.ts");
+  // A `*` cannot be enumerated from the manifest, so collect the `.d.ts` files under the pattern's static
+  // prefix instead. OVER-matching is the safe direction here: an extra declaration can only make a name
+  // ambiguous (refused) or add an arm under a key no consumer can form. UNDER-matching is what re-opens
+  // the fabrication, so a truncated collection refuses the whole typings arm rather than censusing half.
+  const CAP = 128;
+  const files = new Set();
+  let truncated = false;
+  const under = (dir) => {
+    let ents;
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      if (files.size >= CAP) { truncated = true; return; }
+      if (e.isDirectory()) { if (e.name !== "node_modules") under(path.join(dir, e.name)); }
+      else if (/\.d\.[cm]?ts$/.test(e.name)) files.add(path.join(dir, e.name));
+    }
+  };
+  for (const pat of pats) {
+    const star = pat.indexOf("*");
+    if (star < 0) {
+      const abs = path.resolve(rootDir, pat);
+      if (fs.existsSync(abs)) files.add(abs);
+      continue;
+    }
+    under(path.resolve(rootDir, pat.slice(0, star).replace(/[^/]*$/, "")));
+  }
+  if (truncated || files.size > CAP) return null;
+  return [...files];
+}
 function typingsInterfaceImpls() {
   const out = [];
-  let typings = null;
+  const roots = (typingsRoots() ?? []).filter((f) => !projectFiles.has(f));
+  if (!roots.length) return out;
+  // ONE program, its own: adding the .d.ts files as roots of the MAIN program would let a global
+  // augmentation in the typings change how the .js itself types, i.e. move ordinary entries under the
+  // flag. Isolated here, the only thing that can cross is the [interface, class-name] relation.
+  let tprog, tck;
   try {
-    const pj = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
-    const exp = pj.exports?.["."] ?? pj.exports;
-    const cand = pj.types ?? pj.typings ?? (typeof exp === "object" && exp !== null ? exp.types ?? exp.default?.types : null)
-      ?? (typeof pj.main === "string" ? pj.main.replace(/\.[mc]?jsx?$/, ".d.ts") : null) ?? "index.d.ts";
-    if (typeof cand === "string") typings = path.resolve(rootDir, cand);
-  } catch { return out; }
-  if (!typings || !typings.endsWith(".d.ts") || !fs.existsSync(typings) || projectFiles.has(typings)) return out;
-  // Its own program: adding the .d.ts as a root of the MAIN program would let a global augmentation in the
-  // typings change how the .js itself types, i.e. move ordinary entries under the flag. Isolated here, the
-  // only thing that can cross is the [interface, class-name] relation.
-  let tsf, tck;
-  try {
-    const tprog = ts.createProgram([typings], compilerOptions);
+    tprog = ts.createProgram(roots, compilerOptions);
     tck = tprog.getTypeChecker();
-    tsf = tprog.getSourceFile(typings);
   } catch { return out; }
-  const mod = tsf && tck.getSymbolAtLocation(tsf);
-  if (!mod) return out;
   // "belongs to the scanned PACKAGE" — two conditions, and each one was wrong on its own first:
   //   * compared through REALPATHS, because TypeScript resolves module imports through symlinks. A
   //     workspace package reached at `node_modules/pkg -> ../packages/pkg` (the monorepo shape this vein
@@ -3836,28 +3889,33 @@ function typingsInterfaceImpls() {
   };
   const ifaceDeclsOf = (typeExpr) => (deAlias(tck.getSymbolAtLocation(typeExpr))?.declarations ?? [])
     .filter((d) => ts.isInterfaceDeclaration(d) && inPkg(d.getSourceFile().fileName));
-  let exports_;
-  try { exports_ = tck.getExportsOfModule(mod); } catch { return out; }
-  for (const ex of exports_) {
-    for (const d of deAlias(ex)?.declarations ?? []) {
-      if (!ts.isClassDeclaration(d) || !d.name || !inPkg(d.getSourceFile().fileName)) continue;
-      const clsName = d.name.text;
-      // Climb super-interfaces too, matching the in-scan arm: `class C implements Sub` where
-      // `interface Sub extends Sup` must be in Sup's universe, since `s.base()` on a Sub-typed value
-      // resolves `base` to whichever interface DECLARES it.
-      const seen = new Set();
-      const climb = (idecl) => {
-        if (seen.has(idecl)) return;
-        seen.add(idecl);
-        register(idecl, clsName);
-        for (const h of idecl.heritageClauses ?? []) {
-          if (h.token !== ts.SyntaxKind.ExtendsKeyword) continue;
-          for (const t of h.types) for (const s of ifaceDeclsOf(t.expression)) climb(s);
+  for (const root of roots) {
+    const tsf = tprog.getSourceFile(root);
+    const mod = tsf && tck.getSymbolAtLocation(tsf);
+    if (!mod) continue; // a global script, not a module — it exports nothing to pair by name
+    let exports_;
+    try { exports_ = tck.getExportsOfModule(mod); } catch { continue; }
+    for (const ex of exports_) {
+      for (const d of deAlias(ex)?.declarations ?? []) {
+        if (!ts.isClassDeclaration(d) || !d.name || !inPkg(d.getSourceFile().fileName)) continue;
+        const clsName = d.name.text;
+        // Climb super-interfaces too, matching the in-scan arm: `class C implements Sub` where
+        // `interface Sub extends Sup` must be in Sup's universe, since `s.base()` on a Sub-typed value
+        // resolves `base` to whichever interface DECLARES it.
+        const seen = new Set();
+        const climb = (idecl) => {
+          if (seen.has(idecl)) return;
+          seen.add(idecl);
+          register(idecl, clsName);
+          for (const h of idecl.heritageClauses ?? []) {
+            if (h.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+            for (const t of h.types) for (const s of ifaceDeclsOf(t.expression)) climb(s);
+          }
+        };
+        for (const h of d.heritageClauses ?? []) {
+          if (h.token !== ts.SyntaxKind.ImplementsKeyword) continue;
+          for (const t of h.types) for (const idecl of ifaceDeclsOf(t.expression)) climb(idecl);
         }
-      };
-      for (const h of d.heritageClauses ?? []) {
-        if (h.token !== ts.SyntaxKind.ImplementsKeyword) continue;
-        for (const t of h.types) for (const idecl of ifaceDeclsOf(t.expression)) climb(idecl);
       }
     }
   }

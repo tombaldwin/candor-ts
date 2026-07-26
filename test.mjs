@@ -4703,6 +4703,149 @@ exports.FileStore = FileStore;`,
   check("a workspace package reached through a node_modules SYMLINK still emits its union",
         wr.report?.functions.find((e) => e.hash === "symkit#Store.save")?.interfaceUnion === true,
         JSON.stringify(wr.report?.functions.map((e) => [e.hash, e.inferred])));
+
+  // ── THE CENSUS COVERS WHAT THE KEY COVERS ───────────────────────────────────────────────────────
+  // The union hash is `pkg#Iface.member` — package plus a BARE interface name — so EVERY interface of
+  // that name in the package maps to it, whichever subpath exported it. Reading only the `.` typings
+  // left the ambiguity counter blind to the rest: an effectful `Store` on `.` published its `Fs` as the
+  // answer a consumer of `pkg/sub`'s unrelated PURE `Store` resolves to. A fabricated effect and a
+  // fabricated `deny Fs` catch, in the direction this vein's item 1 says never to trade for.
+  const SUBKIT_PKG = `{"name":"subkit","main":"dist/index.js","types":"dist/index.d.ts","exports":{".":{"types":"./dist/index.d.ts","default":"./dist/index.js"},"./sub":{"types":"./dist/sub.d.ts","default":"./dist/sub.js"}}}`;
+  const SUBKIT_MAIN_DTS = `export interface Store { save(k: string): void; }
+export declare class FileStore implements Store { save(k: string): void; }`;
+  const SUBKIT_SUB_DTS = `export interface Store { save(k: string): void; }
+export declare class MemStore implements Store { save(k: string): void; }`;
+  const subkit = project({
+    "package.json": SUBKIT_PKG,
+    "dist/index.js": `"use strict";
+const fs = require("node:fs");
+class FileStore { save(k) { fs.writeFileSync(k, "x"); } }
+exports.FileStore = FileStore;`,
+    "dist/index.d.ts": SUBKIT_MAIN_DTS,
+    "dist/sub.js": `"use strict";
+class MemStore { save(k) { /* pure — nothing here can touch the disk */ } }
+exports.MemStore = MemStore;`,
+    "dist/sub.d.ts": SUBKIT_SUB_DTS,
+  });
+  const sk = chainScan(subkit, "--allow-js");
+  check("two DIFFERENT interfaces exported under one name through different subpaths: the name is REFUSED",
+        !sk.report?.functions.some((e) => e.hash === "subkit#Store.save"),
+        JSON.stringify(sk.report?.functions.map((e) => [e.hash, e.inferred])));
+
+  const subapp = project({
+    "package.json": `{"name":"subapp","dependencies":{"subkit":"1.0.0"}}`,
+    "node_modules/subkit/package.json": SUBKIT_PKG,
+    "node_modules/subkit/dist/index.js": ``,
+    "node_modules/subkit/dist/index.d.ts": SUBKIT_MAIN_DTS,
+    "node_modules/subkit/dist/sub.js": ``,
+    "node_modules/subkit/dist/sub.d.ts": SUBKIT_SUB_DTS,
+    "src/use.ts": `import { Store } from "subkit/sub";
+export function go(s: Store): void { s.save("a"); }`,
+    "fs.pol": `deny Fs\n`,
+  });
+  fs.rmSync(path.join(subapp, ".candor", "report.json"), { force: true });
+  const skr = spawnSync("node", [path.join(HERE, "scan.mjs"), subapp, "--policy", path.join(subapp, "fs.pol")],
+                        { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(subkit, ".candor", "report.json") } });
+  const skrep = JSON.parse(fs.readFileSync(path.join(subapp, ".candor", "report.json"), "utf8"));
+  check("…and the consumer of the OTHER subpath discloses Unknown instead of inheriting the Fs",
+        entry(skrep, "src.use.go")?.inferred.join() === "Unknown"
+          && entry(skrep, "src.use.go")?.unknownWhy?.some((w) => w.startsWith("dispatch:")),
+        JSON.stringify(entry(skrep, "src.use.go")));
+  check("…so `deny Fs` no longer fires on a dispatch that cannot touch the disk (exit 0)",
+        skr.status === 0, `exit=${skr.status}`);
+  // the single-tree control — the same two interfaces in ONE project, no boundary. Exit 0 in BOTH arms:
+  // this is a fabrication, so the control is what proves the split arm was inventing the catch, not that
+  // the merged arm is missing it.
+  const skctl = project({
+    "package.json": `{"name":"skctl"}`,
+    "src/main.ts": `import * as fs from "node:fs";
+export interface Store { save(k: string): void; }
+export class FileStore implements Store { save(k: string): void { fs.writeFileSync(k, "x"); } }`,
+    "src/sub.ts": `export interface Store { save(k: string): void; }
+export class MemStore implements Store { save(k: string): void { /* pure */ } }`,
+    "src/use.ts": `import { Store } from "./sub.js";
+export function go(s: Store): void { s.save("a"); }`,
+    "fs.pol": `deny Fs\n`,
+  });
+  const skc = scan(skctl, "--policy", path.join(skctl, "fs.pol"));
+  check("single-tree control: in ONE project the same dispatch is charged no Fs at all",
+        !(entry(skc.report, "src.use.go")?.inferred ?? []).includes("Fs"),
+        JSON.stringify(entry(skc.report, "src.use.go") ?? null));
+
+  // THE SECOND FIXTURE, and it comes first (standing bar item 0): widening the census is a NARROWING of
+  // what may be published, so it must be shown not to have narrowed past the real arms. A subpath-only
+  // interface with an unambiguous name must now publish its union — the widening is a GAIN direction as
+  // well as a refusal — and the main entry's union must survive beside it.
+  const twokit = project({
+    "package.json": `{"name":"twokit","main":"dist/index.js","types":"dist/index.d.ts","exports":{".":{"types":"./dist/index.d.ts","default":"./dist/index.js"},"./q":{"types":"./dist/q.d.ts","default":"./dist/q.js"}}}`,
+    "dist/index.js": `"use strict";
+const fs = require("node:fs");
+class FileStore { save(k) { fs.writeFileSync(k, "x"); } }
+exports.FileStore = FileStore;`,
+    "dist/index.d.ts": SUBKIT_MAIN_DTS,
+    "dist/q.js": `"use strict";
+const https = require("node:https");
+class HttpQueue { push(k) { https.get("http://q.example.com/" + k); } }
+exports.HttpQueue = HttpQueue;`,
+    "dist/q.d.ts": `export interface Queue { push(k: string): void; }
+export declare class HttpQueue implements Queue { push(k: string): void; }`,
+  });
+  const tk = chainScan(twokit, "--allow-js");
+  check("a SUBPATH-only interface with an unambiguous name now publishes its union too",
+        tk.report?.functions.find((e) => e.hash === "twokit#Queue.push")?.inferred.includes("Net"),
+        JSON.stringify(tk.report?.functions.map((e) => [e.hash, e.inferred])));
+  check("…and the main entry point's union is untouched by the widening",
+        tk.report?.functions.find((e) => e.hash === "twokit#Store.save")?.inferred.includes("Fs"),
+        JSON.stringify(tk.report?.functions.map((e) => [e.hash, e.inferred])));
+
+  // The other second fixture: a RE-EXPORT is ONE declaration, not two. `index.d.ts` re-exporting `./sub`
+  // means both entry points name the same interface, and counting them twice would refuse every package
+  // that ships a barrel file — the widening turning into the under-report it exists to avoid. One
+  // program over all the roots is what makes the node identity hold; per-root programs would not.
+  const rekit = project({
+    "package.json": `{"name":"rekit","main":"dist/index.js","types":"dist/index.d.ts","exports":{".":{"types":"./dist/index.d.ts","default":"./dist/index.js"},"./sub":{"types":"./dist/sub.d.ts","default":"./dist/sub.js"}}}`,
+    "dist/index.js": `"use strict";
+module.exports = require("./sub.js");`,
+    "dist/index.d.ts": `export * from "./sub.js";`,
+    "dist/sub.js": `"use strict";
+const fs = require("node:fs");
+class FileStore { save(k) { fs.writeFileSync(k, "x"); } }
+exports.FileStore = FileStore;`,
+    "dist/sub.d.ts": SUBKIT_MAIN_DTS,
+  });
+  check("a BARREL re-export is one declaration, not an ambiguous pair",
+        chainScan(rekit, "--allow-js").report?.functions
+          .find((e) => e.hash === "rekit#Store.save")?.inferred.includes("Fs"));
+
+  // `typesVersions` is the shape 8 of 343 corpus packages declare and 7 spell with a `*` — it names files
+  // WITHOUT the extension (`{"*":{"*":["dist/*"]}}`), so the census has to put `.d.ts` back and expand the
+  // star, or the second `Store` is invisible exactly as it was through `exports`.
+  const wildkit = project({
+    "package.json": `{"name":"wildkit","main":"dist/index.js","types":"dist/index.d.ts","typesVersions":{"*":{"*":["dist/*"]}}}`,
+    "dist/index.js": `"use strict";
+const fs = require("node:fs");
+class FileStore { save(k) { fs.writeFileSync(k, "x"); } }
+exports.FileStore = FileStore;`,
+    "dist/index.d.ts": SUBKIT_MAIN_DTS,
+    "dist/other.js": `"use strict";
+class MemStore { save(k) { } }
+exports.MemStore = MemStore;`,
+    "dist/other.d.ts": SUBKIT_SUB_DTS,
+  });
+  check("a WILDCARD typesVersions entry is expanded, so its second `Store` is counted",
+        !chainScan(wildkit, "--allow-js").report?.functions.some((e) => e.hash === "wildkit#Store.save"));
+
+  // A star that expands past the cap means the census is INCOMPLETE, and half a census is what re-opens
+  // the fabrication — so the typings arm is refused outright rather than published on partial evidence.
+  const bigFiles = { "package.json": `{"name":"bigkit","main":"dist/index.js","types":"dist/index.d.ts","typesVersions":{"*":{"*":["dist/*"]}}}`,
+    "dist/index.js": `"use strict";
+const fs = require("node:fs");
+class FileStore { save(k) { fs.writeFileSync(k, "x"); } }
+exports.FileStore = FileStore;`,
+    "dist/index.d.ts": SUBKIT_MAIN_DTS };
+  for (let i = 0; i < 200; i++) bigFiles[`dist/f${i}.d.ts`] = `export declare const x${i}: number;\n`;
+  check("a typings census truncated by the cap publishes NOTHING from the typings, not half of it",
+        !chainScan(project(bigFiles), "--allow-js").report?.functions.some((e) => e.interfaceUnion));
 }
 
 // ── PER-FILE module unit keys: importing a package charges its ENTRY, not every file it ships ─────
