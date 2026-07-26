@@ -2089,8 +2089,49 @@ const argIsCallable = (a) => {
 // (8ee89f5, itself fixing an over-charge) therefore dropped a genuine reach: a dep `onErr` performing Fs
 // went from ['Fs'] to pure. Encode the positions rather than assume them.
 const HOF_CALLBACK_POSITIONS = new Map([["then", new Set([0, 1])]]);
-const hofInvokesArg = (name, i) => (HOF_CALLBACK_POSITIONS.get(name) ?? DEFAULT_CB_POS).has(i);
 const DEFAULT_CB_POS = new Set([0]);
+
+/// Does the CALLEE declare a function at this argument position? This is the real discriminator, and
+/// neither the argument's own type nor a per-name position map is a substitute for it:
+///
+///   xs.forEach(cb, thisArg)        param 1 is `thisArg: any`      -> NOT invoked
+///   p.then(onOk, onErr)            param 1 is a function          -> invoked
+///   Object.groupBy(xs, keyFn)      param 1 is a function          -> invoked
+///   _.map(xs, fn) / _.forEach(...) param 1 is a function          -> invoked
+///
+/// The static/free-function form of these HOFs puts the collection first and the callback SECOND, and
+/// `calleeName` cannot see the difference — `_.map` and `xs.map` both yield "map". A hand-written position
+/// map therefore silently dropped every static-form dep callback (measured: `Object.groupBy(rows,
+/// depWrite)` reported the caller pure, and a `deny Fs` gate that failed before passed).
+///
+/// Asking the signature needs no list and cannot go stale. Falls back to the name map only when the
+/// signature is unresolvable, which keeps the previous behaviour rather than guessing.
+const calleeParamIsCallable = (node, i) => {
+  const sig = checker.getResolvedSignature?.(node);
+  const params = sig?.getParameters?.();
+  if (!params || !params.length) return null;            // unresolvable — caller falls back
+  // A trailing rest parameter covers every later position (`nextTick(cb, ...args)`).
+  const p = params[Math.min(i, params.length - 1)];
+  const decl = p?.valueDeclaration;
+  if (i >= params.length && !(decl && ts.isParameter(decl) && decl.dotDotDotToken)) return false;
+  const t = decl ? checker.getTypeOfSymbolAtLocation(p, decl) : null;
+  if (!t) return null;
+  if (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return false; // `thisArg: any` is NOT a callback
+  if (t.getCallSignatures?.().length > 0) return true;
+  // A union such as `((v: T) => void) | undefined | null` — the optional onRejected shape.
+  for (const u of t.types ?? []) if (u.getCallSignatures?.().length > 0) return true;
+  return false;
+};
+
+/// The type check may only WIDEN, never narrow. Asking the callee's signature admits positions a name map
+/// cannot know about (the static/free form, where the callback is second) — but a signature can also fail
+/// to look callable when it plainly is: `setTimeout`'s DOM overload declares `TimerHandler = string |
+/// Function`, which carries no call signatures, so a type-only rule REJECTED argument 0 and dropped an
+/// effect the suite had been pinning for months. Union the two sources and a blind spot in either costs
+/// precision at worst; letting either one veto costs a reach.
+const hofInvokesArg = (name, i, node) =>
+  (HOF_CALLBACK_POSITIONS.get(name) ?? DEFAULT_CB_POS).has(i)
+  || (node ? calleeParamIsCallable(node, i) === true : false);
 
 const HOF_INVOKERS = new Set([
   "map", "forEach", "filter", "reduce", "reduceRight", "find", "findIndex", "findLast", "findLastIndex",
@@ -2354,6 +2395,10 @@ function visitCalls(node) {
             // `.bind` chain to the root receiver and resolve it like a bare ref (`resolveFnRefUnit` follows
             // local aliases too). A `.bind` whose receiver can't be pinned to a fn unit (`getCallback().bind`,
             // a param/`any` holder) still INVOKES whatever it wraps — disclose Unknown, never silent-pure.
+            // The POSITION rule applies to the `.bind` arm too. It sat above the guard and so fired at
+            // every argument index — `xs.forEach(cb, dep.helper.bind(x))` charged a thisArg's effects,
+            // the same over-charge the by-reference arm below was fixed for and this arm was not.
+            if (!hofInvokesArg(calleeName, argIdx, node)) return;
             const bound = unwrapBind(a);
             if (bound) {
               const bref = bound.ref;
@@ -2399,7 +2444,7 @@ function visitCalls(node) {
             //      through the κ/invisible channel, so blanket-Unknown here would over-disclose them.
             //  (3) CALLABILITY — `argIsCallable` (has a call signature, or `any`/`unknown`/unconstrained
             //      generic that COULD hold a function).
-            if (!hofInvokesArg(calleeName, argIdx)) return;
+            if (!hofInvokesArg(calleeName, argIdx, node)) return;
             // The BY-REFERENCE dependency charge belongs BELOW guard (1), not above it. It was placed
             // first and returned early, so it ran at EVERY argument position: `xs.reduce(dep.merge,
             // dep.makeSeed)` and `promise.then(dep.onOk, dep.onErr)` charged the non-callback argument's

@@ -533,12 +533,13 @@ export declare class Idle { label(): string; }`,
 {
   const depSrc = `import * as fsm from "node:fs";
 export function writeIt(x: string): void { fsm.appendFileSync("/tmp/x", x); }
-export function pureIt(x: string): string { return x.trim(); }`;
+export function pureIt(x: string): string { return x.trim(); }
+export function map<T, R>(xs: T[], fn: (x: T) => R): R[] { return xs.map(fn); }`;
   const depDir = project({ "package.json": `{"name":"hofkit","version":"1.0.0"}`, "src/index.ts": depSrc });
   const { prefix: depPrefix } = scan(depDir);
   const appFiles = {
     "package.json": `{"name":"happ","version":"1.0.0"}`,
-    "src/m.ts": `import { writeIt, pureIt } from "hofkit";
+    "src/m.ts": `import { writeIt, pureIt, map } from "hofkit";
 export function viaForEach(xs: string[]): void { xs.forEach(writeIt); }
 export function viaTimeout(): void { setTimeout(writeIt, 0); }
 export function viaPureRef(xs: string[]): string[] { return xs.map(pureIt); }
@@ -550,6 +551,11 @@ export function viaThisArg(xs: string[]): void { xs.forEach(pureIt, writeIt); }
 // ...and the OTHER direction. then(onFulfilled, onRejected) invokes its SECOND argument on rejection, so
 // a dep callback there IS reachable. A blanket arg-0 position rule drops it — a miss, not an over-charge.
 export function viaThenReject(p: Promise<string>): void { p.then(pureIt, writeIt); }
+// STATIC/FREE FORM: the collection is first and the callback SECOND. calleeName cannot tell _.map from
+// xs.map, so a hand-written position map dropped these entirely. The CALLEE's parameter type can.
+export function viaStaticForm(xs: string[]): unknown[] { return map(xs, writeIt); }
+// ...and the .bind arm obeys the same position rule: a bound dep fn in the thisArg slot is not invoked.
+export function viaBindThisArg(xs: string[]): void { xs.forEach(pureIt, writeIt.bind(null)); }
 export function viaBoolean(xs: (string | null)[]): unknown[] { return xs.filter(Boolean); }
 export function viaString(xs: number[]): string[] { return xs.map(String); }`,
     "node_modules/hofkit/package.json": `{"name":"hofkit","version":"1.0.0","types":"dist/index.d.ts","main":"dist/index.js"}`,
@@ -584,6 +590,14 @@ export declare function pureIt(x: string): string;`,
         entry(crep, "src.m.viaThisArg") == null, JSON.stringify(entry(crep, "src.m.viaThisArg")));
   check("boundary: then()'s SECOND callback is invoked on rejection, so its dep effects are reachable",
         ceff("src.m.viaThenReject").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaThenReject")));
+  // NOT asserted here: the STATIC-form case (`map(xs, writeIt)` — collection first, callback second).
+  // The fix is verified on a standalone two-package fixture where the dependency sits in node_modules
+  // (viaStatic: ['Unknown'] before, ['Fs', 'Unknown'] after). In THIS harness the dep is placed such that
+  // the callee resolves local, so the non-local HOF gate never opens and the case cannot be exercised —
+  // a fixture limitation, not engine behaviour. Left unasserted rather than asserted-and-skipped, and
+  // recorded in SCAN-BOUNDARY-WORK-QUEUE.md so it is not mistaken for coverage.
+  check("no-fabrication: a BOUND dep fn in the thisArg slot is not invoked, so it is not charged",
+        !ceff("src.m.viaBindThisArg").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaBindThisArg")));
   // Unchained the dep's body is unknowable — disclose the package rather than claim purity.
   const { report: urep } = scan(project(appFiles));
   check("boundary, unchained: a by-reference dep callback discloses the package",
