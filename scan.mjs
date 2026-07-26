@@ -1765,14 +1765,22 @@ function edgeToTargets(rec, decls) {
 // happens to be in the chained report — the point is that no report could answer.
 // Returns the MEMBER node to name in the disclosure (so the owner type is the interface, not the property
 // the function type hangs off), or null when the key is answerable and silence is the dependency's answer.
+// `interface Api { fetch: () => string }` — a call through a function-typed PROPERTY resolves to the
+// FUNCTION TYPE node, which carries neither a name nor an owner; the member and its interface are one
+// level up. EVERY site that keys on a declaration's name has to make that hop or it forms no key at all,
+// and it is one function because these drifted apart once already: the disclosure arm made the hop and
+// the chained-report join did not, so a property-spelled interface method disclosed
+// `Unknown[dispatch:propkit.IDefinition.getInvocationParameters]` while the producer's union entry under
+// that exact hash sat unread. A function type on a `declare const` is NOT this case — that names a real
+// top-level export the dependency hashed under its bare name — so the parent must be a member signature.
+function memberSigOf(decl) {
+  return decl && (ts.isFunctionTypeNode(decl) || ts.isCallSignatureDeclaration(decl)) && decl.parent
+    && (ts.isPropertySignature(decl.parent) || ts.isMethodSignature(decl.parent)) ? decl.parent : decl;
+}
 function unanswerableKey(decl) {
   if (!decl) return null;
   if (ts.isMethodSignature(decl) || ts.isPropertySignature(decl)) return decl;      // interface / type-literal member
-  // `interface Api { fetch: () => string }` — the call resolves to the FUNCTION TYPE, not the property, so
-  // the member (and the owner type) is one level up. A function type on a `declare const` is NOT this case:
-  // that names a real top-level export the dependency hashed under its bare name.
-  if ((ts.isFunctionTypeNode(decl) || ts.isCallSignatureDeclaration(decl)) && decl.parent
-      && (ts.isPropertySignature(decl.parent) || ts.isMethodSignature(decl.parent))) return decl.parent;
+  if (memberSigOf(decl) !== decl) return memberSigOf(decl);
   if ((ts.isMethodDeclaration(decl) || ts.isPropertyDeclaration(decl)
        || ts.isGetAccessorDeclaration(decl) || ts.isSetAccessorDeclaration(decl))
       && (ts.getCombinedModifierFlags(decl) & ts.ModifierFlags.Abstract)) return decl; // `abstract` member of a declared class
@@ -1792,10 +1800,11 @@ function chargeExternalDecl(rec, decl, tailOverride) {
   const mod = declModule(decl);
   if (!mod || mod.startsWith("<")) return;             // project source / the ES lib — not a package reach
   const pkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
-  const member = decl.name?.getText?.();
+  const nameDecl = memberSigOf(decl); // a function-typed property names its member one level up
+  const member = nameDecl.name?.getText?.();
   // Owner-prefixed first (`Owner.member` — how the dep's own scan hashes a method), bare member as the
   // fallback (a CJS dist scan hashes a top-level export under its bare name). Identical to the call arm.
-  const owner = decl.parent?.name?.getText?.();
+  const owner = nameDecl.parent?.name?.getText?.();
   const hit = tailOverride ? crossDeps.get(`${pkg}#${tailOverride}`)
     : member && ((owner ? crossDeps.get(`${pkg}#${owner}.${member}`) : undefined)
       ?? crossDeps.get(`${pkg}#${member}`));
@@ -2662,11 +2671,23 @@ function visitCalls(node) {
               // base class (or otherwise not a unit) is genuinely unresolved here, and edging the
               // others while staying silent about it would drop its effects (a §4 regression: the
               // pre-CHA code always read Unknown at this site).
+              // An interface member can be spelled two ways and only one of them was ever looked at:
+              // `run(x: string): void` is a MethodSignature, `run: (x: string) => void` is a
+              // PropertySignature whose type is a FunctionTypeNode — the same contract, and the second
+              // is what @cucumber/cucumber's `IDefinition.getInvocationParameters` and @ukri-tfs/email's
+              // whole `SendStrategy` use. The checker resolves a call through the property to the
+              // FUNCTION TYPE NODE, not to the property, so `isMethodSignature` was false and the
+              // dispatch fell straight through to Unknown. Normalising the two spellings here also
+              // repairs the disclosure: the reason read `dispatch:<module>.<property>.member`, naming
+              // the property as the OWNER and losing the member entirely, which is not a name the
+              // dispatch-frontier can resolve against the hierarchy sidecar.
+              const sigDecl = memberSigOf(decl);
               let edged = false;
-              if (ts.isMethodSignature(decl) && decl.parent && ts.isInterfaceDeclaration(decl.parent)) {
-                const impls = interfaceImpls.get(decl.parent) ?? [];
+              if ((ts.isMethodSignature(sigDecl) || ts.isPropertySignature(sigDecl))
+                  && sigDecl.parent && ts.isInterfaceDeclaration(sigDecl.parent)) {
+                const impls = interfaceImpls.get(sigDecl.parent) ?? [];
                 if (impls.length > 0 && impls.length <= CHA_FANOUT_LIMIT) {
-                  const member = decl.name?.getText?.();
+                  const member = sigDecl.name?.getText?.();
                   let allResolved = true;
                   const targets = [];
                   for (const cls of impls) {
@@ -2685,10 +2706,10 @@ function visitCalls(node) {
                 // QUALIFIED owner (module.Type), matching the `mod.Class.member` fn quals so the
                 // dispatch-frontier (callers --include-unknown) can resolve overrides against the
                 // hierarchy sidecar. Bare `decl.parent.name` would not match a reacher's declaringType.
-                const tn = decl.parent?.name
-                  ? `${moduleOf(decl.parent.getSourceFile())}.${namespacePrefixOf(decl.parent)}${decl.parent.name.getText()}`
+                const tn = sigDecl.parent?.name
+                  ? `${moduleOf(sigDecl.parent.getSourceFile())}.${namespacePrefixOf(sigDecl.parent)}${sigDecl.parent.name.getText()}`
                   : "type";
-                const mn = decl.name?.getText?.() ?? "member";
+                const mn = sigDecl.name?.getText?.() ?? "member";
                 rec.why.add(`dispatch:${tn}.${mn}`); // resolution landed on a type, not a body — canonical `dispatch:OWNER.member` (frontier-relevant)
               }
             }
@@ -2881,9 +2902,10 @@ function visitCalls(node) {
           // that function's recorded transitive effects (+ literal surfaces) by `hash`.
           let inheritedFromDep = false;
           if (!eff && crossDeps.size > 0 && !mod.startsWith("<")) {
-            let localTail = decl.name ? decl.name.getText() : null;
-            const owner3 = decl.parent && decl.parent.name ? decl.parent.name.getText() : null;
-            if (localTail && owner3 && (ts.isMethodSignature(decl) || ts.isMethodDeclaration(decl) || ts.isPropertySignature(decl)))
+            const nameDecl = memberSigOf(decl); // a function-typed property names its member one level up
+            let localTail = nameDecl.name ? nameDecl.name.getText() : null;
+            const owner3 = nameDecl.parent && nameDecl.parent.name ? nameDecl.parent.name.getText() : null;
+            if (localTail && owner3 && (ts.isMethodSignature(nameDecl) || ts.isMethodDeclaration(nameDecl) || ts.isPropertySignature(nameDecl)))
               localTail = `${owner3}.${localTail}`;
             // `new DepClass()` — a CONSTRUCTOR declaration has NO name, so `localTail` stayed null and the
             // join was skipped entirely, even though the dependency's report carries the entry under
@@ -2900,7 +2922,7 @@ function visitCalls(node) {
             // common @types style) resolve the consumer's call to Owner.member — without the
             // fallback exactly the typed-consumer shape the chain targets never joined.
             const hit = localTail && (crossDeps.get(`${depMod}#${localTail}`)
-              ?? (decl.name ? crossDeps.get(`${depMod}#${decl.name.getText()}`) : undefined));
+              ?? (nameDecl.name ? crossDeps.get(`${depMod}#${nameDecl.name.getText()}`) : undefined));
             if (hit) {
               inheritedFromDep = true;
               for (const x of hit.inferred) rec.direct.add(x);
@@ -4021,7 +4043,13 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
     const broad = implClasses.length > CHA_FANOUT_LIMIT;
 
     for (const member of ifaceDecl.members ?? []) {
-      if (!member.name || !(ts.isMethodSignature(member) || ts.isMethodDeclaration(member))) continue;
+      // Both spellings of an interface method (see the in-scan site): `run(): void` and
+      // `run: () => void`. Only a FunctionTypeNode qualifies — precise or nothing. A property typed
+      // `(() => void) | undefined`, or with any non-function type, stays out: charging a plain data
+      // property's name would be the fabrication mirror of the miss this closes.
+      const fnMember = ts.isMethodSignature(member) || ts.isMethodDeclaration(member)
+        || (ts.isPropertySignature(member) && member.type && ts.isFunctionTypeNode(member.type));
+      if (!member.name || !fnMember) continue;
       const m = member.name.getText();
       const infU = new Set(), blindU = new Set();
       if (broad) infU.add("Unknown");

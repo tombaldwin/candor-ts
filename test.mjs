@@ -5004,6 +5004,76 @@ export function drive(c: Chan): void { c.go(); }`,
         (entry(fanNet.rep, "src.use.drive")?.inferred ?? []).includes("Unknown")
           && fanApp("deny Unknown\n").r.status === 1,
         JSON.stringify(entry(fanNet.rep, "src.use.drive")));
+
+  // ── AN INTERFACE METHOD HAS TWO SPELLINGS ───────────────────────────────────────────────────────
+  // `run(x): void` is a MethodSignature; `run: (x) => void` is a PropertySignature over a
+  // FunctionTypeNode. The same contract, and only the first was ever looked at — by the union emitter
+  // OR by the in-scan dispatch site, so both arms fell through to Unknown. Real: @cucumber/cucumber's
+  // `IDefinition.getInvocationParameters`, and the whole of @ukri-tfs/email's `SendStrategy`, which
+  // declares four implementers and not one method signature.
+  const PROP_DTS = `export interface IDefinition { getInvocationParameters: (o: string) => string[]; }
+export declare class Definition implements IDefinition { getInvocationParameters: (o: string) => string[]; }`;
+  const propkit = project({
+    "package.json": `{"name":"propkit","main":"dist/index.js","types":"dist/index.d.ts"}`,
+    "dist/index.js": `"use strict";
+const fs = require("node:fs");
+class Definition { getInvocationParameters(o) { return [fs.readFileSync(o, "utf8")]; } }
+exports.Definition = Definition;`,
+    "dist/index.d.ts": PROP_DTS,
+  });
+  const pk = chainScan(propkit, "--allow-js");
+  check("an interface member spelled as a FUNCTION-TYPED PROPERTY is unioned like a method",
+        pk.report?.functions.find((e) => e.hash === "propkit#IDefinition.getInvocationParameters")
+          ?.inferred.includes("Fs"),
+        JSON.stringify(pk.report?.functions.map((e) => [e.hash, e.inferred])));
+
+  const propapp = project({
+    "package.json": `{"name":"propapp","dependencies":{"propkit":"1.0.0"}}`,
+    "node_modules/propkit/package.json": `{"name":"propkit","main":"dist/index.js","types":"dist/index.d.ts"}`,
+    "node_modules/propkit/dist/index.js": ``,
+    "node_modules/propkit/dist/index.d.ts": PROP_DTS,
+    "src/use.ts": `import { IDefinition } from "propkit";
+export function go(d: IDefinition): string[] { return d.getInvocationParameters("x"); }`,
+    "fs.pol": `deny Fs\n`,
+  });
+  fs.rmSync(path.join(propapp, ".candor", "report.json"), { force: true });
+  const pr = spawnSync("node", [path.join(HERE, "scan.mjs"), propapp, "--policy", path.join(propapp, "fs.pol")],
+                       { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(propkit, ".candor", "report.json") } });
+  const prep = JSON.parse(fs.readFileSync(path.join(propapp, ".candor", "report.json"), "utf8"));
+  check("the chained consumer resolves the property-spelled dispatch (was Unknown)",
+        entry(prep, "src.use.go")?.inferred.join() === "Fs", JSON.stringify(entry(prep, "src.use.go")));
+  check("…and the two-tree `deny Fs` gate fires (exit 0 -> 1)", pr.status === 1, `exit=${pr.status}`);
+  // the single-tree control, in BOTH class spellings: the implementer can declare the member as a method
+  // or as an arrow-valued property, and the dispatch must resolve either way.
+  for (const [what, impl] of [["arrow property", `getInvocationParameters = (o: string): string[] => [fs.readFileSync(o, "utf8")];`],
+                              ["method", `getInvocationParameters(o: string): string[] { return [fs.readFileSync(o, "utf8")]; }`]]) {
+    const ctl = project({
+      "package.json": `{"name":"propctl"}`,
+      "src/dep.ts": `import * as fs from "node:fs";
+export interface IDefinition { getInvocationParameters: (o: string) => string[]; }
+export class Definition implements IDefinition { ${impl} }`,
+      "src/use.ts": `import { IDefinition } from "./dep.js";
+export function go(d: IDefinition): string[] { return d.getInvocationParameters("x"); }`,
+    });
+    check(`single-tree control (${what} implementer): the same dispatch resolves to Fs, not Unknown`,
+          entry(scan(ctl).report, "src.use.go")?.inferred.join() === "Fs",
+          JSON.stringify(entry(scan(ctl).report, "src.use.go")));
+  }
+  // THE SECOND FIXTURE: precise or nothing. A property that is NOT function-typed must not be joined by
+  // name — charging a plain data property whose name happens to match a unit is the fabrication mirror
+  // of the miss above, and a union-typed `(() => void) | undefined` is not a function type either.
+  const notfn = project({
+    "package.json": `{"name":"notfn","main":"dist/index.js","types":"dist/index.d.ts"}`,
+    "dist/index.js": `"use strict";
+const fs = require("node:fs");
+class Definition { load(o) { return fs.readFileSync(o, "utf8"); } }
+exports.Definition = Definition;`,
+    "dist/index.d.ts": `export interface IDefinition { load: string; maybe?: (() => void) | undefined; }
+export declare class Definition implements IDefinition { load: string; }`,
+  });
+  check("a NON-function-typed property of the same name is never joined (precise or nothing)",
+        !chainScan(notfn, "--allow-js").report?.functions.some((e) => e.hash.startsWith("notfn#IDefinition.")),
+        JSON.stringify(chainScan(notfn, "--allow-js").report?.functions.map((e) => [e.hash, e.inferred])));
 }
 
 // ── PER-FILE module unit keys: importing a package charges its ENTRY, not every file it ships ─────
