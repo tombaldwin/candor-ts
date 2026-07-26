@@ -80,8 +80,18 @@ A dist-CJS export unit (a `module.exports` surface scanned with `--allow-js`) ca
 (a path list, or a directory of `*.json`); an unclassified call into a package with a loaded
 report inherits that function's recorded transitive effects and literal surfaces, joined by the
 report's `hash` (`package#LocalName`). A report produced by a different candor-ts version is
-downgraded to `Unknown` rather than silently trusted (spec §2.1). Caveat: a type-only boundary
-(`import type` …, the tRPC style) has no runtime calls to inherit through — nothing to join.
+downgraded to `Unknown` rather than silently trusted, and grants that package **no coverage** — so a key it
+does not answer falls back to the κ ledger's `invisible` hedge rather than reading pure (spec §2.1). Caveat:
+a type-only boundary (`import type` …, the tRPC style) has no runtime calls to inherit through — nothing to
+join.
+
+**Changing a report KEY is a wire change: bump `package.json`'s version in the same commit.** `candor.version`
+is the only discriminator §2.1 has, so two builds that disagree about a key while sharing a version string
+disarm it — and note what the bump does and does not buy. It downgrades the entries a report *carries*; it
+cannot conjure a key the report *lacks*, so an already-installed consumer that looks up a key this build no
+longer emits simply misses, whatever the version says. That direction is unfixable from the producing side
+(the consumer's code is frozen), which is why a stale report is denied coverage here: it is what stops the
+NEXT key change reading as a purity claim.
 
 ## Query it (same names/shapes as the Rust and JVM engines — candor-spec §3.1)
 

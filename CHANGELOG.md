@@ -8,6 +8,42 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**Build id moved to 0.23.2, and an untrusted chained report no longer licenses silence** (`scan.mjs`,
+`package.json`). The per-file module unit key landed without a version bump, so a build with the *new* key
+shape and a build with the *old* one both called themselves `candor-ts-0.23.1` and §2.1 could not tell them
+apart. Two separate things follow, and only the second is a code fix:
+
+- The **build id must move with any wire-visible key change**, because §2.1 staleness is the only thing that
+  reads it. Not moving it disarms every protection that *does* work — ordinary call joins stop downgrading
+  to `Unknown`, and the AS-EFF-005 baseline guard stops invalidating.
+- It would **not** have closed the hole it looked like it closed, and the code comment claiming it did is
+  corrected rather than trusted. Staleness rewrites the *content* of the keys a report carries; it can never
+  conjure a key the report lacks, so an already-installed consumer whose only lookup is `<pkg>#<module>`
+  misses whatever the version says. Measured with the pre-change build as the consumer over a report from
+  this one: the importer is **absent from `functions`** — a ⟨0.21⟩ purity claim — and `deny Fs` sits at exit
+  0, where the single-tree control is exit 1 in both arms. Nothing a new report can carry fixes that either:
+  the old consumer's code is frozen and reads exactly one discriminator.
+
+What *is* fixable is the same hole in this build, for the next key change. ⚠ **A chained report that fails
+the §2.1 version check now grants no coverage.** Previously it was registered as covering its package
+anyway, so the keys it carried read `Unknown` (right) while every key it simply did not contain read **pure**
+(wrong, and silent) — a purity claim on the authority of a report the engine had just decided not to trust.
+Now an unanswered key falls back to the κ ledger's `invisible: [pkg]` hedge, and an `import` backed only by
+such a report discloses `Unknown` with `stale-dep:<pkg>` instead of nothing. Fires only on a version
+mismatch — a configuration the family already treats as invalid gate input.
+
+Also: `depInitCell` tries the **precise** per-file key before the legacy `<pkg>#<module>` one. The legacy
+branch ran first and won unconditionally, so a report carrying both shapes was answered by the union the
+per-file key exists to replace.
+
+Measured. Nine real chained reports across five `@ukri-tfs` packages and four services, 2 587 entries, both
+arms' engines kept by content hash: **byte-identical** once the version string is normalised — the predicted
+result, since none of those runs has a version mismatch. The mechanism was then shown live on the same
+corpus rather than assumed reachable (standing bar item 8): with one dependency report marked as another
+build, `invite-service` gains **76 `invisible` hedges and 10 functions that were absent from the report
+entirely**, with 0 effect losses. Eight regression tests, each guard mutated out and its named failing test
+recorded.
+
 ⚠ **A chained lookup that could never have been answered no longer reads as a purity claim** (`scan.mjs`).
 candor-spec `DEP-RECEIVER-TYPING-DESIGN.md`, half 1; conformance PART 21 now runs the ts arm alongside
 java and rust. When a call into a chained dependency finds no entry, that means one of two things, and the

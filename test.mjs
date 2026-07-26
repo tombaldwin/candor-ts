@@ -5178,6 +5178,118 @@ net.connect(53, "8.8.8.8");`,
   check("an uninstallable package falls back to the union rather than resolving nothing",
         entry(c4.report, "src.use.<module>")?.inferred.includes("Fs"),
         JSON.stringify(c4.report?.functions));
+
+  // ORDERING. The compatibility branch used to run FIRST and win unconditionally, so a report carrying
+  // both key shapes was answered by the legacy UNION — the over-approximation this change exists to
+  // remove — even though the precise per-file answer sat right beside it. Precise first, legacy as the
+  // fallback: the same answer for a report with one shape, the right one for a report with both.
+  const both = JSON.parse(fs.readFileSync(depReport, "utf8"));
+  both.functions.push({ ...both.functions.find((e) => e.hash === "depkit3#example.dns.<module>"),
+                        hash: "depkit3#<module>" });
+  const bothPath = path.join(dep, ".candor", "both.json");
+  fs.writeFileSync(bothPath, JSON.stringify(both));
+  const c5 = runChained(consumer("depkit3"), bothPath);
+  check("a report carrying BOTH key shapes is answered by the PRECISE one, not the legacy union",
+        entry(c5.report, "src.use.<module>")?.inferred.includes("Fs")
+          && !entry(c5.report, "src.use.<module>")?.inferred.includes("Net"),
+        JSON.stringify(c5.report?.functions));
+}
+
+// ── §2.1 STALENESS: an UNTRUSTED report's SILENCE is not a purity claim ───────────────────────────
+// §2.1 downgrades a chained report from another engine build to `Unknown`. It did that to the entries the
+// report CARRIES — while registering the package as covered anyway, so every key the report did NOT contain
+// went on reading PURE, on the authority of a report the engine had just decided not to trust. A silent
+// under-report, and it is the class a wire-key change falls into: when the module unit key moved from
+// `<pkg>#<module>` to `<pkg>#<relpath>.<module>`, an already-installed consumer's lookup simply missed, and
+// no version string could have rescued it — staleness rewrites the CONTENT of the keys a report carries and
+// can never conjure one it lacks. Measured with that build as the consumer over a report from this one: the
+// importer was ABSENT from `functions` (a ⟨0.21⟩ purity claim) with `deny Fs` at exit 0, where the
+// single-tree control is exit 1 in both arms. So an untrusted report grants NO coverage, and an import
+// backed only by one discloses `Unknown`.
+{
+  const dep = project({
+    "package.json": `{"name":"stalekit","main":"index.js","types":"index.d.ts"}`,
+    "index.js": `"use strict";
+const fs = require("node:fs");
+fs.writeFileSync("/tmp/stalekit-boot", "1");
+function helper() { fs.readFileSync("/tmp/stalekit-x"); }
+module.exports = { helper };`,
+    "index.d.ts": `export declare function helper(): void;`,
+  });
+  const ds = scan(dep, "--allow-js");
+  const freshPath = `${ds.prefix}.json`;
+  const fresh = JSON.parse(fs.readFileSync(freshPath, "utf8"));
+  const write = (name, r) => {
+    const p = path.join(dep, ".candor", name);
+    fs.writeFileSync(p, JSON.stringify(r));
+    return p;
+  };
+  // The SAME report, one field different — the build id. Nothing else changes, so every difference in the
+  // consumer's output is attributable to §2.1 and to nothing else.
+  const otherBuild = { ...fresh, candor: { ...fresh.candor, version: `${fresh.candor.version}-other` } };
+  const otherPath = write("otherbuild.json", otherBuild);
+  // …and the pair carrying no answer for `helper` at all, which is where "silence" is the whole question:
+  // from a TRUSTED report that absence is the dependency's purity claim (SPEC §2 rule 3); from an untrusted
+  // one it is not an answer at all.
+  const drop = (r, suffix) => ({ ...r, functions: r.functions.filter((e) => !e.hash.endsWith(suffix)) });
+  const quietFreshPath = write("quiet-fresh.json", drop(fresh, "#helper"));
+  const quietOtherPath = write("quiet-other.json", drop(otherBuild, "#helper"));
+  const noModOtherPath = write("nomod-other.json", drop(otherBuild, ".<module>"));
+
+  const app = () => project({
+    "package.json": `{"name":"staleapp","dependencies":{"stalekit":"1.0.0"}}`,
+    "node_modules/stalekit/package.json": `{"name":"stalekit","main":"index.js","types":"index.d.ts"}`,
+    "node_modules/stalekit/index.js": `"use strict";\nmodule.exports = { helper() {} };`,
+    "node_modules/stalekit/index.d.ts": `export declare function helper(): void;`,
+    "src/use.ts": `import { helper } from "stalekit";
+export function go(): void { helper(); }`,
+    "unknown.pol": `deny Unknown\n`,
+  });
+  const run = (a, deps, ...extra) => {
+    fs.rmSync(path.join(a, ".candor", "report.json"), { force: true });   // standing bar item 7
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), a, ...extra],
+                        { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: deps } });
+    const p = path.join(a, ".candor", "report.json");
+    return { r, report: fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : null };
+  };
+
+  // THE SECOND FIXTURE, WRITTEN FIRST (standing bar item 0). This makes a report count for LESS, so the
+  // failure mode to look for is false uncertainty: a report from THIS build must keep resolving precisely,
+  // and its silence must keep meaning pure. Both halves, before either half of the stale arm is believed.
+  const f = run(app(), freshPath);
+  check("a chained report from THIS build still resolves precisely (no fresh uncertainty)",
+        entry(f.report, "src.use.go")?.inferred.join() === "Fs"
+          && entry(f.report, "src.use.<module>")?.inferred.join() === "Fs",
+        JSON.stringify(f.report?.functions));
+  check("…and a TRUSTED report's silence still reads as the dependency's purity claim (§2 rule 3)",
+        !entry(run(app(), quietFreshPath).report, "src.use.go"),
+        JSON.stringify(run(app(), quietFreshPath).report?.functions));
+
+  // The stale arm. The entries it carries downgrade (that half always worked); the entries it does NOT
+  // carry stop reading pure — the κ ledger's `invisible` hedge comes back, because the package is no
+  // longer covered by a report we trust.
+  const o = run(app(), otherPath);
+  check("a report from ANOTHER build downgrades the keys it carries to Unknown (§2.1, unchanged)",
+        entry(o.report, "src.use.go")?.inferred.join() === "Unknown",
+        JSON.stringify(o.report?.functions));
+  check("an UNTRUSTED report's silence is no longer a purity claim — the ledger hedges instead",
+        entry(run(app(), quietOtherPath).report, "src.use.go")?.invisible?.includes("stalekit"),
+        JSON.stringify(run(app(), quietOtherPath).report?.functions));
+
+  // The import edge is the site the wire-key change actually broke, and it has no κ ledger under it —
+  // a module key that is simply absent charges nothing at all. Disclose instead: `Unknown`, with its reason.
+  check("an import backed only by an untrusted report discloses Unknown, never nothing",
+        entry(o.report, "src.use.<module>")?.inferred.join() === "Unknown"
+          && entry(o.report, "src.use.<module>")?.unknownWhy?.includes("stale-dep:stalekit"),
+        JSON.stringify(entry(o.report, "src.use.<module>")));
+  check("…and it holds when the untrusted report carries no module entry to downgrade at all",
+        entry(run(app(), noModOtherPath).report, "src.use.<module>")?.unknownWhy?.includes("stale-dep:stalekit"),
+        JSON.stringify(run(app(), noModOtherPath).report?.functions));
+  const pol = (a) => ["--policy", path.join(a, "unknown.pol")];
+  const aStale = app(), aFresh = app();
+  check("…so `deny Unknown` catches the untrusted chain (exit 1) where the trusted one passes (exit 0)",
+        run(aStale, otherPath, ...pol(aStale)).r.status === 1
+          && run(aFresh, freshPath, ...pol(aFresh)).r.status === 0);
 }
 
 // ── the SEEDED-VIOLATION SENSITIVITY BATTERY as a gate (RQ1 Part C) ───────────────────────────────

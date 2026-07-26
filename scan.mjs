@@ -507,6 +507,18 @@ const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:
 // serde_json rule the Rust/JVM engines already carry; /code-review found TS missing it). Fed from
 // the envelope's `package` field (works for an all-pure EMPTY report) and from entry hash prefixes.
 const depCoveredPkgs = new Set();
+// Packages whose ONLY chained report failed the §2.1 version check. Kept OUT of `depCoveredPkgs`, because a
+// report the engine has decided not to trust cannot make a coverage claim on the package's behalf: §2 rule 3
+// turns a report's SILENCE into a purity claim, and §2.1 exists to say this report's assertions are not ours
+// to repeat. Before the split a stale report still registered coverage, so the keys it DID carry read
+// `Unknown` (right) while every key it simply did not contain read PURE (wrong, and silent) — a cardinal sin
+// licensed by an untrusted report. Now an unanswered key falls back to the κ ledger's `invisible: [pkg]`
+// hedge, and an `import` backed only by a stale report discloses `Unknown` rather than nothing. This is the
+// FORWARD half of the wire-key hazard written up at `depInitCell`: staleness downgrades the CONTENT of the
+// keys a report carries and can never conjure one it lacks, so trusting its silence is what made a changed
+// key shape read pure. Fires only on a version mismatch — a configuration the family already treats as
+// invalid gate input (the AS-EFF-005 baseline guard says exactly that).
+const staleDepPkgs = new Set();
 {
   // --workspace's auto-scanned deps dir is prepended to the explicit CANDOR_DEPS/config spec (both chain).
   const spec = [workspaceDepsDir, depInitsDir, process.env.CANDOR_DEPS ?? candorConfig.deps ?? ""].filter(Boolean).join(":");
@@ -524,11 +536,12 @@ const depCoveredPkgs = new Set();
       // A report whose version can't be VERIFIED is not trusted (§2.1) — a missing header is as
       // untrustworthy as a mismatched one (the Rust engine's rule; the engines split on this).
       const stale = d.candor?.version !== ENGINE_VERSION;
-      if (typeof d.package === "string" && d.package) depCoveredPkgs.add(d.package);
+      const covers = stale ? staleDepPkgs : depCoveredPkgs;   // an untrusted report grants no coverage
+      if (typeof d.package === "string" && d.package) covers.add(d.package);
       for (const e of d.functions ?? []) {
         if (!e.hash) continue;
         const hashPkg = e.hash.split("#")[0];
-        if (hashPkg) depCoveredPkgs.add(hashPkg);
+        if (hashPkg) covers.add(hashPkg);
         const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), invisible: new Set(), hosts: [], cmds: [], paths: [], tables: [] };
         for (const x of stale ? ["Unknown"] : e.inferred ?? []) cell.inferred.add(x);
         // A chained dep's OWN blind boundary (an uncovered package IT calls into) travels to a consumer as
@@ -542,6 +555,12 @@ const depCoveredPkgs = new Set();
       }
     } catch { console.error(`candor-ts: CANDOR_DEPS report unparsable, skipped: ${f}`); }
   }
+  // A package chained TWICE — once fresh, once stale — is covered by the fresh report, so it is not a
+  // stale-only package and must not pick up the disclosure below on top of a real answer.
+  for (const p of depCoveredPkgs) staleDepPkgs.delete(p);
+  if (staleDepPkgs.size)
+    console.error(`candor-ts: ${staleDepPkgs.size} chained dependency report(s) were produced by a DIFFERENT engine build — `
+      + `downgraded to Unknown and granted no coverage (§2.1): ${[...staleDepPkgs].sort().join(", ")}`);
 }
 
 if (allowJs) { compilerOptions.allowJs = true; compilerOptions.checkJs = false; }
@@ -3564,21 +3583,42 @@ function resolveProjectModule(spec, fromFile) {
 // closure computed above), so asking for the entry is both narrow and complete — no reachability guess,
 // and a published-but-unimported `example/dns.js` keeps its own key that nobody looks up.
 //
-// COMPATIBILITY. The key is wire-visible, so a consumer may meet a report written before it existed, whose
-// module units all hash `<pkg>#<module>`. That shape is a RELIABLE discriminator — no engine emits a bare
-// `<module>` tail now, since every local carries its module path — so the old key is honoured when present
-// and the old (union) answer is returned unchanged. Silence would have been the wrong default: a new
-// consumer over an old report would have resolved nothing and read the import pure, turning a precision fix
-// into the under-report this vein exists to close. The reverse direction is already covered by §2.1 version
-// gating: an OLD consumer over a NEW report treats the whole report as stale and downgrades it to Unknown.
+// COMPATIBILITY, both directions, and the second one is NOT what the first version of this comment said it
+// was. The key is wire-visible, so the two builds can meet either way round.
+//
+// A NEW consumer over an OLD report (module units all hashed `<pkg>#<module>`) is handled here. The bare
+// `<module>` tail is a STRUCTURAL discriminator, not a version guess — no engine emits one now, since every
+// local carries its module path — so the old key is honoured and gives back its old (union) answer. Silence
+// would have been the wrong default: resolving nothing would read the import as pure and turn a precision
+// fix into the under-report this vein exists to close. The PRECISE key is tried first, so a report that
+// somehow carries both is answered by the per-file one rather than by the union it supersedes.
+//
+// An OLD consumer over a NEW report is NOT covered, and §2.1 CANNOT cover it — the earlier claim that "an
+// OLD consumer over a NEW report treats the whole report as stale and downgrades it to Unknown" is false.
+// Staleness rewrites the CONTENT of the entries a report carries; it can never manufacture a key the report
+// does not contain, so a consumer whose only lookup is `<pkg>#<module>` misses whatever the version says.
+// Measured, pre-per-file build as the consumer over a report from this one: the importer is ABSENT from
+// `functions` — a ⟨0.21⟩ purity claim — and `deny Fs` sits at exit 0 where the single-tree control is exit 1
+// in both arms; with the report's version altered so the consumer calls it stale, the ordinary call join
+// does downgrade to `Unknown` and the import edge stays exactly as absent as before.
+//
+// So the build id MUST move with a wire-key change — it is what arms every §2.1 protection that does work
+// (ordinary call joins downgrade, the AS-EFF-005 baseline guard invalidates), and leaving two builds
+// indistinguishable disarms all of them — but it is not what closes this, and neither is anything a new
+// report could carry: the old consumer's code is frozen and reads exactly one discriminator,
+// `candor.version`, so a structural field would be inert in the only direction that needs it. The fix that
+// IS available is forward-looking and lives in the loader: a stale report no longer grants COVERAGE, so
+// from this build on, a key an untrusted report fails to answer falls back to the κ ledger's `invisible`
+// hedge instead of reading pure, and an import backed only by a stale report discloses `Unknown`.
 const depEntryCache = new Map();
 function depInitCell(pkg, subpath) {
-  const old = crossDeps.get(`${pkg}#<module>`);
-  if (old) return old;                                // pre-per-file report: unchanged behaviour
   const ck = `${pkg} ${subpath}`;
   if (!depEntryCache.has(ck)) depEntryCache.set(ck, resolveDepEntryKey(pkg, subpath));
   const key = depEntryCache.get(ck);
-  if (key) return crossDeps.get(key);
+  if (key && crossDeps.has(key)) return crossDeps.get(key);
+  const old = crossDeps.get(`${pkg}#<module>`);
+  if (old) return old;                                // pre-per-file report: unchanged behaviour
+  if (key) return undefined;                          // per-file report, and this module is pure: silence
   // The package is not on disk, or its entry cannot be resolved (a conditional/wildcard `exports` map this
   // does not model). Nothing licenses narrowing then, so fall back to the UNION over its module units —
   // today's answer, an over-approximation, and never a fresh silence.
@@ -3655,7 +3695,18 @@ function resolveDepEntryKey(pkg, subpath) {
         const seg = spec.split("/");
         const pkg = spec.startsWith("@") ? seg.slice(0, 2).join("/") : seg[0];
         const cell = depInitCell(pkg, spec.slice(pkg.length).replace(/^\//, ""));
-        if (cell && cell.inferred.size) depInits.push([node, cell]);
+        // §2.1, applied to the key rather than to the entry. The version check downgrades the CONTENT of
+        // the keys a stale report carries; a key it does NOT carry — because a later build renamed it, or
+        // because the module unit simply is not there — comes back empty, and "empty" is only a purity
+        // claim when the report making it is trusted. So an import whose package is chained ONLY by a
+        // report from another build discloses `Unknown` instead of nothing. The reason class is
+        // `unresolved` (policy.mjs's catch-all), which is what it is: candor could not resolve this import,
+        // and says so. This is the whole class the per-file module key change fell into — see `depInitCell`.
+        const staleOnly = staleDepPkgs.has(pkg);
+        if (cell && cell.inferred.size)
+          depInits.push([node, staleOnly ? { ...cell, why: [`stale-dep:${pkg}`] } : cell]);
+        else if (staleOnly)
+          depInits.push([node, { inferred: new Set(["Unknown"]), invisible: new Set(), why: [`stale-dep:${pkg}`] }]);
       }
     }
     ts.forEachChild(node, collect);
@@ -3672,6 +3723,7 @@ function resolveDepEntryKey(pkg, subpath) {
     if (!rec) continue;
     for (const e of cell.inferred) rec.direct.add(e);
     for (const b of cell.invisible) rec.blind.add(b);
+    for (const w of cell.why ?? []) rec.why.add(w);   // §2.1 stale-dep disclosure carries its reason
   }
   for (let changed = true; changed; ) {
     changed = false;
