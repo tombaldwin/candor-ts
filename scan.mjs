@@ -2376,7 +2376,6 @@ function visitCalls(node) {
             // already happening. `argIsCallable` keeps a non-function dep value out (a `reduce` seed), and a
             // pure global builtin (`.filter(Boolean)`, `.map(String)`) resolves to the ES lib and adds
             // nothing, so the shapes guard (2) protects stay protected.
-            if (d2 && !declIsLocal(d2) && argIsCallable(a)) { chargeExternalDecl(rec, d2); return; }
             // OPAQUE callback → Unknown (the cardinal-sin guard): a callback the es-lib signature resolved to
             // the CALLEE (`forEach`) so its reference was dropped silent-pure — `arr.forEach(cb)` read pure
             // though `cb` runs caller-supplied code. Disclose Unknown, the same posture as the direct
@@ -2392,6 +2391,13 @@ function visitCalls(node) {
             //  (3) CALLABILITY — `argIsCallable` (has a call signature, or `any`/`unknown`/unconstrained
             //      generic that COULD hold a function).
             if (argIdx !== 0) return;
+            // The BY-REFERENCE dependency charge belongs BELOW guard (1), not above it. It was placed
+            // first and returned early, so it ran at EVERY argument position: `xs.reduce(dep.merge,
+            // dep.makeSeed)` and `promise.then(dep.onOk, dep.onErr)` charged the non-callback argument's
+            // effects to the caller. `argIsCallable` does not save it — a seed object typed `any`, or a
+            // dep VALUE with a call signature, passes. Guard (1) exists for exactly this shape and its own
+            // comment names the case (`path.reduce(fn, obj)`); the new arm simply ran before it.
+            if (d2 && !declIsLocal(d2) && argIsCallable(a)) { chargeExternalDecl(rec, d2); return; }
             // A value holder the CALLER controls (a project param / local var / binding element) is genuinely
             // opaque. A holder declared in a LIB/dep file — the global `Boolean`/`String`/`Number` constructors
             // (`declare var Boolean: BooleanConstructor` in lib.es5.d.ts) or an imported dep binding — is a known

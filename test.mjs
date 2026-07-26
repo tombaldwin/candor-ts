@@ -543,6 +543,10 @@ export function viaForEach(xs: string[]): void { xs.forEach(writeIt); }
 export function viaTimeout(): void { setTimeout(writeIt, 0); }
 export function viaPureRef(xs: string[]): string[] { return xs.map(pureIt); }
 export function viaStore(xs: string[], sink: unknown[]): void { sink.push(writeIt); }
+// POSITION. forEach's SECOND argument is thisArg — bound as this, never invoked. The by-reference dep
+// charge originally ran ABOVE the position guard and so fired at every argument index, charging a
+// non-callback dep ref's effects to the caller.
+export function viaThisArg(xs: string[]): void { xs.forEach(pureIt, writeIt); }
 export function viaBoolean(xs: (string | null)[]): unknown[] { return xs.filter(Boolean); }
 export function viaString(xs: number[]): string[] { return xs.map(String); }`,
     "node_modules/hofkit/package.json": `{"name":"hofkit","version":"1.0.0","types":"dist/index.d.ts","main":"dist/index.js"}`,
@@ -573,6 +577,8 @@ export declare function pureIt(x: string): string;`,
         JSON.stringify(entry(crep, "src.m.viaBoolean")));
   check("no-fabrication: .map(String) stays pure", entry(crep, "src.m.viaString") == null,
         JSON.stringify(entry(crep, "src.m.viaString")));
+  check("no-fabrication: a dep ref in forEach's thisArg slot is never invoked, so it is not charged",
+        entry(crep, "src.m.viaThisArg") == null, JSON.stringify(entry(crep, "src.m.viaThisArg")));
   // Unchained the dep's body is unknowable — disclose the package rather than claim purity.
   const { report: urep } = scan(project(appFiles));
   check("boundary, unchained: a by-reference dep callback discloses the package",
