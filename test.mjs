@@ -4937,6 +4937,73 @@ export declare class MemStore implements Store { save(k: string): void; }`,
         chainScan(shadow2).report?.functions
           .find((e) => e.hash === "shadow2#Store.save")?.inferred.includes("Fs"),
         JSON.stringify(chainScan(shadow2).report?.functions.map((e) => [e.hash, e.inferred])));
+
+  // ── THE FAN-OUT BOUND ───────────────────────────────────────────────────────────────────────────
+  // The union emitter unioned EVERY implementer, skipping the `CHA_FANOUT_LIMIT` the in-scan dispatch
+  // site applies — so the producer published what its own dispatch refuses to resolve. Measured on real
+  // code: rxjs's `Operator` has 70 implementers, 16 of which reach Net; rxjs's own
+  // `Observable.subscribe` reads `Unknown[dispatch:src.internal.Operator.Operator.call]` while its
+  // report handed a chained consumer `rxjs#Operator.call -> ['Net','Unknown']`.
+  const chanLib = (n, lastEffectful) => {
+    const cls = [];
+    for (let i = 0; i < n - 1; i++) cls.push(`export class C${i} implements Chan { go(): void { } }`);
+    cls.push(lastEffectful
+      ? `export class C${n - 1} implements Chan { go(): void { https.get("http://s3.example.com/x"); } }`
+      : `export class C${n - 1} implements Chan { go(): void { } }`);
+    return project({ "package.json": `{"name":"fankit"}`,
+      "src/index.ts": `import * as https from "node:https";
+export interface Chan { go(): void; }
+${cls.join("\n")}` });
+  };
+  // THE SECOND FIXTURES FIRST, both taken from the java sibling (`429c7b2`), which wrote them for the
+  // same reason: the fixture proving a narrowing closed a fabrication cannot notice the reaches it closed
+  // with it. An interface AT the bound is the widest one in-scan dispatch resolves, so it must still
+  // publish precisely — a bound written as `>=` would take the whole rung with it and no smear fixture
+  // would say so.
+  check("an interface AT the fan-out bound (12) still publishes its precise union",
+        chainScan(chanLib(12, true)).report?.functions
+          .find((e) => e.hash === "fankit#Chan.go")?.inferred.join() === "Net");
+  const wide = chainScan(chanLib(13, true)).report?.functions.find((e) => e.hash === "fankit#Chan.go");
+  check("past the bound the union is refused: Unknown, NOT the 13-way smear",
+        wide?.inferred.join() === "Unknown" && wide?.unresolved === true, JSON.stringify(wide));
+  check("…and the refusal carries its reason so `deny E Unknown[dispatch]` still bites",
+        wide?.unknownWhy?.join() === "dispatch:fankit.Chan.go", JSON.stringify(wide));
+  // The other second fixture, and the one shape that ADDS an entry: past the bound the disclosure is
+  // made even when every implementer the scan CAN see is pure. Silence would be a purity claim (SPEC §2
+  // rule 3) and twelve pure implementers do not make the thirteenth pure — dropping the union and
+  // leaving nothing is the cardinal sin wearing a precision fix.
+  const widePure = chainScan(chanLib(13, false)).report?.functions.find((e) => e.hash === "fankit#Chan.go");
+  check("a broad interface whose visible implementers are ALL pure discloses Unknown rather than nothing",
+        widePure?.inferred.join() === "Unknown", JSON.stringify(widePure));
+
+  // the consumer side: what the smear did was fail `deny Net` on a dispatch that cannot reach the
+  // network. After the bound it is disclosed instead — `deny Net` exit 1 -> 0, `deny Unknown[dispatch]`
+  // exit 0 -> 1 — and NOTHING goes silent, which is the trade the java sibling measured too.
+  const fanDep = chanLib(13, true);
+  chainScan(fanDep);
+  const fanApp = (pol) => {
+    const app = project({
+      "package.json": `{"name":"fanapp","dependencies":{"fankit":"1.0.0"}}`,
+      "node_modules/fankit/package.json": `{"name":"fankit","types":"index.d.ts","main":"index.js"}`,
+      "node_modules/fankit/index.js": ``,
+      "node_modules/fankit/index.d.ts": `export interface Chan { go(): void; }`,
+      "src/use.ts": `import { Chan } from "fankit";
+export function drive(c: Chan): void { c.go(); }`,
+      "p.pol": pol,
+    });
+    fs.rmSync(path.join(app, ".candor", "report.json"), { force: true });
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", path.join(app, "p.pol")],
+                        { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(fanDep, ".candor", "report.json") } });
+    return { r, rep: JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8")) };
+  };
+  const fanNet = fanApp("deny Net\n");
+  check("the chained consumer of a BROAD interface no longer inherits the smeared Net (exit 1 -> 0)",
+        fanNet.r.status === 0 && !(entry(fanNet.rep, "src.use.drive")?.inferred ?? []).includes("Net"),
+        `exit=${fanNet.r.status} ${JSON.stringify(entry(fanNet.rep, "src.use.drive"))}`);
+  check("…and it is DISCLOSED there, not silent: Unknown, and `deny Unknown` bites (exit 0 -> 1)",
+        (entry(fanNet.rep, "src.use.drive")?.inferred ?? []).includes("Unknown")
+          && fanApp("deny Unknown\n").r.status === 1,
+        JSON.stringify(entry(fanNet.rep, "src.use.drive")));
 }
 
 // ── PER-FILE module unit keys: importing a package charges its ENTRY, not every file it ships ─────

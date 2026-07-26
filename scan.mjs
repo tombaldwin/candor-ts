@@ -948,6 +948,17 @@ const nodeName = new WeakMap();  // declaration node -> qualified name
 // `@Entity()` (naming-strategy-dependent) contributes nothing — never a guess.
 const entityTables = new Map();    // ClassDeclaration node -> table name
 const interfaceImpls = new Map();  // InterfaceDeclaration node -> implementing ClassDeclarations (CHA universe)
+// The bound on an interface CHA fan-out, shared by the in-scan dispatch site and the `interfaceUnion`
+// entries a chained consumer resolves through. Past it an OPEN hierarchy may have an implementer the scan
+// never saw, so its visible union is an open-world guess and both sites report `Unknown` instead. It is
+// one constant on purpose: the two sites disagreeing is exactly the defect the union rung shipped with —
+// rxjs's `Operator` has 70 implementers, so rxjs's OWN `operator.call` reads
+// `Unknown[dispatch:…Operator.call]` while its published report offered a chained consumer
+// `rxjs#Operator.call -> ['Net','Unknown']`, the union of all 70. (The java sibling is `429c7b2`; its
+// `isClosedHierarchy` carve-out has no TS analogue — there is no `sealed`, so no hierarchy is provably
+// complete — and `closedWorldResolvable` is deliberately not copied, since asserting the scanned classes
+// are the whole world is exactly what publishing for a chained consumer contradicts.)
+const CHA_FANOUT_LIMIT = 12;
 const classOverrides = new Map();  // base-method MemberDeclaration node -> overriding subclass member nodes (class-CHA)
 const classDescendants = new Map();// base ClassDeclaration -> transitive LOCAL subclass ClassDeclarations (coercion-CHA)
 // `Object.defineProperty(target, key, { get/set })` runtime accessors (the silent-pure defineProperty
@@ -2654,7 +2665,7 @@ function visitCalls(node) {
               let edged = false;
               if (ts.isMethodSignature(decl) && decl.parent && ts.isInterfaceDeclaration(decl.parent)) {
                 const impls = interfaceImpls.get(decl.parent) ?? [];
-                if (impls.length > 0 && impls.length <= 12) {
+                if (impls.length > 0 && impls.length <= CHA_FANOUT_LIMIT) {
                   const member = decl.name?.getText?.();
                   let allResolved = true;
                   const targets = [];
@@ -3992,12 +4003,29 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
     const ifaceName = ifaceDecl.name?.text;
     if (!ifaceName || !implClasses.length) continue;
     if (ifaceNameCounts.get(ifaceName) > 1) continue; // ambiguous interface name — never guess which I
+    // BOUNDED CHA — the same `CHA_FANOUT_LIMIT` the in-scan dispatch site applies. The union emitter
+    // shipped without it, so the producer PUBLISHED what its own dispatch refuses to resolve: rxjs's
+    // `Operator` has 70 implementers, sixteen of which reach Net, and rxjs's own `Observable.subscribe`
+    // reads `Unknown[dispatch:src.internal.Operator.Operator.call]` while the report offers a chained
+    // consumer `rxjs#Operator.call -> ['Net','Unknown']`. A consumer holding one pure operator inherits
+    // the other sixty-nine, and fails `deny Net` on a dispatch that cannot reach the network.
+    //
+    // UNKNOWN, not silence: an absent entry is a purity claim (SPEC §2 rule 3) and twelve pure
+    // implementers do not make the thirteenth pure — so the broad arm discloses even when every
+    // implementer it CAN see is pure, the one shape here that adds an entry rather than narrowing one.
+    // MEASURED, not assumed, and the measurement narrows the claim: mutating this to `continue` still
+    // leaves a ts CONSUMER disclosing, because half 1's unanswerable-key arm covers an absent interface
+    // key. What silence would cost is this report's own honesty — the producer's `deny E
+    // Unknown[dispatch]`, any consumer without half 1's conjuncts, and the entry that is read as data
+    // rather than joined. The named tests that fail on that mutation are the producer-side three.
+    const broad = implClasses.length > CHA_FANOUT_LIMIT;
 
     for (const member of ifaceDecl.members ?? []) {
       if (!member.name || !(ts.isMethodSignature(member) || ts.isMethodDeclaration(member))) continue;
       const m = member.name.getText();
       const infU = new Set(), blindU = new Set();
-      for (const clsName of implClasses) {
+      if (broad) infU.add("Unknown");
+      else for (const clsName of implClasses) {
         const e = localEffs.get(`${clsName}.${m}`);
         if (e) { for (const x of e.inferred) infU.add(x); for (const b of e.blind) blindU.add(b); }
       }
@@ -4009,6 +4037,12 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
       const { line, character } = sfIface.getLineAndCharacterOfPosition(ifaceDecl.getStart());
       const un = { fn: `${ifaceName}.${m}`, loc: `${path.relative(rootDir, sfIface.fileName)}:${line + 1}:${character + 1}`,
                    hash, inferred: [...infU].sort(), interfaceUnion: true };
+      // The reason travels with the disclosure, spelled the way the CONSUMER of this entry spells the
+      // same site (`dispatch:<pkg>.<Iface>.<member>`, half 1's form), so a `deny E Unknown[dispatch]` at
+      // the producer still bites. Known residual, not introduced here: the ts dep-join copies `inferred`
+      // and `invisible` only, so a chained consumer's own entry loses the reason CLASS and falls back to
+      // `unresolved` — the ts sibling of candor-java `6ab26e4`, still open.
+      if (broad) { un.unresolved = true; un.unknownWhy = [`dispatch:${pkgName}.${ifaceName}.${m}`]; }
       if (blindU.size) un.invisible = [...blindU].sort();
       functions.push(un);
     }
