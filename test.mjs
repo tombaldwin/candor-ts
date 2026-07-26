@@ -5065,6 +5065,27 @@ ${cls.join("\n")}` });
   check("a broad interface whose visible implementers are ALL pure discloses Unknown rather than nothing",
         widePure?.inferred.join() === "Unknown", JSON.stringify(widePure));
 
+  // THE UNKNOWN TRUST MARKER IS A FUNCTION OF THE SET, not of the branch that put Unknown there. It was
+  // set only on the `broad` arm, so a union INHERITING Unknown from an implementer published
+  // `inferred: ['Unknown']` with `unresolved` absent — a machine consumer told in one field that the set
+  // may be incomplete (SPEC §2) and in the next that it is not. Live: all seven of rxjs's published
+  // unions. The REASON stays scoped to `broad`, correctly — ⟨0.6⟩ requires `unknownWhy` on a DIRECT
+  // Unknown source, and an Unknown inherited from an implementer's body is not one.
+  const inheritedUnknown = project({
+    "package.json": `{"name":"unkkit"}`,
+    "src/index.ts": `export interface Chan { go(): void; }
+export class C0 implements Chan { go(): void { (globalThis as any).mystery.run(); } }`,
+  });
+  const iu = chainScan(inheritedUnknown).report?.functions.find((e) => e.hash === "unkkit#Chan.go");
+  check("a union that INHERITS Unknown carries the trust marker, not just the broad arm",
+        iu?.inferred.includes("Unknown") && iu?.unresolved === true && iu?.unknownWhy === undefined,
+        JSON.stringify(iu));
+  // …and the second fixture: a union with no Unknown must still say so, rather than gaining the marker.
+  check("…and a union with no Unknown still reports `unresolved: false`",
+        chainScan(chanLib(12, true)).report?.functions
+          .find((e) => e.hash === "fankit#Chan.go")?.unresolved === false,
+        JSON.stringify(chainScan(chanLib(12, true)).report?.functions.find((e) => e.hash === "fankit#Chan.go")));
+
   // the consumer side: what the smear did was fail `deny Net` on a dispatch that cannot reach the
   // network. After the bound it is disclosed instead — `deny Net` exit 1 -> 0, `deny Unknown[dispatch]`
   // exit 0 -> 1 — and NOTHING goes silent, which is the trade the java sibling measured too.

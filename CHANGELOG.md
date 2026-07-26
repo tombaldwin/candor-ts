@@ -8,6 +8,15 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+⚠ **A union entry carrying `Unknown` now carries the trust marker too** (`scan.mjs`). `unresolved` was set
+on the `broad` arm only, so an `interfaceUnion` entry that *inherited* `Unknown` from an implementer's body
+published `inferred: ['Unknown']` with `unresolved` absent — telling a machine consumer in one field that
+the set may be incomplete (SPEC §2: "true if `inferred` may be incomplete") and in the next that it is not.
+Live on real code: every one of the seven unions `rxjs` published had it. The marker now follows the set,
+exactly as it does for an ordinary entry; the *reason* stays scoped to `broad`, correctly, since ⟨0.6⟩
+requires `unknownWhy` on a **direct** `Unknown` source and an inherited one is not that. Found while tracing
+the entries a truncated census drops.
+
 ⚠ **A real entry claiming a union's hash no longer suppresses the union** (`scan.mjs`). The interface-CHA
 emitter skipped any hash already published by a real entry, where candor-java **merges** it (`48a5f18`).
 That commit's argument transfers whole: publishing under a hash is answering *what can running this member

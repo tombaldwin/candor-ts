@@ -4188,7 +4188,16 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
       // the producer still bites. Known residual, not introduced here: the ts dep-join copies `inferred`
       // and `invisible` only, so a chained consumer's own entry loses the reason CLASS and falls back to
       // `unresolved` — the ts sibling of candor-java `6ab26e4`, still open.
-      if (broad) { un.unresolved = true; un.unknownWhy = [`dispatch:${pkgName}.${ifaceName}.${m}`]; }
+      // The Unknown TRUST MARKER is a function of the set, exactly as it is for an ordinary entry
+      // (`unresolved: inf.includes("Unknown")` above) — not of the branch that put Unknown there. Setting
+      // it only on the `broad` arm left a union that inherits Unknown from an IMPLEMENTER reading
+      // `inferred: ['Unknown']` with `unresolved` absent, i.e. FALSE: a machine consumer told in one field
+      // that the set may be incomplete (SPEC §2 "true if `inferred` may be incomplete") and in the next
+      // that it is not. Live on real code — every one of rxjs's seven published unions had it. The REASON
+      // stays scoped to `broad`, and correctly: ⟨0.6⟩ requires `unknownWhy` on a DIRECT Unknown source, and
+      // a union that inherited its Unknown from an implementer's body is not one.
+      un.unresolved = infU.has("Unknown");
+      if (broad) un.unknownWhy = [`dispatch:${pkgName}.${ifaceName}.${m}`];
       if (blindU.size) un.invisible = [...blindU].sort();
       functions.push(un);
     }
