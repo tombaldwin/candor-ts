@@ -3945,14 +3945,44 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
   const unionArms = [];
   for (const [ifaceDecl, implClasses] of interfaceImpls)
     unionArms.push([ifaceDecl, implClasses.map((c) => c.name?.text).filter(Boolean)]);
-  const inScanIfaceNames = new Set(unionArms.map(([d]) => d.name?.text).filter(Boolean));
-  // The IN-SCAN arm wins a name collision, and does not become ambiguous because of one. A package built
-  // to `dist` keeps a `types` entry that is the GENERATED SHADOW of the very source being scanned
-  // (@ukri-tfs/common: src/ scanned, `types: dist/lib/index.d.ts`), so both arms describe the same
-  // `interface Logger` — and counting them as two competing declarations silently deleted SEVEN real union
-  // entries from that package's report, an under-report introduced by a fabrication guard. Measured in the
-  // A/B, which is the only reason it was seen.
-  for (const arm of typingsInterfaceImpls()) if (!inScanIfaceNames.has(arm[0].name?.text)) unionArms.push(arm);
+  const inScanClassesByName = new Map(); // iface NAME -> every class the in-scan arms register under it
+  for (const [d, cls] of unionArms) {
+    const n = d.name?.text;
+    if (!n) continue;
+    const set = inScanClassesByName.get(n) ?? new Set();
+    for (const c of cls) set.add(c);
+    inScanClassesByName.set(n, set);
+  }
+  // A typings declaration colliding with an in-scan NAME is dropped only when it is REDUNDANT — when every
+  // class it names is already in the in-scan arm's set, so the in-scan arm's union is a superset and the
+  // typings arm has nothing to add. That is the SHADOW case and the only one: a package built to `dist`
+  // keeps a `types` entry that is the generated shadow of the very source being scanned (@ukri-tfs/common:
+  // `src/` scanned, `types: dist/lib/index.d.ts`), both arms describe the same `interface Logger` with the
+  // same implementers, and counting them as two competing declarations silently deleted SEVEN real union
+  // entries from that report.
+  //
+  // "The in-scan arm wins" as first written dropped the typings arm on the NAME alone, and that threw away
+  // the one piece of evidence the engine had that the name means two different things. Measured: a package
+  // whose internal `interface Store` (implementer does Net) shares a name with the PUBLIC `Store` its
+  // typings pair to an effectful `FileStore` published `mixkit#Store.save -> ['Net']`, with
+  // `unresolved: false` — a confident answer that is both a fabricated Net and a dropped Fs, and no
+  // disclosure, so `deny Fs` sits at exit 0 on a consumer whose dispatch really does write. The in-scan
+  // arm alone cannot see that (a `dist` class carries no heritage clause), which is why the defect
+  // predates 5057026 in the in-scan arm and only becomes FIXABLE once the typings arm exists to
+  // contradict it. Non-redundant now means AMBIGUOUS: the arm is pushed, the counter refuses BOTH, and the
+  // consumer falls back to half 1's `Unknown[dispatch:pkg.Iface.member]` — honest in both directions
+  // instead of confident in neither.
+  //
+  // Redundant-drop can still leave the in-scan union over-approximating for a consumer that meant the
+  // other interface, since the in-scan set is a superset by construction. That is unchanged behaviour of
+  // the in-scan arm, not something this rule introduces: no key that was precise becomes wider.
+  for (const arm of typingsInterfaceImpls()) {
+    const n = arm[0].name?.text;
+    if (!n) continue;
+    const inScan = inScanClassesByName.get(n);
+    if (inScan && arm[1].every((c) => inScan.has(c))) continue;
+    unionArms.push(arm);
+  }
   const ifaceNameCounts = new Map();
   for (const [ifaceDecl] of unionArms) {
     const n = ifaceDecl.name?.text;

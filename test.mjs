@@ -4846,6 +4846,97 @@ exports.FileStore = FileStore;`,
   for (let i = 0; i < 200; i++) bigFiles[`dist/f${i}.d.ts`] = `export declare const x${i}: number;\n`;
   check("a typings census truncated by the cap publishes NOTHING from the typings, not half of it",
         !chainScan(project(bigFiles), "--allow-js").report?.functions.some((e) => e.interfaceUnion));
+
+  // ── A NAME COLLISION IS EVIDENCE, NOT NOISE ─────────────────────────────────────────────────────
+  // "The in-scan arm wins" dropped the typings arm on the NAME alone, throwing away the one piece of
+  // evidence the engine had that the name means two different things. A package with an INTERNAL
+  // `interface Store` (its implementer does Net) and a PUBLIC one its typings pair to an effectful
+  // `FileStore` published `mixkit#Store.save -> ['Net']` with `unresolved: false`: a fabricated Net, a
+  // dropped Fs and no disclosure at all. The in-scan arm alone cannot see this — a `dist` class carries
+  // no heritage clause — so the defect predates the typings arm and only becomes fixable once that arm
+  // exists to contradict it.
+  const MIX_DTS = `export interface Store { save(k: string): void; }
+export declare class FileStore implements Store { save(k: string): void; }`;
+  const mixkit = project({
+    "package.json": `{"name":"mixkit","main":"dist/index.js","types":"dist/index.d.ts"}`,
+    "src/internal.ts": `import * as https from "node:https";
+export interface Store { save(k: string): void; }
+export class MemStore implements Store { save(k: string): void { https.get("http://telemetry.example.com/" + k); } }`,
+    "dist/index.js": `"use strict";
+const fs = require("node:fs");
+class FileStore { save(k) { fs.writeFileSync(k, "x"); } }
+exports.FileStore = FileStore;`,
+    "dist/index.d.ts": MIX_DTS,
+  });
+  const mx = chainScan(mixkit, "--allow-js");
+  check("an in-scan interface does NOT publish its answer under a name the typings give to another",
+        !mx.report?.functions.some((e) => e.hash === "mixkit#Store.save"),
+        JSON.stringify(mx.report?.functions.map((e) => [e.hash, e.inferred])));
+
+  const mixapp = (pol) => {
+    const app = project({
+      "package.json": `{"name":"mixapp","dependencies":{"mixkit":"1.0.0"}}`,
+      "node_modules/mixkit/package.json": `{"name":"mixkit","main":"dist/index.js","types":"dist/index.d.ts"}`,
+      "node_modules/mixkit/dist/index.js": ``,
+      "node_modules/mixkit/dist/index.d.ts": MIX_DTS,
+      "src/use.ts": `import { Store } from "mixkit";
+export function go(s: Store): void { s.save("a"); }`,
+      "p.pol": pol,
+    });
+    fs.rmSync(path.join(app, ".candor", "report.json"), { force: true });
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", path.join(app, "p.pol")],
+                        { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(mixkit, ".candor", "report.json") } });
+    return { r, rep: JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8")) };
+  };
+  const mxNet = mixapp("deny Net\n");
+  check("…so the consumer discloses the dispatch instead of inheriting the OTHER interface's Net",
+        entry(mxNet.rep, "src.use.go")?.inferred.join() === "Unknown"
+          && entry(mxNet.rep, "src.use.go")?.unknownWhy?.includes("dispatch:mixkit.Store.save"),
+        JSON.stringify(entry(mxNet.rep, "src.use.go")));
+  check("…the fabricated `deny Net` catch is gone (exit 1 -> 0)", mxNet.r.status === 0, `exit=${mxNet.r.status}`);
+  check("…and `deny Unknown[dispatch]` now bites where a confident wrong answer sat (exit 0 -> 1)",
+        mixapp("deny Unknown[dispatch,unresolved]\n").r.status === 1);
+  // the single-tree control: one project, both interfaces, the PUBLIC one's implementer effectful. The
+  // dispatch resolves precisely there, which is what makes the split arm's confident `Net` a defect of
+  // the boundary rather than a limit of the analysis.
+  const mxctl = project({
+    "package.json": `{"name":"mxctl"}`,
+    "src/internal.ts": `import * as https from "node:https";
+export interface Store { save(k: string): void; }
+export class MemStore implements Store { save(k: string): void { https.get("http://telemetry.example.com/" + k); } }`,
+    "src/pub.ts": `import * as fs from "node:fs";
+export interface PublicStore { save(k: string): void; }
+export class FileStore implements PublicStore { save(k: string): void { fs.writeFileSync(k, "x"); } }`,
+    "src/use.ts": `import { PublicStore } from "./pub.js";
+export function go(s: PublicStore): void { s.save("a"); }`,
+    "fs.pol": `deny Fs\n`,
+  });
+  const mxc = scan(mxctl, "--policy", path.join(mxctl, "fs.pol"));
+  check("single-tree control: the same dispatch resolves to Fs, and never to the other interface's Net",
+        entry(mxc.report, "src.use.go")?.inferred.join() === "Fs",
+        JSON.stringify(entry(mxc.report, "src.use.go")));
+
+  // THE SECOND FIXTURE, and the reason the rule is REDUNDANCY and not the name: a `types` entry that is
+  // the generated shadow of the scanned source names the SAME implementers, so the typings arm adds
+  // nothing and the in-scan union must survive untouched. Counting those as two competing declarations is
+  // what deleted seven real entries from @ukri-tfs/common the first time round. Distinct from the
+  // `shadowed` fixture above: this one has TWO implementers, so a subset test that only handled the
+  // one-class case would pass there and fail here.
+  const shadow2 = project({
+    "package.json": `{"name":"shadow2","main":"dist/index.js","types":"dist/index.d.ts"}`,
+    "tsconfig.json": `{"include":["src"]}`,
+    "src/index.ts": `import * as fs from "node:fs";
+export interface Store { save(k: string): void; }
+export class FileStore implements Store { save(k: string): void { fs.writeFileSync(k, "x"); } }
+export class MemStore implements Store { save(k: string): void { /* pure */ } }`,
+    "dist/index.d.ts": `export interface Store { save(k: string): void; }
+export declare class FileStore implements Store { save(k: string): void; }
+export declare class MemStore implements Store { save(k: string): void; }`,
+  });
+  check("a generated SHADOW naming the same implementers leaves the in-scan union untouched",
+        chainScan(shadow2).report?.functions
+          .find((e) => e.hash === "shadow2#Store.save")?.inferred.includes("Fs"),
+        JSON.stringify(chainScan(shadow2).report?.functions.map((e) => [e.hash, e.inferred])));
 }
 
 // ── PER-FILE module unit keys: importing a package charges its ENTRY, not every file it ships ─────
