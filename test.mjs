@@ -5094,6 +5094,133 @@ export function drive(c: Chan): void { c.go(); }`,
           && fanApp("deny Unknown\n").r.status === 1,
         JSON.stringify(entry(fanNet.rep, "src.use.drive")));
 
+  // ── A REAL ENTRY CLAIMING THE HASH NO LONGER SUPPRESSES THE UNION ───────────────────────────────
+  // `if (emittedHashes.has(hash)) continue` dropped the union whenever any real entry already published
+  // under it — the candor-java sibling `48a5f18`, whose argument transfers whole: `['Fs']` under a hash a
+  // consumer keys on IS a purity claim about everything else that dispatch reaches. TS reaches the
+  // collision by a BARE NAME (`pkg#Store.save`), so any `class Store` in the package claims the key an
+  // interface-typed consumer forms — by declaration merging, or by two unrelated declarations sharing a
+  // name across files.
+  const COLLIDE_DTS = `export interface Store { save(k: string): void; }
+export declare class FileStore implements Store { save(k: string): void; }
+export declare class NetStore implements Store { save(k: string): void; }`;
+  const collidekit = project({
+    "package.json": `{"name":"collidekit"}`,
+    "src/iface.ts": `import * as fs from "node:fs";
+import * as https from "node:https";
+export interface Store { save(k: string): void; }
+export class FileStore implements Store { save(k: string): void { fs.writeFileSync(k, "x"); } }
+export class NetStore implements Store { save(k: string): void { https.get("http://s3.example.com/" + k); } }`,
+    // an UNRELATED class that happens to share the interface's bare name, so it claims `#Store.save`.
+    "src/other.ts": `export class Store { save(k: string): void { void process.env.HOME; } }`,
+    "src/use.ts": `import type { Store } from "./iface.js";
+export function go(s: Store): void { s.save("a"); }`,
+    "net.pol": `deny Net\n`,
+  });
+  const collideRep = chainScan(collidekit).report;
+  check("a claimed hash still gets its union, as a MARKED entry beside the real one",
+        collideRep?.functions.some((e) => e.hash === "collidekit#Store.save" && e.interfaceUnion
+                                          && e.inferred.join() === "Fs,Net"),
+        JSON.stringify(collideRep?.functions.map((e) => [e.fn, e.hash, e.inferred])));
+  // THE SECOND FIXTURE, and it is why this is not java's `mergeUnionInto`. java widens the claiming entry
+  // in place; it can, because there the claimant is the interface's own `default` METHOD, whose in-scan
+  // dispatch site is already charged the whole CHA union. TS interfaces have no bodies, so the claimant is
+  // always a CLASS body — and widening it charges that class with effects a DIFFERENT class performs.
+  // Measured on this fixture with java's merge ported literally: `src.other.Store.save`, whose body only
+  // reads an environment variable, comes back `['Env','Fs','Net']` and the producer's own `deny Net` names
+  // it as a violator. That is the hazard java's comment names when it refuses to widen `overdeclared`, one
+  // field along. The union goes in its own entry instead and SPEC §2's duplicate-hash UNION rule joins it.
+  check("…and the CLAIMING entry is not rewritten: a class keeps the effects its own body has",
+        collideRep?.functions.find((e) => e.fn === "src.other.Store.save")?.inferred.join() === "Env",
+        JSON.stringify(collideRep?.functions.find((e) => e.fn === "src.other.Store.save")));
+  const collideProd = spawnSync("node", [path.join(HERE, "scan.mjs"), collidekit, "--policy", path.join(collidekit, "net.pol")],
+                                { encoding: "utf8", env: { ...process.env, CANDOR_WORKSPACE_CHAIN: "1" } });
+  const collideGate = `${collideProd.stdout}\n${collideProd.stderr}`;
+  check("…so the producer's own `deny Net` names the union, never the env-reading class",
+        /AS-EFF-006\] `Store\.save`/.test(collideGate)
+          && !/AS-EFF-006\] `src\.other\.Store\.save`/.test(collideGate),
+        collideGate.split("\n").filter((l) => l.includes("AS-EFF")).join(" | "));
+
+  const collideApp = (pol) => {
+    const app = project({
+      "package.json": `{"name":"collideapp","dependencies":{"collidekit":"1.0.0"}}`,
+      "node_modules/collidekit/package.json": `{"name":"collidekit","main":"index.js","types":"index.d.ts"}`,
+      "node_modules/collidekit/index.js": ``,
+      "node_modules/collidekit/index.d.ts": COLLIDE_DTS,
+      "src/use.ts": `import type { Store } from "collidekit";
+export function go(s: Store): void { s.save("a"); }`,
+      "p.pol": pol,
+    });
+    fs.rmSync(path.join(app, ".candor", "report.json"), { force: true });   // standing bar item 7
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", path.join(app, "p.pol")],
+                        { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(collidekit, ".candor", "report.json") } });
+    return { r, rep: JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8")) };
+  };
+  const collideNet = collideApp("deny Net\n");
+  check("the chained consumer inherits the dispatch union, not just the claiming entry (deny Net 0 -> 1)",
+        collideNet.r.status === 1
+          && ["Env", "Fs", "Net"].every((e) => entry(collideNet.rep, "src.use.go")?.inferred.includes(e)),
+        `exit=${collideNet.r.status} ${JSON.stringify(entry(collideNet.rep, "src.use.go"))}`);
+  // The single-tree control: the same dispatch, one project, no boundary — `['Fs','Net']` and exit 1. That
+  // is what makes the chained `['Env']` a boundary defect rather than a limit, and it is the shape of
+  // `48a5f18`'s argument: the engine must not contradict itself across the scan boundary.
+  const collideCtl = scan(collidekit, "--policy", path.join(collidekit, "net.pol"));
+  check("single-tree control: the same dispatch reads Fs,Net in one project and `deny Net` exits 1",
+        entry(collideCtl.report, "src.use.go")?.inferred.join() === "Fs,Net" && collideCtl.r.status === 1,
+        `exit=${collideCtl.r.status} ${JSON.stringify(entry(collideCtl.report, "src.use.go"))}`);
+
+  // THE OTHER SECOND FIXTURE: a claimed hash whose union adds NOTHING must produce no second entry, or a
+  // merge that fires when there is nothing to merge is just bloating the report. java's `mergeUnionInto`
+  // returns `real` unchanged for exactly this case.
+  const quietClaim = project({
+    "package.json": `{"name":"quietkit"}`,
+    "src/iface.ts": `import * as fs from "node:fs";
+export interface Store { save(k: string): void; }
+export class FileStore implements Store { save(k: string): void { fs.writeFileSync(k, "x"); } }`,
+    "src/other.ts": `import * as fs from "node:fs";
+export class Store { save(k: string): void { fs.writeFileSync(k, "y"); } }`,
+  });
+  check("a claimed hash whose union adds nothing publishes no second entry",
+        chainScan(quietClaim).report?.functions.filter((e) => e.hash === "quietkit#Store.save").length === 1,
+        JSON.stringify(chainScan(quietClaim).report?.functions.map((e) => [e.fn, e.hash, e.inferred])));
+
+  // DECLARATION MERGING, the other door to the same collision: `interface Store` and `class Store` are one
+  // name, so the class's own `save` claims the key. The checker resolves a `Store`-typed receiver to the
+  // class body, so this one under-reports in-scan too — but the published artifact must not, since a
+  // structurally-compatible `NetStore` is assignable to `Store` and the emitter had already computed that.
+  const mergekit = project({
+    "package.json": `{"name":"mergekit"}`,
+    "src/index.ts": `import * as fs from "node:fs";
+import * as https from "node:https";
+export interface Store { save(k: string): void; }
+export class Store { save(k: string): void { fs.writeFileSync(k, "x"); } }
+export class NetStore implements Store { save(k: string): void { https.get("http://s3.example.com/" + k); } }`,
+  });
+  check("a DECLARATION-MERGED class+interface publishes the union too",
+        chainScan(mergekit).report?.functions.some((e) => e.hash === "mergekit#Store.save" && e.interfaceUnion),
+        JSON.stringify(chainScan(mergekit).report?.functions.map((e) => [e.fn, e.hash, e.inferred])));
+
+  // AND THE `broad` CASE, which is what the fan-out bound exists for: past the bound the union publishes
+  // `['Unknown'] unresolved:true`, and a claiming entry used to REPLACE that disclosure with a confident
+  // answer about a dispatch the engine had just refused to resolve.
+  const broadClaim = (() => {
+    const cls = [];
+    for (let i = 0; i < 13; i++) cls.push(`export class C${i} implements Store { save(k: string): void { } }`);
+    return project({
+      "package.json": `{"name":"broadkit"}`,
+      "src/iface.ts": `export interface Store { save(k: string): void; }
+${cls.join("\n")}`,
+      "src/other.ts": `import * as fs from "node:fs";
+export class Store { save(k: string): void { fs.writeFileSync(k, "z"); } }`,
+    });
+  })();
+  const bc = chainScan(broadClaim).report?.functions
+    .find((e) => e.hash === "broadkit#Store.save" && e.interfaceUnion);
+  check("a BROAD dispatch still discloses Unknown under a hash a real entry claims",
+        bc?.inferred.join() === "Unknown" && bc?.unresolved === true
+          && bc?.unknownWhy?.join() === "dispatch:broadkit.Store.save",
+        JSON.stringify(chainScan(broadClaim).report?.functions.map((e) => [e.fn, e.hash, e.inferred])));
+
   // ── AN INTERFACE METHOD HAS TWO SPELLINGS ───────────────────────────────────────────────────────
   // `run(x): void` is a MethodSignature; `run: (x) => void` is a PropertySignature over a
   // FunctionTypeNode. The same contract, and only the first was ever looked at — by the union emitter

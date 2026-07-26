@@ -4027,7 +4027,11 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
     for (const b of rec.blind) cell.blind.add(b);
     localEffs.set(rec.local, cell);
   }
-  const emittedHashes = new Set(functions.map((e) => e.hash));
+  // One union entry per hash — among UNION entries. It deliberately does NOT include the hashes real
+  // entries already claim; see the emit site for why a claimed hash needs the union too.
+  const emittedUnionHashes = new Set();
+  const realByHash = new Map();
+  for (const e of functions) if (!realByHash.has(e.hash)) realByHash.set(e.hash, e);
   // interface-NAME ambiguity: two `interface I` decls (different files/scopes) both key the union hash on
   // `pkg#I.m`, so first-wins would emit ONE I's union under a name a consumer of the OTHER I resolves to (a
   // fabrication). Count decls per name and skip an ambiguous one — the family's never-guess rule, matching
@@ -4140,8 +4144,41 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
       }
       if (infU.size === 0 && blindU.size === 0) continue; // pure across all impls — silence = purity
       const hash = `${pkgName}#${ifaceName}.${m}`;
-      if (emittedHashes.has(hash)) continue; // a real entry already claims this hash
-      emittedHashes.add(hash);
+      if (emittedUnionHashes.has(hash)) continue;
+      // A REAL entry already claiming this hash used to SUPPRESS the union, and that was a silent
+      // under-report — the candor-java sibling is `48a5f18`, whose argument transfers whole: publishing
+      // under a hash is answering "what can running this member do", and `['Fs']` under a hash a consumer
+      // keys on IS a purity claim about everything else the dispatch reaches. TS reaches the collision by
+      // a BARE NAME: the hash is `pkg#Store.save`, so any `class Store` in the package claims the key an
+      // interface-typed consumer forms — whether by declaration merging (`interface Store` + `class Store`
+      // are one name) or by two unrelated declarations sharing a name across files. Measured on the second
+      // shape: in-scan `go(s: Store) { s.save() }` reads ['Fs','Net'] (the CHA union) and `deny Net` exits
+      // 1; split and chained, the consumer read the unrelated class's ['Env'] — a dropped Fs AND Net with
+      // `deny Net` at exit 0, plus a fabricated `deny Env` catch. The engine contradicting itself across
+      // the scan boundary, which is exactly what `48a5f18` names.
+      //
+      // WHERE THIS DEPARTS FROM JAVA, and why. java MERGES the union into the claiming entry. It can:
+      // there the claimant is the interface's own `default` METHOD, a body whose in-scan dispatch site is
+      // already charged the whole CHA union, so widening it states nothing new about that unit. TS
+      // interfaces have no bodies, so the claimant is always a CLASS body — and widening a class's
+      // `inferred` charges that class with effects a DIFFERENT class performs, firing the producer's own
+      // AS-EFF-006/001 gate on code that cannot do it. That is precisely the hazard java's own comment
+      // names when it refuses to widen `declared`/`overdeclared`, one field along. So the union is emitted
+      // as its OWN entry under the shared hash instead, and SPEC §2's documented duplicate-hash UNION rule
+      // does the join at the consumer — the same answer java's merge produces, with no analysed unit's
+      // assertions rewritten, no `analyzed` arithmetic disturbed (the entry stays marked
+      // `interfaceUnion`), and the producer's gate still describing the bodies it actually read.
+      //
+      // The dedup that DOES survive is java's "return `real` unchanged when the union adds nothing": if
+      // every effect and every `invisible` the union carries is already under that hash, a second entry
+      // would be noise, and reports stay byte-identical wherever there is nothing to add. A `broad` union
+      // always publishes, because its `unresolved`/`unknownWhy` is a disclosure about the DISPATCH that a
+      // resolved class entry does not make.
+      const claimed = realByHash.get(hash);
+      if (claimed && !broad
+          && [...infU].every((x) => claimed.inferred.includes(x))
+          && [...blindU].every((b) => (claimed.invisible ?? []).includes(b))) continue;
+      emittedUnionHashes.add(hash);
       const sfIface = ifaceDecl.getSourceFile();
       const { line, character } = sfIface.getLineAndCharacterOfPosition(ifaceDecl.getStart());
       const un = { fn: `${ifaceName}.${m}`, loc: `${path.relative(rootDir, sfIface.fileName)}:${line + 1}:${character + 1}`,

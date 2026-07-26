@@ -8,6 +8,32 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+⚠ **A real entry claiming a union's hash no longer suppresses the union** (`scan.mjs`). The interface-CHA
+emitter skipped any hash already published by a real entry, where candor-java **merges** it (`48a5f18`).
+That commit's argument transfers whole: publishing under a hash is answering *what can running this member
+do*, so `['Fs']` under a hash a consumer keys on is a purity claim about everything else the dispatch
+reaches. TypeScript reaches the collision by a **bare name** — the hash is `pkg#Store.save`, so any
+`class Store` in the package claims the key an interface-typed consumer forms, whether through declaration
+merging (`interface Store` + `class Store` are one name) or through two unrelated declarations sharing a
+name across files. Measured on the second shape: in-scan, `go(s: Store) { s.save() }` reads `['Fs','Net']`
+and `deny Net` exits 1; split and chained, the consumer read the unrelated class's `['Env']` — a dropped
+`Fs` *and* `Net` with `deny Net` at exit 0, plus a fabricated `deny Env` catch. The engine contradicting
+itself across the scan boundary.
+
+**Where this departs from java, and why it is not `mergeUnionInto`.** java widens the claiming entry in
+place; it can, because there the claimant is the interface's own `default` **method**, a body whose in-scan
+dispatch site is already charged the whole CHA union. TypeScript interfaces have no bodies, so the claimant
+is always a **class** body — and widening it charges that class with effects a *different* class performs.
+Measured with java's merge ported literally: `src.other.Store.save`, whose body only reads an environment
+variable, comes back `['Env','Fs','Net']` and the producer's own `deny Net` names it as a violator. That is
+precisely the hazard java's own comment names when it refuses to widen `declared`/`overdeclared`, one field
+along. So the union is emitted as its **own** marked entry under the shared hash and SPEC §2's documented
+duplicate-hash **UNION** rule does the join at the consumer: the same answer java's merge produces, with no
+analysed unit's assertions rewritten and no `analyzed` arithmetic disturbed. java's "return `real`
+unchanged when the union adds nothing" survives as a dedup, so reports stay byte-identical wherever there
+is nothing to add; a `broad` union always publishes, because its `unresolved`/`unknownWhy` is a disclosure
+about the *dispatch* that a resolved class entry does not make.
+
 ⚠ **A truncated typings census refuses to PUBLISH, not to look** (`scan.mjs`). The published-typings walk
 gives up past 128 declaration files, and it discarded the typings arm when it did — landing the refusal on
 the *evidence* side, when the evidence is the only thing that can tell the engine an interface name means
