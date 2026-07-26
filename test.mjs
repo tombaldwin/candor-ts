@@ -523,6 +523,64 @@ export declare class Idle { label(): string; }`,
         entry(urep, "src.m.boot")?.invisible?.includes("ctorkit"), JSON.stringify(urep.functions));
 }
 
+// ── 2f-sexies. A DEP function passed BY REFERENCE to an invoking HOF ──────────────────────────────
+// Same vein, third mechanism. `xs.forEach(depWrite)` / `setTimeout(depWrite, 0)`: the HOF calls it, so
+// its effects are reachable — but the ref got neither an edge (no local unit) nor an Unknown. The
+// opaque-callback Unknown is suppressed for a ref that resolves to a concrete declaration, on the stated
+// grounds that "dep calls flow through the κ/invisible channel" — and that channel is the CallExpression
+// handler, which a by-reference pass never enters. The result was silent-pure on BOTH sides of the
+// boundary: no effect chained, no disclosure unchained.
+{
+  const depSrc = `import * as fsm from "node:fs";
+export function writeIt(x: string): void { fsm.appendFileSync("/tmp/x", x); }
+export function pureIt(x: string): string { return x.trim(); }`;
+  const depDir = project({ "package.json": `{"name":"hofkit","version":"1.0.0"}`, "src/index.ts": depSrc });
+  const { prefix: depPrefix } = scan(depDir);
+  const appFiles = {
+    "package.json": `{"name":"happ","version":"1.0.0"}`,
+    "src/m.ts": `import { writeIt, pureIt } from "hofkit";
+export function viaForEach(xs: string[]): void { xs.forEach(writeIt); }
+export function viaTimeout(): void { setTimeout(writeIt, 0); }
+export function viaPureRef(xs: string[]): string[] { return xs.map(pureIt); }
+export function viaStore(xs: string[], sink: unknown[]): void { sink.push(writeIt); }
+export function viaBoolean(xs: (string | null)[]): unknown[] { return xs.filter(Boolean); }
+export function viaString(xs: number[]): string[] { return xs.map(String); }`,
+    "node_modules/hofkit/package.json": `{"name":"hofkit","version":"1.0.0","types":"dist/index.d.ts","main":"dist/index.js"}`,
+    "node_modules/hofkit/dist/index.d.ts": `export declare function writeIt(x: string): void;
+export declare function pureIt(x: string): string;`,
+    "node_modules/hofkit/dist/index.js": `exports.writeIt = () => {}; exports.pureIt = (x) => x;`,
+  };
+  const app = project(appFiles);
+  fs.writeFileSync(path.join(app, "deny.policy"), "deny Fs\n");
+  const chained = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", path.join(app, "deny.policy")],
+                            { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: `${depPrefix}.json` } });
+  const crep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  const ceff = (fn) => entry(crep, fn)?.inferred ?? [];
+  check("boundary: a dep fn passed to forEach carries the dep's effects",
+        ceff("src.m.viaForEach").includes("Fs"), JSON.stringify(crep.functions));
+  check("boundary: ...and to setTimeout", ceff("src.m.viaTimeout").includes("Fs"),
+        JSON.stringify(ceff("src.m.viaTimeout")));
+  check("boundary: the `deny Fs` gate is exit 1 again for a by-reference dep callback",
+        chained.status === 1, `status=${chained.status} ${chained.stdout}`);
+  // NO FABRICATION. Three shapes that must stay untouched: a PURE dep fn (the dep's report omits it —
+  // silence is its purity claim), a STORE sink that never invokes its argument (`push` is not an invoking
+  // HOF), and the pure global coercion constructors this arm deliberately lets through to the ES lib.
+  check("no-fabrication: a PURE dep fn by reference stays pure", entry(crep, "src.m.viaPureRef") == null,
+        JSON.stringify(entry(crep, "src.m.viaPureRef")));
+  check("no-fabrication: a dep fn merely STORED (push) is not charged", entry(crep, "src.m.viaStore") == null,
+        JSON.stringify(entry(crep, "src.m.viaStore")));
+  check("no-fabrication: .filter(Boolean) stays pure", entry(crep, "src.m.viaBoolean") == null,
+        JSON.stringify(entry(crep, "src.m.viaBoolean")));
+  check("no-fabrication: .map(String) stays pure", entry(crep, "src.m.viaString") == null,
+        JSON.stringify(entry(crep, "src.m.viaString")));
+  // Unchained the dep's body is unknowable — disclose the package rather than claim purity.
+  const { report: urep } = scan(project(appFiles));
+  check("boundary, unchained: a by-reference dep callback discloses the package",
+        entry(urep, "src.m.viaForEach")?.invisible?.includes("hofkit"), JSON.stringify(urep.functions));
+  check("no-fabrication, unchained: .filter(Boolean) still discloses nothing",
+        entry(urep, "src.m.viaBoolean") == null, JSON.stringify(entry(urep, "src.m.viaBoolean")));
+}
+
 // ── 2b. `show` SURFACES the literal Fs paths + Exec cmds (the regression that shipped) ─────────────
 // scan writes the surface under report keys `paths`/`cmds`; `show` once read a nonexistent `e.fs`, so
 // it silently dropped every file path even though the MCP `candor_show` doc promises "paths". The CLI

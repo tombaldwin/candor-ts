@@ -2330,6 +2330,18 @@ function visitCalls(node) {
             const d2 = realDecl(checker.getSymbolAtLocation(a));
             const t = (d2 && nodeName.get(d2)) || resolveFnRefUnit(a); // pin direct fn OR a local alias chain
             if (t) { rec.edges.add(t); return; } // resolvable named/local callback — keep its analyzed effect
+            // A DEPENDENCY function passed BY REFERENCE — `xs.forEach(depWrite)`, `setTimeout(dep.tick, 0)`.
+            // The invoking HOF calls it, so its effects are reachable here, and the dependency's report
+            // holds them under `<pkg>#depWrite`. Guard (2) below reasons that a ref resolving to a concrete
+            // external declaration is fine because "dep calls flow through the κ/invisible channel" — but
+            // that channel is the CallExpression handler, and a by-reference pass never enters it. So the
+            // shape got neither an edge NOR an Unknown NOR a disclosure: silent-pure, on both sides of the
+            // boundary (candor-spec SOUNDNESS-VEIN-crossing-the-scan-boundary.md). Route it through the same
+            // decision procedure a DIRECT call to it would get, which is exactly what guard (2) assumed was
+            // already happening. `argIsCallable` keeps a non-function dep value out (a `reduce` seed), and a
+            // pure global builtin (`.filter(Boolean)`, `.map(String)`) resolves to the ES lib and adds
+            // nothing, so the shapes guard (2) protects stay protected.
+            if (d2 && !declIsLocal(d2) && argIsCallable(a)) { chargeExternalDecl(rec, d2); return; }
             // OPAQUE callback → Unknown (the cardinal-sin guard): a callback the es-lib signature resolved to
             // the CALLEE (`forEach`) so its reference was dropped silent-pure — `arr.forEach(cb)` read pure
             // though `cb` runs caller-supplied code. Disclose Unknown, the same posture as the direct
