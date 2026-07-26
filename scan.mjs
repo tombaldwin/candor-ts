@@ -1599,13 +1599,25 @@ function enumerateGetters(owner, type) {
 // is the field-initializer `Class.constructor` synthesis (~scan.mjs:774) one level up: the module
 // body is the file's own initializer. Minted LAZILY — only when a top-level statement actually
 // attributes an effect/edge here — so a pure top-level never gains a unit (pure units are omitted).
-// The qual mirrors sibling top-level units (`moduleOf(sf).<module>`); the bare local is `<module>`.
+// The qual mirrors sibling top-level units (`moduleOf(sf).<module>`), and the LOCAL — the tail of the
+// cross-package `hash` — carries the module path too, so every file's initializer gets its own join key.
+// A bare `<module>` local collapsed every file in a package onto ONE hash `<pkg>#<module>`, and since
+// duplicate hashes union on load, importing a package charged the union of EVERY published file's top
+// level: `proper-lockfile` picked up `Net` from `retry`'s `example/dns.js`, which nothing imports. The
+// union was baked into the KEY, not the scan scope, so narrowing the scan could not have fixed it — and
+// both obvious narrowings are wrong (scanning only the entry file drops the entry's transitively-required
+// modules, which genuinely DO run on import; excluding `example/`/`test/` by name is a guess about
+// reachability, and those files are published). Per-file keys need no reachability guess at all: the
+// consumer looks up the package's ENTRY module, whose `inferred` already includes its transitive imports
+// because the in-scan module-import edge computes that closure, and an unimported `example/dns.js` simply
+// has its own key nobody asks for. This is also what the rest of the family already does — java keys a
+// `<clinit>` by its owner class, rust a lazy static by its item path.
 function moduleUnit(sf) {
   const mod = moduleOf(sf);
   const qual = `${mod}.<module>`;
   let rec = fns.get(qual);
   if (!rec) {
-    rec = { local: "<module>", direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
+    rec = { local: qual, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
             cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(),
             entry: false, unitKind: "initializer",
             loc: `${path.relative(rootDir, sf.fileName)}:1:1`,
@@ -3514,6 +3526,76 @@ function resolveProjectModule(spec, fromFile) {
   for (const e of MODULE_EXTS) if (projectFiles.has(base + e)) return base + e;
   return null;
 }
+// Which of a chained dependency's module initializers an `import "pkg"` actually runs. `pkg#<relpath>
+// .<module>` is per FILE, and the entry unit's `inferred` already carries its transitive imports (the
+// closure computed above), so asking for the entry is both narrow and complete — no reachability guess,
+// and a published-but-unimported `example/dns.js` keeps its own key that nobody looks up.
+//
+// COMPATIBILITY. The key is wire-visible, so a consumer may meet a report written before it existed, whose
+// module units all hash `<pkg>#<module>`. That shape is a RELIABLE discriminator — no engine emits a bare
+// `<module>` tail now, since every local carries its module path — so the old key is honoured when present
+// and the old (union) answer is returned unchanged. Silence would have been the wrong default: a new
+// consumer over an old report would have resolved nothing and read the import pure, turning a precision fix
+// into the under-report this vein exists to close. The reverse direction is already covered by §2.1 version
+// gating: an OLD consumer over a NEW report treats the whole report as stale and downgrades it to Unknown.
+const depEntryCache = new Map();
+function depInitCell(pkg, subpath) {
+  const old = crossDeps.get(`${pkg}#<module>`);
+  if (old) return old;                                // pre-per-file report: unchanged behaviour
+  const ck = `${pkg} ${subpath}`;
+  if (!depEntryCache.has(ck)) depEntryCache.set(ck, resolveDepEntryKey(pkg, subpath));
+  const key = depEntryCache.get(ck);
+  if (key) return crossDeps.get(key);
+  // The package is not on disk, or its entry cannot be resolved (a conditional/wildcard `exports` map this
+  // does not model). Nothing licenses narrowing then, so fall back to the UNION over its module units —
+  // today's answer, an over-approximation, and never a fresh silence.
+  let cell = null;
+  for (const [h, c] of crossDeps) {
+    if (!h.startsWith(`${pkg}#`) || !h.endsWith(".<module>")) continue;
+    cell ??= { inferred: new Set(), invisible: new Set(), hosts: [], cmds: [], paths: [], tables: [] };
+    for (const e of c.inferred) cell.inferred.add(e);
+    for (const b of c.invisible) cell.invisible.add(b);
+  }
+  return cell;
+}
+function resolveDepEntryKey(pkg, subpath) {
+  let dir = null;
+  for (let d = rootDir; ; d = path.dirname(d)) {
+    const c = path.join(d, "node_modules", pkg);
+    if (fs.existsSync(path.join(c, "package.json"))) { dir = c; break; }
+    if (path.dirname(d) === d) break;
+  }
+  if (!dir) return null;
+  const resolve = (rel) => {
+    const base = path.resolve(dir, rel);
+    for (const e of MODULE_EXTS) {
+      const p = base + e;
+      try { if (fs.statSync(p).isFile()) return p; } catch { /* next */ }
+    }
+    return null;
+  };
+  let file = null;
+  if (subpath) file = resolve(subpath);
+  else {
+    let pj = {};
+    try { pj = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")); } catch { /* below */ }
+    // `exports` wins over `main` in Node. Only the plain shapes are modelled — a string, or a "." entry
+    // that is a string or a condition map — because a wildcard/pattern map cannot name ONE entry module
+    // and the fallback above is the honest answer for it.
+    const dot = typeof pj.exports === "string" ? pj.exports
+      : (pj.exports && typeof pj.exports === "object" ? pj.exports["."] ?? null : null);
+    const cand = [];
+    if (typeof dot === "string") cand.push(dot);
+    else if (dot && typeof dot === "object")
+      for (const k of ["require", "node", "default", "import"]) if (typeof dot[k] === "string") cand.push(dot[k]);
+    if (typeof pj.main === "string") cand.push(pj.main);
+    cand.push("index.js");
+    for (const c of cand) if ((file = resolve(c))) break;
+  }
+  if (!file) return null;
+  const rel = path.relative(dir, file).replace(/\.[mc]?[tj]sx?$/, "").split(path.sep).join(".");
+  return `${pkg}#${rel}.<module>`;
+}
 {
   const pending = [];                                 // [fromNode, targetQual]
   const depInits = [];                                // [fromNode, chained dep's initializer cell]
@@ -3530,16 +3612,16 @@ function resolveProjectModule(spec, fromFile) {
         pending.push([node, `${rel}.<module>`]);
       } else if (!spec.startsWith(".") && crossDeps.size > 0) {
         // EXTERNAL specifier with a CHAINED report: importing a package runs its entry module, so the
-        // importer reaches whatever that initializer does. The dep's module units already hash under
-        // `<pkg>#<module>` — a package's initializers share the one key — so the effects are sitting in
-        // `crossDeps` and the edge simply never consulted them. This is the DETERMINED half of the
-        // external case: no `Unknown` is invented, and an unchained dependency stays exactly as it was,
-        // because blanket-disclosing every external import measured at 60-100% of modules and would make
-        // the initializer unit useless rather than honest (candor-spec
-        // SOUNDNESS-VEIN-initializer-edge.md).
+        // importer reaches whatever that initializer does. The dep's module units are in `crossDeps` and
+        // the edge simply never consulted them. This is the DETERMINED half of the external case: no
+        // `Unknown` is invented, and an unchained dependency stays exactly as it was, because
+        // blanket-disclosing every external import measured at 60-100% of modules and would make the
+        // initializer unit useless rather than honest (candor-spec SOUNDNESS-VEIN-initializer-edge.md).
+        // What runs is THE MODULE THIS SPECIFIER NAMES, so that is what is looked up — a subpath import
+        // names its own file, a bare package name names its entry.
         const seg = spec.split("/");
         const pkg = spec.startsWith("@") ? seg.slice(0, 2).join("/") : seg[0];
-        const cell = crossDeps.get(`${pkg}#<module>`);
+        const cell = depInitCell(pkg, spec.slice(pkg.length).replace(/^\//, ""));
         if (cell && cell.inferred.size) depInits.push([node, cell]);
       }
     }

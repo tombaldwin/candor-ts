@@ -4705,6 +4705,110 @@ exports.FileStore = FileStore;`,
         JSON.stringify(wr.report?.functions.map((e) => [e.hash, e.inferred])));
 }
 
+// ── PER-FILE module unit keys: importing a package charges its ENTRY, not every file it ships ─────
+// All of a package's module units used to hash `<pkg>#<module>`, and duplicate hashes union on load, so
+// `import "pkg"` charged the union of EVERY published file's top level — `proper-lockfile` picked up `Net`
+// from `retry`'s `example/dns.js`. Per-file keys let the consumer ask for the module the specifier names.
+{
+  const depSrc = {
+    "package.json": `{"name":"depkit3","main":"index.js"}`,
+    "index.js": `"use strict";
+const inner = require("./lib/inner.js");
+module.exports = { inner };`,
+    // the entry does not perform this itself — it is reached only THROUGH the entry's require.
+    "lib/inner.js": `"use strict";
+const fs = require("node:fs");
+const CFG = fs.readFileSync("/etc/inner.conf", "utf8");
+module.exports = { CFG };`,
+    // published, but nothing imports it: the false charge.
+    "example/dns.js": `"use strict";
+const net = require("node:net");
+net.connect(53, "8.8.8.8");`,
+  };
+  const dep = project(depSrc);
+  const ds = scan(dep, "--allow-js");
+  const mods = ds.report.functions.filter((e) => e.hash.endsWith(".<module>"));
+  check("each file's initializer gets its OWN cross-package key (not one shared `<pkg>#<module>`)",
+        mods.length === 3 && new Set(mods.map((e) => e.hash)).size === 3
+          && mods.some((e) => e.hash === "depkit3#index.<module>"),
+        JSON.stringify(mods.map((e) => e.hash)));
+
+  const consumer = (specifier, extra = {}) => {
+    const app = project({
+      "package.json": `{"name":"shopapp3","dependencies":{"depkit3":"1.0.0"}}`,
+      "src/use.ts": `import ${JSON.stringify(specifier)};\nexport function go(): number { return 1; }`,
+      "net.pol": `deny Net\n`,
+      "fs.pol": `deny Fs\n`,
+      ...extra,
+    });
+    for (const [rel, content] of Object.entries(depSrc)) {
+      const p = path.join(app, "node_modules", "depkit3", rel);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, content);
+    }
+    return app;
+  };
+  const runChained = (app, depReport, ...extra) => {
+    fs.rmSync(path.join(app, ".candor", "report.json"), { force: true }); // standing bar item 8
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), app, ...extra],
+                        { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: depReport } });
+    const p = path.join(app, ".candor", "report.json");
+    return { r, report: fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : null };
+  };
+  const depReport = `${ds.prefix}.json`;
+
+  // THE SECOND FIXTURE, WRITTEN FIRST (standing bar item 0). This narrows what an import charges, so the
+  // failure mode to look for is the MISS: the entry's transitively-required module genuinely DOES run on
+  // import, and its top-level effect must survive. It survives without a reachability analysis because the
+  // entry unit's own `inferred` already carries the closure — the in-scan module-import edge computed it.
+  const a1 = consumer("depkit3");
+  const c1 = runChained(a1, depReport);
+  check("an import still charges the entry's TRANSITIVELY-required module's top-level effect",
+        entry(c1.report, "src.use.<module>")?.inferred.includes("Fs"),
+        JSON.stringify(c1.report?.functions));
+  check("…and the gate on that real reach still fires (deny Fs, exit 1)",
+        runChained(a1, depReport, "--policy", path.join(a1, "fs.pol")).r.status === 1);
+  // and the fabrication is gone: nothing imports `example/dns.js`, so its Net is no longer charged.
+  check("an import no longer charges an UNIMPORTED file's top level",
+        !entry(c1.report, "src.use.<module>")?.inferred.includes("Net"),
+        JSON.stringify(c1.report?.functions));
+  check("…so the gate stops firing on the effect that file alone contributed (deny Net, exit 0)",
+        runChained(a1, depReport, "--policy", path.join(a1, "net.pol")).r.status === 0);
+
+  // a SUBPATH import names its own module, and must still charge it — narrowing to the package entry
+  // regardless of the specifier would be the same miss one level along.
+  const a2 = consumer("depkit3/example/dns.js");
+  const c2 = runChained(a2, depReport);
+  check("a SUBPATH import charges the module that specifier names",
+        entry(c2.report, "src.use.<module>")?.inferred.includes("Net"),
+        JSON.stringify(c2.report?.functions));
+
+  // COMPATIBILITY. A report written before per-file keys hashes every module unit `<pkg>#<module>`. A new
+  // consumer must not silently resolve nothing over it — that would turn a precision fix into the
+  // under-report this vein exists to close — so the old key is honoured when present, with its old (union)
+  // answer. No current engine emits a bare `<module>` tail, so its presence is a reliable discriminator.
+  const legacy = JSON.parse(fs.readFileSync(depReport, "utf8"));
+  for (const e of legacy.functions) if (e.hash.endsWith(".<module>")) e.hash = "depkit3#<module>";
+  const legacyPath = path.join(dep, ".candor", "legacy.json");
+  fs.writeFileSync(legacyPath, JSON.stringify(legacy));
+  const a3 = consumer("depkit3");
+  const c3 = runChained(a3, legacyPath);
+  check("a report using the OLD shared `<pkg>#<module>` key still resolves (never silently nothing)",
+        entry(c3.report, "src.use.<module>")?.inferred.includes("Fs"),
+        JSON.stringify(c3.report?.functions));
+
+  // and when the package is NOT on disk there is nothing to resolve an entry against, so the answer stays
+  // the union — an over-approximation, never a fresh silence.
+  const a4 = project({
+    "package.json": `{"name":"shopapp4","dependencies":{"depkit3":"1.0.0"}}`,
+    "src/use.ts": `import "depkit3";\nexport function go(): number { return 1; }`,
+  });
+  const c4 = runChained(a4, depReport);
+  check("an uninstallable package falls back to the union rather than resolving nothing",
+        entry(c4.report, "src.use.<module>")?.inferred.includes("Fs"),
+        JSON.stringify(c4.report?.functions));
+}
+
 // ── the SEEDED-VIOLATION SENSITIVITY BATTERY as a gate (RQ1 Part C) ───────────────────────────────
 // The honesty oracle is only worth its verdict if it is SENSITIVE. sensitivity.mjs plants a real Fs effect
 // behind each of N dynamic mechanisms (eval, Function ctor, computed require, callback-in-collection, async
