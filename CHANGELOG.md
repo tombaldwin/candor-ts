@@ -8,6 +8,44 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+⚠ **A chained lookup that could never have been answered no longer reads as a purity claim** (`scan.mjs`).
+candor-spec `DEP-RECEIVER-TYPING-DESIGN.md`, half 1; conformance PART 21 now runs the ts arm alongside
+java and rust. When a call into a chained dependency finds no entry, that means one of two things, and the
+engine drew no distinction between them:
+
+- **keyed-and-missed** — the key names a body the dependency scanned (`declare class C { m() }`,
+  `declare function f()`). Dependency reports omit pure functions (SPEC §2 rule 3), so absence IS the
+  dependency's answer. Unchanged: silence stays silence.
+- **no answerable key** — resolution landed on an *abstraction*: an interface method or property
+  signature, an anonymous type-literal member, an `abstract` member. No body is hashed under that name in
+  the dependency, whatever its implementations do, so the lookup was never a question. Now `Unknown` with
+  `dispatch:<pkg>.<Owner>.<member>`; previously the caller was **absent from the report entirely**, which
+  under the ⟨0.21⟩ manifest is a positive purity claim rather than a gap.
+
+TypeScript arrives at this by a different road than rust, and the canonical fixture from the design note
+does **not** reproduce here: return types travel in the `.d.ts`, so a factory-bound receiver is typed and
+`build().fetch()` joins precisely. A receiver TS genuinely cannot type is `any`, which already read
+`callback:` Unknown. What was silent is the receiver typed to an abstraction the dependency's report has
+no vocabulary for — `build(): Fetcher` over a `.d.ts` whose only body is hashed `pkg#Client.fetch`.
+
+The trigger is a **conjunction of three**, not "untyped receiver" (which is pervasive, and hedging on it
+would be the false-uncertainty failure): the key is unanswerable, the value comes from a package, **and
+the package is CHAINED**. The third is load-bearing — for an unchained package the κ ledger already
+discloses `invisible: [pkg]`, so a second voice would be noise; it is precisely when the package is
+covered that the ledger correctly falls silent and that silence becomes the confident claim.
+
+Measured. Unchained, 10 real targets (candor-ts, 5 ukri-tfs packages, 4 services): **0 gains, 0 losses,
+entry counts identical** — the third conjunct holding on real code. Chained (`--workspace`) over 5
+ukri-tfs services: **5 gains, 0 losses** across ~1000 analysed functions. Chaining the same dependency
+reports *without* producer-side `interfaceUnion` entries (the plain `CANDOR_DEPS` shape): 8 gains on 202
+analysed functions, and 3 on 453. Every gain traced — `@ukri-tfs/message-handling#OutboundChannel.publishRaw`
+(implementations publish to SNS; that package declares the interface name twice, so the union's
+never-guess ambiguity guard correctly declines and this arm is the fail-closed floor underneath it),
+`@ukri-tfs/common#CoreLogger.info`/`.error` (implementations reach `Clock`), `ServiceHostNames.getUrl`
+(reaches `Env`), and `FastifyInstanceDecorations.getServices` (installed at runtime by
+`fastify.decorate('getServices', …)` — genuinely unresolvable). ⚠ may add `Unknown` to functions
+previously reported pure when a dependency report is chained.
+
 ⚠ **Four mechanisms that died at the SCAN BOUNDARY** (`scan.mjs`). Take code candor analyses soundly,
 split it across a package boundary, scan the dependency separately and chain its report — the arrangement
 candor's own docs recommend — and the effect disappeared. The dependency's report held the right answer

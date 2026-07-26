@@ -581,6 +581,121 @@ export declare function pureIt(x: string): string;`,
         entry(urep, "src.m.viaBoolean") == null, JSON.stringify(entry(urep, "src.m.viaBoolean")));
 }
 
+// ── 2f-sexies. the UNANSWERABLE KEY across the scan boundary ──────────────────────────────────────
+// candor-spec DEP-RECEIVER-TYPING-DESIGN.md, half 1. A chained lookup coming back empty has two
+// readings with opposite evidential weight, and the engine drew no distinction: a key that names a
+// BODY the dep scanned (`declare class C { m() }`) makes absence the dep's own purity claim (SPEC §2
+// rule 3), but a key that names an ABSTRACTION — an interface method/property signature, an anonymous
+// type-literal member, an `abstract` member — names nothing the dep's report could ever carry, so the
+// silence answered a question that was never asked. Measured pre-fix: `go` ABSENT from the report
+// while the dependency's own report read `ifacekit#Client.fetch -> ['Fs']`.
+// Third conjunct: only when the dependency is CHAINED. Unchained, the κ ledger already discloses
+// `invisible: [pkg]` and a second voice would be pure false uncertainty.
+{
+  const depSrc = `import * as fsm from "node:fs";
+export interface Fetcher { fetch(): string; }
+export class Client implements Fetcher { fetch(): string { return fsm.readFileSync("/etc/x", "utf8"); } }
+export function build(): Fetcher { return new Client(); }
+export abstract class Base { abstract pull(): string; }
+export class Puller extends Base { pull(): string { return process.env.HOME ?? ""; } }
+export function buildBase(): Base { return new Puller(); }
+export interface Api { load: () => string; }
+export class ApiImpl implements Api { load = (): string => fsm.readFileSync("/etc/y", "utf8"); }
+export function buildApi(): Api { return new ApiImpl(); }
+export interface Job { run(): void; }
+export class RealJob implements Job { run(): void { fsm.appendFileSync("/tmp/j", "x"); } }
+export function buildJob(): Job { return new RealJob(); }
+export class Plain { label(): string { return "p"; } }
+export class Loud { shout(): string { return fsm.readFileSync("/etc/z", "utf8"); } }`;
+  const appSrc = `import { build, buildBase, buildApi, buildJob, Plain, Loud } from "SPEC";
+export function useFetcher(): string { return build().fetch(); }
+export function usePuller(): string { return buildBase().pull(); }
+export function useApi(): string { return buildApi().load(); }
+export function useJob(): void { [1].forEach(buildJob().run); }
+export function usePlain(): string { return new Plain().label(); }
+export function useLoud(): string { return new Loud().shout(); }`;
+  const depDir = project({ "package.json": `{"name":"ifacekit","version":"1.0.0"}`, "src/index.ts": depSrc });
+  const { prefix: depPrefix } = scan(depDir);
+  // The published shape: dist JS + typings. The `implements`/`extends` clauses and the bodies live in
+  // the dep's SOURCE; the consumer only ever sees these declarations.
+  const appFiles = {
+    "package.json": `{"name":"capp","version":"1.0.0"}`,
+    "src/m.ts": appSrc.replace("SPEC", "ifacekit"),
+    "node_modules/ifacekit/package.json": `{"name":"ifacekit","version":"1.0.0","types":"dist/index.d.ts","main":"dist/index.js"}`,
+    "node_modules/ifacekit/dist/index.d.ts": `export interface Fetcher { fetch(): string; }
+export declare function build(): Fetcher;
+export declare abstract class Base { abstract pull(): string; }
+export declare function buildBase(): Base;
+export interface Api { load: () => string; }
+export declare function buildApi(): Api;
+export interface Job { run(): void; }
+export declare function buildJob(): Job;
+export declare class Plain { label(): string; }
+export declare class Loud { shout(): string; }`,
+    "node_modules/ifacekit/dist/index.js": `exports.build = () => ({}); exports.buildBase = () => ({}); exports.buildApi = () => ({});
+exports.buildJob = () => ({}); exports.Plain = class {}; exports.Loud = class {};`,
+  };
+  const app = project(appFiles);
+  fs.writeFileSync(path.join(app, "deny.policy"), "deny Fs Unknown\n");
+  const chained = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", path.join(app, "deny.policy")],
+                            { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: `${depPrefix}.json` } });
+  const crep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  const why = (fn) => entry(crep, fn)?.unknownWhy ?? [];
+  const unk = (fn) => (entry(crep, fn)?.inferred ?? []).includes("Unknown");
+  check("boundary: a chained dep's INTERFACE-typed receiver discloses instead of reading pure",
+        unk("src.m.useFetcher") && why("src.m.useFetcher").includes("dispatch:ifacekit.Fetcher.fetch"),
+        JSON.stringify(crep.functions));
+  check("boundary: ...an ABSTRACT member of a chained dep's class likewise",
+        unk("src.m.usePuller") && why("src.m.usePuller").includes("dispatch:ifacekit.Base.pull"),
+        JSON.stringify(entry(crep, "src.m.usePuller")));
+  check("boundary: ...and a FUNCTION-VALUED property signature (the call resolves to the function type)",
+        unk("src.m.useApi") && why("src.m.useApi").includes("dispatch:ifacekit.Api.load"),
+        JSON.stringify(entry(crep, "src.m.useApi")));
+  check("boundary: ...and on the DESUGARED path (a dep interface member passed by reference to a HOF)",
+        unk("src.m.useJob") && why("src.m.useJob").includes("dispatch:ifacekit.Job.run"),
+        JSON.stringify(entry(crep, "src.m.useJob")));
+  // CONTROL 1 — KEYED-AND-MISSED. `Plain.label` is a CONCRETE method the dep scanned and found pure, so
+  // its absence from the dep's report IS its answer (SPEC §2 rule 3). Disclosing here would be the false
+  // uncertainty this rung is built to avoid: silence must survive.
+  check("no false uncertainty: a keyed-and-missed CONCRETE dep method stays silent",
+        entry(crep, "src.m.usePlain") == null, JSON.stringify(entry(crep, "src.m.usePlain")));
+  // CONTROL 2 — the precise join still wins. A concrete, EFFECTFUL dep method keeps its exact effect;
+  // the disclosure must never displace an answer the engine actually has.
+  check("precision preserved: a concrete effectful dep method still joins to its exact effect",
+        (entry(crep, "src.m.useLoud")?.inferred ?? []).includes("Fs") && !unk("src.m.useLoud"),
+        JSON.stringify(entry(crep, "src.m.useLoud")));
+  // THE GATE FLIP, on a project holding ONLY the unanswerable call — so the verdict turns on this arm
+  // and nothing else. Split + chained was exit 0 (a false all-clear over a dependency that reads a file);
+  // it is exit 1 again, matching the one-project control.
+  const gateApp = project({ ...appFiles, "src/m.ts": `import { build } from "ifacekit";
+export function useFetcher(): string { return build().fetch(); }` });
+  fs.writeFileSync(path.join(gateApp, "deny.policy"), "deny Fs Unknown\n");
+  const gated = spawnSync("node", [path.join(HERE, "scan.mjs"), gateApp, "--policy", path.join(gateApp, "deny.policy")],
+                          { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: `${depPrefix}.json` } });
+  check("boundary: the `deny Fs Unknown` gate is exit 1 again for an unanswerable dep key",
+        gated.status === 1, `status=${gated.status} ${gated.stdout}`);
+  check("boundary: ...and the whole-app gate fails too",
+        chained.status === 1, `status=${chained.status} ${chained.stdout}`);
+  // CONTROL 3 — the third conjunct. UNCHAINED, the κ ledger already names the package `invisible`, so
+  // the arm must not fire: a second disclosure over the same gap is noise, and `invisible` must survive.
+  const { report: urep } = scan(project(appFiles));
+  check("third conjunct: UNCHAINED the arm is silent and `invisible` is intact",
+        entry(urep, "src.m.useFetcher")?.invisible?.includes("ifacekit")
+        && !(entry(urep, "src.m.useFetcher")?.inferred ?? []).includes("Unknown"),
+        JSON.stringify(entry(urep, "src.m.useFetcher")));
+  // SINGLE-TREE CONTROL — the same source in ONE project resolves precisely (local interface CHA / class
+  // overrides reach the implementations), which is what makes this a BOUNDARY defect and not a general
+  // limitation of the engine.
+  const { report: ctl } = scan(project({
+    "package.json": `{"name":"one","version":"1.0.0"}`,
+    "src/dep.ts": depSrc,
+    "src/m.ts": appSrc.replace("SPEC", "./dep"),
+  }));
+  check("single-tree control: the same code in ONE project resolves the interface dispatch precisely",
+        (entry(ctl, "src.m.useFetcher")?.inferred ?? []).includes("Fs"),
+        JSON.stringify(entry(ctl, "src.m.useFetcher")));
+}
+
 // ── 2b. `show` SURFACES the literal Fs paths + Exec cmds (the regression that shipped) ─────────────
 // scan writes the surface under report keys `paths`/`cmds`; `show` once read a nonexistent `e.fs`, so
 // it silently dropped every file path even though the MCP `candor_show` doc promises "paths". The CLI

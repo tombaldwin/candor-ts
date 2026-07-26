@@ -1732,6 +1732,30 @@ function edgeToTargets(rec, decls) {
   for (const d of decls) { const t = nodeName.get(d); if (t) rec.edges.add(t); }
 }
 
+// ⟨scan-boundary, half 1⟩ Could a chained dependency's report EVER carry an entry under the key this
+// declaration names? A `declare function`/`declare class` member names a real body the dependency scanned
+// and hashed, so a miss is that dependency's purity claim (SPEC §2 rule 3) and must stay silent. A member
+// of a TYPE — an interface method/property signature, an anonymous type-literal member, an `abstract`
+// member — names no body at all: the implementation the call actually reaches is hashed under some other
+// type's name (`depkit#Client.fetch` for a `Fetcher`-typed receiver), which is why the lookup was never
+// answerable in the first place. Purely a question about the DECLARATION KIND, so it cannot depend on what
+// happens to be in the chained report — the point is that no report could answer.
+// Returns the MEMBER node to name in the disclosure (so the owner type is the interface, not the property
+// the function type hangs off), or null when the key is answerable and silence is the dependency's answer.
+function unanswerableKey(decl) {
+  if (!decl) return null;
+  if (ts.isMethodSignature(decl) || ts.isPropertySignature(decl)) return decl;      // interface / type-literal member
+  // `interface Api { fetch: () => string }` — the call resolves to the FUNCTION TYPE, not the property, so
+  // the member (and the owner type) is one level up. A function type on a `declare const` is NOT this case:
+  // that names a real top-level export the dependency hashed under its bare name.
+  if ((ts.isFunctionTypeNode(decl) || ts.isCallSignatureDeclaration(decl)) && decl.parent
+      && (ts.isPropertySignature(decl.parent) || ts.isMethodSignature(decl.parent))) return decl.parent;
+  if ((ts.isMethodDeclaration(decl) || ts.isPropertyDeclaration(decl)
+       || ts.isGetAccessorDeclaration(decl) || ts.isSetAccessorDeclaration(decl))
+      && (ts.getCombinedModifierFlags(decl) & ts.ModifierFlags.Abstract)) return decl; // `abstract` member of a declared class
+  return null;
+}
+
 // Charge `rec` for reaching a resolved EXTERNAL declaration through a DESUGARED site — one that is not a
 // CallExpression, so the (CLASSIFY)/join/ledger arm of the call path never sees it. This is the same
 // decision procedure that arm runs, in the same order: the chained sibling report (the SPEC §2 `hash`
@@ -1767,6 +1791,17 @@ function chargeExternalDecl(rec, decl, tailOverride) {
   if (!kappaKnows(pkg) && !depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
     unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
     rec.blind.add(pkg);
+    return;
+  }
+  // ⟨scan-boundary, half 1⟩ the UNANSWERABLE key, on the desugared sites too — the CallExpression arm's
+  // twin (see there for the argument). `[1].forEach(job.run)` where `job` is typed as a chained dep's
+  // INTERFACE hands the join a key no report can carry, and a covered package silences the ledger, so the
+  // caller read confidently pure. Same three conjuncts, same reason class.
+  const abstraction = unanswerableKey(decl);
+  if (abstraction && depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
+    rec.direct.add("Unknown");
+    const owner = abstraction.parent?.name?.getText?.();
+    rec.why.add(`dispatch:${pkg}.${owner ?? "type"}.${abstraction.name?.getText?.() ?? "member"}`);
   }
 }
 
@@ -2811,6 +2846,7 @@ function visitCalls(node) {
             // at the declared-not-verified tier — its effects are attributed and it is NOT a blind
             // spot. Otherwise the κ ledger names it (an uncurated dependency the review must read).
             const declared = packageManifestEffects(file);
+            const abstraction = unanswerableKey(decl);
             if (declared !== null) {
               for (const e of declared) rec.direct.add(e); // [] = declared pure: covered, adds nothing
             } else if (!kappaKnows(pkg) && !depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
@@ -2820,6 +2856,30 @@ function visitCalls(node) {
               // unqualified completeness claim. This branch already IS the global-blind condition, so no
               // post-filter is needed (κ either knows a package or it doesn't).
               rec.blind.add(pkg);
+            } else if (abstraction && depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
+              // ⟨scan-boundary, half 1⟩ THE UNANSWERABLE KEY, candor-spec DEP-RECEIVER-TYPING-DESIGN.md.
+              // A chained lookup that comes back empty has two readings with OPPOSITE evidential weight:
+              //   * KEYED-AND-MISSED — the key names a BODY the dep scanned (`declare class C { m() }`,
+              //     `declare function f()`), and the dep's report omits pure functions, so absence IS its
+              //     answer (SPEC §2 rule 3). Silence is correct; nothing happens here.
+              //   * NO ANSWERABLE KEY — resolution landed on an ABSTRACTION (an interface method/property
+              //     signature, an anonymous type-literal member, an `abstract` member). There is no body
+              //     under that name in the dependency, so its report can NEVER carry the key, whatever the
+              //     implementations do. No question was asked, and silence answers none.
+              // TypeScript reaches this case by a different road than rust: a receiver it genuinely cannot
+              // type is `any`, which already reads `callback:` Unknown. Its unformed key is the receiver
+              // typed to an abstraction the dependency's report has no vocabulary for — `build(): Fetcher`
+              // exported over a `.d.ts` whose only implementation, `Client`, is what the dep actually
+              // hashed. Measured: `go` was absent from the report entirely while the dep's own report read
+              // `depkit#Client.fetch -> ['Fs']`.
+              // THE THIRD CONJUNCT (`depCoveredPkgs.has(pkg)` — the dependency is CHAINED) is the arm
+              // above, and it is load-bearing rather than incidental: for an UNCHAINED package the κ ledger
+              // already discloses `invisible: [pkg]`, so a second voice would be pure false uncertainty. It
+              // is exactly when the package IS covered that the ledger correctly falls silent and that
+              // silence becomes the confident purity claim this rung exists to prevent.
+              rec.direct.add("Unknown");
+              const owner = abstraction.parent?.name?.getText?.();
+              rec.why.add(`dispatch:${pkg}.${owner ?? "type"}.${abstraction.name?.getText?.() ?? "member"}`); // SPEC §4 `dispatch:<owner-type>.<member>` — an abstraction with no visible impl; package-qualified so a dep type never collides with a local one
             }
           }
         }
