@@ -329,9 +329,22 @@ export function declaringType(fn) { const b = stripPos(fn); const i = b.lastInde
 
 // Load the type-hierarchy sidecar (`<prefix>.hierarchy.json`, 0.7), or {} if absent (→ the frontier
 // falls back to a simple-name match, which over-lists — the safe direction).
+// ⟨metadata keys⟩ A key this reader cannot interpret is DROPPED, not coerced. `norm` used to turn a
+// non-array value into `[]` and KEEP the key, which puts a PHANTOM TYPE in the hierarchy — a name no code
+// declares — and a phantom is not inert here: `callersFrontier`'s `hasHier` gates on
+// `Object.keys(h).length > 0`, so ONE metadata key flips the frontier off the over-listing simple-name
+// match onto the precise subtype test, over a hierarchy that can answer nothing. Measured on candor-java's
+// first `"@superclass"` encoding (an OBJECT among arrays; since fixed producer-side to a flat array,
+// candor-java `403f24b`): a flat project whose sidecar was `{}` disclosed `possibleViaUnknownDispatch:
+// [app.Frontier.go]`, and the SAME project with `{"@superclass":{}}` disclosed `[]`. A metadata key
+// silently narrowed a disclosure.
+// The rule is deliberately asymmetric because the two mistakes are not. A phantom key can only ever
+// NARROW this frontier; dropping an unknown key can only ever widen it back to the documented fallback,
+// and this frontier is a disclosure that is explicitly allowed to over-list. So the `@` extension
+// namespace and any non-array value both go, rather than being guessed at.
 export function loadHierarchy(prefix) {
   const norm = (h) => (h && typeof h === "object" && !Array.isArray(h))
-    ? Object.fromEntries(Object.entries(h).map(([k, v]) => [k, Array.isArray(v) ? v : []])) : {};
+    ? Object.fromEntries(Object.entries(h).filter(([k, v]) => !k.startsWith("@") && Array.isArray(v))) : {};
   if (fs.existsSync(`${prefix}.hierarchy.json`)) {
     try { return norm(JSON.parse(fs.readFileSync(`${prefix}.hierarchy.json`, "utf8"))); } catch { return {}; }
   }

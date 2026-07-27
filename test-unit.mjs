@@ -633,12 +633,26 @@ test("isReport: a callgraph/ledger/calibrated sibling is not a report", () => {
 });
 
 // ── query-core: loadHierarchy (the ⟨0.7⟩ sidecar loader — was never executed by any suite) ─────────
-test("loadHierarchy: exact sidecar, wrong-type coercion, corrupt → {}, absent → {}", () => {
+test("loadHierarchy: exact sidecar, uninterpretable keys DROPPED, corrupt → {}, absent → {}", () => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
-  // the exact `<prefix>.hierarchy.json` form; a non-array supertype value is coerced to []
+  // The exact `<prefix>.hierarchy.json` form. A non-array value is DROPPED, not coerced to `[]` and
+  // kept: a kept key is a PHANTOM TYPE no code declares, and `callersFrontier` counts keys.
   fs.writeFileSync(path.join(d, "r.hierarchy.json"),
     JSON.stringify({ "m.Impl": ["m.Base"], "m.Odd": "not-an-array" }));
-  assert.deepEqual(loadHierarchy(path.join(d, "r")), { "m.Impl": ["m.Base"], "m.Odd": [] });
+  assert.deepEqual(loadHierarchy(path.join(d, "r")), { "m.Impl": ["m.Base"] });
+  // …and the `@` extension namespace (SPEC §2.2) goes the same way, whatever shape it carries. The real
+  // one is candor-java's `"@superclass"` (`bb8459a`, an OBJECT; flattened to an array in `403f24b`).
+  fs.writeFileSync(path.join(d, "x.hierarchy.json"),
+    JSON.stringify({ "m.Impl": ["m.Base"], "@superclass": { "m.Impl": "m.Base" } }));
+  assert.deepEqual(loadHierarchy(path.join(d, "x")), { "m.Impl": ["m.Base"] });
+  // …including the array-valued spelling, which type-coercion alone would have let through.
+  fs.writeFileSync(path.join(d, "y.hierarchy.json"),
+    JSON.stringify({ "m.Impl": ["m.Base"], "@superclass": ["m.Impl", "m.Base"] }));
+  assert.deepEqual(loadHierarchy(path.join(d, "y")), { "m.Impl": ["m.Base"] });
+  // A sidecar carrying ONLY metadata is exactly an ABSENT one — the row that makes it a disclosure fix
+  // rather than a tidy-up, since `hasHier` reads emptiness.
+  fs.writeFileSync(path.join(d, "z.hierarchy.json"), JSON.stringify({ "@superclass": ["m.Impl"] }));
+  assert.deepEqual(loadHierarchy(path.join(d, "z")), {});
   // corrupt JSON → {} (tolerate — the frontier falls back to the safe over-listing direction)
   fs.writeFileSync(path.join(d, "c.hierarchy.json"), "{ not json");
   assert.deepEqual(loadHierarchy(path.join(d, "c")), {});
@@ -669,6 +683,37 @@ test("loadHierarchy → callersFrontier: a loaded sidecar actually drives the su
     [{ fn: "m.Go.go", viaDispatchOn: "run" }]);
   const fns2 = [{ fn: "m.Go.go", unknownWhy: ["dispatch:m.Elsewhere.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
   assert.deepEqual(callersFrontier(cg, fns2, hier, "m.Sink.touch").possibleViaUnknownDispatch, []);
+  fs.rmSync(d, { recursive: true, force: true });
+});
+test("loadHierarchy → callersFrontier: a METADATA key cannot narrow the frontier", () => {
+  // `callersFrontier` gates on `Object.keys(hierarchy).length > 0`, so a key the loader keeps but cannot
+  // interpret is not inert: it takes the frontier off the documented over-listing fallback and onto the
+  // precise subtype test over a hierarchy that answers nothing. Both directions, because the fix is a
+  // WIDENING and the row that must not move is the one with a real type in it.
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
+  const cg = { "m.Impl.run": ["m.Sink.touch"], "m.Sink.touch": [], "m.Go.go": [] };
+  const unrelated = [{ fn: "m.Go.go", unknownWhy: ["dispatch:m.Elsewhere.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
+  const genuine = [{ fn: "m.Go.go", unknownWhy: ["dispatch:m.Base.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
+
+  // NO-CHANGE DIRECTION FIRST. A real type beside the metadata key: the subtype test still rules the
+  // unrelated owner out and admits the genuine override, exactly as without the metadata key.
+  fs.writeFileSync(path.join(d, "both.hierarchy.json"),
+    JSON.stringify({ "m.Impl": ["m.Base"], "@superclass": { "m.Impl": "m.Base" } }));
+  const both = loadHierarchy(path.join(d, "both"));
+  assert.deepEqual(callersFrontier(cg, unrelated, both, "m.Sink.touch").possibleViaUnknownDispatch, []);
+  assert.deepEqual(callersFrontier(cg, genuine, both, "m.Sink.touch").possibleViaUnknownDispatch,
+    [{ fn: "m.Go.go", viaDispatchOn: "run" }]);
+
+  // THE DEFECT. A sidecar carrying ONLY metadata must behave exactly as an ABSENT one — which over-lists,
+  // and over-listing is the direction a "cannot confirm" disclosure is allowed to be wrong in. Kept as a
+  // phantom this returned `[]`: a reacher silently dropped from the frontier by a key about bookkeeping.
+  fs.writeFileSync(path.join(d, "meta.hierarchy.json"), JSON.stringify({ "@superclass": ["m.Impl", "m.Base"] }));
+  const meta = loadHierarchy(path.join(d, "meta"));
+  assert.deepEqual(meta, {});
+  assert.deepEqual(callersFrontier(cg, unrelated, meta, "m.Sink.touch").possibleViaUnknownDispatch,
+    callersFrontier(cg, unrelated, {}, "m.Sink.touch").possibleViaUnknownDispatch);
+  assert.deepEqual(callersFrontier(cg, unrelated, meta, "m.Sink.touch").possibleViaUnknownDispatch,
+    [{ fn: "m.Go.go", viaDispatchOn: "run" }]);
   fs.rmSync(d, { recursive: true, force: true });
 });
 

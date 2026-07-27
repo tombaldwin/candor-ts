@@ -8,6 +8,22 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**A hierarchy-sidecar key this reader cannot interpret is DROPPED, not coerced** (`query-core.mjs`).
+`loadHierarchy`'s `norm` turned a non-array value into `[]` and KEPT the key, putting a phantom type — a
+name no code declares — into the hierarchy. That is not inert: `callersFrontier` gates on
+`Object.keys(hierarchy).length > 0`, so a single metadata key takes the frontier off its documented
+over-listing simple-name fallback and onto the precise subtype test, over a hierarchy that can answer
+nothing. Measured on candor-java's first `"@superclass"` encoding (an object among arrays, since
+flattened producer-side in candor-java `403f24b`): a flat project whose sidecar was `{}` disclosed
+`possibleViaUnknownDispatch: [app.Frontier.go]`; the same project with `{"@superclass":{}}` disclosed
+`[]`. The `@` extension namespace (SPEC §2.2) and any non-array value are now both dropped — asymmetric
+on purpose, because a phantom key can only NARROW this frontier while an unknown key dropped can only
+widen it back to the fallback, and this is a "cannot confirm" disclosure that is allowed to over-list.
+Note the array-valued spelling is java's CURRENT one, so a type check alone would not have caught it.
+NOT changed, and flagged for a four-way ruling: `hasHier` gates on EMPTINESS, rust's `callers.rs` does
+the same, and candor-java's `Query.java` gates on ABSENCE and takes the precise path over a
+present-but-empty map, which narrows. Three engines, two answers, same input.
+
 **`--workspace`'s cache ownership is one derivation, and it is recorded from the WRITE** (`scan.mjs`).
 `95d0b8b`'s sweep rule — *a file candor would have OVERWRITTEN on success is the file it removes on
 failure* — holds only while the writer's name and the sweeper's candidate name are the same string, and
