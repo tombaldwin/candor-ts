@@ -2108,6 +2108,106 @@ export function buy(): void { charge(100); }`,
         buy4?.inferred.includes("Net") && buy4?.hosts?.includes("api.stripe.com"), JSON.stringify(buy4));
 }
 
+// ── 11b. ⟨0.20⟩ the dep's Net-surface INCOMPLETENESS crosses the boundary with its hosts ──────────
+// A trust marker failing OPEN at the scan boundary: `hosts` is a LOWER bound and `netClass`'s
+// `unknown-host` is the producer's published judgment that it is one. The join copied the literals and
+// not the judgment, so the consumer re-derived `netClass` from a partial surface and certified it.
+{
+  const pol = (dir, body) => { const p = path.join(dir, "p.policy"); fs.writeFileSync(p, body); return p; };
+  // THE SECOND FIXTURE, WRITTEN FIRST (standing bar item 0): a dep whose Net surface is COMPLETE must NOT
+  // pick up `unknown-host` at the consumer. Without this control the fix is indistinguishable from
+  // "every chained Net is unknown-host", which floods `deny Net[unknown-host]` on clean code.
+  const cleanDep = project({
+    "package.json": `{"name":"cleanlib"}`,
+    "src/t.ts": `import * as netm from "node:net";
+export function beacon(): void { netm.connect(443, "sentry.io"); }`,
+  });
+  scan(cleanDep);
+  const cleanApp = project({
+    "package.json": `{"name":"cleanapp","dependencies":{"cleanlib":"1.0.0"}}`,
+    "node_modules/cleanlib/package.json": `{"name":"cleanlib","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/cleanlib/index.d.ts": `export declare function beacon(): void;`,
+    "node_modules/cleanlib/index.js": ``,
+    "src/m.ts": `import { beacon } from "cleanlib";
+export function go(): void { beacon(); }`,
+  });
+  const cleanDeps = path.join(cleanDep, ".candor", "report.json");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), cleanApp], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: cleanDeps } });
+  const goClean = entry(JSON.parse(fs.readFileSync(path.join(cleanApp, ".candor", "report.json"), "utf8")), "src.m.go");
+  check("a COMPLETE dep Net surface stays certified at the consumer (no unknown-host flood)",
+        goClean?.netClass?.includes("known-telemetry") && !goClean?.netClass?.includes("unknown-host"),
+        JSON.stringify(goClean));
+  const cleanGate = spawnSync("node", [path.join(HERE, "scan.mjs"), cleanApp, "--policy", pol(cleanApp, "deny Net[unknown-host]\n")],
+                              { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: cleanDeps } });
+  check("…and `deny Net[unknown-host]` stays GREEN over it", cleanGate.status === 0, cleanGate.stdout + cleanGate.stderr);
+
+  // THE DEFECT: one literal host and one runtime host in the same dep function. The producer publishes
+  // `netClass: ['known-telemetry','unknown-host']`; the consumer used to read `['known-telemetry']`.
+  const dep = project({
+    "package.json": `{"name":"masklib"}`,
+    "src/t.ts": `import * as netm from "node:net";
+export function beacon(where: string): void { netm.connect(443, "sentry.io"); netm.connect(443, where); }`,
+  });
+  const depRep = scan(dep).report;
+  check("producer publishes the masked Net surface as unknown-host",
+        entry(depRep, "src.t.beacon")?.netClass?.includes("unknown-host")
+        && entry(depRep, "src.t.beacon")?.netClass?.includes("known-telemetry"),
+        JSON.stringify(entry(depRep, "src.t.beacon")));
+  const app = project({
+    "package.json": `{"name":"maskapp","dependencies":{"masklib":"1.0.0"}}`,
+    "node_modules/masklib/package.json": `{"name":"masklib","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/masklib/index.d.ts": `export declare function beacon(where: string): void;`,
+    "node_modules/masklib/index.js": ``,
+    "src/m.ts": `import { beacon } from "masklib";
+export function go(w: string): void { beacon(w); }`,
+  });
+  const deps = path.join(dep, ".candor", "report.json");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), app], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: deps } });
+  const go = entry(JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8")), "src.m.go");
+  check("a chained dep's masked Net surface arrives as unknown-host (the marker crosses the boundary)",
+        go?.inferred.includes("Net") && go?.hosts?.includes("sentry.io") && go?.netClass?.includes("unknown-host"),
+        JSON.stringify(go));
+
+  // THE SINGLE-TREE CONTROL — the same source in ONE package is exit 1 in BOTH arms, so this is a
+  // BOUNDARY defect and not a general limitation of the destination-class rung.
+  const ctl = project({
+    "package.json": `{"name":"maskapp"}`,
+    "src/t.ts": `import * as netm from "node:net";
+export function beacon(where: string): void { netm.connect(443, "sentry.io"); netm.connect(443, where); }`,
+    "src/m.ts": `import { beacon } from "./t";
+export function go(w: string): void { beacon(w); }`,
+  });
+  const ctlGate = spawnSync("node", [path.join(HERE, "scan.mjs"), ctl, "--policy", pol(ctl, "deny Net[unknown-host]\n")], { encoding: "utf8" });
+  check("single-tree control: `deny Net[unknown-host]` fires (exit 1)", ctlGate.status === 1, ctlGate.stdout + ctlGate.stderr);
+  const splitGate = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", pol(app, "deny Net[unknown-host]\n")],
+                              { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: deps } });
+  check("split + chained: the SAME rule still fires (exit 1) — the boundary no longer certifies it",
+        splitGate.status === 1, splitGate.stdout + splitGate.stderr);
+
+  // The MASKING form java `e24edd9` names, one layer up: the consumer's OWN literal host must not certify
+  // a dep's hostless Net. Without the marker `hosts` is non-empty, so `netClassesOf` never adds unknown-host.
+  const hostless = project({
+    "package.json": `{"name":"hostlesslib"}`,
+    "src/t.ts": `import * as netm from "node:net";
+export function send(where: string): void { netm.connect(443, where); }`,
+  });
+  scan(hostless);
+  const mixed = project({
+    "package.json": `{"name":"mixedapp","dependencies":{"hostlesslib":"1.0.0"}}`,
+    "node_modules/hostlesslib/package.json": `{"name":"hostlesslib","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/hostlesslib/index.d.ts": `export declare function send(where: string): void;`,
+    "node_modules/hostlesslib/index.js": ``,
+    "src/m.ts": `import { send } from "hostlesslib";
+import * as netm from "node:net";
+export function both(w: string): void { netm.connect(443, "sentry.io"); send(w); }`,
+  });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), mixed], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(hostless, ".candor", "report.json") } });
+  const both = entry(JSON.parse(fs.readFileSync(path.join(mixed, ".candor", "report.json"), "utf8")), "src.m.both");
+  check("a sibling literal in the CONSUMER's body cannot certify a chained dep's hostless Net",
+        both?.netClass?.includes("unknown-host") && both?.netClass?.includes("known-telemetry"),
+        JSON.stringify(both));
+}
+
 // ── 12. entry points + reachable + unknownWhy + allow-js + import-alias edges ────────────────────
 {
   const d = project({

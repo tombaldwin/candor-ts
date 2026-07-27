@@ -542,7 +542,7 @@ const staleDepPkgs = new Set();
         if (!e.hash) continue;
         const hashPkg = e.hash.split("#")[0];
         if (hashPkg) covers.add(hashPkg);
-        const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [] };
+        const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [], netIncomplete: false };
         for (const x of stale ? ["Unknown"] : e.inferred ?? []) cell.inferred.add(x);
         // ⟨0.19⟩ THE REASON CLASS TRAVELS WITH THE UNKNOWN. Without this the join copied `inferred` and
         // `invisible` only, so a dependency's `Unknown[reflect:eval]` arrived at the consumer as a bare
@@ -558,6 +558,23 @@ const staleDepPkgs = new Set();
         if (!stale) for (const b of e.invisible ?? []) cell.invisible.add(b);
         if (!stale) for (const m of ["hosts", "cmds", "paths", "tables"])
           for (const v of e[m] ?? []) if (!cell[m].includes(v)) cell[m].push(v);
+        // ⟨0.20⟩ THE NET SURFACE'S INCOMPLETENESS TRAVELS WITH ITS HOSTS. `hosts` is a LOWER bound — the
+        // producer marks a masked/hostless Net internally (`rec.incomplete`) and publishes that judgment as
+        // `unknown-host` in `netClass`. The join copied the host LITERALS and not the judgment, so the
+        // consumer re-derived `netClass` from a lower bound as if it were the whole surface: a dep entry
+        // reading `netClass: ['known-telemetry','unknown-host']` arrived as `['known-telemetry']`, and
+        // `deny Net[unknown-host]` — a rule whose entire job is to catch a destination candor cannot see —
+        // went from exit 1 to exit 0 one package boundary along. Same shape as the ⟨0.19⟩ reason class two
+        // lines up, one field over: a fail-CLOSED marker failing OPEN at the boundary. No format rung: the
+        // dependency already published the answer under the hash the consumer joins.
+        //
+        // Read off `netClass` rather than an incompleteness field because `rec.incomplete` is deliberately
+        // INTERNAL family-wide (java/rust keep it out of the report too) — `unknown-host` IS its wire form.
+        // Carries ONLY the incompleteness, never the classes: `known-telemetry`/`known-partner` are facts
+        // about the hosts already copied above, and re-deriving them from those literals is what keeps the
+        // consumer's `netClass` a function of the surface it can see (the property `netClassesOf` exists to
+        // hold). A stale report's assertions are not ours to repeat, and it contributes no Net at all.
+        if (!stale && (e.netClass ?? []).includes("unknown-host")) cell.netIncomplete = true;
         crossDeps.set(e.hash, cell);
       }
     } catch { console.error(`candor-ts: CANDOR_DEPS report unparsable, skipped: ${f}`); }
@@ -1823,6 +1840,12 @@ function applyDepHit(rec, hit) {
   for (const v of hit.cmds ?? []) rec.cmds.add(v);
   for (const v of hit.paths ?? []) rec.paths.add(v);
   for (const v of hit.tables ?? []) rec.tables.add(v);
+  // ⟨0.20⟩ and the Net surface's INCOMPLETENESS with them — see the loader. `hosts` above is a lower bound;
+  // without this the consumer certifies a destination class off a partial host list, and a sibling literal
+  // in the CONSUMER's own body masks a hostless dep Net exactly the way candor-java `e24edd9` describes one
+  // layer down. Additive: it can only ADD `unknown-host`, never remove a class, so it never turns a firing
+  // gate green.
+  if (hit.netIncomplete) rec.incomplete.add("Net");
 }
 function unanswerableKey(decl) {
   if (!decl) return null;
@@ -3635,10 +3658,11 @@ function depInitCell(pkg, subpath) {
   let cell = null;
   for (const [h, c] of crossDeps) {
     if (!h.startsWith(`${pkg}#`) || !h.endsWith(".<module>")) continue;
-    cell ??= { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [] };
+    cell ??= { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [], netIncomplete: false };
     for (const e of c.inferred) cell.inferred.add(e);
     for (const b of c.invisible) cell.invisible.add(b);
     for (const w of c.why ?? []) cell.why.add(w);
+    if (c.netIncomplete) cell.netIncomplete = true;   // a UNION of module units is incomplete if ANY of them is
   }
   return cell;
 }
@@ -3735,6 +3759,10 @@ function resolveDepEntryKey(pkg, subpath) {
     for (const e of cell.inferred) rec.direct.add(e);
     for (const b of cell.invisible) rec.blind.add(b);
     for (const w of cell.why ?? []) rec.why.add(w);   // §2.1 stale-dep disclosure carries its reason
+    // ⟨0.20⟩ …and the initializer's Net incompleteness, for the same reason the call join carries it. This
+    // arm copies no `hosts` (a module unit's literals are not this caller's), so today it can only turn a
+    // hostless Net that a sibling literal in THIS body would have certified back into `unknown-host`.
+    if (cell.netIncomplete) rec.incomplete.add("Net");
   }
   for (let changed = true; changed; ) {
     changed = false;
