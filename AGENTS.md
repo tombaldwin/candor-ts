@@ -81,9 +81,14 @@ A dist-CJS export unit (a `module.exports` surface scanned with `--allow-js`) ca
 report inherits that function's recorded transitive effects and literal surfaces, joined by the
 report's `hash` (`package#LocalName`). A report produced by a different candor-ts version is
 downgraded to `Unknown` rather than silently trusted, and grants that package **no coverage** — so a key it
-does not answer falls back to the κ ledger's `invisible` hedge rather than reading pure (spec §2.1). Caveat:
-a type-only boundary (`import type` …, the tRPC style) has no runtime calls to inherit through — nothing to
-join.
+does not answer falls back to the κ ledger's `invisible` hedge rather than reading pure (spec §2.1). **A report
+that declares itself INCOMPLETE** — a non-empty ⟨0.21⟩ `unanalyzed` — grants **no coverage** either, for the
+same reason read one step earlier: spec §2 rule 3 makes a report's silence a purity claim, and this one has
+just said it never read some of its own source. Its entries are kept unchanged (they were derived from source
+it *did* read); only its silence hedges, and an `import` backed only by such a report discloses
+`Unknown[incomplete-dep:<pkg>]`. Chaining an incomplete report is therefore never worse than not chaining it.
+Caveat: a type-only boundary (`import type` …, the tRPC style) has no runtime calls to inherit through —
+nothing to join.
 
 **Changing a report KEY is a wire change: bump `package.json`'s version in the same commit.** `candor.version`
 is the only discriminator §2.1 has, so two builds that disagree about a key while sharing a version string

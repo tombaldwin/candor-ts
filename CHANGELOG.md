@@ -8,6 +8,38 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+⚠ **⟨0.21⟩ A chained report that DECLARES ITSELF INCOMPLETE no longer grants coverage** (`scan.mjs`). SPEC
+§2 rule 3 turns a report's silence into a purity claim; a report carrying a non-empty `unanalyzed` has just
+said it never read some of its own source, so its silence about that source answers nothing. Measured
+before the fix: a dependency with one unparseable file scans to exit 0 with a report that still names its
+package, and a consumer calling a declaration that file was supposed to hold went from
+`invisible: ["deplib"]` unchained — the honest hedge — to **absent from the report entirely**, a ⟨0.21⟩
+positive purity claim about a function that writes to the filesystem, with `deny Fs` at exit 0. The
+single-tree control over the same sources is exit 2 ("a gate cannot be green over unanalyzed code"), so
+chaining an incomplete report was strictly WORSE than not chaining it: the dependency's own scan refused to
+certify a gate over itself and the consumer certified one on its behalf. The same door `651c9f9` closed for
+a report failing the §2.1 version check, with a different key.
+
+The TREATMENT differs from staleness, and that difference is the point: a stale report's entries are
+assertions from a build we do not trust and are downgraded to `Unknown`; an incomplete report's entries were
+derived from source it DID read and are kept **unchanged**. Only the SILENCE hedges — strictly additive, no
+effect is ever removed. Half 1's unanswerable-key `Unknown` still fires alongside the ledger hedge rather
+than being replaced by it (letting the hedge replace it would have narrowed `deny E Unknown[dispatch]` — a
+gate lost to a fix), and an `import` backed only by an incomplete report discloses
+`Unknown[incomplete-dep:<pkg>]`, the initializer-edge half of the same argument. ⚠ a chained consumer may
+newly carry `invisible`/`Unknown` where a dependency's report is incomplete; regenerate baselines.
+
+⚠ **⟨0.20⟩ A chained dependency's masked Net surface no longer arrives certified** (`scan.mjs`). `hosts` is
+a LOWER bound and `netClass`'s `unknown-host` is the producer's published judgment that it is one; the join
+copied the literals and not the judgment. A dep entry reading `netClass: ['known-telemetry','unknown-host']`
+arrived at the consumer as `['known-telemetry']`, and `deny Net[unknown-host]` — a rule whose entire job is
+to catch a destination candor cannot see — went exit 1 → exit 0 one package boundary along, against a
+single-tree control that is exit 1 in both arms. The same hole let a literal host in the CONSUMER's own body
+certify a chained dep's hostless Net (candor-java `e24edd9`'s masking shape, one boundary along). A
+fail-closed marker failing open at the boundary, the sibling of `e66f29e`; no format rung, since the
+dependency already published the answer under the hash the consumer joins. ⚠ `deny Net[unknown-host]` may
+newly fire on a chained consumer.
+
 ⚠ **⟨0.19⟩ A chained dependency's Unknown keeps its REASON CLASS at the consumer** (`scan.mjs`). The dep
 join copied `inferred` and `invisible` only, so a dependency's `Unknown[reflect:eval]` arrived as a bare
 `Unknown` and fell back to the generic `unresolved` — and `deny Net Unknown[reflect]`, a rule written to

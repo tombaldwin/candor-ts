@@ -519,6 +519,25 @@ const depCoveredPkgs = new Set();
 // key shape read pure. Fires only on a version mismatch — a configuration the family already treats as
 // invalid gate input (the AS-EFF-005 baseline guard says exactly that).
 const staleDepPkgs = new Set();
+// ⟨0.21⟩ Packages whose ONLY chained report DECLARES ITSELF INCOMPLETE — it carries a non-empty
+// `unanalyzed`, i.e. it names source it could not analyze. Same door as `staleDepPkgs`, different key: a
+// report says "these units were never derived", and §2 rule 3 then turns their ABSENCE from `functions`
+// into a purity claim about exactly the code the report just said it never read. Measured before it was
+// fixed: a dependency with one unparseable file scans to exit 0 and a report that still names its package,
+// the consumer chains it, and a function calling the vanished declaration goes from
+// `invisible:['deplib']` (unchained, the honest hedge) to ABSENT FROM THE REPORT — a ⟨0.21⟩ positive
+// purity claim about a function that writes to the filesystem, with `deny Fs` at exit 0. The single-tree
+// control over the SAME sources is exit 2 ("a gate cannot be green over unanalyzed code"), so chaining an
+// incomplete report was strictly WORSE than not chaining it: the dependency's own scan refused to certify
+// a gate over itself and the consumer certified one on its behalf.
+//
+// The treatment DIFFERS from staleness, and the difference is the whole point. A stale report's entries
+// are assertions from a build we do not trust, so they are downgraded to `Unknown`. An incomplete report's
+// entries were derived from source it DID analyze and are true — only its SILENCE is not a purity claim.
+// So the entries are kept exactly as they are and only COVERAGE is withheld: strictly additive, an
+// answered key still answers, an unanswered one falls back to the κ ledger's `invisible: [pkg]` hedge.
+// Nothing is downgraded and no effect is ever removed.
+const incompleteDepPkgs = new Set();
 {
   // --workspace's auto-scanned deps dir is prepended to the explicit CANDOR_DEPS/config spec (both chain).
   const spec = [workspaceDepsDir, depInitsDir, process.env.CANDOR_DEPS ?? candorConfig.deps ?? ""].filter(Boolean).join(":");
@@ -536,7 +555,11 @@ const staleDepPkgs = new Set();
       // A report whose version can't be VERIFIED is not trusted (§2.1) — a missing header is as
       // untrustworthy as a mismatched one (the Rust engine's rule; the engines split on this).
       const stale = d.candor?.version !== ENGINE_VERSION;
-      const covers = stale ? staleDepPkgs : depCoveredPkgs;   // an untrusted report grants no coverage
+      // ⟨0.21⟩ …and neither does one that names source it could not analyze (see `incompleteDepPkgs`).
+      // Staleness is checked FIRST: a report we do not trust cannot be trusted about its own completeness
+      // either, so its `unanalyzed` claim buys it nothing beyond the downgrade it already gets.
+      const incomplete = !stale && Array.isArray(d.unanalyzed) && d.unanalyzed.length > 0;
+      const covers = stale ? staleDepPkgs : incomplete ? incompleteDepPkgs : depCoveredPkgs;   // an untrusted or self-declared-incomplete report grants no coverage
       if (typeof d.package === "string" && d.package) covers.add(d.package);
       for (const e of d.functions ?? []) {
         if (!e.hash) continue;
@@ -582,9 +605,17 @@ const staleDepPkgs = new Set();
   // A package chained TWICE — once fresh, once stale — is covered by the fresh report, so it is not a
   // stale-only package and must not pick up the disclosure below on top of a real answer.
   for (const p of depCoveredPkgs) staleDepPkgs.delete(p);
+  // …and the same for completeness: a package chained twice, once complete and once not, IS covered by the
+  // complete report. A COMPLETE report is a coverage claim on its own, so it must not inherit the other's
+  // hedge — the same "must not pick up the disclosure on top of a real answer" rule one line up.
+  for (const p of depCoveredPkgs) incompleteDepPkgs.delete(p);
   if (staleDepPkgs.size)
     console.error(`candor-ts: ${staleDepPkgs.size} chained dependency report(s) were produced by a DIFFERENT engine build — `
       + `downgraded to Unknown and granted no coverage (§2.1): ${[...staleDepPkgs].sort().join(", ")}`);
+  if (incompleteDepPkgs.size)
+    console.error(`candor-ts: ${incompleteDepPkgs.size} chained dependency report(s) declare source they could not analyze `
+      + `(\`unanalyzed\`) — entries kept, but granted no coverage, so a key they do not answer discloses instead of reading `
+      + `pure: ${[...incompleteDepPkgs].sort().join(", ")}`);
 }
 
 if (allowJs) { compilerOptions.allowJs = true; compilerOptions.checkJs = false; }
@@ -1856,6 +1887,16 @@ function unanswerableKey(decl) {
       && (ts.getCombinedModifierFlags(decl) & ts.ModifierFlags.Abstract)) return decl; // `abstract` member of a declared class
   return null;
 }
+// ⟨scan-boundary, half 1⟩ THE DISCLOSURE ITSELF, in ONE place. It had two copies — the CallExpression arm
+// and the desugared-declaration arm — and this pass needed to add a condition to both, which is exactly the
+// setup that let candor-java's `crossDepJoin` and this engine's own dep-apply drift (`6ab26e4`, `4dad22d`).
+// `dispatch:<pkg>.<owner-type>.<member>` is SPEC §4's spelling, package-qualified so a dependency's type
+// can never collide with a local one.
+function discloseUnanswerableKey(rec, pkg, abstraction) {
+  rec.direct.add("Unknown");
+  const owner = abstraction.parent?.name?.getText?.();
+  rec.why.add(`dispatch:${pkg}.${owner ?? "type"}.${abstraction.name?.getText?.() ?? "member"}`);
+}
 
 // Charge `rec` for reaching a resolved EXTERNAL declaration through a DESUGARED site — one that is not a
 // CallExpression, so the (CLASSIFY)/join/ledger arm of the call path never sees it. This is the same
@@ -1882,21 +1923,25 @@ function chargeExternalDecl(rec, decl, tailOverride) {
   const file = decl.getSourceFile().fileName;
   const declared = packageManifestEffects(file);
   if (declared !== null) { for (const e of declared) rec.direct.add(e); return; } // [] = declared pure
+  const abstraction = unanswerableKey(decl);
   if (!kappaKnows(pkg) && !depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
     unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
     rec.blind.add(pkg);
+    // ⟨0.21⟩ A package chained ONLY by a SELF-DECLARED-INCOMPLETE report reaches this arm because its
+    // coverage was withheld — but half 1 below still has something to say about it, and letting the ledger
+    // hedge REPLACE the Unknown would be a narrowing introduced by a fix (standing bar item 0): a
+    // `deny E Unknown[dispatch]` that fires today would stop firing. Both voices, not one instead of the
+    // other — the "second voice is false uncertainty" argument below is about an UNCHAINED package, where
+    // no report was ever asked.
+    if (abstraction && incompleteDepPkgs.has(pkg)) discloseUnanswerableKey(rec, pkg, abstraction);
     return;
   }
   // ⟨scan-boundary, half 1⟩ the UNANSWERABLE key, on the desugared sites too — the CallExpression arm's
   // twin (see there for the argument). `[1].forEach(job.run)` where `job` is typed as a chained dep's
   // INTERFACE hands the join a key no report can carry, and a covered package silences the ledger, so the
   // caller read confidently pure. Same three conjuncts, same reason class.
-  const abstraction = unanswerableKey(decl);
-  if (abstraction && depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
-    rec.direct.add("Unknown");
-    const owner = abstraction.parent?.name?.getText?.();
-    rec.why.add(`dispatch:${pkg}.${owner ?? "type"}.${abstraction.name?.getText?.() ?? "member"}`);
-  }
+  if (abstraction && depCoveredPkgs.has(pkg) && crossesPackageBoundary(file))
+    discloseUnanswerableKey(rec, pkg, abstraction);
 }
 
 // ---- implicit VALUE-COERCION desugaring (the silent-pure holes where the JS coercion protocol calls a
@@ -3013,6 +3058,11 @@ function visitCalls(node) {
               // unqualified completeness claim. This branch already IS the global-blind condition, so no
               // post-filter is needed (κ either knows a package or it doesn't).
               rec.blind.add(pkg);
+              // ⟨0.21⟩ …and half 1 STILL speaks for a package whose only chained report declares itself
+              // incomplete, which lands here because its coverage was withheld. See the twin in
+              // `chargeExternalDecl`: the ledger hedge must ADD to the Unknown, never replace it, or the
+              // completeness fix silently narrows `deny E Unknown[dispatch]` (standing bar item 0).
+              if (abstraction && incompleteDepPkgs.has(pkg)) discloseUnanswerableKey(rec, pkg, abstraction);
             } else if (abstraction && depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
               // ⟨scan-boundary, half 1⟩ THE UNANSWERABLE KEY, candor-spec DEP-RECEIVER-TYPING-DESIGN.md.
               // A chained lookup that comes back empty has two readings with OPPOSITE evidential weight:
@@ -3034,9 +3084,7 @@ function visitCalls(node) {
               // already discloses `invisible: [pkg]`, so a second voice would be pure false uncertainty. It
               // is exactly when the package IS covered that the ledger correctly falls silent and that
               // silence becomes the confident purity claim this rung exists to prevent.
-              rec.direct.add("Unknown");
-              const owner = abstraction.parent?.name?.getText?.();
-              rec.why.add(`dispatch:${pkg}.${owner ?? "type"}.${abstraction.name?.getText?.() ?? "member"}`); // SPEC §4 `dispatch:<owner-type>.<member>` — an abstraction with no visible impl; package-qualified so a dep type never collides with a local one
+              discloseUnanswerableKey(rec, pkg, abstraction);
             }
           }
         }
@@ -3737,11 +3785,19 @@ function resolveDepEntryKey(pkg, subpath) {
         // report from another build discloses `Unknown` instead of nothing. The reason class is
         // `unresolved` (policy.mjs's catch-all), which is what it is: candor could not resolve this import,
         // and says so. This is the whole class the per-file module key change fell into — see `depInitCell`.
+        // ⟨0.21⟩ …and the SAME argument for a report that declares itself INCOMPLETE. The reasoning is
+        // identical with one word changed: an empty answer is a purity claim only when the report making it
+        // is complete, and this one says it is not. The TREATMENT differs, because the evidence does — an
+        // incomplete report's entries were derived from source it DID read, so a cell it DOES answer is kept
+        // untouched (no `Unknown`, no reason bolted on); only the SILENCE hedges.
         const staleOnly = staleDepPkgs.has(pkg);
+        const incompleteOnly = incompleteDepPkgs.has(pkg);
         if (cell && cell.inferred.size)
           depInits.push([node, staleOnly ? { ...cell, why: [`stale-dep:${pkg}`] } : cell]);
         else if (staleOnly)
           depInits.push([node, { inferred: new Set(["Unknown"]), invisible: new Set(), why: [`stale-dep:${pkg}`] }]);
+        else if (incompleteOnly)
+          depInits.push([node, { inferred: new Set(["Unknown"]), invisible: new Set(), why: [`incomplete-dep:${pkg}`] }]);
       }
     }
     ts.forEachChild(node, collect);

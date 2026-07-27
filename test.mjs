@@ -2108,6 +2108,152 @@ export function buy(): void { charge(100); }`,
         buy4?.inferred.includes("Net") && buy4?.hosts?.includes("api.stripe.com"), JSON.stringify(buy4));
 }
 
+// ── 11a. ⟨0.21⟩ a chained report that DECLARES ITSELF INCOMPLETE grants no coverage ───────────────
+// §2 rule 3 turns a report's silence into a purity claim. A report carrying `unanalyzed` has just said it
+// never read some of its own source, so its silence about that source answers nothing — the same split
+// `651c9f9` made for a report that fails the §2.1 version check, through a different door.
+{
+  const pol = (dir, body) => { const p = path.join(dir, "p.policy"); fs.writeFileSync(p, body); return p; };
+  const mkApp = (name) => project({
+    "package.json": `{"name":"${name}","dependencies":{"holedep":"1.0.0"}}`,
+    "node_modules/holedep/package.json": `{"name":"holedep","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/holedep/index.d.ts": `export declare function ping(): void;\nexport declare function save(p: string): void;`,
+    "node_modules/holedep/index.js": ``,
+    "src/main.ts": `import { save } from "holedep";\nexport function go(): void { save("/tmp/x"); }`,
+  });
+  // THE SECOND FIXTURE, WRITTEN FIRST (standing bar item 0): a COMPLETE dep report must still grant
+  // coverage, so a key it does not answer stays SILENT. Without this control the fix is indistinguishable
+  // from "chained coverage no longer exists", which re-opens the κ-hedge flood §2 rule 3 exists to close.
+  const whole = project({
+    "package.json": `{"name":"holedep"}`,
+    "src/ok.ts": `import * as netm from "node:net";\nexport function ping(): void { netm.connect(443, "ok.example.com"); }`,
+    "src/other.ts": `export function save(p: string): void { /* genuinely pure */ }`,
+  });
+  const wholeRep = scan(whole).report;
+  check("control: the complete dep report declares no unanalyzed units",
+        !(wholeRep.unanalyzed ?? []).length, JSON.stringify(wholeRep.unanalyzed));
+  const appW = mkApp("wholeapp");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), appW], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(whole, ".candor", "report.json") } });
+  const goW = entry(JSON.parse(fs.readFileSync(path.join(appW, ".candor", "report.json"), "utf8")), "src.main.go");
+  check("a COMPLETE dep report still grants coverage — its silence stays a purity claim",
+        goW == null || (!goW.invisible?.includes("holedep") && !goW.inferred.includes("Unknown")),
+        JSON.stringify(goW));
+
+  // THE DEFECT. `const T = \`` swallows the rest of the file, so `save` is not merely mis-parsed — its
+  // declaration is GONE from the report while the envelope still names the package. The dep's own scan
+  // refuses to certify a gate over itself (exit 2); the consumer used to certify one on its behalf.
+  const holed = project({
+    "package.json": `{"name":"holedep"}`,
+    "src/ok.ts": `import * as netm from "node:net";\nexport function ping(): void { netm.connect(443, "ok.example.com"); }`,
+    "src/broken.ts": "import * as fsm from \"node:fs\";\nconst T = `oops\nexport function save(p: string): void { fsm.writeFileSync(p, \"x\"); }\n",
+  });
+  const holedScan = scan(holed);
+  check("the dep scan discloses the hole and still names its package",
+        (holedScan.report.unanalyzed ?? []).length === 1 && holedScan.report.package === "holedep"
+        && !holedScan.report.functions.some((e) => e.hash === "holedep#save"),
+        JSON.stringify(holedScan.report.unanalyzed) + " " + JSON.stringify(holedScan.report.functions.map((e) => e.hash)));
+  const depRepPath = path.join(holed, ".candor", "report.json");
+  const app = mkApp("holeapp");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), app], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: depRepPath } });
+  const go = entry(JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8")), "src.main.go");
+  check("a key an INCOMPLETE dep report cannot answer hedges instead of reading pure",
+        go != null && go.invisible?.includes("holedep"), JSON.stringify(go));
+  const gate = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", pol(app, "deny Fs\n")],
+                         { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: depRepPath } });
+  check("…and the consumer stops certifying: the incomplete chain is DISCLOSED on stderr",
+        /declare source they could not analyze/.test(gate.stderr) && /holedep/.test(gate.stderr), gate.stderr);
+
+  // THE SINGLE-TREE CONTROL: the same sources in ONE package are exit 2 in BOTH arms — the gate cannot be
+  // green over unanalyzed code — so chaining an incomplete report was strictly worse than not chaining it.
+  const ctl = project({
+    "package.json": `{"name":"holeapp"}`,
+    "src/broken.ts": "import * as fsm from \"node:fs\";\nconst T = `oops\nexport function save(p: string): void { fsm.writeFileSync(p, \"x\"); }\n",
+    "src/main.ts": `import { save } from "./broken";\nexport function go(): void { save("/tmp/x"); }`,
+  });
+  const ctlGate = spawnSync("node", [path.join(HERE, "scan.mjs"), ctl, "--policy", pol(ctl, "deny Fs\n")], { encoding: "utf8" });
+  check("single-tree control: the gate refuses to certify over unanalyzed code (exit 2)",
+        ctlGate.status === 2, String(ctlGate.status) + ctlGate.stderr);
+
+  // An `import` backed ONLY by an incomplete report discloses, the way one backed only by a stale report
+  // does — the initializer edge's half of the same argument.
+  const imp = project({
+    "package.json": `{"name":"impapp","dependencies":{"holedep":"1.0.0"}}`,
+    "node_modules/holedep/package.json": `{"name":"holedep","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/holedep/index.d.ts": `export declare function ping(): void;`,
+    "node_modules/holedep/index.js": ``,
+    "src/main.ts": `import "holedep";\nexport function go(): void { }`,
+  });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), imp], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: depRepPath } });
+  const impMod = JSON.parse(fs.readFileSync(path.join(imp, ".candor", "report.json"), "utf8"))
+    .functions.find((e) => e.fn === "src.main.<module>");
+  check("an import backed only by an INCOMPLETE report discloses Unknown[incomplete-dep]",
+        impMod?.inferred.includes("Unknown") && impMod?.unknownWhy?.includes("incomplete-dep:holedep"),
+        JSON.stringify(impMod));
+
+  // The KEPT half, and the guard that makes this different from staleness: an entry the incomplete report
+  // DOES carry is still applied UNCHANGED. Its effects were derived from source the dep did read, so
+  // downgrading them would be trading a false purity claim for a lost reach.
+  const useOk = project({
+    "package.json": `{"name":"okapp","dependencies":{"holedep":"1.0.0"}}`,
+    "node_modules/holedep/package.json": `{"name":"holedep","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/holedep/index.d.ts": `export declare function ping(): void;`,
+    "node_modules/holedep/index.js": ``,
+    "src/main.ts": `import { ping } from "holedep";\nexport function go(): void { ping(); }`,
+  });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), useOk], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: depRepPath } });
+  const goOk = entry(JSON.parse(fs.readFileSync(path.join(useOk, ".candor", "report.json"), "utf8")), "src.main.go");
+  check("an entry the incomplete report DOES carry is applied unchanged (not downgraded to Unknown)",
+        goOk?.inferred.includes("Net") && !goOk?.inferred.includes("Unknown") && goOk?.hosts?.includes("ok.example.com"),
+        JSON.stringify(goOk));
+
+  // A package chained TWICE — once incomplete, once complete — is COVERED by the complete report. Same
+  // rule as the stale/fresh pair one line along in the loader: a real coverage claim must not pick up the
+  // other report's hedge, or a fixpoint `--workspace` round that happens to also see an older partial
+  // report would hedge everything.
+  const appBoth = mkApp("bothapp");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), appBoth], { encoding: "utf8",
+    env: { ...process.env, CANDOR_DEPS: `${depRepPath}:${path.join(whole, ".candor", "report.json")}` } });
+  const repBoth = JSON.parse(fs.readFileSync(path.join(appBoth, ".candor", "report.json"), "utf8"));
+  const goBoth = entry(repBoth, "src.main.go");
+  check("a package chained twice — incomplete AND complete — is covered by the COMPLETE report",
+        goBoth == null || (!goBoth.invisible?.includes("holedep") && !goBoth.inferred.includes("Unknown")),
+        JSON.stringify(goBoth));
+  // …and specifically at the IMPORT edge, which is the only reader of `incompleteDepPkgs` that a covered
+  // package still reaches (the κ-ledger arm is gated on the package being UNcovered, so it cannot). Without
+  // the dedup the importing module discloses `Unknown[incomplete-dep]` on a package a complete report
+  // covers — false uncertainty manufactured by the fix, and the mutant that proves this guard is load-bearing.
+  const modBoth = repBoth.functions.find((e) => e.fn === "src.main.<module>");
+  check("…including at the import edge: no incomplete-dep hedge on a package a complete report covers",
+        !(modBoth?.unknownWhy ?? []).some((w) => w.startsWith("incomplete-dep:")), JSON.stringify(modBoth));
+
+  // Half 1 must SURVIVE the coverage withdrawal. The unanswerable-key Unknown fires today because the
+  // package is covered; withholding coverage sends the site to the κ-ledger arm, and letting that hedge
+  // REPLACE the Unknown would narrow `deny E Unknown[dispatch]` — a gate lost to a fix (item 0).
+  const ifaceDep = project({
+    "package.json": `{"name":"ifacedep"}`,
+    "src/ok.ts": `import * as fsm from "node:fs";\nexport class FileStore { save(p: string): void { fsm.writeFileSync(p, "x"); } }`,
+    "src/broken.ts": "const T = `oops\nexport function gone(): void { }\n",
+  });
+  scan(ifaceDep);
+  const ifaceApp = project({
+    "package.json": `{"name":"ifaceapp","dependencies":{"ifacedep":"1.0.0"}}`,
+    "node_modules/ifacedep/package.json": `{"name":"ifacedep","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/ifacedep/index.d.ts": `export interface Store { save(p: string): void; }\nexport declare function build(): Store;`,
+    "node_modules/ifacedep/index.js": ``,
+    "src/main.ts": `import { build } from "ifacedep";\nexport function go(): void { build().save("/tmp/x"); }`,
+  });
+  const ifaceDeps = path.join(ifaceDep, ".candor", "report.json");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), ifaceApp], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: ifaceDeps } });
+  const goIf = entry(JSON.parse(fs.readFileSync(path.join(ifaceApp, ".candor", "report.json"), "utf8")), "src.main.go");
+  check("half 1's unanswerable-key Unknown SURVIVES the coverage withdrawal (both voices, not one)",
+        goIf?.inferred.includes("Unknown") && goIf?.unknownWhy?.some((w) => w.startsWith("dispatch:ifacedep.Store."))
+        && goIf?.invisible?.includes("ifacedep"), JSON.stringify(goIf));
+  const ifaceGate = spawnSync("node", [path.join(HERE, "scan.mjs"), ifaceApp, "--policy", pol(ifaceApp, "deny Fs Unknown[dispatch]\n")],
+                              { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: ifaceDeps } });
+  check("…so `deny Fs Unknown[dispatch]` still fires over an incomplete chain (exit 1)",
+        ifaceGate.status === 1, String(ifaceGate.status) + ifaceGate.stdout);
+}
+
 // ── 11b. ⟨0.20⟩ the dep's Net-surface INCOMPLETENESS crosses the boundary with its hosts ──────────
 // A trust marker failing OPEN at the scan boundary: `hosts` is a LOWER bound and `netClass`'s
 // `unknown-host` is the producer's published judgment that it is one. The join copied the literals and
