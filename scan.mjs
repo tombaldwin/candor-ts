@@ -2336,6 +2336,18 @@ const DEFAULT_CB_POS = new Set([0]);
 ///
 /// Asking the signature needs no list and cannot go stale. Falls back to the name map only when the
 /// signature is unresolvable, which keeps the previous behaviour rather than guessing.
+///
+/// THREE-VALUED, and the third value is load-bearing: `true` = the callee declares a callback here,
+/// `false` = it declares something that positively is NOT one, `null` = the signature carries no
+/// information. Only a caller that treats `null` as "charge" may use this to DROP.
+///
+/// The receiver slot is the reason `any` cannot simply mean `false`. `xs.forEach(cb, thisArg)` declares
+/// `thisArg?: any`, and so does a loosely-typed library's genuine callback (`forEach(xs: any[], fn:
+/// any)`) — the same type, opposite meanings. The es-lib/DOM receiver slot is identifiable by its
+/// parameter NAME, which every HOF_INVOKERS entry that has one spells `thisArg`. That name list is a
+/// DENYLIST of positions proven safe to treat as non-callbacks: a receiver name nobody thought of costs
+/// precision (an over-charge on the contrived `hof(xs, fn, someFn.bind(x))`), never a reach.
+const THIS_ARG_PARAM_NAMES = new Set(["thisArg"]);
 const calleeParamIsCallable = (node, i) => {
   const sig = checker.getResolvedSignature?.(node);
   const params = sig?.getParameters?.();
@@ -2346,7 +2358,10 @@ const calleeParamIsCallable = (node, i) => {
   if (i >= params.length && !(decl && ts.isParameter(decl) && decl.dotDotDotToken)) return false;
   const t = decl ? checker.getTypeOfSymbolAtLocation(p, decl) : null;
   if (!t) return null;
-  if (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return false; // `thisArg: any` is NOT a callback
+  // `any`/`unknown` says nothing about whether the callee invokes this position — except at the named
+  // receiver slot, which is what this carve-out was written for (`thisArg?: any`). See the denylist above.
+  if (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown))
+    return THIS_ARG_PARAM_NAMES.has(p.getName?.() ?? p.name ?? "") ? false : null;
   if (t.getCallSignatures?.().length > 0) return true;
   // A union such as `((v: T) => void) | undefined | null` — the optional onRejected shape.
   for (const u of t.types ?? []) if (u.getCallSignatures?.().length > 0) return true;
@@ -2362,6 +2377,24 @@ const calleeParamIsCallable = (node, i) => {
 const hofInvokesArg = (name, i, node) =>
   (HOF_CALLBACK_POSITIONS.get(name) ?? DEFAULT_CB_POS).has(i)
   || (node ? calleeParamIsCallable(node, i) === true : false);
+
+/// The `.bind` arm's form of the position rule, and it must be asked the other way round.
+///
+/// `hofInvokesArg` is a POSITIVE test: it answers "the callee invokes this position" or "I have no
+/// evidence", and those two are not distinguishable in its return value. Using it to RETURN EARLY makes
+/// "I could not tell" mean SILENCE — an allowlist of positions the engine happens to have a signature
+/// for, wearing a gate's clothes. Measured on a two-package fixture: a free-form `forEach(xs, fn: any)`
+/// from a dependency dropped a `.bind`-wrapped local writer entirely, and `deny Fs src.api` went from
+/// exit 1 to exit 0. Unresolved and loosely-typed signatures are exactly where the engine knows least,
+/// so they must charge most.
+///
+/// `.bind(…)` yields a FUNCTION VALUE, so the callability of the ARGUMENT is not in question here (it is
+/// for the by-reference arm below, which keeps the positive test plus `argIsCallable`). The only open
+/// question is whether the callee invokes THIS position, and the answer may only be "no" on positive
+/// evidence: the name map excludes it AND the signature declares something that is not a callback.
+const hofArgIsNeverCallback = (name, i, node) =>
+  !(HOF_CALLBACK_POSITIONS.get(name) ?? DEFAULT_CB_POS).has(i)
+  && !!node && calleeParamIsCallable(node, i) === false;
 
 const HOF_INVOKERS = new Set([
   "map", "forEach", "filter", "reduce", "reduceRight", "find", "findIndex", "findLast", "findLastIndex",
@@ -2628,7 +2661,9 @@ function visitCalls(node) {
             // The POSITION rule applies to the `.bind` arm too. It sat above the guard and so fired at
             // every argument index — `xs.forEach(cb, dep.helper.bind(x))` charged a thisArg's effects,
             // the same over-charge the by-reference arm below was fixed for and this arm was not.
-            if (!hofInvokesArg(calleeName, argIdx, node)) return;
+            // …but it must be the NEGATIVE test, not `!hofInvokesArg`: an unresolved or loosely-typed
+            // callee signature is not a licence to drop a bound callback. See `hofArgIsNeverCallback`.
+            if (hofArgIsNeverCallback(calleeName, argIdx, node)) return;
             const bound = unwrapBind(a);
             if (bound) {
               const bref = bound.ref;

@@ -539,7 +539,8 @@ export function map<T, R>(xs: T[], fn: (x: T) => R): R[] { return xs.map(fn); }`
   const { prefix: depPrefix } = scan(depDir);
   const appFiles = {
     "package.json": `{"name":"happ","version":"1.0.0"}`,
-    "src/m.ts": `import { writeIt, pureIt, map } from "hofkit";
+    "src/m.ts": `import { writeIt, pureIt, map, forEach, filter } from "hofkit";
+import { localWrite } from "./local.js";
 export function viaForEach(xs: string[]): void { xs.forEach(writeIt); }
 export function viaTimeout(): void { setTimeout(writeIt, 0); }
 export function viaPureRef(xs: string[]): string[] { return xs.map(pureIt); }
@@ -556,11 +557,26 @@ export function viaThenReject(p: Promise<string>): void { p.then(pureIt, writeIt
 export function viaStaticForm(xs: string[]): unknown[] { return map(xs, writeIt); }
 // ...and the .bind arm obeys the same position rule: a bound dep fn in the thisArg slot is not invoked.
 export function viaBindThisArg(xs: string[]): void { xs.forEach(pureIt, writeIt.bind(null)); }
+// The same shape with a LOCAL writer. A dep ref in this slot can only ever produce Unknown here (the
+// .bind arm resolves refs to project UNITS, and a dep fn is not one), so an assertion about Fs on the
+// line above cannot fail whatever the gate does — a local one can.
+export function viaBindThisArgLocal(xs: string[]): void { xs.forEach(pureIt, localWrite.bind(null)); }
+// ...but the position rule may only DROP on positive evidence. A dependency's free-form HOF whose
+// published typings declare "fn: any" says nothing about whether it invokes that position, and the
+// .bind arm read that silence as "not a callback" — dropping the bound writer entirely.
+export function viaLooseStaticBind(xs: string[]): void { forEach(xs, localWrite.bind(null)); }
+// CONTROL for the same shape at the position the NAME MAP owns: it never consulted the signature, so
+// it must stay charged however loosely the callee is typed.
+export function viaLooseBindArg0(xs: string[]): void { filter(localWrite.bind(null), xs); }
 export function viaBoolean(xs: (string | null)[]): unknown[] { return xs.filter(Boolean); }
 export function viaString(xs: number[]): string[] { return xs.map(String); }`,
+    "src/local.ts": `import * as fsm from "node:fs";
+export function localWrite(x: string): void { fsm.appendFileSync("/tmp/y", x); }`,
     "node_modules/hofkit/package.json": `{"name":"hofkit","version":"1.0.0","types":"dist/index.d.ts","main":"dist/index.js"}`,
     "node_modules/hofkit/dist/index.d.ts": `export declare function writeIt(x: string): void;
-export declare function pureIt(x: string): string;`,
+export declare function pureIt(x: string): string;
+export declare function forEach(xs: any[], fn: any): void;
+export declare function filter(fn: any, xs: any[]): any[];`,
     "node_modules/hofkit/dist/index.js": `exports.writeIt = () => {}; exports.pureIt = (x) => x;`,
   };
   const app = project(appFiles);
@@ -596,8 +612,30 @@ export declare function pureIt(x: string): string;`,
   // the callee resolves local, so the non-local HOF gate never opens and the case cannot be exercised —
   // a fixture limitation, not engine behaviour. Left unasserted rather than asserted-and-skipped, and
   // recorded in SCAN-BOUNDARY-WORK-QUEUE.md so it is not mistaken for coverage.
-  check("no-fabrication: a BOUND dep fn in the thisArg slot is not invoked, so it is not charged",
-        !ceff("src.m.viaBindThisArg").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaBindThisArg")));
+  // The receiver-slot guard, asserted so it can actually FAIL. Mutating the guard out left the suite
+  // 766/0: the assertion here was `!includes("Fs")` on a DEP ref, and that arm's only possible output
+  // is an Unknown disclosure — the shape it was written to catch (['Unknown'] before the guard, pure
+  // after) was invisible to it. Assert the ENTRY's absence for the dep form, and add a LOCAL writer
+  // whose fabrication shows up as the concrete Fs.
+  check("no-fabrication: a BOUND dep fn in the thisArg slot is not invoked, so nothing is disclosed",
+        entry(crep, "src.m.viaBindThisArg") == null, JSON.stringify(entry(crep, "src.m.viaBindThisArg")));
+  check("no-fabrication: ...and a bound LOCAL writer in that slot is not charged either",
+        entry(crep, "src.m.viaBindThisArgLocal") == null, JSON.stringify(entry(crep, "src.m.viaBindThisArgLocal")));
+  // ...and the SECOND DIRECTION of the very same guard. `!hofInvokesArg(...)` is a positive test used to
+  // return early, so "the signature told me nothing" meant SILENCE: a dependency's free-form
+  // `forEach(xs: any[], fn: any)` dropped a `.bind`-wrapped local writer, and a scoped `deny Fs` went
+  // from exit 1 to exit 0. `any` at a parameter is NO evidence — only the named receiver slot
+  // (`thisArg`) is evidence, which is what the check above pins. Charge unless positively told not to.
+  check("boundary: a LOOSELY-TYPED free-form HOF still invokes its bound callback",
+        ceff("src.m.viaLooseStaticBind").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaLooseStaticBind")));
+  check("boundary: ...and the name map's own position never depended on the signature",
+        ceff("src.m.viaLooseBindArg0").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaLooseBindArg0")));
+  // The GATE form of the same defect — the reason it is a cardinal sin and not a precision loss.
+  fs.writeFileSync(path.join(app, "scoped.policy"), "deny Fs src.m.viaLooseStaticBind\n");
+  const scoped = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", path.join(app, "scoped.policy")],
+                           { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: `${depPrefix}.json` } });
+  check("boundary: a scoped `deny Fs` is exit 1 for a bound callback under a loosely-typed HOF",
+        scoped.status === 1, `status=${scoped.status} ${scoped.stdout}`);
   // Unchained the dep's body is unknowable — disclose the package rather than claim purity.
   const { report: urep } = scan(project(appFiles));
   check("boundary, unchained: a by-reference dep callback discloses the package",
