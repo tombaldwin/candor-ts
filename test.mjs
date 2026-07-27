@@ -1442,7 +1442,7 @@ export function place(db: DatabaseSync): void { save(db); }`,
   check("--gate-json + violation still exits 1", r.status === 1, `status=${r.status}`);
   let v = null;
   try { v = JSON.parse(fs.readFileSync(gp, "utf8")); } catch { /* null → checks fail with raw */ }
-  check("--gate-json verdict declares spec 0.23", v?.spec === "0.23", JSON.stringify(v)?.slice(0, 120));
+  check("--gate-json verdict declares spec 0.24", v?.spec === "0.24", JSON.stringify(v)?.slice(0, 120));
   check("--gate-json verdict ok:false on a failing gate", v?.ok === false, `ok=${v?.ok}`);
   const viol = v?.violations?.find((x) => x.fn === "src.domain.place");
   check("--gate-json names the violating fn with its rule", viol?.rule === "AS-EFF-006", JSON.stringify(v?.violations)?.slice(0, 160));
@@ -5927,8 +5927,8 @@ export function z(): void { readFileSync("/etc/z"); }`;
 {
   for (const f of ["README.md", "AGENTS.md"]) {
     const doc = fs.readFileSync(path.join(HERE, f), "utf8");
-    check(`${f} states the current spec contract (spec 0.23)`, doc.includes("spec 0.23"));
-    const stale = doc.match(/spec 0\.[0-7]\b|spec 0\.9\b|spec 0\.1[0-5]\b/g) ?? [];
+    check(`${f} states the current spec contract (spec 0.24)`, doc.includes("spec 0.24"));
+    const stale = doc.match(/spec 0\.[0-7]\b|spec 0\.9\b|spec 0\.1[0-9]\b|spec 0\.2[0-3]\b/g) ?? [];
     check(`${f} carries no stale spec-generation string`, stale.length === 0, JSON.stringify(stale));
     const refLines = doc.split("\n").filter((l) => /reference engine/i.test(l));
     check(`${f} mentions the reference engine at least once`, refLines.length > 0);
