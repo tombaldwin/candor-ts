@@ -2883,6 +2883,40 @@ export function wrap(): void { (opaque as any)(); }`,
   check("an inherited Unknown with nothing recoverable still carries a reason field",
         goBare == null || !goBare.inferred.includes("Unknown") || (goBare.unknownWhy ?? []).length > 0,
         JSON.stringify(goBare));
+
+  // ⟨0.24⟩ SPEC §6.2's CONTRIBUTES clause — and the reason it is a NO-OP for this engine, pinned so it
+  // stays one. The clause says a reasonless `Unknown` must CONTRIBUTE `unresolved` rather than default to
+  // it when the class set comes out EMPTY (absence is not upward-closed: acquiring a second, classifiable
+  // reason REMOVED the default, so a caller of one reasonless dep was rejected while a caller of that dep
+  // AND a reasoned one — strictly worse-known — passed). It also says the right place to satisfy that is
+  // where the Unknown is CREATED, so the ill-formed state is never constructed at all. candor-ts is
+  // already there, twice over: the emitter writes `unknownWhy: ["unresolved"]` on ANY direct Unknown it
+  // could not name, and the trust-marker self-check above it REFUSES TO WRITE A REPORT that carries one
+  // (`direct carries Unknown but unknownWhy is empty`) — the state is not merely unwritten, it is
+  // unwritable. Same shape as swift's per-entry `dep:<hash>` / `dep-stale:<pkg>` tags, one layer later.
+  //
+  // MEASURED before pinning it, by instrumenting the gate's empty-set default and running five real arms
+  // (this engine's own sources with --allow-js, execa @ HEAD, got @ HEAD, and execa chained against 13
+  // dependency reports — once TRUSTED, once STALE): 0 fires, and 0 entries carrying a direct Unknown with
+  // no reason, over 1872 Unknown-bearing functions. The STALE arm is the one that matters — a distrusted
+  // producer's entries are downgraded to a bare `Unknown` with its reasons deliberately NOT copied
+  // (the loader's `if (!stale)` guards), which is the route candor-java found to be its ONLY route to the
+  // join-side default. So this asserts the scan SUCCEEDS on that arm: an invariant that fails closed is
+  // satisfied only if a report comes out the other side.
+  const staleDir = path.join(bareCons, "stale-deps");
+  fs.mkdirSync(staleDir, { recursive: true });
+  const bareRep = JSON.parse(fs.readFileSync(path.join(bare, ".candor", "report.json"), "utf8"));
+  bareRep.candor.version = "0000000-not-this-build";
+  fs.writeFileSync(path.join(staleDir, "barepkg.json"), JSON.stringify(bareRep));
+  fs.rmSync(path.join(bareCons, ".candor"), { recursive: true, force: true });   // delete before re-measuring
+  const staleRun = spawnSync("node", [path.join(HERE, "scan.mjs"), bareCons], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: staleDir } });
+  const stalePathJ = path.join(bareCons, ".candor", "report.json");
+  const staleRep = fs.existsSync(stalePathJ) ? JSON.parse(fs.readFileSync(stalePathJ, "utf8")) : null;
+  const unnamed = (staleRep?.functions ?? []).filter((e) => (e.direct ?? []).includes("Unknown") && !(e.unknownWhy ?? []).length);
+  check("⟨0.24⟩ a reasonless Unknown is NOT REPRESENTABLE: every DIRECT Unknown carries a reason, even one a STALE dep produced",
+        staleRep != null && staleRun.status === 0 && unnamed.length === 0
+          && staleRep.functions.some((e) => (e.direct ?? []).includes("Unknown")),
+        `status=${staleRun.status} ${staleRun.stderr.slice(0, 200)} ${JSON.stringify((staleRep?.functions ?? []).map((e) => [e.fn, e.direct, e.unknownWhy]))}`);
 }
 
 // ── 11a. ⟨0.21⟩ a chained report that DECLARES ITSELF INCOMPLETE grants no coverage ───────────────

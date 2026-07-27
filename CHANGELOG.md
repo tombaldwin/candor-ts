@@ -8,6 +8,27 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**§6.2 ⟨0.24⟩ CONTRIBUTES — measured UNREACHABLE here, and now pinned so it stays that way** (`test.mjs`,
+no behaviour change). The clause replaces a default keyed on the class set being EMPTY with a
+*contribution* at the node, because emptiness is not upward-closed: acquiring a second, classifiable
+reason REMOVED the default, so a caller of one reasonless dependency was rejected by
+`deny E Unknown[unresolved]` while a caller of that dependency AND a reasoned one — strictly worse-known —
+passed. It also says the fix belongs where the `Unknown` is CREATED, so the ill-formed state is never
+constructed.
+
+candor-ts is already there, twice over. The emitter writes `unknownWhy: ["unresolved"]` on any DIRECT
+`Unknown` it could not name, and the trust-marker self-check refuses to write a report at all if an entry
+still carries one (`direct carries Unknown but unknownWhy is empty`, exit 2) — the state is not merely
+unwritten, it is **unwritable**. MEASURED before assuming it: the gate's empty-set default was
+instrumented and run over five real arms — this engine's own sources, execa, got, and execa chained
+against 13 dependency reports once TRUSTED and once STALE — for **0 fires and 0 direct-`Unknown`-without-
+a-reason entries over 1872 `Unknown`-bearing functions**. The stale arm is the load-bearing one: a
+distrusted producer's reasons are deliberately not copied at the join, which is the route candor-java
+found to be its ONLY route to the default. Blast radius of implementing the join-side rule anyway: 0 class
+sets changed, 0 verdict flips, trusted or stale. So it is not implemented; the invariant is pinned by test
+instead, on the stale-dependency arm, asserting the scan SUCCEEDS (an invariant that fails closed is
+satisfied only if a report comes out the other side).
+
 **`unverified --class` FAILED OPEN, AND READ THE DIRECT-ONLY FIELD** — SPEC §6.2 ⟨0.24⟩ (`policy.mjs`,
 `query-core.mjs`, `query.mjs`). Two independent faults in one predicate, both in the under-report
 direction, and `unverified` is the verb whose entire job is to name the holes a green `pure`/`deny E`
