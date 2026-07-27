@@ -174,9 +174,19 @@ want-JSON flag.
   `class PgStore implements Store`) resolves to the local implementors when the dispatch is narrow
   (≤12 classes) — the layered-DI pattern carries its real effects; only an interface with no
   visible implementor still reads `Unknown` (`dispatch:<Type>`).
-- **`unknownWhy` names each direct Unknown's origin** (`call:jwt.sign`, `callback:param#0`,
-  `dispatch:<Type>`) — triage starts at the named site. Inheritors carry `Unknown` with no why;
-  follow the callgraph down to the root.
+- **`unknownWhy` names each direct Unknown's origin** as `kind:detail` — triage starts at the named
+  site. Inheritors carry `Unknown` with no why; follow the callgraph down to the root. The `kind` is
+  drawn from §4's closed **five**-kind vocabulary — `reflect:` / `native:` / `dispatch:` /
+  `callback:` / `ambiguous:` — of which candor-ts's language model produces three:
+  `reflect:eval`, `reflect:defineProperty:dynamic-key` (TypeScript folds its native boundary into
+  `reflect:`, so no bare `native:`), `callback:param#0`, and `dispatch:<pkg>.<Type>.<member>` —
+  the one **normative** detail shape, and what the `callers --include-unknown` frontier resolves
+  overrides against. It also carries `no-node_modules:<pkg>` for the *setup* class (a declared dep
+  that isn't installed — a mis-configuration, not a blind spot). A kind candor-ts never emits can
+  still appear in its output: a chained dependency's reasons are relayed verbatim, and every query
+  verb reads other engines' reports — `ambiguous:` (name resolution was ambiguous, so no owner type
+  was formed at all) is candor-rust's and arrives that way. Any kind outside the five round-trips
+  untouched and classifies through the conservative catch-all (§2 forward-compatibility).
 - **`entryPoint: true` marks runtime-invoked roots** (Nest `@Get/@Post/…` handler methods, Next
   `route.ts` HTTP exports and `middleware`) — their effects are never orphaned; `reachable` unions
   over them. Pure entry points stay visible in the report.

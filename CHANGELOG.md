@@ -8,6 +8,54 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**§4 ⟨0.24⟩'s FIFTH `unknownWhy` kind, `ambiguous:` — AUDITED, ALREADY CONFORMANT, now controlled**
+(`test.mjs`, `test-unit.mjs`, `AGENTS.md`; **no production change, no verdict change**). §4 grew a fifth
+kind — the analyser's own *name resolution* was ambiguous (two same-named local definitions), so no owner
+type could be formed at all; not a `dispatch:` with a missing body, not a `callback:` (no function value).
+
+§4 ⟨0.24⟩ warns that **an engine holds this vocabulary twice and the halves drift**: a prefix/string
+classifier feeding §6.2's class table, and a typed/structural one (enum, union, validator, kind-keyed
+`switch`). The reference JVM engine had exactly that split — `ambiguous` → `dispatch` on the string path
+and a *null* kind → `unresolved` on the typed path, one token, two answers, one engine, silently.
+**candor-ts holds it ONCE.** The audit enumerated every construction site (`scan.mjs` emits `reflect:`,
+`callback:`, `dispatch:`, plus the `setup`-class `no-node_modules:`) and every read (`reasonClass` and the
+`resolveReasonClasses` fixpoint in `policy.mjs`; `blindspots` / `blindspotsStats` / `parseClassFilter` /
+`unverified --class` in `query-core.mjs`; the dependency join and the SETUP diagnostic in `scan.mjs`;
+`verify-core.mjs` and `lsp.mjs`, both verbatim). There is no enum, no union type, no kind allowlist and no
+validator anywhere — every class decision routes through the one prefix table, which has mapped
+`ambiguous` → `dispatch` since the reason-scoped-Unknown rung. The failure mode §4 describes is
+structurally unreachable here, so nothing was fixed; what was missing was the evidence.
+
+Two ts-specific answers, both pinned by fixture:
+
+- **candor-ts emits no `ambiguous:`** — TypeScript's module system gives every declaration a resolvable
+  home — **but it carries them**. The dependency join copies a chained report's `unknownWhy` VERBATIM into
+  the consumer's own report keyed by the calling function, and every query verb reads other engines'
+  reports directly (`--report` at a candor-rust prefix, where the kind sits on 8710 of 19607
+  `Unknown`-bearing entries). §4: *a consumer may need a kind it never emits.*
+- **The `callers --include-unknown` frontier keys off the KIND, not the class** (`w.startsWith("dispatch:")`),
+  which is what §4 ⟨0.24⟩ requires: `ambiguous:` projects to class `dispatch` but has NO OWNER, so a
+  class-keyed frontier admits entries there is nothing to resolve overrides against. Pinned the way
+  candor-rust pinned it — the kind-keyed frontier and the class-keyed `blindspots --class dispatch` run
+  over ONE report and must DISAGREE about the `ambiguous:` entry. Measured with the frontier mutated to be
+  class-keyed: it admits `m.Ambig.go` with `viaDispatchOn: "two same-named local definitions"`, in both the
+  hierarchy and the no-hierarchy arm.
+
+**THE CONTROL**, at three levels, because without it *"added a fifth kind"* and *"stopped checking the kind
+set"* are the same diff: a fabricated off-vocabulary kind (`banana:whatever`) must round-trip verbatim and
+classify through the CONSERVATIVE catch-all (§2 forward-compatibility) — asserted on `reasonClass`
+directly, over `query-core` in-process, and end to end through `blindspots --json` / `--class` /
+`callers --include-unknown` on a foreign report, plus through the dependency chain. Every assertion was
+**mutation-verified**: dropping `ambiguous` from the table (2 unit + 5 behavioural rows red, frontier rows
+correctly unmoved), the blanket catch-all → `dispatch` (both controls red at both levels), a class-keyed
+frontier (5 rows red), and a kind allowlist on the chain relay (both relay rows red).
+
+`AGENTS.md` was a second copy after all — not of the executable table, but of the vocabulary — and it had
+drifted: it named `call:jwt.sign`, an origin string this engine has not emitted since the
+`callback:param#i` form landed, and did not mention `ambiguous:` at all. Rewritten to state the closed
+five-kind set, which three of them candor-ts actually produces, and that an unrecognised kind round-trips.
+The doc drift gate now covers the kind vocabulary alongside the spec-generation strings.
+
 **§6.2 ⟨0.24⟩ CONTRIBUTES — measured UNREACHABLE here, and now pinned so it stays that way** (`test.mjs`,
 no behaviour change). The clause replaces a default keyed on the class set being EMPTY with a
 *contribution* at the node, because emptiness is not upward-closed: acquiring a second, classifiable

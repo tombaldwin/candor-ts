@@ -85,6 +85,34 @@ test("reasonClass: raw unknownWhy tokens map to normative classes", () => {
   assert.equal(reasonClass("dynamicMemberLookup:Config.host"), "reflect");
   assert.equal(reasonClass("dynamicMemberLookup"), "reflect");
 });
+// ⟨0.24⟩ `ambiguous:` is SPEC §4's FIFTH kind — the analyser's own NAME RESOLUTION was ambiguous (two
+// same-named local definitions), so no owner type could be formed at all. Not a `dispatch:` with a missing
+// body and not a `callback:` (no function value). candor-ts's language model produces none of its own —
+// TypeScript's module system gives every declaration a resolvable home — but the kind reaches this engine
+// two ways: a chained dependency's `unknownWhy` is relayed VERBATIM into the consumer's report
+// (scan.mjs's join), and EVERY query verb reads foreign reports (`--report` at a candor-rust prefix, where
+// the kind is on 8710 of 19607 Unknown-bearing entries). So it must classify here whether or not it is
+// emitted here. §6.2 projects it to class `dispatch`, which is why nothing above ever noticed §4 was one
+// kind short: candor-ts holds this vocabulary ONCE (this prefix table — no enum, no union, no validator,
+// no kind-keyed `switch`), so the two-halves drift §4 ⟨0.24⟩ warns about is structurally unreachable here.
+//
+// THE CONTROL that separates "added a fifth kind" from "stopped checking the kind set": a FABRICATED
+// off-vocabulary kind must still route through the CONSERVATIVE CATCH-ALL (§2 forward-compatibility), NOT
+// through `dispatch`. In the `kind:detail` form specifically — the bare `brand-new-token` row above cannot
+// catch a blanket `return "dispatch"` in the catch-all, and cannot catch a catch-all widened to a prefix
+// match either. Asserted for the kind that WAS added and one that was NOT, side by side, because the pair
+// is the assertion: either one alone passes a diff that stopped discriminating.
+test("reasonClass ⟨0.24⟩: `ambiguous:` classifies dispatch; a fabricated kind stays on the catch-all", () => {
+  assert.equal(reasonClass("ambiguous:two same-named local definitions"), "dispatch"); // dot-free detail
+  assert.equal(reasonClass("ambiguous:mod.Thing.go"), "dispatch");                     // dotted detail
+  assert.equal(reasonClass("Ambiguous:Mixed-Case"), "dispatch");                       // the table lowercases
+  assert.equal(reasonClass("banana:whatever"), "unresolved");   // § 2 forward-compat, NOT dispatch
+  assert.equal(reasonClass("banana"), "unresolved");
+  // and the near-miss: a kind that merely CONTAINS a canonical name is not that kind (the table is a
+  // PREFIX match, and a prefix match is exactly what a `.includes()` slip would turn into a false hit).
+  assert.equal(reasonClass("not-ambiguous:x"), "unresolved");
+  assert.equal(reasonClass("banana:ambiguous:x"), "unresolved");
+});
 test("parsePolicy: Unknown[class…] / * / dynamic", () => {
   const r = parsePolicy("deny Net Unknown[dispatch,indirect] dom\n").deny[0];
   assert.deepEqual(r.effects, ["Net", "Unknown"]);

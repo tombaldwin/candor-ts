@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { show, loadReport, callersFrontier } from "./query-core.mjs";
+import { show, loadReport, callersFrontier, blindspots, blindspotsStats } from "./query-core.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let pass = 0, fail = 0;
@@ -4290,6 +4290,144 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
         JSON.stringify(ord) + ` (localeCompare order would be ${JSON.stringify(["app.alpha.run", "app.Zed.run"])})`);
 }
 
+// ── §4 ⟨0.24⟩ the FIFTH kind, `ambiguous:` — A DISPATCH FRONTIER MUST KEY OFF THE KIND, NOT THE CLASS ──
+// `ambiguous:` means the analyser's own NAME RESOLUTION was ambiguous (two same-named local definitions),
+// so NO OWNER TYPE was ever formed. It projects to §6.2 class `dispatch`, but the frontier's condition (3)
+// — "is a confirmed reacher an OVERRIDE of OWNER.member?" — has nothing to resolve against. A CLASS-keyed
+// frontier admits those entries; a KIND-keyed one excludes them for free. candor-ts's is kind-keyed
+// (`w.startsWith("dispatch:")` in callersFrontier), and this pins it AGAINST the class selector over ONE
+// report, mirroring candor-rust's fixture: the two selectors must DISAGREE about the `ambiguous:` entry,
+// and the disagreement is the correct answer, not a bug in either. Asserting only the frontier's exclusion
+// would also pass if the entry were simply missing from the report — the `blindspots --class dispatch`
+// half is what proves the entry is present, is class `dispatch`, and is nonetheless kept out.
+{
+  const cg = { "m.Impl.run": ["m.Sink.touch"], "m.Sink.touch": [], "m.Dotted.go": [], "m.Ambig.go": [], "m.Banana.go": [] };
+  const hier = { "m.Impl": ["m.Base"] }; // Impl <: Base
+  const fns = [
+    { fn: "m.Impl.run", inferred: [], unknownWhy: [] },
+    { fn: "m.Dotted.go", inferred: ["Unknown"], unknownWhy: ["dispatch:m.Base.run"] },  // kind dispatch, class dispatch
+    { fn: "m.Ambig.go", inferred: ["Unknown"], unknownWhy: ["ambiguous:two same-named local definitions"] },
+    { fn: "m.Banana.go", inferred: ["Unknown"], unknownWhy: ["banana:whatever"] },      // the off-vocabulary control
+  ];
+  for (const [arm, h] of [["hierarchy", hier], ["no-hierarchy", {}]]) {
+    const fr = callersFrontier(cg, fns, h, "m.Sink.touch").possibleViaUnknownDispatch;
+    check(`frontier is KIND-keyed: an \`ambiguous:\` source is NOT admitted (${arm} arm)`,
+          !fr.some((e) => e.fn === "m.Ambig.go"), JSON.stringify(fr));
+    // …and the answerable `dispatch:` entry is still there, so the exclusion is discrimination, not a
+    // frontier that stopped working.
+    check(`frontier: the dotted \`dispatch:\` source IS still admitted alongside it (${arm} arm)`,
+          fr.length === 1 && fr[0].fn === "m.Dotted.go", JSON.stringify(fr));
+  }
+  // THE CLASS-KEYED SELECTOR OVER THE SAME REPORT returns it — proving the entry exists and IS class
+  // `dispatch` (§6.2), i.e. that the frontier's exclusion is keyed on the KIND and on nothing else.
+  const byClass = blindspots(fns, cg, "dispatch").sources.map((s) => s.fn).sort();
+  check("§6.2: `blindspots --class dispatch` (CLASS-keyed) DOES return the `ambiguous:` source",
+        JSON.stringify(byClass) === JSON.stringify(["m.Ambig.go", "m.Dotted.go"]), JSON.stringify(byClass));
+  // THE CONTROL. A fabricated off-vocabulary kind must behave exactly as before the fifth kind was
+  // recognised: never admitted to the frontier (asserted in both arms above by `fr.length === 1`), and
+  // classified through the CONSERVATIVE CATCH-ALL — `unresolved`, not `dispatch`. Without this pair,
+  // "added a fifth kind" and "stopped checking the kind set" are the same diff.
+  check("control: a fabricated `banana:` kind is NOT class dispatch (catch-all, §2 forward-compat)",
+        !blindspots(fns, cg, "dispatch").sources.some((s) => s.fn === "m.Banana.go"),
+        JSON.stringify(blindspots(fns, cg, "dispatch").sources.map((s) => s.fn)));
+  check("control: a fabricated `banana:` kind classifies `unresolved`",
+        JSON.stringify(blindspots(fns, cg, "unresolved").sources.map((s) => s.fn)) === JSON.stringify(["m.Banana.go"]),
+        JSON.stringify(blindspots(fns, cg, "unresolved").sources.map((s) => s.fn)));
+  // …and the class DISTRIBUTION counts them in exactly those two buckets, with nothing landing anywhere
+  // else — the whole-report view, which a per-entry assertion cannot see.
+  const st = blindspotsStats(fns).byClass;
+  check("blindspots --stats: ambiguous+dispatch → 2 dispatch, banana → 1 unresolved, rest 0",
+        st.dispatch === 2 && st.unresolved === 1 && st.reflect === 0 && st.native === 0
+          && st.indirect === 0 && st.setup === 0, JSON.stringify(st));
+}
+
+// ── §4 ⟨0.24⟩ the fifth kind, END TO END through the shipped verbs (the model-level block above is over
+// query-core directly; this is the same three claims through the CLI a consumer actually runs, on a report
+// candor-ts did not produce — a foreign engine's, which is the only way `ambiguous:` reaches it). ──
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-kind024-"));
+  const rep = {
+    candor: { version: "candor-rust-0.24.0", spec: "0.24" },
+    functions: [
+      // The three `*.go` units reach `m.Sink.touch` ONLY through their unresolved call — they are NOT
+      // confirmed callers (the frontier skips those), which is the whole shape the verb exists to disclose.
+      { fn: "m.Dotted.go", inferred: ["Unknown"], direct: ["Unknown"], unresolved: true, unknownWhy: ["dispatch:m.Base.run"] },
+      { fn: "m.Ambig.go", inferred: ["Unknown"], direct: ["Unknown"], unresolved: true, unknownWhy: ["ambiguous:two same-named local definitions"] },
+      { fn: "m.Banana.go", inferred: ["Unknown"], direct: ["Unknown"], unresolved: true, unknownWhy: ["banana:whatever"] },
+      { fn: "m.Impl.run", inferred: [], direct: [], unresolved: false, calls: ["m.Sink.touch"] },
+      { fn: "m.Sink.touch", inferred: [], direct: [], unresolved: false },
+    ],
+  };
+  const prefix = path.join(d, "report");
+  fs.writeFileSync(`${prefix}.json`, JSON.stringify(rep));
+  fs.writeFileSync(`${prefix}.callgraph.json`, JSON.stringify(
+    { "m.Dotted.go": [], "m.Ambig.go": [], "m.Banana.go": [],
+      "m.Impl.run": ["m.Sink.touch"], "m.Sink.touch": [] }));
+  const q = (...a) => {
+    const r = spawnSync("node", [path.join(HERE, "query.mjs"), ...a, "--report", prefix, "--json"], { encoding: "utf8" });
+    return { r, out: (() => { try { return JSON.parse(r.stdout); } catch { return null; } })() };
+  };
+  const bs = q("blindspots");
+  const whyOf = (fn) => bs.out?.sources.find((s) => s.fn === fn)?.why;
+  // (1) ROUND-TRIPPED VERBATIM. Both the fifth kind and the fabricated one — the engine neither rewrites
+  // nor drops a `kind:detail` it did not author. The fabricated one is the load-bearing half: an engine
+  // that had started normalising unknown kinds onto a known one would pass every class assertion below.
+  check("e2e: `ambiguous:` round-trips VERBATIM through `blindspots --json`",
+        JSON.stringify(whyOf("m.Ambig.go")) === JSON.stringify(["ambiguous:two same-named local definitions"]),
+        JSON.stringify(bs.out?.sources));
+  check("e2e control: a fabricated `banana:whatever` round-trips VERBATIM too (§2 forward-compat)",
+        JSON.stringify(whyOf("m.Banana.go")) === JSON.stringify(["banana:whatever"]), JSON.stringify(bs.out?.sources));
+  // (2) CLASSIFIED — the fifth kind onto `dispatch` (§6.2), the fabricated one onto the CATCH-ALL.
+  const cls = (c) => q("blindspots", "--class", c).out?.sources.map((s) => s.fn).sort() ?? null;
+  check("e2e: `blindspots --class dispatch` selects the `ambiguous:` source (§6.2 projection)",
+        JSON.stringify(cls("dispatch")) === JSON.stringify(["m.Ambig.go", "m.Dotted.go"]), JSON.stringify(cls("dispatch")));
+  check("e2e control: `--class unresolved` selects the fabricated kind and ONLY it (catch-all, not dispatch)",
+        JSON.stringify(cls("unresolved")) === JSON.stringify(["m.Banana.go"]), JSON.stringify(cls("unresolved")));
+  // (3) THE FRONTIER STAYS KIND-KEYED THROUGH THE CLI. `m.Impl.run` is the confirmed reacher and an
+  // override of `m.Base.run` under no hierarchy sidecar (simple-name match), so `m.Dotted.go` is disclosed
+  // — and neither the class-sibling `ambiguous:` nor the fabricated kind rides in behind it.
+  const fr = q("callers", "m.Sink.touch", "--include-unknown").out?.possibleViaUnknownDispatch ?? [];
+  check("e2e: `callers --include-unknown` admits ONLY the `dispatch:` source (kind-keyed frontier)",
+        JSON.stringify(fr.map((e) => e.fn)) === JSON.stringify(["m.Dotted.go"]), JSON.stringify(fr));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── §4 ⟨0.24⟩ "a consumer may need a kind it never emits" — THE CHAIN RELAY. candor-ts emits no
+// `ambiguous:` of its own (TypeScript's module system gives every declaration a resolvable home), but the
+// dependency join copies a chained report's `unknownWhy` VERBATIM into the consumer's own report keyed by
+// the CALLING function, so the kind lands in candor-ts output regardless. Pinned here so the relay cannot
+// silently start filtering by a kind allowlist — which would be this engine's version of the §4 defect. ──
+{
+  // The dep's unit must be EFFECTFUL to appear in its report at all (§2 rule 3: silence is purity), so it
+  // reads the clock — the effect is scaffolding, the `unknownWhy` rewrite below is the subject.
+  const depDir = project({ "index.ts": `export function reach(): number { return Date.now(); }` });
+  fs.writeFileSync(path.join(depDir, "package.json"), JSON.stringify({ name: "ambig-dep", version: "0.0.0" }));
+  const { prefix: depPrefix } = scan(depDir);
+  // Rewrite the DEP's entry to carry the two foreign kinds, leaving the producing-build header intact (the
+  // join distrusts a report whose `candor.version` is not this exact build and downgrades it to a bare
+  // Unknown, so a literally-foreign file would test the STALE path instead of the relay).
+  const depRep = JSON.parse(fs.readFileSync(`${depPrefix}.json`, "utf8"));
+  const de = depRep.functions.find((e) => e.fn.endsWith(".reach"));
+  de.inferred = ["Unknown"]; de.direct = ["Unknown"]; de.unresolved = true;
+  de.unknownWhy = ["ambiguous:two same-named local definitions", "banana:whatever"];
+  fs.writeFileSync(`${depPrefix}.json`, JSON.stringify(depRep));
+  const app = project({
+    "package.json": `{"name": "ambig-app", "dependencies": {"ambig-dep": "0.0.0"}}`,
+    "node_modules/ambig-dep/package.json": `{"name":"ambig-dep","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/ambig-dep/index.d.ts": `export declare function reach(): number;`,
+    "node_modules/ambig-dep/index.js": ``,
+    "src/a.ts": `import { reach } from "ambig-dep";\nexport function go(): number { return reach(); }`,
+  });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), app],
+            { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: `${depPrefix}.json` } });
+  const appRep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  const why = entry(appRep, "src.a.go")?.unknownWhy ?? [];
+  check("chain relay: a dep's `ambiguous:` reaches the CONSUMER's own report, verbatim",
+        why.includes("ambiguous:two same-named local definitions"), JSON.stringify(entry(appRep, "src.a.go")));
+  check("chain relay control: a dep's FABRICATED kind is relayed verbatim too (no allowlist filter)",
+        why.includes("banana:whatever"), JSON.stringify(entry(appRep, "src.a.go")));
+}
+
 // ── node:vm executes a runtime code STRING → Unknown (the eval-class disclosure). Was silent-pure —
 // found by real-world corpus testing (vm is κ-covered @types/node with no rule, so it read pure, not
 // invisible). Mirrors eval/Function/import() which already disclose Unknown. ──
@@ -5737,6 +5875,20 @@ export function z(): void { readFileSync("/etc/z"); }`;
     check(`${f}: every "reference engine" mention attributes candor-java`,
           refLines.every((l) => /candor-java/.test(l)),
           JSON.stringify(refLines.filter((l) => !/candor-java/.test(l))));
+  }
+  // ⟨0.24⟩ …AND the `unknownWhy` kind vocabulary, which is the OTHER thing this doc restates from the spec
+  // and the one §4 ⟨0.24⟩ names as the drift surface: "an engine holds this vocabulary twice, and the
+  // halves drift". candor-ts holds the executable copy ONCE (policy.mjs's prefix table — no enum, no union,
+  // no validator), so AGENTS.md IS the second copy, and a doc that lists four kinds while the table
+  // classifies five is the same divergence one layer out. Measured before this gate: the doc named
+  // `call:jwt.sign` — a RETIRED origin the engine has not emitted since the `callback:param#i` form landed
+  // — as a live example, alongside no mention of `ambiguous:` at all.
+  {
+    const doc = fs.readFileSync(path.join(HERE, "AGENTS.md"), "utf8");
+    for (const k of ["reflect:", "native:", "dispatch:", "callback:", "ambiguous:"])
+      check(`AGENTS.md names §4's kind \`${k}\` (the closed five-kind vocabulary)`, doc.includes(`\`${k}`), k);
+    check("AGENTS.md names no RETIRED `call:` origin (the engine emits `callback:param#i`)",
+          !/`call:/.test(doc), (doc.match(/`call:[^`]*`/g) ?? []).join(" "));
   }
 }
 
