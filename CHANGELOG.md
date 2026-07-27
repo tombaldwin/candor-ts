@@ -8,6 +8,26 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+⚠ **`--workspace` now re-derives the fixpoint after sweeping a stale cached dep report** (`scan.mjs`).
+`95d0b8b` correctly stopped serving a cached report this run did not write, but it swept AFTER the
+fixpoint rounds — and every child in those rounds is spawned with `CANDOR_DEPS` pointing at the same
+cache, so a sibling that scanned cleanly had already chained the report being deleted and its own cached
+report kept that answer. The file went; the conclusion drawn from it survived one hop away, in whatever
+the parent then chained. Reproduced on a two-hop workspace (`libb` imports `liba`; `liba` stops being
+scannable): the consumer's `callB` was **ABSENT from `functions`** — a ⟨0.21⟩ positive purity claim about
+a call into source candor could not read — where the same source with no cache said
+`invisible: ['liba']`. Through the interface-CHA join the identical cause moves a GATE the other way:
+`deny Fs` **exit 1 warm / exit 0 cold**, red over a body that is no longer on disk. After a sweep the
+fixpoint runs once more against the clean cache and the run says so on stderr; one pass suffices, because
+a report file only ever appears from a success. **Gated on something having been swept, so a clean
+workspace pays nothing.** Measured on vue-core (`runtime-core` chaining `@vue/reactivity` and
+`@vue/shared`, whose own coverage ledger names them at 273 and 119 calls): clean arm **byte-identical**
+across the change, app report and both dep reports; with `@vue/shared` made unscannable, **0 effect
+gains, 0 losses, Unknown delta 0**, and **+53 `invisible` disclosures and +18 entries recovered in the
+carrier's report**, 3 of them reaching the consumer. The post-change warm run is now byte-identical to
+the cache-free control, which the pre-change one was not. Same shape and reason as candor-swift
+`43a0eaa`.
+
 ⚠ **A `dispatch:` reason that can name neither an owner nor a member is a `callback:`** (`scan.mjs`).
 SPEC §4 reserves `dispatch:` for an unresolved dispatch with a **resolvable owner type AND member** —
 `owner.member` is the vocabulary's one normative detail, what conformance PART 10 compares and what the

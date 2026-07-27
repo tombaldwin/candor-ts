@@ -448,6 +448,7 @@ function dropUnanswered(dir, candidates, answered, ownFiles, nameOf, flag) {
   }
   if (dropped.length)
     console.error(`candor-ts: ${flag} could not scan ${dropped.sort().join(", ")} this run — dropped the PREVIOUS run's cached report(s) rather than answer from them (their calls read Unknown/invisible, as an unchained dependency does)`);
+  return dropped;
 }
 const workspaceDepFileName = (real) => failedDepName(real);
 
@@ -484,24 +485,49 @@ if (wantWorkspace) {
   const answered = new Set();                 // realpath -> this run produced a report for it
   const ownFiles = new Set();                 // the files this run wrote (never deletion candidates)
   const MAX_ROUNDS = 6;
-  for (let round = 0; round < MAX_ROUNDS; round++) {
-    let anyChanged = false;
-    for (const real of depPaths) {
-      try {
-        const out = execFileSync(process.execPath, [selfPath, real, "--json"],
-          { env: { ...process.env, CANDOR_WORKSPACE_CHAIN: "1", CANDOR_DEPS: workspaceDepsDir },
-            maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
-        const name = (JSON.parse(out.toString()).package) || path.basename(real);
-        names.add(name);
-        const file = path.join(workspaceDepsDir, `${name.replace(/[/@]/g, "_")}.json`);
-        answered.add(real); ownFiles.add(file);
-        const prev = fs.existsSync(file) ? fs.readFileSync(file) : null;
-        if (!prev || !prev.equals(out)) { fs.writeFileSync(file, out); anyChanged = true; }
-      } catch { /* a dep that fails to scan is skipped — see the ownership sweep below */ }
+  const runRounds = () => {
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      let anyChanged = false;
+      for (const real of depPaths) {
+        try {
+          const out = execFileSync(process.execPath, [selfPath, real, "--json"],
+            { env: { ...process.env, CANDOR_WORKSPACE_CHAIN: "1", CANDOR_DEPS: workspaceDepsDir },
+              maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
+          const name = (JSON.parse(out.toString()).package) || path.basename(real);
+          names.add(name);
+          const file = path.join(workspaceDepsDir, `${name.replace(/[/@]/g, "_")}.json`);
+          answered.add(real); ownFiles.add(file);
+          const prev = fs.existsSync(file) ? fs.readFileSync(file) : null;
+          if (!prev || !prev.equals(out)) { fs.writeFileSync(file, out); anyChanged = true; }
+        } catch { /* a dep that fails to scan is skipped — see the ownership sweep below */ }
+      }
+      if (!anyChanged) break;   // fixpoint reached: transitive effects fully propagated
     }
-    if (!anyChanged) break;   // fixpoint reached: transitive effects fully propagated
+  };
+  runRounds();
+  // ⟨sweep, then re-derive⟩ THE SWEEP ALONE LEAVES THE STALE ANSWER ONE HOP AWAY. Every child above is
+  // spawned with `CANDOR_DEPS` pointing at THIS SAME directory, so a sibling that scanned cleanly has
+  // already chained the report the sweep is about to remove — and its own cached report keeps that
+  // answer, which is then what the parent chains. Deleting the file destroys the evidence and not the
+  // conclusion. Measured on a two-dep workspace (`libb` imports `liba`, `liba` stops being scannable):
+  // the parent's `callB` was ABSENT from `functions` — a ⟨0.21⟩ positive purity claim about a call into
+  // source candor could not read — while the COLD arm, same source and no cache, said
+  // `invisible: ['liba']`. Through the interface-CHA join the same shape moves a GATE: `deny Fs` exit 1
+  // warm / exit 0 cold, red over a body that is not on disk.
+  //
+  // So re-run the fixpoint once against the swept cache. ONE extra pass suffices: a report file only
+  // ever appears from a success, so a second sweep can find nothing the first did not — which is why
+  // `dropUnanswered` is NOT called again (a call that can only ever return `[]` is a guard that costs
+  // nothing, and this file does not keep those). Gated on something HAVING been dropped, so a clean
+  // workspace pays nothing: same rounds, same spawns, byte-identical artifacts.
+  // Same shape and same reason as candor-swift `43a0eaa`.
+  const dropped = dropUnanswered(workspaceDepsDir, depPaths, answered, ownFiles, workspaceDepFileName, "--workspace");
+  if (dropped.length) {
+    // Disclosed, because it is the only channel that distinguishes the two gates: a reader who sees the
+    // sweep line and NOT this one is looking at a run whose siblings still carry the swept answer.
+    console.error(`candor-ts: --workspace re-ran the dependency fixpoint against the swept cache — a sibling that scanned cleanly may have chained ${dropped.sort().join(", ")} before the sweep, and its cached report would have kept that answer`);
+    runRounds();
   }
-  dropUnanswered(workspaceDepsDir, depPaths, answered, ownFiles, workspaceDepFileName, "--workspace");
   console.error(`candor-ts: --workspace chained ${names.size} workspace dep report(s), transitive${names.size ? ": " + [...names].sort().join(", ") : " (none found)"}`);
 }
 // ⟨dep initializers⟩ --dep-inits: importing a package RUNS its entry module, so the importer reaches

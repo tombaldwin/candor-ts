@@ -882,6 +882,150 @@ export function run(): void { fsm.appendFileSync("/tmp/sib", "x"); }`,
         eff("src.m.useHand")?.inferred?.includes("Fs"), JSON.stringify(eff("src.m.useHand")));
 }
 
+// ── 2f-septies (b2). THE SWEEP DELETED THE FILE AND LEFT THE ANSWER ────────────────────────────────
+// `95d0b8b` is right that a cached report this run did not write is not this run's answer, and it
+// sweeps one. But it sweeps AFTER the fixpoint rounds have already run, and every child in those rounds
+// is spawned with `CANDOR_DEPS` pointing at the SAME cache — so a sibling that scanned cleanly has
+// already chained the report being deleted, and ITS cached report keeps that answer. The parent then
+// chains the sibling. The file goes; the conclusion drawn from it survives one hop away.
+//
+// candor-swift `43a0eaa` re-runs its fixpoint once for exactly this reason. The workspace here is the
+// two-hop shape that makes it visible: `libb` imports `liba`, and `liba` stops being scannable.
+//
+// THE CONTROL IS THE COLD ARM, and it is what makes this a cache defect rather than a limitation: the
+// same source with no cache at all must give the same answer as the same source with one. A cache that
+// changes the verdict is the whole bug, in either direction.
+{
+  const mkWorkspace = (ifaceForm) => {
+    // The path dep at the far end. Two shapes, because they fail in OPPOSITE directions.
+    const liba = project(ifaceForm ? {
+      "package.json": `{"name":"liba","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+      "index.d.ts": `export interface Fetcher { fetch(): void; }
+export declare class Client implements Fetcher { fetch(): void; }`,
+      "index.ts": `import * as fsm from "node:fs";
+export interface Fetcher { fetch(): void; }
+export class Client implements Fetcher { fetch(): void { fsm.appendFileSync("/tmp/liba", "x"); } }`,
+    } : {
+      "package.json": `{"name":"liba","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+      "index.d.ts": `export declare function aWrite(): void;`,
+      "index.ts": `export function aWrite(): void { /* pure, so the cached report's SILENCE is the claim */ }`,
+    });
+    // The SIBLING. It scans cleanly in every run; it is the carrier, not the casualty.
+    const libb = project(ifaceForm ? {
+      "package.json": `{"name":"libb","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+      "index.d.ts": `export declare function useB(f: import("liba").Fetcher): void;`,
+      "index.ts": `import type { Fetcher } from "liba";
+export function useB(f: Fetcher): void { f.fetch(); }`,
+    } : {
+      "package.json": `{"name":"libb","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+      "index.d.ts": `export declare function useB(): void;`,
+      "index.ts": `import { aWrite } from "liba";
+export function useB(): void { aWrite(); }`,
+    });
+    const app = project(ifaceForm ? {
+      "package.json": `{"name":"wsapp","version":"1.0.0"}`,
+      "src/m.ts": `import { useB } from "libb";
+import type { Fetcher } from "liba";
+export function callB(f: Fetcher): void { useB(f); }`,
+    } : {
+      "package.json": `{"name":"wsapp","version":"1.0.0"}`,
+      "src/m.ts": `import { useB } from "libb";
+export function callB(): void { useB(); }`,
+    });
+    fs.mkdirSync(path.join(app, "node_modules"), { recursive: true });
+    fs.symlinkSync(liba, path.join(app, "node_modules", "liba"));
+    fs.symlinkSync(libb, path.join(app, "node_modules", "libb"));
+    // `libb` resolves `liba` through its own node_modules — a real workspace link, not the app's.
+    fs.mkdirSync(path.join(libb, "node_modules"), { recursive: true });
+    fs.symlinkSync(liba, path.join(libb, "node_modules", "liba"));
+    return { app, liba, libb };
+  };
+  const runWs = (app, extra = []) =>
+    spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--workspace", ...extra], { encoding: "utf8" });
+  const appEntry = (app, fn) =>
+    entry(JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8")), fn);
+  const depBytes = (app) => {
+    const d = path.join(app, ".candor", "deps");
+    return fs.readdirSync(d).sort().map((f) => `${f}:${fs.readFileSync(path.join(d, f), "utf8")}`).join("\n");
+  };
+
+  // ── THE NO-CHANGE FIXTURE, FIRST. A second fixpoint pass that alters a CLEAN run is the obvious cost
+  // of this fix, so it is the row written before the defect's. Nothing here is stale, nothing is swept,
+  // and the re-pass must not run at all.
+  {
+    const { app } = mkWorkspace(false);
+    const r1 = runWs(app);
+    const before = depBytes(app) + "\n@app\n" + fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8");
+    const r2 = runWs(app);
+    const after = depBytes(app) + "\n@app\n" + fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8");
+    check("workspace re-pass: a clean run sweeps nothing", !/could not scan/.test(r1.stderr + r2.stderr),
+          r1.stderr + r2.stderr);
+    // The re-pass is GATED on something having been dropped. Without this row the gate is invisible in
+    // every channel the suite reads (an ungated re-pass is byte-identical and merely slower — standing
+    // bar item 8c: a guard that cannot be detected needs a test), so the gate discloses itself on the
+    // one channel that can see it.
+    check("workspace re-pass: ...so the fixpoint is NOT re-run", !/re-ran the dependency fixpoint/.test(r1.stderr + r2.stderr),
+          r1.stderr + r2.stderr);
+    check("workspace re-pass: ...and every artifact is byte-identical across the two runs", before === after,
+          `${before}\n---\n${after}`);
+    check("workspace re-pass: ...with the two-hop chain intact and the consumer reading it",
+          /chained 2 workspace dep report\(s\), transitive: liba, libb/.test(r2.stderr), r2.stderr);
+  }
+
+  // ── THE DEFECT, in the cardinal-sin direction: an ANSWERABLE key (`declare function aWrite`). The
+  // stale report's SILENCE about `aWrite` is its purity claim (SPEC §2 rule 3), `libb` chained it, and
+  // the parent inherited a positive purity claim about a call into source candor could not read.
+  {
+    const { app, liba } = mkWorkspace(false);
+    runWs(app);
+    check("workspace re-pass: the two-hop chain is pure while `liba` is scannable and pure",
+          appEntry(app, "src.m.callB") == null, JSON.stringify(appEntry(app, "src.m.callB")));
+    // `liba` loses its analyzable source; its `.d.ts` stays, so `libb` still RESOLVES `aWrite`.
+    fs.rmSync(path.join(liba, "index.ts"));
+    const r = runWs(app);
+    check("workspace re-pass: a SIBLING's cached report does not keep the swept report's answer",
+          appEntry(app, "src.m.callB")?.invisible?.includes("liba"), JSON.stringify(appEntry(app, "src.m.callB")));
+    check("workspace re-pass: ...the carrier's own cached report is re-derived too",
+          entry(JSON.parse(fs.readFileSync(path.join(app, ".candor", "deps", "libb.json"), "utf8")), "index.useB")
+            ?.invisible?.includes("liba"),
+          fs.readFileSync(path.join(app, ".candor", "deps", "libb.json"), "utf8"));
+    check("workspace re-pass: ...and the run says it re-derived rather than only deleting",
+          /re-ran the dependency fixpoint/.test(r.stderr), r.stderr);
+    // THE COLD CONTROL. Same source, no cache: the answer must be the same one. Without this row the
+    // rows above pass for any change that happens to disclose, rather than for the right answer.
+    const cold = mkWorkspace(false);
+    runWs(cold.app);
+    fs.rmSync(path.join(cold.liba, "index.ts"));
+    fs.rmSync(path.join(cold.app, ".candor", "deps"), { recursive: true, force: true });
+    runWs(cold.app);
+    check("workspace re-pass control: the COLD arm gives the same answer as the warm one",
+          JSON.stringify(appEntry(cold.app, "src.m.callB")?.invisible)
+            === JSON.stringify(appEntry(app, "src.m.callB")?.invisible),
+          `${JSON.stringify(appEntry(cold.app, "src.m.callB"))} vs ${JSON.stringify(appEntry(app, "src.m.callB"))}`);
+  }
+
+  // ── THE SAME MECHANISM MOVING A GATE, through the interface-CHA join. `liba`'s run-1 report carries an
+  // `interfaceUnion` entry for `Fetcher.fetch`, so `libb`'s `f.fetch()` joins a CONCRETE `Fs` — and that
+  // `Fs` survived inside `libb`'s cached report after `liba`'s was swept. `deny Fs` was exit 1 over a
+  // body that is no longer on disk, against a cold arm that is exit 0. The opposite direction to the
+  // rows above, from the identical cause, which is why both are here.
+  {
+    const { app, liba } = mkWorkspace(true);
+    runWs(app);
+    check("workspace re-pass: the interface-CHA join carries the dep's concrete effect while it is readable",
+          appEntry(app, "src.m.callB")?.inferred?.includes("Fs"), JSON.stringify(appEntry(app, "src.m.callB")));
+    fs.rmSync(path.join(liba, "index.ts"));
+    fs.writeFileSync(path.join(app, "fs.policy"), "deny Fs src.m.callB\n");
+    const g = runWs(app, ["--policy", path.join(app, "fs.policy")]);
+    check("workspace re-pass: a stale interface-CHA effect does not survive the sweep inside a sibling",
+          !appEntry(app, "src.m.callB")?.inferred?.includes("Fs"), JSON.stringify(appEntry(app, "src.m.callB")));
+    check("workspace re-pass: ...and it is disclosed rather than merely dropped (item 1b)",
+          appEntry(app, "src.m.callB")?.invisible?.includes("liba"), JSON.stringify(appEntry(app, "src.m.callB")));
+    check("workspace re-pass: ...so `deny Fs` is exit 0, agreeing with the cache-free arm", g.status === 0,
+          `status=${g.status} ${g.stdout}`);
+  }
+}
+
 // ── 2f-septies (c). the ⟨0.21⟩ `unanalyzed` manifest, read four ways ──────────────────────────────
 // `21277eb` withheld coverage from a dep report that declares itself incomplete. It asked
 // `Array.isArray(u) && u.length > 0`, which reads `"unanalyzed": "oops"` and `"unanalyzed": {}` as
