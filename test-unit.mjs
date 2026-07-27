@@ -23,6 +23,7 @@ import {
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
   discoverConfigPolicy, evaluatePolicy, reasonClass, parseUnknownAliases, parseNetPartners,
+  resolveReasonClasses,
 } from "./policy.mjs";
 import {
   isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
@@ -118,8 +119,11 @@ test("evaluatePolicy: reason class propagates transitively to callers", () => {
   assert.deepEqual(fire("deny Net Unknown[reflect]\n"), ["dom.callee", "dom.caller"], "reflect fires on caller + callee");
   assert.deepEqual(fire("deny Net Unknown[native]\n"), [], "native tolerates a reflect-class Unknown");
   assert.deepEqual(fire("deny Net Unknown\n"), ["dom.callee", "dom.caller"], "bare Unknown fires on any");
-  // an Unknown with no recorded reason ⇒ unresolved (conservative)
-  const noReason = [{ fn: "x.f", inferred: ["Unknown"] }];
+  // an Unknown with no recorded reason ⇒ unresolved (conservative). ⟨0.24⟩ the fixture now says WHOSE
+  // hole it is: `direct: ["Unknown"]` — a leaf with no callees, so its Unknown can only be its own. The
+  // contribution is gated on exactly that (§6.2 req 3); an entry that merely INHERITED an Unknown is
+  // scoped by its callee's class instead, which is what `dom.caller` above pins.
+  const noReason = [{ fn: "x.f", inferred: ["Unknown"], direct: ["Unknown"] }];
   const fire2 = (pol) => evaluatePolicy(parsePolicy(pol), noReason, { "x.f": [] }).filter((v) => v.rule === "AS-EFF-006").length;
   assert.equal(fire2("deny Net Unknown[unresolved]\n"), 1, "no reason ⇒ unresolved matches");
   assert.equal(fire2("deny Net Unknown[reflect]\n"), 0, "no reason ⇒ not a specific class");
@@ -600,6 +604,80 @@ test("unverified: flags an Unknown fn in a pure/deny scope + names the deny-Unkn
   const none = unverified(fns, parsePolicy("pure domain"), scopeMatches, "reflect");
   assert.equal(none.unverified.length, 0);
   assert.equal(none.ok, true, "no matching-class hole ⇒ ok (the class-scoped view is clean)");
+});
+// ⟨0.24⟩ SPEC §6.2's `--class` clause, the two halves that were both wrong here: the filter read the
+// DIRECT-only `unknownWhy` (so a purely inherited hole matched nothing) and it failed OPEN on absence (so
+// an unclassifiable hole was dropped by EVERY filter, including one naming its own class). The cheap
+// diagnostic the spec makes normative: `--class dynamic` names every genuine class, so it must exclude
+// NOTHING. Measured before the repair on three real targets: 207→173, 268→158, 64→21.
+test("unverified --class ⟨0.24⟩: resolves TRANSITIVELY, fails CLOSED, and still discriminates", () => {
+  const cg = { "app.inherits": ["app.src"], "app.src": [], "app.mystery": [], "app.reflectOnly": [] };
+  const fns = [
+    // a SOURCE: its own body has the unresolvable dispatch
+    { fn: "app.src", inferred: ["Unknown"], direct: ["Unknown"], unknownWhy: ["dispatch:app.Base.run"] },
+    // ⟨0.6⟩ direct-only: a fn that merely INHERITED the Unknown publishes no reason of its own
+    { fn: "app.inherits", inferred: ["Unknown"], direct: [] },
+    // a direct Unknown the producer could not name (a foreign report; candor-ts's own emitter writes
+    // `["unresolved"]` here, which is the same rule one layer earlier)
+    { fn: "app.mystery", inferred: ["Unknown"], direct: ["Unknown"] },
+    { fn: "app.reflectOnly", inferred: ["Unknown"], direct: ["Unknown"], unknownWhy: ["reflect:eval"] },
+  ];
+  const U = (spec) => unverified(fns, parsePolicy("pure app"), scopeMatches, spec, cg).unverified.map((h) => h.fn).sort();
+  // THE DIAGNOSTIC: an alias for every genuine class excludes nothing.
+  assert.deepEqual(U("dynamic"), U(null), "`--class dynamic` must exclude nothing");
+  assert.deepEqual(U("*"), U(null));
+  // (1) TRANSITIVE: the inherited hole is scoped by its CALLEE's class …
+  assert.ok(U("dispatch").includes("app.inherits"), "an inherited hole matches its callee's class");
+  // (2) … and NOT by `unresolved` — the control a blanket "keep everything" fails, and the mirror
+  // fabrication (tagging a correctly-classified inherited Unknown `unresolved`) that §6.2 req 3 forbids.
+  assert.deepEqual(U("unresolved"), ["app.mystery"],
+    "only the hole nothing in reach accounts for contributes `unresolved`");
+  // (3) the filter still DISCRIMINATES — it is not "everything matches everything".
+  assert.deepEqual(U("native"), []);
+  assert.deepEqual(U("reflect"), ["app.reflectOnly"]);
+  assert.deepEqual(U("dispatch"), ["app.inherits", "app.src"]);
+  // (4) FAIL CLOSED: a hole whose class set cannot be resolved AT ALL (inherited from beyond this
+  // report/graph) is KEPT by every filter, never dropped.
+  const orphan = [{ fn: "app.orphan", inferred: ["Unknown"], direct: [] }];
+  for (const c of ["native", "reflect", "unresolved", "dynamic"])
+    assert.deepEqual(unverified(orphan, parsePolicy("pure app"), scopeMatches, c, {}).unverified.map((h) => h.fn),
+      ["app.orphan"], `an unclassifiable hole survives --class ${c}`);
+  // (5) …and `blindspots` shares the FLAG, not this behaviour (§6.2 req 0). It is the SOURCE view, so the
+  // inherited unit is not an entry at all and the direct-only read is CORRECT there. Measured on three
+  // real targets: `blindspots --class dynamic` already excluded nothing (237/190/55, unchanged).
+  const bs = (spec) => blindspots(fns, cg, spec).sources.map((s) => s.fn).sort();
+  assert.ok(!bs(null).includes("app.inherits"), "blindspots excludes a purely inherited Unknown");
+  assert.deepEqual(bs("dynamic"), bs(null), "blindspots --class dynamic excludes nothing either");
+  assert.deepEqual(bs("dispatch"), ["app.src"], "…and stays the direct-reason SOURCE view");
+});
+// The gate and the disclosure now run the SAME resolution (SPEC §6.2: "THE GATE AND THE DISCLOSURE MUST
+// APPLY THE SAME RULE, AND SHOULD SHARE THE SAME CODE") — pin the shared function's own contract.
+test("resolveReasonClasses ⟨0.24⟩: CONTRIBUTES at the node, never keyed on the joined set being empty", () => {
+  // The three-row counterexample to the monotone-denial corollary. Under a rule keyed on ABSENCE, `both`
+  // — which calls a reasonless dep AND a reasoned one, so it knows strictly LESS than `oneReasonless` —
+  // came out {dispatch} and PASSED `Unknown[unresolved]` where `oneReasonless` was rejected.
+  const fns = [
+    { fn: "dep.reasonless", inferred: ["Unknown"], direct: ["Unknown"] },
+    { fn: "dep.reasoned", inferred: ["Unknown"], direct: ["Unknown"], unknownWhy: ["dispatch:d.Base.run"] },
+    { fn: "app.oneReasonless", inferred: ["Unknown"], direct: [] },
+    { fn: "app.oneReasoned", inferred: ["Unknown"], direct: [] },
+    { fn: "app.both", inferred: ["Unknown"], direct: [] },
+  ];
+  const cg = {
+    "app.oneReasonless": ["dep.reasonless"], "app.oneReasoned": ["dep.reasoned"],
+    "app.both": ["dep.reasonless", "dep.reasoned"], "dep.reasonless": [], "dep.reasoned": [],
+  };
+  const acc = resolveReasonClasses(fns, cg);
+  const classesOf = (fn) => [...(acc.get(fn) ?? [])].sort();
+  assert.deepEqual(classesOf("app.oneReasonless"), ["unresolved"]);
+  assert.deepEqual(classesOf("app.oneReasoned"), ["dispatch"]);
+  assert.deepEqual(classesOf("app.both"), ["dispatch", "unresolved"],
+    "a class set may only GROW as more is learned — acquiring a reason must not REMOVE `unresolved`");
+  // …so the verdict is monotone: row 3 knows less than row 1 and must not pass where row 1 is rejected.
+  const denied = (fn) => evaluatePolicy(parsePolicy("deny Unknown[unresolved]"), fns, cg).some((v) => v.fn === fn);
+  assert.equal(denied("app.oneReasonless"), true);
+  assert.equal(denied("app.both"), true, "adding a call must never turn a red verdict green");
+  assert.equal(denied("app.oneReasoned"), false, "…and a classified hole is still out of scope");
 });
 test("fix-gate: no crossing → ok:true, empty remedies", () => {
   const r = fixGate(ofCg, ofFns, parsePolicy("deny Net nonesuch"), scopeMatches);

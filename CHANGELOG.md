@@ -8,6 +8,51 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**`unverified --class` FAILED OPEN, AND READ THE DIRECT-ONLY FIELD** — SPEC §6.2 ⟨0.24⟩ (`policy.mjs`,
+`query-core.mjs`, `query.mjs`). Two independent faults in one predicate, both in the under-report
+direction, and `unverified` is the verb whose entire job is to name the holes a green `pure`/`deny E`
+layer is passing without proving anything.
+
+1. It matched against `unknownWhy`, which §4 makes **direct-only by design** — a reason names a site in
+   the function's *own* body — so a function whose `Unknown` is purely INHERITED carries no reason of its
+   own and matched **no filter at all**. Measured on three real targets: **24%** of `Unknown`-bearing
+   entries on this engine's own sources and **57–58%** on execa and got carry no direct reason.
+2. An entry it could not classify was DROPPED rather than kept, so a hole was excluded by every filter
+   *including one naming its own class*.
+
+THE DIAGNOSTIC, now normative and now a test: `--class dynamic` is an alias for every genuine class, so it
+must exclude NOTHING — a filtered count below the unfiltered one IS the defect and the gap is its size.
+Measured before → after, unfiltered vs `--class dynamic`:
+
+| target | policy | before | after |
+|---|---|---|---|
+| candor-ts's own sources | `pure` | 207 → 173 (−16%) | 207 → 207 |
+| candor-ts's own sources | `deny Net Fs Exec Db` | 208 → 174 | 208 → 208 |
+| execa | `pure` | 268 → 158 (−41%) | 268 → 268 |
+| execa | `deny Net Fs Exec Db` | 289 → 166 (−43%) | 289 → 289 |
+| got | `pure` | 64 → 21 (−67%) | 64 → 64 |
+| got | `deny Net Fs Exec Db` | 74 → 25 (−66%) | 74 → 74 |
+
+All six rows converge exactly. The filter still DISCRIMINATES — it is not "everything matches everything":
+on execa chained against 13 stale dependency reports (333 holes) it selects 268 `indirect`, 76
+`unresolved` and **0** `native`/`reflect`/`dispatch`.
+
+THE REPAIR IS STRUCTURAL, because the root cause was two implementations of one rule. The GATE was never
+party to this: it already resolved the class set transitively over the call graph. The divergence was
+entirely consumer-side, in the one query that reads a **report** instead of the scan's in-memory graph,
+carrying an open-coded second copy of the classification that nothing compared against the first. The
+fixpoint and the match rule are now `resolveReasonClasses` / `reasonClassesMatch` in `policy.mjs`, called
+by both, and `--class` resolves its `dynamic` alias from the same `DYNAMIC_CLASSES` list a
+`deny E Unknown[dynamic]` rule does. The match FAILS CLOSED: an entry whose class set cannot be resolved
+at all is KEPT by every filter.
+
+**`blindspots --class` is deliberately UNCHANGED** — same flag, opposite correct behaviour (§6.2 req 0).
+It is the SOURCE view (§3.1) and already excludes a unit whose `Unknown` is purely inherited, so every
+entry it filters carries a direct reason by construction; resolving transitively there would pull in
+exactly the units the verb exists to exclude. Measured, not assumed: `blindspots --class dynamic` already
+excluded nothing on all three targets (237/190/55 sources, unchanged). A shared code path is not a shared
+defect.
+
 ⚠ **REPORT BYTES DEPENDED ON THE AMBIENT LOCALE** — SPEC §2 ⟨0.24⟩ (`scan.mjs`, `query-core.mjs`). Seven
 orderings used `String.prototype.localeCompare`, which with no locale argument consults the runtime's
 default locale (in Node, taken from `LC_ALL`/`LANG` when ICU is available). One of them — the κ-coverage

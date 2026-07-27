@@ -13,7 +13,10 @@ export const EFFECTS = ["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log",
 // candor-rust's — the mapping below mirrors java's prefix-based ReasonClass.classify(String).
 export const REASON_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved", "setup"];
 // `dynamic` = every GENUINE blind-spot class (excludes `setup`), incl. `unresolved` so it never under-gates.
-const DYNAMIC_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved"];
+// Exported so the `--class` flag (query-core) resolves the alias from THIS list rather than a second copy:
+// the flag and the policy filter name the same vocabulary, so `--class dynamic` and `Unknown[dynamic]`
+// cannot drift into meaning different sets.
+export const DYNAMIC_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved"];
 /** Map a raw `unknownWhy` token (e.g. `reflect:eval`, `callback:fetch`) to its normative reason class. */
 export function reasonClass(why) {
   const w = String(why).trim().toLowerCase();
@@ -31,6 +34,69 @@ export function reasonClass(why) {
   if (w.startsWith("dispatch") || w.startsWith("indy") || w.startsWith("ambiguous")) return "dispatch";
   if (w.startsWith("missing-config") || w.startsWith("no-tsconfig") || w.startsWith("no-node_modules")) return "setup";
   return "unresolved"; // conservative catch-all
+}
+
+// ⟨0.24⟩ THE reason-class resolution — ONE copy, for the GATE (evaluatePolicy, over the scan's in-memory
+// graph) and for the DISCLOSURE (`unverified --class`, over a loaded report). SPEC §6.2: "THE GATE AND THE
+// DISCLOSURE MUST APPLY THE SAME RULE, AND SHOULD SHARE THE SAME CODE." They did not: the gate resolved
+// transitively and the query open-coded a second, direct-only match — two implementations of one rule
+// inside one engine, drifting because nothing compared them, and the consumer-side one under-reported the
+// very holes the verb exists to name. Measured before the repair, `--class dynamic` (an alias for every
+// genuine class, so it must exclude NOTHING) against unfiltered `unverified`: 207→173 on this engine's own
+// sources, 268→158 on execa, 64→21 on got. So: no second fixpoint, no second match rule.
+//
+// `unknownWhy` is DIRECT-ONLY by design (§4: a reason names a site in the function's OWN body), so a
+// function whose Unknown is purely INHERITED carries no reason of its own — 24% of Unknown-bearing entries
+// on this engine's sources and 57-58% on execa/got. Matching against the direct field reads a field that
+// answers a different question.
+export function resolveReasonClasses(functions, callgraph = {}) {
+  const acc = new Map();
+  for (const f of functions ?? []) {
+    const cs = new Set((f.unknownWhy ?? []).map(reasonClass));
+    // ⟨0.24⟩ CONTRIBUTES, not "is treated as". A DIRECT Unknown the function did not name ADDS
+    // `unresolved` HERE, at the node that owns the hole — never as a fallback on the JOINED set being
+    // empty. Emptiness is not upward-closed, so the old absence-keyed default was REMOVED by acquiring a
+    // second, classifiable reason: a caller of one reasonless dep was rejected by `Unknown[unresolved]`,
+    // a caller of one reasoned dep was not, and a caller of BOTH — strictly worse-known than the first —
+    // passed. Adding a call turned a red verdict green (the monotone-denial corollary).
+    // Gated on a DIRECT Unknown (§6.2 req 3), never on the reason set merely being absent: absence is
+    // also exactly what an INHERITED Unknown looks like, and tagging one of those `unresolved` when its
+    // callee classified it perfectly well is the mirror fabrication.
+    // candor-ts's own reports cannot reach this branch — its emitter already writes `["unresolved"]` on a
+    // direct Unknown it could not name (scan.mjs), which is the same rule one layer earlier, at the source.
+    // It fires for a FOREIGN report (java/rust/swift/an older build), which every query verb also reads.
+    if ((f.direct ?? []).includes("Unknown") && !(f.unknownWhy ?? []).length) cs.add("unresolved");
+    if (cs.size) acc.set(f.fn, cs);
+  }
+  // …then propagate over the call graph to a fixpoint, so `Unknown[reflect]` at a caller inheriting
+  // Unknown from a reflect-caused callee still fires (matches java/rust reasonClassAcc).
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const [caller, callees] of Object.entries(callgraph ?? {})) {
+      for (const callee of callees) {
+        const cc = acc.get(callee);
+        if (!cc) continue;
+        let set = acc.get(caller);
+        if (!set) { set = new Set(); acc.set(caller, set); }
+        for (const c of cc) if (!set.has(c)) { set.add(c); changed = true; }
+      }
+    }
+  }
+  return acc;
+}
+
+/** ⟨0.24⟩ The class MATCH, shared by the gate and `unverified --class`. `classes` = a fn's resolved class
+ *  set (resolveReasonClasses); `filter` = the rule's / the flag's class tokens (an array or a Set). A null
+ *  filter means no narrowing. FAILS CLOSED: a function whose class set could not be resolved AT ALL is
+ *  KEPT by every filter, never dropped — the failure this replaces read "no matching reason ⇒ exclude", so
+ *  an unclassifiable hole was excluded by every filter INCLUDING one naming its own class. Fail-closed can
+ *  only ever ADD a violation / keep a disclosure, never remove one. */
+export function reasonClassesMatch(classes, filter) {
+  if (!filter) return true;
+  if (!classes || classes.size === 0) return true;
+  const has = filter instanceof Set ? (c) => filter.has(c) : (c) => filter.includes(c);
+  for (const c of classes) if (has(c)) return true;
+  return false;
 }
 // The literal surfaces `allow` can restrict. `Llm` ⟨0.13⟩ rides Net's host literal (SPEC §1) —
 // `allow Llm <host…>` restricts which MODEL hosts a scope may reach, matched by hostname like Net.
@@ -204,27 +270,9 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
     if (netClass && netClass.length) rec.netClass = netClass;
     out.push(rec);
   };
-  // Reason-scoped Unknown: the Unknown reason CLASS must travel the call graph the same way the Unknown
-  // EFFECT does (unknownWhy in the report is direct-only). Classify each fn's DIRECT reasons to class
-  // tokens, then propagate transitively over `callgraph` to a fixpoint — so `deny E Unknown[reflect]` at a
-  // caller inheriting Unknown from a reflect-caused callee still fires (matches java/rust reasonClassAcc).
-  const reasonAcc = new Map();
-  for (const f of functions) {
-    const cs = new Set((f.unknownWhy ?? []).map(reasonClass));
-    if (cs.size) reasonAcc.set(f.fn, cs);
-  }
-  for (let changed = true; changed; ) {
-    changed = false;
-    for (const [caller, callees] of Object.entries(callgraph)) {
-      for (const callee of callees) {
-        const cc = reasonAcc.get(callee);
-        if (!cc) continue;
-        let set = reasonAcc.get(caller);
-        if (!set) { set = new Set(); reasonAcc.set(caller, set); }
-        for (const c of cc) if (!set.has(c)) { set.add(c); changed = true; }
-      }
-    }
-  }
+  // Reason-scoped Unknown: the Unknown reason CLASS travels the call graph the same way the Unknown
+  // EFFECT does. ONE copy of that resolution, shared with the disclosure side — see resolveReasonClasses.
+  const reasonAcc = resolveReasonClasses(functions, callgraph);
   for (const f of functions) {
     for (const r of pol.deny) {
       if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
@@ -236,13 +284,10 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
         ? f.inferred.filter((e) => e !== "Unknown")
         : f.inferred.filter((e) => r.effects.includes(e));
       // Reason-scoped Unknown: a `deny E Unknown[classes]` keeps its Unknown hit only for a fn whose
-      // TRANSITIVE reason classes include one of those; an Unknown with no recorded reason ⇒ `unresolved`.
+      // TRANSITIVE reason classes include one of those. Same rule object as `unverified --class`.
       let kept = hits;
-      if (hits.includes("Unknown") && (r.unknownClasses?.length)) {
-        const cs = reasonAcc.get(f.fn);
-        const fnClasses = cs && cs.size ? [...cs] : ["unresolved"];
-        if (!fnClasses.some((c) => r.unknownClasses.includes(c))) kept = hits.filter((e) => e !== "Unknown");
-      }
+      if (hits.includes("Unknown") && (r.unknownClasses?.length)
+          && !reasonClassesMatch(reasonAcc.get(f.fn), r.unknownClasses)) kept = hits.filter((e) => e !== "Unknown");
       // Net destination-class: a `deny Net[dest…]` keeps its Net hit only for a fn reaching one of those
       // destination classes; else tolerate (only asserted-safe destinations). Fail-closed: a masked surface /
       // a Net with no visible host is unknown-host (netClassesOf). The class travels the call graph via

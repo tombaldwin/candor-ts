@@ -5074,6 +5074,28 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
           && eqJson(bsJ.sources[0].affected, ["app.caller"]),
         `status=${bs.status} ${bs.stdout.slice(0, 160)}`);
 
+  // ⟨0.24⟩ `unverified --class`, END TO END — the CLI arm the unit test cannot reach: the verb has to LOAD
+  // the callgraph sidecar, because the class set is resolved TRANSITIVELY (SPEC §6.2). `app.caller`
+  // inherits its Unknown from `app.dyn` and so publishes no reason of its own (⟨0.6⟩ direct-only); the old
+  // filter matched the direct field and dropped it from EVERY `--class`, `dynamic` included.
+  fs.writeFileSync(path.join(d, "uv.json"), rep([
+    { fn: "app.dyn", inferred: ["Unknown"], direct: ["Unknown"], unknownWhy: ["reflect:eval"], loc: "u.ts:1" },
+    { fn: "app.caller", inferred: ["Unknown"], direct: [], loc: "u.ts:9" },
+  ]));
+  fs.writeFileSync(path.join(d, "uv.callgraph.json"), JSON.stringify({ "app.caller": ["app.dyn"], "app.dyn": [] }));
+  fs.writeFileSync(path.join(d, "uv.policy"), "pure app\n");
+  const uv = (...extra) => {
+    const r = runQuery("unverified", "--report", path.join(d, "uv"), "--policy", path.join(d, "uv.policy"), ...extra);
+    return { status: r.status, fns: JSON.parse(r.stdout).unverified.map((h) => h.fn).sort() };
+  };
+  const uvAll = uv(), uvDyn = uv("--class", "dynamic"), uvRefl = uv("--class", "reflect"), uvNat = uv("--class", "native");
+  check("CLI unverified --class dynamic excludes NOTHING (the §6.2 ⟨0.24⟩ diagnostic)",
+        uvAll.status === 0 && eqJson(uvAll.fns, ["app.caller", "app.dyn"]) && eqJson(uvDyn.fns, uvAll.fns),
+        `all=${JSON.stringify(uvAll)} dyn=${JSON.stringify(uvDyn)}`);
+  check("CLI unverified --class: the INHERITED hole is scoped by its callee's class, transitively",
+        eqJson(uvRefl.fns, ["app.caller", "app.dyn"]) && eqJson(uvNat.fns, []),
+        `reflect=${JSON.stringify(uvRefl.fns)} native=${JSON.stringify(uvNat.fns)}`);
+
   fs.rmSync(d, { recursive: true, force: true });
 }
 

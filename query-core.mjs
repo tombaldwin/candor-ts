@@ -10,7 +10,7 @@
  */
 import fs from "node:fs";
 import nodePath from "node:path";
-import { reasonClass } from "./policy.mjs";
+import { reasonClass, REASON_CLASSES, DYNAMIC_CLASSES, resolveReasonClasses, reasonClassesMatch } from "./policy.mjs";
 
 // Sibling report/callgraph files of a multi-report prefix (candor-scan writes <prefix>.<crate>.scan.json,
 // one per workspace member) — so the loaders read ANY engine's output, not just candor-ts's <prefix>.json.
@@ -599,7 +599,9 @@ export function impact(fns, cg, q) {
 // candor-java/candor-query: { sources:[{fn,why,reaches,affected}], totalUnknown }.
 // ⟨0.20⟩ `--class <c,…>` filter: the six reason classes, `dynamic` (every genuine class), or `*` (all).
 // null spec ⇒ no filter; an unknown token warns; an all-unknown spec ⇒ an empty set that matches nothing.
-const ALL_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved", "setup"];
+// The vocabulary is policy.mjs's — the flag and a `deny E Unknown[…]` rule must name the same class set,
+// so `--class` resolving `dynamic` from a private copy of the list is a drift waiting to happen.
+const ALL_CLASSES = REASON_CLASSES;
 export function parseClassFilter(spec) {
   if (!spec) return null;
   const out = new Set();
@@ -607,12 +609,20 @@ export function parseClassFilter(spec) {
     t = t.trim();
     if (!t) continue;
     if (t === "*") return new Set(ALL_CLASSES);
-    if (t === "dynamic") { for (const c of ALL_CLASSES) if (c !== "setup") out.add(c); continue; }
+    if (t === "dynamic") { for (const c of DYNAMIC_CLASSES) out.add(c); continue; }
     if (ALL_CLASSES.includes(t)) out.add(t);
     else console.error(`candor-ts: --class ignores unknown reason-class \`${t}\` (known: ${ALL_CLASSES.join(",")}; aliases: dynamic,*)`);
   }
   return out;
 }
+// `blindspots`'s filter, and DELIBERATELY the direct-only one — see SPEC §6.2 ⟨0.24⟩ req 0. `blindspots`
+// is the SOURCE view (§3.1): it already excludes a unit whose Unknown is purely inherited, so every entry
+// it filters carries a direct reason by construction and reading `unknownWhy` is correct here. Resolving
+// transitively would pull in exactly the units the verb is defined to exclude, turning a ranked worklist of
+// root causes into a list of everything downstream of them. `unverified` is the opposite and shares the
+// FLAG, not this predicate: an inherited hole is still a hole the gate did not prove. A shared code path is
+// not a shared defect. Measured: `--class dynamic` already excludes nothing here (237/190/55 sources on
+// three targets, unchanged filtered), which is what a correct source view looks like.
 const classMatches = (cf, why) => cf === null || (why ?? []).some((w) => cf.has(reasonClass(w)));
 
 export function blindspots(fns, cg, classSpec = null) {
@@ -944,13 +954,21 @@ export function unverifiedHoleRule(fn, inferred, policyParsed, scopeMatches) {
   return null;
 }
 
-export function unverified(fns, policyParsed, scopeMatches, classSpec = null) {
+// ⟨0.24⟩ `--class` here resolves the class set TRANSITIVELY, with the GATE's own code (policy.mjs) and over
+// the same reach the gate uses — `cg` is the callgraph sidecar. It used to match `e.unknownWhy`, the
+// DIRECT-only field (§4: a reason names a site in the fn's OWN body), so a hole whose Unknown is purely
+// inherited matched NO filter at all — including one naming its own class, and including `dynamic`, which
+// names every genuine class and must therefore exclude nothing. That made the one verb whose job is to
+// surface the holes a green gate is hiding under-report them, and under-report MORE the more the user
+// narrowed. Measured on three real targets, unfiltered → `--class dynamic`: 207→173, 268→158, 64→21.
+export function unverified(fns, policyParsed, scopeMatches, classSpec = null, cg = {}) {
   const cf = parseClassFilter(classSpec);   // ⟨0.20⟩ --class: keep only holes of a matching reason class
+  const reasonAcc = cf ? resolveReasonClasses(fns, cg) : null;
   const holes = [];
   for (const e of fns) {
     // Same predicate + upgrade as the gate note (scan.mjs) — one source of truth for a hole.
     const r = unverifiedHoleRule(e.fn, e.inferred, policyParsed, scopeMatches);
-    if (!r || !classMatches(cf, e.unknownWhy)) continue;
+    if (!r || (cf && !reasonClassesMatch(reasonAcc.get(e.fn), cf))) continue;
     const [rule, upgrade] = ruleUpgrade(r);
     holes.push({ fn: e.fn, rule, unknownWhy: e.unknownWhy ?? [], upgrade });
   }

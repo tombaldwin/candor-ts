@@ -299,7 +299,7 @@ function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknow
     if (a === "--strict") { if (strict) wantStrict = true; continue; }                       // vocabulary — tolerated everywhere,
     if (a === "--include-unknown") { if (includeUnknown) wantIncludeUnknown = true; continue; } // used only by the verb that reads it
     if (a === "--stats") { continue; }   // ⟨0.20⟩ tolerated everywhere; read by the `blindspots` case via args.includes
-    if (a === "--class") { // ⟨0.20⟩ value flag; the value is read by the `blindspots` case
+    if (a === "--class") { // ⟨0.20⟩ value flag; the value is read by the `blindspots` and `unverified` cases
       if (i + 1 >= rawArgs.length) { console.error("candor-ts: --class requires a <class,…> value (reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*)"); process.exit(2); }
       i++; continue;
     }
@@ -419,7 +419,7 @@ const SUBCOMMANDS = [
   ["whatif", `<fn> <Effect> [--policy <file>] ${REPORT_TAIL}`, "the impact of giving a function an effect, vs a policy (exit 1 on a violation)"],
   ["fix", `<fn> <Effect> [--policy <file>] ${REPORT_TAIL}`, "the boundary fix: where the effect belongs + the hoist refactor"],
   ["fix-gate", `[--policy <file>] [--strict] ${REPORT_TAIL}`, "a fix for EVERY boundary crossing — advisory (--strict: exit 1 while any remains)"],
-  ["unverified", `[--policy <file>] [--strict] ${REPORT_TAIL}`, "pure/deny layers that PASS but are Unknown (not PROVABLY clean)"],
+  ["unverified", `[--policy <file>] [--strict] [--class <c,…>] ${REPORT_TAIL}`, "pure/deny layers that PASS but are Unknown (not PROVABLY clean); --class: drill down"],
   ["agents", "", "print the agent contract for this build (AGENTS.md)"],
 ];
 
@@ -912,7 +912,11 @@ switch (cmd) {
     try { ptext = fs.readFileSync(policyFile, "utf8"); }
     catch { console.error(`candor: policy ${policyFile} could not be read`); process.exit(2); }
     const uci = args.indexOf("--class");   // ⟨0.20⟩ drill-down by reason class
-    const r = coreUnverified(loadReportOrDie(prefix), parsePolicy(ptext), scopeMatches, uci >= 0 ? args[uci + 1] : null);
+    // ⟨0.24⟩ the callgraph rides along: `--class` resolves the reason class TRANSITIVELY, over the same
+    // reach the gate uses (SPEC §6.2). Without the sidecar the resolution degrades to direct-only — which
+    // is why the match FAILS CLOSED, so a hole it cannot classify is still listed rather than dropped.
+    const r = coreUnverified(loadReportOrDie(prefix), parsePolicy(ptext), scopeMatches,
+                             uci >= 0 ? args[uci + 1] : null, uci >= 0 ? loadCallgraph(prefix) : {});
     emit(r);
     process.exit(strict && !r.ok ? 1 : 0);
     break; // unreachable
