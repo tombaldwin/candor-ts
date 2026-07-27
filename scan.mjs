@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText, reasonClass } from "./policy.mjs";
-import { unverifiedHoleRule, ruleUpgrade } from "./query-core.mjs";
+import { unverifiedHoleRule, ruleUpgrade, byCodePoint } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
          modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf } from "./scan-core.mjs";
@@ -4698,7 +4698,14 @@ const envelope = { candor: { version: ENGINE_VERSION, toolchain: `node-${process
 // ⟨0.15 staged⟩ the κ-coverage ledger as DATA (COVERAGE-DESIGN.md §1): ONE sorted form (count desc,
 // name asc — exactly the stderr line's order) feeds the envelope field, the stderr receipt below, and
 // the --gate-json advisory, so the three can never tell different stories.
-const uncoveredLedger = [...unlistedSeen.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+// ⟨0.24⟩ `name asc` = BY CODE POINT (SPEC §2: every ordering in a report MUST be locale-INDEPENDENT). This
+// tiebreak used `localeCompare`, and unlike the other six sites it orders bytes INSIDE THE EMITTED REPORT —
+// so the break was OBSERVED, not argued: one build, one unchanged tree, two runs differing only in the
+// environment (`LC_ALL=C` vs `LC_ALL=et_EE.UTF-8`) produced reports with different md5, the two
+// `coverage.uncovered` entries transposed. The keys here are npm package names — lowercase ASCII, the case
+// the UTF-16 hazard cannot reach — and Estonian collates z between s and t, so ASCII bought no safety.
+// Every "a default report is byte-identical" claim in the spec was false against this line.
+const uncoveredLedger = [...unlistedSeen.entries()].sort((a, b) => b[1] - a[1] || byCodePoint(a[0], b[0]));
 // ⟨0.15 staged⟩ `coverage` envelope field — the stderr disclosure travels WITH the artifact, so a
 // report-consuming verb can no longer read a partially-covered report as total. Same names/counts as
 // the stderr line. OMITTED entirely when nothing is uncovered (the `extensions`-field precedent): a

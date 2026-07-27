@@ -149,7 +149,7 @@ export function reportCoverage(prefix) {
     } catch { /* unreadable sibling — the reportVersion posture: keep looking */ }
   }
   if (merged.size === 0) return null;
-  return [...merged.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  return [...merged.entries()].sort((a, b) => b[1] - a[1] || byCodePoint(a[0], b[0]))
     .map(([name, calls]) => ({ name, calls }));
 }
 
@@ -356,12 +356,27 @@ export function loadHierarchy(prefix) {
 }
 
 // Order two strings by UNICODE CODE POINT — the collation SPEC §3.1 ⟨0.24⟩ pins for `viaDispatchOn`
-// (Rust gets it free from `BTreeSet<&str>`). JavaScript's DEFAULT `Array.sort` (and `<`, and
+// (Rust gets it free from `BTreeSet<&str>`), AND the ordering SPEC §2 ⟨0.24⟩ pins for EVERY ordering in a
+// report or a query output. JavaScript's DEFAULT `Array.sort` (and `<`, and
 // `String.prototype.localeCompare`, and `Intl.Collator`) is NOT it: the first three order by UTF-16 CODE
 // UNIT, so a supplementary character — stored as a surrogate pair starting U+D800 — sorts BEFORE
 // everything above the surrogate block, the opposite of code-point order; `Intl.Collator` is
 // locale-sensitive, which is worse still. ASCII is unaffected either way, but `<owner>.<member>` is built
 // from user identifiers and all four analysed languages allow non-ASCII ones, so this is reachable.
+//
+// ⟨0.24⟩ The two rules are SEPARATE and the locale one is STRICTER: collation says which of the
+// well-defined orders, §2 says the order must not consult the environment AT ALL — the same input on the
+// same machine under a different `LC_ALL` must produce the same bytes, or "a default report is
+// byte-identical" is not even a checkable claim and the effects-fingerprint has no ground. `localeCompare`
+// satisfies NEITHER; this comparator satisfies both. That is not theoretical here and it is not confined to
+// exotic characters: MEASURED on this build (node v23.6.0, full ICU), `"zpad".localeCompare("tpad")` is +1
+// under `LC_ALL=C` and −1 under `LC_ALL=et_EE.UTF-8` — Estonian collates z between s and t — and pure-ASCII
+// lowercase npm package names are exactly what the coverage ledger below is keyed by. Two scans of one
+// build of one engine over one unchanged tree emitted DIFFERENT REPORT BYTES (different md5, the
+// `coverage.uncovered` entries transposed). `LC_ALL=da_DK.UTF-8` breaks a second pure-ASCII pair
+// (`"aardvark"` sorts AFTER `"z"`, aa = å). The old "ASCII is unaffected" reasoning held only for the
+// UTF-16 hazard; it never held for the locale one.
+//
 // §3.1 also names UTF-8 byte order as the same ORDER — but NOT as the method, and this comparator
 // deliberately does no encoding. An UNPAIRED SURROGATE is representable in a UTF-16 string yet has no UTF-8
 // encoding, so encoding first maps every lone surrogate to the SAME replacement bytes and two details
@@ -374,7 +389,11 @@ export function loadHierarchy(prefix) {
 // and it evaporates the day this is refactored to a comparator-backed sorted set. Spreading a string
 // yields CODE POINTS (JS string iteration is code-point-wise) and leaves a lone surrogate as itself, so
 // comparing those sequences is order-correct AND lossless, with no arithmetic and nothing to evaporate.
-const byCodePoint = (a, b) => {
+//
+// EXPORTED, and it is the ONLY string comparator in this engine — `scan.mjs` imports THIS one rather than
+// growing a second. A near-copy is how the report side and the query side drift back apart, one clause at a
+// time, and the drift would be invisible on the ASCII inputs every test uses.
+export const byCodePoint = (a, b) => {
   const A = [...a], B = [...b];
   for (let i = 0; i < Math.min(A.length, B.length); i++) {
     const x = A[i].codePointAt(0), y = B[i].codePointAt(0);
@@ -454,7 +473,7 @@ export function callersFrontier(cg, fns, hierarchy, q) {
     }
     if (hits.size) possible.push({ fn: f.fn, viaDispatchOn: [...hits].sort(byCodePoint).join(",") });
   }
-  possible.sort((a, b) => a.fn.localeCompare(b.fn));
+  possible.sort((a, b) => byCodePoint(a.fn, b.fn));
   return { ...base, possibleViaUnknownDispatch: possible };
 }
 
@@ -528,8 +547,8 @@ export function containment(fns, baseFns) {
     const layers = byEff[eff]; if (!layers) continue;
     const entries = Object.entries(layers);
     const tot = entries.reduce((a, [, n]) => a + n, 0);
-    const owner = entries.slice().sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
-    const placement = Object.fromEntries(entries.slice().sort((a, b) => a[0].localeCompare(b[0])));
+    const owner = entries.slice().sort((a, b) => b[1] - a[1] || byCodePoint(a[0], b[0]))[0];
+    const placement = Object.fromEntries(entries.slice().sort((a, b) => byCodePoint(a[0], b[0])));
     contained.push({ effect: eff, containmentPct: Math.floor((100 * owner[1]) / tot),
                      layers: entries.length, owner: owner[0], placement });
   }
@@ -614,7 +633,7 @@ export function blindspots(fns, cg, classSpec = null) {
     const affected = [...reached].sort();
     sources.push({ fn: e.fn, why, reaches: affected.length, affected });
   }
-  sources.sort((a, b) => b.reaches - a.reaches || a.fn.localeCompare(b.fn)); // most-smearing first, stable
+  sources.sort((a, b) => b.reaches - a.reaches || byCodePoint(a.fn, b.fn)); // most-smearing first, stable
   return { sources, totalUnknown };
 }
 
@@ -695,7 +714,7 @@ export function diff(curFns, baseFns) {
     const lost = [...b].filter((e) => !c.has(e)).sort();
     if (gained.length || lost.length) changes.push({ fn, gained, lost });
   }
-  changes.sort((a, b) => a.fn.localeCompare(b.fn));
+  changes.sort((a, b) => byCodePoint(a.fn, b.fn));
   return { changes };
 }
 

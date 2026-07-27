@@ -3242,6 +3242,65 @@ export function go(): string { fsm.readFileSync("/x"); chunk("ab"); return pad("
   check("⟨0.15⟩ the per-fn posture is untouched: the calling fn still carries `invisible` (no reshape)",
         entry(report, "src.a.go")?.invisible?.includes("leftpad"), JSON.stringify(entry(report, "src.a.go")));
 }
+
+// ── ⟨0.24⟩ REPORT BYTES ARE LOCALE-INDEPENDENT (SPEC §2) ─────────────────────────────────────────
+// The coverage ledger's name tiebreak orders bytes INSIDE the emitted report, and it used
+// `localeCompare` — which consults the runtime's ambient locale. So the same build over the same
+// unchanged tree could emit two different reports on two machines, and every "a default report is
+// byte-identical" claim in the spec (plus the deterministic effects-fingerprint) rested on it not doing
+// that. This is a SEPARATE, STRICTER rule than the collation one below: collation picks which of the
+// well-defined orders, this one says the order must not consult the environment at all.
+//
+// MEASURED, not argued. Pre-fix, on this build, the two runs below produced reports with DIFFERENT md5 —
+// the `coverage.uncovered` entries transposed — because Estonian collates z between s and t, so
+// `"zpad".localeCompare("tpad")` flips sign with `LC_ALL`. The keys are npm package names: lowercase
+// ASCII, exactly the case the UTF-16 hazard cannot reach. ASCII bought no safety here.
+//
+// The counts are EQUAL (one call each) on purpose: the primary key is count-descending, so equal counts
+// are what hand the decision to the name comparator. With unequal counts this fixture would pass under
+// `localeCompare` and pin nothing.
+{
+  const stub = (name) => ({
+    [`node_modules/${name}/package.json`]: `{"name":"${name}","version":"0.0.0","main":"index.js","types":"index.d.ts"}`,
+    [`node_modules/${name}/index.d.ts`]: `export declare function go(s: string): string;`,
+    [`node_modules/${name}/index.js`]: `module.exports.go = (s) => s;`,
+  });
+  const d = project({
+    ...stub("zpad"), ...stub("tpad"),
+    "src/a.ts": `import { go as gz } from "zpad";
+import { go as gt } from "tpad";
+export function run(): string { return gz("a") + gt("b"); }`,
+  });
+  // `--json` prints the report to stdout, so this compares the emitted BYTES and never a re-parse.
+  const under = (loc) => spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--json"],
+                                   { encoding: "utf8", env: { ...process.env, LC_ALL: loc, LANG: loc } });
+  const c = under("C").stdout, et = under("et_EE.UTF-8").stdout, da = under("da_DK.UTF-8").stdout;
+  check("⟨0.24⟩ report BYTES are identical under LC_ALL=C, et_EE and da_DK (SPEC §2 locale-independence)",
+        c.length > 0 && c === et && c === da,
+        `C=${c.length}B et=${et.length}B da=${da.length}B` + (c === et ? "" : ` | first divergence C-vs-et`));
+  // Identity alone would also hold for a comparator that is stably WRONG, so pin the order too: code
+  // point puts `tpad` first. Asserted on ALL THREE runs, not just the C one — under `localeCompare` the C
+  // run alone still reads `tpad, zpad`, so checking it would go green against the very defect this block
+  // exists for. The et/da runs are where the order actually moves.
+  const names = (s) => (JSON.parse(s).coverage?.uncovered ?? []).map((u) => u.name);
+  const cp = JSON.stringify(["tpad", "zpad"]);
+  check("⟨0.24⟩ ...and that one order is CODE POINT (tpad before zpad) in EVERY locale, not a collation",
+        JSON.stringify(names(c)) === cp && JSON.stringify(names(et)) === cp && JSON.stringify(names(da)) === cp,
+        `C=${JSON.stringify(names(c))} et=${JSON.stringify(names(et))} da=${JSON.stringify(names(da))}`);
+  // CALIBRATION — is the fixture discriminating on THIS runtime? `localeCompare(a, b, "et")` names the
+  // locale explicitly, so it answers "does this build carry Estonian collation data?" without depending
+  // on the parent's own environment. If it does, the ambient probe MUST flip too; if it does not (a
+  // small-ICU Node), nothing in the environment can break the report here and the two checks above are a
+  // regression guard on the comparator rather than a demonstration of the break. Said out loud, because a
+  // test that quietly stops discriminating is worse than one that never did.
+  const hasEtData = "zpad".localeCompare("tpad", "et") < 0;
+  const probe = spawnSync("node", ["-e", "process.stdout.write(String('zpad'.localeCompare('tpad')))"],
+                          { encoding: "utf8", env: { ...process.env, LC_ALL: "et_EE.UTF-8", LANG: "et_EE.UTF-8" } });
+  check("⟨0.24⟩ ...calibration: where the build HAS Estonian collation, LC_ALL flips `localeCompare` on this ASCII pair",
+        !hasEtData || probe.stdout.trim() === "-1", `etData=${hasEtData} ambientProbe=${JSON.stringify(probe.stdout)}`);
+  if (!hasEtData) console.log("  note this Node build lacks Estonian collation data — the two checks above are a NON-discriminating regression guard on this runtime");
+}
+
 // ⟨0.15 staged⟩ the coverage envelope is OMITTED when nothing is uncovered — a fully-covered report is
 // byte-identical to a ⟨0.14⟩ one (the wire-compatibility half of the rung), and an UNRESOLVABLE import
 // keeps the stronger `Unknown` posture without joining the ledger (no node_modules path to count).
@@ -4175,6 +4234,26 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
   check("frontier: two details differing only in a LONE SURROGATE stay two entries (no lossy collapse)",
         surr.length === 1 && surr[0].viaDispatchOn.split(",").length === 2,
         JSON.stringify(surr.map((e) => [...e.viaDispatchOn].map((c) => c.codePointAt(0).toString(16)))));
+  // ⟨0.24⟩ THE OTHER SORT IN THIS FUNCTION — the ENTRY order, keyed on `fn`, which used `localeCompare`
+  // (SPEC §2: every ordering in a QUERY OUTPUT is locale-independent too, not just the ones in a report).
+  // The pair is chosen so `localeCompare` and code point DISAGREE in EVERY locale, not just an exotic one:
+  // ICU compares letters case-insensitively at the primary level, so `app.Zed.run` sorts AFTER
+  // `app.alpha.run` (z after a), while code point puts it FIRST ('Z' = U+005A < 'a' = U+0061). Verified in
+  // C, en_GB, et_EE, da_DK, tr_TR and ja_JP: `localeCompare` = +1, code point = −1 in all six. So this
+  // assertion goes RED against `localeCompare` on any runtime, which the ASCII-lowercase fixtures above
+  // would not — and a PascalCase type segment beside a lowercase module segment is what real quals look
+  // like, so it is the realistic case rather than the contrived one.
+  const cgO = { "app.Zed.run": [], "app.alpha.run": [], "app.Sink.touch": [], "app.Impl.run": ["app.Sink.touch"] };
+  const fnsO = [
+    { fn: "app.alpha.run", unknownWhy: ["dispatch:app.Base.run"] },
+    { fn: "app.Zed.run", unknownWhy: ["dispatch:app.Base.run"] },
+    { fn: "app.Impl.run", unknownWhy: [] },
+  ];
+  const ord = callersFrontier(cgO, fnsO, { "app.Impl": ["app.Base"] }, "app.Sink.touch")
+    .possibleViaUnknownDispatch.map((e) => e.fn);
+  check("frontier: ENTRY order is by CODE POINT, not `localeCompare` (uppercase segment sorts first)",
+        JSON.stringify(ord) === JSON.stringify(["app.Zed.run", "app.alpha.run"]),
+        JSON.stringify(ord) + ` (localeCompare order would be ${JSON.stringify(["app.alpha.run", "app.Zed.run"])})`);
 }
 
 // ── node:vm executes a runtime code STRING → Unknown (the eval-class disclosure). Was silent-pure —

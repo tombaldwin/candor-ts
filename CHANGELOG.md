@@ -8,6 +8,30 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+⚠ **REPORT BYTES DEPENDED ON THE AMBIENT LOCALE** — SPEC §2 ⟨0.24⟩ (`scan.mjs`, `query-core.mjs`). Seven
+orderings used `String.prototype.localeCompare`, which with no locale argument consults the runtime's
+default locale (in Node, taken from `LC_ALL`/`LANG` when ICU is available). One of them — the κ-coverage
+ledger's name tiebreak — orders entries INSIDE the emitted report, so this was not a presentation detail:
+every *"a default report is byte-identical"* claim in the spec, and the deterministic effects-fingerprint,
+rested on an assumption the engine did not hold to.
+
+MEASURED, not argued: one build, one unchanged tree, two scans differing only in the environment produced
+reports with **different md5** — `coverage.uncovered` held `tpad, zpad` under `LC_ALL=C` and `zpad, tpad`
+under `LC_ALL=et_EE.UTF-8`, because Estonian collates z between s and t. The keys are npm package names,
+i.e. **lowercase ASCII** — the case usually assumed safe, and the one the UTF-16 hazard cannot reach.
+`LC_ALL=da_DK.UTF-8` breaks a second ASCII pair (`aardvark` after `z`, aa = å). All seven sites now use the
+single exported `byCodePoint` comparator that already backed `viaDispatchOn`; `scan.mjs` imports THAT one
+rather than growing a near-copy that could drift back apart on inputs no test uses.
+
+This is a **separate and stricter rule** than the ⟨0.24⟩ collation rule below: collation says *which* of
+the well-defined orders, this says the order must not consult the environment at all. `localeCompare`
+satisfied neither. Marked ⚠ because a report produced under a non-C locale can change bytes across this
+release; under `LC_ALL=C` the order is unchanged (C already agreed with code point on these inputs).
+
+The remaining bare `.sort()` calls are a **different** class and are untouched here: UTF-16 code-unit
+order — deterministic and locale-independent, so §2-clean, but not code-point order for supplementary
+characters.
+
 ⚠ **A DOT-FREE `dispatch:` reason was silently DROPPED from `possibleViaUnknownDispatch`** — SPEC §3.1
 ⟨0.24⟩ (`query-core.mjs`). §4 reserves a dot-free detail for an unresolved dispatch whose owner type could
 not be formed at all (candor-rust emits `dispatch:untyped cross-package receiver`). With no owner and no
