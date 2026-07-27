@@ -1026,6 +1026,97 @@ export function callB(): void { useB(); }`,
   }
 }
 
+// ── 2f-septies (b3). THE TWO NAMES THAT HAVE TO BE ONE NAME ────────────────────────────────────────
+// `95d0b8b`'s sweep rule is "a file candor would have OVERWRITTEN on success is the file it removes on
+// failure". That is only true while the WRITER's name and the SWEEPER's candidate name are the same
+// string, and they were two spellings of one derivation: the writer took `report.package` on trust,
+// `failedDepName` required a non-empty STRING. A manifest whose `name` is not a string makes them
+// disagree — and the sweep is the unrecoverable direction.
+{
+  const mkOwn = (manifestName) => {
+    const dep = project({
+      "package.json": `{"name":${manifestName},"version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+      "index.d.ts": `export declare function u(): void;`,
+      "index.ts": `export function u(): void {}`,
+    });
+    const app = project({
+      "package.json": `{"name":"ownapp","version":"1.0.0"}`,
+      "src/m.ts": `export function f(): void {}`,
+    });
+    fs.mkdirSync(path.join(app, "node_modules"), { recursive: true });
+    // The link's NAME in node_modules is what makes it a discovered path dep; the file it is filed under
+    // comes from the manifest, and the two are deliberately different here.
+    fs.symlinkSync(dep, path.join(app, "node_modules", "utils"));
+    fs.mkdirSync(path.join(app, ".candor", "deps"), { recursive: true });
+    return { app, dep, base: path.basename(dep) };
+  };
+  const runWs = (app) => spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--workspace"], { encoding: "utf8" });
+
+  // NO-DELETION FIRST, and this row is the whole point: a report the USER placed under the name the
+  // sweep would derive for this dep must not be destroyed by a scan that SUCCEEDED. Pre-fix it was —
+  // `name.replace` threw on the number, the `catch` read the success as a failure, and the sweep took it.
+  {
+    const { app, dep, base } = mkOwn("123");
+    const hand = path.join(app, ".candor", "deps", `${base}.json`);
+    fs.writeFileSync(hand, JSON.stringify({ candor: { version: "hand" }, package: "handmade", functions: [] }));
+    const r = runWs(app);
+    check("workspace ownership: a dep whose manifest `name` is not a string is not a FAILED scan",
+          !/could not scan/.test(r.stderr), r.stderr);
+    check("workspace ownership: ...so nothing at the derived name is deleted",
+          fs.existsSync(hand), fs.readdirSync(path.join(app, ".candor", "deps")).join(","));
+    // …and the file that is there is candor's own report for that dep, filed under the SAME name
+    // `failedDepName` would have derived — which is what makes the sweep's rule true rather than lucky.
+    let filed = null;
+    try { filed = JSON.parse(fs.readFileSync(hand, "utf8")); } catch { /* the row above already named it */ }
+    check("workspace ownership: ...it is candor's own report, filed under the sweeper's own name",
+          Array.isArray(filed?.functions) && filed.candor?.version !== "hand", JSON.stringify(filed)?.slice(0, 120));
+    check("workspace ownership: ...and the count line names what is on disk, not the manifest's non-string",
+          new RegExp(`chained 1 workspace dep report\\(s\\), transitive: ${base}`).test(r.stderr), r.stderr);
+    fs.rmSync(dep, { recursive: true, force: true });
+  }
+  // CONTROL: an ordinary string name is unaffected — the derivation only changes where it was undefined.
+  {
+    const { app } = mkOwn(`"utilkit"`);
+    const r = runWs(app);
+    check("workspace ownership control: an ordinary manifest name still files under the manifest name",
+          fs.existsSync(path.join(app, ".candor", "deps", "utilkit.json")),
+          fs.readdirSync(path.join(app, ".candor", "deps")).join(","));
+    check("workspace ownership control: ...and says so", /transitive: utilkit/.test(r.stderr), r.stderr);
+  }
+  // THE WRITE DOOR. `95d0b8b` closed "a report this run did not write is not this run's answer" for a
+  // scan that threw. The bookkeeping sat ABOVE the write, so a write that threw — a read-only cache dir,
+  // a full disk, a mode a CI image sets — recorded the dep as ANSWERED, the sweep skipped it, and the
+  // PREVIOUS run's report stood in for one this run never put on disk. Same class, different door.
+  {
+    const dep = project({
+      "package.json": `{"name":"wkit","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+      "index.d.ts": `export declare function w(): void;`,
+      "index.ts": `export function w(): void {}`,
+    });
+    const app = project({
+      "package.json": `{"name":"wapp2","version":"1.0.0"}`,
+      "src/m.ts": `import { w } from "wkit";
+export function useW(): void { w(); }`,
+    });
+    fs.mkdirSync(path.join(app, "node_modules"), { recursive: true });
+    fs.symlinkSync(dep, path.join(app, "node_modules", "wkit"));
+    runWs(app);
+    const cached = path.join(app, ".candor", "deps", "wkit.json");
+    check("workspace write door: a scannable path dep is cached", fs.existsSync(cached),
+          fs.readdirSync(path.join(app, ".candor", "deps")).join(","));
+    // The dep gains an effect AND the cache file becomes unwritable, so the fresh bytes cannot land.
+    fs.writeFileSync(path.join(dep, "index.ts"),
+      `import * as fsm from "node:fs";\nexport function w(): void { fsm.appendFileSync("/tmp/w", "x"); }`);
+    fs.chmodSync(cached, 0o444);
+    const r = runWs(app);
+    const e = entry(JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8")), "src.m.useW");
+    check("workspace write door: a report this run could not WRITE is not served from the previous run",
+          !(e == null), JSON.stringify(e));
+    check("workspace write door: ...it is swept and named on stderr", /could not scan wkit\b/.test(r.stderr), r.stderr);
+    fs.chmodSync(path.dirname(cached), 0o755);
+  }
+}
+
 // ── 2f-septies (c). the ⟨0.21⟩ `unanalyzed` manifest, read four ways ──────────────────────────────
 // `21277eb` withheld coverage from a dep report that declares itself incomplete. It asked
 // `Array.isArray(u) && u.length > 0`, which reads `"unanalyzed": "oops"` and `"unanalyzed": {}` as

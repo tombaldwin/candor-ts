@@ -493,12 +493,30 @@ if (wantWorkspace) {
           const out = execFileSync(process.execPath, [selfPath, real, "--json"],
             { env: { ...process.env, CANDOR_WORKSPACE_CHAIN: "1", CANDOR_DEPS: workspaceDepsDir },
               maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
-          const name = (JSON.parse(out.toString()).package) || path.basename(real);
-          names.add(name);
-          const file = path.join(workspaceDepsDir, `${name.replace(/[/@]/g, "_")}.json`);
-          answered.add(real); ownFiles.add(file);
+          // ⟨ownership, half 1⟩ ONE derivation, shared with `failedDepName`, and TOTAL. The sweep's rule is
+          // "a file candor would have OVERWRITTEN on success is the file it removes on failure", which is
+          // only true while the writer's name and the sweeper's candidate name are the same string. They
+          // were two spellings: this line took `report.package` on trust, `failedDepName` required a
+          // non-empty STRING. A manifest saying `"name": 123` (or an object, or an array) made them
+          // disagree — `name.replace` threw, the `catch` below read a SUCCESSFUL scan as a failure, and the
+          // sweep then deleted `<directory-basename>.json`, a name this writer would never have produced.
+          // Measured: a user-placed report at that name was destroyed, stderr said "could not scan utils"
+          // about a scan that exited 0, and the count line claimed to have chained `123` while no file had
+          // been written at all. Same test as `failedDepName`, so the two cannot drift apart again.
+          const declaredPkg = JSON.parse(out.toString()).package;
+          const name = (typeof declaredPkg === "string" && declaredPkg) ? declaredPkg : path.basename(real);
+          const file = depCacheFileName(workspaceDepsDir, name);
           const prev = fs.existsSync(file) ? fs.readFileSync(file) : null;
           if (!prev || !prev.equals(out)) { fs.writeFileSync(file, out); anyChanged = true; }
+          // ⟨ownership, half 2⟩ Recorded from the WRITE, not from the scan. These three lines used to sit
+          // ABOVE it, so a `writeFileSync` that threw — a read-only `.candor/deps`, a full disk, a mode
+          // the CI image sets — marked the dep ANSWERED, which made the sweep skip it and left the
+          // PREVIOUS run's report standing in for a report this run never put on disk. That is exactly the
+          // class `95d0b8b` closed, reached through the write door instead of the scan door. Note
+          // `answered` is still recorded when the bytes are UNCHANGED and no write happens: confirmed is
+          // not the same as rewritten, and keying it on a byte change would make a stable repeat run
+          // delete the cache it had just verified.
+          names.add(name); answered.add(real); ownFiles.add(file);
         } catch { /* a dep that fails to scan is skipped — see the ownership sweep below */ }
       }
       if (!anyChanged) break;   // fixpoint reached: transitive effects fully propagated

@@ -8,6 +8,21 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**`--workspace`'s cache ownership is one derivation, and it is recorded from the WRITE** (`scan.mjs`).
+`95d0b8b`'s sweep rule — *a file candor would have OVERWRITTEN on success is the file it removes on
+failure* — holds only while the writer's name and the sweeper's candidate name are the same string, and
+they were two spellings: the writer took `report.package` on trust, `failedDepName` required a non-empty
+STRING. A manifest saying `"name": 123` made them disagree, and the disagreement was the unrecoverable
+direction: `name.replace` threw, the `catch` read a scan that **exited 0** as a failure, and the sweep
+deleted `<directory-basename>.json` — a name that writer would never have produced — while stderr said
+"could not scan utils" about a successful scan and the count line claimed to have chained `123` with no
+file on disk. Both sides now use the same total derivation. Separately, `answered`/`ownFiles` moved BELOW
+the write: they used to be recorded from the SCAN, so a `writeFileSync` that threw (a read-only cache
+dir, a full disk) marked the dep answered, the sweep skipped it, and the PREVIOUS run's report stood in
+for one this run never put on disk — `95d0b8b`'s own class through the write door. Inert on real input:
+**0 of 28,407 real `package.json` manifests across 61 `node_modules` trees have a non-string `name`**,
+so the corpus is the fabrication control and the fixtures are the evidence.
+
 ⚠ **`--workspace` now re-derives the fixpoint after sweeping a stale cached dep report** (`scan.mjs`).
 `95d0b8b` correctly stopped serving a cached report this run did not write, but it swept AFTER the
 fixpoint rounds — and every child in those rounds is spawned with `CANDOR_DEPS` pointing at the same
