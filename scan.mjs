@@ -398,6 +398,59 @@ const declaredButUninstalled = new Set();
 // there is no re-discovery recursion. TRANSITIVE: a dep's calls into ITS OWN workspace deps must also
 // resolve, so we scan every dep repeatedly WITH the accumulating deps dir chained, to a fixpoint (effects
 // are monotone → a few rounds converge; bounded by MAX_ROUNDS = workspace dep-graph depth).
+// ⟨cache ownership⟩ `.candor/deps/` and `.candor/dep-inits/` are WRITE-ONLY caches that were never
+// cleared, so a package whose rescan THREW was answered from the PREVIOUS run's file while the `catch`
+// above said it "is skipped". Reproduced: a package published as typings plus a MINIFIED bundle exits 2
+// on "no TypeScript sources" (the file walk excludes `*.d.ts` and `*.min.js`), and its consumer went on
+// inheriting the prior build's PURITY CLAIM — silently, with `coverage.uncovered` empty and nothing on
+// stderr. That is the cardinal sin through a cache door, and the same class as candor-swift `43a0eaa`.
+//
+// Two directions, and they pull against each other:
+//   a file THIS RUN did not write is never served as if it had been, AND
+//   a file CANDOR did not write is never deleted.
+// The second is the unrecoverable one — candor-swift's own first fix (`b4f6cbc`) had to be repaired
+// because its sweep deleted user-placed reports.
+//
+// So ownership is DERIVED, not marked. A sidecar marker would answer only for caches written AFTER this
+// change and leave the first post-change run in exactly the broken state. The rule instead is: a file
+// candor would have OVERWRITTEN on success is a file candor removes on failure. The candidates are the
+// packages this run actually discovered, named by the WRITER'S OWN naming function, and nothing else is
+// ever a candidate — a report the user dropped in for a package this run never looked at is untouched
+// and still chains, on the same authority as any other `CANDOR_DEPS` input.
+//
+// STATED RESIDUAL: a cache file for a package that USED to be discovered and no longer is lingers and is
+// still chained. Deleting it would require deciding it was ours, which is exactly the claim that cannot
+// be made about a file this run never had a candidate for. Information kept rather than destroyed.
+const depCacheFileName = (dir, name) => path.join(dir, `${String(name).replace(/[/@]/g, "_")}.json`);
+// The name for a dep whose scan FAILED, in the WRITER'S OWN order of sources: the writer takes
+// `report.package` and falls back to the directory basename, and `report.package` comes from the
+// manifest — so the manifest `name` is the middle term, reachable without a successful scan.
+function failedDepName(real) {
+  try {
+    const n = JSON.parse(fs.readFileSync(path.join(real, "package.json"), "utf8")).name;
+    if (typeof n === "string" && n) return n;
+  } catch { /* unreadable/malformed manifest — the basename is the writer's last source too */ }
+  return path.basename(real);
+}
+function dropUnanswered(dir, candidates, answered, ownFiles, nameOf, flag) {
+  const dropped = [];
+  for (const c of candidates) {
+    if (answered.has(c)) continue;
+    const f = depCacheFileName(dir, nameOf(c));
+    // Never remove a file THIS run wrote: two candidates can derive the same name, and one of them
+    // succeeding must not be undone by the other failing.
+    if (ownFiles.has(f) || !fs.existsSync(f)) continue;
+    // Name it by the DERIVED name, not the directory: for a path dep those differ (the directory is
+    // whatever the checkout is called), and naming the directory tells the reader nothing they can
+    // match against their manifest — or against the file that was removed.
+    try { fs.unlinkSync(f); dropped.push(nameOf(c)); }
+    catch (e) { console.error(`candor-ts: ${flag} could not remove the stale cached report ${f} (${e.message}) — it will be chained`); }
+  }
+  if (dropped.length)
+    console.error(`candor-ts: ${flag} could not scan ${dropped.sort().join(", ")} this run — dropped the PREVIOUS run's cached report(s) rather than answer from them (their calls read Unknown/invisible, as an unchained dependency does)`);
+}
+const workspaceDepFileName = (real) => failedDepName(real);
+
 let workspaceDepsDir = null;
 if (wantWorkspace) {
   const selfPath = fileURLToPath(import.meta.url);
@@ -428,6 +481,8 @@ if (wantWorkspace) {
   //    calls into a sibling dep resolve. A dep chaining its OWN prior report is harmless (its internal calls
   //    resolve locally, never via crossDeps). Stop when a round changes no report, or at the depth cap.
   const names = new Set();
+  const answered = new Set();                 // realpath -> this run produced a report for it
+  const ownFiles = new Set();                 // the files this run wrote (never deletion candidates)
   const MAX_ROUNDS = 6;
   for (let round = 0; round < MAX_ROUNDS; round++) {
     let anyChanged = false;
@@ -439,12 +494,14 @@ if (wantWorkspace) {
         const name = (JSON.parse(out.toString()).package) || path.basename(real);
         names.add(name);
         const file = path.join(workspaceDepsDir, `${name.replace(/[/@]/g, "_")}.json`);
+        answered.add(real); ownFiles.add(file);
         const prev = fs.existsSync(file) ? fs.readFileSync(file) : null;
         if (!prev || !prev.equals(out)) { fs.writeFileSync(file, out); anyChanged = true; }
-      } catch { /* a dep that fails to scan is skipped — its calls stay Unknown/invisible, still sound */ }
+      } catch { /* a dep that fails to scan is skipped — see the ownership sweep below */ }
     }
     if (!anyChanged) break;   // fixpoint reached: transitive effects fully propagated
   }
+  dropUnanswered(workspaceDepsDir, depPaths, answered, ownFiles, workspaceDepFileName, "--workspace");
   console.error(`candor-ts: --workspace chained ${names.size} workspace dep report(s), transitive${names.size ? ": " + [...names].sort().join(", ") : " (none found)"}`);
 }
 // ⟨dep initializers⟩ --dep-inits: importing a package RUNS its entry module, so the importer reaches
@@ -473,6 +530,8 @@ if (wantDepInits) {
     }
   }
   const scanned = [];
+  const candidates = [];                      // the packages this run RESOLVED on disk — see `dropUnanswered`
+  const answered = new Set(), ownFiles = new Set();
   for (const pkg of wanted) {
     let dir = null;
     for (let d = rootDir; ; d = path.dirname(d)) {
@@ -481,14 +540,20 @@ if (wantDepInits) {
       if (path.dirname(d) === d) break;
     }
     if (!dir) continue;                       // not installed, or a builtin/type-only import
+    candidates.push(pkg);
+    const file = depCacheFileName(depInitsDir, pkg);
     try {
       const out = execFileSync(process.execPath, [selfPath2, dir, "--json", "--allow-js"],
         { env: { ...process.env, CANDOR_WORKSPACE_CHAIN: "1" },
           maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
-      fs.writeFileSync(path.join(depInitsDir, `${pkg.replace(/[/@]/g, "_")}.json`), out);
+      fs.writeFileSync(file, out);
+      answered.add(pkg); ownFiles.add(file);
       scanned.push(pkg);
-    } catch { /* a dep that fails to scan is skipped — its initializer stays undisclosed, as today */ }
+    } catch { /* a dep that fails to scan is skipped — see the ownership sweep below */ }
   }
+  // The name is the package name the CONSUMER imports, which is what the writer above keys on, so the
+  // derivation is the writer's own and has no second source to disagree with.
+  dropUnanswered(depInitsDir, candidates, answered, ownFiles, (pkg) => pkg, "--dep-inits");
   console.error(`candor-ts: --dep-inits scanned ${scanned.length} of ${wanted.size} direct dependenc${wanted.size === 1 ? "y" : "ies"}${scanned.length ? ": " + scanned.sort().join(", ") : ""}`);
 }
 // CANDOR_DEPS (SPEC §2): sibling/dependency reports whose effects a call into that package

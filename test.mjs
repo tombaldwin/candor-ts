@@ -749,6 +749,139 @@ export function viaIterableParam0(s: Set<string>): boolean { return every(s, wri
         entry(urep, "src.m.viaBoolean") == null, JSON.stringify(entry(urep, "src.m.viaBoolean")));
 }
 
+// ── 2f-septies. THE CACHE THAT WAS NEVER CLEARED ──────────────────────────────────────────────────
+// `.candor/dep-inits/` and `.candor/deps/` are write-only caches. A package whose rescan THREW was
+// therefore answered from the PREVIOUS run's file, while the `catch` that swallowed the failure said in
+// its own comment that the dep "is skipped" — candor-spec SCAN-BOUNDARY-WORK-QUEUE.md, filed
+// ABSENT-BY-ACCIDENT, and the same class as candor-swift `43a0eaa`.
+//
+// The failure lever is the ordinary published shape, not a contrivance: the file walk excludes `*.d.ts`
+// and `*.min.js`, so a package shipping typings plus a minified bundle exits 2 on "no TypeScript
+// sources" while still RESOLVING for its consumer. Measured on five real packages in the A/B corpus.
+{
+  const appFiles = {
+    "package.json": `{"name":"t2app","version":"1.0.0","dependencies":{"stalekit":"1.0.0"}}`,
+    "src/m.ts": `import { hot } from "stalekit";
+export function useHot(): void { hot("x"); }`,
+    "node_modules/stalekit/package.json": `{"name":"stalekit","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/stalekit/index.d.ts": `export declare function hot(x: string): void;`,
+    // v1: a body candor can read, and it is PURE — so the cached report's SILENCE is a purity claim.
+    "node_modules/stalekit/index.js": `export function hot(x) { return 1; }`,
+  };
+  const app = project(appFiles);
+  const cache = (f) => path.join(app, ".candor", "dep-inits", f);
+  const useHot = () => {
+    const rep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+    return entry(rep, "src.m.useHot");
+  };
+  const run = () => spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--dep-inits"], { encoding: "utf8" });
+
+  run();
+  check("dep-inits cache: a scannable dependency is scanned and its report cached",
+        fs.existsSync(cache("stalekit.json")), fs.readdirSync(path.join(app, ".candor", "dep-inits")).join(","));
+  check("dep-inits cache: ...and the chained report's silence is the dep's purity claim",
+        useHot() == null, JSON.stringify(useHot()));
+
+  // NO-DELETION FIRST. A report the USER placed for a package this run never discovered is not a
+  // deletion candidate — the sweep that fixed swift's version of this destroyed exactly these
+  // (candor-swift `b4f6cbc`), and they are unrecoverable.
+  fs.writeFileSync(cache("notacandidate.json"),
+    JSON.stringify({ candor: { version: "whatever" }, package: "notacandidate", functions: [] }));
+
+  // The package is upgraded to a MINIFIED build: same typings, so the consumer still resolves `hot`,
+  // but nothing candor can analyze — the rescan exits 2 and the `catch` swallows it.
+  fs.rmSync(path.join(app, "node_modules", "stalekit", "index.js"));
+  fs.writeFileSync(path.join(app, "node_modules", "stalekit", "index.min.js"),
+    `import fs from "node:fs";export function hot(x){fs.appendFileSync("/tmp/hot",x)}`);
+  const r2 = run();
+  // THE DEFECT, in the cardinal-sin direction: the on-disk body writes a file, and the consumer was
+  // reading a PURITY CLAIM sourced entirely from the previous run's report about source that is gone.
+  check("dep-inits cache: a package whose rescan THREW is not answered from the previous run's file",
+        useHot()?.invisible?.includes("stalekit"), JSON.stringify(useHot()));
+  check("dep-inits cache: ...the stale cached report is removed, not merely ignored",
+        !fs.existsSync(cache("stalekit.json")), fs.readdirSync(path.join(app, ".candor", "dep-inits")).join(","));
+  check("dep-inits cache: ...and it says so on stderr rather than going quiet",
+        /could not scan stalekit/.test(r2.stderr), r2.stderr);
+  // …and the other direction of the same sweep.
+  check("no-deletion: a report candor did not write is never a deletion candidate",
+        fs.existsSync(cache("notacandidate.json")), fs.readdirSync(path.join(app, ".candor", "dep-inits")).join(","));
+
+  // CONTROL. Restore the scannable build: the sweep must not fire, the cache must come back, and the
+  // answer must be exactly what it was. Without this the rows above pass for a sweep that deletes
+  // everything every run.
+  fs.rmSync(path.join(app, "node_modules", "stalekit", "index.min.js"));
+  fs.writeFileSync(path.join(app, "node_modules", "stalekit", "index.js"), `export function hot(x) { return 1; }`);
+  fs.writeFileSync(path.join(app, "node_modules", "stalekit", "package.json"),
+    `{"name":"stalekit","version":"1.0.0","types":"index.d.ts","main":"index.js"}`);
+  const r3 = run();
+  check("dep-inits cache control: a SUCCEEDING rescan keeps its cache and its answer",
+        fs.existsSync(cache("stalekit.json")) && useHot() == null, JSON.stringify(useHot()));
+  check("dep-inits cache control: ...and the sweep says nothing when nothing failed",
+        !/could not scan/.test(r3.stderr), r3.stderr);
+}
+
+// ── 2f-septies (b). the same cache, reached through `--workspace` ─────────────────────────────────
+// `.candor/deps/` is the dir `--workspace` writes AND the dir users point `CANDOR_DEPS` at, so both
+// directions have to hold here at once: a failed path dep's stale report must go, and a hand-placed
+// report for a non-path dependency must survive AND still chain.
+{
+  const app = project({
+    "package.json": `{"name":"wapp","version":"1.0.0"}`,
+    "src/m.ts": `import { pull } from "handdep";
+import { run } from "sib";
+export function useHand(): void { pull(); }
+export function useSib(): void { run(); }`,
+    "node_modules/handdep/package.json": `{"name":"handdep","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/handdep/index.d.ts": `export declare function pull(): void;`,
+    "node_modules/handdep/index.js": `exports.pull=()=>{};`,
+  });
+  // A real workspace path dep: a SYMLINK out of node_modules to a sibling source tree.
+  const sib = project({
+    "package.json": `{"name":"sib","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "index.d.ts": `export declare function run(): void;`,
+    "index.ts": `import * as fsm from "node:fs";
+export function run(): void { fsm.appendFileSync("/tmp/sib", "x"); }`,
+  });
+  fs.symlinkSync(sib, path.join(app, "node_modules", "sib"));
+  const depsDir = path.join(app, ".candor", "deps");
+  const run = () => spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--workspace"], { encoding: "utf8" });
+  const eff = (fn) => {
+    const rep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+    return entry(rep, fn);
+  };
+
+  run();
+  check("workspace cache: a symlinked path dep is scanned and chained",
+        eff("src.m.useSib")?.inferred?.includes("Fs"), JSON.stringify(eff("src.m.useSib")));
+  // A hand-placed report for a package that is NOT a path dep — a real dir in node_modules, so it is
+  // never a discovery candidate. This is the ordinary `CANDOR_DEPS`-into-`.candor/deps` setup.
+  fs.writeFileSync(path.join(depsDir, "handdep.json"), JSON.stringify({
+    candor: { version: JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8")).version
+      ? `candor-ts-${JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8")).version}` : "x" },
+    package: "handdep",
+    functions: [{ fn: "index.pull", hash: "handdep#pull", inferred: ["Fs"], direct: ["Fs"] }],
+  }));
+
+  // The path dep loses its analyzable source (its `.d.ts` stays, so the consumer still resolves `run`).
+  fs.rmSync(path.join(sib, "index.ts"));
+  fs.rmSync(path.join(sib, "index.js"), { force: true });
+  const r2 = run();
+  check("workspace cache: a path dep whose rescan THREW is not answered from the previous run's file",
+        !eff("src.m.useSib")?.inferred?.includes("Fs"), JSON.stringify(eff("src.m.useSib")));
+  check("workspace cache: ...its stale report is removed",
+        !fs.existsSync(path.join(depsDir, "sib.json")), fs.readdirSync(depsDir).join(","));
+  // Named by the DERIVED package name, not the directory. The two differ here by construction — the
+  // path dep's directory is a mkdtemp name and its manifest says `sib` — so the manifest-name source
+  // is load-bearing for this row and the basename fallback cannot answer it by accident.
+  check("workspace cache: ...and it names the PACKAGE on stderr, not the checkout directory",
+        /could not scan sib\b/.test(r2.stderr), r2.stderr);
+  // BOTH DIRECTIONS AT ONCE, which is the point of doing this in `.candor/deps` rather than a fixture dir.
+  check("no-deletion: a hand-placed report in the workspace deps dir survives the sweep",
+        fs.existsSync(path.join(depsDir, "handdep.json")), fs.readdirSync(depsDir).join(","));
+  check("no-deletion: ...and is still chained",
+        eff("src.m.useHand")?.inferred?.includes("Fs"), JSON.stringify(eff("src.m.useHand")));
+}
+
 // ── 2f-sexies. the UNANSWERABLE KEY across the scan boundary ──────────────────────────────────────
 // candor-spec DEP-RECEIVER-TYPING-DESIGN.md, half 1. A chained lookup coming back empty has two
 // readings with opposite evidential weight, and the engine drew no distinction: a key that names a
