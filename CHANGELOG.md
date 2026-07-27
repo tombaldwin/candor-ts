@@ -8,6 +8,35 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+⚠ **A `dispatch:` reason that can name neither an owner nor a member is a `callback:`** (`scan.mjs`).
+SPEC §4 reserves `dispatch:` for an unresolved dispatch with a **resolvable owner type AND member** —
+`owner.member` is the vocabulary's one normative detail, what conformance PART 10 compares and what the
+⟨0.7⟩ dispatch-frontier resolves against the hierarchy sidecar — and says every owner-less unresolved
+invocation is `callback:`. Each emission site was substituting the literal words `type`/`member` for
+whichever half it could not name, publishing a `dispatch:` no frontier could resolve and a reason CLASS the
+other three engines do not give the same input (rust `callback:unresolved call`, java
+`callback:…Function.apply`, swift `callback:fn` — all `indirect`). Instrumented over a 15-repo corpus:
+1,234 such emissions, every one from the interface-CHA arm, in two shapes that are both function VALUES —
+a named type whose content is a CALL SIGNATURE (`interface UnaryFunction { (x: T): R }` — owner, no
+member) and a member of an ANONYMOUS type literal (member, no owner). The nameable half is kept in the
+`callback:` detail (`callback:src.a.UnaryFunction`, `callback:run`). **Effect sets and entry counts are
+identical** across 14 real targets; 695 functions move to reason class `indirect`, monotonically (0 gain
+`dispatch`, 0 lose `indirect`). `deny Unknown` and `deny Unknown[indirect]` are unmoved everywhere, so
+nothing goes silent — but **`deny Unknown[dispatch]` narrows**: it flips exit 1 → 0 on 4 of the 14 (conf,
+got, ky, p-queue), in each of which every dispatch reason in the report was one of the malformed ones
+(6/6, 56/56, 18/18, 10/10). A well-formed `dispatch:mod.Iface.member` is untouched and still fails the rule.
+
+**A `.bind`-wrapped callback is no longer dropped when the callee's signature says nothing** (`scan.mjs`).
+The `.bind` arm's position gate returned early on `!hofInvokesArg(…)`, a POSITIVE test whose value cannot
+distinguish "the callee invokes this position" from "I have no evidence" — so an unresolved or loosely
+typed higher-order callee meant SILENCE. Measured: a dependency's free-form `forEach(xs: any[], fn: any)`
+dropped a `.bind`-wrapped local writer entirely and a scoped `deny Fs` went **exit 1 → exit 0**, with the
+single-tree control unchanged in both arms. The arm now drops only on positive evidence of the opposite.
+`any` cannot be that evidence — `xs.forEach(cb, thisArg?: any)` and a loose library's `fn: any` are the
+same type with opposite meanings — so the callability probe went three-valued and the receiver slot is
+recognised by parameter NAME. A/B over 22 real targets (~13,000 functions): zero gains, losses, Unknown
+delta and entry delta, with the precondition instrumented to show the differing branch never fires there.
+
 **The TRUST-MARKER INVARIANT is now asserted over every entry, before anything is written** (`scan.mjs`).
 An entry whose `inferred` contains `Unknown` MUST carry `unresolved: true` (SPEC §2), and one naming a
 DIRECT `Unknown` MUST carry a non-empty `unknownWhy` (⟨0.6⟩). Both are TIER-1 markers a consumer reads
