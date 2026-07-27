@@ -2386,15 +2386,79 @@ const calleeParamIsCallable = (node, i) => {
   return false;
 };
 
+/// Is the callee's parameter `i` a COLLECTION — an array, tuple, array-like or iterable?
+///
+/// This exists to answer ONE question, at position 0: has the RECEIVER been relocated into an argument?
+/// `HOF_CALLBACK_POSITIONS`/`DEFAULT_CB_POS` describe the METHOD form (`xs.forEach(cb, thisArg)`), where
+/// the collection is the receiver and the callback is argument 0. The static/free form of the same HOF
+/// (`forEach(xs, cb)`, `_.map(xs, fn)`, `Object.groupBy(xs, keyFn)`) puts the collection in argument 0 and
+/// shifts everything right by one — so the map is not merely silent about position 1 there, it is wrong
+/// by exactly one place. When the signature is well typed the callable check already recovers that; when
+/// it is not (`forEach(xs: any[], fn: any)`), nothing did.
+///
+/// "Positively a collection" is the whole point: this may only ever ADD positions, so a type shape it
+/// fails to recognise costs the precision that is already lost today, never a reach. The obvious
+/// alternative — "position 0 is positively NOT a callback" — over-fires on exactly the case the union
+/// above was built for: `setTimeout`'s `TimerHandler = string | Function` carries no call signature, so
+/// it would read as a relocated receiver and shift the whole map onto the delay argument.
+///
+/// THE FIRST VERSION OF THIS PREDICATE FIRED 68 TIMES ON A PRODUCTION TREE AND WAS WRONG ALL 68 TIMES,
+/// which is why the union rule is `every` and not `some`. Every firing was TypeORM's
+/// `EntityManager.find(entityClass: EntityTarget<T>, options)`, and `EntityTarget` is a union with a
+/// `string` arm — `string` carries `[Symbol.iterator]`, so an ANY-constituent test called it a
+/// collection and relocated the map onto `options`. A union is the relocated receiver only if EVERY
+/// constituent is, and a string is never it.
+const calleeParamIsCollection = (node, i) => {
+  const sig = checker.getResolvedSignature?.(node);
+  const params = sig?.getParameters?.();
+  if (!params || i >= params.length) return false;
+  const decl = params[i]?.valueDeclaration;
+  const t = decl ? checker.getTypeOfSymbolAtLocation(params[i], decl) : null;
+  if (!t) return false;
+  // `any` FIRST, and it is not a formality: `checker.isArrayLikeType(any)` is TRUE (measured — `any` is
+  // assignable to `readonly any[]`), so without this every `any`-typed parameter 0 would read as a
+  // relocated receiver. That includes the METHOD form, where relocating puts the RECEIVER SLOT inside the
+  // map and so silences the `thisArg` denylist `b66b69a` had just landed — a fix undoing its predecessor.
+  const one = (u) => !!u && !(u.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.StringLike))
+    && (checker.isArrayType?.(u) || checker.isTupleType?.(u)
+    || checker.isArrayLikeType?.(u)
+    // `Set`/`Map`/`Iterable<T>`/a generic `T extends Iterable<…>`: the iterator member is the definition.
+    || (u.getProperties?.() ?? []).some((s) => s.getName?.().startsWith("__@iterator")));
+  return t.types?.length ? t.types.every(one) : one(t);
+};
+
+/// The positions the name map would name if the RECEIVER had not moved into argument 0. Empty unless
+/// parameter 0 is positively the collection.
+const hofRelocatedPositions = (name, node) => {
+  if (!node || !calleeParamIsCollection(node, 0)) return null;
+  const shifted = new Set();
+  for (const p of HOF_CALLBACK_POSITIONS.get(name) ?? DEFAULT_CB_POS) shifted.add(p + 1);
+  return shifted;
+};
+
 /// The type check may only WIDEN, never narrow. Asking the callee's signature admits positions a name map
 /// cannot know about (the static/free form, where the callback is second) — but a signature can also fail
 /// to look callable when it plainly is: `setTimeout`'s DOM overload declares `TimerHandler = string |
 /// Function`, which carries no call signatures, so a type-only rule REJECTED argument 0 and dropped an
 /// effect the suite had been pinning for months. Union the two sources and a blind spot in either costs
 /// precision at worst; letting either one veto costs a reach.
+///
+/// THE THIRD DISJUNCT is the relocated map. The name map describes the METHOD form; in the free/static
+/// form the collection is argument 0 and the callback is argument 1, and a loosely-typed callee
+/// (`forEach(xs: any[], fn: any)`) leaves the callable check with nothing to say — so the map was not
+/// merely silent about position 1 there, it was wrong by exactly one place.
+///
+/// It carries NO `!== false` veto of its own, and that is a fact about the one call site rather than a
+/// claim about the predicate: a position where the signature says `false` and the base map does not
+/// name has ALREADY been dropped by `hofArgIsNeverCallback` at the top of that argument loop, and a
+/// position where the base map DOES name it satisfies the first disjunct before this one is reached.
+/// So a veto here can never change an answer — written, it failed no test, and the composition is
+/// pinned by the `groupBy(xs: any[], key: string)` row instead. If this ever gains a second caller, the
+/// caller owes that argument its own drop.
 const hofInvokesArg = (name, i, node) =>
   (HOF_CALLBACK_POSITIONS.get(name) ?? DEFAULT_CB_POS).has(i)
-  || (node ? calleeParamIsCallable(node, i) === true : false);
+  || (node ? calleeParamIsCallable(node, i) === true : false)
+  || !!hofRelocatedPositions(name, node)?.has(i);
 
 /// The `.bind` arm's form of the position rule, and it must be asked the other way round.
 ///
@@ -2410,6 +2474,13 @@ const hofInvokesArg = (name, i, node) =>
 /// for the by-reference arm below, which keeps the positive test plus `argIsCallable`). The only open
 /// question is whether the callee invokes THIS position, and the answer may only be "no" on positive
 /// evidence: the name map excludes it AND the signature declares something that is not a callback.
+///
+/// It deliberately does NOT consult the relocated map above. Sharing one position set between the two
+/// arms is the tidier-looking option and it is wrong: this arm already requires the signature to speak
+/// POSITIVELY, and a relocation inferred from a convention must not overrule that. `groupBy(xs: any[],
+/// key: string)` is the shape — argument 1 is declared a string, the relocation would put it in the map,
+/// and a shared set would charge a bound writer sitting in it. Mutating the two apart also failed no
+/// test, so the sharing was neither necessary nor free.
 const hofArgIsNeverCallback = (name, i, node) =>
   !(HOF_CALLBACK_POSITIONS.get(name) ?? DEFAULT_CB_POS).has(i)
   && !!node && calleeParamIsCallable(node, i) === false;

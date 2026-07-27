@@ -539,7 +539,7 @@ export function map<T, R>(xs: T[], fn: (x: T) => R): R[] { return xs.map(fn); }`
   const { prefix: depPrefix } = scan(depDir);
   const appFiles = {
     "package.json": `{"name":"happ","version":"1.0.0"}`,
-    "src/m.ts": `import { writeIt, pureIt, map, forEach, filter } from "hofkit";
+    "src/m.ts": `import { writeIt, pureIt, map, forEach, filter, reduce, groupBy, find, sort, every, anyHof, anyHof2 } from "hofkit";
 import { localWrite } from "./local.js";
 export function viaForEach(xs: string[]): void { xs.forEach(writeIt); }
 export function viaTimeout(): void { setTimeout(writeIt, 0); }
@@ -568,6 +568,43 @@ export function viaLooseStaticBind(xs: string[]): void { forEach(xs, localWrite.
 // CONTROL for the same shape at the position the NAME MAP owns: it never consulted the signature, so
 // it must stay charged however loosely the callee is typed.
 export function viaLooseBindArg0(xs: string[]): void { filter(localWrite.bind(null), xs); }
+// ── the BY-REFERENCE arm's form of the same hole, and the SEED rows that bound the fix ─────────────
+// NO FABRICATION FIRST. The free form relocates the name map by exactly ONE place — it does not
+// charge every position the signature happens to be silent about. The SEED of a fold is argument 2,
+// it is a function VALUE the fold never invokes, and the naive three-valued widening ("charge
+// wherever calleeParamIsCallable returns null") charges it.
+export function viaFreeSeedDep(xs: string[], cb: any): any { return reduce(xs, cb, writeIt); }
+// ...and the METHOD form is not relocated at all: argument 0 is positively the callback, so the map
+// is CONFIRMED rather than merely assumed, and zod's path.reduce(fn, obj) seed stays out.
+export function viaMethodSeed(xs: string[], seed: any): any { return xs.reduce((a: any) => a, seed); }
+// ...and the relocation must exclude any. checker.isArrayLikeType(any) is TRUE, so a relocation that
+// does not put the RECEIVER SLOT of a loosely-typed METHOD-form HOF inside the map — which silences
+// the thisArg denylist b66b69a landed one commit earlier.
+export function viaAnyHofThisArg(): void { anyHof.forEach(pureIt, localWrite); }
+// ...and the same any at parameter 0 with a second parameter the thisArg denylist does NOT name, so
+// the top-of-loop drop cannot fire and the relocation is what decides. This is the row the any
+// exclusion answers for; the thisArg row above is answered by the denylist itself.
+export function viaAnyHofExtra(): void { anyHof2.forEach(pureIt, writeIt); }
+// ...and the relocation is the WEAKEST of the three evidences, so the signature may VETO it. Argument 1
+// is declared a string; the relocation names that position and must not win.
+export function viaFreeTypedNonCallbackDep(xs: string[]): any { return groupBy(xs, writeIt); }
+// ...and the DROP arm must not share the relocated set at all: it already demands positive evidence,
+// and a relocation inferred from a convention overruling that charges the bound writer in the slot.
+export function viaFreeTypedNonCallbackBind(xs: string[]): any { return groupBy(xs, localWrite.bind(null)); }
+// ...and a UNION at parameter 0 is the relocated receiver only if EVERY constituent is. A string carries
+// [Symbol.iterator], so an any-constituent test read TypeORM's EntityTarget<T> as a collection and
+// relocated the map onto its options argument — 68 firings on a production tree, all 68 wrong.
+export function viaUnionParam0(xs: string[]): any { return find(xs, writeIt); }
+// ...and a bare string is not one either, for the same reason and on its own.
+export function viaStringParam0(): any { return sort("abc", writeIt); }
+// THE REACH. A dep fn passed BY REFERENCE at a position a loosely-typed collection-first HOF does not
+// declare: the map assumes position 0, the signature says any, and the arm returned early on the
+// POSITIVE test — so "I could not tell" meant the dep's concrete Fs was dropped.
+export function viaLooseStaticRef(xs: string[]): void { forEach(xs, writeIt); }
+// ...and a collection is not only an array. Object.groupBy/Map.groupBy declare Iterable<T>, and a Set
+// is array-LIKE to nobody — the iterator member is what says "collection", so the relocation must read
+// it or the whole static-form family narrows to arrays.
+export function viaIterableParam0(s: Set<string>): boolean { return every(s, writeIt); }
 export function viaBoolean(xs: (string | null)[]): unknown[] { return xs.filter(Boolean); }
 export function viaString(xs: number[]): string[] { return xs.map(String); }`,
     "src/local.ts": `import * as fsm from "node:fs";
@@ -576,7 +613,14 @@ export function localWrite(x: string): void { fsm.appendFileSync("/tmp/y", x); }
     "node_modules/hofkit/dist/index.d.ts": `export declare function writeIt(x: string): void;
 export declare function pureIt(x: string): string;
 export declare function forEach(xs: any[], fn: any): void;
-export declare function filter(fn: any, xs: any[]): any[];`,
+export declare function filter(fn: any, xs: any[]): any[];
+export declare function reduce(xs: any[], fn: any, seed: any): any;
+export declare function groupBy(xs: any[], key: string): any;
+export declare function find(target: any[] | { n: number }, opts: any): any;
+export declare function sort(target: string, opts: any): any;
+export declare function every(xs: Iterable<string>, fn: any): boolean;
+export declare const anyHof: { forEach(fn: any, thisArg?: any): void };
+export declare const anyHof2: { forEach(fn: any, extra?: any): void };`,
     "node_modules/hofkit/dist/index.js": `exports.writeIt = () => {}; exports.pureIt = (x) => x;`,
   };
   const app = project(appFiles);
@@ -636,6 +680,67 @@ export declare function filter(fn: any, xs: any[]): any[];`,
                            { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: `${depPrefix}.json` } });
   check("boundary: a scoped `deny Fs` is exit 1 for a bound callback under a loosely-typed HOF",
         scoped.status === 1, `status=${scoped.status} ${scoped.stdout}`);
+  // ── the BY-REFERENCE arm's form of the same hole. NO-FABRICATION ROWS FIRST: each one is a shape a
+  // widening could reach that this one must not, and each was measured to FAIL under a mutant.
+  // A widening that charges wherever `calleeParamIsCallable` returns `null` charges the fold's SEED —
+  // a function VALUE at a position the fold never invokes. `reduce`'s relocated map is {0,1}; the seed
+  // is argument 2 and stays out.
+  check("no-fabrication: a free-form fold's SEED is not a callback, however loosely it is typed",
+        !ceff("src.m.viaFreeSeedDep").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaFreeSeedDep")));
+  // The METHOD form is not relocated at all — its argument 0 is positively the callback, so the name
+  // map is confirmed rather than merely assumed. This is the zod `path.reduce(fn, obj)` shape that
+  // guard (1) was written for, and the only thing standing between it and a fabricated disclosure.
+  check("no-fabrication: the METHOD form's seed discloses nothing (the zod path.reduce shape)",
+        entry(crep, "src.m.viaMethodSeed") == null, JSON.stringify(entry(crep, "src.m.viaMethodSeed")));
+  // `checker.isArrayLikeType(any)` is TRUE, so a relocation that does not exclude `any` fires on a
+  // loosely-typed METHOD-form HOF and pulls the RECEIVER SLOT into the map — silencing the `thisArg`
+  // denylist landed one commit earlier. A fix undoing its predecessor, caught by measuring the predicate.
+  check("no-fabrication: an `any`-typed parameter 0 does not defeat the thisArg denylist",
+        !ceff("src.m.viaAnyHofThisArg").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaAnyHofThisArg")));
+  check("no-fabrication: ...and an `any` parameter 0 is not a relocated receiver at an undenied slot",
+        !ceff("src.m.viaAnyHofExtra").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaAnyHofExtra")));
+  check("no-fabrication: a POSITIVELY typed non-callback outranks the relocated position",
+        !ceff("src.m.viaFreeTypedNonCallbackDep").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaFreeTypedNonCallbackDep")));
+  check("no-fabrication: ...and the DROP arm does not consult the relocated set at all",
+        !ceff("src.m.viaFreeTypedNonCallbackBind").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaFreeTypedNonCallbackBind")));
+  check("no-fabrication: a UNION at parameter 0 relocates only if EVERY constituent is a collection",
+        !ceff("src.m.viaUnionParam0").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaUnionParam0")));
+  check("no-fabrication: ...and a bare `string` is iterable but is not a relocated receiver",
+        !ceff("src.m.viaStringParam0").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaStringParam0")));
+  // THE REACH. Same predicate, same argument, same position — and the LOCAL half of it was charged all
+  // along (`viaLooseStaticBind` above), because the local edge arm sits ABOVE guard (1) and the dep
+  // charge sits below it. Two rules on one argument list, disagreeing only about which tree the
+  // referent lives in, which is what makes it a boundary defect rather than a limitation.
+  check("boundary: a dep fn BY REFERENCE under a loosely-typed collection-first HOF carries its effects",
+        ceff("src.m.viaLooseStaticRef").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaLooseStaticRef")));
+  check("boundary: ...and an Iterable at parameter 0 is a relocated receiver too (Object.groupBy's shape)",
+        ceff("src.m.viaIterableParam0").includes("Fs"), JSON.stringify(entry(crep, "src.m.viaIterableParam0")));
+  fs.writeFileSync(path.join(app, "ref.policy"), "deny Fs src.m.viaLooseStaticRef\n");
+  const refGate = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", path.join(app, "ref.policy")],
+                            { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: `${depPrefix}.json` } });
+  check("boundary: a scoped `deny Fs` is exit 1 for a by-reference callback under a loose free-form HOF",
+        refGate.status === 1, `status=${refGate.status} ${refGate.stdout}`);
+  // THE CONTROL. The identical shape with the HOF and the writer in ONE tree: the non-local arm never
+  // opens, the precise callback-flow resolves it, and the gate is exit 1 in BOTH arms. Without this the
+  // row above could be a general limitation of loose typings rather than a boundary defect.
+  const oneTree = project({
+    "package.json": `{"name":"honeapp","version":"1.0.0"}`,
+    "src/hof.ts": `export function forEach(xs: any[], fn: any): void { for (const x of xs) fn(x); }`,
+    "src/w.ts": `import * as fsm from "node:fs";
+export function writeIt(x: string): void { fsm.appendFileSync("/tmp/x", x); }`,
+    "src/m.ts": `import { forEach } from "./hof.js";
+import { writeIt } from "./w.js";
+export function viaLooseStaticRef(xs: string[]): void { forEach(xs, writeIt); }
+// ...and a collection is not only an array. Object.groupBy/Map.groupBy declare Iterable<T>, and a Set
+// is array-LIKE to nobody — the iterator member is what says "collection", so the relocation must read
+// it or the whole static-form family narrows to arrays.
+export function viaIterableParam0(s: Set<string>): boolean { return every(s, writeIt); }`,
+  });
+  fs.writeFileSync(path.join(oneTree, "ref.policy"), "deny Fs src.m.viaLooseStaticRef\n");
+  const oneGate = spawnSync("node", [path.join(HERE, "scan.mjs"), oneTree, "--policy", path.join(oneTree, "ref.policy")],
+                            { encoding: "utf8" });
+  check("boundary control: the SAME shape inside ONE tree is exit 1 in both arms",
+        oneGate.status === 1, `status=${oneGate.status} ${oneGate.stdout}`);
   // Unchained the dep's body is unknowable — disclose the package rather than claim purity.
   const { report: urep } = scan(project(appFiles));
   check("boundary, unchained: a by-reference dep callback discloses the package",
