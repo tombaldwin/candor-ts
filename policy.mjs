@@ -17,7 +17,15 @@ const DYNAMIC_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolve
 /** Map a raw `unknownWhy` token (e.g. `reflect:eval`, `callback:fetch`) to its normative reason class. */
 export function reasonClass(why) {
   const w = String(why).trim().toLowerCase();
-  if (w.startsWith("reflect") || w === "dynamicmemberlookup") return "reflect";
+  // `startsWith`, NOT `===`. candor-swift emits this token in the normative `kind:detail` form —
+  // `dynamicMemberLookup:<root>.<prop>` (CallCollector.swift) — and never bare, so an equality test can
+  // never match a real one and the token falls through to the `unresolved` catch-all below. Both classes
+  // are in DYNAMIC_CLASSES, so a bare `deny Unknown` is unaffected; what silently weakens is the
+  // class-targeted `deny Unknown[reflect]`, which is the form the reason ratchet is adopted in. Found by
+  // the swift sweep (the same equality test made `Unknown[reflect]` unsatisfiable there even in one tree)
+  // and fixed in candor-java as `d9b07b0`. Widening to a prefix is monotone: only ever MORE tokens reach
+  // `reflect`, never fewer.
+  if (w.startsWith("reflect") || w.startsWith("dynamicmemberlookup")) return "reflect";
   if (w.startsWith("native")) return "native";
   if (w.startsWith("callback") || w.startsWith("closure") || w.startsWith("task-handoff")) return "indirect";
   if (w.startsWith("dispatch") || w.startsWith("indy") || w.startsWith("ambiguous")) return "dispatch";

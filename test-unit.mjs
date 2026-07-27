@@ -76,6 +76,13 @@ test("reasonClass: raw unknownWhy tokens map to normative classes", () => {
   assert.equal(reasonClass("ambiguous:same-name"), "dispatch");
   assert.equal(reasonClass("unresolved"), "unresolved");
   assert.equal(reasonClass("brand-new-token"), "unresolved"); // conservative catch-all
+  // A FOREIGN engine's token arrives in the normative `kind:detail` form. candor-swift emits
+  // `dynamicMemberLookup:<root>.<prop>` and NEVER the bare token, so the `===` this replaced could not
+  // match a real one — it fell through to `unresolved`, and since both classes are in DYNAMIC_CLASSES a
+  // bare `deny Unknown` still fired while the class-targeted `deny Unknown[reflect]` silently did not.
+  // The bare row stays: dropping it while widening would be a narrowing dressed as a fix.
+  assert.equal(reasonClass("dynamicMemberLookup:Config.host"), "reflect");
+  assert.equal(reasonClass("dynamicMemberLookup"), "reflect");
 });
 test("parsePolicy: Unknown[class…] / * / dynamic", () => {
   const r = parsePolicy("deny Net Unknown[dispatch,indirect] dom\n").deny[0];
