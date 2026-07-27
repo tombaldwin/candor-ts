@@ -685,6 +685,73 @@ test("loadHierarchy → callersFrontier: a loaded sidecar actually drives the su
   assert.deepEqual(callersFrontier(cg, fns2, hier, "m.Sink.touch").possibleViaUnknownDispatch, []);
   fs.rmSync(d, { recursive: true, force: true });
 });
+test("loadHierarchy → callersFrontier: a DOT-FREE dispatch detail is disclosed, not dropped ⟨0.24⟩", () => {
+  // §3.1 ⟨0.24⟩: a `dispatch:` detail with no dot names no OWNER, so condition (3) ("is a confirmed
+  // reacher an override of OWNER.M?") is UNANSWERABLE — and an unanswerable condition is not a failed one.
+  // MEASURED here before the fix, through this same disk-loaded path: the frontier held only the dotted
+  // entry in BOTH arms, with no diagnostic. Same shape as the CLI (`callers --include-unknown`), which is
+  // where the drop was seen. The controls (no-reason fn, unrelated-owner fn) are what prove the widening
+  // is not a blanket.
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
+  fs.writeFileSync(path.join(d, "r.hierarchy.json"), JSON.stringify({ "m.Impl": ["m.Base"] }));
+  const hier = loadHierarchy(path.join(d, "r"));
+  const cg = { "m.Impl.handle": ["m.Sink.touch"], "m.Sink.touch": [], "m.Dotted.go": [], "m.Untyped.go": [], "m.Unrelated.go": [], "m.NoReason.go": [] };
+  const raw = "untyped cross-package receiver";   // candor-rust's dot-free detail
+  const fns = [
+    { fn: "m.Impl.handle", unknownWhy: [] },
+    { fn: "m.Dotted.go", unknownWhy: ["dispatch:m.Base.handle"] },      // condition (3) HOLDS
+    { fn: "m.Untyped.go", unknownWhy: [`dispatch:${raw}`] },            // UNANSWERABLE → disclose
+    { fn: "m.Unrelated.go", unknownWhy: ["dispatch:m.Elsewhere.handle"] }, // condition (3) FAILS → out
+    { fn: "m.NoReason.go", unknownWhy: [] },                            // no dispatch reason → out
+  ];
+  // Hierarchy arm: exactly the answerable-and-true entry plus the unanswerable one.
+  assert.deepEqual(callersFrontier(cg, fns, hier, "m.Sink.touch").possibleViaUnknownDispatch,
+    [{ fn: "m.Dotted.go", viaDispatchOn: "handle" }, { fn: "m.Untyped.go", viaDispatchOn: raw }]);
+  // No-hierarchy arm: over-lists by simple name (so `m.Unrelated.go` joins, per the documented fallback)
+  // and the dot-free entry is disclosed there too — the drop was in BOTH arms.
+  assert.deepEqual(callersFrontier(cg, fns, {}, "m.Sink.touch").possibleViaUnknownDispatch,
+    [{ fn: "m.Dotted.go", viaDispatchOn: "handle" }, { fn: "m.Unrelated.go", viaDispatchOn: "handle" },
+      { fn: "m.Untyped.go", viaDispatchOn: raw }]);
+  // The ARM-DEPENDENT shape: a dot-free detail equal to a DOTTED reacher's SIMPLE METHOD name. The split
+  // helpers fall back to the whole string, so `handle` became BOTH owner and member: the by-method lookup
+  // hit (no-hierarchy arm disclosed it) and the subtype test then ran with a non-type string as owner
+  // (hierarchy arm dropped it). MEASURED pre-fix through the CLI: no-hier `[{m.Row3.go,handle}]`, hier
+  // `[]` — the SAME report answered two ways by whether this sidecar file exists. Asserted as arm
+  // EQUALITY, because the disagreement was the defect.
+  const cg3 = { "m.Impl.handle": ["m.Sink.touch"], "m.Sink.touch": [], "m.Row3.go": [] };
+  const fns3 = [{ fn: "m.Row3.go", unknownWhy: ["dispatch:handle"] }, { fn: "m.Impl.handle", unknownWhy: [] }];
+  assert.deepEqual(callersFrontier(cg3, fns3, hier, "m.Sink.touch").possibleViaUnknownDispatch,
+    callersFrontier(cg3, fns3, {}, "m.Sink.touch").possibleViaUnknownDispatch);
+  assert.deepEqual(callersFrontier(cg3, fns3, hier, "m.Sink.touch").possibleViaUnknownDispatch,
+    [{ fn: "m.Row3.go", viaDispatchOn: "handle" }]);
+  fs.rmSync(d, { recursive: true, force: true });
+});
+test("loadHierarchy → callersFrontier: ABSENT ≡ EMPTY sidecar, and neither collapses the frontier ⟨0.24⟩", () => {
+  // §3.1 ⟨0.24⟩: an empty §2.2 sidecar and an absent one are the SAME INPUT — both mean "the subtype test
+  // is unanswerable", which means OVER-LIST, not drop. Reading `{}` as the positive claim "no type has a
+  // supertype" would score condition (3) as FAILED for every dotted source at once and collapse the
+  // frontier to `[]` — measured in candor-java, where it took the WORKING dotted entries with it. Pinned
+  // as the three-arm triple the frontier engines share: absent ≡ `{}` (over-list) vs populated (precise).
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
+  fs.writeFileSync(path.join(d, "empty.hierarchy.json"), "{}");
+  const absent = loadHierarchy(path.join(d, "nosuch")), empty = loadHierarchy(path.join(d, "empty"));
+  fs.writeFileSync(path.join(d, "full.hierarchy.json"), JSON.stringify({ "m.Impl": ["m.Base"] }));
+  const full = loadHierarchy(path.join(d, "full"));
+  const cg = { "m.Impl.handle": ["m.Sink.touch"], "m.Sink.touch": [], "m.Ok.go": [], "m.Unrelated.go": [] };
+  const fns = [
+    { fn: "m.Ok.go", unknownWhy: ["dispatch:m.Base.handle"] },          // condition (3) HOLDS under `full`
+    { fn: "m.Unrelated.go", unknownWhy: ["dispatch:m.Elsewhere.handle"] }, // condition (3) FAILS under `full`
+    { fn: "m.Impl.handle", unknownWhy: [] },
+  ];
+  const at = (h) => callersFrontier(cg, fns, h, "m.Sink.touch").possibleViaUnknownDispatch;
+  // absent ≡ empty, and BOTH over-list (the unrelated owner is admitted, the working entry is KEPT).
+  assert.deepEqual(at(empty), at(absent));
+  assert.deepEqual(at(empty), [{ fn: "m.Ok.go", viaDispatchOn: "handle" }, { fn: "m.Unrelated.go", viaDispatchOn: "handle" }]);
+  assert.notDeepEqual(at(empty), []);   // the collapse java measured
+  // populated: precise — the unrelated owner drops out, the genuine override stays.
+  assert.deepEqual(at(full), [{ fn: "m.Ok.go", viaDispatchOn: "handle" }]);
+  fs.rmSync(d, { recursive: true, force: true });
+});
 test("loadHierarchy → callersFrontier: a METADATA key cannot narrow the frontier", () => {
   // `callersFrontier` gates on `Object.keys(hierarchy).length > 0`, so a key the loader keeps but cannot
   // interpret is not inert: it takes the frontier off the documented over-listing fallback and onto the

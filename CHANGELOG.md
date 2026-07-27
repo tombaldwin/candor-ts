@@ -8,6 +8,41 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+⚠ **A DOT-FREE `dispatch:` reason was silently DROPPED from `possibleViaUnknownDispatch`** — SPEC §3.1
+⟨0.24⟩ (`query-core.mjs`). §4 reserves a dot-free detail for an unresolved dispatch whose owner type could
+not be formed at all (candor-rust emits `dispatch:untyped cross-package receiver`). With no owner and no
+member, condition (3) — "is a confirmed reacher an override of `OWNER.M`?" — is UNANSWERABLE, and an
+unanswerable condition must not be scored as a failed one. MEASURED before the fix on a report carrying one
+dotted and one dot-free source: the frontier held only the dotted entry, in BOTH the hierarchy and the
+no-hierarchy arm, and no diagnostic named the dropped one. A consumer reads that omission as "no function
+may reach the target through an unresolved dispatch" — the claim the engine is not entitled to make. Such
+an entry is now disclosed with `viaDispatchOn` set to the raw detail verbatim, recognised STRUCTURALLY (no
+`.`) and short-circuited BEFORE the owner/member split is attempted. Two further shapes were measured here,
+both from the split helpers falling back to the WHOLE STRING with no dot — which degrades the override test
+into string equality between a reason detail and a function name: a detail equal to a reacher's whole qual
+was disclosed, but only by REFLEXIVITY over a string that is not a type name (right output, wrong reason);
+and a detail equal to a DOTTED reacher's simple method name was disclosed in the no-hierarchy arm and
+DROPPED in the hierarchy arm — the same report answered two ways by whether a sidecar happens to exist.
+The frontier over-lists by construction and asserts nothing into `transitive`, so a spurious entry costs
+precision while a dropped one is a false all-clear. Controls (a source with no dispatch reason; a dotted
+reason that genuinely fails condition (3)) are pinned OUT, so this is a widening and not a blanket.
+
+**`viaDispatchOn` now collates by UNICODE CODE POINT** — SPEC §3.1 ⟨0.24⟩ (`query-core.mjs`). A function
+carrying several `dispatch:` reasons gets ONE entry whose `viaDispatchOn` is the sorted, deduplicated,
+comma-joined union of the passing members and the raw dot-free details, with the two kinds interleaved.
+JavaScript's default `Array.sort` orders by UTF-16 CODE UNIT, which puts a supplementary character —
+stored as a surrogate pair — BEFORE everything above the surrogate block, the opposite of code-point
+order; that is exactly the comparator the clause forbids, so it is replaced with an explicit code-point
+one. Pinned against candor-java's end-to-end CLI literals (`run,untyped cross-package receiver,write` and
+the dedup case `run`), reproduced byte-for-byte here through this CLI. UTF-8 byte order names the ORDER,
+not the METHOD: the comparator does no encoding, because a lone surrogate has no UTF-8 encoding and
+encoding-first makes two distinct details compare EQUAL — cardinality-lossy in candor-java, whose
+accumulator is a comparator-backed sorted set. Measured here: that loss does NOT transfer, since this
+accumulator dedups by `Set` string identity and orders in a separate `Array.sort` that never drops equal
+elements. The encoding is refused anyway, because that safety belongs to the accumulator rather than the
+comparator and would evaporate on refactor; the lone-surrogate test is kept as a cardinality regression
+guard on that shape, and says so rather than claiming a discrimination it does not have.
+
 **A hierarchy-sidecar key this reader cannot interpret is DROPPED, not coerced** (`query-core.mjs`).
 `loadHierarchy`'s `norm` turned a non-array value into `[]` and KEPT the key, putting a phantom type — a
 name no code declares — into the hierarchy. That is not inert: `callersFrontier` gates on
@@ -20,9 +55,12 @@ flattened producer-side in candor-java `403f24b`): a flat project whose sidecar 
 on purpose, because a phantom key can only NARROW this frontier while an unknown key dropped can only
 widen it back to the fallback, and this is a "cannot confirm" disclosure that is allowed to over-list.
 Note the array-valued spelling is java's CURRENT one, so a type check alone would not have caught it.
-NOT changed, and flagged for a four-way ruling: `hasHier` gates on EMPTINESS, rust's `callers.rs` does
-the same, and candor-java's `Query.java` gates on ABSENCE and takes the precise path over a
-present-but-empty map, which narrows. Three engines, two answers, same input.
+NOT changed, and flagged for a ruling: `hasHier` gates on EMPTINESS, rust's `callers.rs` does the same,
+and candor-java's `Query.java` gated on ABSENCE and took the precise path over a present-but-empty map,
+which narrows. Three engines, two answers, same input. RULED since, in ts's favour — SPEC §3.1 ⟨0.24⟩ makes
+an empty sidecar and an absent one the SAME input (both mean the subtype test is unanswerable, so both
+over-list); candor-java measured `{}` collapsing its frontier to `[]` entirely, taking the dotted entries
+that were working. No change needed here, and the absent ≡ `{}` ≢ populated triple is now a test.
 
 **`--workspace`'s cache ownership is one derivation, and it is recorded from the WRITE** (`scan.mjs`).
 `95d0b8b`'s sweep rule — *a file candor would have OVERWRITTEN on success is the file it removes on

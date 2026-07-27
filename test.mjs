@@ -4050,6 +4050,133 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
         callersFrontier(cg, fns2, {}, "m.Sink.touch").possibleViaUnknownDispatch.length === 1, "");
 }
 
+// ── frontier ⟨0.24⟩: a DOT-FREE `dispatch:` detail (§4 reserves it for a dispatch whose owner type could
+// not be formed at all — candor-rust emits `dispatch:untyped cross-package receiver`) names no OWNER and
+// no member, so condition (3) is UNANSWERABLE and MUST NOT be scored as a failed one. MEASURED before the
+// fix on exactly this shape: the frontier held ONLY the dotted entry in BOTH arms and no diagnostic named
+// the dropped one. The CONTROLS below are what separate this fix from a blanket "disclose everything". ──
+{
+  const cg = { "m.Impl.handle": ["m.Sink.touch"], "m.Sink.touch": [], "m.Dotted.go": [], "m.Untyped.go": [], "m.Unrelated.go": [], "m.NoReason.go": [] };
+  const hier = { "m.Impl": ["m.Base"] }; // Impl <: Base
+  const fns = [
+    { fn: "m.Impl.handle", unknownWhy: [] },
+    { fn: "m.Dotted.go", unknownWhy: ["dispatch:m.Base.handle"] },                   // dotted, condition (3) HOLDS
+    { fn: "m.Untyped.go", unknownWhy: ["dispatch:untyped cross-package receiver"] }, // dot-free
+    { fn: "m.Unrelated.go", unknownWhy: ["dispatch:m.Elsewhere.handle"] },           // dotted, condition (3) FAILS
+    { fn: "m.NoReason.go", unknownWhy: [] },                                         // no dispatch reason at all
+  ];
+  const raw = "untyped cross-package receiver";
+  const got = (h) => callersFrontier(cg, fns, h, "m.Sink.touch").possibleViaUnknownDispatch;
+  // (a) DISCLOSED with the raw detail verbatim, in BOTH arms.
+  for (const [arm, h] of [["hierarchy", hier], ["no-hierarchy", {}]]) {
+    const r = got(h);
+    check(`frontier: dot-free dispatch detail is DISCLOSED with the raw detail (${arm} arm)`,
+          r.some((e) => e.fn === "m.Untyped.go" && e.viaDispatchOn === raw), JSON.stringify(r));
+  }
+  // (b) THE CONTROLS — without these a blanket "disclose every Unknown fn" would pass (a). A fn with NO
+  // dispatch reason stays out of BOTH arms; a fn whose DOTTED reason genuinely fails condition (3) (owner
+  // `m.Elsewhere`, not above the reaching override) stays out of the arm that can answer condition (3).
+  check("frontier control: a fn with no dispatch reason is NOT disclosed (hierarchy arm)",
+        !got(hier).some((e) => e.fn === "m.NoReason.go"), JSON.stringify(got(hier)));
+  check("frontier control: a fn with no dispatch reason is NOT disclosed (no-hierarchy arm)",
+        !got({}).some((e) => e.fn === "m.NoReason.go"), JSON.stringify(got({})));
+  check("frontier control: a DOTTED reason failing condition (3) is still ruled OUT (unrelated owner)",
+        !got(hier).some((e) => e.fn === "m.Unrelated.go"), JSON.stringify(got(hier)));
+  // and the answerable dotted entry is unmoved by the widening.
+  check("frontier: hierarchy arm holds EXACTLY the dotted + the dot-free entry",
+        JSON.stringify(got(hier)) === JSON.stringify([{ fn: "m.Dotted.go", viaDispatchOn: "handle" }, { fn: "m.Untyped.go", viaDispatchOn: raw }]),
+        JSON.stringify(got(hier)));
+  // NO NEW FALSE POSITIVE. `declaringType`/`simpleMethod` fall back to the WHOLE string with no dot, so a
+  // dot-free detail could already match a reacher by name — reflexively under a hierarchy when the reacher
+  // is itself dot-free (a root-level TS function), or by simple name in the fallback arm. Measured: that
+  // coincidence produced viaDispatchOn === the raw detail already, i.e. exactly what ⟨0.24⟩ requires, so
+  // the widening supersedes the accident rather than adding a second, differently-valued entry.
+  const cg2 = { "m.Impl.handle": ["m.Sink.touch"], "handle": ["m.Sink.touch"], "m.Sink.touch": [], "m.Coincide.go": [] };
+  const fns2b = [{ fn: "m.Coincide.go", unknownWhy: ["dispatch:handle"] }, { fn: "m.Impl.handle", unknownWhy: [] }, { fn: "handle", unknownWhy: [] }];
+  for (const [arm, h] of [["hierarchy", hier], ["no-hierarchy", {}]]) {
+    const r = callersFrontier(cg2, fns2b, h, "m.Sink.touch").possibleViaUnknownDispatch;
+    check(`frontier: a dot-free detail COINCIDING with a reacher name yields ONE entry, raw detail (${arm} arm)`,
+          JSON.stringify(r) === JSON.stringify([{ fn: "m.Coincide.go", viaDispatchOn: "handle" }]), JSON.stringify(r));
+  }
+  // ROW 3 — the ARM-DEPENDENT shape, and the reason §3.1 ⟨0.24⟩ requires the short-circuit BEFORE the
+  // split rather than merely before the lookup. A dot-free detail equal to a DOTTED reacher's SIMPLE
+  // METHOD name: the by-method lookup hits (the detail became the member), so the no-hierarchy arm
+  // disclosed it; the hierarchy arm then ran the subtype test with owner = "handle" — a string that is
+  // not a type name — and DROPPED it. MEASURED here pre-fix, with the short-circuit disabled: no-hier
+  // `[{m.Row3.go, handle}]`, hier `[]`. Same input, opposite outputs, decided by nothing but whether a
+  // sidecar exists. The assertion is arm-EQUALITY, not two separate contains-checks, because the defect
+  // was the disagreement. Note there is NO dot-free reacher here — that is what separates this from the
+  // coincidence case above, where reflexivity made the hierarchy arm agree by accident.
+  const cg3 = { "m.Impl.handle": ["m.Sink.touch"], "m.Sink.touch": [], "m.Row3.go": [] };
+  const fns3 = [{ fn: "m.Row3.go", unknownWhy: ["dispatch:handle"] }, { fn: "m.Impl.handle", unknownWhy: [] }];
+  const withH = callersFrontier(cg3, fns3, hier, "m.Sink.touch").possibleViaUnknownDispatch;
+  const noH = callersFrontier(cg3, fns3, {}, "m.Sink.touch").possibleViaUnknownDispatch;
+  check("frontier: dot-free detail == a dotted reacher's simple method name — SAME in both arms (row 3)",
+        JSON.stringify(withH) === JSON.stringify(noH), `hier=${JSON.stringify(withH)} nohier=${JSON.stringify(noH)}`);
+  check("frontier: ...and that shared answer is the entry, disclosed with the raw detail (row 3)",
+        JSON.stringify(withH) === JSON.stringify([{ fn: "m.Row3.go", viaDispatchOn: "handle" }]), JSON.stringify(withH));
+}
+
+// ── frontier ⟨0.24⟩ THE MIXED SOURCE + the pinned COLLATION. One fn carrying several `dispatch:` reasons
+// gets ONE entry whose `viaDispatchOn` is the SORTED, DEDUPLICATED, comma-joined union of the passing
+// members and the raw dot-free details. The two literals below are candor-java's, produced from its real
+// CLI, and are the shared cross-engine fixture — assert the exact STRING, because the conformance
+// differential only substring-checks this field and cannot see an ordering divergence. ──
+{
+  const cg = { "app.Impl.run": ["app.Sink.touch"], "app.Zed.write": ["app.Sink.touch"], "app.Sink.touch": [], "app.Mixed.go": [] };
+  const hier = { "app.Impl": ["app.Base", "app.Other"], "app.Zed": ["app.Base"] };
+  // Reasons fed in an order that is NOT the sorted order, and the sorted answer INTERLEAVES the two kinds
+  // (`write` sorts AFTER the dot-free phrase). So a "dotted members first, then dot-free" join fails, an
+  // insertion-order join fails, and the assertion cannot lean on an upstream container to have sorted.
+  const fns = [
+    { fn: "app.Mixed.go", unknownWhy: ["dispatch:untyped cross-package receiver", "dispatch:app.Base.write", "dispatch:app.Base.run"] },
+    { fn: "app.Impl.run", unknownWhy: [] }, { fn: "app.Zed.write", unknownWhy: [] },
+  ];
+  const mixed = callersFrontier(cg, fns, hier, "app.Sink.touch").possibleViaUnknownDispatch;
+  check("frontier: MIXED source -> ONE entry, sorted union of members + raw details (java's literal)",
+        JSON.stringify(mixed) === JSON.stringify([{ fn: "app.Mixed.go", viaDispatchOn: "run,untyped cross-package receiver,write" }]),
+        JSON.stringify(mixed));
+  // DEDUP: two dotted reasons naming the SAME member through different owners, both passing (the reacher
+  // is a subtype of both) — the member appears ONCE.
+  const fnsD = [
+    { fn: "app.Mixed.go", unknownWhy: ["dispatch:app.Base.run", "dispatch:app.Other.run"] },
+    { fn: "app.Impl.run", unknownWhy: [] }, { fn: "app.Zed.write", unknownWhy: [] },
+  ];
+  const dedup = callersFrontier(cg, fnsD, hier, "app.Sink.touch").possibleViaUnknownDispatch;
+  check("frontier: two reasons naming the same member M dedup to one M (java's literal)",
+        JSON.stringify(dedup) === JSON.stringify([{ fn: "app.Mixed.go", viaDispatchOn: "run" }]), JSON.stringify(dedup));
+  // COLLATION, on a fixture that DISTINGUISHES the two orders — candor-java's pair, mirrored. U+1D400 is
+  // supplementary (stored as the surrogate pair D835 DC00); U+FB00 is BMP, ABOVE the surrogate block. Under
+  // JS's default UTF-16 code-unit sort the supplementary one comes FIRST (0xD835 < 0xFB00); under the
+  // pinned CODE-POINT order it comes LAST (0x1D400 > 0xFB00). Both are letters, so this is a realistic
+  // identifier pair. Both details are dot-free, so they are disclosed verbatim and the assertion is purely
+  // about order. VERIFIED RED against a bare `.sort()` (which produced the U+1D400-first string).
+  // The all-ASCII literals above are deliberately NOT this test: ASCII is where the two orders agree, so
+  // they pin the join and the dedup while this pins the collation.
+  const bmp = "ﬀ", sup = "\u{1D400}";
+  const fnsC = [{ fn: "app.Mixed.go", unknownWhy: [`dispatch:${sup}`, `dispatch:${bmp}`] }, { fn: "app.Impl.run", unknownWhy: [] }];
+  const coll = callersFrontier(cg, fnsC, hier, "app.Sink.touch").possibleViaUnknownDispatch;
+  check("frontier: viaDispatchOn collates by UNICODE CODE POINT, not UTF-16 code unit",
+        coll.length === 1 && coll[0].viaDispatchOn === `${bmp},${sup}`,
+        JSON.stringify(coll) + ` (utf16 order would be ${JSON.stringify(`${sup},${bmp}`)})`);
+  // CARDINALITY, not identity. Two details differing only in an UNPAIRED SURROGATE must stay TWO elements.
+  // A comparator that encodes to UTF-8 first collapses every lone surrogate to the same replacement bytes,
+  // so they compare EQUAL; in candor-java, whose accumulator is a comparator-backed sorted set, that meant
+  // "duplicate" and one element silently vanished — order-correct and lossy at once. Asserted as a COUNT,
+  // not a string: a lone surrogate does not survive the JSON wire in any engine, so identity is not
+  // pinnable end-to-end (java's first attempt failed on its own harness rendering both as `?`).
+  // MEASURED, and stated plainly because a test comment that overclaims is the defect this repo keeps
+  // finding: this assertion does NOT go red against the UTF-8 comparator HERE. This accumulator dedups by
+  // `Set` string identity and orders in a separate `Array.sort`, which never drops equal elements, so both
+  // survive either way. It is a REGRESSION guard on the accumulator's shape — the day the `Set` + `sort`
+  // pair becomes one comparator-backed sorted structure, this is the assertion that catches it.
+  const fnsS = [{ fn: "app.Mixed.go", unknownWhy: ["dispatch:\uD800", "dispatch:\uD801"] }, { fn: "app.Impl.run", unknownWhy: [] }];
+  const surr = callersFrontier(cg, fnsS, hier, "app.Sink.touch").possibleViaUnknownDispatch;
+  check("frontier: two details differing only in a LONE SURROGATE stay two entries (no lossy collapse)",
+        surr.length === 1 && surr[0].viaDispatchOn.split(",").length === 2,
+        JSON.stringify(surr.map((e) => [...e.viaDispatchOn].map((c) => c.codePointAt(0).toString(16)))));
+}
+
 // ── node:vm executes a runtime code STRING → Unknown (the eval-class disclosure). Was silent-pure —
 // found by real-world corpus testing (vm is κ-covered @types/node with no rule, so it read pure, not
 // invisible). Mirrors eval/Function/import() which already disclose Unknown. ──

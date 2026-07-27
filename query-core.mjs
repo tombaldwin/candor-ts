@@ -355,6 +355,34 @@ export function loadHierarchy(prefix) {
   return norm(h);
 }
 
+// Order two strings by UNICODE CODE POINT — the collation SPEC §3.1 ⟨0.24⟩ pins for `viaDispatchOn`
+// (Rust gets it free from `BTreeSet<&str>`). JavaScript's DEFAULT `Array.sort` (and `<`, and
+// `String.prototype.localeCompare`, and `Intl.Collator`) is NOT it: the first three order by UTF-16 CODE
+// UNIT, so a supplementary character — stored as a surrogate pair starting U+D800 — sorts BEFORE
+// everything above the surrogate block, the opposite of code-point order; `Intl.Collator` is
+// locale-sensitive, which is worse still. ASCII is unaffected either way, but `<owner>.<member>` is built
+// from user identifiers and all four analysed languages allow non-ASCII ones, so this is reachable.
+// §3.1 also names UTF-8 byte order as the same ORDER — but NOT as the method, and this comparator
+// deliberately does no encoding. An UNPAIRED SURROGATE is representable in a UTF-16 string yet has no UTF-8
+// encoding, so encoding first maps every lone surrogate to the SAME replacement bytes and two details
+// differing only there compare EQUAL. In candor-java that was also CARDINALITY-LOSSY: its accumulator is a
+// comparator-backed sorted set, so "equal" meant "duplicate" and one element vanished from the join.
+// MEASURED here, and it does NOT transfer: this accumulator dedups by `Set` STRING IDENTITY and orders in a
+// separate `Array.sort` that never drops equal elements, so a `Buffer.compare(Buffer.from(a,"utf8"), …)`
+// comparator keeps both entries (verified — the lone-surrogate test below stays green against it). The
+// encoding is still refused, because that safety is a property of the accumulator, not of the comparator,
+// and it evaporates the day this is refactored to a comparator-backed sorted set. Spreading a string
+// yields CODE POINTS (JS string iteration is code-point-wise) and leaves a lone surrogate as itself, so
+// comparing those sequences is order-correct AND lossless, with no arithmetic and nothing to evaporate.
+const byCodePoint = (a, b) => {
+  const A = [...a], B = [...b];
+  for (let i = 0; i < Math.min(A.length, B.length); i++) {
+    const x = A[i].codePointAt(0), y = B[i].codePointAt(0);
+    if (x !== y) return x - y;
+  }
+  return A.length - B.length;
+};
+
 // Reflexive+transitive subtype test over the hierarchy sidecar.
 function isSubtypeOf(type, owner, hierarchy) {
   if (type === owner) return true;
@@ -369,6 +397,39 @@ function isSubtypeOf(type, owner, hierarchy) {
 // plus functions that reach `q` only through a `dispatch:OWNER.member` the engine declined to resolve —
 // disclosed iff a confirmed reacher is an override of OWNER.member (same method AND a subtype of OWNER
 // per the hierarchy; empty hierarchy → simple-name match, over-lists). Never asserted ("cannot confirm").
+//
+// ⟨0.24⟩ A `dispatch:` detail with NO DOT (§4 reserves it for an unresolved dispatch where NO owner type
+// could be formed at all — candor-rust's `dispatch:untyped cross-package receiver`) names no OWNER and no
+// member, so condition (3) — "is a confirmed reacher an override of OWNER.M?" — is UNANSWERABLE, and an
+// unanswerable condition MUST NOT be scored as a failed one. It is DISCLOSED with `viaDispatchOn` = the
+// raw detail verbatim. Measured here before the fix, on a report carrying one dotted and one dot-free
+// source: the frontier held ONLY the dotted entry, in BOTH the hierarchy and the no-hierarchy arm, with no
+// diagnostic naming the dropped one — `typesByMethod.get(<whole detail>)` missed and the `continue` ate it.
+// Same direction the no-hierarchy fallback already takes one rung up: with no sidecar the subtype test is
+// unanswerable and the answer is to over-list, not to drop. The frontier over-lists by construction and
+// asserts nothing into `transitive`, so a spurious entry costs precision while a dropped one is a false
+// all-clear on the query. The test is STRUCTURAL and runs BEFORE the split is attempted (a §3.1 MUST),
+// never a match on the specific string: an allowlist of known details would silently drop every detail it
+// did not anticipate, which is this defect again.
+//
+// The short-circuit has to come FIRST because the split helpers fall back to the WHOLE STRING with no dot,
+// and they are applied to the reason detail AND to the reachers' quals — so the override test degenerates
+// into string equality between a reason detail and a function name. Three dot-free shapes, measured:
+//   · a PHRASE (`untyped cross-package receiver`) — dropped in both arms; the defect as briefed.
+//   · a detail equal to a reacher's WHOLE qual — disclosed, but in the hierarchy arm the subtype test
+//     passed only by REFLEXIVITY over a string that is not a type name; the sidecar was never consulted.
+//     Right output, wrong reason — the shape that hides the gap instead of showing it.
+//   · a detail equal to a DOTTED reacher's simple method name — matched in the no-hierarchy arm (the
+//     by-method lookup hits) and DROPPED in the hierarchy arm (the subtype test runs with a non-type
+//     string as owner). Same input, opposite outputs, decided by whether a sidecar happens to exist.
+// That last one is the same lever as the phantom-key fix `7bbf73c` (an uninterpretable sidecar key is
+// dropped, not kept as `[]`, because keeping it flips the arm): one changes WHICH arm you land in, this
+// one removes the arm's power to change the answer for an unanswerable detail.
+//
+// ⟨0.24⟩ THE MIXED SOURCE: one function carrying several `dispatch:` reasons — dotted ones that pass
+// condition (3) and dot-free ones that cannot be evaluated — gets ONE entry whose `viaDispatchOn` is the
+// sorted, deduplicated, comma-joined union of the passing members `M` and the raw dot-free details. The
+// two kinds INTERLEAVE (they are one sorted set, not "dotted first"), and the `Set` supplies the dedup.
 export function callersFrontier(cg, fns, hierarchy, q) {
   const base = callers(cg, q);
   const confirmed = new Set([...base.of, ...base.transitive]);
@@ -381,12 +442,17 @@ export function callersFrontier(cg, fns, hierarchy, q) {
     const hits = new Set();
     for (const w of f.unknownWhy ?? []) {
       if (!w.startsWith("dispatch:")) continue;
-      const key = w.slice("dispatch:".length), m = simpleMethod(key), owner = declaringType(key);
+      const key = w.slice("dispatch:".length);
+      // STRUCTURAL, and BEFORE the split is attempted (SPEC §3.1 ⟨0.24⟩ MUST). No dot ⇒ no owner and no
+      // member ⇒ condition (3) is unanswerable ⇒ disclose the raw detail. Tested on the same stripped
+      // string the split would consume, so this fires exactly when the split would have no dot to use.
+      if (!stripPos(key).includes(".")) { hits.add(key); continue; }
+      const m = simpleMethod(key), owner = declaringType(key);
       const types = typesByMethod.get(m);
       if (!types) continue;
       if (!hasHier || types.some((t) => isSubtypeOf(t, owner, hierarchy))) hits.add(m);
     }
-    if (hits.size) possible.push({ fn: f.fn, viaDispatchOn: [...hits].sort().join(",") });
+    if (hits.size) possible.push({ fn: f.fn, viaDispatchOn: [...hits].sort(byCodePoint).join(",") });
   }
   possible.sort((a, b) => a.fn.localeCompare(b.fn));
   return { ...base, possibleViaUnknownDispatch: possible };
