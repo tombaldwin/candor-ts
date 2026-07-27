@@ -8,6 +8,19 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**The TRUST-MARKER INVARIANT is now asserted over every entry, before anything is written** (`scan.mjs`).
+An entry whose `inferred` contains `Unknown` MUST carry `unresolved: true` (SPEC §2), and one naming a
+DIRECT `Unknown` MUST carry a non-empty `unknownWhy` (⟨0.6⟩). Both are TIER-1 markers a consumer reads
+INSTEAD of re-deriving the judgment, so a contradiction between them and the effect set is undetectable from
+the outside — the consumer is told in one field that the set may be incomplete and in the next that it is
+not. It is asserted rather than trusted because it has already shipped broken: `e66f29e` found a union entry
+publishing `inferred: ['Unknown']` with `unresolved` ABSENT, live on all seven of rxjs's published unions.
+Two independent producers derive the marker and a third would be easy to add. Fail-closed: a violation
+writes NO report and exits 2, because a report whose trust markers lie is worse than no report. Verified to
+CATCH (a mutated producer exits 2 and writes nothing) and measured silent on real output — 42 reports /
+22 978 entries offline, plus 4 live chained consumer scans and 12 live producer scans with the union emitter
+armed, zero violations.
+
 ⚠ **⟨0.19⟩ The reason class survives a dependency unit that only INHERITED its `Unknown`** (`scan.mjs`).
 The half underneath `4dad22d`. ⟨0.6⟩ makes `unknownWhy` DIRECT-ONLY — required on a unit that introduces
 `Unknown`, absent on one that merely inherited it — so a dependency's *exported* function publishes

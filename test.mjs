@@ -2108,6 +2108,53 @@ export function buy(): void { charge(100); }`,
         buy4?.inferred.includes("Net") && buy4?.hosts?.includes("api.stripe.com"), JSON.stringify(buy4));
 }
 
+// ── 11d. the TRUST-MARKER INVARIANT holds over every entry every scan writes ──────────────────────
+// `e66f29e` shipped a union entry carrying `inferred:['Unknown']` with `unresolved` absent — a TIER-1
+// marker reading FALSE on an entry that was not resolved, live on all seven of rxjs's unions. Two
+// independent producers derive that marker. This asserts the property rather than re-checking the two.
+{
+  const d = project({
+    "package.json": `{"name":"markers"}`,
+    "src/a.ts": `import * as netm from "node:net";
+export function reflectish(k: string): void { eval(k); }
+export function netty(): void { netm.connect(443, "sentry.io"); }
+export function inherits(k: string): void { reflectish(k); }
+export interface Store { save(p: string): void; }
+export class FileStore implements Store { save(p: string): void { eval(p); } }
+export class MemStore implements Store { save(p: string): void { netm.connect(443, "x.example.com"); } }`,
+  });
+  for (const [label, extra] of [["plain", []], ["producer (union entries)", []]]) {
+    const env = label === "plain" ? { ...process.env } : { ...process.env, CANDOR_WORKSPACE_CHAIN: "1" };
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), d, ...extra], { encoding: "utf8", env });
+    const rep = JSON.parse(fs.readFileSync(path.join(d, ".candor", "report.json"), "utf8"));
+    const bad = rep.functions.filter((e) =>
+      ((e.inferred ?? []).includes("Unknown") && e.unresolved !== true)
+      || (Array.isArray(e.direct) && e.direct.includes("Unknown") && !(e.unknownWhy ?? []).length));
+    check(`every entry's trust markers agree with its effect set — ${label}`,
+          r.status === 0 && bad.length === 0, JSON.stringify(bad));
+  }
+  // …and the check FAILS CLOSED rather than writing a report that lies. Injected through the one channel a
+  // test has: a report is written only after the check, so a violated invariant means NO report and exit 2.
+  const probe = project({
+    "package.json": `{"name":"probe"}`,
+    "src/a.ts": `export function f(k: string): void { eval(k); }`,
+  });
+  // The mutant engine lives in its OWN dir (siblings copied, node_modules symlinked) and never inside the
+  // scanned project — a scratch copy of the engine left in a scanned tree shows up as extra units, which
+  // has cost this vein a false A/B datapoint before.
+  const eng = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-mutant-"));
+  for (const m of ["policy.mjs", "query-core.mjs", "contract.mjs", "scan-core.mjs", "surface.mjs", "package.json"])
+    fs.copyFileSync(path.join(HERE, m), path.join(eng, m));
+  try { fs.symlinkSync(path.join(HERE, "node_modules"), path.join(eng, "node_modules"), "dir"); } catch { /* exists */ }
+  const mutant = path.join(eng, "scan.mjs");
+  fs.writeFileSync(mutant, fs.readFileSync(path.join(HERE, "scan.mjs"), "utf8")
+    .replace("    unresolved: inf.includes(\"Unknown\"),", "    unresolved: false,"));
+  const r2 = spawnSync("node", [mutant, probe, "--out", path.join(probe, "m")], { encoding: "utf8" });
+  check("a producer that gets the marker wrong writes NO report and exits 2",
+        r2.status === 2 && /INTERNAL INVARIANT VIOLATED/.test(r2.stderr)
+        && !fs.existsSync(path.join(probe, "m.json")), `status=${r2.status} ${r2.stderr.slice(0, 300)}`);
+}
+
 // ── 11c. ⟨0.19⟩ the reason class survives a dep unit that only INHERITED its Unknown ──────────────
 // ⟨0.6⟩ makes `unknownWhy` DIRECT-ONLY, so a dependency's exported function publishes `Unknown` with no
 // reason whenever the unresolvable call is one hop further in. The consumer then falls back to

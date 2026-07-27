@@ -4384,6 +4384,44 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
     }
   }
 }
+// ---- the TRUST-MARKER INVARIANT, checked over every entry before anything is written ----------------
+// An entry whose `inferred` contains `Unknown` MUST carry `unresolved: true` (SPEC §2, "true if `inferred`
+// may be incomplete"), and one that names a DIRECT `Unknown` MUST carry a non-empty `unknownWhy` (⟨0.6⟩,
+// REQUIRED on a source). Both are TIER-1 markers a machine consumer reads INSTEAD of re-deriving the
+// judgment, so a contradiction between them and the effect set is undetectable from the outside: the
+// consumer is told in one field that the set may be incomplete and in the next that it is not, and it has
+// no third channel to break the tie. That is the cardinal-sin shape wearing a data-consistency bug.
+//
+// It is asserted rather than trusted because it has ALREADY shipped broken. `e66f29e` found a union entry
+// publishing `inferred: ['Unknown']` with `unresolved` ABSENT — the marker was set on the `broad` arm only,
+// so an entry that INHERITED its Unknown from an implementer read `false`. Live on all seven of rxjs's
+// published unions. Two independent producers derive this marker (the ordinary entry loop and the union
+// emitter) and a third would be easy to add; "two places that must agree" is a property, and a property is
+// worth a check rather than a comment (item 9).
+//
+// FAIL CLOSED, before any file is written: no report at all is better than one whose trust markers lie,
+// because a downstream gate cannot tell the difference. Exit 2 is the family's "could not produce a
+// trustworthy answer" (an unreadable policy, a corrupt baseline, an unanalyzable source all take it).
+{
+  const contradictions = [];
+  for (const e of functions) {
+    if ((e.inferred ?? []).includes("Unknown") && e.unresolved !== true)
+      contradictions.push(`${e.fn}: inferred carries Unknown but \`unresolved\` is ${JSON.stringify(e.unresolved)}`);
+    // `direct` is absent on a synthesized union entry (it is not an analysed body), so the ⟨0.6⟩ rule is
+    // asked only of entries that make a direct claim at all.
+    if (Array.isArray(e.direct) && e.direct.includes("Unknown") && !(e.unknownWhy ?? []).length)
+      contradictions.push(`${e.fn}: direct carries Unknown but \`unknownWhy\` is empty (⟨0.6⟩ requires it on a source)`);
+  }
+  if (contradictions.length) {
+    console.error(`candor-ts: INTERNAL INVARIANT VIOLATED — ${contradictions.length} report entr`
+      + `${contradictions.length === 1 ? "y contradicts its" : "ies contradict their"} own trust markers; `
+      + `NO report written (a consumer cannot detect this from the outside):`);
+    for (const c of contradictions.slice(0, 20)) console.error(`  ${c}`);
+    if (contradictions.length > 20) console.error(`  … and ${contradictions.length - 20} more`);
+    process.exit(2);
+  }
+}
+
 // ⟨0.21⟩ An opaque, within-engine-stable fingerprint of a sorted qual set — FNV-1a 64-bit over the
 // newline-terminated UTF-8 quals, lowercase hex zero-padded to 16. BigInt (JS numbers can't hold 64 bits),
 // masked to 64 bits each step so it matches the java reference byte-for-byte (one algorithm the spec can
