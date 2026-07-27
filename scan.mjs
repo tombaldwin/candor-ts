@@ -687,7 +687,17 @@ const incompleteDepPkgs = new Set();
       // ⟨0.21⟩ …and neither does one that names source it could not analyze (see `incompleteDepPkgs`).
       // Staleness is checked FIRST: a report we do not trust cannot be trusted about its own completeness
       // either, so its `unanalyzed` claim buys it nothing beyond the downgrade it already gets.
-      const incomplete = !stale && Array.isArray(d.unanalyzed) && d.unanalyzed.length > 0;
+      // …and a MALFORMED manifest fails CLOSED. `Array.isArray(…) && length > 0` reads
+      // `"unanalyzed": "oops"` and `"unanalyzed": {}` as COMPLETE, so a report that garbles its own
+      // completeness claim bought the very coverage `21277eb` withheld from one that states it plainly —
+      // the same door, reopened by a malformed key. This is the posture the file already takes on a
+      // malformed `inferred` (untrustworthy ⇒ Unknown, never pure), and it matches java and rust
+      // (candor-rust `dbab8be`), which is what stops `deny E Unknown[class]` answering differently per
+      // engine. ABSENT and EMPTY are the two complete readings and they must both survive: the writer
+      // OMITS the key when it has nothing to declare (see `envelope.unanalyzed` below), so reading
+      // absence as incompleteness would withhold coverage from every ordinary report.
+      const incomplete = !stale && d.unanalyzed !== undefined
+        && !(Array.isArray(d.unanalyzed) && d.unanalyzed.length === 0);
       const covers = stale ? staleDepPkgs : incomplete ? incompleteDepPkgs : depCoveredPkgs;   // an untrusted or self-declared-incomplete report grants no coverage
       if (typeof d.package === "string" && d.package) covers.add(d.package);
       const inheritedWhy = stale ? new Map() : resolveInheritedWhy(d.functions ?? []);

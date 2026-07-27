@@ -882,6 +882,55 @@ export function run(): void { fsm.appendFileSync("/tmp/sib", "x"); }`,
         eff("src.m.useHand")?.inferred?.includes("Fs"), JSON.stringify(eff("src.m.useHand")));
 }
 
+// ── 2f-septies (c). the ⟨0.21⟩ `unanalyzed` manifest, read four ways ──────────────────────────────
+// `21277eb` withheld coverage from a dep report that declares itself incomplete. It asked
+// `Array.isArray(u) && u.length > 0`, which reads `"unanalyzed": "oops"` and `"unanalyzed": {}` as
+// COMPLETE — so a report that GARBLES its completeness claim bought the coverage a report that states
+// it plainly is refused. Same door, reopened by a malformed key, and a fail-OPEN.
+//
+// java and rust (candor-rust `dbab8be`) both fail closed here; ts and swift did not. Coverage is the
+// claim that an ABSENT entry is the dep's own purity claim (SPEC §2 rule 3), so an unreadable
+// completeness claim must buy nothing — the posture this file already takes on a malformed `inferred`.
+{
+  const depDir = project({ "package.json": `{"name":"mkit","version":"1.0.0"}`,
+    "src/index.ts": `import * as fsm from "node:fs";
+export function loud(): void { fsm.appendFileSync("/tmp/m", "x"); }
+export function quiet(): string { return "q"; }` });
+  const { prefix } = scan(depDir);
+  const base = JSON.parse(fs.readFileSync(`${prefix}.json`, "utf8"));
+  const appFiles = {
+    "package.json": `{"name":"mapp","version":"1.0.0"}`,
+    "src/m.ts": `import { quiet } from "mkit";
+export function useQuiet(): string { return quiet(); }`,
+    "node_modules/mkit/package.json": `{"name":"mkit","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/mkit/index.d.ts": `export declare function loud(): void;
+export declare function quiet(): string;`,
+    "node_modules/mkit/index.js": `exports.loud=()=>{};exports.quiet=()=>"q";`,
+  };
+  // `covered` = the dep's silence about `quiet` was read as its purity claim, so no entry is emitted.
+  const covered = (manifest) => {
+    const app = project(appFiles);
+    const d = JSON.parse(JSON.stringify(base));
+    if (manifest === undefined) delete d.unanalyzed; else d.unanalyzed = manifest;
+    const dep = path.join(app, "dep.json");
+    fs.writeFileSync(dep, JSON.stringify(d));
+    spawnSync("node", [path.join(HERE, "scan.mjs"), app], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: dep } });
+    const rep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+    return entry(rep, "src.m.useQuiet") == null;
+  };
+  // THE TWO COMPLETE READINGS, FIRST. The writer OMITS the key when it has nothing to declare, so
+  // reading absence as incompleteness withholds coverage from every ordinary report — the tempting
+  // fail-closed reading, and the one that breaks everything (candor-java's mutant failed seven tests).
+  check("manifest: an ABSENT `unanalyzed` is a COMPLETE report and still grants coverage", covered(undefined));
+  check("manifest: an EMPTY `unanalyzed` is complete too", covered([]));
+  check("manifest: a non-empty `unanalyzed` withholds coverage (⟨0.21⟩, 21277eb)",
+        !covered([{ path: "src/x.ts", reason: "source failed to parse" }]));
+  // …and the malformed shapes, which fail CLOSED.
+  check("manifest: a STRING `unanalyzed` is not a completeness claim — coverage withheld", !covered("oops"));
+  check("manifest: an OBJECT `unanalyzed` is not one either", !covered({}));
+  check("manifest: a NULL `unanalyzed` is not one either", !covered(null));
+}
+
 // ── 2f-sexies. the UNANSWERABLE KEY across the scan boundary ──────────────────────────────────────
 // candor-spec DEP-RECEIVER-TYPING-DESIGN.md, half 1. A chained lookup coming back empty has two
 // readings with opposite evidential weight, and the engine drew no distinction: a key that names a
