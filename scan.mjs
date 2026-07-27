@@ -519,6 +519,70 @@ const depCoveredPkgs = new Set();
 // key shape read pure. Fires only on a version mismatch — a configuration the family already treats as
 // invalid gate input (the AS-EFF-005 baseline guard says exactly that).
 const staleDepPkgs = new Set();
+// ⟨0.19⟩ For ONE chained report, the reason classes each unit's `Unknown` INHERITED from the units it
+// calls — the half of the reason-class contract that lives underneath `4dad22d`. See the call site for the
+// defect; this is the mechanism, and two properties of it are load-bearing:
+//
+// PER REPORT, never across. The keys here are `fn` quals (`src.c.origin`), which are report-local and
+// collide freely between packages — two dependencies both shipping `src.index.helper` is ordinary. The
+// cross-package key is the `hash`, and it is deliberately not what this walks: leaf-key joining across
+// reports is the fabrication this whole vein exists to avoid.
+//
+// AT CLASS GRANULARITY, one representative reason per class rather than the transitive string set.
+// Measured over 34 real dependency reports / 22 328 entries: 9 206 entries carry `Unknown` with no reason
+// and 9 122 of them (99.1%) have one recoverable from `calls` — but the raw strings blow up to 458 on a
+// single core-js unit, while the DISTINCT CLASSES never exceed 3 (8 097 entries reach exactly one class,
+// 927 two, 98 three). The class is what `deny E Unknown[<class>]` quantifies over and what SPEC §4 makes
+// normative; the raw detail is best-effort and stays with the unit that owns it, under its own hash. So a
+// representative is truthful, bounded and sufficient — and picking the lexicographically smallest makes it
+// deterministic, which a report diff depends on.
+//
+// Reverse-edge fixpoint rather than a per-entry walk: the relation is a union over a call graph that can
+// cycle, and seeding from the units that HAVE a reason and pushing backwards terminates by monotonicity
+// (each class's representative only ever decreases, over a finite string set) without a visited-set per
+// query or a recursion depth.
+function resolveInheritedWhy(entries) {
+  // Nothing to propagate unless some unit both HAS a reason and is CALLED — the cheap exit for the common
+  // report with no call edges at all.
+  if (!entries.some((e) => (e.unknownWhy ?? []).length) || !entries.some((e) => (e.calls ?? []).length))
+    return new Map();
+  const callers = new Map();                       // callee qual -> the quals that call it
+  for (const e of entries)
+    for (const c of e.calls ?? []) {
+      let list = callers.get(c);
+      if (!list) { list = []; callers.set(c, list); }
+      list.push(e.fn);
+    }
+  const byClass = new Map();                       // qual -> Map(reason class -> representative raw reason)
+  const q = [];
+  for (const e of entries) {
+    if (!(e.unknownWhy ?? []).length) continue;
+    const m = new Map();
+    for (const w of e.unknownWhy) {
+      const k = reasonClass(w);
+      const cur = m.get(k);
+      if (cur === undefined || w < cur) m.set(k, w);
+    }
+    byClass.set(e.fn, m);
+    q.push(e.fn);
+  }
+  for (let head = 0; head < q.length; head++) {
+    const src = byClass.get(q[head]);
+    for (const up of callers.get(q[head]) ?? []) {
+      let dst = byClass.get(up);
+      if (!dst) { dst = new Map(); byClass.set(up, dst); }
+      let changed = false;
+      for (const [k, w] of src) {
+        const cur = dst.get(k);
+        if (cur === undefined || w < cur) { dst.set(k, w); changed = true; }
+      }
+      if (changed) q.push(up);
+    }
+  }
+  const out = new Map();
+  for (const [fn, m] of byClass) out.set(fn, [...m.values()].sort());
+  return out;
+}
 // ⟨0.21⟩ Packages whose ONLY chained report DECLARES ITSELF INCOMPLETE — it carries a non-empty
 // `unanalyzed`, i.e. it names source it could not analyze. Same door as `staleDepPkgs`, different key: a
 // report says "these units were never derived", and §2 rule 3 then turns their ABSENCE from `functions`
@@ -561,6 +625,7 @@ const incompleteDepPkgs = new Set();
       const incomplete = !stale && Array.isArray(d.unanalyzed) && d.unanalyzed.length > 0;
       const covers = stale ? staleDepPkgs : incomplete ? incompleteDepPkgs : depCoveredPkgs;   // an untrusted or self-declared-incomplete report grants no coverage
       if (typeof d.package === "string" && d.package) covers.add(d.package);
+      const inheritedWhy = stale ? new Map() : resolveInheritedWhy(d.functions ?? []);
       for (const e of d.functions ?? []) {
         if (!e.hash) continue;
         const hashPkg = e.hash.split("#")[0];
@@ -574,6 +639,32 @@ const incompleteDepPkgs = new Set();
         // candor-java `6ab26e4`. A STALE report keeps the bare Unknown: its reasons are assertions from a
         // build we do not trust, and `unresolved` is the honest class for "we cannot say why".
         if (!stale) for (const w of e.unknownWhy ?? []) cell.why.add(w);
+        // …AND THE CLASS OF AN UNKNOWN THE DEP UNIT ITSELF ONLY INHERITED. ⟨0.6⟩ makes `unknownWhy`
+        // DIRECT-ONLY — required on a unit that introduces `Unknown`, absent on one that merely inherited
+        // it — so a dependency's EXPORTED function publishes `inferred: ['Unknown']` with no reason at all
+        // whenever the unresolvable call is one hop further in. The line above then has nothing to copy and
+        // the consumer falls back to `unresolved`. `4dad22d` fixed "the join drops the reason"; this is the
+        // half underneath it, "the producer never published one", and it is where the reason ratchet is
+        // actually adopted: `deny Unknown[reflect]` is exit 1 single-tree and exit 0 chained, at ONE hop and
+        // at two, while the bare `deny Unknown` fires throughout — so only the class-targeted middle reads
+        // green. (Found by the java sweep, which reached it first; the mirror is real too — the class
+        // DEGRADES to the catch-all, so `deny Unknown[unresolved]` is 0 single-tree and 1 chained.)
+        //
+        // No format rung and no producer change: the dependency's own `calls` edges already say which of
+        // its units the Unknown came from, and that unit's `unknownWhy` is right there in the same report.
+        // Resolving it HERE also keeps ⟨0.6⟩ intact at both ends — the producer still publishes a reason
+        // only on a direct source, and at the consumer the joined Unknown IS direct (`applyDepHit` adds it
+        // to `rec.direct`), which is the shape `4dad22d` established.
+        // Applied to EVERY entry, not only the ones with no reason of their own — and restricting it to
+        // those was standing-bar item 0 firing mid-implementation. The first fixture used a dep export
+        // that inherits its Unknown and has NO direct reason, so it was structurally incapable of noticing
+        // a unit that has one AND reaches a second class through its calls. Measured: a `pkgc#both` doing
+        // `eval(k)` (its own `reflect:`) and calling a `callback:` unit carried only `reflect:`, and
+        // `deny Unknown[indirect]` was exit 1 single-tree and exit 0 chained — the very defect this commit
+        // closes, surviving in a narrower shape. In-scan the GATE accumulates reason classes over the call
+        // graph (policy.mjs); across the boundary it cannot walk into the dependency, so the classes have
+        // to travel in the cell or the accumulation stops at the package edge.
+        if (!stale) for (const w of inheritedWhy.get(e.fn) ?? []) cell.why.add(w);
         // A chained dep's OWN blind boundary (an uncovered package IT calls into) travels to a consumer as
         // that consumer's `invisible` — the transitive disclosure the workspace chain exists to carry (a
         // sibling package's `SnsTopic.publish → invisible:[@aws-sdk/client-sns]` must not read pure across

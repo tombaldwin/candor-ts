@@ -2108,6 +2108,176 @@ export function buy(): void { charge(100); }`,
         buy4?.inferred.includes("Net") && buy4?.hosts?.includes("api.stripe.com"), JSON.stringify(buy4));
 }
 
+// ── 11c. ⟨0.19⟩ the reason class survives a dep unit that only INHERITED its Unknown ──────────────
+// ⟨0.6⟩ makes `unknownWhy` DIRECT-ONLY, so a dependency's exported function publishes `Unknown` with no
+// reason whenever the unresolvable call is one hop further in. The consumer then falls back to
+// `unresolved`, and `deny Unknown[reflect]` reads green one package boundary along.
+{
+  const pol = (dir, body) => { const p = path.join(dir, "p.policy"); fs.writeFileSync(p, body); return p; };
+  // pkgc: the Unknown ORIGIN is a LOCAL callee; the EXPORT a consumer joins only inherits it.
+  const c = project({
+    "package.json": `{"name":"pkgc"}`,
+    "src/c.ts": `import * as netm from "node:net";
+function origin(k: string): void { netm.connect(443, "api.example.com"); eval(k); }
+export function reach(k: string): void { origin(k); }`,
+  });
+  const cRep = scan(c).report;
+  check("producer: the exported unit inherits Unknown and — per ⟨0.6⟩ — publishes NO reason",
+        cRep.functions.find((e) => e.hash === "pkgc#reach")?.inferred.includes("Unknown")
+        && !(cRep.functions.find((e) => e.hash === "pkgc#reach")?.unknownWhy ?? []).length,
+        JSON.stringify(cRep.functions.map((e) => [e.hash, e.unknownWhy])));
+  // THE SECOND FIXTURE, WRITTEN FIRST (item 0): a unit that HAS its own reason must keep exactly that and
+  // must NOT be widened with its callees'. The report's `unknownWhy` is direct-only by contract at both
+  // ends; this recovery is for units that have NONE, not a licence to accumulate over the graph.
+  check("a unit with its OWN reason is not widened by its callees'",
+        JSON.stringify(cRep.functions.find((e) => e.hash === "pkgc#origin")?.unknownWhy) === '["reflect:eval"]',
+        JSON.stringify(cRep.functions.find((e) => e.hash === "pkgc#origin")));
+  const mkMid = (name, dts) => project({
+    "package.json": `{"name":"${name}","dependencies":{"pkgc":"1.0.0"}}`,
+    "node_modules/pkgc/package.json": `{"name":"pkgc","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/pkgc/index.d.ts": dts,
+    "node_modules/pkgc/index.js": ``,
+    "src/b.ts": `import { reach } from "pkgc";
+export function middle(k: string): void { reach(k); }`,
+  });
+  const b = mkMid("pkgb", `export declare function reach(k: string): void;`);
+  const cDeps = path.join(c, ".candor", "report.json");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), b], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: cDeps } });
+  const bRep = JSON.parse(fs.readFileSync(path.join(b, ".candor", "report.json"), "utf8"));
+  check("ONE hop: the consumer recovers the dep's inherited reason CLASS (not `unresolved`)",
+        bRep.functions.find((e) => e.hash === "pkgb#middle")?.unknownWhy?.includes("reflect:eval"),
+        JSON.stringify(bRep.functions.map((e) => [e.hash, e.unknownWhy])));
+  // TWO hops: pkga -> pkgb -> pkgc. pkgb's own entry now carries the reason, so the second hop is the
+  // ordinary `4dad22d` copy — but only because the first hop stopped losing it.
+  const a = project({
+    "package.json": `{"name":"pkga","dependencies":{"pkgb":"1.0.0"}}`,
+    "node_modules/pkgb/package.json": `{"name":"pkgb","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/pkgb/index.d.ts": `export declare function middle(k: string): void;`,
+    "node_modules/pkgb/index.js": ``,
+    "src/a.ts": `import { middle } from "pkgb";
+export function top(k: string): void { middle(k); }`,
+  });
+  const bDeps = path.join(b, ".candor", "report.json");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), a], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: bDeps } });
+  const aRep = JSON.parse(fs.readFileSync(path.join(a, ".candor", "report.json"), "utf8"));
+  check("TWO hops: the reason class still arrives",
+        aRep.functions.find((e) => e.hash === "pkga#top")?.unknownWhy?.includes("reflect:eval"),
+        JSON.stringify(aRep.functions.map((e) => [e.hash, e.unknownWhy])));
+
+  // THE SINGLE-TREE CONTROL, and the gate in BOTH directions. `deny Unknown[native]` is the negative
+  // control that proves the rule discriminates; `deny Unknown[unresolved]` is the DEGRADATION mirror —
+  // before the fix it was 0 single-tree and 1 chained, i.e. the catch-all fired where the precise rule
+  // could not. Both must now agree with the control.
+  const ctl = project({
+    "package.json": `{"name":"pkga"}`,
+    "src/c.ts": `import * as netm from "node:net";
+function origin(k: string): void { netm.connect(443, "api.example.com"); eval(k); }
+export function reach(k: string): void { origin(k); }`,
+    "src/b.ts": `import { reach } from "./c";
+export function middle(k: string): void { reach(k); }`,
+    "src/a.ts": `import { middle } from "./b";
+export function top(k: string): void { middle(k); }`,
+  });
+  for (const [rule, want] of [["deny Unknown[reflect]", 1], ["deny Unknown[native]", 0], ["deny Unknown[unresolved]", 0]]) {
+    const one = spawnSync("node", [path.join(HERE, "scan.mjs"), ctl, "--policy", pol(ctl, rule + "\n")], { encoding: "utf8" });
+    const hop1 = spawnSync("node", [path.join(HERE, "scan.mjs"), b, "--policy", pol(b, rule + "\n")],
+                           { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: cDeps } });
+    const hop2 = spawnSync("node", [path.join(HERE, "scan.mjs"), a, "--policy", pol(a, rule + "\n")],
+                           { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: bDeps } });
+    check(`\`${rule}\`: chained agrees with the single-tree control at one hop AND two`,
+          one.status === want && hop1.status === want && hop2.status === want,
+          `control=${one.status} hop1=${hop1.status} hop2=${hop2.status} want=${want}`);
+  }
+
+  // THE FIXTURE ITEM 0 DEMANDED, and it caught a live under-carry. The first version of this recovery ran
+  // only for dep entries with NO reason of their own — and the fixture above, whose export inherits its
+  // Unknown and has no direct reason, was structurally incapable of noticing a unit that has one AND
+  // reaches a SECOND class through its calls. `both` sources `reflect:eval` itself and calls a `callback:`
+  // unit; with the restriction it carried only `reflect:`, and `deny Unknown[indirect]` was exit 1
+  // single-tree and exit 0 chained — this commit's own defect, one shape narrower.
+  const c2 = project({
+    "package.json": `{"name":"pkgc2"}`,
+    "src/c.ts": `import * as netm from "node:net";
+function deep(k: string): void { netm.connect(443, "api.example.com"); (process as any).binding(k); }
+export function both(k: string): void { eval(k); deep(k); }`,
+  });
+  scan(c2);
+  const b3 = project({
+    "package.json": `{"name":"pkgb3","dependencies":{"pkgc2":"1.0.0"}}`,
+    "node_modules/pkgc2/package.json": `{"name":"pkgc2","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/pkgc2/index.d.ts": `export declare function both(k: string): void;`,
+    "node_modules/pkgc2/index.js": ``,
+    "src/b.ts": `import { both } from "pkgc2";
+export function middle(k: string): void { both(k); }`,
+  });
+  const ctl2 = project({
+    "package.json": `{"name":"pkgb3"}`,
+    "src/c.ts": `import * as netm from "node:net";
+function deep(k: string): void { netm.connect(443, "api.example.com"); (process as any).binding(k); }
+export function both(k: string): void { eval(k); deep(k); }`,
+    "src/b.ts": `import { both } from "./c";
+export function middle(k: string): void { both(k); }`,
+  });
+  const c2Deps = path.join(c2, ".candor", "report.json");
+  for (const [rule, want] of [["deny Unknown[indirect]", 1], ["deny Unknown[reflect]", 1],
+                              ["deny Unknown[native]", 0], ["deny Unknown[dispatch]", 0]]) {
+    const one = spawnSync("node", [path.join(HERE, "scan.mjs"), ctl2, "--policy", pol(ctl2, rule + "\n")], { encoding: "utf8" });
+    const two = spawnSync("node", [path.join(HERE, "scan.mjs"), b3, "--policy", pol(b3, rule + "\n")],
+                          { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: c2Deps } });
+    check(`a dep unit with its OWN reason still carries the classes it REACHES — \`${rule}\``,
+          one.status === want && two.status === want, `control=${one.status} chained=${two.status} want=${want}`);
+  }
+
+  // NO CROSS-REPORT CONTAMINATION. The resolver keys on `fn` quals, which are report-LOCAL and collide
+  // freely between packages — leaf-key joining ACROSS reports is the fabrication this vein exists to avoid.
+  // `otherpkg` declares the same qual `src.c.origin` with a NATIVE reason and nothing must pick it up.
+  const other = project({
+    "package.json": `{"name":"otherpkg"}`,
+    "src/c.ts": `export function origin(k: string): void { (process as any).binding(k); }`,
+  });
+  const otherRep = scan(other).report;
+  // The string to look for is READ OUT OF the other report rather than written here by hand. A literal
+  // guess is how this assertion was vacuous on its first pass — it asserted the absence of a `native:`
+  // prefix while the reason `otherpkg` actually emits is `callback:`, so the mutant that merges every
+  // report into one graph passed it. A test that cannot name what it reads proves nothing.
+  const foreignWhy = otherRep.functions.find((e) => e.fn === "src.c.origin")?.unknownWhy?.[0];
+  check("control: the other package declares the SAME qual with a DIFFERENT reason",
+        !!foreignWhy && foreignWhy !== "reflect:eval", JSON.stringify(otherRep.functions.map((e) => [e.fn, e.unknownWhy])));
+  // The FOREIGN report is chained FIRST, deliberately: the resolution is computed and applied per report as
+  // each is read, so a globally-scoped resolver only contaminates a report loaded AFTER the colliding one.
+  // Chaining pkgc first hides the hazard behind load order, which is exactly the kind of accident that makes
+  // a guard look verified when it is not.
+  const bothDeps = `${path.join(other, ".candor", "report.json")}:${cDeps}`;
+  const b2 = mkMid("pkgb2", `export declare function reach(k: string): void;`);
+  spawnSync("node", [path.join(HERE, "scan.mjs"), b2], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: bothDeps } });
+  const b2mid = JSON.parse(fs.readFileSync(path.join(b2, ".candor", "report.json"), "utf8"))
+    .functions.find((e) => e.hash === "pkgb2#middle");
+  check("a same-named qual in ANOTHER report contributes no reason (per-report, never leaf-keyed)",
+        b2mid?.unknownWhy?.includes("reflect:eval") && !(b2mid?.unknownWhy ?? []).includes(foreignWhy),
+        JSON.stringify(b2mid) + " foreign=" + foreignWhy);
+
+  // The FALLBACK survives: an inherited Unknown with nothing recoverable still reads `unresolved` rather
+  // than losing its reason field altogether.
+  const bare = project({
+    "package.json": `{"name":"barepkg"}`,
+    "src/x.ts": `export declare function opaque(): void;
+export function wrap(): void { (opaque as any)(); }`,
+  });
+  scan(bare);
+  const bareCons = project({
+    "package.json": `{"name":"bareapp","dependencies":{"barepkg":"1.0.0"}}`,
+    "node_modules/barepkg/package.json": `{"name":"barepkg","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/barepkg/index.d.ts": `export declare function wrap(): void;`,
+    "node_modules/barepkg/index.js": ``,
+    "src/m.ts": `import { wrap } from "barepkg";\nexport function go(): void { wrap(); }`,
+  });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), bareCons], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(bare, ".candor", "report.json") } });
+  const goBare = entry(JSON.parse(fs.readFileSync(path.join(bareCons, ".candor", "report.json"), "utf8")), "src.m.go");
+  check("an inherited Unknown with nothing recoverable still carries a reason field",
+        goBare == null || !goBare.inferred.includes("Unknown") || (goBare.unknownWhy ?? []).length > 0,
+        JSON.stringify(goBare));
+}
+
 // ── 11a. ⟨0.21⟩ a chained report that DECLARES ITSELF INCOMPLETE grants no coverage ───────────────
 // §2 rule 3 turns a report's silence into a purity claim. A report carrying `unanalyzed` has just said it
 // never read some of its own source, so its silence about that source answers nothing — the same split

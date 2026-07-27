@@ -8,6 +8,32 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+⚠ **⟨0.19⟩ The reason class survives a dependency unit that only INHERITED its `Unknown`** (`scan.mjs`).
+The half underneath `4dad22d`. ⟨0.6⟩ makes `unknownWhy` DIRECT-ONLY — required on a unit that introduces
+`Unknown`, absent on one that merely inherited it — so a dependency's *exported* function publishes
+`inferred: ['Unknown']` with no reason at all whenever the unresolvable call is one hop further in, and the
+consumer falls back to `unresolved`. `4dad22d` fixed "the join drops the reason"; this is "the producer never
+published one". Measured: `deny Unknown[reflect]` is exit 1 single-tree and **exit 0 chained**, at one hop and
+at two, while the bare `deny Unknown` fires throughout — so only the class-targeted middle, which is how the
+reason ratchet is actually adopted, reads green. The mirror is real too: the class DEGRADES to the catch-all,
+so `deny Unknown[unresolved]` is 0 single-tree and 1 chained. (Found by the java sweep, which reached it
+first.)
+
+No format rung, no producer change, no §4 vocabulary change: the dependency's own `calls` edges already say
+which of its units the `Unknown` came from, and that unit's `unknownWhy` is in the same report. Resolved at
+LOAD time, **per report** (the keys are report-local `fn` quals, which collide freely between packages — the
+cross-package key is the `hash`, and leaf-key joining across reports is the fabrication this vein exists to
+avoid) and **at CLASS granularity**, one representative reason per class. Measured over 34 real dependency
+reports / 22 328 entries: 9 206 entries carry `Unknown` with no reason and 9 122 (99.1%) have one recoverable,
+but the raw strings blow up to 458 on a single core-js unit while the distinct CLASSES never exceed 3.
+
+A/B over 4 chained real targets, both arms' engine files kept by content hash: **0 effect gains, 0 losses, 0
+entry delta, 0 Unknown delta**; 57 functions gain a reason string, 17 lose one, and **every class lost is
+`unresolved`** — the catch-all replaced by a real class (17 gains of `indirect`, 4 of `dispatch`). No function
+lost its reason field. ⚠ a `deny E Unknown[<class>]` rule may newly fire on a chained consumer, and a rule
+written against `unresolved` may stop firing where a real class is now known — both directions match the
+single-tree control.
+
 ⚠ **⟨0.21⟩ A chained report that DECLARES ITSELF INCOMPLETE no longer grants coverage** (`scan.mjs`). SPEC
 §2 rule 3 turns a report's silence into a purity claim; a report carrying a non-empty `unanalyzed` has just
 said it never read some of its own source, so its silence about that source answers nothing. Measured
