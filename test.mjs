@@ -2813,6 +2813,60 @@ export function orphan(k: Sink): void { k.flush(); }`,
         JSON.stringify(entry(report, "src.app.orphan")));
 }
 
+// ── SPEC §4's dividing line: `dispatch:` needs an OWNER TYPE **and** a MEMBER ─────────────────────
+// "an unresolved virtual/interface dispatch with a resolvable owner type + member … every owner-less
+// unresolved invocation is `callback:`" (SPEC §4), and `owner.member` is the vocabulary's one NORMATIVE
+// detail — what conformance PART 10 compares and what the ⟨0.7⟩ dispatch-frontier resolves against the
+// hierarchy sidecar. Each emission site used to substitute the literal words `type`/`member` for
+// whichever half it could not name. Measured on a 15-repo corpus: 1,234 such emissions, every one from
+// the interface-CHA arm, and they moved 695 functions into reason class `dispatch` where rust
+// (`callback:unresolved call`), java (`callback:…Function.apply`) and swift (`callback:fn`) all say
+// `indirect` for the same input. BOTH DIRECTIONS are asserted here, because the change NARROWS
+// `deny Unknown[dispatch]` and a fixture that only shows the narrowing is the item-0 trap.
+{
+  const d = project({
+    "package.json": `{"name":"vocab","version":"1.0.0"}`,
+    "src/a.ts": `export interface Store { save(x: string): void; }
+export interface UnaryFunction { (x: string): void; }
+// KEEPS dispatch: a named interface, a named member, no implementor.
+export function useStore(s: Store): void { s.save("x"); }
+// A named type whose only content is a CALL SIGNATURE — there is no member to name, and invoking it is
+// a function-VALUE call. The owner half survives in the callback: detail (best-effort, not normative).
+export function useUnary(f: UnaryFunction): void { f("x"); }
+// The mirror: a member of an ANONYMOUS type literal — the member is named, the owner is not.
+const holder: { run(): void } = { run() {} };
+export function useHolder(): void { holder.run(); }`,
+  });
+  const { report } = scan(d);
+  const why = (fn) => entry(report, fn)?.unknownWhy ?? [];
+  const noDispatch = (fn) => !why(fn).some((w) => w.startsWith("dispatch:"));
+  check("§4 SECOND DIRECTION: a named interface member with no impl KEEPS dispatch:<owner>.<member>",
+        why("src.a.useStore").includes("dispatch:src.a.Store.save"), JSON.stringify(why("src.a.useStore")));
+  check("§4: a named CALL-SIGNATURE type has no member, so the reason is callback:, not dispatch:",
+        why("src.a.useUnary").includes("callback:src.a.UnaryFunction") && noDispatch("src.a.useUnary"),
+        JSON.stringify(why("src.a.useUnary")));
+  check("§4: a member of an ANONYMOUS type literal has no owner, so it is callback: too",
+        why("src.a.useHolder").includes("callback:run") && noDispatch("src.a.useHolder"),
+        JSON.stringify(why("src.a.useHolder")));
+  check("§4: no reason anywhere spells the placeholder words `type`/`member` in an owner.member slot",
+        !report.functions.some((f) => (f.unknownWhy ?? []).some((w) => /^dispatch:(.*\.)?type\.|^dispatch:.*\.member$/.test(w))),
+        JSON.stringify(report.functions.flatMap((f) => f.unknownWhy ?? [])));
+  // THE GATE, both ways. Nothing goes silent — the Unknown and its trust marker are untouched; what
+  // moves is which CLASS-TARGETED rule bites, and the same site is caught by Unknown[indirect].
+  const gate = (rule) => {
+    fs.writeFileSync(path.join(d, "g.pol"), `${rule}\n`);
+    return scan(d, "--policy", path.join(d, "g.pol")).r.status;
+  };
+  check("§4 gate: `deny Unknown[dispatch]` STILL fires on the well-formed dispatch (exit 1)",
+        gate("deny Unknown[dispatch,unresolved] src.a.useStore") === 1);
+  check("§4 gate: ...and no longer fires on the owner-less call (exit 0)",
+        gate("deny Unknown[dispatch,unresolved] src.a.useUnary") === 0);
+  check("§4 gate: `deny Unknown[indirect]` fires there instead — the hole is still gated (exit 1)",
+        gate("deny Unknown[indirect,unresolved] src.a.useUnary") === 1);
+  check("§4 gate: and bare `deny Unknown` is unmoved, so nothing went silent (exit 1)",
+        gate("deny Unknown src.a.useUnary") === 1);
+}
+
 // ── super-interface CHA (R47): a SUPER-method on a sub-interface value resolves precisely ──────────
 {
   const d = project({

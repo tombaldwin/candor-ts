@@ -1986,8 +1986,26 @@ function unanswerableKey(decl) {
 function discloseUnanswerableKey(rec, pkg, abstraction) {
   rec.direct.add("Unknown");
   const owner = abstraction.parent?.name?.getText?.();
-  rec.why.add(`dispatch:${pkg}.${owner ?? "type"}.${abstraction.name?.getText?.() ?? "member"}`);
+  rec.why.add(dispatchWhy(owner ? `${pkg}.${owner}` : null, abstraction.name?.getText?.()));
 }
+
+/// SPEC §4's dividing line, in ONE place. `dispatch:` is reserved for an unresolved dispatch whose OWNER
+/// TYPE **and** MEMBER are both known — `owner.member` is the vocabulary's one NORMATIVE detail, it is what
+/// conformance PART 10 compares, and it is what the ⟨0.7⟩ dispatch-frontier resolves against the hierarchy
+/// sidecar. "Every owner-less unresolved invocation is `callback:`" is the spec's own words.
+///
+/// Each emission site used to substitute the literal words `type`/`member` for whichever half it could not
+/// name, producing a `dispatch:` string that no frontier can ever resolve and — worse — a reason CLASS
+/// (`dispatch`) that the other three engines do not give the same input: on an owner-less function value
+/// rust emits `callback:unresolved call`, java `callback:…Function.apply`, swift `callback:fn`, all class
+/// `indirect`. candor-ts was the four-way outlier and this moves it to the family AND to the spec.
+///
+/// The detail on `callback:` is best-effort (not conformance-compared), so keep whichever half was
+/// nameable rather than discarding it: a call through a named function TYPE (`interface UnaryFunction {
+/// (x: T): R }`) is `callback:<the type>`, a member of an anonymous type literal is `callback:<member>`.
+const dispatchWhy = (qualifiedOwner, member) =>
+  qualifiedOwner && member ? `dispatch:${qualifiedOwner}.${member}`
+                           : `callback:${qualifiedOwner ?? member ?? "unresolved call"}`;
 
 // Charge `rec` for reaching a resolved EXTERNAL declaration through a DESUGARED site — one that is not a
 // CallExpression, so the (CLASSIFY)/join/ledger arm of the call path never sees it. This is the same
@@ -2857,11 +2875,13 @@ function visitCalls(node) {
                   for (const ot of oTargets) rec.edges.add(ot);
                   if (!allResolved) {
                     rec.direct.add("Unknown");
-                    rec.why.add(`dispatch:${decl.parent?.name ? `${moduleOf(decl.parent.getSourceFile())}.${decl.parent.name.getText()}` : "type"}.${decl.name?.getText?.() ?? "member"}`); // class-override dispatch — canonical `dispatch:QUALIFIED-OWNER.member`, frontier-relevant
+                    rec.why.add(dispatchWhy(  // class-override dispatch — canonical `dispatch:QUALIFIED-OWNER.member`, frontier-relevant
+                      decl.parent?.name ? `${moduleOf(decl.parent.getSourceFile())}.${decl.parent.name.getText()}` : null,
+                      decl.name?.getText?.()));
                   }
                 } else {
                   rec.direct.add("Unknown"); // override family too wide to enumerate soundly
-                  rec.why.add(`dispatch:${decl.parent?.name?.getText?.() ?? "type"}.${decl.name?.getText?.() ?? "member"}`); // class-override dispatch (overridable member, unresolved/too-wide family) — canonical `dispatch:OWNER.member`, frontier-relevant
+                  rec.why.add(dispatchWhy(decl.parent?.name?.getText?.(), decl.name?.getText?.())); // class-override dispatch (overridable member, unresolved/too-wide family) — canonical `dispatch:OWNER.member`, frontier-relevant
                 }
               }
             }
@@ -2941,9 +2961,13 @@ function visitCalls(node) {
                 // hierarchy sidecar. Bare `decl.parent.name` would not match a reacher's declaringType.
                 const tn = sigDecl.parent?.name
                   ? `${moduleOf(sigDecl.parent.getSourceFile())}.${namespacePrefixOf(sigDecl.parent)}${sigDecl.parent.name.getText()}`
-                  : "type";
-                const mn = sigDecl.name?.getText?.() ?? "member";
-                rec.why.add(`dispatch:${tn}.${mn}`); // resolution landed on a type, not a body — canonical `dispatch:OWNER.member` (frontier-relevant)
+                  : null;
+                // A CALL SIGNATURE has no member to name (`interface UnaryFunction { (x: T): R }`,
+                // `type PatchFn = (a, b) => void`), and a member of an ANONYMOUS type literal has no
+                // owner to name. Both are function-VALUE invocations, not member dispatch — see
+                // `dispatchWhy`. This is where all 1,234 malformed strings measured on a 15-repo corpus
+                // came from; the other emission sites produced none.
+                rec.why.add(dispatchWhy(tn, sigDecl.name?.getText?.())); // resolution landed on a type, not a body — canonical `dispatch:OWNER.member` (frontier-relevant)
               }
             }
           }
