@@ -598,10 +598,21 @@ export function impact(fns, cg, q) {
 // Unknown from a handful of root causes — this names them, ranked, to declare/resolve/accept. Matches
 // candor-java/candor-query: { sources:[{fn,why,reaches,affected}], totalUnknown }.
 // ⟨0.20⟩ `--class <c,…>` filter: the six reason classes, `dynamic` (every genuine class), or `*` (all).
-// null spec ⇒ no filter; an unknown token warns; an all-unknown spec ⇒ an empty set that matches nothing.
-// The vocabulary is policy.mjs's — the flag and a `deny E Unknown[…]` rule must name the same class set,
-// so `--class` resolving `dynamic` from a private copy of the list is a drift waiting to happen.
+// null spec ⇒ no filter. The vocabulary is policy.mjs's — the flag and a `deny E Unknown[…]` rule must name
+// the same class set, so `--class` resolving `dynamic` from a private copy of the list is a drift waiting
+// to happen.
+//
+// ⟨0.24⟩ THE VALUE GRAMMAR (SPEC §6.2): an UNRECOGNISED token is a USAGE ERROR, not a warn-and-drop. This
+// is deliberately the OPPOSITE of the policy side, and the asymmetry is the whole point. A dropped token in
+// a `deny E Unknown[…]` rule leaves the rule WIDER — it still fires, on more, so the mistake is loud. A
+// dropped token here leaves the filter NARROWER: `--class dyanmic` answered a question the user never asked
+// with a SMALLER number, exit 0, indistinguishable from a real all-clear. That is the same fail-open class
+// as the transitive-resolution defect fixed in cbbb05c, arriving through the argument parser instead of the
+// match rule. A query flag that cannot be honoured is REFUSED, never approximated.
+// Throws ClassFilterError so the caller can render it as a usage error (exit 2); it is never a warning and
+// never a silent empty set. Empty tokens (a trailing comma, whitespace) are separators, not tokens.
 const ALL_CLASSES = REASON_CLASSES;
+export class ClassFilterError extends Error {}
 export function parseClassFilter(spec) {
   if (!spec) return null;
   const out = new Set();
@@ -611,7 +622,7 @@ export function parseClassFilter(spec) {
     if (t === "*") return new Set(ALL_CLASSES);
     if (t === "dynamic") { for (const c of DYNAMIC_CLASSES) out.add(c); continue; }
     if (ALL_CLASSES.includes(t)) out.add(t);
-    else console.error(`candor-ts: --class ignores unknown reason-class \`${t}\` (known: ${ALL_CLASSES.join(",")}; aliases: dynamic,*)`);
+    else throw new ClassFilterError(`candor-ts: --class: unknown reason class \`${t}\` (accepted: ${ALL_CLASSES.join(",")}; aliases: dynamic,*)`);
   }
   return out;
 }

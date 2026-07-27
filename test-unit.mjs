@@ -18,7 +18,7 @@ import {
   matches, show, where, callers, map, impact, path as provenance, diff, gains, reachable, whatif,
   fix, fixGate, unverified,
   containment, loadReport, loadCallgraph, loadHierarchy, callersFrontier, blindspots, blindspotsStats, isReport,
-  reportCoverage, gainsCoverage,
+  reportCoverage, gainsCoverage, parseClassFilter, ClassFilterError,
 } from "./query-core.mjs";
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
@@ -677,6 +677,51 @@ test("unverified --class ⟨0.24⟩: resolves TRANSITIVELY, fails CLOSED, and st
   assert.ok(!bs(null).includes("app.inherits"), "blindspots excludes a purely inherited Unknown");
   assert.deepEqual(bs("dynamic"), bs(null), "blindspots --class dynamic excludes nothing either");
   assert.deepEqual(bs("dispatch"), ["app.src"], "…and stays the direct-reason SOURCE view");
+});
+// ⟨0.24⟩ SPEC §6.2's VALUE GRAMMAR for the flag itself. The parser is the single choke point — every verb
+// that takes `--class` reaches the filter through here — so the grammar is pinned at the function boundary
+// and again end to end (test.mjs CLI-10) for the flag-level rule the parser cannot see (repetition).
+// WHY REFUSE, when the policy side drops-with-a-warning: a dropped token there leaves a WIDER rule (it
+// still fires, on more), whereas a dropped token here leaves a NARROWER filter — `--class dyanmic` used to
+// answer a question nobody asked with a SMALLER number at exit 0, unreadable from a genuine all-clear.
+test("parseClassFilter ⟨0.24⟩: the §6.2 value grammar — six classes + 2 aliases, an unknown token REFUSED", () => {
+  const S = (spec) => [...parseClassFilter(spec)].sort();
+  // (1) a valid single token, and (2) a valid comma list (whitespace + a trailing comma are separators)
+  assert.deepEqual(S("reflect"), ["reflect"]);
+  assert.deepEqual(S("reflect,native"), ["native", "reflect"]);
+  assert.deepEqual(S(" reflect , native ,"), ["native", "reflect"]);
+  // (3) BOTH aliases are accepted — `dynamic` is what the normative §6.2 diagnostic every engine carries
+  // passes, so rejecting it would break that standing test; `*` is every class INCLUDING setup.
+  assert.deepEqual(S("dynamic"), ["dispatch", "indirect", "native", "reflect", "unresolved"]);
+  assert.deepEqual(S("*"), ["dispatch", "indirect", "native", "reflect", "setup", "unresolved"]);
+  assert.deepEqual(S("setup"), ["setup"], "`setup` is a class in its own right (excluded only from `dynamic`)");
+  assert.equal(parseClassFilter(null), null, "no spec ⇒ no filter, not an empty one");
+  // (4) an UNRECOGNISED token is a usage error, and the message NAMES it and lists the accepted set — the
+  // assertion that separates "refused for the right reason" from "refused because something else broke".
+  let err = null;
+  try { parseClassFilter("dyanmic"); } catch (e) { err = e; }
+  assert.ok(err instanceof ClassFilterError, `an unknown token must throw ClassFilterError, got ${err}`);
+  assert.match(err.message, /`dyanmic`/, "the message names the offending token");
+  assert.match(err.message, /reflect,dispatch,indirect,native,unresolved,setup/, "…and lists the six classes");
+  assert.match(err.message, /dynamic,\*/, "…and both aliases");
+  // (5) one bad token poisons the WHOLE list — the failure mode being closed is the PARTIAL honour, where
+  // `reflect,dyanmic` quietly became `{reflect}` and reported less than either token asked for.
+  assert.throws(() => parseClassFilter("reflect,dyanmic"), ClassFilterError);
+  assert.throws(() => parseClassFilter("Reflect"), ClassFilterError, "the vocabulary is case-SENSITIVE");
+  // (6) THE REGRESSION CONTROL: well-formed input selects exactly what it selected before. Counts, not
+  // just exit codes — this change must alter no selection and no verdict for input it accepts.
+  const cg = { "app.inherits": ["app.src"], "app.src": [], "app.reflectOnly": [] };
+  const fns = [
+    { fn: "app.src", inferred: ["Unknown"], direct: ["Unknown"], unknownWhy: ["dispatch:app.Base.run"] },
+    { fn: "app.inherits", inferred: ["Unknown"], direct: [] },
+    { fn: "app.reflectOnly", inferred: ["Unknown"], direct: ["Unknown"], unknownWhy: ["reflect:eval"] },
+  ];
+  const nb = (spec) => blindspots(fns, cg, spec).sources.length;
+  const nu = (spec) => unverified(fns, parsePolicy("pure app"), scopeMatches, spec, cg).unverified.length;
+  assert.deepEqual([nb(null), nb("dynamic"), nb("*"), nb("reflect"), nb("reflect,dispatch"), nb("native")],
+    [2, 2, 2, 1, 2, 0], "blindspots selection by class, unchanged");
+  assert.deepEqual([nu(null), nu("dynamic"), nu("*"), nu("reflect"), nu("reflect,dispatch"), nu("native")],
+    [3, 3, 3, 1, 3, 0], "unverified selection by class, unchanged");
 });
 // The gate and the disclosure now run the SAME resolution (SPEC §6.2: "THE GATE AND THE DISCLOSURE MUST
 // APPLY THE SAME RULE, AND SHOULD SHARE THE SAME CODE") — pin the shared function's own contract.

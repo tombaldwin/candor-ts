@@ -38,7 +38,7 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          containment as coreContainment, diff as coreDiff,
          where as coreWhere, map as coreMap, whatif as coreWhatif,
          fix as coreFix, fixGate as coreFixGate, unverified as coreUnverified,
-         matches as coreMatches, gainsCoverage,
+         matches as coreMatches, gainsCoverage, parseClassFilter, ClassFilterError,
          loadReport, loadCallgraph, reportVersion, reportPackage } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
 // The §6 effect vocabulary — used to reject a typo'd effect name in `where` (corpus-audit #3). Kept in step
@@ -282,6 +282,7 @@ function loadReportOrDie(prefix) {
 function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknown = false, argc = 0 } = {}) {
   const positionals = [];
   let reportLocator = null, policyFile = null, wantStrict = false, wantIncludeUnknown = false;
+  let sawClass = false;   // ⟨0.24⟩ `--class` takes ONE list and is NOT repeatable (SPEC §6.2)
   for (let i = 0; i < rawArgs.length; i++) {
     const a = rawArgs[i];
     if (a === "--report") {
@@ -301,6 +302,19 @@ function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknow
     if (a === "--stats") { continue; }   // ⟨0.20⟩ tolerated everywhere; read by the `blindspots` case via args.includes
     if (a === "--class") { // ⟨0.20⟩ value flag; the value is read by the `blindspots` and `unverified` cases
       if (i + 1 >= rawArgs.length) { console.error("candor-ts: --class requires a <class,…> value (reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*)"); process.exit(2); }
+      // ⟨0.24⟩ SPEC §6.2's VALUE GRAMMAR, validated HERE — the one place every verb's args pass through, so
+      // no verb can accept a value the filter will not honour. Two rules, one reason (see parseClassFilter):
+      // a `--class` the engine cannot honour must be REFUSED, because honouring it partially SHRINKS the
+      // answer and a shrunken answer is unreadable from a true all-clear.
+      // (1) NOT REPEATABLE — a second `--class` is a usage error, not a union and not last-wins. The verbs
+      // read `args.indexOf("--class")`, so a repeat silently took the FIRST list and dropped the rest: a
+      // narrower answer than either flag asked for.
+      if (sawClass) { console.error("candor-ts: --class is not repeatable — pass ONE comma-separated list (e.g. `--class reflect,native`); a second --class is a usage error, not a union"); process.exit(2); }
+      sawClass = true;
+      // (2) EVERY TOKEN RECOGNISED — a typo'd token exits 2 naming the token and the accepted set, rather
+      // than dropping to an empty filter that reports zero holes at exit 0.
+      try { parseClassFilter(rawArgs[i + 1]); }
+      catch (e) { if (e instanceof ClassFilterError) { console.error(e.message); process.exit(2); } throw e; }
       i++; continue;
     }
     if (a.startsWith("-") && a.length > 1) {
@@ -477,6 +491,11 @@ OPTIONS  (uniform across every engine)
   --json                    machine-readable JSON (the default when output is piped/redirected)
   --text, --human           human-readable prose (the default at a terminal)
   --include-unknown         callers: also list the unresolved-dispatch frontier
+  --class <c,…>             blindspots/unverified: drill down by Unknown reason class. ONE
+                            comma-separated list, NOT repeatable, drawn from reflect, dispatch,
+                            indirect, native, unresolved, setup — plus \`dynamic\` (every genuine
+                            class, i.e. all but setup) and \`*\` (all). An unrecognised token is a
+                            usage error (exit 2), never a silently narrower answer.
   --strict                  make an advisory verb a CI gate — exit 1 while a finding remains:
                             unverified (an unverified-purity hole), fix-gate (a boundary
                             crossing), gains (ANY gained effect). Advisory (exit 0) otherwise.

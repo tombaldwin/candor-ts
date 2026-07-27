@@ -8,6 +8,46 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**⚠ `--class` ACCEPTED A VALUE IT COULD NOT HONOUR, AND ANSWERED A NARROWER QUESTION** — SPEC §6.2 ⟨0.24⟩'s
+value grammar (`query-core.mjs`, `query.mjs`). `--class dyanmic` — a typo — exited **0** with an empty
+filter: `blindspots` and `unverified` both reported **zero** holes, after a one-line warning on stderr that
+no CI log reads. A repeated `--class reflect --class native` silently took the FIRST list (the verbs read
+`args.indexOf`), answering with less than either flag asked for. Both are exit-0 documents that look
+exactly like a clean report.
+
+`--class <c>[,<c>…]` now takes ONE comma-separated list and is NOT repeatable; every token must be one of
+the six classes or the aliases `dynamic` / `*`; anything else is a **usage error, exit 2**, naming the
+offending token and listing the accepted set, with **no answer document on stdout**:
+
+```
+candor-ts: --class: unknown reason class `dyanmic` (accepted: reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*)
+candor-ts: --class is not repeatable — pass ONE comma-separated list (e.g. `--class reflect,native`); a second --class is a usage error, not a union
+```
+
+**WHY THIS IS THE OPPOSITE OF THE POLICY SIDE, WHERE AN UNKNOWN CLASS IS DROPPED WITH A WARNING.** A token
+dropped from a `deny E Unknown[…]` rule leaves that rule **WIDER** — it still fires, on more — so the
+mistake surfaces as a failing gate. A token dropped here leaves the filter **NARROWER**, and on
+`unverified` a narrower answer is indistinguishable from a real all-clear: the verb whose entire job is to
+name the holes a green `pure`/`deny E` layer passes without proving anything reports fewer of them, the
+more the user narrows. That is the same fail-open the transitive-resolution fix below closed, arriving
+through the argument parser instead of the match rule. A query flag that cannot be honoured is refused.
+
+One bad token poisons the whole list — `--class reflect,dyanmic` is refused rather than partially honoured
+as `{reflect}`, since a partial honour is exactly the silently-smaller answer. Validation sits in
+`parseClassFilter` (which now throws `ClassFilterError` instead of warning) and is applied at the single
+CLI choke point where `--class` is consumed, so it covers **every** verb that takes the flag: `blindspots
+--class`, `blindspots --stats --class` and `unverified --class` — this engine's three readers of the
+filter — and any future one, without a second copy of the rule.
+
+**No verdict and no selection changes for well-formed input**, asserted by count and not just by exit
+code (`test-unit.mjs` at the function boundary, `test.mjs` CLI-10 end to end): unfiltered / `dynamic` /
+`*` / a comma list all select what they selected before, `native` still selects 0 at exit 0, and the
+repeat test uses two VALID tokens so the only defect under test is the repetition — the message is
+asserted, so it cannot pass because some other arg-parse rule happened to exit 2. `blindspots --class`'s
+class-set semantics are untouched (§6.2 req 0); the value grammar is a property of the FLAG and applies
+wherever the flag is accepted. Pinned four-way by conformance PART 27 row R5 (`value-grammar`), whose
+`engine: "*"` waiver — the suite's only one — this closes.
+
 **§4 ⟨0.24⟩'s FIFTH `unknownWhy` kind, `ambiguous:` — AUDITED, ALREADY CONFORMANT, now controlled**
 (`test.mjs`, `test-unit.mjs`, `AGENTS.md`; **no production change, no verdict change**). §4 grew a fifth
 kind — the analyser's own *name resolution* was ambiguous (two same-named local definitions), so no owner

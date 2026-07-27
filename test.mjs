@@ -5268,6 +5268,66 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
         eqJson(uvRefl.fns, ["app.caller", "app.dyn"]) && eqJson(uvNat.fns, []),
         `reflect=${JSON.stringify(uvRefl.fns)} native=${JSON.stringify(uvNat.fns)}`);
 
+  // ── ⟨0.24⟩ SPEC §6.2's `--class` VALUE GRAMMAR, end to end over EVERY verb that takes the flag ─────
+  // `--class <c>[,<c>…]` is ONE comma-separated list, NOT repeatable; an unrecognised token is a usage
+  // error (exit 2) naming the token and the accepted set. Before this, `--class dyanmic` exited 0 with an
+  // EMPTY filter and a repeated `--class` silently took the first list — both NARROW the answer, and a
+  // narrowed answer is unreadable from a genuine all-clear. Deliberately NOT the policy side's
+  // drop-with-a-warning: a dropped policy token leaves the rule WIDER (loud), this left it NARROWER.
+  // The MESSAGE is asserted, not just the exit code — a status-only assertion passes for the wrong reason
+  // (any other arg-parse defect also exits 2), which is how a sibling engine's flag test survived its own
+  // mutation today.
+  const ACCEPTED = /reflect,dispatch,indirect,native,unresolved,setup/;
+  const bsc = (...extra) => {
+    const r = runQuery("blindspots", "--report", path.join(d, "bs"), ...extra);
+    let n = null; try { n = JSON.parse(r.stdout).sources.length; } catch { /* refused ⇒ no stdout */ }
+    return { status: r.status, n, err: r.stderr };
+  };
+  // (1) a valid single token and (2) a valid comma LIST are honoured — and the count is the control: this
+  // change must alter no selection for well-formed input (bs.json: one source, `reflect:eval`).
+  const gOne = bsc("--class", "reflect"), gList = bsc("--class", "reflect,native");
+  const gDyn = bsc("--class", "dynamic"), gStar = bsc("--class", "*"), gNone = bsc(), gNat = bsc("--class", "native");
+  check("CLI --class ⟨0.24⟩ grammar: a single token and a comma LIST are accepted and select the same source",
+        gOne.status === 0 && gOne.n === 1 && gList.status === 0 && gList.n === 1 && gNone.n === 1,
+        `one=${JSON.stringify(gOne)} list=${JSON.stringify(gList)} unfiltered=${gNone.n}`);
+  // (3) BOTH aliases are accepted — `dynamic` is what §6.2's normative diagnostic passes, so a grammar
+  // rejecting it would break that standing test; `native` is the discrimination control, proving an empty
+  // result under a VALID token is exit 0 and never confusable with a refusal.
+  check("CLI --class ⟨0.24⟩ grammar: `dynamic` and `*` are accepted; a valid-but-unmatched class is exit 0",
+        gDyn.status === 0 && gDyn.n === 1 && gStar.status === 0 && gStar.n === 1 && gNat.status === 0 && gNat.n === 0,
+        `dynamic=${JSON.stringify(gDyn)} star=${JSON.stringify(gStar)} native=${JSON.stringify(gNat)}`);
+  // (4) an UNRECOGNISED token: exit 2, naming the token AND the accepted set — never an empty filter at 0.
+  const typo = bsc("--class", "dyanmic"), typoInList = bsc("--class", "reflect,dyanmic");
+  check("CLI --class ⟨0.24⟩ grammar: a typo'd token exits 2 NAMING the token and the accepted set",
+        typo.status === 2 && /`dyanmic`/.test(typo.err) && ACCEPTED.test(typo.err) && /dynamic,\*/.test(typo.err)
+          && typo.n === null,
+        `status=${typo.status} n=${typo.n} err=${typo.err.trim()}`);
+  check("CLI --class ⟨0.24⟩ grammar: one bad token poisons the whole list (no PARTIAL honour at exit 0)",
+        typoInList.status === 2 && /`dyanmic`/.test(typoInList.err) && typoInList.n === null,
+        `status=${typoInList.status} n=${typoInList.n} err=${typoInList.err.trim()}`);
+  // (5) NOT REPEATABLE: two VALID tokens, so the ONLY defect is the repetition — and the message must be
+  // the not-repeatable one, not the unknown-class one, or the test would pass for the wrong reason.
+  const rep2 = bsc("--class", "reflect", "--class", "native");
+  check("CLI --class ⟨0.24⟩ grammar: a repeated --class exits 2 (not a union, not last-wins)",
+        rep2.status === 2 && /not repeatable/.test(rep2.err) && !/unknown reason class/.test(rep2.err)
+          && rep2.n === null,
+        `status=${rep2.status} n=${rep2.n} err=${rep2.err.trim()}`);
+  // (6) the grammar is a property of the FLAG, so it holds on every verb that accepts it — `blindspots`,
+  // `blindspots --stats` and `unverified` are this engine's three readers of the filter.
+  const stats = runQuery("blindspots", "--stats", "--report", path.join(d, "bs"), "--class", "dyanmic");
+  const statsOk = runQuery("blindspots", "--stats", "--report", path.join(d, "bs"), "--class", "reflect");
+  const uvTypo = runQuery("unverified", "--report", path.join(d, "uv"), "--policy", path.join(d, "uv.policy"),
+                          "--class", "dyanmic");
+  const uvRep = runQuery("unverified", "--report", path.join(d, "uv"), "--policy", path.join(d, "uv.policy"),
+                         "--class", "reflect", "--class", "native");
+  check("CLI --class ⟨0.24⟩ grammar: the SAME rule on `blindspots --stats` and `unverified` (all 3 readers)",
+        stats.status === 2 && /`dyanmic`/.test(stats.stderr) && ACCEPTED.test(stats.stderr)
+          && uvTypo.status === 2 && /`dyanmic`/.test(uvTypo.stderr) && ACCEPTED.test(uvTypo.stderr)
+          && uvRep.status === 2 && /not repeatable/.test(uvRep.stderr)
+          && statsOk.status === 0 && JSON.parse(statsOk.stdout).byClass.reflect === 1,
+        `stats=${stats.status}/${stats.stderr.trim()} uv=${uvTypo.status}/${uvTypo.stderr.trim()} `
+          + `uvRep=${uvRep.status} statsOk=${statsOk.status}/${statsOk.stdout.trim()}`);
+
   fs.rmSync(d, { recursive: true, force: true });
 }
 
