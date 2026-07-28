@@ -5921,15 +5921,57 @@ export function z(): void { readFileSync("/etc/z"); }`;
 
 // ── doc drift gates (TESTING.md §9): the family phrases the docs must carry ────────────────────────
 // README/AGENTS are load-bearing self-descriptions: they must state the CURRENT spec contract
-// ("spec 0.23", no stale generation strings — AGENTS.md shipped "spec 0.7" examples a full generation
-// after the 0.8 roll) and, wherever they lean on the reference engine, attribute it (candor-java IS
-// the reference — the family ruling the baseline/pure semantics cite).
+// (no stale generation strings — AGENTS.md shipped "spec 0.7" examples a full generation after the
+// 0.8 roll) and, wherever they lean on the reference engine, attribute it (candor-java IS the
+// reference — the family ruling the baseline/pure semantics cite).
+//
+// TWO FIXES, both from the 0.23→0.24 bump, where this gate was GREEN while the doc it gates carried a
+// stale current-contract claim:
+//
+//   FORM. The old detector was `/spec 0\.2[0-3]\b/` — a SPACE. README's envelope row writes
+//   `spec: "0.23"`, with a colon and quotes, so the stale string walked straight past a check whose
+//   whole job was catching it. The separator is now any 1-4 of quote/colon/space/hyphen, which covers
+//   `spec 0.24`, `spec: "0.24"`, `spec-0.24` and `candor-spec 0.24` (package.json's npm description —
+//   the most externally visible copy of all, and the one that shipped to the registry stale).
+//   Deliberately NOT `[^0-9A-Za-z]`: that class matches the `§` in a lowercase `spec §6.1`, turning a
+//   section reference into the version "6.1".
+//
+//   EXEMPTION. The old detector enumerated stale RANGES with a hole at 0.8, because AGENTS.md's
+//   `unitKind: "export"` (spec 0.8, informative)` is a HISTORICAL MARKER — it names the rung a field
+//   arrived at and must not move when the floor does. An enumeration encodes the wrong thing: it
+//   false-positives the next legitimate annotation, and it needs an edit every time the floor moves.
+//   The gate now keys on the `, informative)` marker itself, which IS the current-contract-versus-
+//   history distinction, and compares everything else against the ONE current value.
+//
+// And that value is READ FROM scan.mjs, not written here. A literal in a drift gate pins the drift it
+// exists to catch — exactly how candor-java's docs gate stayed green through this same bump.
 {
+  const SPEC = (fs.readFileSync(path.join(HERE, "scan.mjs"), "utf8")
+    .match(/const SPEC_VERSION = "([0-9]+\.[0-9]+)"/) ?? [])[1];
+  check("the doc gate reads the spec floor off scan.mjs (not a literal)", !!SPEC, String(SPEC));
+  // Any `spec` + version, capturing a trailing historical marker so it can be told apart.
+  const claim = /spec[-: "]{1,4}([0-9]+\.[0-9]+)(, informative\))?/g;
+  const staleIn = (doc) =>
+    [...doc.matchAll(claim)].filter((m) => !m[2] && m[1] !== SPEC).map((m) => m[0]);
+
+  // A NEGATIVE CONTROL for the exemption. If `, informative)` ever stopped matching, the filter above
+  // would silently pass everything and this whole gate would become a no-op that still printed ok.
+  const probe = `(spec 0.8, informative) and a live spec: "0.9" and a section ref spec §6.1`;
+  check("the historical-marker exemption discriminates (skips `, informative)`, keeps a live claim, ignores `spec §`)",
+        JSON.stringify(staleIn(probe)) === JSON.stringify([`spec: "0.9`]), JSON.stringify(staleIn(probe)));
+
+  // package.json's description is the npm REGISTRY page — a current-contract claim with the widest
+  // audience of any doc here, and the last one anybody looks at.
+  for (const f of ["README.md", "AGENTS.md", "package.json"]) {
+    const doc = fs.readFileSync(path.join(HERE, f), "utf8");
+    check(`${f} states the current spec contract (spec ${SPEC})`,
+          new RegExp(`spec[-: "]{1,4}${SPEC.replace(".", "\\.")}\\b`).test(doc));
+    const stale = staleIn(doc);
+    check(`${f} carries no stale spec-generation string`, stale.length === 0, JSON.stringify(stale));
+  }
+
   for (const f of ["README.md", "AGENTS.md"]) {
     const doc = fs.readFileSync(path.join(HERE, f), "utf8");
-    check(`${f} states the current spec contract (spec 0.24)`, doc.includes("spec 0.24"));
-    const stale = doc.match(/spec 0\.[0-7]\b|spec 0\.9\b|spec 0\.1[0-9]\b|spec 0\.2[0-3]\b/g) ?? [];
-    check(`${f} carries no stale spec-generation string`, stale.length === 0, JSON.stringify(stale));
     const refLines = doc.split("\n").filter((l) => /reference engine/i.test(l));
     check(`${f} mentions the reference engine at least once`, refLines.length > 0);
     check(`${f}: every "reference engine" mention attributes candor-java`,
