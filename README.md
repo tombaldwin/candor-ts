@@ -34,6 +34,14 @@ node query.mjs blindspots  .candor/report          # the Unknown SOURCES, ranked
 node query.mjs whatif   .candor/report db.save Net policy  # pre-edit gate verdict (exit 1)
 node query.mjs diff     .candor/report baseline 1  # per-function effect delta (exit 1 on a gain;
                                                    #   a baseline from a DIFFERENT build ⇒ disclosed ⚠ + exit 0)
+node query.mjs gate --report dep/.candor/report.json --policy arch.policy --gate-json -
+                                                   # ⟨0.24⟩ apply a policy to an EXISTING report, NO scan
+                                                   #   (exit 0/1/2) — the supply-chain verb: gate a
+                                                   #   DEPENDENCY's published report without its source.
+                                                   #   Reads that report and nothing else; a rule the wire
+                                                   #   cannot answer (`forbid`, `allow`, a class-scoped
+                                                   #   `deny` with the scoping field absent) is REFUSED
+                                                   #   with exit 2, never evaluated on partial evidence.
 ```
 
 A checked-in **`.candor/config`** (spec §3.4) replaces the env wiring — `policy arch.policy` /
@@ -204,7 +212,8 @@ read the Rust source".
 
 0.19.x, speaking candor-spec 0.24: the analysis core, the gate (`--policy` / `--gate-json` /
 `.candor/config`), the full §3.1 query surface (including `containment`, `blindspots`, the
-`--include-unknown` dispatch frontier), the MCP server, the LSP server, and the watch loop are
+`--include-unknown` dispatch frontier, and ⟨0.24⟩ `gate --report` — the gate applied to an EXISTING
+report, byte-equivalent to `scan --policy`'s verdict), the MCP server, the LSP server, and the watch loop are
 real, behaviorally tested (`npm test` — the behavioral suite across six harnesses), **soundness-fuzzed
 with verified teeth** (`node fuzz.mjs` — spec §7.13: generated effect chains through every encoded
 call form, any silent-pure = red), and conformance-held against the Rust/JVM/Swift engines. The

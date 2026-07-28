@@ -288,16 +288,62 @@ export function literalAllowed(effect, reached, values) {
   }
 }
 
+// ⟨0.24⟩ SPEC §3.1 — the REPORT route's Net destination classes, taken VERBATIM off the wire.
+//
+// `netClass` is already the TRANSITIVE set the producer derived (scan.mjs writes `netClassesOf([...rec
+// .hosts], rec.incomplete.has("Net"), netPartners)` into every Net-bearing entry), so re-deriving it in a
+// consumer is a §3.1 ⟨0.24⟩ re-classification with two live failure modes, in OPPOSITE directions:
+//   · the producer's `.candor/config` `net-partner` list is NOT on the wire, so a host the producer
+//     classified `known-partner` re-derives here as `unknown-host` — `deny Net[unknown-host]` fires on a
+//     function the producing project asserted safe (a FABRICATED violation, and one whose evidence the
+//     consumer cannot even see);
+//   · the AS-EFF-008 masked-surface flag is not on the wire either, so an entry whose `netClass` says
+//     `unknown-host` BECAUSE its host was runtime-computed re-derives from its one benign visible literal
+//     and loses the `unknown-host` member — the fail-OPEN mirror, on the exact filter a hardening team
+//     narrows through.
+// TWO MODES, because the two report routes differ in ONE way that matters — whether a refusal channel
+// exists downstream:
+//   · DEFAULT (MCP `candor_gate`, LSP diagnostics): map only the entries that actually CARRY the field.
+//     An entry without it falls back to the derivation, which is the fail-CLOSED reading (`netClassesOf`
+//     floors an empty/masked surface at `unknown-host`) and keeps a pre-⟨0.20⟩ or foreign report gated
+//     rather than silently un-narrowed. Neither surface can refuse a question, so a hedge beats a hole.
+//   · `authoritative` (`gate --report`): map EVERY `Net`-bearing entry, to its `netClass` or to the EMPTY
+//     set, so the derivation is unreachable and the report is the only source of the class — the §3.1
+//     ⟨0.24⟩ MUST NOT taken literally. That verb REFUSES a scoped `deny Net[…]` over a `netClass`-less
+//     entry (exit 2), so no gate DECISION rests on the empty set; what the mode additionally prevents is
+//     the class list a BARE `deny Net` violation REPORTS being re-derived from `hosts` — asserting a
+//     destination class the report never made, in a field a consumer reads as the producer's judgment.
+export function reportNetClasses(functions, { authoritative = false } = {}) {
+  const m = new Map();
+  for (const f of functions ?? []) {
+    const carried = Array.isArray(f.netClass) ? f.netClass : [];
+    if (carried.length === 0 && !(authoritative && (f.inferred ?? []).includes("Net"))) continue;
+    const prev = m.get(f.fn);
+    // A repeated `fn` is malformed input; UNION rather than overwrite — the direction that cannot turn a
+    // violation into a pass (java `gateInputFromReport` merges the same way).
+    m.set(f.fn, prev ? [...new Set([...prev, ...carried])].sort() : carried);
+  }
+  return m;
+}
+
 /**
  * The standing gate: evaluate a parsed policy over a report + callgraph (AS-EFF-006 deny/pure over
  * transitive inferred; AS-EFF-008 allowlists over the transitive literal surfaces, the no-visible-
  * literal case flagged as uncertifiable; AS-EFF-009 forbid by reachability). One line per violation.
+ *
+ * ⟨0.24⟩ THE ONLY MATCHING CODE IN THIS ENGINE. `scan --policy` lands here over the live graph;
+ * `gate --report` (SPEC §3.1) lands here over a WRITTEN report, with `callgraph`/`incomplete`/`partners`
+ * empty — none of the three rides the ⟨0.24⟩ wire, and the two rule kinds that would have needed them
+ * (`forbid`, `allow`) are REFUSED by that verb rather than evaluated on partial evidence. That shared
+ * landing is what makes "the same verdict from the same signature" a property of the code rather than of
+ * two consistent authors, and it is what §6.2 asks for: "THE GATE AND THE DISCLOSURE MUST APPLY THE SAME
+ * RULE, AND SHOULD SHARE THE SAME CODE."
  */
 // Each violation is a STRUCTURED record { rule, fn, effects, detail } (candor-spec §3.3 ⟨0.8⟩): `effects`
 // is the specific denied/allowed effect set the violation concerns ([] for the 009 layer-flow, which has
 // no single effect); `detail` is the message BODY (no `[AS-EFF-00x]` prefix — the rule carries the code).
 // The console gate renders `[${rule}] ${detail}`; --gate-json emits the records verbatim.
-export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map(), partners = new Set()) {
+export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map(), partners = new Set(), netClasses = null) {
   const out = [];
   // `Llm` ⟨0.13⟩ reaches the SAME hosts surface as Net (an Llm host WAS captured as a Net host literal).
   const surfaces = { Net: "hosts", Llm: "hosts", Exec: "cmds", Fs: "paths", Db: "tables" };
@@ -312,6 +358,14 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
   // Reason-scoped Unknown: the Unknown reason CLASS travels the call graph the same way the Unknown
   // EFFECT does. ONE copy of that resolution, shared with the disclosure side — see resolveReasonClasses.
   const reasonAcc = resolveReasonClasses(functions, callgraph);
+  // ⟨0.24⟩ ONE definition of a function's Net destination classes for this run: the report's own field when
+  // it carries one (see reportNetClasses), else the derivation from the surfaces the caller supplied. The
+  // gate's TEST and the class list it REPORTS both read it, so the two can't disagree about one function.
+  // `has`, not `get(…) ?? derive`: an entry mapped to the EMPTY set is a report that carried no class,
+  // and on the authoritative route that absence is the answer — deriving one there would re-classify.
+  const netClassOf = (f) => (netClasses && netClasses.has(f.fn))
+    ? netClasses.get(f.fn)
+    : netClassesOf(f.hosts ?? [], incomplete.get(f.fn)?.has("Net") ?? false, partners);
   for (const f of functions) {
     for (const r of pol.deny) {
       if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
@@ -332,16 +386,14 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       // a Net with no visible host is unknown-host (netClassesOf). The class travels the call graph via
       // f.hosts + f.incomplete, both propagated transitively before the gate (scan.mjs).
       if (kept.includes("Net") && (r.netClasses?.length)) {
-        const fnNet = netClassesOf(f.hosts ?? [], incomplete.get(f.fn)?.has("Net") ?? false, partners);
+        const fnNet = netClassOf(f);
         if (!fnNet.some((c) => r.netClasses.includes(c))) kept = kept.filter((e) => e !== "Net");
       }
       if (kept.length) {
         // When Unknown is denied, report ALL reason classes on the fn (transitive) — every reason the gate bit.
         const rc = kept.includes("Unknown") ? [...(reasonAcc.get(f.fn) ?? [])].sort() : undefined;
         // ⟨0.20⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
-        const ncv = kept.includes("Net")
-          ? netClassesOf(f.hosts ?? [], incomplete.get(f.fn)?.has("Net") ?? false, partners)
-          : undefined;
+        const ncv = kept.includes("Net") ? netClassOf(f) : undefined;
         push("AS-EFF-006", f.fn, kept, `\`${f.fn}\` performs { ${kept.join(", ")} }, forbidden by policy: \`${r.raw}\``, rc, ncv);
       }
     }

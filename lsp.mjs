@@ -45,7 +45,7 @@ import { createRequire } from "node:module";
 import nodePath from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as Q from "./query-core.mjs";
-import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches } from "./policy.mjs";
+import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses } from "./policy.mjs";
 
 // Version: from the sibling package.json when running inside the npm package; a single-file BUNDLE of
 // this server (the IDE-plugin embedding) has no sibling package.json — fall back rather than crash.
@@ -297,7 +297,11 @@ function diagnosticsFor(docPath) {
   const text = activePolicy();
   if (text === null || !hasReport(reportPrefix)) return [];
   const fns = Q.loadReport(reportPrefix);
-  const violations = evaluatePolicy(parsePolicy(text), fns, Q.loadCallgraph(reportPrefix));
+  // ⟨0.24⟩ `netClass` VERBATIM off the wire — the same report-route rule as the MCP `candor_gate` tool and
+  // `gate --report`; re-deriving it here would answer with the CONSUMER's `net-partner` evidence about the
+  // producer's project, in both the fabricating and the fail-open direction (see reportNetClasses).
+  const violations = evaluatePolicy(parsePolicy(text), fns, Q.loadCallgraph(reportPrefix),
+                                    new Map(), new Set(), reportNetClasses(fns));
   const locByFn = new Map(fns.filter((e) => e.loc).map((e) => [e.fn, locParts(e.loc)]));
   const out = [];
   for (const v of violations) {

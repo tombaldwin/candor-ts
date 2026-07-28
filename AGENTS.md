@@ -116,6 +116,15 @@ Q whatif   $P <fn> <Effect> [policy]  # pre-edit gate verdict (exit 1 if it woul
 Q fix      $P <fn> <Effect> <policy>  # the boundary FIX: where the effect belongs + the hoist refactor
 Q unverified $P <policy> [--strict]  # pure/deny layers that PASS but are Unknown (not PROVABLY clean)
 Q fix-gate $P <policy>              # a fix for EVERY crossing — the loop's block-message remedy
+Q gate --report $P --policy <file> [--json] [--gate-json <f>]
+                                    # ⟨0.24⟩ apply a policy to an EXISTING report, NO scan (exit 0/1/2).
+                                    # The supply-chain verb: gate a DEPENDENCY's published report. Reads
+                                    # the report and nothing else — no callgraph sidecar, no chained dep,
+                                    # no re-classification; an ABSENT entry stays absent (the ⟨0.21⟩
+                                    # purity claim). Its --gate-json is BYTE-EQUAL to `scan --policy`'s.
+                                    # `forbid`, `allow`, and a class-scoped `deny` whose scoping datum
+                                    # the report does not carry are REFUSED (exit 2), never evaluated on
+                                    # partial evidence — gate those at scan time instead.
 Q diff     $P <baseline-prefix> 1   # per-function effect delta (exit 1 on a gained effect)
 Q gains    $P <baseline-prefix>     # supply-chain alarm: {gained, byFunction} — effects a surface grew
 Q reachable $P 1                    # what the app DOES at runtime: effects over the entry points

@@ -546,5 +546,35 @@ fs.rmSync(W, { recursive: true, force: true });
   fs.rmSync(A, { recursive: true, force: true });
 }
 
+// ---- ⟨0.24⟩ the MCP `candor_gate` tool SHARES `evaluatePolicy` with `gate --report` ---------------
+// SPEC §6.2: "THE GATE AND THE DISCLOSURE MUST APPLY THE SAME RULE, AND SHOULD SHARE THE SAME CODE."
+// `gate --report` lands in the same `evaluatePolicy` this tool does, so the correctness argument for one
+// is the correctness argument for the other — and this tool reads WHATEVER report the caller points it
+// at, including a foreign one. The ⟨0.20⟩ destination class is where that bites: `netClass` records the
+// PRODUCER's `net-partner` judgment, and that config does not ride the wire, so re-deriving the class
+// from `hosts` here answered with the CONSUMER's evidence about someone else's project — a FABRICATED
+// `deny Net[unknown-host]` hit in one direction and a `deny Net[known-partner]` that silently stops
+// firing in the other. Both arms asserted, over a report this machine did not produce.
+{
+  const F = fs.mkdtempSync("/tmp/candor-mcp-foreign-");
+  fs.writeFileSync(`${F}/r.json`, JSON.stringify({
+    candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 1, digest: "0" },
+    functions: [{ fn: "app.call", inferred: ["Net"], direct: ["Net"], hosts: ["partner.example"], netClass: ["known-partner"] }],
+  }));
+  fs.writeFileSync(`${F}/u.pol`, "deny Net[unknown-host]\n");
+  fs.writeFileSync(`${F}/k.pol`, "deny Net[known-partner]\n");
+  const gcall = (id, pol) => ({ jsonrpc: "2.0", id, method: "tools/call",
+    params: { name: "candor_gate", arguments: { report: `${F}/r`, policy: `${F}/${pol}` } } });
+  const gr = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+                               gcall(2, "u.pol"), gcall(3, "k.pol")], [], { CANDOR_REPORT: `${F}/r` });
+  const gt = (id) => JSON.parse(gr.find((r) => r.id === id).result.content[0].text);
+  ok("candor_gate: `netClass` VERBATIM over a FOREIGN report — `deny Net[unknown-host]` does not fire on a producer-declared `known-partner` host (a re-derivation fabricates a violation here)",
+     gt(2).ok === true && gt(2).violations.length === 0, JSON.stringify(gt(2)).slice(0, 200));
+  ok("candor_gate: …and `deny Net[known-partner]` DOES fire on it (a re-derivation would silently tolerate)",
+     gt(3).ok === false && gt(3).violations[0]?.fn === "app.call"
+     && eq(gt(3).violations[0]?.netClass, ["known-partner"]), JSON.stringify(gt(3)).slice(0, 200));
+  fs.rmSync(F, { recursive: true, force: true });
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -222,6 +222,70 @@ export function loadReport(prefix) {
   }
   return tagHardFail(fns, hardFail);
 }
+
+/**
+ * ⟨0.24⟩ THE `gate --report` READER (SPEC §3.1) — the report FILE(S) at `prefix`, and nothing else.
+ *
+ * A SEPARATE reader was needed, and not because the existing one enriches: `loadReport` above reads the
+ * same files, but it returns ONLY the `functions` array and THROWS THE ENVELOPE AWAY. The gate verdict is
+ * `{spec, ok, analyzed:{count}, violations, incomplete?, unanalyzed?, coverage?}` — three of those fields
+ * are ⟨0.21⟩/⟨0.15⟩ ENVELOPE facts, so a verb that must produce a document byte-equal to `scan --policy`'s
+ * cannot be built on a loader that discards them. Reading them in a SECOND pass would be worse than a
+ * second reader: the envelope and the entries would come from two reads of a file another process may
+ * rewrite between them (scan writes atomically, so one read is always one coherent report). Hence: one
+ * pass, one parse per file, entries AND envelope out of the same bytes.
+ *
+ * WHAT IT DELIBERATELY DOES NOT READ, because §3.1 ⟨0.24⟩ forbids improving the input ("An engine MUST NOT
+ * re-derive, widen, or re-classify anything while serving this verb … a report entry that is ABSENT is
+ * absent — the ⟨0.21⟩ purity claim — and MUST NOT be back-filled from a callgraph sidecar or a chained
+ * dep"): no `.callgraph.json` (`loadCallgraph`, which `callers`/`tour`/`fix`/`fix-gate`/`unverified --class`
+ * all call), no `.hierarchy.json`, no `.locs.json`, no `CANDOR_DEPS`/`.candor/config` `deps` chaining, no
+ * `net-partner` re-mapping of the `netClass` this report already states. The reach the reason-class
+ * fixpoint runs over is the entries' OWN §2 `calls` field — report data in, report data out.
+ *
+ * Returns `{functions, analyzed, unanalyzed, coverage, hardFail}`. `hardFail` carries the `loadReport`
+ * meaning exactly: a file was FOUND and yielded nothing trustworthy (never "there was no file" — the
+ * caller's `requireReport` owns that), so a corrupt report can be refused instead of gated green.
+ */
+export function loadGateReport(prefix) {
+  const files = fs.existsSync(`${prefix}.json`) ? [`${prefix}.json`] : siblings(prefix, isReport);
+  const functions = [], unanalyzed = [], cov = new Map();
+  let hardFail = false, analyzed = 0;
+  for (const f of files) {
+    let parsed;
+    try { parsed = JSON.parse(fs.readFileSync(f, "utf8")); }
+    catch { console.error(`candor-ts: report ${f} failed to parse — its functions are OMITTED from this gate (corrupt or mid-write); re-run the scan`); hardFail = true; continue; }
+    const entries = normFns(parsed, f);
+    if (entries.length === 0 && !isCleanEmptyReport(parsed)) {
+      console.error(`candor-ts: report ${f} yielded no usable functions — OMITTED (malformed report); re-run the scan`);
+      hardFail = true;
+    }
+    functions.push(...entries);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;  // legacy bare array: no envelope
+    // ⟨0.21⟩ the completeness manifest. `count` SUMS across siblings, exactly as the multi-report `functions`
+    // arrays concatenate — the analyzed universe of a workspace is the union of its members'.
+    const a = parsed.analyzed;
+    if (a && typeof a === "object" && typeof a.count === "number" && Number.isFinite(a.count)) analyzed += a.count;
+    // ⟨0.21⟩ `unanalyzed` — normalized to the {path, reason} pair, in THAT key order, because the verdict
+    // this feeds is compared BYTE for byte against the scan's.
+    if (Array.isArray(parsed.unanalyzed))
+      for (const u of parsed.unanalyzed)
+        if (u && typeof u === "object" && !Array.isArray(u))
+          unanalyzed.push({ path: typeof u.path === "string" ? u.path : "", reason: typeof u.reason === "string" ? u.reason : "" });
+    // ⟨0.15⟩ the κ ledger. Merged + re-sorted the PRODUCER's way (count desc, name asc by code point —
+    // reportCoverage's rule, and scan.mjs's), so a single-report prefix reproduces the emitted order exactly.
+    const unc = parsed.coverage?.uncovered;
+    if (Array.isArray(unc))
+      for (const e of unc)
+        if (e && typeof e === "object" && typeof e.name === "string" && e.name) {
+          const n = typeof e.calls === "number" && Number.isFinite(e.calls) ? e.calls : 0;
+          cov.set(e.name, (cov.get(e.name) ?? 0) + n);
+        }
+  }
+  const coverage = [...cov.entries()].sort((a, b) => b[1] - a[1] || byCodePoint(a[0], b[0]))
+    .map(([name, calls]) => ({ name, calls }));
+  return { functions, analyzed, unanalyzed, coverage, hardFail };
+}
 // The returned graph carries a non-enumerable `partial` flag (the loadReport `hardFail` precedent):
 // true iff a sidecar file was MATCHED but failed to read/parse — its edges were DROPPED (disclosed on
 // stderr above), so the graph is an UNDER-approximation. An ABSENT sidecar is NOT partial: nothing

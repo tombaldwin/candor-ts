@@ -8,6 +8,79 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**⟨0.24⟩ `gate --report <locator> --policy <file>` — THE GATE AS A FUNCTION OF A GIVEN SIGNATURE.** SPEC
+§3.1 makes it a MUST and candor-ts did not have it; PART 27's R6 row printed `NOSURF`, and the 0.24
+changelog entry in candor-spec had to be publicly corrected to "pinned 2-of-4" because of it. It lands
+here as a QUERY verb, inheriting §3.3.1's grammar unchanged — the same locator rules and discovery
+fallback, the same `CANDOR_POLICY` fallback, the same exit-2 on an unreadable policy — with **no
+positionals**, exit codes exactly `scan --policy`'s (0 / 1 / 2), and `--json` defined as `--gate-json -`
+(a scan's `--json <file>` writes the *report*, and there is no report to write here, so the verb's machine
+output is the verdict; a second meaning would be the one place a consumer could tell the two routes apart).
+
+Two things it buys. *It is the supply-chain verb*: gating a dependency's published report is the operation
+an adopter wants and could not previously express without re-analysing code they do not have. And *it
+makes the code-implements-spec direction testable at all*: every other route into the gate recomputes `S`
+from source, so a defect in the **gate** and a defect in the **classifier** were indistinguishable from
+any test that could be written — which is exactly how this rung's own §6.2 divergence hid.
+
+**THE MUST NOT.** No re-deriving, widening or re-classifying: `S` and `D` come from the report as given,
+and an ABSENT entry is absent — the ⟨0.21⟩ purity claim — never back-filled. A new reader
+(`query-core.mjs` `loadGateReport`) reads the report file(s) at the locator and nothing else: no
+`.callgraph.json`, no `CANDOR_DEPS` / `.candor/config` `deps` chaining, no `.hierarchy.json`, no
+`net-partner` re-mapping. It is a SEPARATE reader because `loadReport` returns only the `functions` array
+and discards the envelope, while three fields of the verdict (`analyzed.count`, `unanalyzed`, the ⟨0.15⟩
+coverage advisory) are envelope facts — read in the SAME pass as the entries, so the two cannot come from
+two reads of a file another process may rewrite between them. Proven with an absent entry beside **three
+baits at once** — a callgraph sidecar naming it and edging it to an effectful unit, a chained dep report
+giving it the effect outright, and a `.candor/config` `deps` key — verdict clean, with a NEGATIVE CONTROL
+(the same baits, the effect written INTO the report) that exits 1, and **mutation-verified**: with the
+reader patched to adopt the sidecar-named entry, the absent arm goes 0 → 1.
+
+**⚠ `netClass` IS NOW READ VERBATIM ON EVERY REPORT ROUTE**, which changes MCP `candor_gate` and the LSP
+diagnostics as well as the new verb. `netClass` records the PRODUCER's `net-partner` judgment and its
+masked-surface flag, neither of which rides the wire — so re-deriving the ⟨0.20⟩ destination class from
+`hosts` in a consumer answered with THIS machine's evidence about someone else's project, in both
+directions at once: a host the producer classified `known-partner` re-read as `unknown-host` (a
+**fabricated** `deny Net[unknown-host]` hit) and a masked surface re-read from its one benign visible
+literal, losing `unknown-host` (the fail-open mirror, on the filter a hardening team narrows through). An
+entry that carries no `netClass` still falls back to the derivation, which is floored at `unknown-host` —
+the direction that cannot un-narrow the filter.
+
+**ANSWERABILITY: a rule whose evidence the wire does not carry is REFUSED (exit 2), never evaluated** —
+all three measured fail-OPEN if approximated instead. `forbid A -> B` (whole-policy: a report's `calls` is
+effect-relevant, so a crossing into a wholly PURE unit is invisible while `forbid` matches on NAME);
+`allow <E> …` (whole-policy: the AS-EFF-008 surface-completeness marker does not ride the wire, and
+`netClass: unknown-host` is NOT that marker — it also names a merely unrecognised host); and a
+class-scoped `deny` whose scoping datum is an ABSENT optional field (per-(rule, function)) — the live one,
+where `deny Net[unknown-host]` over a `Net`-bearing entry with no `netClass` matched an empty set and
+returned **exit 0** where the bare `deny Net` returns 1.
+
+**The refusal is MINIMAL, not coarse.** The class set only GROWS and `Reject` is upward-closed in it, so
+where the classes determinable from the entry ALONE already intersect the filter, the rule FIRES — missing
+data could only have added matches. Only an EMPTY determinable set (does not fire, and more evidence still
+could) is refused. One consequence worth naming: because this engine CONTRIBUTES `unresolved` at the entry
+that owns a reasonless direct `Unknown` (§6.2 requirement 3), it does **not** repeat the over-broad
+refusal SPEC §3.1 records against candor-swift — `deny E Unknown[unresolved]` over such an entry FIRES
+rather than exiting 2.
+
+**EQUIVALENCE IS THE ACCEPTANCE TEST, AND IT IS BYTE-LEVEL.** For any report a scan produced,
+`gate --report <it> --policy P` produces a `--gate-json` document byte-equal to `scan --policy P`'s —
+`analyzed.count`, `reasonClass`, `netClass` and the coverage advisory included — with the same exit code.
+Measured over **73 rows and three corpora** at landing (a synthetic fixture exercising every effect and
+several reason classes, a 1717-function slice of eslint's rules, and an `unanalyzed`/exit-2 fixture); 22
+of them ride in `npm test` as the standing gate, with a non-vacuity control (the matrix must contain
+violating rows AND verdicts carrying `netClass`/`reasonClass`) and a check that **no refusal fires on a
+self-produced report**. Cross-checked against `candor-spec/reference/policy_model.py` over **19 968 rows**
+(1536 REACHABLE signatures × 13 verbs) — **0 disagreements**, with a mispaired-verb negative control that
+fires 768.
+
+Both routes into the gate land in the same `evaluatePolicy` (SPEC §6.2: "THE GATE AND THE DISCLOSURE MUST
+APPLY THE SAME RULE, AND SHOULD SHARE THE SAME CODE"), which is what makes "the same verdict from the same
+signature" a property of the code rather than of two consistent authors. Also: `--gate-json` on a
+read-only query is now a loud exit 2 naming `gate`, rather than silently inert — the gateless-green shape
+where a wrapper names a verdict path, nothing writes it, and the wrapper reads no violations and calls the
+build clean.
+
 **⚠ `--class` ACCEPTED A VALUE IT COULD NOT HONOUR, AND ANSWERED A NARROWER QUESTION** — SPEC §6.2 ⟨0.24⟩'s
 value grammar (`query-core.mjs`, `query.mjs`). `--class dyanmic` — a typo — exited **0** with an empty
 filter: `blindspots` and `unverified` both reported **zero** holes, after a one-line warning on stderr that

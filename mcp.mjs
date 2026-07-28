@@ -19,7 +19,7 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
-import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches } from "./policy.mjs";
+import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses } from "./policy.mjs";
 
 const VERSION = createRequire(import.meta.url)("./package.json").version; // single-sourced, like scan.mjs
 
@@ -234,7 +234,15 @@ const TOOLS = {
         if (!cfg) throw new Error("no policy: pass `policy`, or check one into the repo's .candor/config (spec §3.4)");
         text = confinedPolicyRead(cfg.policyPath, p, cfg.repoRoot);
       }
-      const v = evaluatePolicy(parsePolicy(text), loadReportLoud(p), Q.loadCallgraph(p));
+      // ⟨0.24⟩ `netClass` VERBATIM off the wire (reportNetClasses). This is a REPORT route — like
+      // `gate --report`, and unlike a scan it holds neither the producer's `net-partner` config nor the
+      // masked-surface flag, so re-deriving the destination class from `hosts` answered with THIS
+      // machine's evidence about the PRODUCER's project: a `known-partner` host re-read as `unknown-host`
+      // (a FABRICATED `deny Net[unknown-host]` hit) and a masked surface re-read from its one benign
+      // literal (the fail-open mirror). An entry carrying no `netClass` still falls back to the
+      // derivation, which is floored at `unknown-host` — the direction that cannot un-narrow the filter.
+      const gfns = loadReportLoud(p);
+      const v = evaluatePolicy(parsePolicy(text), gfns, Q.loadCallgraph(p), new Map(), new Set(), reportNetClasses(gfns));
       return { ok: v.length === 0, violations: v };
     },
   },

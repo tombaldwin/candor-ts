@@ -7202,5 +7202,300 @@ export function go(): void { helper(); }`,
     `oracleRecall=${s?.oracleRecall} inconclusive=${s?.inconclusive}`);
 }
 
+// ── ⟨0.24⟩ SPEC §3.1 `gate --report <locator> --policy <file>` ────────────────────────────────────
+// Apply a policy to an EXISTING report, with no scan. Everything below drives the SHIPPED CLI and reads
+// its exit code / its `--gate-json` bytes — never the in-process functions — because the whole point of
+// the verb is that the gate is reachable as a function of a GIVEN signature, and an in-process capture
+// would re-open exactly the "a defect in the gate and a defect in the classifier are indistinguishable"
+// hole the clause exists to close.
+const gateCli = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), "gate", ...a], { encoding: "utf8" });
+// A hand-written report at `<dir>/r.json` (+ optional sidecar) — the shape conformance PART 27 writes.
+function handReport(files) {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-gate-"));
+  for (const [rel, content] of Object.entries(files)) {
+    const p = path.join(d, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, typeof content === "string" ? content : JSON.stringify(content, null, 1));
+  }
+  return d;
+}
+
+// ── (a) EQUIVALENCE IS THE ACCEPTANCE TEST, AND IT IS BYTE-LEVEL ──────────────────────────────────
+// For any report a scan produced, `gate --report <it> --policy P` must produce a `--gate-json` document
+// BYTE-EQUAL to `scan --policy P`'s — `analyzed.count`, `reasonClass`, `netClass` and the coverage
+// advisory included — and the SAME exit code. Anything less lets the two routes drift into two gates.
+// (This matrix is the standing gate; the landing measurement ran 73 rows over three corpora, including
+// a 1717-function slice of eslint's rules, all byte-equal.)
+{
+  const d = project({
+    ".candor/config": "net-partner api.partner.example\n",
+    "package.json": `{ "name": "gatefix", "dependencies": { "left-pad": "^1.0.0" } }`,
+    "src/app.ts": `import * as fsm from "node:fs";
+import { execSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
+import leftPad from "left-pad";
+export function readIt() { return fsm.readFileSync("/etc/hosts"); }
+export async function fetchPartner() { return fetch("https://api.partner.example/x"); }
+export async function fetchTelemetry() { return fetch("https://sentry.io/api"); }
+export async function fetchRuntime(u: string) { return fetch(u); }
+export function runIt() { return execSync("git status"); }
+export function save(db: DatabaseSync) { db.exec("INSERT INTO orders (id) VALUES (1)"); }
+export function envIt() { return process.env.HOME; }
+export function padIt(s: string) { return leftPad(s, 10); }
+export function dyn(o: any, k: string) { return o[k](); }
+export function refl(s: string) { return eval(s); }
+export function all(db: DatabaseSync, o: any) {
+  readIt(); fetchPartner(); fetchTelemetry(); fetchRuntime("x"); runIt(); save(db);
+  envIt(); padIt("a"); dyn(o, "k"); refl("1");
+}`,
+  });
+  const POLICIES = [
+    ["pure", "pure\n"], ["deny_fs", "deny Fs\n"], ["deny_net", "deny Net\n"], ["deny_db", "deny Db\n"],
+    ["deny_exec", "deny Exec\n"], ["deny_env", "deny Env\n"], ["deny_unknown", "deny Unknown\n"],
+    ["deny_clipboard", "deny Clipboard\n"], ["deny_net_unknown", "deny Net Unknown\n"],
+    ["u_dispatch", "deny Unknown[dispatch,unresolved]\n"], ["u_reflect", "deny Unknown[reflect,unresolved]\n"],
+    ["u_setup", "deny Unknown[setup]\n"], ["u_dynamic", "deny Unknown[dynamic]\n"],
+    ["n_unknownhost", "deny Net[unknown-host]\n"], ["n_partner", "deny Net[known-partner]\n"],
+    ["n_telemetry", "deny Net[known-telemetry]\n"],
+    ["scoped", "deny Fs src.app.readIt\n"], ["scoped_none", "pure ZzzNoSuchScope\n"],
+    ["multi", "deny Net\ndeny Fs\ndeny Unknown[dynamic,unresolved]\n"], ["comment_only", "# nothing\n"],
+  ];
+  const out = path.join(d, "verdicts");
+  fs.mkdirSync(out, { recursive: true });
+  const diffs = [];
+  let fired = 0, refusedOnSelfProduced = 0, sawNetClass = false, sawReasonClass = false;
+  for (const [name, text] of POLICIES) {
+    const pol = path.join(d, `${name}.pol`);
+    fs.writeFileSync(pol, text);
+    const a = path.join(out, `${name}.scan.json`), b = path.join(out, `${name}.gate.json`);
+    for (const f of [a, b]) if (fs.existsSync(f)) fs.rmSync(f);   // DELETE the output before measuring
+    const s = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", pol, "--gate-json", a], { encoding: "utf8" });
+    const g = gateCli("--report", path.join(d, ".candor", "report.json"), "--policy", pol, "--gate-json", b);
+    if (!fs.existsSync(a) || !fs.existsSync(b)) { diffs.push(`${name}: a --gate-json document was not written (scan ${s.status}, gate ${g.status})`); continue; }
+    const av = fs.readFileSync(a), bv = fs.readFileSync(b);
+    if (!av.equals(bv)) diffs.push(`${name}: NOT byte-equal\n  scan ${av.toString().slice(0, 400)}\n  gate ${bv.toString().slice(0, 400)}`);
+    if (s.status !== g.status) diffs.push(`${name}: exit ${s.status} (scan) vs ${g.status} (gate)`);
+    if (s.status === 1) fired++;
+    // "Refusing costs nothing on a self-produced report" (SPEC §3.1) — netClass is emitted for every
+    // Net-bearing entry and floored at unknown-host, and an in-scope Unknown always resolves. A refusal
+    // here would mean the producer dropped a channel its own consumer needs.
+    if (g.status === 2 && s.status !== 2) { refusedOnSelfProduced++; diffs.push(`${name}: gate REFUSED a self-produced report — ${g.stderr.slice(0, 300)}`); }
+    if (av.includes("netClass")) sawNetClass = true;
+    if (av.includes("reasonClass")) sawReasonClass = true;
+  }
+  check(`gate --report: --gate-json is BYTE-EQUAL to scan --policy's over ${POLICIES.length} policies, same exit`,
+        diffs.length === 0, diffs.join("\n"));
+  // The row is VACUOUS unless a policy actually fired — byte-equal empty verdicts prove little.
+  check("gate --report: the equivalence matrix is NON-VACUOUS (policies that violate, and the ⟨0.19⟩/⟨0.20⟩ class fields ride the verdict)",
+        fired >= 5 && sawNetClass && sawReasonClass, `fired=${fired} netClass=${sawNetClass} reasonClass=${sawReasonClass}`);
+  check("gate --report: no answerability refusal fires on a report this engine produced",
+        refusedOnSelfProduced === 0);
+
+  // ⟨0.21⟩ the completeness manifest travels ON the report, so the SAME exit-2 follows from it. A real
+  // violation dominates, exactly as it does on the scan path.
+  fs.writeFileSync(path.join(d, "src", "bad.ts"), "export function broken( { { {\n");
+  const inc = [];
+  for (const [name, text] of [["i_net", "deny Net\n"], ["i_clipboard", "deny Clipboard\n"]]) {
+    const pol = path.join(d, `${name}.pol`);
+    fs.writeFileSync(pol, text);
+    const a = path.join(out, `${name}.scan.json`), b = path.join(out, `${name}.gate.json`);
+    for (const f of [a, b]) if (fs.existsSync(f)) fs.rmSync(f);
+    const s = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", pol, "--gate-json", a], { encoding: "utf8" });
+    const g = gateCli("--report", path.join(d, ".candor", "report.json"), "--policy", pol, "--gate-json", b);
+    if (!fs.existsSync(a) || !fs.existsSync(b) || !fs.readFileSync(a).equals(fs.readFileSync(b)) || s.status !== g.status)
+      inc.push(`${name}: scan ${s.status} / gate ${g.status}`);
+    if (name === "i_clipboard" && g.status !== 2) inc.push("i_clipboard: an unanalyzed unit must make the gate exit 2, not certify");
+  }
+  check("gate --report: the ⟨0.21⟩ `unanalyzed` manifest carries the same exit-2 verdict, byte-equal", inc.length === 0, inc.join("; "));
+}
+
+// ── (b) THE MUST NOT: an ABSENT entry is absent, past THREE back-fill channels at once ─────────────
+// SPEC §3.1 ⟨0.24⟩: "An engine MUST NOT re-derive, widen, or re-classify anything while serving this
+// verb … a report entry that is ABSENT is absent — the ⟨0.21⟩ purity claim — and MUST NOT be back-filled
+// from a callgraph sidecar or a chained dep." `app.Facade.load` is NOT in the report, and the effect it
+// would have is supplied through every channel this engine has: the `.callgraph.json` sidecar names it
+// and edges it to an Fs-bearing unit, a chained dep report gives it Fs outright, and a `.candor/config`
+// `deps` key sits beside the report AND in the directory the verb does open a config from.
+// MUTATION-VERIFIED 2026-07-28: with the reader patched to adopt a sidecar-named entry from the dep
+// report, the ABSENT arm goes 0 -> 1. The NEGATIVE CONTROL below is what makes that meaningful — without
+// it, an engine that ignored the policy entirely would pass this row.
+{
+  const dep = { candor: { version: "handwritten", spec: "0.24" }, package: "dep", analyzed: { count: 2, digest: "0" },
+                functions: [{ fn: "app.Facade.load", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] },
+                            { fn: "dep.readCfg", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] }] };
+  const absent = { candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 3, digest: "0" },
+                   functions: [{ fn: "app.Wire.send", inferred: ["Net"], direct: ["Net"], hosts: ["ok.example.com"], netClass: ["unknown-host"] }] };
+  const present = JSON.parse(JSON.stringify(absent));
+  present.functions.push({ fn: "app.Facade.load", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] });
+  const cg = { "app.Facade.load": ["dep.readCfg"], "dep.readCfg": [], "app.Wire.send": [] };
+  const d = handReport({
+    "rep/r.json": absent, "rep/r.callgraph.json": cg,
+    "rep/r2.json": present, "rep/r2.callgraph.json": cg,
+    "deps/dep.json": dep,
+    "p.pol": "deny Fs app.Facade\n",
+  });
+  fs.mkdirSync(path.join(d, "rep", ".candor"), { recursive: true });
+  fs.writeFileSync(path.join(d, "rep", ".candor", "config"), `deps ${path.join(d, "deps")}\n`);
+  fs.mkdirSync(path.join(d, ".candor"), { recursive: true });
+  fs.writeFileSync(path.join(d, ".candor", "config"), `deps ${path.join(d, "deps")}\n`);
+  const env = { ...process.env, CANDOR_DEPS: path.join(d, "deps") };
+  const run = (rep) => spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", path.join(d, "rep", rep),
+                                          "--policy", path.join(d, "p.pol")], { encoding: "utf8", cwd: path.join(d, "rep"), env });
+  const ra = run("r.json"), rp = run("r2.json");
+  check("gate --report: an ABSENT entry is NOT back-filled from a callgraph sidecar, a chained dep, or a config `deps` key (exit 0)",
+        ra.status === 0, `exit=${ra.status} ${ra.stdout}${ra.stderr}`.slice(0, 400));
+  check("gate --report: NEGATIVE CONTROL — the same policy + the same three baits, effect written INTO the report (exit 1)",
+        rp.status === 1, `exit=${rp.status} ${rp.stdout}${rp.stderr}`.slice(0, 400));
+}
+
+// ── (c) ANSWERABILITY: a rule whose EVIDENCE THE WIRE DOES NOT CARRY is REFUSED, never evaluated ────
+// All three were measured FAIL-OPEN if approximated instead, and the third is a live one: `deny
+// Net[unknown-host]` over a Net-bearing entry with no `netClass` matched an empty set and returned exit
+// 0 where the bare `deny Net` returns 1 — an absent optional field silently un-scoping a fail-closed
+// security gate. The BARE rule rides along as the control that proves the fixture can fire at all.
+{
+  const d = handReport({
+    "r.json": { candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 4, digest: "0" },
+      functions: [
+        { fn: "app.egress", inferred: ["Net"], direct: ["Net"], hosts: ["example.com"] },              // Net, netClass ABSENT
+        { fn: "app.classed", inferred: ["Net"], direct: ["Net"], hosts: ["example.com"], netClass: ["unknown-host"] },
+        { fn: "app.inherited", inferred: ["Unknown"], direct: [] },                                    // inherited Unknown, no `calls`
+        { fn: "app.reasonless", inferred: ["Unknown"], direct: ["Unknown"] },                          // DIRECT Unknown, no reason
+      ] },
+  });
+  const rc = (text) => {
+    fs.writeFileSync(path.join(d, "p.pol"), text);
+    return gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol")).status;
+  };
+  check("gate --report: `forbid A -> B` is REFUSED whole-policy (exit 2) — a report's `calls` is effect-relevant, so a crossing into a wholly PURE unit is invisible",
+        rc("forbid a -> b\n") === 2);
+  check("gate --report: `allow <E> …` is REFUSED whole-policy (exit 2) — the AS-EFF-008 surface-completeness marker does not ride the wire",
+        rc("allow Net in app example.com\n") === 2);
+  check("gate --report: a class-scoped `deny Net[…]` over a Net entry with NO `netClass` is REFUSED (exit 2)",
+        rc("deny Net[unknown-host] app.egress\n") === 2);
+  check("gate --report: …and the BARE `deny Net` over the same entry FIRES (exit 1) — which is what makes the refusal a fail-open fix, not a formality",
+        rc("deny Net app.egress\n") === 1);
+  check("gate --report: a class-scoped `deny Unknown[…]` over an INHERITED Unknown with no `calls` edge is REFUSED (exit 2)",
+        rc("deny Unknown[dispatch] app.inherited\n") === 2);
+  check("gate --report: …and the bare `deny Unknown` over the same entry FIRES (exit 1)",
+        rc("deny Unknown app.inherited\n") === 1);
+  // THE REFUSAL IS MINIMAL (SPEC §3.1 ⟨0.24⟩), and per (rule, function): the class set only GROWS and
+  // Reject is upward-closed in it, so a scoped rule whose own matches carry their evidence still
+  // evaluates — including the arm where it does NOT fire, which is an ANSWER and not a refusal.
+  check("gate --report: MINIMAL — a scoped `deny Net[unknown-host]` over an entry that DOES carry `netClass` FIRES (exit 1), even though another entry in the report lacks the field",
+        rc("deny Net[unknown-host] app.classed\n") === 1);
+  check("gate --report: MINIMAL — the same entry under `deny Net[known-partner]` is ANSWERED, not refused (exit 0)",
+        rc("deny Net[known-partner] app.classed\n") === 0);
+  // The ⟨0.24⟩ CONTRIBUTES case, which SPEC §3.1 records candor-swift as refusing OVER-BROADLY: a
+  // function whose DIRECT `Unknown` names no reason contributes `unresolved` FROM THE ENTRY ALONE, with
+  // no transitive step, so the rule fires and the answer is certain. This engine already contributes at
+  // the entry (policy.mjs resolveReasonClasses), so it answers rather than declining.
+  check("gate --report: MINIMAL — a reasonless DIRECT `Unknown` is answerable: `deny Unknown[unresolved]` FIRES (exit 1), not exit 2",
+        rc("deny Unknown[unresolved] app.reasonless\n") === 1);
+  check("gate --report: …and `deny Unknown[dispatch]` over that same entry is ANSWERED as a pass (exit 0)",
+        rc("deny Unknown[dispatch] app.reasonless\n") === 0);
+}
+
+// ── (d) `netClass` is read VERBATIM — the MUST NOT's "no re-classifying", with teeth ───────────────
+// The producer's `.candor/config` `net-partner` list is not on the wire. Re-deriving the destination
+// class in the consumer would answer with THIS machine's evidence about the PRODUCER's project, in both
+// directions: a `known-partner` host re-read as `unknown-host` (a FABRICATED `deny Net[unknown-host]`
+// hit) and, symmetrically, a `deny Net[known-partner]` that stops firing. Both arms are asserted, and
+// the second run adds a consumer-side config naming a DIFFERENT partner to prove the CWD cannot move it.
+{
+  const d = handReport({
+    "r.json": { candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 1, digest: "0" },
+      functions: [{ fn: "app.call", inferred: ["Net"], direct: ["Net"], hosts: ["partner.example"], netClass: ["known-partner"] }] },
+    "u.pol": "deny Net[unknown-host]\n",
+    "k.pol": "deny Net[known-partner]\n",
+  });
+  const run = (pol) => spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", path.join(d, "r.json"),
+                                          "--policy", path.join(d, pol)], { encoding: "utf8", cwd: d }).status;
+  check("gate --report: `netClass` VERBATIM — `deny Net[unknown-host]` does NOT fire on a host the producer classified `known-partner` (exit 0; a re-derivation says 1)",
+        run("u.pol") === 0);
+  check("gate --report: `netClass` VERBATIM — `deny Net[known-partner]` DOES fire on it (exit 1; a re-derivation says 0)",
+        run("k.pol") === 1);
+  fs.mkdirSync(path.join(d, ".candor"), { recursive: true });
+  fs.writeFileSync(path.join(d, ".candor", "config"), "net-partner other.example\n");
+  check("gate --report: a CONSUMER-side `net-partner` config cannot move the verdict (the §3.1 MUST NOT: no re-mapping through this machine's config)",
+        run("k.pol") === 1);
+}
+
+// ── (e) THE GRAMMAR (§3.3.1, inherited unchanged) and the `--json` ≡ `--gate-json -` ruling ─────────
+{
+  const d = handReport({
+    "r.json": { candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 1, digest: "0" },
+      functions: [{ fn: "app.f", inferred: ["Net"], direct: ["Net"], hosts: ["x.example"], netClass: ["unknown-host"] }] },
+    "ok.pol": "deny Fs\n",
+  });
+  const R = path.join(d, "r.json"), P = path.join(d, "ok.pol");
+  check("gate --report: a stray POSITIONAL is a usage error (exit 2) — `gate` takes none, so it is never probed as a report or a policy",
+        gateCli("--report", R, "--policy", P, "stray").status === 2);
+  check("gate --report: an UNREADABLE policy exits 2, policy NOT evaluated (never a silent green)",
+        gateCli("--report", R, "--policy", path.join(d, "nope.pol")).status === 2);
+  check("gate --report: no policy at all is exit 2 — with no policy there is no verdict to give",
+        gateCli("--report", R).status === 2);
+  check("gate --report: a report locator that names nothing is exit 2",
+        gateCli("--report", path.join(d, "missing.json"), "--policy", P).status === 2);
+  check("gate --report: `--gate-json` with no value is exit 2",
+        gateCli("--report", R, "--policy", P, "--gate-json").status === 2);
+  check("gate --report: `--gate-json --policy p` cannot SWALLOW the policy and run gateless-green (exit 2)",
+        gateCli("--report", R, "--policy", P, "--gate-json", "--policy", P).status === 2);
+  check("gate --report: a typo'd flag is exit 2, never swallowed",
+        gateCli("--report", R, "--policy", P, "--jsno").status === 2);
+  check("gate --report: CANDOR_POLICY is the same fallback the other policy verbs use",
+        spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", R], { encoding: "utf8", env: { ...process.env, CANDOR_POLICY: P } }).status === 0);
+  // `--json` IS `--gate-json -` (SPEC §3.1 ⟨0.24⟩): on a scan `--json <file>` writes the REPORT, and
+  // there is no report to write here. A second meaning would be the one place a consumer could tell the
+  // two routes into the gate apart. Parsed from the SHIPPED CLI's stdout, so a prose line leaking onto
+  // stdout fails the row rather than being argued about.
+  const j = gateCli("--report", R, "--policy", P, "--json");
+  let jv = null; try { jv = JSON.parse(j.stdout); } catch { /* below */ }
+  check("gate --report: `--json` puts the VERDICT on stdout as pure JSON (prose routed to stderr)",
+        jv !== null && jv.spec === "0.24" && jv.ok === true && Array.isArray(jv.violations), j.stdout.slice(0, 300));
+  const gj = gateCli("--report", R, "--policy", P, "--gate-json", "-");
+  check("gate --report: `--gate-json -` writes the SAME document to stdout — the two spellings are one flag",
+        gj.stdout === j.stdout, `${gj.stdout.slice(0, 200)} vs ${j.stdout.slice(0, 200)}`);
+  const both = gateCli("--report", R, "--policy", P, "--json", "--gate-json", "-");
+  check("gate --report: `--json --gate-json -` emits the verdict ONCE (stdout stays parseable)",
+        both.stdout === j.stdout);
+  // `--gate-json` on a read-only query would be silently INERT — the gateless-green shape (a wrapper
+  // names a verdict path, nothing writes it, the wrapper reads no violations and calls the build clean).
+  const inert = spawnSync("node", [path.join(HERE, "query.mjs"), "where", "Net", "--report", R, "--gate-json", path.join(d, "v.json")], { encoding: "utf8" });
+  check("gate --report: `--gate-json` on a read-only verb is exit 2 naming `gate`, never silently inert",
+        inert.status === 2 && /--gate-json applies to `gate`/.test(inert.stderr), inert.stderr.slice(0, 200));
+  check("gate is listed in the usage catalogue (so the verb is discoverable, not folklore)",
+        /^\s+gate\s+--report/m.test(spawnSync("node", [path.join(HERE, "query.mjs")], { encoding: "utf8" }).stderr));
+}
+
+// ── (f) THE ⟨0.15⟩ COVERAGE ADVISORY rides the verdict, off the ENVELOPE ───────────────────────────
+// SPEC §3.1 names the coverage advisory in the byte-equality obligation, but the κ ledger is empty on
+// every corpus the equivalence matrix above can reach, so the arm would be VACUOUS there. Asserted
+// directly instead: the verdict block is `{uncovered: <count>, packages: [<name>…]}` in the PRODUCER's
+// order (calls descending, then name by code point) — the same shape `scan --policy --gate-json` writes,
+// read off the report envelope rather than recomputed. The two rows also differ (2 uncovered, `tpad`
+// before `zpad` despite the alphabetical order) so a shape that ignored the ledger cannot pass.
+{
+  const d = handReport({
+    "r.json": { candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 2, digest: "0" },
+      coverage: { uncovered: [{ name: "zpad", calls: 1 }, { name: "tpad", calls: 9 }] },
+      functions: [{ fn: "app.f", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] }] },
+    "p.pol": "deny Net\n",
+  });
+  const r = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"), "--json");
+  let v = null; try { v = JSON.parse(r.stdout); } catch { /* below */ }
+  check("gate --report: the ⟨0.15⟩ κ ledger rides the verdict as {uncovered, packages} in the producer's order",
+        v !== null && v.analyzed.count === 2 && v.coverage?.uncovered === 2
+        && JSON.stringify(v.coverage.packages) === JSON.stringify(["tpad", "zpad"]), r.stdout.slice(0, 300));
+}
+
+// ── (g) THE VERB REFUSES A CORRUPT REPORT rather than gating an empty (all-clear) signature ─────────
+{
+  const d = handReport({ "r.json": "{ not json", "p.pol": "deny Net\n" });
+  const r = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"));
+  check("gate --report: a corrupt report is exit 2 — never an empty signature gated green (the §4 cardinal sin)",
+        r.status === 2, `exit=${r.status}`);
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
