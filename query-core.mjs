@@ -52,28 +52,72 @@ const reportFilesAt = (prefix) => (fs.existsSync(`${prefix}.json`) ? [`${prefix}
 // Defend the queries against a partial/old-engine/hand-edited report: the §2 required fields are
 // defaulted, and a WRONG-TYPE field is coerced — a non-array `inferred` (e.g. the string "Net") must
 // NOT survive, or `new Set("Net")` iterates characters into {N,e,t} (a fabricated effect set). Array
-// only when actually an array; else []. The §2 forward-compatibility posture applied to the consumer.
+// only when actually an array, and STRING elements only; else []. The §2 forward-compatibility posture
+// applied to the consumer. The coercion is what keeps the READ-ONLY queries never-crash / never-fabricate;
+// on a VERDICT route it is not enough on its own, which is what `entryCorruptKeys` below exists for.
 function normFn(e) {
-  const arr = (v) => (Array.isArray(v) ? v : []);
-  return { ...e, inferred: arr(e.inferred), direct: arr(e.direct), calls: arr(e.calls) };
+  const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
+  const o = { ...e, inferred: arr(e.inferred), direct: arr(e.direct), calls: arr(e.calls) };
+  // The optional string-array fields are rewritten ONLY when present, so "omitted when empty" survives
+  // (`show` gates each on `?.length`) — but when present they get the same element filter, because a
+  // non-string in `unknownWhy` reaches `reasonClass()` and one in `hosts`/`netClass` reaches the ⟨0.20⟩
+  // destination-class matcher.
+  for (const k of ["unknownWhy", "netClass", "hosts", "cmds", "paths", "tables",
+                   "declared", "undeclared", "overdeclared"]) if (k in e) o[k] = arr(e[k]);
+  return o;
+}
+
+// ⟨0.24⟩ SPEC §2: **A KEY THAT IS PRESENT BUT UNPARSEABLE IS CORRUPT INPUT, AND MUST NEVER BE COERCED TO
+// ITS EMPTY VALUE.** `normFn` above coerces, and on a read-only query that is right — it returns what it
+// found and asserts nothing. On a VERDICT route it is the fail-open direction, because under ⟨0.21⟩ an
+// entry's absence from `functions` is a POSITIVE PURITY CLAIM: an entry whose `inferred` cannot be read
+// silently becomes an entry with no effects, which is not a gap but a lie. Measured: `{"fn":"app.bad",
+// "inferred":[1],"direct":[1]}` under `deny Net` gated exit 0 with `{"ok":true,"violations":[]}`.
+//
+// So the loaders ALSO record which keys were present-but-unparseable, and the verdict routes refuse on
+// that (see `loadGateReport`'s `corrupt` and query.mjs's `gate --report`). ABSENT is NOT corrupt — absent
+// takes its documented default, which is the whole distinction the rule draws; only a key that is THERE
+// and of the wrong shape is a refusal. Scoped to the §2 keys a verdict reads: `fn` (the entry's identity
+// — §2-required, and an entry with no name is a claim about nothing), the effect sets the policy matches
+// on, the ⟨0.19⟩/⟨0.20⟩ class fields it scopes with, and the `calls` edges the reason-class fixpoint runs
+// over. `loc`/`hash`/`unitKind`/`invisible`/`unresolved` are deliberately NOT here: no verdict reads them,
+// so refusing on them would be a spurious refusal on a report whose gate-relevant content is intact.
+const VERDICT_STR_ARRAY_KEYS = ["inferred", "direct", "calls", "unknownWhy", "netClass", "hosts",
+                                "declared", "undeclared", "overdeclared"];
+const isStrArray = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
+function entryCorruptKeys(e) {
+  if (!e || typeof e !== "object" || Array.isArray(e)) return ["<entry is not an object>"];
+  const bad = [];
+  if (typeof e.fn !== "string") bad.push("fn");
+  for (const k of VERDICT_STR_ARRAY_KEYS) if (k in e && !isStrArray(e[k])) bad.push(k);
+  return bad;
 }
 
 // Normalize a parsed report's `functions` into clean entries. A non-array `functions`, or an entry that
 // isn't an object with a STRING `fn`, is DISCLOSED and dropped — it would otherwise crash a query
 // (`map()` deref on a fn-less entry) or fabricate a junk entity (a primitive normalized into `{0:'t',…}`).
 // The never-crash / never-fabricate posture for malformed input from any engine's report.
+// Returns `{entries, corrupt}`: `corrupt` NAMES every present-but-unparseable §2 key (SPEC §2 ⟨0.24⟩,
+// `entryCorruptKeys`), for the verdict routes that must refuse rather than believe the coerced default.
 function normFns(parsed, source) {
   const raw = parsed && typeof parsed === "object" && parsed.functions !== undefined ? parsed.functions : parsed;
   if (!Array.isArray(raw)) {
     console.error(`candor-ts: report ${source} has no functions array — OMITTED from this query (malformed report)`);
-    return [];
+    return { entries: [], corrupt: ["`functions` (absent, or not an array)"] };
   }
-  const out = [];
+  const out = [], corrupt = [];
   for (const e of raw) {
+    const bad = entryCorruptKeys(e);
+    if (bad.length) {
+      const who = typeof e?.fn === "string" ? `entry \`${e.fn}\`` : "an entry";
+      corrupt.push(`${who}: ${bad.map((k) => `\`${k}\``).join(", ")}`);
+      console.error(`candor-ts: report ${source}: ${who} has present-but-unparseable §2 key(s) ${bad.map((k) => `\`${k}\``).join(", ")}`
+        + ` — a key that is THERE but of the wrong shape is corrupt input, not an empty one (SPEC §2 ⟨0.24⟩)`);
+    }
     if (e && typeof e === "object" && typeof e.fn === "string") out.push(normFn(e));
     else console.error(`candor-ts: report ${source} has a malformed entry (no string \`fn\`) — skipped`);
   }
-  return out;
+  return { entries: out, corrupt };
 }
 
 /** The producing engine build of the report(s) at a prefix (the §2.1 envelope `candor.version`) — null
@@ -249,14 +293,19 @@ function loadOneReport(file, label) {
   let parsed;
   try { parsed = JSON.parse(fs.readFileSync(file, "utf8")); }
   catch { console.error(`candor-ts: report ${label} failed to parse — its functions are OMITTED from this query (corrupt or mid-write); re-run the scan`); return { entries: [], hardFail: true }; }
-  const entries = normFns(parsed, label);
-  // normFns already DISCLOSED any malformation (no functions array / dropped entries). If nothing usable
-  // survived AND the doc wasn't a clean-empty report, the report is corrupt — fail loud, never empty.
+  const { entries, corrupt } = normFns(parsed, label);
+  // normFns already DISCLOSED any malformation (no functions array / dropped entries / a present-but-
+  // unparseable §2 key). If nothing usable survived AND the doc wasn't a clean-empty report, the report is
+  // corrupt — fail loud, never empty. A present-but-unparseable §2 key is EQUALLY a hard fail even when
+  // other entries survived (SPEC §2 ⟨0.24⟩): under ⟨0.21⟩ the coerced-empty entry is a purity CLAIM, so
+  // believing the survivors would certify a package whose corrupt entry is exactly where the violation
+  // would have been. `hardFail` is only consulted by the loud wrappers, so the tolerant read-only queries
+  // keep returning what they found (see loadReportOrDie / loadReportLoud).
   if (entries.length === 0 && !isCleanEmptyReport(parsed)) {
     console.error(`candor-ts: report ${label} yielded no usable functions — OMITTED (malformed report); re-run the scan`);
-    return { entries, hardFail: true };
+    return { entries, hardFail: true, corrupt };
   }
-  return { entries, hardFail: false };
+  return { entries, hardFail: corrupt.length > 0, corrupt };
 }
 
 export function loadReport(prefix) {
@@ -296,14 +345,16 @@ export function loadReport(prefix) {
  * `net-partner` re-mapping of the `netClass` this report already states. The reach the reason-class
  * fixpoint runs over is the entries' OWN §2 `calls` field — report data in, report data out.
  *
- * Returns `{functions, analyzed, unanalyzed, coverage, judgedNothing, hardFail}`. `hardFail` carries the
- * `loadReport` meaning exactly: a file was FOUND and yielded nothing trustworthy (never "there was no
- * file" — the caller's `requireReport` owns that), so a corrupt report can be refused instead of gated
- * green. `judgedNothing` is the ⟨0.24⟩ reading of `analyzed.count` (see `claimsToHaveJudgedNothing`).
+ * Returns `{functions, analyzed, unanalyzed, coverage, judgedNothing, hardFail, corrupt}`. `hardFail`
+ * carries the `loadReport` meaning exactly: a file was FOUND and yielded nothing trustworthy (never "there
+ * was no file" — the caller's `requireReport` owns that), so a corrupt report can be refused instead of
+ * gated green. `corrupt` NAMES every present-but-unparseable §2 key found (SPEC §2 ⟨0.24⟩ requires the
+ * refusal to name the key), entry-level and envelope-level; non-empty implies `hardFail`.
+ * `judgedNothing` is the ⟨0.24⟩ reading of `analyzed.count` (see `claimsToHaveJudgedNothing`).
  */
 export function loadGateReport(prefix) {
   const files = reportFilesAt(prefix);
-  const functions = [], unanalyzed = [], cov = new Map();
+  const functions = [], unanalyzed = [], cov = new Map(), corrupt = [];
   let hardFail = false, analyzed = 0;
   // ⟨0.24⟩ did the report handed to the gate judge ANYTHING? Per FILE, then ANDed across the multi-report
   // siblings, because the union of several reports has judged something as soon as ONE of them has — the
@@ -316,24 +367,52 @@ export function loadGateReport(prefix) {
     let parsed;
     try { parsed = JSON.parse(fs.readFileSync(f, "utf8")); }
     catch { console.error(`candor-ts: report ${f} failed to parse — its functions are OMITTED from this gate (corrupt or mid-write); re-run the scan`); hardFail = true; continue; }
-    const entries = normFns(parsed, f);
+    const { entries, corrupt: entryCorrupt } = normFns(parsed, f);
     if (entries.length === 0 && !isCleanEmptyReport(parsed)) {
       console.error(`candor-ts: report ${f} yielded no usable functions — OMITTED (malformed report); re-run the scan`);
       hardFail = true;
     }
+    for (const c of entryCorrupt) corrupt.push(`${f}: ${c}`);
     if (!claimsToHaveJudgedNothing(parsed, entries)) judgedNothing = false;
     functions.push(...entries);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;  // legacy bare array: no envelope
     // ⟨0.21⟩ the completeness manifest. `count` SUMS across siblings, exactly as the multi-report `functions`
     // arrays concatenate — the analyzed universe of a workspace is the union of its members'.
-    const a = parsed.analyzed;
-    if (a && typeof a === "object" && typeof a.count === "number" && Number.isFinite(a.count)) analyzed += a.count;
+    // ⟨0.24⟩ ABSENT vs PRESENT-BUT-UNPARSEABLE, on the two envelope keys the verdict reads. ABSENT keeps its
+    // documented default (a pre-⟨0.21⟩ producer emits no `analyzed` at all, and `claimsToHaveJudgedNothing`
+    // owns that row); PRESENT and of the wrong shape is corrupt input, NAMED in the refusal, never summed
+    // as 0 or dropped as []. A BOOLEAN is not an integer — `typeof true` is "boolean", and swift read
+    // `{count: true}` as 1 through an NSNumber bridge — and neither is a fraction or a negative (SPEC §2
+    // ⟨0.24⟩: "non-integral, negative, non-numeric or otherwise unparseable"). `analyzed: {}` with `count`
+    // simply ABSENT is NOT corrupt: the key is missing, so it takes the documented default and the
+    // judged-nothing disclosure carries it.
+    if ("analyzed" in parsed) {
+      const a = parsed.analyzed;
+      if (!a || typeof a !== "object" || Array.isArray(a))
+        corrupt.push(`${f}: \`analyzed\` (expected an object \`{count, digest}\`)`);
+      else if ("count" in a && !(typeof a.count === "number" && Number.isInteger(a.count) && a.count >= 0))
+        corrupt.push(`${f}: \`analyzed.count\` (expected a non-negative integer; a boolean is not an integer)`);
+      else if (typeof a.count === "number") analyzed += a.count;
+    }
     // ⟨0.21⟩ `unanalyzed` — normalized to the {path, reason} pair, in THAT key order, because the verdict
-    // this feeds is compared BYTE for byte against the scan's.
-    if (Array.isArray(parsed.unanalyzed))
-      for (const u of parsed.unanalyzed)
-        if (u && typeof u === "object" && !Array.isArray(u))
-          unanalyzed.push({ path: typeof u.path === "string" ? u.path : "", reason: typeof u.reason === "string" ? u.reason : "" });
+    // this feeds is compared BYTE for byte against the scan's. This is the SHARPEST case of the ⟨0.24⟩ rule
+    // and the spec says so: `unanalyzed` NON-EMPTINESS is the fail-closed trigger, so a silently dropped
+    // element turns exit 2 into a green verdict. `unanalyzed: ["src/broken.rs"]` — a bare string list — was
+    // dropped by all four engines and exited 0. A missing `reason` on an otherwise well-formed element stays
+    // lenient (an absent key, defaulted to ""), and the {unit, why} shape the spec names lands there: the
+    // element is an object, both keys are absent, so it normalizes to `{path:"",reason:""}` and still trips
+    // the incompleteness exit — which is why ts already refused that one.
+    if ("unanalyzed" in parsed) {
+      const us = parsed.unanalyzed;
+      if (!Array.isArray(us)) corrupt.push(`${f}: \`unanalyzed\` (expected an array of \`{path, reason}\`)`);
+      else for (const u of us) {
+        if (!u || typeof u !== "object" || Array.isArray(u))
+          corrupt.push(`${f}: \`unanalyzed\` (an element is ${JSON.stringify(u)}, not a \`{path, reason}\` object)`);
+        else if (("path" in u && typeof u.path !== "string") || ("reason" in u && typeof u.reason !== "string"))
+          corrupt.push(`${f}: \`unanalyzed\` (an element's \`path\`/\`reason\` is present but not a string)`);
+        else unanalyzed.push({ path: typeof u.path === "string" ? u.path : "", reason: typeof u.reason === "string" ? u.reason : "" });
+      }
+    }
     // ⟨0.15⟩ the κ ledger. Merged + re-sorted the PRODUCER's way (count desc, name asc by code point —
     // reportCoverage's rule, and scan.mjs's), so a single-report prefix reproduces the emitted order exactly.
     const unc = parsed.coverage?.uncovered;
@@ -346,7 +425,7 @@ export function loadGateReport(prefix) {
   }
   const coverage = [...cov.entries()].sort((a, b) => b[1] - a[1] || byCodePoint(a[0], b[0]))
     .map(([name, calls]) => ({ name, calls }));
-  return { functions, analyzed, unanalyzed, coverage, judgedNothing, hardFail };
+  return { functions, analyzed, unanalyzed, coverage, judgedNothing, hardFail: hardFail || corrupt.length > 0, corrupt };
 }
 // The returned graph carries a non-enumerable `partial` flag (the loadReport `hardFail` precedent):
 // true iff a sidecar file was MATCHED but failed to read/parse — its edges were DROPPED (disclosed on

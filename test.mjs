@@ -7743,8 +7743,99 @@ export function all(db: DatabaseSync, o: any) {
         !judged(say("legacy.json")), say("legacy.json").stderr.slice(0, 200));
   check("⟨0.24⟩ gate --report: row 3 — a manifest-less EMPTY report reads as judged-nothing",
         judged(say("nomanifest.json")));
-  check("⟨0.24⟩ gate --report: fail-closed — a manifest that cannot be READ is not a claim",
-        judged(say("garbled.json")));
+  // Fail-closed on a manifest that cannot be READ — and after the ⟨0.24⟩ present-but-unparseable rule
+  // (SPEC §2) the fail-closed answer on THIS route is the refusal, not the caveat: `analyzed: "oops"` is
+  // a §2 key that is THERE and of the wrong shape, so exit 2 NAMING it. The count-0 row above is the
+  // control that keeps the two apart — a READABLE zero still exits 0 with an unmoved document, because
+  // there the byte-equality obligation is real (a scan that analyzed nothing writes exactly that), while
+  // no scan ever emits `analyzed: "oops"` for a refusal to diverge from.
+  const gb = say("garbled.json");
+  check("⟨0.24⟩ gate --report: fail-closed — a manifest that cannot be READ is not a claim: exit 2, naming `analyzed`",
+        gb.status === 2 && /`analyzed`/.test(gb.stderr) && gb.stdout.trim() === "", `exit=${gb.status} ${gb.stderr.slice(0, 300)}`);
+}
+
+// ── (i) ⟨0.24⟩ SPEC §2: A PRESENT-BUT-UNPARSEABLE KEY IS CORRUPT INPUT, NEVER ITS EMPTY VALUE ───────
+// "That default is always the permissive value — 0, [], absent — so the coercion converts corrupt input
+// into a claim, and on every one of these keys the claim is the safe-looking one." Under ⟨0.21⟩ an entry
+// with no effects is a POSITIVE PURITY CLAIM, so an entry whose `inferred` was coerced from `[1]` to `[]`
+// did not become a gap — it became a lie, and the gate certified it (measured: exit 0,
+// `{"ok":true,"violations":[]}`). The matrix below is half REFUSAL rows and half ABSENT rows on purpose:
+// the rule is a DISTINCTION, and a fix that refused on absence too would be a spurious-refusal machine
+// that fails every pre-⟨0.21⟩ and every legitimately-sparse report. The last two rows pin the SCOPE — a
+// wrong-typed key no verdict reads is not a refusal, and a read-only query over the same bytes still
+// answers (it returns what it found rather than certifying, so the coercion is right there).
+{
+  const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app" };
+  const A = { count: 2, digest: "0" };
+  const clean = { fn: "app.ok", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] };
+  const rep = (o) => ({ ...V, analyzed: A, functions: [], ...o });
+  const d = handReport({
+    // ── PRESENT BUT UNPARSEABLE → exit 2, naming the key
+    "e_elem.json":    rep({ functions: [{ fn: "app.bad", inferred: [1], direct: [1] }] }),
+    "e_nonarr.json":  rep({ functions: [{ fn: "app.bad", inferred: "Net", direct: [] }] }),
+    "e_mixed.json":   rep({ functions: [clean, { fn: "app.bad", inferred: [1] }] }),   // a SURVIVOR beside it
+    "e_nofn.json":    rep({ functions: [clean, { inferred: ["Net"], direct: ["Net"] }] }),
+    "e_why.json":     rep({ functions: [{ fn: "app.bad", inferred: ["Unknown"], direct: ["Unknown"], unknownWhy: [7] }] }),
+    "e_netcls.json":  rep({ functions: [{ fn: "app.bad", inferred: ["Net"], direct: ["Net"], hosts: ["x"], netClass: 1 }] }),
+    "e_declared.json": rep({ functions: [{ fn: "app.bad", inferred: [], direct: [], declared: { Net: true } }] }),
+    "u_strings.json": rep({ unanalyzed: ["src/broken.ts"] }),                     // the spec's own case
+    "u_nonarr.json":  rep({ unanalyzed: "src/broken.ts" }),
+    "u_badpath.json": rep({ unanalyzed: [{ path: 3, reason: "parse error" }] }),
+    "a_bool.json":    rep({ analyzed: { count: true, digest: "0" } }),             // swift's NSNumber bridge
+    "a_frac.json":    rep({ analyzed: { count: 0.5, digest: "0" } }),
+    "a_neg.json":     rep({ analyzed: { count: -1, digest: "0" } }),
+    "a_str.json":     rep({ analyzed: { count: "2", digest: "0" } }),
+    // ── LEGITIMATELY ABSENT → the documented default, exit 0
+    "ok_noinf.json":  rep({ functions: [{ fn: "app.q", direct: [] }] }),           // `inferred` simply absent
+    "ok_bare.json":   rep({ functions: [{ fn: "app.q" }] }),                       // every optional key absent
+    "ok_nounan.json": rep({ functions: [clean] }),                                 // `unanalyzed` absent
+    "ok_noman.json":  { ...V, functions: [clean] },                                // `analyzed` absent (pre-⟨0.21⟩)
+    "ok_emptyman.json": rep({ analyzed: { digest: "0" }, functions: [clean] }),    // `count` absent INSIDE `analyzed`
+    "ok_emptyunan.json": rep({ unanalyzed: [], functions: [clean] }),              // present and EMPTY is not corrupt
+    // ── SCOPE: wrong-typed, but no verdict reads it → not a refusal
+    "ok_offscope.json": rep({ functions: [{ ...clean, loc: 7, hash: [], unresolved: "yes", unitKind: 3 }] }),
+    "p.pol": "deny Net\n",
+  });
+  const g = (rep_) => gateCli("--report", path.join(d, rep_), "--policy", path.join(d, "p.pol"), "--json");
+  const REFUSE = [["e_elem", "inferred"], ["e_nonarr", "inferred"], ["e_mixed", "inferred"], ["e_nofn", "fn"],
+                  ["e_why", "unknownWhy"], ["e_netcls", "netClass"], ["e_declared", "declared"],
+                  ["u_strings", "unanalyzed"], ["u_nonarr", "unanalyzed"], ["u_badpath", "unanalyzed"],
+                  ["a_bool", "analyzed.count"], ["a_frac", "analyzed.count"], ["a_neg", "analyzed.count"],
+                  ["a_str", "analyzed.count"]];
+  const bad = [];
+  for (const [name, key] of REFUSE) {
+    const r = g(`${name}.json`);
+    if (r.status !== 2) bad.push(`${name}: exit ${r.status} (expected 2) ${r.stdout.slice(0, 120)}`);
+    else if (!r.stderr.includes(`\`${key}\``)) bad.push(`${name}: refused but did not NAME \`${key}\` — ${r.stderr.slice(0, 200)}`);
+    else if (r.stdout.trim() !== "") bad.push(`${name}: refused but still wrote a verdict document`);
+  }
+  check(`⟨0.24⟩ gate --report: all ${REFUSE.length} present-but-unparseable §2 keys are exit 2, each NAMING the key, with no verdict document`,
+        bad.length === 0, bad.join("\n"));
+  // THE OTHER HALF OF THE RULE. Without these the fix is indistinguishable from "refuse anything unusual",
+  // which would break every sparse or pre-⟨0.21⟩ report in the wild.
+  const spurious = [];
+  for (const name of ["ok_noinf", "ok_bare", "ok_nounan", "ok_noman", "ok_emptyman", "ok_emptyunan", "ok_offscope"]) {
+    const r = g(`${name}.json`);
+    if (r.status !== 0) spurious.push(`${name}: exit ${r.status} (expected 0) — ${r.stderr.slice(0, 200)}`);
+  }
+  check("⟨0.24⟩ gate --report: CONTROL — an ABSENT key takes its documented default (exit 0), and a wrong-typed key NO verdict reads is not a refusal",
+        spurious.length === 0, spurious.join("\n"));
+  // The mixed row is the sharp one: a clean entry survived, so a "did anything load?" guard would have
+  // certified. Assert the SURVIVOR did not license the verdict.
+  const mx = g("e_mixed.json");
+  check("⟨0.24⟩ gate --report: a corrupt entry BESIDE a clean survivor still refuses — the survivor does not license a verdict over the entry that could not be read",
+        mx.status === 2 && mx.stdout.trim() === "" && /app\.bad/.test(mx.stderr), `exit=${mx.status} ${mx.stderr.slice(0, 250)}`);
+  // NEGATIVE CONTROL for the whole block: the same entry written WELL, with the effect the corruption hid.
+  const live = handReport({ "r.json": { ...V, analyzed: A, functions: [{ fn: "app.bad", inferred: ["Net"], direct: ["Net"], hosts: ["x"], netClass: ["unknown-host"] }] },
+                            "p.pol": "deny Net\n" });
+  const lv = gateCli("--report", path.join(live, "r.json"), "--policy", path.join(live, "p.pol"), "--json");
+  check("⟨0.24⟩ gate --report: NEGATIVE CONTROL — the same entry written WELL fires the violation (exit 1), so the refusal rows are not just an unloadable fixture",
+        lv.status === 1 && JSON.parse(lv.stdout).violations.length === 1, `exit=${lv.status} ${lv.stdout.slice(0, 200)}`);
+  // THE BOUNDARY: the coercion is still right on a read-only query, which returns what it found rather
+  // than certifying. `show` over the very bytes the gate refuses must still answer, exit 0.
+  const sh = spawnSync("node", [path.join(HERE, "query.mjs"), "show", "--report", path.join(d, "e_elem.json"), "app.bad"], { encoding: "utf8" });
+  check("⟨0.24⟩ gate --report: BOUNDARY — a read-only query over the SAME corrupt bytes still answers (exit 0); only the verdict route refuses",
+        sh.status === 0, `exit=${sh.status} ${sh.stderr.slice(0, 200)}`);
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);

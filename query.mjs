@@ -1121,7 +1121,19 @@ switch (cmd) {
     // building `gverdictObj`, so no verdict document is written to stdout or to `--gate-json <file>`
     // either (an absent document a wrapper must handle, never a green one it will believe). Matches
     // candor-rust and candor-swift, both of which exit 2 on this fixture.
+    //
+    // …and the SAME refusal covers the second way a report fails to load cleanly: a §2 key that is PRESENT
+    // BUT UNPARSEABLE (SPEC §2 ⟨0.24⟩ — "a reader that recovers from a type mismatch by substituting the
+    // default … the language's convenience default is the fail-open direction on every key in this
+    // format"). The refusal NAMES the key, as the spec requires, because the point is to send the producer
+    // back to the bytes. Measured: `{"fn":"app.bad","inferred":[1],"direct":[1]}` under `deny Net` gated
+    // exit 0 with `{"ok":true,"violations":[]}` — the entry was coerced to an effect-free one, and under
+    // ⟨0.21⟩ an effect-free entry is a POSITIVE PURITY CLAIM, so the corrupt entry did not become a gap,
+    // it became a lie. ABSENT is untouched: absent takes its documented default, which is exactly the
+    // distinction the rule draws.
     if (g.hardFail) {
+      if (g.corrupt.length)
+        console.error(`candor-ts: the report at prefix '${prefix}' has ${g.corrupt.length} present-but-unparseable §2 key(s) — a key that is THERE but of the wrong shape is corrupt input, not an empty one (SPEC §2 ⟨0.24⟩); coercing it to its empty value would turn corruption into a purity claim. Refusing to gate — fix the report or re-run the scan:\n  ${g.corrupt.join("\n  ")}`);
       console.error(`candor-ts: a report found at prefix '${prefix}' failed to load — refusing to gate over a report that did not load cleanly; a partial signature makes a green verdict meaningless (the effects of the report that did not load are exactly the ones a violation would come from). Re-run the scan.`);
       process.exit(2);
     }

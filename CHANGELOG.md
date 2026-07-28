@@ -8,6 +8,30 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**⚠ ⟨0.24⟩ A PRESENT-BUT-UNPARSEABLE §2 KEY IS CORRUPT INPUT, NOT ITS EMPTY VALUE** (SPEC §2: "a reader
+that recovers from a type mismatch by substituting the default … the language's convenience default is the
+fail-open direction on every key in this format"). Under ⟨0.21⟩ an entry with no effects is a **positive
+purity claim**, so an entry whose `inferred` was coerced from `[1]` to `[]` did not become a gap — it
+became a lie, and `gate --report` certified it (measured: exit 0, `{"ok":true,"violations":[]}`). A
+21-row matrix over the same policy measured **12 of 14 corrupt-key shapes gating GREEN** before the fix.
+`gate --report` (and the MCP `candor_gate` tool) now **exit 2, naming the key**, with no verdict document,
+on a §2 key that is *present* and of the wrong shape: entry `fn`/`inferred`/`direct`/`calls`/`unknownWhy`/
+`netClass`/`hosts`/`declared`/`undeclared`/`overdeclared`, and envelope `functions`/`analyzed`/`unanalyzed`.
+Three shapes worth naming: `unanalyzed: ["src/broken.ts"]` — a bare string list — was dropped and gated
+green (the spec records all four engines doing this, and `unanalyzed` non-emptiness *is* the fail-closed
+trigger); `analyzed: {count: true}` (swift's NSNumber-bridge case) read as judged-nothing and exited 0; and
+`analyzed: {count: 0.5}` / `{count: -1}` rode **verbatim into the verdict document** as a fractional and a
+negative analyzed-universe size.
+
+**ABSENT is untouched, and that is half the rule.** An absent key takes its documented default and still
+exits 0 — a missing `inferred`, a missing `unanalyzed`, a pre-⟨0.21⟩ report with no `analyzed` at all, an
+`analyzed: {}` whose `count` is simply absent, and a present-but-*empty* `unanalyzed`. A wrong-typed key
+that **no verdict reads** (`loc`, `hash`, `unresolved`, `unitKind`) is likewise not a refusal: refusing
+there would be a spurious-refusal machine rather than a gate. Read-only queries keep the coercion —
+`show`/`map`/`tour` over the very bytes the gate refuses still answer, because they return what they found
+rather than certifying. Verified on real scan output: hal-explorer (45 entries) and ukri-tfs (4121
+entries) gate byte-equal to `scan --policy` across three policies with no spurious refusal.
+
 **⚠ ⟨0.24⟩ A PARTIALLY-CORRUPT MULTI-REPORT PREFIX NO LONGER GATES GREEN** (SPEC §3.1: "a report that
 cannot be parsed is corrupt input, not an effect-free package … A located report that yields no
 trustworthy functions MUST fail loudly"). `gate --report <prefix>` refused only when EVERY file under the
