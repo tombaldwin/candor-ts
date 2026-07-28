@@ -19,7 +19,8 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
-import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses } from "./policy.mjs";
+import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses,
+         parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText } from "./policy.mjs";
 
 const VERSION = createRequire(import.meta.url)("./package.json").version; // single-sourced, like scan.mjs
 
@@ -106,6 +107,30 @@ function confinedPolicyRead(policyPath, prefix, root = policyRoot(prefix)) {
     throw new Error(`policy must be within the report's repo (${root}) — refusing to read \`${clip(policyPath)}\``);
   try { return fs.readFileSync(abs, "utf8"); }
   catch { throw new Error(`policy \`${clip(policyPath)}\` could not be read — NOT evaluated (a missing gate source must be loud, never a clean verdict)`); }
+}
+/**
+ * ⟨0.24⟩ ONE policy PARSE for every tool here that consults one — the MCP twin of query.mjs's
+ * `loadPolicyOrDie`, and it closes the same two defects on the agent-facing surface.
+ *
+ * These tools called `parsePolicy(text)` with NO alias map, so a rule written against a checked-in
+ * `unknown-alias` was silently REWRITTEN — widened to the bare effect — in the very tools an agent
+ * consults before and after an edit, while the CLI gate honoured it. And with ⟨0.24⟩ making an
+ * unrecognised value token a POLICY ERROR (§6.2 `382a7e0`/`be0b9a9`), `candor_gate` would otherwise
+ * have kept enforcing a policy it cannot honour as written — the narrowing case stops gating what the
+ * operator spelled while the gate still looks armed, which is the fail-open the ruling exists to
+ * close, arriving here through the surface an agent trusts most.
+ *
+ * The vocabulary anchors at the POLICY FILE (§3.1 `99eb4e9`), as it does on both CLI routes, so the
+ * same policy means the same thing however it is reached. A policy error throws, which the tool layer
+ * renders as `isError` — the MCP shape of the CLI's exit 2.
+ */
+function policyOrThrow(text, policyPath) {
+  const errs = [];
+  const aliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(policyPath, process.cwd())), errs);
+  const pol = parsePolicy(text, aliases);
+  errs.push(...pol.errors);
+  if (errs.length) throw new Error(policyErrorText(policyPath ?? "(policy)", errs));
+  return pol;
 }
 // The repo's .candor/config (spec §3.4), from the report's directory upward — shared impl in policy.mjs.
 function configPolicy(prefix) {
@@ -204,7 +229,7 @@ const TOOLS = {
       // typo'd/missing path silently evaluate with NO policy → `ok:true, violations:[]`, a false green
       // on the agent-facing pre-edit gate (exactly what the CLI whatif exits 2 to prevent). The read's
       // throw lands as the tool-level isError, mirroring the CLI's fail-closed posture.
-      const pol = a.policy ? parsePolicy(confinedPolicyRead(a.policy, p)) : null;
+      const pol = a.policy ? policyOrThrow(confinedPolicyRead(a.policy, p), a.policy) : null;
       const r = Q.whatif(Q.loadCallgraph(p), a.fn, a.effect, pol, scopeMatches);
       if (r === null) throw new Error(`no function matching \`${clip(a.fn)}\` in the call graph`);
       return r;
@@ -216,10 +241,11 @@ const TOOLS = {
     run: (a, p) => {
       // The fix is defined relative to a boundary — a policy is required. Given → confined fail-closed read;
       // else the repo's checked-in policy (same resolution as candor_gate), so it works zero-config.
-      let text;
+      let text, polPath = a.policy ?? null;
       if (a.policy) text = confinedPolicyRead(a.policy, p);
       else {
         const cfg = configPolicy(p);
+        polPath = cfg?.policyPath ?? null;
         if (!cfg) throw new Error("no policy: pass `policy`, or check one into the repo's .candor/config (spec §3.4) — the fix is defined relative to the boundary it crosses");
         text = confinedPolicyRead(cfg.policyPath, p, cfg.repoRoot);
       }
@@ -227,7 +253,7 @@ const TOOLS = {
       // The sidecar is the only graph a candor-ts report carries — fail loud (tool error) when it's absent,
       // never a degenerate empty-graph remedy. (/code-review.)
       if (!cg || Object.keys(cg).length === 0) throw new Error(`no call-graph sidecar for the report — fix needs it (re-scan with --out)`);
-      const r = Q.fix(cg, loadReportLoud(p), a.fn, a.effect, parsePolicy(text), scopeMatches);
+      const r = Q.fix(cg, loadReportLoud(p), a.fn, a.effect, policyOrThrow(text, polPath), scopeMatches);
       if (r === null) throw new Error(`no function matching \`${clip(a.fn)}\` in the call graph`);
       return r;
     },
@@ -236,10 +262,11 @@ const TOOLS = {
     description: "The policy verdict over this report: { ok, violations:[{rule, fn, effects, detail}] } — 'would this repo pass its architecture gate?'. Uses `policy` if given, else the repo's checked-in .candor/config policy (spec §3.4). Computed from the report — the engine's own --gate-json run is the authoritative CI form: it additionally fails an allow rule whose literal surface is INCOMPLETE (a masked/invisible endpoint), which is not a report field, so a green here can still be red in CI.",
     schema: { type: "object", properties: { policy: { type: "string", description: "path to a §6.2 policy file (optional; defaults to the repo's .candor/config `policy`)" }, ...reportArg }, required: [] },
     run: (a, p) => {
-      let text;
+      let text, polPath = a.policy ?? null;
       if (a.policy) text = confinedPolicyRead(a.policy, p);
       else {
         const cfg = configPolicy(p);
+        polPath = cfg?.policyPath ?? null;
         if (!cfg) throw new Error("no policy: pass `policy`, or check one into the repo's .candor/config (spec §3.4)");
         text = confinedPolicyRead(cfg.policyPath, p, cfg.repoRoot);
       }
@@ -251,7 +278,7 @@ const TOOLS = {
       // literal (the fail-open mirror). An entry carrying no `netClass` still falls back to the
       // derivation, which is floored at `unknown-host` — the direction that cannot un-narrow the filter.
       const gfns = loadReportLoud(p, { partialIsFatal: true });
-      const v = evaluatePolicy(parsePolicy(text), gfns, Q.loadCallgraph(p), new Map(), new Set(), reportNetClasses(gfns));
+      const v = evaluatePolicy(policyOrThrow(text, polPath), gfns, Q.loadCallgraph(p), new Map(), new Set(), reportNetClasses(gfns));
       // ⟨0.24⟩ …and a report that JUDGED NOTHING is not an all-clear (SPEC §2's three-row table, bound to
       // every report-reading route by §3.1: "the obligation is on the reading, not on the route by which
       // the report arrived"). This tool is exactly such a route — it gates whatever `report` points at,
@@ -278,14 +305,15 @@ const TOOLS = {
                  + "repo's checked-in .candor/config policy.",
     schema: { type: "object", properties: { policy: { type: "string", description: "path to a §6.2 policy file (optional; defaults to the repo's .candor/config `policy`)" }, ...reportArg }, required: [] },
     run: (a, p) => {
-      let text;
+      let text, polPath = a.policy ?? null;
       if (a.policy) text = confinedPolicyRead(a.policy, p);
       else {
         const cfg = configPolicy(p);
+        polPath = cfg?.policyPath ?? null;
         if (!cfg) throw new Error("no policy: pass `policy`, or check one into the repo's .candor/config (spec §3.4)");
         text = confinedPolicyRead(cfg.policyPath, p, cfg.repoRoot);
       }
-      return Q.unverified(loadReportLoud(p), parsePolicy(text), scopeMatches);
+      return Q.unverified(loadReportLoud(p), policyOrThrow(text, polPath), scopeMatches);
     },
   },
   candor_containment: {

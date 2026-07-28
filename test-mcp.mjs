@@ -642,5 +642,57 @@ fs.rmSync(W, { recursive: true, force: true });
   fs.rmSync(F, { recursive: true, force: true });
 }
 
+// ── ⟨0.24⟩ THE AGENT-FACING GATE TAKES THE POLICY-ERROR POSTURE, AND RESOLVES THE VOCABULARY ──────
+// `candor_gate` is a GATE, and it called `parsePolicy(text)` with no alias map and no error check. Two
+// live fail-opens on the surface an agent trusts most: an aliased rule was silently WIDENED to the bare
+// effect (so the same policy meant one thing here and another in the CLI gate that judges the edit), and
+// after §6.2 `be0b9a9` an unrecognised token would have kept enforcing a policy the engine cannot honour
+// as written — the NARROWING case, which stops gating what the operator spelled while the gate still
+// looks armed. Both rows drive the real MCP session; the CONTROL is what keeps the row from passing on a
+// tool that has simply started erroring on every policy.
+{
+  const G = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-pol-"));
+  fs.mkdirSync(path.join(G, ".candor"), { recursive: true });
+  fs.writeFileSync(path.join(G, "app.ts"),
+    'export function dyn(o: any, k: string) { return o[k](); }\n');
+  execFileSync("node", [path.join(HERE, "scan.mjs"), G, "--out", path.join(G, ".candor", "report")],
+               { stdio: "ignore" });
+  // TWO aliases, and the second is the whole point. The entry's Unknown is `callback:`-caused ⇒ class
+  // `indirect`, so `fires = indirect` fires and `tolerates = reflect` must NOT. An engine that ignores
+  // the alias map drops the token and WIDENS the rule to a bare `deny Unknown`, which fires on BOTH — so
+  // the firing row alone cannot tell "the alias resolved" from "the alias was ignored".
+  fs.writeFileSync(path.join(G, ".candor", "config"),
+                   "unknown-alias fires = indirect\nunknown-alias tolerates = reflect\n");
+  fs.writeFileSync(path.join(G, "typo.pol"), "deny Unknown[dispatch,nativ] app\n");
+  fs.writeFileSync(path.join(G, "alias.pol"), "deny Unknown[fires] app\n");
+  fs.writeFileSync(path.join(G, "tolerate.pol"), "deny Unknown[tolerates] app\n");
+  fs.writeFileSync(path.join(G, "plain.pol"), "deny Unknown app\n");
+  const RP = path.join(G, ".candor", "report");
+  const call = (id, name, args) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const gr = await mcpSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    call(2, "candor_gate", { report: RP, policy: path.join(G, "typo.pol") }),
+    call(3, "candor_gate", { report: RP, policy: path.join(G, "alias.pol") }),
+    call(4, "candor_gate", { report: RP, policy: path.join(G, "plain.pol") }),
+    call(5, "candor_gate", { report: RP, policy: path.join(G, "tolerate.pol") }),
+  ], ["--root", G]);
+  const gById = Object.fromEntries(gr.map((r) => [r.id, r]));
+  const txt = (id) => gById[id].result.content[0].text;
+  ok("⟨0.24⟩ candor_gate: an unrecognised policy token is a POLICY ERROR — the tool errors naming the token, it does not enforce a rule it silently rewrote",
+     gById[2].result.isError === true && /nativ/.test(txt(2)), txt(2).slice(0, 200));
+  const aliased = JSON.parse(txt(3)), plain = JSON.parse(txt(4)), tolerated = JSON.parse(txt(5));
+  // THE DISCRIMINATING PAIR. Before the fix the firing row passed FOR THE WRONG REASON — the token was
+  // dropped, the rule widened to a bare `deny Unknown`, and a widened rule fires too. Only the tolerating
+  // arm separates the two readings, and it is the one that regresses.
+  ok("⟨0.24⟩ candor_gate: a `.candor/config` alias RESOLVES here as it does at the CLI gate — the class it names FIRES, and a class it does not name is TOLERATED (a dropped-and-widened rule would fire on both)",
+     gById[3].result.isError !== true && aliased.ok === false && aliased.violations.length === 1
+       && gById[5].result.isError !== true && tolerated.ok === true && tolerated.violations.length === 0,
+     `fires=${txt(3).slice(0, 140)} tolerates=${txt(5).slice(0, 140)}`);
+  ok("⟨0.24⟩ candor_gate CONTROL: an ordinary policy with no alias and no typo still gates normally",
+     gById[4].result.isError !== true && plain.ok === false && plain.violations.length === 1,
+     txt(4).slice(0, 200));
+  fs.rmSync(G, { recursive: true, force: true });
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
