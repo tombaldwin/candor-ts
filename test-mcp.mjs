@@ -470,6 +470,45 @@ fs.rmSync(OUTSIDE, { recursive: true, force: true });
   fs.rmSync(C, { recursive: true, force: true });
 }
 
+// ── a PARTIALLY-corrupt multi-report prefix is a tool error for candor_gate, not a green verdict ────
+// The block above only covered "EVERY file failed". The mixed case is the live one, and it is worse on
+// this surface than on the CLI: `candor_gate` answered `{ok: true, violations: []}` — a VERDICT, the
+// clean bill of health an agent acts on — off the one sibling that survived, while the sibling carrying
+// the denied `Net` was dropped with a disclosure written to the SERVER's stderr, which the agent never
+// reads. Same rule as the CLI `gate --report`. CONTROLS: the same prefix with B written whole gates
+// RED (so the fixture can fire), and candor_map over the partial prefix still ANSWERS (the read-only
+// tools keep the looser bar deliberately — a partial answer is a smaller claim than a green gate).
+{
+  const M = fs.mkdtempSync("/tmp/candor-mcppartial-");
+  const V = { candor: { version: "handwritten", toolchain: "none", spec: "0.24" } };
+  const clean = { ...V, package: "cleanpkg", analyzed: { count: 3, digest: "aa" }, functions: [{ fn: "a.pureish", inferred: [], direct: [] }] };
+  const dirty = { ...V, package: "dirty", analyzed: { count: 1, digest: "bb" },
+                  functions: [{ fn: "b.leak", inferred: ["Net"], direct: ["Net"], hosts: ["evil.example"], netClass: ["unknown-host"] }] };
+  fs.mkdirSync(`${M}/part`); fs.mkdirSync(`${M}/fire`);
+  fs.writeFileSync(`${M}/part/rep.Aclean.scan.json`, JSON.stringify(clean));
+  fs.writeFileSync(`${M}/part/rep.Bdirty.scan.json`, `{"candor":{"spec":"0.24"},"package":"dirty","functions":[{"fn":"b.leak","inferred":[`);
+  fs.writeFileSync(`${M}/fire/rep.Aclean.scan.json`, JSON.stringify(clean));
+  fs.writeFileSync(`${M}/fire/rep.Bdirty.scan.json`, JSON.stringify(dirty));
+  fs.writeFileSync(`${M}/part/deny.pol`, "deny Net\n");   // policy confinement: it must live in the report's own repo
+  fs.writeFileSync(`${M}/fire/deny.pol`, "deny Net\n");
+  const call = (id, name, args) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const pr = await mcpSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    call(2, "candor_gate", { report: `${M}/part/rep`, policy: `${M}/part/deny.pol` }),
+    call(3, "candor_gate", { report: `${M}/fire/rep`, policy: `${M}/fire/deny.pol` }),
+    call(4, "candor_map", { report: `${M}/part/rep` }),
+  ]);
+  const pById = Object.fromEntries(pr.map((r) => [r.id, r]));
+  const pText = (id) => pById[id].result.content[0].text;
+  ok("mcp partial: candor_gate over a PARTIALLY-corrupt multi-report prefix is a loud tool error, never {ok:true,violations:[]}",
+     pById[2].result.isError === true && /did not load cleanly/.test(pText(2)) && !/"ok": ?true/.test(pText(2)), pText(2).slice(0, 200));
+  ok("mcp partial: CONTROL — the SAME prefix with B written whole gates RED (the fixture can fire)",
+     pById[3].result.isError !== true && JSON.parse(pText(3)).ok === false && JSON.parse(pText(3)).violations.length === 1, pText(3).slice(0, 200));
+  ok("mcp partial: CONTROL — a read-only tool over the same partial prefix still ANSWERS (the bar is raised only for the verdict)",
+     pById[4].result.isError !== true, pText(4).slice(0, 160));
+  fs.rmSync(M, { recursive: true, force: true });
+}
+
 fs.rmSync(W, { recursive: true, force: true });
 // ── candor_activity: the edit-time gate's self-inspection tool (FEEDBACK-SPEC "richer MCP push") ──
 {

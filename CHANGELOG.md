@@ -8,6 +8,21 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**⚠ ⟨0.24⟩ A PARTIALLY-CORRUPT MULTI-REPORT PREFIX NO LONGER GATES GREEN** (SPEC §3.1: "a report that
+cannot be parsed is corrupt input, not an effect-free package … A located report that yields no
+trustworthy functions MUST fail loudly"). `gate --report <prefix>` refused only when EVERY file under the
+locator failed to load; with one clean sibling beside one truncated mid-write sibling, the survivor kept
+the entry count above zero and the gate exited **0** with `{"ok":true,"violations":[]}` — while the
+truncated sibling was the one carrying the `Net` the policy denied. The per-file disclosure was real, but
+it went to **stderr**, and a CI wrapper reads the *document*, which was a clean green with no trace that
+half the package was missing. Now: any report under the locator that does not load cleanly is **exit 2
+with no verdict document at all** — nothing on stdout, nothing written to `--gate-json <file>` — matching
+candor-rust and candor-swift on the same fixture. The stderr per-file disclosure is kept. The MCP
+`candor_gate` tool had the same hole on the agent channel (a green `{ok: true, violations: []}` result)
+and is fixed with it; the read-only tools keep the looser bar deliberately, since a partial answer is a
+smaller claim than a green gate. The regression rows assert on the **document**, with controls proving the
+same two-sibling prefix still fires a violation and still certifies when both siblings load.
+
 **⚠ ⟨0.24⟩ A CHAINED REPORT WITH `analyzed.count: 0` NO LONGER BUYS COVERAGE — "I judged nothing" must not
 read as full coverage** (SPEC §2's three-row table). A report carrying `functions: []` **and**
 `analyzed.count: 0` was strictly MORE confident than not chaining the package at all: every call into it

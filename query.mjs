@@ -1106,8 +1106,23 @@ switch (cmd) {
       process.exit(2);
     }
     const g = loadGateReport(prefix);
-    if (g.functions.length === 0 && g.hardFail) {
-      console.error(`candor-ts: every report found at prefix '${prefix}' failed to load — refusing to gate an empty (all-clear) signature over a corrupt report; re-run the scan.`);
+    // ANY report under the locator that did not load cleanly REFUSES THE WHOLE GATE — not just the case
+    // where they ALL failed. The old guard was `functions.length === 0 && hardFail`, i.e. it fired only
+    // when nothing survived anywhere, so a multi-report prefix with ONE clean sibling and one truncated
+    // one gated GREEN off the survivor: measured on `rep.Aclean.scan.json` (pure) beside a mid-write
+    // `rep.Bdirty.scan.json` (which carried the `Net` the policy denies), candor-ts exited 0 with
+    // `{"ok":true,"violations":[]}`. The stderr line from loadGateReport DID say the dirty report's
+    // functions were omitted — but stderr is not the machine-consumer channel, and a CI wrapper reads the
+    // DOCUMENT, which was a clean green with no trace that half the package was missing. §3.1: "a report
+    // that cannot be parsed is corrupt input, not an effect-free package … A located report that yields no
+    // trustworthy functions MUST fail loudly." The union of a signature and a hole is a HOLE: the gate is
+    // a claim about a whole package, and the effects of the sibling that did not load are exactly the ones
+    // a violation would have come from. Keep the per-file disclosure, move the verdict — refuse BEFORE
+    // building `gverdictObj`, so no verdict document is written to stdout or to `--gate-json <file>`
+    // either (an absent document a wrapper must handle, never a green one it will believe). Matches
+    // candor-rust and candor-swift, both of which exit 2 on this fixture.
+    if (g.hardFail) {
+      console.error(`candor-ts: a report found at prefix '${prefix}' failed to load — refusing to gate over a report that did not load cleanly; a partial signature makes a green verdict meaningless (the effects of the report that did not load are exactly the ones a violation would come from). Re-run the scan.`);
       process.exit(2);
     }
     // ⟨0.24⟩ …AND A REPORT THAT JUDGED NOTHING IS NOT AN ALL-CLEAR EITHER (SPEC §2's three-row table,

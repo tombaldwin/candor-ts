@@ -68,10 +68,19 @@ const clip = (s, n = 120) => { s = String(s); return s.length > n ? s.slice(0, n
 // corrupt report — the §4 cardinal sin, exactly what the CLI's loadReportOrDie exits 2 on. The throw
 // surfaces as the same isError result shape every other tool failure uses. EVERY tool that loads a
 // report (main prefix or baseline) goes through this — never bare Q.loadReport.
-function loadReportLoud(p) {
+// `partialIsFatal` raises the bar from "NOTHING parsed" to "not EVERYTHING parsed", and `candor_gate`
+// passes it because that tool emits a VERDICT: `{ok: true, violations: []}` over a multi-report prefix
+// with one clean sibling and one truncated one is a green document over a package half of whose signature
+// never loaded, and the disclosure Q.loadReport writes goes to the SERVER's stderr — a channel the calling
+// agent never reads. Same rule, same argument as the CLI `gate --report` (see query.mjs). The read-only
+// tools keep the looser bar deliberately: they return what they found rather than asserting a clean bill
+// of health, so the partial answer is a smaller claim than a green gate.
+function loadReportLoud(p, { partialIsFatal = false } = {}) {
   const fns = Q.loadReport(p);
-  if (fns.length === 0 && fns.hardFail)
-    throw new Error(`every report found at prefix \`${clip(p)}\` failed to load — refusing to report an empty (all-clear) answer over a corrupt report; re-run the scan`);
+  if (fns.hardFail && (partialIsFatal || fns.length === 0))
+    throw new Error(fns.length === 0
+      ? `every report found at prefix \`${clip(p)}\` failed to load — refusing to report an empty (all-clear) answer over a corrupt report; re-run the scan`
+      : `a report found at prefix \`${clip(p)}\` failed to load — refusing to gate over a report that did not load cleanly; a partial signature makes a green verdict meaningless (the effects of the report that did not load are exactly the ones a violation would come from). Re-run the scan`);
   return fns;
 }
 // The confinement root for a caller-supplied policy path: the repo the report belongs to — the
@@ -241,7 +250,7 @@ const TOOLS = {
       // (a FABRICATED `deny Net[unknown-host]` hit) and a masked surface re-read from its one benign
       // literal (the fail-open mirror). An entry carrying no `netClass` still falls back to the
       // derivation, which is floored at `unknown-host` — the direction that cannot un-narrow the filter.
-      const gfns = loadReportLoud(p);
+      const gfns = loadReportLoud(p, { partialIsFatal: true });
       const v = evaluatePolicy(parsePolicy(text), gfns, Q.loadCallgraph(p), new Map(), new Set(), reportNetClasses(gfns));
       // ⟨0.24⟩ …and a report that JUDGED NOTHING is not an all-clear (SPEC §2's three-row table, bound to
       // every report-reading route by §3.1: "the obligation is on the reading, not on the route by which

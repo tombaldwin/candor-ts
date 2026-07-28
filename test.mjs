@@ -7650,6 +7650,56 @@ export function all(db: DatabaseSync, o: any) {
         r.status === 2, `exit=${r.status}`);
 }
 
+// ── (g2) A PARTIALLY-CORRUPT MULTI-REPORT PREFIX REFUSES TOO, AND THE ASSERTION IS ON THE DOCUMENT ──
+// The row above only covered the case where EVERY file failed. The live defect was the MIXED one: a
+// clean `<prefix>.Aclean.scan.json` (pure) beside a mid-write `<prefix>.Bdirty.scan.json` that carried
+// the `Net` the policy denies. The old guard was `functions.length === 0 && hardFail`, so the survivor
+// kept the count above zero and the gate exited 0 with `{"ok":true,"violations":[]}` — a clean green over
+// a package half of whose signature never loaded. The SHAPE of the finding is the DOCUMENT, not the exit
+// code: loadGateReport's stderr line DID name the dirty file, but stderr is not the machine-consumer
+// channel and a CI wrapper reads the verdict. So this row asserts the document is ABSENT (nothing on
+// stdout, nothing written to `--gate-json <file>`), keeps the stderr disclosure as a requirement, and
+// carries TWO negative controls so it cannot pass by refusing every multi-report prefix. rust and swift
+// already exit 2 on this exact fixture.
+{
+  const V = { candor: { version: "handwritten", toolchain: "none", spec: "0.24" } };
+  const clean = { ...V, package: "cleanpkg", analyzed: { count: 3, digest: "aa" },
+                  functions: [{ fn: "a.pureish", inferred: [], direct: [] }] };
+  const dirtyWhole = { ...V, package: "dirty", analyzed: { count: 1, digest: "bb" },
+                       functions: [{ fn: "b.leak", inferred: ["Net"], direct: ["Net"], hosts: ["evil.example"], netClass: ["unknown-host"] }] };
+  const pureWhole = { ...V, package: "dirty", analyzed: { count: 1, digest: "bb" },
+                      functions: [{ fn: "b.fine", inferred: ["Fs"], direct: ["Fs"], paths: ["/tmp/x"] }] };
+  // Truncated mid-write, as a killed or half-flushed scan leaves it — and truncated INSIDE the very entry
+  // that carried the Net, so the effect is unrecoverable from the bytes on disk.
+  const truncated = `{"candor":{"version":"h","toolchain":"n","spec":"0.24"},"package":"dirty","functions":[{"fn":"b.leak","inferred":[`;
+  const d = handReport({
+    "part/rep.Aclean.scan.json": clean, "part/rep.Bdirty.scan.json": truncated,
+    "fire/rep.Aclean.scan.json": clean, "fire/rep.Bdirty.scan.json": dirtyWhole,
+    "pass/rep.Aclean.scan.json": clean, "pass/rep.Bdirty.scan.json": pureWhole,
+    "p.pol": "deny Net\n",
+  });
+  const P = path.join(d, "p.pol");
+  const gj = path.join(d, "verdict.json");
+  if (fs.existsSync(gj)) fs.rmSync(gj);                       // DELETE the output before measuring
+  const r = gateCli("--report", path.join(d, "part", "rep"), "--policy", P, "--json", "--gate-json", gj);
+  check("gate --report: a PARTIALLY-corrupt multi-report prefix is exit 2 — one clean sibling does not license a verdict over the one that did not load",
+        r.status === 2, `exit=${r.status} ${r.stdout}${r.stderr}`.slice(0, 400));
+  check("gate --report: …and NO VERDICT DOCUMENT is produced — not on stdout, not at `--gate-json <file>` (the green document WAS the finding)",
+        r.stdout.trim() === "" && !fs.existsSync(gj), `stdout=${r.stdout.slice(0, 200)} gateJsonWritten=${fs.existsSync(gj)}`);
+  check("gate --report: …and the per-file disclosure is KEPT — the refusal names the sibling that failed to parse",
+        /rep\.Bdirty\.scan\.json/.test(r.stderr) && /failed to (parse|load)/.test(r.stderr), r.stderr.slice(0, 300));
+  // CONTROL 1: the same prefix shape with B written WHOLE — the merge works, and the Net the truncation
+  // hid is exactly what a violation would have come from.
+  const f = gateCli("--report", path.join(d, "fire", "rep"), "--policy", P, "--json");
+  check("gate --report: CONTROL — the SAME two-sibling prefix with B written whole FIRES the violation the truncation hid (exit 1)",
+        f.status === 1 && JSON.parse(f.stdout).violations.length === 1, `exit=${f.status} ${f.stdout.slice(0, 300)}`);
+  // CONTROL 2: a multi-report prefix is not refused for BEING multi-report.
+  const p = gateCli("--report", path.join(d, "pass", "rep"), "--policy", P, "--json");
+  check("gate --report: CONTROL — a two-sibling prefix that BOTH load cleanly still certifies (exit 0, count summed across siblings)",
+        p.status === 0 && JSON.parse(p.stdout).ok === true && JSON.parse(p.stdout).analyzed.count === 4,
+        `exit=${p.status} ${p.stdout.slice(0, 300)}`);
+}
+
 // ── (h) ⟨0.24⟩ A REPORT THAT JUDGED NOTHING IS NOT AN ALL-CLEAR (SPEC §2's table, bound by §3.1) ────
 // "A report presented DIRECTLY to the gate with `analyzed.count: 0` makes the same claim as a chained
 // one, and must be read the same way … the obligation is on the reading, not on the route by which the
