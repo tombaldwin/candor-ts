@@ -149,8 +149,29 @@ const ASCII_WS_TRIM = /^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g;
 // ⟨0.19⟩ `aliases` (a Map name→class-token[], from `.candor/config` `unknown-alias`) lets an `Unknown[<name>]`
 // filter resolve a user-defined name (SPEC §6.2). A config alias never changes what bare `deny E Unknown`
 // means (always `Unknown[*]`), so a rule's denied set stays legible from the policy alone.
+//
+// ⟨0.24⟩ RETURNS `errors` AND `aliasesUsed` BESIDE THE RULES (SPEC §6.2 `382a7e0`/`be0b9a9`, §3.1 `99eb4e9`).
+// The rule objects are UNCHANGED — a token this parser cannot honour is still recorded in the rule exactly
+// as before, so `parsepolicy` can still show what was written — but an UNRECOGNISED VALUE TOKEN now lands
+// in `errors`, and every verdict-bearing call site refuses (exit 2) instead of running a policy it silently
+// rewrote. Measured on this engine before the change, over a report whose only `Unknown` is reflect-caused:
+//
+//   deny Unknown[dispatch,nativ] app         -> exit 0, rule kept as `Unknown[dispatch]`      NARROWS
+//   deny Net[known-partner,unkown-host] app  -> exit 0, rule kept as `Net[known-partner]`     NARROWS
+//   deny Unknown[corp] app                   -> exit 1, rule kept as bare `deny Unknown`      WIDENS
+//
+// The NARROWING half is the fail-open and it is the common case — a typo lands beside correct tokens far
+// more often than alone — and the rule stops gating what the operator spelled while the gate still looks
+// armed. The WIDENING half is loud but announces "ignoring policy rule" and then KEEPS a DIFFERENT rule,
+// which is a false disclosure. Neither is a policy the operator wrote.
 export function parsePolicy(text, aliases = null) {
   const deny = [], allow = [], forbid = [];
+  // ⟨0.24⟩ every value token this parser could not honour AS WRITTEN, and every alias a rule RESOLVED
+  // THROUGH. `aliasesUsed` is recorded at the point of USE, never from the alias map: a config defining ten
+  // aliases the policy never mentions moved nothing, and naming it would train the reader to skip the field.
+  const errors = [], aliasesUsed = new Map();
+  const tokenError = (vocabulary, token, accepted, where) =>
+    errors.push({ vocabulary, token, accepted, where });
   // Split LINES on \n / \r\n / bare \r — the three forms Java's Files.readAllLines (the reference parser)
   // breaks on. Splitting on \n ONLY let a classic-Mac (bare-\r) file collapse to one line: \r is also an
   // in-line ASCII-ws token separator (below), so every rule after the first was glued into the first rule's
@@ -180,7 +201,7 @@ export function parsePolicy(text, aliases = null) {
             if (!cn) continue;
             if (cn === "*") netStar = true;
             else if (NET_DEST_CLASSES.includes(cn)) netClasses.add(cn);
-            else warn(`unknown Net destination-class \`${cn}\` (known: ${NET_DEST_CLASSES.join(",")}, or *)`);
+            else tokenError("Net destination-class", cn, `${NET_DEST_CLASSES.join(", ")}, or *`, line);
           }
           continue;
         }
@@ -193,8 +214,9 @@ export function parsePolicy(text, aliases = null) {
             if (cn === "*") unknownStar = true;
             else if (cn === "dynamic") DYNAMIC_CLASSES.forEach((c) => unknownClasses.add(c));
             else if (REASON_CLASSES.includes(cn)) unknownClasses.add(cn);
-            else if (aliases && aliases.has(cn)) aliases.get(cn).forEach((c) => unknownClasses.add(c)); // ⟨0.19⟩ config unknown-alias
-            else warn(`unknown reason-class/alias \`${cn}\` (known: ${REASON_CLASSES.join(",")}; aliases: dynamic,*, or a config \`unknown-alias\`)`);
+            else if (aliases && aliases.has(cn)) { aliasesUsed.set(cn, [...aliases.get(cn)].sort()); aliases.get(cn).forEach((c) => unknownClasses.add(c)); } // ⟨0.19⟩ config unknown-alias
+            else tokenError("reason-class/alias", cn,
+              `${REASON_CLASSES.join(", ")}; aliases: dynamic, *, or a config \`unknown-alias\``, line);
           }
           continue;
         }
@@ -235,7 +257,42 @@ export function parsePolicy(text, aliases = null) {
       warn("unknown rule kind");
     }
   }
-  return { deny, allow, forbid };
+  // ⟨0.24⟩ `aliasesUsed` is name -> THE CLASSES IT RESOLVED TO, not a bare name list (SPEC §3.1
+  // `b4e9155`): naming the source without the content leaves a reader knowing they were affected and not
+  // how. Key order is sorted so the disclosure is deterministic across runs and across the two routes.
+  return { deny, allow, forbid, errors,
+           aliasesUsed: Object.fromEntries([...aliasesUsed.entries()].sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))) };
+}
+
+// ⟨0.24⟩ The ONE rendering of the unreadable-policy posture (SPEC §6.2), so the wording cannot drift
+// between the scan gate, `gate --report`, `whatif`, `fix-gate`, `unverified` and `parsepolicy`. Returns the
+// human line; the caller prints it, writes the ⟨0.24⟩ refusal document and exits 2.
+export function policyErrorText(policyFile, errors) {
+  const head = `candor-ts: policy ${policyFile} cannot be honoured AS WRITTEN`;
+  const body = errors.map((e) =>
+    `  unknown ${e.vocabulary} \`${e.token}\` (known: ${e.accepted})\n    in: ${e.where}`).join("\n");
+  return `${head} — ${errors.length} unrecognised value token(s):\n${body}\n`
+    + "  Refusing (exit 2), policy NOT evaluated: dropping the token would rewrite the policy into a "
+    + "DIFFERENT one. If it is the list's only token the rule WIDENS to the bare effect; if it sits beside "
+    + "valid tokens the rule NARROWS and stops gating what you spelled, while the gate still looks armed.\n"
+    + "  Fix the spelling, or define it in `.candor/config` as `unknown-alias <name> = <class,…>`.";
+}
+
+// ⟨0.24⟩ THE REFUSAL DOCUMENT (SPEC §3.1 `107755b`, carve-outs removed by `1503368`). A refusal used to
+// write NO `--gate-json` document at all, so a CI wrapper reading that path unconditionally re-read THE
+// PREVIOUS RUN'S document as current — a green file from yesterday's clean run, still on disk, is how a
+// refusal becomes an all-clear. Deleting the path is not the fix either: a consumer that treats a missing
+// file as "nothing to report" fails open by a different route.
+//
+// It MUST be fail-closed to a NAIVE reader: `ok: false` so a consumer keying only on `ok` lands on FAIL,
+// `refused: true` so one keying on that learns why, and **NO `violations` KEY AT ALL** — the gate is making
+// no claim about violations, and an empty array is precisely the claim it cannot make. ABSENT, not empty.
+// `1503368`: no cause is exempt, including an unreadable policy — a stale green does not care why this run
+// declined to overwrite it.
+export function refusalVerdict(spec, reason, unevaluated = null) {
+  const o = { spec, ok: false, refused: true, reason };
+  if (unevaluated && unevaluated.length) o.unevaluated = unevaluated;
+  return o;
 }
 
 /** §6.2 scope match: by NAME SEGMENT, last segment a prefix.
@@ -343,7 +400,23 @@ export function reportNetClasses(functions, { authoritative = false } = {}) {
 // is the specific denied/allowed effect set the violation concerns ([] for the 009 layer-flow, which has
 // no single effect); `detail` is the message BODY (no `[AS-EFF-00x]` prefix — the rule carries the code).
 // The console gate renders `[${rule}] ${detail}`; --gate-json emits the records verbatim.
-export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map(), partners = new Set(), netClasses = null) {
+// ⟨0.24⟩ `withhold(rule, fn, effect) -> bool` (SPEC §3.1 `5a8cf48`) — THE OPERATIONAL FORM OF MINIMAL
+// REFUSAL, and the half of the precedence ruling that makes it safe. It is null on the scan route (full
+// evidence, nothing to withhold) and supplied by `gate --report`.
+//
+// WHY IT EXISTS, because the mechanism is not obvious from the signature. Until the precedence fix, an
+// unanswerable scoped rule SHORT-CIRCUITED the whole gate, so this function was never reached with one.
+// Removing the short-circuit made it reachable — and `reasonClassesMatch` floors an empty class set at
+// `unresolved`, which is the correct fail-closed default for a MATCHER ("could this rule apply?") and the
+// WRONG basis for a FIRING ("did it?"). Measured on this engine: a `deny Unknown[unresolved]` over an entry
+// whose Unknown is INHERITED and reasonless began emitting an actual violation RECORD, asserting a reason
+// nobody recorded. Same constant, same helper, opposite direction of harm — a fabrication reachable ONLY
+// through the soundness fix.
+//
+// It is per (rule, function, effect), never whole-policy and never whole-rule: `deny Fs Net[unknown-host]`
+// over a function carrying BOTH a certain `Fs` and a `netClass`-less `Net` must still report the `Fs`.
+// Withholding the pair would delete a certain violation — the very harm the precedence ruling is fixing.
+export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map(), partners = new Set(), netClasses = null, withhold = null) {
   const out = [];
   // `Llm` ⟨0.13⟩ reaches the SAME hosts surface as Net (an Llm host WAS captured as a Net host literal).
   const surfaces = { Net: "hosts", Llm: "hosts", Exec: "cmds", Fs: "paths", Db: "tables" };
@@ -389,6 +462,9 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
         const fnNet = netClassOf(f);
         if (!fnNet.some((c) => r.netClasses.includes(c))) kept = kept.filter((e) => e !== "Net");
       }
+      // ⟨0.24⟩ …and LAST, because it overrides the matchers rather than joining them: an effect whose match
+      // this report cannot evidence is neither a violation nor a pass. The caller lists it as `unevaluated`.
+      if (withhold && kept.length) kept = kept.filter((e) => !withhold(r, f.fn, e));
       if (kept.length) {
         // When Unknown is denied, report ALL reason classes on the fn (transitive) — every reason the gate bit.
         const rc = kept.includes("Unknown") ? [...(reasonAcc.get(f.fn) ?? [])].sort() : undefined;
@@ -478,10 +554,48 @@ export function discoverConfigText(fromDir) {
   }
 }
 
+// ⟨0.24⟩ The PATH the text above came from (SPEC §3.1 `99eb4e9`: "if a config file supplied vocabulary that
+// participated in the verdict, the `--gate-json` document MUST name that file"). Discovery WALKS PARENT
+// DIRECTORIES and `CANDOR_CONFIG` overrides it outright, so a file the operator never named — and cannot
+// see named anywhere in the output — can decide the verdict. That is the ambient-input failure this format
+// exists to refuse, and the remedy is the usual one: not to forbid the input, but to make it unable to act
+// unnamed. Same walk as `discoverConfigText`, deliberately, so the two cannot name different files.
+export function discoverConfigPath(fromDir) {
+  const env = process.env.CANDOR_CONFIG;
+  if (env) { try { fs.readFileSync(env, "utf8"); return nodePath.resolve(env); } catch { return null; } }
+  let dir = nodePath.resolve(fromDir);
+  for (;;) {
+    const cand = nodePath.join(dir, ".candor", "config");
+    if (fs.existsSync(cand)) return cand;
+    const parent = nodePath.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+// ⟨0.24⟩ The ANCHOR for keys that supply POLICY VOCABULARY (SPEC §3.1 `99eb4e9`). All four gate verbs used
+// to anchor config discovery at the POLICY file's directory while all four scan routes anchored at the
+// TARGET, so with the policy filed outside the scan target `scan --policy P` and `gate --report R --policy
+// P` expanded the SAME rule differently — §3.1's byte-equality MUST broken by a file that is neither the
+// report nor the policy. Vocabulary travels with the policy that uses it. TARGET-scoped keys (`deps`,
+// `net-partner`, scan settings) keep anchoring at the target, because they describe the thing being scanned
+// rather than the language the rules are written in.
+export function policyVocabularyAnchor(policyFile, fallbackDir) {
+  return policyFile ? nodePath.dirname(nodePath.resolve(policyFile)) : fallbackDir;
+}
+
 // ⟨0.19⟩ Parse `unknown-alias <name> = <class,…>` lines (SPEC §6.2) into a Map name→class-token[]. A name
 // that shadows a built-in (`*`/`dynamic`/a class token) is warned-and-skipped, as is a no-valid-class def.
 // Byte-shape with the java `Config.addAlias` / rust `parse_unknown_aliases`.
-export function parseUnknownAliases(configText) {
+// ⟨0.24⟩ `errors`, when supplied, receives an unrecognised token in an alias DEFINITION under the same rule
+// as one in the policy itself (SPEC §6.2 `be0b9a9` — the rule binds EVERY policy value list). This is the
+// sharper of the two: the typo is in the VOCABULARY the policy is written against rather than in the policy,
+// and it fails open identically — `unknown-alias corp = dispatch,nativ` silently becomes `{dispatch}`, so
+// `deny Unknown[corp]` stops gating native-caused holes that `= dispatch,native` catches, and the operator
+// reads a policy that mentions no typo at all. A RESERVED or empty NAME stays a warn-and-skip: the name is
+// not a value token, the definition is dropped whole, and a rule referencing it then raises its own
+// unrecognised-token error at the policy — loud by the route the ruling already covers.
+export function parseUnknownAliases(configText, errors = null) {
   const out = new Map();
   if (!configText) return out;
   for (const raw of configText.split(/\r?\n/)) {
@@ -502,6 +616,8 @@ export function parseUnknownAliases(configText) {
       if (!cn) continue;
       if (cn === "dynamic") DYNAMIC_CLASSES.forEach((c) => classes.add(c));
       else if (REASON_CLASSES.includes(cn)) classes.add(cn);
+      else if (errors) errors.push({ vocabulary: "reason-class", token: cn,
+                                     accepted: `${REASON_CLASSES.join(", ")}, or dynamic`, where: line });
       else console.error(`candor: \`unknown-alias ${name}\` names unknown reason-class \`${cn}\` — skipped`);
     }
     if (classes.size === 0) console.error(`candor: ignoring \`unknown-alias ${name}\` — no valid reason-class`);

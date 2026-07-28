@@ -24,7 +24,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, discoverConfigText,
-         evaluatePolicy, reportNetClasses, resolveReasonClasses } from "./policy.mjs";
+         evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
+         policyVocabularyAnchor, policyErrorText, refusalVerdict } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
@@ -478,27 +479,78 @@ function resolveGateReportVerb(rawArgs) {
  *
  * PER (RULE, FUNCTION), not per policy — §3.1's granularity ruling. A scoped rule whose own matches all
  * carry their evidence evaluates normally; only the rule that would have been silently narrowed is refused.
+ *
+ * ⟨0.24⟩ IT NO LONGER SHORT-CIRCUITS THE GATE (SPEC §3.1 `7271c69` + `5a8cf48`), and that is the whole of
+ * this rung's precedence correction. It used to return the FIRST refusal message and the verb exited 2 on
+ * the spot — so a policy carrying a firing `deny Fs` BESIDE one unanswerable scoped rule exited 2 and wrote
+ * no `--gate-json` document at all, DELETING A CERTAIN VIOLATION from the machine-consumer channel. `Reject`
+ * is upward-closed (PAPER3 Lemma 2): if a rule fires on evidence the report carries, however the
+ * unanswerable rule would have resolved cannot un-reject it, so exit 1 is not merely fail-closed there, it
+ * is CERTAIN — and it names the violation where exit 2 names nothing.
+ *
+ * So it now returns EVERY unanswerable (rule, function, effect) triple, as a disclosure that travels
+ * ALONGSIDE a verdict rather than as the whole output, plus the `withhold` predicate `evaluatePolicy` needs
+ * to keep the unevidenced pairs from FIRING (see the note on that parameter — flooring an empty class set
+ * at `unresolved` is right for a matcher and wrong for a firing).
  */
-function unanswerableScopedFilter(pol, functions, reasonAcc, netMap) {
+function unanswerableScoped(pol, functions, reasonAcc, netMap) {
+  const held = new Set(), byRule = new Map();
+  const key = (raw, fn, eff) => `${raw}\u0000${fn}\u0000${eff}`;
+  const note = (r, fn, eff, why) => {
+    held.add(key(r.raw, fn, eff));
+    let e = byRule.get(r.raw);
+    if (!e) { e = { rule: r.raw, fns: [], why }; byRule.set(r.raw, e); }
+    e.fns.push(fn);
+  };
   for (const r of pol.deny) {
     for (const f of functions) {
       if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
       const inf = f.inferred ?? [];
       if (r.netClasses?.length && inf.includes("Net") && !(netMap.get(f.fn)?.length))
-        return `\`${r.raw}\` narrows on the Net DESTINATION CLASS, but \`${f.fn}\` carries Net with no `
+        note(r, f.fn, "Net", "narrows on the Net DESTINATION CLASS, but %F carr%S Net with no "
           + "`netClass` in this report — the field the filter reads is absent, so the narrowing would "
-          + "succeed for lack of evidence and drop a Net the bare `deny Net` catches. Refusing (exit 2) "
-          + "rather than passing: an absent optional field must not relax a fail-closed gate. Use the bare "
-          + "`deny Net`, or gate at scan time (candor-ts <src> --policy <file>).";
+          + "succeed for lack of evidence and drop a Net the bare `deny Net` catches. NOT EVALUATED for "
+          + "those functions rather than passed: an absent optional field must not relax a fail-closed "
+          + "gate. Use the bare `deny Net`, or gate at scan time (candor-ts <src> --policy <file>).");
       if (r.unknownClasses?.length && inf.includes("Unknown") && !(reasonAcc.get(f.fn)?.size))
-        return `\`${r.raw}\` narrows on the Unknown REASON CLASS, but \`${f.fn}\` carries Unknown with no `
-          + "reason reachable in this report — neither its own `unknownWhy` nor a `calls` edge to one. "
+        note(r, f.fn, "Unknown", "narrows on the Unknown REASON CLASS, but %F carr%S Unknown with no "
+          + "reason reachable in this report — neither %P own `unknownWhy` nor a `calls` edge to one. "
           + "§6.2 resolves the class set TRANSITIVELY over the gate's reach; with the channel missing, "
-          + "every narrowed filter silently tolerates while only the bare `deny Unknown` fires. Refusing "
-          + "(exit 2). Use the bare `deny Unknown`, or gate at scan time (candor-ts <src> --policy <file>).";
+          + "every narrowed filter silently tolerates while only the bare `deny Unknown` fires. NOT "
+          + "EVALUATED for those functions rather than passed. Use the bare `deny Unknown`, or gate at "
+          + "scan time (candor-ts <src> --policy <file>).");
     }
   }
-  return null;
+  // EVERY withheld function is named, never one witness standing for the rest: the operator has to be able
+  // to see which part of the policy went unenforced, and a count cannot be acted on.
+  const unevaluated = [...byRule.values()].map(({ rule, fns, why }) => {
+    const names = [...new Set(fns)].sort();
+    const list = names.map((n) => `\`${n}\``).join(", ");
+    return { rule, why: `\`${rule}\` ` + why.replace("%F", list).replace("%S", names.length === 1 ? "ies" : "y")
+                                            .replace("%P", names.length === 1 ? "its" : "their") };
+  });
+  return { unevaluated, withhold: held.size ? (r, fn, eff) => held.has(key(r.raw, fn, eff)) : null };
+}
+
+/**
+ * ⟨0.24⟩ ONE policy LOAD for every verb in this file that consults one, so the vocabulary anchor and the
+ * unreadable-policy posture cannot drift between them (SPEC §6.2 `382a7e0`/`be0b9a9`, §3.1 `99eb4e9`).
+ *
+ * Two defects it closes at once, and the second is why it had to be a shared helper rather than a check
+ * bolted onto the gate. `whatif`, `fix`, `fix-gate` and `unverified` never loaded `unknown-alias` AT ALL:
+ * they silently rewrote an aliased rule — widening or narrowing it — while the gate honoured it, so the
+ * same policy meant two different things in the verb an agent consults BEFORE editing and in the gate that
+ * judges the edit. And once an unrecognised token became a policy ERROR, those same four verbs would have
+ * started REFUSING a perfectly valid aliased policy. Wiring the anchor in makes them right; the refusal
+ * alone would only have made them loud.
+ */
+function loadPolicyOrDie(policyFile, text) {
+  const errs = [];
+  const aliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(policyFile, process.cwd())), errs);
+  const pol = parsePolicy(text, aliases);
+  errs.push(...pol.errors);
+  if (errs.length) { console.error(policyErrorText(policyFile, errs)); process.exit(2); }
+  return pol;
 }
 
 // Resolve the policy for the gate verbs (whatif/fix/fix-gate/unverified): the --policy flag, else the
@@ -648,8 +700,26 @@ switch (cmd) {
     }
     // ⟨0.19⟩ config-aware: resolve `Unknown[<alias>]` via a checked-in `unknown-alias`, anchored to the
     // policy file (or CANDOR_CONFIG) — the dump reflects real gate resolution + pins the four-way expansion.
-    const aliases = parseUnknownAliases(discoverConfigText(path.dirname(path.resolve(args[0]))));
-    emit(parsePolicy(text, aliases));
+    //
+    // ⟨0.24⟩ THIS VERB MUST NOT REFUSE (SPEC §3.1 `6929dce`), and it is the one policy-consulting verb that
+    // must not. Making an unrecognised token a policy ERROR (§6.2 `be0b9a9`) is right for the GATE, which
+    // must not enforce a policy it cannot honour as written — but applying it in the PARSER put the refusal
+    // on the WITNESS, whose entire job is to answer "what did this engine make of my policy?", a question
+    // most valuable exactly when the answer is "not what you meant". Measured: this verb began exiting 2 on
+    // the conformance battery, which carries `Unknown[bogus,reflect]` and `Net[bogus,unknown-host]`
+    // DELIBERATELY, and the four-way suite HALTED at PART 4 — one ruling took the whole cross-impl
+    // differential offline. A diagnostic that declines to explain the thing being diagnosed has inverted
+    // its purpose.
+    //
+    // So: the parse, PLUS `errors` naming every token that could not be honoured and the accepted set, at
+    // exit 0. The token has to APPEAR as an error rather than being silently dropped — pre-⟨0.24⟩ this was
+    // drop-with-a-warning, and a differential that cannot tell "dropped" from "rejected" cannot pin this
+    // rung at all. The rules themselves are unchanged, which is what keeps PART 4's deny/allow/forbid
+    // comparison meaningful across the engines that report the error differently.
+    const ppErrs = [];
+    const ppAliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(args[0], process.cwd())), ppErrs);
+    const ppPol = parsePolicy(text, ppAliases);
+    emit({ ...ppPol, errors: [...ppErrs, ...ppPol.errors] });
     break;
   }
   case "show": {
@@ -983,7 +1053,7 @@ switch (cmd) {
         console.error(`candor: policy ${policyFile} could not be read; whatif NOT evaluated against it`);
         process.exit(2);
       }
-      pol = parsePolicy(text);
+      pol = loadPolicyOrDie(policyFile, text);
     }
     // Shared query-core — the CLI and MCP `candor_whatif` are one blast-radius + deny evaluation
     // (the CLI keeps the I/O + exit codes; the core is pure — see `where` above for the drift class).
@@ -1012,7 +1082,7 @@ switch (cmd) {
     // The sidecar is the ONLY graph a candor-ts report carries (it embeds no inline `calls`). Fail LOUD when
     // it's absent — never compute a degenerate empty-graph remedy that reads as a false "no clean hoist".
     if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
-    const r = coreFix(cg, loadReportOrDie(prefix), target, eff, parsePolicy(ptext), scopeMatches);
+    const r = coreFix(cg, loadReportOrDie(prefix), target, eff, loadPolicyOrDie(policyFile, ptext), scopeMatches);
     if (r === null) { console.error(`candor: no function matching \`${target}\` in the call graph`); process.exit(2); }
     emit(r);
     break;
@@ -1030,7 +1100,7 @@ switch (cmd) {
     catch { console.error(`candor: policy ${policyFile} could not be read — no fix computed`); process.exit(2); }
     const cg = loadCallgraph(prefix);
     if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix-gate needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
-    const fgr = coreFixGate(cg, loadReportOrDie(prefix), parsePolicy(ptext), scopeMatches);
+    const fgr = coreFixGate(cg, loadReportOrDie(prefix), loadPolicyOrDie(policyFile, ptext), scopeMatches);
     emit(fgr);
     process.exit(strict && !fgr.ok ? 1 : 0);
     break; // unreachable
@@ -1058,7 +1128,7 @@ switch (cmd) {
     const ucg = uci >= 0 ? loadCallgraph(prefix) : {};
     if (uci >= 0 && Object.keys(ucg).length === 0 && !ucg.partial && !ufns.some((e) => (e.calls ?? []).length))
       console.error(`candor-ts: no call-graph sidecar for '${prefix}' and no \`calls\` edges in the report — \`--class\` resolved each hole's reason class from its OWN \`unknownWhy\` only; a hole whose Unknown is INHERITED reads \`unresolved\` here (re-run: candor-ts <src> --out ${prefix})`);
-    const r = coreUnverified(ufns, parsePolicy(ptext), scopeMatches,
+    const r = coreUnverified(ufns, loadPolicyOrDie(policyFile, ptext), scopeMatches,
                              uci >= 0 ? args[uci + 1] : null, ucg);
     emit(r);
     process.exit(strict && !r.ok ? 1 : 0);
@@ -1081,29 +1151,77 @@ switch (cmd) {
     // is enforced and argued. No `.callgraph.json`, no chained dep, no `.hierarchy.json`, no
     // re-classification. An ABSENT entry is absent: the ⟨0.21⟩ purity claim, taken as given.
     const { prefix, policyFile, gateJsonPath, json } = resolveGateReportVerb(args);
+    // ⟨0.24⟩ EVERY exit from here on that is a REFUSAL writes the document (SPEC §3.1 `107755b`, carve-outs
+    // removed by `1503368`) — including an unreadable policy, because a stale green does not care why this
+    // run declined to overwrite it. A USAGE error deliberately does not: the command was never a gate
+    // invocation, so there is nothing to refuse and nothing a wrapper could be reading a verdict from.
+    const gdests = [...new Set([json ? "-" : null, gateJsonPath].filter((d) => d !== null && d !== undefined))];
+    const gwrite = (obj) => {
+      const text = JSON.stringify(obj, null, 1);
+      for (const dest of gdests) {
+        if (dest === "-") { console.log(text); continue; }
+        // A SURFACING side-output: an unwritable path is one stderr line, never a raw ENOENT crash whose
+        // exit 1 would read as a policy violation on a clean run (the scan path's rule).
+        try {
+          const tmp = `${dest}.${process.pid}.tmp`;
+          fs.writeFileSync(tmp, text + "\n");
+          fs.renameSync(tmp, dest);
+        } catch (e) { console.error(`candor-ts: could not write --gate-json ${dest}: ${e.message}`); }
+      }
+    };
+    const grefuse = (reason, unevaluated = null) => {
+      gwrite(refusalVerdict(SPEC_VERSION, reason, unevaluated));
+      process.exit(2);
+    };
     if (!policyFile) { console.error("candor-ts: gate requires a policy — pass `--policy <file>`, or set CANDOR_POLICY / a .candor/config `policy` key. `gate` applies a policy to an existing report; with no policy there is no verdict to give."); process.exit(2); }
     let gtext;
     try { gtext = fs.readFileSync(policyFile, "utf8"); }
-    catch { console.error(`candor-ts: policy ${policyFile === "" ? "(configured empty)" : policyFile} could not be read — failing (exit 2), policy NOT evaluated`); process.exit(2); }
+    catch {
+      const why = `policy ${policyFile === "" ? "(configured empty)" : policyFile} could not be read — failing (exit 2), policy NOT evaluated`;
+      console.error(`candor-ts: ${why}`);
+      grefuse(why);
+    }
     // ⟨0.19⟩ `unknown-alias` expansion for an `Unknown[<alias>]` filter, anchored to the POLICY file — an
-    // alias is part of the policy's own vocabulary, not of the report. The ⟨0.20⟩ `net-partner` list is
-    // deliberately NOT loaded: `netClass` is read verbatim off the wire, so re-classifying its hosts
-    // through THIS machine's config would be exactly the re-derivation §3.1 ⟨0.24⟩ forbids (and would make
-    // the verdict depend on the consumer's CWD). Nor is the `deps` key, for the same reason.
-    const gpol = parsePolicy(gtext, parseUnknownAliases(discoverConfigText(path.dirname(path.resolve(policyFile)))));
-    // ── ANSWERABILITY (SPEC §3.1 ⟨0.24⟩): a rule whose EVIDENCE THE WIRE DOES NOT CARRY is REFUSED (exit
-    // 2), never evaluated on partial evidence — which would be the gateless-green failure the gate exists
-    // to prevent, in the fail-OPEN direction, on a policy the user believed was enforced. Two of the three
-    // are decidable from the POLICY alone, so they are whole-policy: enforcing the answerable half and
-    // exiting 0 IS gateless-green.
+    // alias is part of the policy's own vocabulary, not of the report. ⟨0.24⟩ SPEC §3.1 `99eb4e9` makes that
+    // anchor NORMATIVE and puts the SCAN route on it too (policyVocabularyAnchor), so byte-equality holds by
+    // construction rather than by the two routes happening to point at one directory. The ⟨0.20⟩
+    // `net-partner` list is deliberately NOT loaded: `netClass` is read verbatim off the wire, so
+    // re-classifying its hosts through THIS machine's config would be exactly the re-derivation §3.1 ⟨0.24⟩
+    // forbids (and would make the verdict depend on the consumer's CWD). Nor is the `deps` key, likewise.
+    const gcfgDir = policyVocabularyAnchor(policyFile, process.cwd());
+    const gerrors = [];
+    const gpol = parsePolicy(gtext, parseUnknownAliases(discoverConfigText(gcfgDir), gerrors));
+    gerrors.push(...gpol.errors);
+    // ⟨0.24⟩ SPEC §6.2 (`382a7e0` + `be0b9a9`): a policy that cannot be honoured AS WRITTEN is a POLICY
+    // ERROR, not a rule to silently rewrite — exit 2, the unreadable-policy posture, before any evaluation.
+    if (gerrors.length) { const why = policyErrorText(policyFile, gerrors); console.error(why); grefuse(why); }
+    // ⟨0.24⟩ THE CONFIG FILE THAT SUPPLIED VOCABULARY THE VERDICT USED (SPEC §3.1 `99eb4e9`) — named on a
+    // REFERENCE, not only on a firing, because the measured harm was a GREEN verdict a vocabulary file made
+    // green. Omitted when no alias was used, so every other verdict stays byte-identical to before.
+    const gcfgPath = Object.keys(gpol.aliasesUsed).length ? discoverConfigPath(gcfgDir) : null;
+    const gvocab = gcfgPath ? { config: gcfgPath, aliases: gpol.aliasesUsed } : null;
+    // ── ANSWERABILITY (SPEC §3.1 ⟨0.24⟩): a rule whose EVIDENCE THE WIRE DOES NOT CARRY is NOT EVALUATED,
+    // never evaluated on partial evidence — which would be the gateless-green failure the gate exists to
+    // prevent, in the fail-OPEN direction, on a policy the user believed was enforced. Two of the three are
+    // decidable from the POLICY alone, so their GRANULARITY is whole-policy.
+    //
+    // ⟨0.24⟩ BUT WHOLE-POLICY GRANULARITY IS NOT A LICENCE TO SUPPRESS A VIOLATION (SPEC §3.1 `1503368`).
+    // These two used to exit 2 on the spot, so a firing `deny Fs` beside a `forbid` rule exited 2 with the
+    // certain violation absent from the document — the same Lemma-2 error as the scoped case, and Lemma 2
+    // does not care which KIND of refusal stands beside the firing rule. They are now UNEVALUATED rules
+    // disclosed beside whatever the rest of the policy decided; a policy that is nothing BUT these still
+    // refuses below, because then there is no verdict to dominate them.
+    const gunevaluated = [];
     if (gpol.forbid.length) {
-      console.error(`candor-ts: gate: this policy has ${gpol.forbid.length} \`forbid\` rule(s), which \`gate --report\` cannot evaluate — a report's \`calls\` graph is EFFECT-RELEVANT (only callees with a non-empty effect set are kept), so a crossing into a wholly PURE unit is invisible in it while \`forbid\` matches on NAME. The rule would read green where a scan fails. Gate layering at scan time: candor-ts <src> --policy ${policyFile}`);
-      process.exit(2);
+      const why = `this policy has ${gpol.forbid.length} \`forbid\` rule(s), which \`gate --report\` cannot evaluate — a report's \`calls\` graph is EFFECT-RELEVANT (only callees with a non-empty effect set are kept), so a crossing into a wholly PURE unit is invisible in it while \`forbid\` matches on NAME. The rule would read green where a scan fails. Gate layering at scan time: candor-ts <src> --policy ${policyFile}`;
+      console.error(`candor-ts: gate: ${why}`);
+      for (const r of gpol.forbid) gunevaluated.push({ rule: r.raw, why });
     }
     if (gpol.allow.length) {
       const effs = [...new Set(gpol.allow.map((r) => r.effect))].sort();
-      console.error(`candor-ts: gate: this policy has \`allow ${effs.join("`/`")}\` rule(s), which \`gate --report\` cannot evaluate — the AS-EFF-008 surface-completeness marker does not ride the report wire in any form, so a benign visible literal beside a runtime-computed endpoint would be CERTIFIED here and flagged by a scan. (\`netClass: unknown-host\` is NOT that marker — it also names a merely UNRECOGNISED host, so reading it as "masked" flags functions whose surface is fully visible.) Gate allowlists at scan time: candor-ts <src> --policy ${policyFile}`);
-      process.exit(2);
+      const why = `this policy has \`allow ${effs.join("`/`")}\` rule(s), which \`gate --report\` cannot evaluate — the AS-EFF-008 surface-completeness marker does not ride the report wire in any form, so a benign visible literal beside a runtime-computed endpoint would be CERTIFIED here and flagged by a scan. (\`netClass: unknown-host\` is NOT that marker — it also names a merely UNRECOGNISED host, so reading it as "masked" flags functions whose surface is fully visible.) Gate allowlists at scan time: candor-ts <src> --policy ${policyFile}`;
+      console.error(`candor-ts: gate: ${why}`);
+      for (const r of gpol.allow) gunevaluated.push({ rule: r.raw, why });
     }
     const g = loadGateReport(prefix);
     // ANY report under the locator that did not load cleanly REFUSES THE WHOLE GATE — not just the case
@@ -1118,9 +1236,25 @@ switch (cmd) {
     // trustworthy functions MUST fail loudly." The union of a signature and a hole is a HOLE: the gate is
     // a claim about a whole package, and the effects of the sibling that did not load are exactly the ones
     // a violation would have come from. Keep the per-file disclosure, move the verdict — refuse BEFORE
-    // building `gverdictObj`, so no verdict document is written to stdout or to `--gate-json <file>`
-    // either (an absent document a wrapper must handle, never a green one it will believe). Matches
-    // candor-rust and candor-swift, both of which exit 2 on this fixture.
+    // building `gverdictObj`, so no VERDICT document is written to stdout or to `--gate-json <file>`
+    // either. Matches candor-rust and candor-swift, both of which exit 2 on this fixture.
+    //
+    // ⟨0.24⟩ A REFUSAL DOCUMENT still goes out (SPEC §3.1 `107755b`) — the earlier reading, that writing
+    // nothing keeps a wrapper from mistaking a refusal for a judgement, had it backwards: writing nothing
+    // does not leave the wrapper with no document, it leaves it with LAST RUN's. What stops the refusal
+    // being read as a judgement is `refused: true` and the MISSING `violations` key, not its absence from
+    // the disk.
+    //
+    // ⟨0.24⟩ AND THE PRECEDENCE RULING DOES NOT REACH THIS EXIT (SPEC §3.1 `01d5c6b`). The two refusals are
+    // indistinguishable from the exit code, so the distinction has to be drawn here. An ANSWERABILITY
+    // refusal says the report is trustworthy and one rule cannot be decided from it — the other rules'
+    // evidence IS carried, so a firing rule is certain and Lemma 2 makes exit 1 dominate. A CORRUPTION
+    // refusal says the report cannot be read AS A REPORT, which undermines the very premise that argument
+    // runs on: a violation computed from a document with an unparseable §2 key is not a certain finding, it
+    // is a finding computed from bytes of unknown meaning, and exiting 1 on it would assert a confidence the
+    // input does not support — the mirror of the fabrication `5a8cf48` closed. The test, stated rather than
+    // instanced: does the refusal's cause undermine the premise that the fired rule's evidence was carried?
+    // Here it does, so nothing downstream of this input is certain and the refusal dominates.
     //
     // …and the SAME refusal covers the second way a report fails to load cleanly: a §2 key that is PRESENT
     // BUT UNPARSEABLE (SPEC §2 ⟨0.24⟩ — "a reader that recovers from a type mismatch by substituting the
@@ -1134,8 +1268,9 @@ switch (cmd) {
     if (g.hardFail) {
       if (g.corrupt.length)
         console.error(`candor-ts: the report at prefix '${prefix}' has ${g.corrupt.length} present-but-unparseable §2 key(s) — a key that is THERE but of the wrong shape is corrupt input, not an empty one (SPEC §2 ⟨0.24⟩); coercing it to its empty value would turn corruption into a purity claim. Refusing to gate — fix the report or re-run the scan:\n  ${g.corrupt.join("\n  ")}`);
-      console.error(`candor-ts: a report found at prefix '${prefix}' failed to load — refusing to gate over a report that did not load cleanly; a partial signature makes a green verdict meaningless (the effects of the report that did not load are exactly the ones a violation would come from). Re-run the scan.`);
-      process.exit(2);
+      const why = `a report found at prefix '${prefix}' failed to load — refusing to gate over a report that did not load cleanly; a partial signature makes a green verdict meaningless (the effects of the report that did not load are exactly the ones a violation would come from). Re-run the scan.`;
+      console.error(`candor-ts: ${why}`);
+      grefuse(why, gunevaluated);
     }
     // ⟨0.24⟩ …AND A REPORT THAT JUDGED NOTHING IS NOT AN ALL-CLEAR EITHER (SPEC §2's three-row table,
     // bound to this verb by §3.1: "a report presented DIRECTLY to the gate with `analyzed.count: 0` makes
@@ -1163,16 +1298,22 @@ switch (cmd) {
     const gnet = reportNetClasses(g.functions, { authoritative: true });
     const gacc = resolveReasonClasses(g.functions, {});
     // THE THIRD REFUSAL — the only one that depends on the REPORT rather than the policy alone, and the
-    // only one that is per (rule, function). See unanswerableScopedFilter for why it is minimal.
-    const refusal = unanswerableScopedFilter(gpol, g.functions, gacc, gnet);
-    if (refusal) { console.error(`candor-ts: gate: ${refusal}`); process.exit(2); }
+    // only one whose GRANULARITY is per (rule, function). See unanswerableScoped for why it is minimal, and
+    // why it no longer short-circuits.
+    const { unevaluated: gscoped, withhold: gwithhold } = unanswerableScoped(gpol, g.functions, gacc, gnet);
+    for (const u of gscoped) { console.error(`candor-ts: gate: ${u.why}`); gunevaluated.push(u); }
     // ONE matcher for both routes into the gate (SPEC §6.2: "THE GATE AND THE DISCLOSURE MUST APPLY THE
     // SAME RULE, AND SHOULD SHARE THE SAME CODE"). `scan --policy` and this verb both land in
     // evaluatePolicy, which is what makes "the same verdict from the same signature" a property of the
     // code rather than of two consistent authors. The empty callgraph/incomplete/partners arguments are
-    // the report route's honest inputs, not stubs: none of the three rides the ⟨0.24⟩ wire, and the two
-    // rule kinds that would have needed them are refused above.
-    const gviol = evaluatePolicy(gpol, g.functions, {}, new Map(), new Set(), gnet);
+    // the report route's honest inputs, not stubs: none of the three rides the ⟨0.24⟩ wire.
+    //
+    // ⟨0.24⟩ `forbid`/`allow` are STRIPPED rather than passed: they are the two whole-policy unanswerable
+    // kinds, now disclosed as `unevaluated` instead of short-circuiting (`1503368`), and handing them to the
+    // matcher would be the very evaluation-on-partial-evidence they are unanswerable FOR — `allow` would
+    // fire AS-EFF-008 "no visible literal" on every report entry whose surface the wire does not carry.
+    const gviol = evaluatePolicy({ deny: gpol.deny, allow: [], forbid: [] },
+                                 g.functions, {}, new Map(), new Set(), gnet, gwithhold);
     // Route the human output exactly as a scan does: to stderr whenever stdout carries the verdict
     // document, so `candor-ts-query gate … --json | jq` sees pure JSON.
     const gsay = (json || gateJsonPath === "-") ? (l) => console.error(l) : (l) => console.log(l);
@@ -1185,32 +1326,39 @@ switch (cmd) {
     // order, because §3.1 ⟨0.24⟩ makes byte-equality with `scan --policy`'s `--gate-json` the acceptance
     // test. `analyzed.count`, `incomplete`/`unanalyzed` and the ⟨0.15⟩ coverage advisory all come off the
     // report envelope rather than being recomputed.
+    //
+    // ⟨0.24⟩ PRECEDENCE (SPEC §3.1 `7271c69`): **violation (1) > refusal (2) > incomplete (2)**, and the
+    // first rung is forced by Lemma 2 rather than chosen. A firing rule is decided on evidence the report
+    // carries, so no unanswerable rule beside it can un-reject the policy — the verdict is written and the
+    // unevaluated rules ride ALONGSIDE it under `unevaluated`. Only when nothing fired is the refusal the
+    // whole answer, and then it is a REFUSAL DOCUMENT (no `violations` key), not a verdict.
     const gverdictObj = { spec: SPEC_VERSION, ok: gviol.length === 0 && !gincomplete,
-                          analyzed: { count: g.analyzed }, violations: gviol };
+                          analyzed: { count: g.analyzed } };
+    if (gvocab) gverdictObj.policyVocabulary = gvocab;
+    gverdictObj.violations = gviol;
+    if (gunevaluated.length) gverdictObj.unevaluated = gunevaluated;
     if (gincomplete) { gverdictObj.incomplete = true; gverdictObj.unanalyzed = g.unanalyzed; }
     if (g.coverage.length)
       gverdictObj.coverage = { uncovered: g.coverage.length, packages: g.coverage.map((c) => c.name) };
-    const gverdict = JSON.stringify(gverdictObj, null, 1);
-    // `--json` IS `--gate-json -`; deduplicated so `--json --gate-json -` writes stdout ONCE.
-    for (const dest of [...new Set([json ? "-" : null, gateJsonPath].filter((d) => d !== null && d !== undefined))]) {
-      if (dest === "-") { console.log(gverdict); continue; }
-      // A SURFACING side-output: an unwritable path is one stderr line, never a raw ENOENT crash whose
-      // exit 1 would read as a policy violation on a clean run (the scan path's rule).
-      try {
-        const tmp = `${dest}.${process.pid}.tmp`;
-        fs.writeFileSync(tmp, gverdict + "\n");
-        fs.renameSync(tmp, dest);
-      } catch (e) { console.error(`candor-ts: could not write --gate-json ${dest}: ${e.message}`); }
-    }
     if (gviol.length) {
+      gwrite(gverdictObj);
       console.error(`candor-ts: ${gviol.length} policy violation(s)`);
+      if (gunevaluated.length)
+        console.error(`candor-ts: …and ${gunevaluated.length} rule(s) could not be evaluated against this report (disclosed above and under \`unevaluated\`) — the violation(s) named are certain regardless of how those would have resolved`);
       console.error("→ candor-ts-query fix-gate names the remedy for each");
       process.exit(1);
     }
+    if (gunevaluated.length)
+      grefuse(`${gunevaluated.length} policy rule(s) could not be evaluated against this report`, gunevaluated);
     if (gincomplete) {
-      console.error(`candor-ts: gate NOT certified — the report declares ${g.unanalyzed.length} unit(s) candor could not analyze; a gate cannot be green over unanalyzed code`);
+      const why = `gate NOT certified — the report declares ${g.unanalyzed.length} unit(s) candor could not analyze; a gate cannot be green over unanalyzed code`;
+      console.error(`candor-ts: ${why}`);
+      // The INCOMPLETE verdict is a JUDGEMENT, not a refusal: it names what was analyzed and what was not,
+      // and §3.1 makes byte-equality with `scan --policy`'s document the acceptance test for exactly it.
+      gwrite(gverdictObj);
       process.exit(2);
     }
+    gwrite(gverdictObj);
     gsay("candor-ts: no violations");
     process.exit(0);
     break; // unreachable

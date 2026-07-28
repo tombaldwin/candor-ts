@@ -8,6 +8,63 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**⚠ ⟨0.24⟩ A CERTAIN VIOLATION DOMINATES A REFUSAL, AND A REFUSAL STILL WRITES A DOCUMENT** (SPEC §3.1
+`7271c69` / `107755b` / `1503368` / `5a8cf48` / `01d5c6b`). Measured on a hand-built report carrying one
+unambiguous `Fs` and one `Net` with no `netClass`: a policy holding a firing `deny Fs` **plus** one
+unanswerable `deny Net[unknown-host]` exited **2 with no `--gate-json` document at all**, deleting a
+*certain* violation from the only channel a CI wrapper reads. `Reject` is upward-closed (PAPER3 Lemma 2),
+so a rule that fires on evidence the report carries cannot be un-rejected by however the unanswerable rule
+would have resolved. Now **exit 1, with the violation in the document** and the rule that could not be read
+disclosed beside it under `unevaluated`; the same holds for the whole-policy `forbid`/`allow` refusals,
+which no longer short-circuit. **And every refusal now writes `{spec, ok:false, refused:true, reason,
+unevaluated?}` with NO `violations` key** — absent, never `[]`, which is precisely the claim a refusal
+cannot make. Six causes measured writing nothing before (unanswerable rule, `forbid`, `allow`, an
+unrecognised token, an unreadable policy, a report that did not load), on both routes; a wrapper reading
+that path unconditionally was re-reading **the previous run's green verdict as current**. A usage error
+still writes nothing — it was never a gate invocation.
+
+Two things fell out of that change and both are recorded because they are the interesting half. Removing
+the short-circuit made the evaluator reach code it had never reached, and `reasonClassesMatch` floors an
+empty class set at `unresolved` — correct for a MATCHER, wrong as grounds for a FIRING — so
+`deny Unknown[unresolved]` over an **inherited, reasonless** `Unknown` began emitting a real violation
+record (mutation-verified: with the withholding removed, `app.inherits` appears in `violations`). The
+withholding that closes it is per **(rule, function, effect)**, not per (rule, function): measured on
+`deny Fs Net[unknown-host]` over one function carrying a certain `Fs` beside a `netClass`-less `Net`, the
+pair form gives **exit 2 with the `violations` key absent** — the certain finding deleted, which is the
+very harm the precedence ruling exists to fix. And a **corruption** refusal still dominates even a firing
+rule: an answerability refusal leaves the premise that the fired rule's evidence was carried intact, while
+an unparseable §2 key denies it, so exit 1 there would assert a confidence the input does not support.
+
+**⚠ ⟨0.24⟩ AN UNRECOGNISED POLICY VALUE TOKEN IS A POLICY ERROR — and `parsepolicy` REPORTS it rather than
+refusing** (SPEC §6.2 `382a7e0` / `be0b9a9`, §3.1 `6929dce`). A typo **beside valid tokens** was silently
+dropped and the rule **NARROWED**: `deny Unknown[dispatch,nativ]` stopped gating native-caused holes while
+the operator read a gate that looked armed, and `deny Net[known-partner,unkown-host]` did the same on the
+destination class — measured **exit 0** where the correctly-spelled rule exits 1. That is the fail-open and
+it is the common case. The sole-unrecognised-token form **WIDENED** to the bare effect while printing
+"ignoring policy rule" and then keeping a *different* rule — a false disclosure. Both now **exit 2 on
+`gate --report` and `scan --policy`**, naming the token and the accepted set, across all three vocabularies:
+the reason-class filter, the `Net` destination-class filter, and the **alias DEFINITION**
+(`unknown-alias corp = dispatch,nativ` silently became `{dispatch}` — the typo in the vocabulary the policy
+is written against, which fails open identically). `whatif`, `fix`, `fix-gate` and `unverified` never
+loaded `unknown-alias` **at all**, so an aliased rule meant one thing in the verb an agent consults before
+editing and another in the gate that judges the edit; they now share one policy load with the gate.
+**`parsepolicy` is the exception and must not refuse**: it emits its parse plus an `errors` list naming
+each token and the accepted set, at exit 0 — putting the refusal in the parser made it exit 2 on the
+conformance battery, which carries such tokens deliberately, and **halted the four-way suite at PART 4**.
+
+**⚠ ⟨0.24⟩ POLICY VOCABULARY ANCHORS AT THE POLICY FILE ON BOTH ROUTES, AND IS DISCLOSED** (SPEC §3.1
+`99eb4e9` / `b4e9155`). `gate --report` anchored `.candor/config` discovery at the **policy file's**
+directory while `scan --policy` anchored at the **target**, so with the policy filed outside the scan tree
+the two expanded the same rule differently — §3.1's byte-equality MUST breakable by a file that is neither
+the report nor the policy. Measured after: firing alias (exit 1) and tolerating alias (exit 0) both
+byte-equal across the routes; reverting the scan anchor alone puts them back at 2 vs 1. Target-scoped keys
+(`deps`, `net-partner`, scan settings) are deliberately unmoved — they describe the thing being scanned,
+not the language the rules are written in. And because discovery walks parent directories and
+`CANDOR_CONFIG` overrides it outright, a verdict moved by an alias now carries
+**`policyVocabulary: {config, aliases:{name:[class…]}}`** naming the file *and the definition* — recorded
+at the point of USE, so a config defining aliases the policy never mentions discloses nothing and the
+verdict stays byte-identical to before.
+
 **⚠ ⟨0.24⟩ …AND THE SAME RULE ON THE CHAINED-DEP ROUTE, where it was broken worse.** A chained dependency
 report with a present-but-unparseable §2 key bought the consumer **strictly more confidence than not
 chaining the package at all** — the ⟨0.24⟩ `analyzed.count: 0` defect arriving through a different key.

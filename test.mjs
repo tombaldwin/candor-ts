@@ -7421,6 +7421,19 @@ function handReport(files) {
   return d;
 }
 
+// ⟨0.24⟩ THE REFUSAL DOCUMENT (SPEC §3.1 `107755b`, carve-outs removed by `1503368`). Four rows below used
+// to assert a refusal wrote NOTHING, on the reasoning that an absent document keeps a wrapper from
+// mistaking a refusal for a judgement. That had it backwards, and the whole rung turns on why: writing
+// nothing does not leave the wrapper with NO document, it leaves it with LAST RUN'S — a green file from
+// yesterday's clean run, still on disk, read as today's all-clear. What stops a refusal being read as a
+// judgement is `refused: true` and the MISSING `violations` key, not its absence from the disk. Every one
+// of those rows keeps its real protection — no GREEN verdict may be emitted — and gains the stronger claim.
+const isRefusal = (text) => {
+  let d;
+  try { d = JSON.parse(text); } catch { return false; }
+  return d && d.ok === false && d.refused === true && !("violations" in d);
+};
+
 // ── (a) EQUIVALENCE IS THE ACCEPTANCE TEST, AND IT IS BYTE-LEVEL ──────────────────────────────────
 // For any report a scan produced, `gate --report <it> --policy P` must produce a `--gate-json` document
 // BYTE-EQUAL to `scan --policy P`'s — `analyzed.count`, `reasonClass`, `netClass` and the coverage
@@ -7732,8 +7745,9 @@ export function all(db: DatabaseSync, o: any) {
   const r = gateCli("--report", path.join(d, "part", "rep"), "--policy", P, "--json", "--gate-json", gj);
   check("gate --report: a PARTIALLY-corrupt multi-report prefix is exit 2 — one clean sibling does not license a verdict over the one that did not load",
         r.status === 2, `exit=${r.status} ${r.stdout}${r.stderr}`.slice(0, 400));
-  check("gate --report: …and NO VERDICT DOCUMENT is produced — not on stdout, not at `--gate-json <file>` (the green document WAS the finding)",
-        r.stdout.trim() === "" && !fs.existsSync(gj), `stdout=${r.stdout.slice(0, 200)} gateJsonWritten=${fs.existsSync(gj)}`);
+  check("gate --report: …and NO VERDICT DOCUMENT is produced — stdout and `--gate-json <file>` both carry a ⟨0.24⟩ REFUSAL (ok:false, refused:true, no `violations` key), never the green one that WAS the finding",
+        isRefusal(r.stdout) && fs.existsSync(gj) && isRefusal(fs.readFileSync(gj, "utf8")),
+        `stdout=${r.stdout.slice(0, 200)} gateJson=${fs.existsSync(gj) ? fs.readFileSync(gj, "utf8").slice(0, 200) : "(absent)"}`);
   check("gate --report: …and the per-file disclosure is KEPT — the refusal names the sibling that failed to parse",
         /rep\.Bdirty\.scan\.json/.test(r.stderr) && /failed to (parse|load)/.test(r.stderr), r.stderr.slice(0, 300));
   // CONTROL 1: the same prefix shape with B written WHOLE — the merge works, and the Net the truncation
@@ -7799,7 +7813,7 @@ export function all(db: DatabaseSync, o: any) {
   // no scan ever emits `analyzed: "oops"` for a refusal to diverge from.
   const gb = say("garbled.json");
   check("⟨0.24⟩ gate --report: fail-closed — a manifest that cannot be READ is not a claim: exit 2, naming `analyzed`",
-        gb.status === 2 && /`analyzed`/.test(gb.stderr) && gb.stdout.trim() === "", `exit=${gb.status} ${gb.stderr.slice(0, 300)}`);
+        gb.status === 2 && /`analyzed`/.test(gb.stderr) && isRefusal(gb.stdout), `exit=${gb.status} ${gb.stderr.slice(0, 300)}`);
 }
 
 // ── (i) ⟨0.24⟩ SPEC §2: A PRESENT-BUT-UNPARSEABLE KEY IS CORRUPT INPUT, NEVER ITS EMPTY VALUE ───────
@@ -7855,9 +7869,9 @@ export function all(db: DatabaseSync, o: any) {
     const r = g(`${name}.json`);
     if (r.status !== 2) bad.push(`${name}: exit ${r.status} (expected 2) ${r.stdout.slice(0, 120)}`);
     else if (!r.stderr.includes(`\`${key}\``)) bad.push(`${name}: refused but did not NAME \`${key}\` — ${r.stderr.slice(0, 200)}`);
-    else if (r.stdout.trim() !== "") bad.push(`${name}: refused but still wrote a verdict document`);
+    else if (!isRefusal(r.stdout)) bad.push(`${name}: refused, but the document is not a ⟨0.24⟩ refusal (want ok:false + refused:true + NO violations key): ${r.stdout.slice(0, 160)}`);
   }
-  check(`⟨0.24⟩ gate --report: all ${REFUSE.length} present-but-unparseable §2 keys are exit 2, each NAMING the key, with no verdict document`,
+  check(`⟨0.24⟩ gate --report: all ${REFUSE.length} present-but-unparseable §2 keys are exit 2, each NAMING the key, each emitting a REFUSAL document and never a verdict`,
         bad.length === 0, bad.join("\n"));
   // THE OTHER HALF OF THE RULE. Without these the fix is indistinguishable from "refuse anything unusual",
   // which would break every sparse or pre-⟨0.21⟩ report in the wild.
@@ -7872,7 +7886,7 @@ export function all(db: DatabaseSync, o: any) {
   // certified. Assert the SURVIVOR did not license the verdict.
   const mx = g("e_mixed.json");
   check("⟨0.24⟩ gate --report: a corrupt entry BESIDE a clean survivor still refuses — the survivor does not license a verdict over the entry that could not be read",
-        mx.status === 2 && mx.stdout.trim() === "" && /app\.bad/.test(mx.stderr), `exit=${mx.status} ${mx.stderr.slice(0, 250)}`);
+        mx.status === 2 && isRefusal(mx.stdout) && /app\.bad/.test(mx.stderr), `exit=${mx.status} ${mx.stderr.slice(0, 250)}`);
   // NEGATIVE CONTROL for the whole block: the same entry written WELL, with the effect the corruption hid.
   const live = handReport({ "r.json": { ...V, analyzed: A, functions: [{ fn: "app.bad", inferred: ["Net"], direct: ["Net"], hosts: ["x"], netClass: ["unknown-host"] }] },
                             "p.pol": "deny Net\n" });
@@ -7884,6 +7898,306 @@ export function all(db: DatabaseSync, o: any) {
   const sh = spawnSync("node", [path.join(HERE, "query.mjs"), "show", "--report", path.join(d, "e_elem.json"), "app.bad"], { encoding: "utf8" });
   check("⟨0.24⟩ gate --report: BOUNDARY — a read-only query over the SAME corrupt bytes still answers (exit 0); only the verdict route refuses",
         sh.status === 0, `exit=${sh.status} ${sh.stderr.slice(0, 200)}`);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════
+// ⟨0.24⟩ THE PRECEDENCE / REFUSAL-DOCUMENT / POLICY-ERROR / VOCABULARY-ANCHOR RUNG
+// (SPEC §3.1 `7271c69` `107755b` `99eb4e9` `1503368` `5a8cf48` `01d5c6b` `b4e9155` `6929dce`, §6.2
+//  `382a7e0` `be0b9a9`.)  Every row here drives the SHIPPED CLI and reads the DOCUMENT, not the exit
+// code alone — the harm this whole rung is about is evidence going missing from the machine-consumer
+// channel, and an exit-code-only assertion is blind to exactly that.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const V = { candor: { version: "handwritten", spec: "0.24" } };
+  const readDoc = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } };
+  // A GREEN document already sitting at the --gate-json path: the shape a CI cache or yesterday's clean
+  // run leaves behind, and the whole reason a refusal must WRITE rather than skip.
+  const STALE = JSON.stringify({ spec: "0.24", ok: true, analyzed: { count: 9 }, violations: [] }, null, 1);
+  const seedStale = (p) => { fs.writeFileSync(p, STALE + "\n"); return p; };
+
+  // ── ITEM 1: A CERTAIN VIOLATION DOMINATES A REFUSAL ─────────────────────────────────────────────
+  // The report carries one unambiguous `Fs` and one `Net` with NO `netClass`, so `deny Net[unknown-host]`
+  // cannot be decided from it. Before this rung all four engines exited 2 on the PAIR and wrote no
+  // document at all, deleting a certain violation from the only channel a CI wrapper reads.
+  {
+    const d = handReport({
+      "r.json": { ...V, package: "app", analyzed: { count: 2, digest: "0" },
+                  functions: [{ fn: "app.writes", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] },
+                              { fn: "app.calls", inferred: ["Net"], direct: ["Net"] }] },
+      "mixed.pol": "deny Fs\ndeny Net[unknown-host] app\n",
+      "fire.pol": "deny Fs\n",
+      "refuse.pol": "deny Net[unknown-host] app\n",
+      "forbid.pol": "deny Fs\nforbid app -> infra\n",
+      "allow.pol": "deny Fs\nallow Exec in app git\n",
+    });
+    const run = (pol, out) => {
+      const p = path.join(d, out);
+      if (fs.existsSync(p)) fs.rmSync(p);          // DELETE the output before measuring — a stale
+      return { r: gateCli("--report", path.join(d, "r.json"),   // artifact here reads as a pass.
+                          "--policy", path.join(d, pol), "--gate-json", p), doc: () => readDoc(p) };
+    };
+    // THE ROW. Not `status === 1` — the defect is precisely the case where an engine could get the code
+    // right and still ship no evidence, so the assertion is on the RECORD in the document.
+    const mixed = run("mixed.pol", "mixed.json");
+    const mv = mixed.doc()?.violations;
+    check("⟨0.24⟩ precedence: a firing `deny Fs` BESIDE an unanswerable scoped rule exits 1 and the document CARRIES the certain violation",
+          mixed.r.status === 1 && Array.isArray(mv) && mv.some((v) => v.fn === "app.writes"),
+          `exit=${mixed.r.status} doc=${JSON.stringify(mixed.doc())?.slice(0, 300)}`);
+    // …and the rule it could NOT read is disclosed rather than swallowed — exit 1 reports what it is sure
+    // of, it does not conceal the part it could not evaluate.
+    check("⟨0.24⟩ precedence: …and the unevaluated rule rides the SAME document under `unevaluated`",
+          (mixed.doc()?.unevaluated ?? []).some((u) => /Net\[unknown-host\]/.test(u.rule)),
+          JSON.stringify(mixed.doc()?.unevaluated));
+    // TWO CONTROLS, neither optional. Without the second the row cannot distinguish "the violation
+    // dominated the refusal" from "the scoped rule was answerable all along and there was no refusal".
+    const fire = run("fire.pol", "fire.json"), refuse = run("refuse.pol", "refuse.json");
+    check("⟨0.24⟩ precedence CONTROL: `deny Fs` alone still exits 1, `deny Net[unknown-host]` alone still exits 2",
+          fire.r.status === 1 && refuse.r.status === 2, `fire=${fire.r.status} refuse=${refuse.r.status}`);
+    // ⟨0.24⟩ `1503368`: precedence binds the WHOLE-POLICY refusals too. Lemma 2 does not care which KIND
+    // of refusal stands beside the firing rule. These two used to exit 2 with the violation absent.
+    for (const [pol, out, kind] of [["forbid.pol", "fb.json", "forbid"], ["allow.pol", "al.json", "allow"]]) {
+      const a = run(pol, out);
+      check(`⟨0.24⟩ precedence: a firing rule beside a whole-policy \`${kind}\` refusal exits 1 with the violation in the document`,
+            a.r.status === 1 && (a.doc()?.violations ?? []).some((v) => v.fn === "app.writes"),
+            `exit=${a.r.status} doc=${JSON.stringify(a.doc())?.slice(0, 300)}`);
+    }
+  }
+
+  // ── ITEM 1b: THE FABRICATION THE PRECEDENCE FIX MAKES REACHABLE ─────────────────────────────────
+  // Removing the short-circuit lets the evaluator reach code it never reached before, and
+  // `reasonClassesMatch` floors an EMPTY class set at `unresolved` — right for a MATCHER ("could this
+  // rule apply?"), wrong as grounds for a FIRING ("did it?"). Without the withholding this engine emits
+  // a violation RECORD for `app.inherits`, asserting a reason nobody recorded. MUTATION-VERIFIED: with
+  // the `withhold` filter removed, `app.inherits` appears in `violations`.
+  {
+    const d = handReport({
+      "r.json": { ...V, package: "app", analyzed: { count: 2, digest: "0" },
+                  functions: [{ fn: "app.writes", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] },
+                              // INHERITED and reasonless: no `unknownWhy`, no `direct` Unknown (which would
+                              // CONTRIBUTE `unresolved` at its own entry), and a `calls` edge to a callee
+                              // the report does not carry — so nothing classifies it.
+                              { fn: "app.inherits", inferred: ["Unknown"], direct: [], calls: ["vendor.gone"] }] },
+      "p.pol": "deny Fs\ndeny Unknown[unresolved] app.inherits\n",
+    });
+    const out = path.join(d, "v.json");
+    const r = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"), "--gate-json", out);
+    const vs = readDoc(out)?.violations ?? [];
+    check("⟨0.24⟩ withholding: an unanswerable (rule, fn) pair is NEITHER a violation nor a pass — no fabricated `unresolved` record beside the certain one",
+          r.status === 1 && vs.length === 1 && vs[0].fn === "app.writes",
+          `exit=${r.status} violations=${JSON.stringify(vs)}`);
+  }
+
+  // ── ITEM 1c: THE WITHHOLDING IS PER (RULE, FUNCTION, **EFFECT**) ────────────────────────────────
+  // ONE rule and ONE function carrying BOTH a certain `Fs` and a `netClass`-less `Net`. Withholding the
+  // (rule, function) PAIR — the form §3.1 `5a8cf48` states — deletes the certain `Fs` violation and
+  // refuses instead: MEASURED exit 2 with the `violations` key ABSENT, which is the exact harm the
+  // precedence ruling exists to fix, reintroduced by the fix for the fabrication above.
+  {
+    const d = handReport({
+      "r.json": { ...V, package: "app", analyzed: { count: 1, digest: "0" },
+                  functions: [{ fn: "app.mixed", inferred: ["Fs", "Net"], direct: ["Fs", "Net"], paths: ["/etc/hosts"] }] },
+      "p.pol": "deny Fs Net[unknown-host] app\n",
+    });
+    const out = path.join(d, "v.json");
+    const r = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"), "--gate-json", out);
+    const doc = readDoc(out);
+    check("⟨0.24⟩ withholding is per (rule, fn, EFFECT): one rule's certain `Fs` survives beside its own unanswerable `Net[unknown-host]` on the SAME function",
+          r.status === 1 && (doc?.violations ?? []).length === 1
+            && doc.violations[0].fn === "app.mixed" && doc.violations[0].effects.join() === "Fs",
+          `exit=${r.status} doc=${JSON.stringify(doc)?.slice(0, 300)}`);
+  }
+
+  // ── ITEM 1d: A CORRUPTION REFUSAL DOMINATES EVEN A CERTAIN VIOLATION ────────────────────────────
+  // ⟨0.24⟩ `01d5c6b`. The two refusals are indistinguishable from the exit code, so the boundary has to
+  // be asserted. An ANSWERABILITY refusal leaves the premise intact — the other rules' evidence IS
+  // carried — so a firing rule is certain. A CORRUPTION refusal denies that premise: a violation
+  // computed from a document with an unparseable §2 key is a finding computed from bytes of unknown
+  // meaning, and exit 1 there would assert a confidence the input does not support.
+  {
+    const d = handReport({
+      "r.json": { ...V, package: "app", analyzed: { count: 2, digest: "0" },
+                  functions: [{ fn: "app.writes", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] },
+                              { fn: "app.bad", inferred: ["Net"], direct: ["Net"], netClass: 1 }] },
+      "p.pol": "deny Fs\n",
+    });
+    const out = seedStale(path.join(d, "v.json"));
+    const r = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"), "--gate-json", out);
+    const doc = readDoc(out);
+    check("⟨0.24⟩ precedence BOUNDARY: a CORRUPTION refusal dominates even a firing rule (exit 2, refused, no violations key) — unlike an answerability refusal",
+          r.status === 2 && doc?.ok === false && doc?.refused === true && !("violations" in doc),
+          `exit=${r.status} doc=${JSON.stringify(doc)?.slice(0, 300)}`);
+  }
+
+  // ── ITEM 2: A REFUSAL MUST STILL WRITE A DOCUMENT, AND IT MUST NOT CARRY `violations` ───────────
+  // Every row seeds a GREEN document at the path first, because "wrote nothing" and "wrote a refusal"
+  // are indistinguishable on an empty directory — and the hazard is a wrapper re-reading LAST RUN's
+  // verdict, not a missing file. `1503368`: no cause is exempt, including an unreadable policy.
+  {
+    const d = handReport({
+      "r.json": { ...V, package: "app", analyzed: { count: 1, digest: "0" },
+                  functions: [{ fn: "app.calls", inferred: ["Net"], direct: ["Net"] }] },
+      "bad.json": "{ this is not json",
+      "scoped.pol": "deny Net[unknown-host] app\n",
+      "forbid.pol": "forbid app -> infra\n",
+      "allow.pol": "allow Exec in app git\n",
+      "typo.pol": "deny Unknown[dispatch,nativ] app\n",
+      "live.pol": "deny Net\n",
+    });
+    const bad = [];
+    const ROWS = [
+      ["an unanswerable scoped rule", "scoped.pol", "r.json"],
+      ["a whole-policy `forbid`", "forbid.pol", "r.json"],
+      ["a whole-policy `allow`", "allow.pol", "r.json"],
+      ["an unrecognised policy token", "typo.pol", "r.json"],
+      ["an unreadable policy", "nosuch.pol", "r.json"],
+      ["a report that did not load", "live.pol", "bad.json"],
+    ];
+    for (const [label, pol, rep] of ROWS) {
+      const out = seedStale(path.join(d, `ref.${pol}.${rep}.json`));
+      const r = gateCli("--report", path.join(d, rep), "--policy", path.join(d, pol), "--gate-json", out);
+      const doc = readDoc(out);
+      if (r.status !== 2) { bad.push(`${label}: exit ${r.status}, want 2`); continue; }
+      if (!doc) { bad.push(`${label}: no parseable document — the wrapper re-reads YESTERDAY'S verdict`); continue; }
+      if (doc.ok !== false) bad.push(`${label}: ok=${JSON.stringify(doc.ok)}, want false (a consumer keying only on \`ok\` must land on FAIL)`);
+      if (doc.refused !== true) bad.push(`${label}: refused=${JSON.stringify(doc.refused)}, want true`);
+      // ABSENT, not empty — and this is the whole assertion. `=== []` would pass on the fail-open shape:
+      // a refusal makes NO claim about violations, and an empty array is precisely the claim it cannot make.
+      if ("violations" in doc) bad.push(`${label}: carries a \`violations\` key (${JSON.stringify(doc.violations)}) — ABSENT, not empty`);
+      if (!doc.reason) bad.push(`${label}: no \`reason\``);
+    }
+    check(`⟨0.24⟩ refusal document: all ${ROWS.length} refusal causes OVERWRITE a stale green with ok:false + refused:true and NO \`violations\` key`,
+          bad.length === 0, bad.join("\n"));
+    // THE CONTROL, without which the row above passes on an engine that has stopped emitting the key at
+    // all: a real verdict still carries `violations`, and a clean one still carries it EMPTY.
+    const liveOut = path.join(d, "live.json");
+    const live = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "live.pol"), "--gate-json", liveOut);
+    const pureOut = path.join(d, "pure.json");
+    fs.writeFileSync(path.join(d, "pure.pol"), "deny Fs\n");
+    const pure = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "pure.pol"), "--gate-json", pureOut);
+    check("⟨0.24⟩ refusal document CONTROL: a real VERDICT still carries `violations` (fired: 1 record; clean: an empty array)",
+          live.status === 1 && (readDoc(liveOut)?.violations ?? []).length === 1
+            && pure.status === 0 && Array.isArray(readDoc(pureOut)?.violations) && readDoc(pureOut).violations.length === 0,
+          `live=${live.status} pure=${pure.status}`);
+    // A USAGE error is NOT a refusal: the command was never a gate invocation, so there is nothing to
+    // refuse and nothing a wrapper could be reading a verdict from. The stale document stays untouched.
+    const useOut = seedStale(path.join(d, "usage.json"));
+    const use = gateCli("--report", path.join(d, "r.json"), "--gate-json", useOut);
+    check("⟨0.24⟩ refusal document BOUNDARY: a USAGE error (no --policy) writes NO document — it was never a gate invocation",
+          use.status === 2 && fs.readFileSync(useOut, "utf8") === STALE + "\n", `exit=${use.status}`);
+  }
+
+  // ── ITEM 3: AN UNRECOGNISED VALUE TOKEN IS A POLICY ERROR — AND `parsepolicy` STILL REPORTS ─────
+  // The TYPO-BESIDE-VALID-TOKENS row comes FIRST in every list because it is the fail-open one and the
+  // one that will regress: measured before the fix, `deny Unknown[dispatch,nativ]` exited 0 (the rule
+  // NARROWED to `[dispatch]` and stopped gating native-caused holes while the gate looked armed), where
+  // the sole-unrecognised-token form exited 1 (the rule WIDENED to a bare `deny Unknown`). Two different
+  // wrong answers from two silent rewrites of the same one-line policy.
+  {
+    const d = project({
+      "polhome/.candor/config": "unknown-alias corp = dispatch,nativ\n",
+      "src/app.ts": "export function dyn(o: any, k: string) { return o[k](); }\n",
+    });
+    const rep = handReport({
+      "r.json": { ...V, package: "app", analyzed: { count: 1, digest: "0" },
+                  functions: [{ fn: "app.dyn", inferred: ["Unknown", "Net"], direct: ["Unknown", "Net"],
+                                unknownWhy: ["native:ffi"], hosts: ["x.example"], netClass: ["unknown-host"] }] },
+    });
+    const POLICIES = [
+      ["a typo BESIDE valid reason-class tokens (NARROWS — the fail-open)", "deny Unknown[dispatch,nativ] app\n"],
+      ["a typo BESIDE valid Net destination-class tokens (NARROWS)", "deny Net[known-partner,unkown-host] app\n"],
+      ["the SOLE reason-class token unrecognised (WIDENS)", "deny Unknown[corp2] app\n"],
+      ["the SOLE Net destination-class token unrecognised (WIDENS)", "deny Net[unkown-host] app\n"],
+    ];
+    const bad = [];
+    for (const [label, text] of POLICIES) {
+      const pol = path.join(d, "p.pol");
+      fs.writeFileSync(pol, text);
+      // THE PAIR (`6929dce`): the ENFORCER refuses, the WITNESS reports. Both halves are asserted for
+      // every policy, because moving the error out of the parser is exactly the change that re-opens the
+      // fail-open, and leaving it in the parser is what took the four-way differential offline.
+      const g = gateCli("--report", path.join(rep, "r.json"), "--policy", pol);
+      if (g.status !== 2) bad.push(`${label}: gate --report exit ${g.status}, want 2`);
+      if (!/nativ|unkown-host|corp2/.test(g.stderr)) bad.push(`${label}: the gate did not NAME the offending token`);
+      const s = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", pol], { encoding: "utf8" });
+      if (s.status !== 2) bad.push(`${label}: scan --policy exit ${s.status}, want 2`);
+      const pp = spawnSync("node", [path.join(HERE, "query.mjs"), "parsepolicy", pol], { encoding: "utf8" });
+      if (pp.status !== 0) bad.push(`${label}: parsepolicy exit ${pp.status}, want 0 — the WITNESS must not refuse`);
+      const errs = (() => { try { return JSON.parse(pp.stdout).errors ?? []; } catch { return null; } })();
+      if (!errs || !errs.length) bad.push(`${label}: parsepolicy reported no \`errors\` — a diff that cannot tell "dropped" from "rejected" cannot pin this rung`);
+    }
+    check(`⟨0.24⟩ policy error: all ${POLICIES.length} unrecognised-token forms REFUSE on both gate routes (exit 2) and are REPORTED by parsepolicy (exit 0)`,
+          bad.length === 0, bad.join("\n"));
+    // THE THIRD VOCABULARY (`be0b9a9`): the typo is in the alias DEFINITION rather than in the policy,
+    // and it fails open identically — `= dispatch,nativ` silently becomes `{dispatch}`, so the rule stops
+    // gating native-caused holes while the policy mentions no typo at all.
+    const apol = path.join(d, "polhome", "a.pol");
+    fs.writeFileSync(apol, "deny Unknown[corp] app\n");
+    const ag = gateCli("--report", path.join(rep, "r.json"), "--policy", apol);
+    check("⟨0.24⟩ policy error: a typo in an alias DEFINITION (`unknown-alias corp = dispatch,nativ`) is a policy error too — the vocabulary the policy is written against",
+          ag.status === 2 && /nativ/.test(ag.stderr), `exit=${ag.status} ${ag.stderr.slice(0, 200)}`);
+    // THE CONTROL: correctly spelled, the very same rules are honoured. Without it every row above passes
+    // on an engine that has started refusing every policy.
+    fs.writeFileSync(path.join(d, "polhome", ".candor", "config"), "unknown-alias corp = dispatch,native\n");
+    const ok1 = gateCli("--report", path.join(rep, "r.json"), "--policy", apol);
+    fs.writeFileSync(path.join(d, "ok.pol"), "deny Unknown[dispatch,native] app\n");
+    const ok2 = gateCli("--report", path.join(rep, "r.json"), "--policy", path.join(d, "ok.pol"));
+    check("⟨0.24⟩ policy error CONTROL: the SAME rules spelled correctly are honoured and FIRE (exit 1) — via the alias and directly",
+          ok1.status === 1 && ok2.status === 1, `alias=${ok1.status} direct=${ok2.status}`);
+  }
+
+  // ── ITEM 4: POLICY VOCABULARY ANCHORS AT THE POLICY FILE, ON BOTH ROUTES, AND IS DISCLOSED ──────
+  // The policy is filed OUTSIDE the scan target — which every pre-existing row in this file fails to do,
+  // and is exactly why the anchor split went unseen in four engines. Before the fix the gate verb
+  // anchored at the policy's directory and the scan route at the target, so the same rule expanded
+  // differently and §3.1's byte-equality MUST was breakable by a file that is neither report nor policy.
+  {
+    const d = project({
+      "polhome/my.policy": "deny Unknown[corp] src\n",
+      "proj/src/app.ts": "export function dyn(o: any, k: string) { return o[k](); }\n",
+    });
+    const proj = path.join(d, "proj"), pol = path.join(d, "polhome", "my.policy");
+    const cfg = path.join(d, "polhome", ".candor", "config");
+    fs.mkdirSync(path.dirname(cfg), { recursive: true });
+    const both = (label, aliasDef, wantExit) => {
+      fs.writeFileSync(cfg, aliasDef);
+      const a = path.join(d, `${label}.scan.json`), b = path.join(d, `${label}.gate.json`);
+      for (const f of [a, b]) if (fs.existsSync(f)) fs.rmSync(f);
+      const s = spawnSync("node", [path.join(HERE, "scan.mjs"), proj, "--policy", pol, "--gate-json", a], { encoding: "utf8" });
+      const g = gateCli("--report", path.join(proj, ".candor", "report.json"), "--policy", pol, "--gate-json", b);
+      const out = [];
+      if (!fs.existsSync(a) || !fs.existsSync(b)) out.push(`${label}: a document was not written (scan ${s.status}, gate ${g.status})`);
+      else if (!fs.readFileSync(a).equals(fs.readFileSync(b)))
+        out.push(`${label}: NOT byte-equal\n  scan ${fs.readFileSync(a, "utf8").slice(0, 300)}\n  gate ${fs.readFileSync(b, "utf8").slice(0, 300)}`);
+      if (s.status !== g.status) out.push(`${label}: exit ${s.status} (scan) vs ${g.status} (gate)`);
+      if (s.status !== wantExit) out.push(`${label}: exit ${s.status}, want ${wantExit}`);
+      return { out, doc: readDoc(a) };
+    };
+    // The entry's Unknown is `callback:`-caused ⇒ class `indirect`. BOTH arms are required: one alone
+    // cannot tell "the alias resolved" from "the alias was ignored and the rule widened to bare Unknown",
+    // because a widened rule ALSO fires. The tolerating arm is the discrimination control.
+    const fire = both("firing", "unknown-alias corp = indirect\n", 1);
+    const tol = both("tolerating", "unknown-alias corp = reflect\n", 0);
+    check("⟨0.24⟩ vocabulary anchor: with the policy filed OUTSIDE the scan target, both routes agree byte-for-byte — FIRING alias (exit 1) and TOLERATING alias (exit 0)",
+          fire.out.length === 0 && tol.out.length === 0, [...fire.out, ...tol.out].join("\n"));
+    // AND THE AMBIENCE IS DISCLOSED. Discovery walks parent directories and CANDOR_CONFIG overrides it
+    // outright, so a file the operator never named can decide the verdict. The OBJECT form is required
+    // (`b4e9155`): naming the source without the content leaves the reader knowing they were affected
+    // and not how.
+    const pv = fire.doc?.policyVocabulary;
+    check("⟨0.24⟩ vocabulary anchor: the verdict NAMES the config that supplied the vocabulary, with the alias DEFINITION (`{config, aliases:{name:[class…]}}`), not just its name",
+          pv?.config === cfg && pv?.aliases && !Array.isArray(pv.aliases)
+            && JSON.stringify(pv.aliases.corp) === JSON.stringify(["indirect"]),
+          JSON.stringify(pv));
+    // Recorded at the point of USE, never from the alias map: a config defining ten aliases the policy
+    // never mentions changed nothing, and naming it would train the reader to ignore the field.
+    fs.writeFileSync(cfg, "unknown-alias corp = indirect\nunknown-alias unused = reflect\n");
+    fs.writeFileSync(path.join(d, "noalias.pol"), "deny Fs src\n");
+    const na = path.join(d, "noalias.json");
+    if (fs.existsSync(na)) fs.rmSync(na);
+    spawnSync("node", [path.join(HERE, "scan.mjs"), proj, "--policy", path.join(d, "noalias.pol"), "--gate-json", na], { encoding: "utf8" });
+    check("⟨0.24⟩ vocabulary anchor: a policy that references NO alias discloses nothing (the block is omitted, so the verdict stays byte-identical to pre-⟨0.24⟩)",
+          readDoc(na) && !("policyVocabulary" in readDoc(na)), JSON.stringify(readDoc(na))?.slice(0, 200));
+  }
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
