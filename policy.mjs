@@ -181,11 +181,32 @@ const ASCII_WS_TRIM = /^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g;
 export const POLICY_ERROR_KINDS = ["reason-class/alias", "Net destination-class", "effect-name", "rule-kind"];
 // ⟨0.24⟩ FATAL vs DISCLOSED-ONLY. `errors` is ONE list because §3.1 pins one list, but it carries two
 // populations and only the verdict-bearing call sites need the distinction, so it is derived from `kind`
-// rather than stored: an unrecognised VALUE TOKEN (§6.2 `382a7e0`/`be0b9a9`) refuses, a malformed rule FORM
-// is reported and dropped. `195d45a` is explicit that reporting a dropped line is "additive to the witness
-// and silent about the gate" — `deny Net Exex app` cannot be told from a legitimate scope by the parser, so
-// widening the refusal to every dropped line would be a grammar change, not a token change.
-const FATAL_ERROR_KINDS = new Set(["reason-class/alias", "Net destination-class"]);
+// rather than stored.
+//
+// ⟨0.24⟩ `effect-name` IS FATAL (SPEC §6.2 `1e1748a`) — a typo'd EFFECT NAME deleted the rule, silently,
+// four-way green. Measured on all four engines:
+//
+//     deny Nett app             ->  rust 0  ts 0  java 0  swift 0    the rule is DELETED, the gate is green
+//     allow Nett host.example   ->  rust 0  ts 0  java 0  swift 0    the certification silently vanishes
+//
+// The operator reads an armed `deny Net`; there is no gate at all. This engine already called a dropped
+// rule the LIMIT CASE of silently rewriting the policy — a BIGGER rewrite than a narrowed filter — and the
+// bigger one was warning-only while the smaller one was exit 2. The grammar defence for leaving it open is
+// real but narrower than it was taken to be, and the two conditions that escape it are exactly the ones
+// that raise this kind:
+//   · `allow`'s effect position is a FIXED, CLOSED set with no scope reading available, so a token outside
+//     it is unambiguously a typo (and `allow Clock …` is the same shape: an effect carrying no literal
+//     surface a value list could restrict);
+//   · a `deny` whose effect list ends up EMPTY after scope-splitting is malformed under either reading —
+//     there is no legitimate policy it could be — so refusing loses nothing.
+// What stays open, deliberately, is the genuinely ambiguous middle: a `deny` with at least one valid effect
+// and an unrecognised trailing token that MIGHT be a scope (`deny Net Exex app`). `parsepolicy` reports it
+// either way, so the operator can always see it.
+//
+// `rule-kind` stays DISCLOSED-ONLY: `195d45a` is explicit that reporting a dropped line is "additive to the
+// witness and silent about the gate", and a malformed `forbid` or an unknown rule kind has no closed
+// vocabulary to be measured against — that would be a grammar change, not a token change.
+const FATAL_ERROR_KINDS = new Set(["reason-class/alias", "Net destination-class", "effect-name"]);
 export const fatalPolicyErrors = (errors) => (errors ?? []).filter((e) => FATAL_ERROR_KINDS.has(e.kind));
 // The accepted sets, as ARRAYS (SPEC §3.1 `901f14d`: `accepted` is an array of tokens, not prose — a prose
 // string is unparseable by the consumer the field exists for).
@@ -332,11 +353,19 @@ export function policyErrorText(policyFile, errors) {
   const head = `candor-ts: policy ${policyFile} cannot be honoured AS WRITTEN`;
   const body = errors.map((e) =>
     `  unknown ${e.kind} \`${e.token}\` (known: ${e.accepted.join(", ")})\n    in: ${e.rule}`).join("\n");
-  return `${head} — ${errors.length} unrecognised value token(s):\n${body}\n`
-    + "  Refusing (exit 2), policy NOT evaluated: dropping the token would rewrite the policy into a "
-    + "DIFFERENT one. If it is the list's only token the rule WIDENS to the bare effect; if it sits beside "
-    + "valid tokens the rule NARROWS and stops gating what you spelled, while the gate still looks armed.\n"
-    + "  Fix the spelling, or define it in `.candor/config` as `unknown-alias <name> = <class,…>`.";
+  // ⟨0.24⟩ the tail is written for the population actually present. A VALUE-token typo rewrites a rule;
+  // an EFFECT-name typo DELETES it — different harms, and the alias remedy applies only to the first.
+  const dropped = errors.filter((e) => e.kind === "effect-name");
+  const tail = dropped.length === errors.length
+    ? "  Refusing (exit 2), policy NOT evaluated: the rule names no effect this engine knows, so honouring "
+      + "the policy as written would mean DROPPING the line — and the policy that then runs is the one "
+      + "without it, which is a bigger rewrite than a narrowed filter, not a smaller one.\n"
+      + "  Fix the spelling. (`allow` takes only Net/Llm hosts, Exec commands, Fs paths or Db tables.)"
+    : "  Refusing (exit 2), policy NOT evaluated: dropping the token would rewrite the policy into a "
+      + "DIFFERENT one. If it is the list's only token the rule WIDENS to the bare effect; if it sits beside "
+      + "valid tokens the rule NARROWS and stops gating what you spelled, while the gate still looks armed.\n"
+      + "  Fix the spelling, or define it in `.candor/config` as `unknown-alias <name> = <class,…>`.";
+  return `${head} — ${errors.length} line(s) it cannot honour:\n${body}\n` + tail;
 }
 
 // ⟨0.24⟩ THE `unevaluated` DISCLOSURE FOR A POLICY THIS ENGINE CANNOT HONOUR AS WRITTEN — one entry per

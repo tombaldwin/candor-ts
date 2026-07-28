@@ -8413,5 +8413,60 @@ export function all(db: DatabaseSync, o: any) {
         JSON.stringify(cOut)?.slice(0, 200));
 }
 
+// ── ⟨0.24⟩ A TYPO'D EFFECT NAME DELETED THE RULE, SILENTLY, FOUR-WAY GREEN (SPEC §6.2 `1e1748a`) ────
+// Measured on all four engines:
+//
+//     deny Nett app             ->  rust 0  ts 0  java 0  swift 0    the rule is DELETED, the gate is green
+//     allow Nett host.example   ->  rust 0  ts 0  java 0  swift 0    the certification silently vanishes
+//
+// The operator reads an armed `deny Net` and there is no gate at all. This document already calls a dropped
+// rule the LIMIT CASE of silently rewriting the policy — a bigger rewrite than a narrowed filter — yet the
+// bigger one was warning-only while the smaller one was exit 2. The grammar defence is real but narrower
+// than it was taken to be: `allow`'s effect position is a CLOSED set with no scope reading available, and a
+// `deny` whose effect list ends up EMPTY is malformed under either reading. Both are exit 2.
+//
+// THE ROW THAT MAKES THE OTHERS MEAN SOMETHING is the ambiguous middle: `deny Net Exex app` has a valid
+// effect and a trailing token that MIGHT be a scope, so it stays permissive by design. Without it this
+// block would pass on an engine that had simply started refusing any unfamiliar token.
+{
+  const d = project({ "src/a.ts": "export function f(): void {}\n" });
+  const rep = path.join(d, ".candor", "report.json");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8" });
+  const pol = (name, text) => { const p = path.join(d, name); fs.writeFileSync(p, text); return p; };
+  const denyTypo = pol("denytypo.pol", "deny Nett app\n");
+  const allowTypo = pol("allowtypo.pol", "allow Nett host.example\n");
+  const middle = pol("middle.pol", "deny Net Exex app\n");
+  const good = pol("good.pol", "deny Net app\n");
+  // The `allow` control runs on the SCAN route only: `gate --report` cannot evaluate an `allow` at all
+  // (the AS-EFF-008 surface-completeness marker does not ride the report wire), so it refuses there for a
+  // reason that has nothing to do with this rung.
+  const goodAllow = pol("goodallow.pol", "allow Fs in app /etc/app\n");
+  const scan = (p) => spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", p], { encoding: "utf8" });
+  const gate = (p) => gateCli("--report", rep, "--policy", p);
+  const pp = (p) => spawnSync("node", [path.join(HERE, "query.mjs"), "parsepolicy", p], { encoding: "utf8" });
+  const sDeny = scan(denyTypo), gDeny = gate(denyTypo);
+  check("⟨0.24⟩ effect-name: `deny Nett app` — a `deny` whose effect list is EMPTY after scope-splitting is a POLICY ERROR on BOTH gate routes (exit 2), never a silently deleted rule",
+        sDeny.status === 2 && gDeny.status === 2 && /Nett/.test(sDeny.stderr) && /Nett/.test(gDeny.stderr),
+        `scan=${sDeny.status} gate=${gDeny.status} ${sDeny.stderr.slice(0, 200)}`);
+  const sAllow = scan(allowTypo), gAllow = gate(allowTypo);
+  check("⟨0.24⟩ effect-name: `allow Nett host.example` — `allow`'s effect position is a CLOSED set with no scope reading, so the typo is a POLICY ERROR on both routes (exit 2)",
+        sAllow.status === 2 && gAllow.status === 2 && /Nett/.test(sAllow.stderr) && /Nett/.test(gAllow.stderr),
+        `scan=${sAllow.status} gate=${gAllow.status} ${sAllow.stderr.slice(0, 200)}`);
+  const sMid = scan(middle), gMid = gate(middle);
+  check("⟨0.24⟩ effect-name CONTROL — the AMBIGUOUS MIDDLE stays permissive by design: `deny Net Exex app` has a valid effect and a trailing token that might be a scope, so it is NOT refused (exit 0)",
+        sMid.status === 0 && gMid.status === 0, `scan=${sMid.status} gate=${gMid.status}`);
+  const sGood = scan(good), gGood = gate(good), sGoodAllow = scan(goodAllow);
+  check("⟨0.24⟩ effect-name CONTROL — correctly spelled `deny Net` / `allow Fs` still evaluate normally (the refusal is not now firing on every policy)",
+        sGood.status === 0 && gGood.status === 0 && sGoodAllow.status === 0,
+        `scan=${sGood.status} gate=${gGood.status} allow=${sGoodAllow.status} ${sGood.stderr.slice(0, 160)}`);
+  // THE WITNESS STILL MUST NOT REFUSE (`6929dce`): making a token a policy error in the PARSER is what
+  // took the four-way differential offline once already.
+  const both = [pp(denyTypo), pp(allowTypo)];
+  check("⟨0.24⟩ effect-name: `parsepolicy` still REPORTS both forms at exit 0 — the enforcer refuses, the witness explains",
+        both.every((r) => r.status === 0)
+        && both.every((r) => { try { return (JSON.parse(r.stdout).errors ?? []).some((e) => e.kind === "effect-name" && e.token === "Nett"); } catch { return false; } }),
+        both.map((r) => `${r.status} ${r.stdout.slice(0, 80)}`).join(" | "));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
