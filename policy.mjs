@@ -51,6 +51,28 @@ export function reasonClass(why) {
 // answers a different question.
 export function resolveReasonClasses(functions, callgraph = {}) {
   const acc = new Map();
+  // ⟨0.24⟩ THE REACH IS THE REPORT'S OWN, not the sidecar's. §2 embeds the call edges per entry (`calls`)
+  // precisely so a consumer without the sidecar can reconstruct the graph, and rust (`reason_class_acc`),
+  // java (`gateInputFromReport`: `edges…addAll(e.calls())`) and swift all resolve the reason classes over
+  // THAT field. candor-ts read `<prefix>.callgraph.json` and nothing else, so a report whose sidecar was
+  // deleted / never written / left behind in another workspace silently degraded to a DIRECT-ONLY
+  // resolution — every inherited hole's class set came back empty, and the empty set then matched every
+  // filter (see reasonClassesMatch). Two independent faults compounding into one wrong answer: `--class
+  // unresolved` selected `b_reasoned_only`, whose Unknown its callee classified `dispatch`, which is the
+  // literal outcome §6.2 requirement 3 forbids. Seeding from `calls` also makes the answer BYTE-IDENTICAL
+  // with and without the sidecar, which is the property the other three engines have and this one lacked.
+  // UNION rather than either-or: the sidecar can carry edges an older report's entries don't, and more
+  // edges only ever ADD classes — the fail-closed direction for the gate that shares this resolution.
+  const edges = new Map();
+  const addEdge = (caller, callee) => {
+    let s = edges.get(caller);
+    if (!s) { s = new Set(); edges.set(caller, s); }
+    s.add(callee);
+  };
+  for (const f of functions ?? []) for (const c of f.calls ?? []) addEdge(f.fn, c);
+  for (const [caller, callees] of Object.entries(callgraph ?? {})) {
+    for (const c of Array.isArray(callees) ? callees : []) addEdge(caller, c);
+  }
   for (const f of functions ?? []) {
     const cs = new Set((f.unknownWhy ?? []).map(reasonClass));
     // ⟨0.24⟩ CONTRIBUTES, not "is treated as". A DIRECT Unknown the function did not name ADDS
@@ -72,7 +94,7 @@ export function resolveReasonClasses(functions, callgraph = {}) {
   // Unknown from a reflect-caused callee still fires (matches java/rust reasonClassAcc).
   for (let changed = true; changed; ) {
     changed = false;
-    for (const [caller, callees] of Object.entries(callgraph ?? {})) {
+    for (const [caller, callees] of edges) {
       for (const callee of callees) {
         const cc = acc.get(callee);
         if (!cc) continue;
@@ -87,14 +109,31 @@ export function resolveReasonClasses(functions, callgraph = {}) {
 
 /** ⟨0.24⟩ The class MATCH, shared by the gate and `unverified --class`. `classes` = a fn's resolved class
  *  set (resolveReasonClasses); `filter` = the rule's / the flag's class tokens (an array or a Set). A null
- *  filter means no narrowing. FAILS CLOSED: a function whose class set could not be resolved AT ALL is
- *  KEPT by every filter, never dropped — the failure this replaces read "no matching reason ⇒ exclude", so
- *  an unclassifiable hole was excluded by every filter INCLUDING one naming its own class. Fail-closed can
- *  only ever ADD a violation / keep a disclosure, never remove one. */
+ *  filter means no narrowing.
+ *
+ *  THE UNCLASSIFIABLE CASE PROJECTS TO `{unresolved}` — it is not "kept by every filter". §6.2: a hole
+ *  nothing classified CONTRIBUTES `unresolved`, and `unresolved` is one class among six, so the hole is
+ *  kept by `unresolved` and by `dynamic` (which names every genuine class) and dropped by `native`,
+ *  `reflect`, `dispatch`, `indirect` and `setup` — the spec's own discrimination control says post-repair
+ *  `--class native` selects 0. Byte-aligns with rust `reason_class_matches` (its None/empty arms both read
+ *  `want.contains(Unresolved)`) and java `reasonClassesOf` (`Set.of(UNRESOLVED)`).
+ *
+ *  A blanket `return true` here was the mirror of the fail-open it replaced, and worse on two counts.
+ *  (1) `setup`: `dynamic` deliberately EXCLUDES `setup` as non-genuine, so an entry matching `--class
+ *  setup` because nothing classified it is doubly wrong. (2) It re-opened requirement 3 through the MATCH
+ *  arm rather than the contribution: an inherited `Unknown` its callee classified `dispatch` was selected
+ *  by `--class unresolved` whenever the reach could not be walked, which is the literal outcome §6.2
+ *  forbids — and the requirement-3 gating in resolveReasonClasses, which is correct, cannot prevent it
+ *  because the empty set never reaches that code. Measured cross-engine on identical bytes before the
+ *  repair: `--class native` on an orphan-callee report gave rust/java/swift `[]` and ts `['app.orphan']`.
+ *
+ *  This is still the fail-CLOSED direction for the case that made a blanket keep tempting: a hole no
+ *  filter would name is kept by the two filters an adopter narrows THROUGH (`unresolved`, `dynamic`),
+ *  never dropped by all six. What it refuses is asserting a class the engine does not have evidence for. */
 export function reasonClassesMatch(classes, filter) {
   if (!filter) return true;
-  if (!classes || classes.size === 0) return true;
   const has = filter instanceof Set ? (c) => filter.has(c) : (c) => filter.includes(c);
+  if (!classes || classes.size === 0) return has("unresolved");
   for (const c of classes) if (has(c)) return true;
   return false;
 }

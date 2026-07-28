@@ -664,12 +664,16 @@ test("unverified --class ⟨0.24⟩: resolves TRANSITIVELY, fails CLOSED, and st
   assert.deepEqual(U("native"), []);
   assert.deepEqual(U("reflect"), ["app.reflectOnly"]);
   assert.deepEqual(U("dispatch"), ["app.inherits", "app.src"]);
-  // (4) FAIL CLOSED: a hole whose class set cannot be resolved AT ALL (inherited from beyond this
-  // report/graph) is KEPT by every filter, never dropped.
+  // (4) A hole whose class set cannot be resolved AT ALL (inherited from beyond this report/graph)
+  // PROJECTS TO `{unresolved}` — §6.2's "CONTRIBUTES `unresolved`", which is NOT "kept by every filter".
+  // It is kept by the two filters an adopter narrows THROUGH and dropped by the four that would name a
+  // class the engine has no evidence for; `setup` especially, since `dynamic` excludes it as non-genuine.
   const orphan = [{ fn: "app.orphan", inferred: ["Unknown"], direct: [] }];
-  for (const c of ["native", "reflect", "unresolved", "dynamic"])
-    assert.deepEqual(unverified(orphan, parsePolicy("pure app"), scopeMatches, c, {}).unverified.map((h) => h.fn),
-      ["app.orphan"], `an unclassifiable hole survives --class ${c}`);
+  const orphanU = (c) => unverified(orphan, parsePolicy("pure app"), scopeMatches, c, {}).unverified.map((h) => h.fn);
+  for (const c of ["unresolved", "dynamic", "*"])
+    assert.deepEqual(orphanU(c), ["app.orphan"], `an unclassifiable hole is kept by --class ${c}`);
+  for (const c of ["native", "reflect", "dispatch", "indirect", "setup"])
+    assert.deepEqual(orphanU(c), [], `an unclassifiable hole must NOT be asserted into --class ${c}`);
   // (5) …and `blindspots` shares the FLAG, not this behaviour (§6.2 req 0). It is the SOURCE view, so the
   // inherited unit is not an entry at all and the direct-only read is CORRECT there. Measured on three
   // real targets: `blindspots --class dynamic` already excluded nothing (237/190/55, unchanged).
@@ -751,6 +755,54 @@ test("resolveReasonClasses ⟨0.24⟩: CONTRIBUTES at the node, never keyed on t
   assert.equal(denied("app.oneReasonless"), true);
   assert.equal(denied("app.both"), true, "adding a call must never turn a red verdict green");
   assert.equal(denied("app.oneReasoned"), false, "…and a classified hole is still out of scope");
+});
+// ⟨0.24⟩ THE TEST THE PREVIOUS ROUND COULD NOT WRITE. The control above it (`app.mystery`) carries
+// `direct: ["Unknown"]`, so it exercises the CONTRIBUTION arm — the class set is `{unresolved}` before the
+// match is ever consulted, and the EMPTY-set arm is never constructed. Everything about the empty set was
+// therefore untested, and it read `return true`: an unclassifiable hole matched EVERY filter, including
+// `native` and `setup`. Two ways to build the empty set, both from real reports, both run four-way by an
+// adversarial reviewer on identical bytes:
+//   (a) an ORPHAN CALLEE — the Unknown is inherited from a fn absent from the report;
+//   (b) NO CALLGRAPH SIDECAR — the reach could not be walked, so even a correctly-classified inherited
+//       hole came back empty and `--class unresolved` selected it, the literal outcome §6.2 req 3 forbids.
+// Measured before the repair, `--class native` on (a): rust [] java [] swift [] ts ['app.orphan'].
+test("unverified --class ⟨0.24⟩: the EMPTY class set projects to `unresolved`, and the reach is the REPORT's", () => {
+  // A `dispatch:`-classified source, one caller that inherits from it, one caller whose callee is not in
+  // the report at all. The §2 `calls` field is present — it is the reach rust/java/swift resolve over.
+  const fns = [
+    { fn: "app.src", inferred: ["Unknown"], direct: ["Unknown"], unknownWhy: ["dispatch:app.Base.run"], calls: [] },
+    { fn: "app.inherits", inferred: ["Unknown"], direct: [], calls: ["app.src"] },
+    { fn: "app.orphan", inferred: ["Unknown"], direct: [], calls: ["app.gone"] },
+  ];
+  const sidecar = { "app.src": [], "app.inherits": ["app.src"], "app.orphan": ["app.gone"] };
+  const U = (c, cg) => unverified(fns, parsePolicy("pure app"), scopeMatches, c, cg).unverified.map((h) => h.fn).sort();
+  for (const [what, cg] of [["with the sidecar", sidecar], ["with NO sidecar", {}]]) {
+    // (1) the inherited hole is classified by its callee — and NOT swept into `unresolved`/`native`.
+    assert.deepEqual(U("dispatch", cg), ["app.inherits", "app.src"], `dispatch, ${what}`);
+    assert.deepEqual(U("unresolved", cg), ["app.orphan"], `unresolved, ${what}`);
+    assert.deepEqual(U("native", cg), [], `native, ${what}`);
+    // (2) `setup` is the sharpest form: `dynamic` EXCLUDES it, so a hole matching it because nothing
+    // classified it is doubly wrong.
+    assert.deepEqual(U("setup", cg), [], `setup, ${what}`);
+    // (3) the projection is `{unresolved}`, so the alias that names every genuine class still excludes
+    // nothing — the §6.2 diagnostic every engine carries.
+    assert.deepEqual(U("dynamic", cg), U(null, cg), `--class dynamic excludes nothing, ${what}`);
+  }
+  // (4) BYTE-IDENTICAL with and without the sidecar — the property rust/java/swift have because they
+  // resolve over the entries' own `calls`. candor-ts read `<prefix>.callgraph.json` and nothing else, so
+  // a deleted/never-written sidecar silently degraded to a direct-only resolution and (1) collapsed.
+  for (const c of [null, "dispatch", "unresolved", "native", "setup", "dynamic", "*"])
+    assert.deepEqual(U(c, sidecar), U(c, {}), `--class ${c} must not depend on the sidecar`);
+  // (5) THE GATE ARM, which shares this match: `deny E Unknown[reflect]` must not fire on a function
+  // whose class set is empty. Reachable in the shipped product — the MCP `candor_gate` tool and the LSP
+  // both run evaluatePolicy over a LOADED report, which may be foreign or hand-authored. Verified by a
+  // run over the real MCP stdio transport, not by inspection.
+  const fires = (rule) => evaluatePolicy(parsePolicy(rule), fns, {}).map((v) => v.fn).sort();
+  assert.deepEqual(fires("deny Unknown[reflect] app"), [], "an empty class set is not a reflect hole");
+  assert.deepEqual(fires("deny Unknown[setup] app"), [], "…nor a setup one");
+  assert.deepEqual(fires("deny Unknown[unresolved] app"), ["app.orphan"], "…it IS an unresolved one");
+  assert.deepEqual(fires("deny Unknown[dynamic] app"), ["app.inherits", "app.orphan", "app.src"],
+    "…and `dynamic` still catches every genuine hole — the fail-closed direction is intact");
 });
 test("fix-gate: no crossing → ok:true, empty remedies", () => {
   const r = fixGate(ofCg, ofFns, parsePolicy("deny Net nonesuch"), scopeMatches);

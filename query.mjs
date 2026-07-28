@@ -932,10 +932,19 @@ switch (cmd) {
     catch { console.error(`candor: policy ${policyFile} could not be read`); process.exit(2); }
     const uci = args.indexOf("--class");   // ⟨0.20⟩ drill-down by reason class
     // ⟨0.24⟩ the callgraph rides along: `--class` resolves the reason class TRANSITIVELY, over the same
-    // reach the gate uses (SPEC §6.2). Without the sidecar the resolution degrades to direct-only — which
-    // is why the match FAILS CLOSED, so a hole it cannot classify is still listed rather than dropped.
-    const r = coreUnverified(loadReportOrDie(prefix), parsePolicy(ptext), scopeMatches,
-                             uci >= 0 ? args[uci + 1] : null, uci >= 0 ? loadCallgraph(prefix) : {});
+    // reach the gate uses (SPEC §6.2). The sidecar is no longer the ONLY reach — resolveReasonClasses
+    // unions it with the entries' own §2 `calls` field (what rust/java/swift resolve over), so the answer
+    // is byte-identical with and without it. What remains reportable is a report that carries NEITHER:
+    // then the resolution really is direct-only, every inherited hole reads `unresolved`, and the reader
+    // deserves to know that rather than be told a class the engine could not walk to. Disclosed on the
+    // same channel a CORRUPT sidecar already discloses on (loadCallgraph) — an ABSENT one used to say
+    // nothing at all, which is exactly what made the degradation invisible for a whole release.
+    const ufns = loadReportOrDie(prefix);
+    const ucg = uci >= 0 ? loadCallgraph(prefix) : {};
+    if (uci >= 0 && Object.keys(ucg).length === 0 && !ucg.partial && !ufns.some((e) => (e.calls ?? []).length))
+      console.error(`candor-ts: no call-graph sidecar for '${prefix}' and no \`calls\` edges in the report — \`--class\` resolved each hole's reason class from its OWN \`unknownWhy\` only; a hole whose Unknown is INHERITED reads \`unresolved\` here (re-run: candor-ts <src> --out ${prefix})`);
+    const r = coreUnverified(ufns, parsePolicy(ptext), scopeMatches,
+                             uci >= 0 ? args[uci + 1] : null, ucg);
     emit(r);
     process.exit(strict && !r.ok ? 1 : 0);
     break; // unreachable
