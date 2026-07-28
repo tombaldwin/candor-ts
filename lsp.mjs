@@ -45,7 +45,7 @@ import { createRequire } from "node:module";
 import nodePath from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as Q from "./query-core.mjs";
-import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, resolveReasonClasses } from "./policy.mjs";
+import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, resolveReasonClasses, fatalPolicyErrors } from "./policy.mjs";
 
 // Version: from the sibling package.json when running inside the npm package; a single-file BUNDLE of
 // this server (the IDE-plugin embedding) has no sibling package.json — fall back rather than crash.
@@ -317,8 +317,11 @@ function activePolicyParsed(text) {
   const aliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(activePolicyPath, rootPath || process.cwd())), errs);
   const pol = parsePolicy(text, aliases);
   errs.push(...pol.errors);
-  if (!errs.length) return pol;
-  warnOnce(`candor-lsp: ${policyErrorText(activePolicyPath ?? "(policy)", errs)}\n  No gate diagnostics are produced from it — their ABSENCE here is the refusal, not an all-clear.`);
+  // ⟨0.24⟩ FATAL only: `errors` also carries every LINE the parser dropped whole (SPEC §3.1
+  // `195d45a`) — additive to the `parsepolicy` witness, deliberately silent about the gate.
+  const fatal = fatalPolicyErrors(errs);
+  if (!fatal.length) return pol;
+  warnOnce(`candor-lsp: ${policyErrorText(activePolicyPath ?? "(policy)", fatal)}\n  No gate diagnostics are produced from it — their ABSENCE here is the refusal, not an all-clear.`);
   return null;
 }
 function diagnosticsFor(docPath) {

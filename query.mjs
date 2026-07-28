@@ -25,7 +25,8 @@ import { fileURLToPath } from "node:url";
 
 import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, discoverConfigText,
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
-         policyVocabularyAnchor, policyErrorText, policyErrorUnevaluated, policyUnreadable, refusalVerdict,
+         policyVocabularyAnchor, policyErrorText, policyErrorUnevaluated, policyUnreadable,
+         fatalPolicyErrors, refusalVerdict,
          unanswerableScoped } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
@@ -463,7 +464,10 @@ function loadPolicyOrDie(policyFile, text) {
   const aliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(policyFile, process.cwd())), errs);
   const pol = parsePolicy(text, aliases);
   errs.push(...pol.errors);
-  if (errs.length) { console.error(policyErrorText(policyFile, errs)); process.exit(2); }
+  // ⟨0.24⟩ FATAL only: `errors` also carries every LINE the parser dropped whole (SPEC §3.1
+  // `195d45a`) — additive to the `parsepolicy` witness, deliberately silent about the gate.
+  const fatal = fatalPolicyErrors(errs);
+  if (fatal.length) { console.error(policyErrorText(policyFile, fatal)); process.exit(2); }
   return pol;
 }
 
@@ -1109,13 +1113,14 @@ switch (cmd) {
     const gerrors = [];
     const gpol = parsePolicy(gtext, parseUnknownAliases(discoverConfigText(gcfgDir), gerrors));
     gerrors.push(...gpol.errors);
+    const gfatal = fatalPolicyErrors(gerrors);   // ⟨0.24⟩ see loadPolicyOrDie: dropped LINES report, tokens refuse
     // ⟨0.24⟩ SPEC §6.2 (`382a7e0` + `be0b9a9`): a policy that cannot be honoured AS WRITTEN is a POLICY
     // ERROR, not a rule to silently rewrite — exit 2, the unreadable-policy posture, before any evaluation.
     // ⟨0.24⟩ …and the refusal DISCLOSES which lines went unevaluated, from the SAME builder the scan route
     // uses (SPEC §3.1 makes byte-equality between the two documents the acceptance test — the scan route
     // needed this list so a dominating baseline regression could carry the refusal beside it, and a list on
     // one route only would break the equality on the very change that repaired the precedence).
-    if (gerrors.length) { const why = policyErrorText(policyFile, gerrors); console.error(why); grefuse(why, policyErrorUnevaluated(gerrors)); }
+    if (gfatal.length) { const why = policyErrorText(policyFile, gfatal); console.error(why); grefuse(why, policyErrorUnevaluated(gfatal)); }
     // ⟨0.24⟩ THE CONFIG FILE THAT SUPPLIED VOCABULARY THE VERDICT USED (SPEC §3.1 `99eb4e9`) — named on a
     // REFERENCE, not only on a firing, because the measured harm was a GREEN verdict a vocabulary file made
     // green. Omitted when no alias was used, so every other verdict stays byte-identical to before.

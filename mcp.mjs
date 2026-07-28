@@ -21,7 +21,7 @@ import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses,
          parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText,
-         unanswerableScoped, resolveReasonClasses } from "./policy.mjs";
+         unanswerableScoped, resolveReasonClasses, fatalPolicyErrors } from "./policy.mjs";
 
 const VERSION = createRequire(import.meta.url)("./package.json").version; // single-sourced, like scan.mjs
 
@@ -130,7 +130,10 @@ function policyOrThrow(text, policyPath) {
   const aliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(policyPath, process.cwd())), errs);
   const pol = parsePolicy(text, aliases);
   errs.push(...pol.errors);
-  if (errs.length) throw new Error(policyErrorText(policyPath ?? "(policy)", errs));
+  // ⟨0.24⟩ FATAL only: `errors` also carries every LINE the parser dropped whole (SPEC §3.1
+  // `195d45a`) — additive to the `parsepolicy` witness, deliberately silent about the gate.
+  const fatal = fatalPolicyErrors(errs);
+  if (fatal.length) throw new Error(policyErrorText(policyPath ?? "(policy)", fatal));
   return pol;
 }
 // The repo's .candor/config (spec §3.4), from the report's directory upward — shared impl in policy.mjs.

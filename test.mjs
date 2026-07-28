@@ -8329,5 +8329,89 @@ export function all(db: DatabaseSync, o: any) {
         `status=${ref.status} ${JSON.stringify(refDoc)?.slice(0, 240)}`);
 }
 
+// ── ⟨0.24⟩ THE `parsepolicy` `errors` SHAPE, AND ITS COVERAGE (SPEC §3.1 `195d45a` + `901f14d`) ─────
+// Two defects on the ONE output whose whole job is to be diffed across four engines.
+//
+// SHAPE: the pin is `{kind, token, accepted, rule, message}` with `kind` from a CLOSED set and `accepted`
+// an ARRAY OF TOKENS. This engine emitted `vocabulary` for `kind`, `where` for `rule`, `accepted` as PROSE
+// ("reflect, dispatch, … aliases: dynamic, *, …") and no `message` at all — a prose string is unparseable
+// by the consumer the field exists for.
+//
+// COVERAGE: measured against the reference engine on the conformance battery — java 12 errors, candor-ts
+// 4. The eight missing were LINES DROPPED WHOLE (an unknown effect name, an `allow` on an effect that
+// takes no operand, two malformed `forbid`s, two `allow`s naming no values, an unknown rule kind), each
+// warned on stderr and invisible to the machine output. A dropped rule is the LIMIT CASE of "silently
+// rewritten into a different policy": the rewritten policy is the one WITHOUT that line.
+{
+  const d = project({ "src/a.ts": "export function f(): void {}\n" });
+  const battery = [
+    "deny Net Db domain",              // honoured — the vacuity guard for the parse itself
+    "deny notaneffect",                // DROPPED: names no known effect
+    "allow Clock whatever",            // DROPPED: Clock carries no literal surface a value list restricts
+    "allow Net in",                    // DROPPED: names no values
+    "forbid bad",                      // DROPPED: malformed
+    "forbid glued->arrow",             // DROPPED: the arrow must be its own token
+    "nonsense line",                   // DROPPED: unknown rule kind
+    "deny Fs Unknown[bogus,reflect] io",   // an unrecognised VALUE TOKEN (the pre-existing half)
+    "deny Net[bogus,unknown-host] mixed",  // …and on the destination-class vocabulary
+  ].join("\n") + "\n";
+  const pol = path.join(d, "battery.pol");
+  fs.writeFileSync(pol, battery);
+  const pp = spawnSync("node", [path.join(HERE, "query.mjs"), "parsepolicy", pol], { encoding: "utf8" });
+  const out = (() => { try { return JSON.parse(pp.stdout); } catch { return null; } })();
+  const errs = out?.errors ?? [];
+  const KINDS = ["reason-class/alias", "Net destination-class", "effect-name", "rule-kind"];
+  // The rules themselves are UNCHANGED by the error list — a line with a bad TOKEN is still kept exactly
+  // as written (so the four-way deny/allow/forbid comparison stays meaningful), and only the DROPPED forms
+  // are absent. Three `deny` lines in, three out; the two `allow`/`forbid` lines are the dropped ones.
+  check("⟨0.24⟩ parsepolicy: the WITNESS still does not refuse (exit 0) and its parse is unchanged — token-faulty rules kept, dropped forms absent",
+        pp.status === 0 && out?.deny?.length === 3 && out?.allow?.length === 0 && out?.forbid?.length === 0,
+        `exit=${pp.status} ${pp.stdout.slice(0, 200)}`);
+  check("⟨0.24⟩ parsepolicy `errors` SHAPE: every entry is `{kind, token, accepted, rule, message}` — `kind` from the CLOSED set, `accepted` an ARRAY, and the renamed `vocabulary`/`where` are GONE",
+        errs.length > 0 && errs.every((e) =>
+          KINDS.includes(e.kind) && typeof e.token === "string" && Array.isArray(e.accepted)
+          && typeof e.rule === "string" && typeof e.message === "string"
+          && !("vocabulary" in e) && !("where" in e)),
+        JSON.stringify(errs.slice(0, 2)));
+  check("⟨0.24⟩ parsepolicy `accepted` is a parseable TOKEN LIST, not prose — the reason-class entry names each class as its own element",
+        errs.some((e) => e.kind === "reason-class/alias" && e.accepted.includes("reflect")
+                      && e.accepted.includes("dynamic") && e.accepted.includes("*")
+                      && e.accepted.every((a) => !a.includes(","))),
+        JSON.stringify(errs.find((e) => e.kind === "reason-class/alias")));
+  // COVERAGE: every line the parse did not honour must appear, keyed by its RAW text.
+  const dropped = ["deny notaneffect", "allow Clock whatever", "allow Net in", "forbid bad",
+                   "forbid glued->arrow", "nonsense line"];
+  const missing = dropped.filter((l) => !errs.some((e) => e.rule === l));
+  check("⟨0.24⟩ parsepolicy `errors` covers EVERY LINE NOT HONOURED, not only unrecognised tokens — the six DROPPED lines each appear, naming the raw line",
+        missing.length === 0, `missing: ${missing.join(" | ")}  got: ${errs.map((e) => e.rule).join(" | ")}`);
+  check("⟨0.24⟩ parsepolicy: …and each dropped line SAYS it was dropped, so a reader can tell 'dropped' from 'rejected'",
+        dropped.every((l) => /NOT HONOURED — DROPPED/.test(errs.find((e) => e.rule === l)?.message ?? "")),
+        JSON.stringify(errs.filter((e) => dropped.includes(e.rule)).map((e) => e.message)));
+  check("⟨0.24⟩ parsepolicy: the two unrecognised VALUE TOKENS are still reported, with their own kinds",
+        errs.some((e) => e.kind === "reason-class/alias" && e.token === "bogus")
+        && errs.some((e) => e.kind === "Net destination-class" && e.token === "bogus"),
+        JSON.stringify(errs.map((e) => `${e.kind}:${e.token}`)));
+  // AND THE GATE IS UNMOVED BY THE ADDITION (`195d45a`: "additive to the witness and silent about the
+  // gate"). A policy whose ONLY fault is a dropped FORM must not start refusing — that would be a grammar
+  // change, and `deny Net Exex app` cannot be told from a legitimate scope by the parser.
+  const formOnly = path.join(d, "formonly.pol");
+  fs.writeFileSync(formOnly, "deny Net domain\nforbid bad\nnonsense line\n");
+  const sf = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", formOnly], { encoding: "utf8" });
+  const ppf = spawnSync("node", [path.join(HERE, "query.mjs"), "parsepolicy", formOnly], { encoding: "utf8" });
+  const fErrs = (() => { try { return JSON.parse(ppf.stdout).errors ?? []; } catch { return []; } })();
+  check("⟨0.24⟩ parsepolicy CONTROL: a dropped rule FORM is reported by the witness but does NOT make the gate refuse — reporting it needed no grammar decision, refusing would have been one",
+        sf.status === 0 && fErrs.length === 2, `scan exit=${sf.status} errors=${fErrs.length}`);
+  // …and the CONTROL that keeps the row from passing on a parser that has stopped reporting: a clean
+  // policy carries NO `errors` at all, so a good parse stays byte-identical to pre-⟨0.24⟩.
+  const clean = path.join(d, "clean.pol");
+  fs.writeFileSync(clean, "deny Net domain\nallow Net in api example.com\nforbid a -> b\n");
+  const ppc = spawnSync("node", [path.join(HERE, "query.mjs"), "parsepolicy", clean], { encoding: "utf8" });
+  const cOut = (() => { try { return JSON.parse(ppc.stdout); } catch { return null; } })();
+  check("⟨0.24⟩ parsepolicy CONTROL: a clean policy reports ZERO errors (the field does not fire on well-formed lines)",
+        ppc.status === 0 && (cOut?.errors ?? []).length === 0 && cOut?.deny?.length === 1
+          && cOut?.allow?.length === 1 && cOut?.forbid?.length === 1,
+        JSON.stringify(cOut)?.slice(0, 200));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

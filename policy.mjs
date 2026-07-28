@@ -140,6 +140,11 @@ export function reasonClassesMatch(classes, filter) {
 // The literal surfaces `allow` can restrict. `Llm` ⟨0.13⟩ rides Net's host literal (SPEC §1) —
 // `allow Llm <host…>` restricts which MODEL hosts a scope may reach, matched by hostname like Net.
 const ALLOW_EFFECTS = new Set(["Net", "Exec", "Fs", "Db", "Llm"]);
+// The two effect-position vocabularies, as sorted arrays. `deny`'s is every effect plus the §4 trust
+// marker; `allow`'s is the CLOSED set of effects that carry a literal surface a value list can restrict.
+const EFFECT_VOCAB = [...EFFECTS, "Unknown"].sort();
+const ALLOW_VOCAB = [...ALLOW_EFFECTS].sort();
+const ALLOW_FORM = ["allow <Effect> [in <scope>] <value…>"];
 
 // The §6.2 token separator: ASCII whitespace ONLY (space/tab/LF/VT/FF/CR). JS `\s`/`String.trim` strip
 // Unicode spaces (NBSP, ideographic, …) that Java drops — a gateless-green cross-engine divergence
@@ -164,14 +169,43 @@ const ASCII_WS_TRIM = /^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g;
 // more often than alone — and the rule stops gating what the operator spelled while the gate still looks
 // armed. The WIDENING half is loud but announces "ignoring policy rule" and then KEEPS a DIFFERENT rule,
 // which is a false disclosure. Neither is a policy the operator wrote.
+//
+// ⟨0.24⟩ AND `errors` COVERS EVERY LINE THIS PARSER DID NOT HONOUR, NOT ONLY UNRECOGNISED TOKENS (SPEC §3.1
+// `195d45a`). Measured against the reference engine on the conformance battery: java reported 12, candor-ts
+// 5 — the seven missing were LINES DROPPED WHOLE (an unknown effect name, an `allow` on an effect that
+// takes no operand, two malformed `forbid`s, two `allow`s naming no values, an unknown rule kind), each
+// warned on stderr and invisible to the machine output. **A dropped rule is the LIMIT CASE of "silently
+// rewritten into a different policy": the rewritten policy is the one without that line**, which is a
+// BIGGER rewrite than a narrowed filter, not a smaller one. The witness was disclosing the two cases that
+// prompted the clause and silent on the ones that did not.
+export const POLICY_ERROR_KINDS = ["reason-class/alias", "Net destination-class", "effect-name", "rule-kind"];
+// ⟨0.24⟩ FATAL vs DISCLOSED-ONLY. `errors` is ONE list because §3.1 pins one list, but it carries two
+// populations and only the verdict-bearing call sites need the distinction, so it is derived from `kind`
+// rather than stored: an unrecognised VALUE TOKEN (§6.2 `382a7e0`/`be0b9a9`) refuses, a malformed rule FORM
+// is reported and dropped. `195d45a` is explicit that reporting a dropped line is "additive to the witness
+// and silent about the gate" — `deny Net Exex app` cannot be told from a legitimate scope by the parser, so
+// widening the refusal to every dropped line would be a grammar change, not a token change.
+const FATAL_ERROR_KINDS = new Set(["reason-class/alias", "Net destination-class"]);
+export const fatalPolicyErrors = (errors) => (errors ?? []).filter((e) => FATAL_ERROR_KINDS.has(e.kind));
+// The accepted sets, as ARRAYS (SPEC §3.1 `901f14d`: `accepted` is an array of tokens, not prose — a prose
+// string is unparseable by the consumer the field exists for).
+const REASON_VOCAB = [...REASON_CLASSES, "dynamic", "*"];
+const RULE_KIND_VOCAB = ["deny", "pure", "forbid", "allow"];
+const DROPPED = (why) => `policy line NOT HONOURED — DROPPED (${why}); it is absent from the parse, so the `
+                       + `policy that ran is the one without it`;
+
 export function parsePolicy(text, aliases = null) {
   const deny = [], allow = [], forbid = [];
-  // ⟨0.24⟩ every value token this parser could not honour AS WRITTEN, and every alias a rule RESOLVED
-  // THROUGH. `aliasesUsed` is recorded at the point of USE, never from the alias map: a config defining ten
-  // aliases the policy never mentions moved nothing, and naming it would train the reader to skip the field.
+  // ⟨0.24⟩ every line this parser could not honour AS WRITTEN, and every alias a rule RESOLVED THROUGH.
+  // `aliasesUsed` is recorded at the point of USE, never from the alias map: a config defining ten aliases
+  // the policy never mentions moved nothing, and naming it would train the reader to skip the field.
+  //
+  // THE ENTRY SHAPE IS PINNED (SPEC §3.1 `195d45a` + `901f14d`): `{kind, token, accepted, rule, message}`,
+  // `kind` drawn from the closed POLICY_ERROR_KINDS, `accepted` an ARRAY, `rule` the source line verbatim.
+  // This engine emitted `vocabulary` for `kind`, `where` for `rule`, prose for `accepted`, and no `message`
+  // at all — three renamed/reshaped fields on the one output whose whole job is to be diffed.
   const errors = [], aliasesUsed = new Map();
-  const tokenError = (vocabulary, token, accepted, where) =>
-    errors.push({ vocabulary, token, accepted, where });
+  const err = (kind, token, accepted, rule, message) => errors.push({ kind, token, accepted, rule, message });
   // Split LINES on \n / \r\n / bare \r — the three forms Java's Files.readAllLines (the reference parser)
   // breaks on. Splitting on \n ONLY let a classic-Mac (bare-\r) file collapse to one line: \r is also an
   // in-line ASCII-ws token separator (below), so every rule after the first was glued into the first rule's
@@ -201,7 +235,8 @@ export function parsePolicy(text, aliases = null) {
             if (!cn) continue;
             if (cn === "*") netStar = true;
             else if (NET_DEST_CLASSES.includes(cn)) netClasses.add(cn);
-            else tokenError("Net destination-class", cn, `${NET_DEST_CLASSES.join(", ")}, or *`, line);
+            else err("Net destination-class", cn, [...NET_DEST_CLASSES, "*"], line,
+                     `unknown Net destination-class \`${cn}\` (known: ${NET_DEST_CLASSES.join(", ")}, or *)`);
           }
           continue;
         }
@@ -215,8 +250,9 @@ export function parsePolicy(text, aliases = null) {
             else if (cn === "dynamic") DYNAMIC_CLASSES.forEach((c) => unknownClasses.add(c));
             else if (REASON_CLASSES.includes(cn)) unknownClasses.add(cn);
             else if (aliases && aliases.has(cn)) { aliasesUsed.set(cn, [...aliases.get(cn)].sort()); aliases.get(cn).forEach((c) => unknownClasses.add(c)); } // ⟨0.19⟩ config unknown-alias
-            else tokenError("reason-class/alias", cn,
-              `${REASON_CLASSES.join(", ")}; aliases: dynamic, *, or a config \`unknown-alias\``, line);
+            else err("reason-class/alias", cn, REASON_VOCAB, line,
+                     `unknown reason-class/alias \`${cn}\` (known: ${REASON_CLASSES.join(", ")}; aliases: `
+                     + "dynamic, *, or a config `unknown-alias`)");
           }
           continue;
         }
@@ -226,7 +262,11 @@ export function parsePolicy(text, aliases = null) {
           if (tok === "Net") netStar = true;         // bare Net ⇒ all destinations
         } else { scope = tok; break; }
       }
-      if (effects.length === 0) { warn("deny names no known effect"); continue; }
+      if (effects.length === 0) {
+        warn("deny names no known effect");
+        err("effect-name", t[1] ?? "", EFFECT_VOCAB, line, DROPPED("names no known effect"));
+        continue;
+      }
       // `*` (or bare Unknown) means all classes ⇒ empty filter (matches any Unknown).
       let uc = unknownStar ? [] : [...unknownClasses].sort();
       // `*` (or bare Net) means all destinations ⇒ empty filter (matches any Net).
@@ -239,22 +279,43 @@ export function parsePolicy(text, aliases = null) {
     } else if (t[0] === "pure") {
       deny.push({ effects: [], scope: t[1] ?? "", unknownClasses: [], netClasses: [], raw: line });
     } else if (t[0] === "allow") {
-      if (t.length < 3) { warn("allow names no values"); continue; }
-      if (!ALLOW_EFFECTS.has(t[1])) { warn("allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables"); continue; }
+      if (t.length < 3) {
+        warn("allow names no values");
+        // `token` is EMPTY, not the line's remainder: nothing here was UNRECOGNISED — the line is
+        // truncated, so there is no offending token to name and inventing one would misdirect the reader.
+        err("rule-kind", "", ALLOW_FORM, line, DROPPED("allow names no values"));
+        continue;
+      }
+      if (!ALLOW_EFFECTS.has(t[1])) {
+        warn("allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables");
+        err("effect-name", t[1], ALLOW_VOCAB, line,
+            DROPPED("allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables"));
+        continue;
+      }
       let scope = "", vi = 2;
       if (t[2] === "in") { scope = t[3] ?? ""; vi = 4; }
       const values = t.slice(vi);
-      if (values.length === 0) { warn("allow names no values"); continue; }
+      if (values.length === 0) {
+        warn("allow names no values");
+        err("rule-kind", "", ALLOW_FORM, line, DROPPED("allow names no values"));
+        continue;
+      }
       allow.push({ effect: t[1], scope, values: [...new Set(values)].sort(), raw: line }); // dedup (set)
     } else if (t[0] === "forbid") {
       // Token-wise like the Rust/JVM parsers: the arrow must be its own whitespace-separated token
       // (`a->b` glued is malformed), and tokens past `b` are ignored. A regex here once accepted and
       // rejected DIFFERENT lines than the other engines — the one thing a shared gate must not do.
       const [a, arrow, b] = [t[1] ?? "", t[2] ?? "", t[3] ?? ""];
-      if (!a || arrow !== "->" || !b) { warn("malformed forbid (want `forbid <scope> -> <scope>`)"); continue; }
+      if (!a || arrow !== "->" || !b) {
+        warn("malformed forbid (want `forbid <scope> -> <scope>`)");
+        err("rule-kind", t.slice(1).join(" "), ["forbid <scope> -> <scope>"], line,
+            DROPPED("want `forbid <scope> -> <scope>`"));
+        continue;
+      }
       forbid.push({ from: a, to: b, raw: line });
     } else {
       warn("unknown rule kind");
+      err("rule-kind", t[0], RULE_KIND_VOCAB, line, DROPPED(`unknown rule kind \`${t[0]}\``));
     }
   }
   // ⟨0.24⟩ `aliasesUsed` is name -> THE CLASSES IT RESOLVED TO, not a bare name list (SPEC §3.1
@@ -270,7 +331,7 @@ export function parsePolicy(text, aliases = null) {
 export function policyErrorText(policyFile, errors) {
   const head = `candor-ts: policy ${policyFile} cannot be honoured AS WRITTEN`;
   const body = errors.map((e) =>
-    `  unknown ${e.vocabulary} \`${e.token}\` (known: ${e.accepted})\n    in: ${e.where}`).join("\n");
+    `  unknown ${e.kind} \`${e.token}\` (known: ${e.accepted.join(", ")})\n    in: ${e.rule}`).join("\n");
   return `${head} — ${errors.length} unrecognised value token(s):\n${body}\n`
     + "  Refusing (exit 2), policy NOT evaluated: dropping the token would rewrite the policy into a "
     + "DIFFERENT one. If it is the list's only token the rule WIDENS to the bare effect; if it sits beside "
@@ -291,8 +352,8 @@ export function policyErrorText(policyFile, errors) {
 export function policyErrorUnevaluated(errors) {
   const byLine = new Map();
   for (const e of errors) {
-    if (!byLine.has(e.where)) byLine.set(e.where, []);
-    byLine.get(e.where).push(`\`${e.token}\` is not a recognised ${e.vocabulary} (known: ${e.accepted})`);
+    if (!byLine.has(e.rule)) byLine.set(e.rule, []);
+    byLine.get(e.rule).push(`\`${e.token}\` is not a recognised ${e.kind} (known: ${e.accepted.join(", ")})`);
   }
   return [...byLine.entries()].map(([rule, ts]) => ({ rule,
     why: `NOT EVALUATED — this line cannot be honoured as written: ${ts.join("; ")}. Dropping the token `
@@ -750,8 +811,10 @@ export function parseUnknownAliases(configText, errors = null) {
       if (!cn) continue;
       if (cn === "dynamic") DYNAMIC_CLASSES.forEach((c) => classes.add(c));
       else if (REASON_CLASSES.includes(cn)) classes.add(cn);
-      else if (errors) errors.push({ vocabulary: "reason-class", token: cn,
-                                     accepted: `${REASON_CLASSES.join(", ")}, or dynamic`, where: line });
+      else if (errors) errors.push({ kind: "reason-class/alias", token: cn,
+                                     accepted: [...REASON_CLASSES, "dynamic"], rule: line,
+                                     message: `unknown reason-class \`${cn}\` in an \`unknown-alias\` `
+                                            + `DEFINITION (known: ${REASON_CLASSES.join(", ")}, or dynamic)` });
       else console.error(`candor: \`unknown-alias ${name}\` names unknown reason-class \`${cn}\` — skipped`);
     }
     if (classes.size === 0) console.error(`candor: ignoring \`unknown-alias ${name}\` — no valid reason-class`);

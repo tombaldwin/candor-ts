@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText,
-         reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyErrorUnevaluated, policyUnreadable, refusalVerdict } from "./policy.mjs";
+         reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyErrorUnevaluated, policyUnreadable, fatalPolicyErrors, refusalVerdict } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
@@ -5205,10 +5205,14 @@ if (policyPath !== null) {
     // with the policy filed outside the scan target the two expanded the SAME rule differently and §3.1's
     // byte-equality MUST was breakable by a file that is neither the report nor the policy. `net-partner`
     // (above, at the target) is deliberately NOT moved: it describes the thing being scanned.
-    const policyErrs = [];
-    const unknownAliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(policyPath, target)), policyErrs);
+    const parseErrs = [];
+    const unknownAliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(policyPath, target)), parseErrs);
     const gatePolicy = parsePolicy(text, unknownAliases);
-    policyErrs.push(...gatePolicy.errors);
+    parseErrs.push(...gatePolicy.errors);
+    // ⟨0.24⟩ only the UNRECOGNISED VALUE TOKENS refuse. `errors` now also carries every LINE this parser
+    // dropped whole (SPEC §3.1 `195d45a`), which is additive to the `parsepolicy` witness and deliberately
+    // silent about the gate — refusing there would be a grammar change, not a token change.
+    const policyErrs = fatalPolicyErrors(parseErrs);
     // ⟨0.24⟩ SPEC §6.2 (`382a7e0` + `be0b9a9`): an unrecognised value token — in a reason-class filter, a Net
     // destination-class filter, or an alias DEFINITION — is a POLICY ERROR. Dropping it rewrites the policy
     // into a different one: alone the rule WIDENS to the bare effect, beside valid tokens it NARROWS and stops
