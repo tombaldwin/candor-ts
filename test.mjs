@@ -8259,5 +8259,75 @@ export function all(db: DatabaseSync, o: any) {
   }
 }
 
+// ── ⟨0.24⟩ PRECEDENCE BINDS THE VERDICT, NOT THE POLICY GATE (SPEC §3.1 `4c79958`) ─────────────────
+// A CERTAIN baseline regression was DELETED from the machine channel by an unrelated policy refusal, in
+// all four engines. Measured — a pure function gains an `Fs` call, scanned against a frozen baseline:
+//
+//     control (no policy)          -> exit 1, violations ["AS-EFF-005"]
+//     + a policy with a bad token  -> exit 2, NO `violations` key
+//
+// It survived on stderr, so the human saw it and CI did not — the split this rung exists to close. The
+// AS-EFF-005 guard is a DIFFERENT violation producer from the policy gate, it runs earlier by design, and
+// it records into the same verdict; the precedence repair had been scoped to the policy gate's own list.
+// THE ASSERTION IS ON THE DOCUMENT, deliberately: an exit code alone cannot tell a lost finding from a
+// found one, and the document is the channel that lost it.
+{
+  const pureSrc = "export function worker(): number { return 41 + 1; }\nexport function caller(): number { return worker(); }\n";
+  const gainSrc = 'import fs from "node:fs";\nexport function worker(): number { fs.readFileSync("/tmp/x"); return 41 + 1; }\nexport function caller(): number { return worker(); }\n';
+  const d = project({ "src/app.ts": pureSrc });
+  const bl = path.join(d, "baseline.json");
+  const run = (args, env = {}) => spawnSync("node", [path.join(HERE, "scan.mjs"), d, ...args],
+    { encoding: "utf8", env: { ...process.env, ...env } });
+  run([]);                                                     // record the baseline (same build, all pure)
+  fs.copyFileSync(path.join(d, ".candor", "report.json"), bl);
+  fs.copyFileSync(path.join(d, ".candor", "report.callgraph.json"), path.join(d, "baseline.callgraph.json"));
+  fs.writeFileSync(path.join(d, "src", "app.ts"), gainSrc);    // the regression
+  fs.writeFileSync(path.join(d, "typo.pol"), "deny Unknown[nativ] app\n");
+  const readDoc = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return null; } };
+  const ctlP = path.join(d, "ctl.json"), badP = path.join(d, "bad.json"), unreadP = path.join(d, "unread.json");
+
+  // CONTROL — no policy at all. This is the row that establishes the finding EXISTS on this fixture; a
+  // regression that silently stopped firing would make every row below pass for the wrong reason.
+  const ctl = run(["--gate-json", ctlP], { CANDOR_BASELINE: bl });
+  const ctlDoc = readDoc(ctlP);
+  check("⟨0.24⟩ precedence CONTROL: the baseline regression alone exits 1 with AS-EFF-005 IN the document",
+        ctl.status === 1 && ctlDoc?.ok === false
+          && ctlDoc.violations?.filter((v) => v.rule === "AS-EFF-005").length === 2,
+        `status=${ctl.status} ${JSON.stringify(ctlDoc)?.slice(0, 240)}`);
+
+  // THE DEFECT — an UNHONOURABLE policy beside it. The violation must still be in the document.
+  const bad = run(["--policy", path.join(d, "typo.pol"), "--gate-json", badP], { CANDOR_BASELINE: bl });
+  const badDoc = readDoc(badP);
+  check("⟨0.24⟩ precedence: an unhonourable policy does NOT delete the certain baseline regression — the AS-EFF-005 violations are IN the document",
+        badDoc?.ok === false && Array.isArray(badDoc.violations)
+          && badDoc.violations.filter((v) => v.rule === "AS-EFF-005").length === 2
+          && badDoc.violations.some((v) => v.fn.endsWith("app.worker")),
+        JSON.stringify(badDoc)?.slice(0, 300));
+  check("⟨0.24⟩ precedence: …and the refusal rides ALONGSIDE it under `unevaluated`, naming the raw policy line — a consumer of exit 1 can still see the policy never ran",
+        badDoc?.unevaluated?.length === 1 && badDoc.unevaluated[0].rule === "deny Unknown[nativ] app"
+          && /NOT EVALUATED/.test(badDoc.unevaluated[0].why ?? "") && /nativ/.test(badDoc.unevaluated[0].why ?? ""),
+        JSON.stringify(badDoc?.unevaluated)?.slice(0, 300));
+  check("⟨0.24⟩ precedence: the certain violation dominates the refusal on the EXIT CODE too (1, not 2)",
+        bad.status === 1, `status=${bad.status} ${(bad.stdout + bad.stderr).slice(0, 240)}`);
+
+  // THE SAME MIRROR ON THE OTHER REFUSAL CAUSE — an UNREADABLE policy. Same producer upstream, same rule.
+  const unread = run(["--policy", path.join(d, "no-such.pol"), "--gate-json", unreadP], { CANDOR_BASELINE: bl });
+  const unreadDoc = readDoc(unreadP);
+  check("⟨0.24⟩ precedence MIRROR: an UNREADABLE policy does not delete it either (the rule is over the verdict, not over one refusal cause)",
+        unread.status === 1 && unreadDoc?.violations?.filter((v) => v.rule === "AS-EFF-005").length === 2
+          && unreadDoc.unevaluated?.length === 1 && /entire policy/.test(unreadDoc.unevaluated[0].rule ?? ""),
+        `status=${unread.status} ${JSON.stringify(unreadDoc)?.slice(0, 300)}`);
+
+  // AND THE REFUSAL SHAPE IS INTACT WHERE NOTHING WAS ESTABLISHED — the fix must not turn every refusal
+  // into a verdict. Same policy, NO baseline: the document is a refusal, and `violations` is ABSENT (not
+  // `[]`, which is precisely the claim a refusing gate cannot make).
+  const refP = path.join(d, "ref.json");
+  const ref = run(["--policy", path.join(d, "typo.pol"), "--gate-json", refP]);
+  const refDoc = readDoc(refP);
+  check("⟨0.24⟩ precedence CONTROL 2: with nothing established, the refusal is still a REFUSAL — exit 2, `refused:true`, and NO `violations` key",
+        ref.status === 2 && refDoc?.refused === true && refDoc.ok === false && !("violations" in refDoc),
+        `status=${ref.status} ${JSON.stringify(refDoc)?.slice(0, 240)}`);
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText,
-         reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, refusalVerdict } from "./policy.mjs";
+         reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyErrorUnevaluated, policyUnreadable, refusalVerdict } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
@@ -5015,12 +5015,18 @@ let gateViolations = [];
 // ⟨0.24⟩ the `.candor/config` that supplied POLICY VOCABULARY this verdict actually used — named on the
 // document (SPEC §3.1 `99eb4e9`), null when no alias was referenced so the verdict stays byte-identical.
 let policyVocabulary = null;
+// ⟨0.24⟩ THE POLICY GATE'S REFUSAL, RECORDED RATHER THAN EXECUTED (SPEC §3.1 `4c79958`). An unreadable or
+// unhonourable policy used to `writeRefusal(); exit(2)` on the spot — which DELETED whatever the AS-EFF-005
+// baseline guard, running earlier by design, had already established. Both sites now record here and the
+// single decision point below chooses between a verdict and a refusal on what the run ESTABLISHED.
+// `{why, unevaluated}`: the human sentence, and the machine-legible list of policy lines that never ran.
+let policyRefusal = null;
 // ⟨0.24⟩ THE REFUSAL DOCUMENT on the scan route (SPEC §3.1 `107755b` + `1503368`). Same builder and same
 // bytes as `gate --report`'s, so the two routes cannot drift into two shapes of "I declined to judge".
 // Nothing is written when `--gate-json` was not asked for: the hazard is a wrapper re-reading a PATH.
-const writeRefusal = (reason) => {
+const writeRefusal = (reason, unevaluated = null) => {
   if (!gateJsonPath) return;
-  const text = JSON.stringify(refusalVerdict(SPEC_VERSION, reason), null, 1);
+  const text = JSON.stringify(refusalVerdict(SPEC_VERSION, reason, unevaluated), null, 1);
   if (gateJsonPath === "-") { console.log(text); return; }
   try { writeAtomic(gateJsonPath, text + "\n"); }
   catch (e) { console.error(`candor-ts: could not write --gate-json ${gateJsonPath}: ${e.message}`); }
@@ -5174,69 +5180,98 @@ if (baselinePath !== null) {
 // drop the config comment above promises fails loud. "" now reaches the read, which fails → exit 2
 // (the Rust engine's behavior on the same input).
 if (policyPath !== null) {
-  let text;
+  let text = null;
   try {
     text = fs.readFileSync(policyPath, "utf8");
   } catch {
     // a set-but-unreadable policy must be LOUD — silently passing would let a violation ship
-    const why = `policy ${policyPath === "" ? "(configured empty)" : policyPath} could not be read; gate NOT enforced`;
+    const { why, unevaluated } = policyUnreadable(policyPath);
     console.error(`candor-ts: ${why}`);
     // ⟨0.24⟩ …and it must not leave YESTERDAY'S document at the --gate-json path (SPEC §3.1 `1503368`:
     // the refusal document has no exempt cause — a stale green does not care why this run declined to
     // overwrite it). `candor <src> --policy <typo> --gate-json <path>` is the more common CI shape than
     // `gate --report`, so closing only the query route would be closing half the hazard.
-    writeRefusal(why);
-    process.exit(2);
+    // ⟨0.24⟩ RECORDED, NOT EXECUTED HERE (SPEC §3.1 `4c79958`) — see the emission block below.
+    policyRefusal = { why, unevaluated };
   }
-  // The masking-incompleteness map (fn -> effects whose surface is incomplete), kept INTERNAL like the
-  // java/rust engines (not a report field) — passed to the gate so an incomplete surface fails closed.
-  const incompleteMap = new Map();
-  for (const [name, rec] of fns) if (rec.incomplete.size) incompleteMap.set(name, rec.incomplete);
-  // ⟨0.19⟩ reason-class aliases (SPEC §6.2) from `.candor/config`, so `Unknown[<alias>]` resolves at the gate.
-  // ⟨0.24⟩ ANCHORED AT THE POLICY FILE, not at the target (SPEC §3.1 `99eb4e9`). Vocabulary travels with the
-  // policy that uses it. This route anchored at the TARGET while `gate --report` anchored at the POLICY, so
-  // with the policy filed outside the scan target the two expanded the SAME rule differently and §3.1's
-  // byte-equality MUST was breakable by a file that is neither the report nor the policy. `net-partner`
-  // (above, at the target) is deliberately NOT moved: it describes the thing being scanned.
-  const policyErrs = [];
-  const unknownAliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(policyPath, target)), policyErrs);
-  const gatePolicy = parsePolicy(text, unknownAliases);
-  policyErrs.push(...gatePolicy.errors);
-  // ⟨0.24⟩ SPEC §6.2 (`382a7e0` + `be0b9a9`): an unrecognised value token — in a reason-class filter, a Net
-  // destination-class filter, or an alias DEFINITION — is a POLICY ERROR. Dropping it rewrites the policy
-  // into a different one: alone the rule WIDENS to the bare effect, beside valid tokens it NARROWS and stops
-  // gating what was spelled while the gate still looks armed. Exit 2, policy NOT evaluated.
-  if (policyErrs.length) {
-    const why = policyErrorText(policyPath, policyErrs);
-    console.error(why);
-    writeRefusal(why);
-    process.exit(2);
-  }
-  // ⟨0.24⟩ the config file that supplied vocabulary the verdict USED, so an ambient `.candor/config` — the
-  // walk goes up through every parent, and CANDOR_CONFIG overrides it outright — cannot move a verdict while
-  // staying unnamed in the output (SPEC §3.1 `99eb4e9`).
-  if (Object.keys(gatePolicy.aliasesUsed).length) {
-    const p = discoverConfigPath(policyVocabularyAnchor(policyPath, target));
-    if (p) policyVocabulary = { config: p, aliases: gatePolicy.aliasesUsed };
-  }
-  gateViolations = gateViolations.concat(evaluatePolicy(gatePolicy, functions, cg, incompleteMap, netPartners));
-  // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
-  // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
-  // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).
-  const disclosePolicy = gatePolicy;
-  const purityHoles = [];
-  for (const f of functions) {
-    // Same predicate + upgrade as `candor-ts-query unverified` (query-core.mjs) — one source of truth.
-    const r = unverifiedHoleRule(f.fn, f.inferred, disclosePolicy, scopeMatches);
-    if (r) purityHoles.push([f.fn, ruleUpgrade(r)[1]]);
-  }
-  if (purityHoles.length) {
-    console.error(`candor-ts: note — ${purityHoles.length} function(s) PASS the policy but are Unknown (purity NOT verified — the Unknown could hide a forbidden effect):`);
-    for (const [fn, up] of purityHoles) console.error(`    \`${fn}\`  → add  \`${up}\``);
-    console.error("  (advisory; add the upgrade(s) to REQUIRE provable purity, or run `candor-ts-query unverified` for detail — the gate verdict is unchanged)");
+  if (text !== null) {
+    // The masking-incompleteness map (fn -> effects whose surface is incomplete), kept INTERNAL like the
+    // java/rust engines (not a report field) — passed to the gate so an incomplete surface fails closed.
+    const incompleteMap = new Map();
+    for (const [name, rec] of fns) if (rec.incomplete.size) incompleteMap.set(name, rec.incomplete);
+    // ⟨0.19⟩ reason-class aliases (SPEC §6.2) from `.candor/config`, so `Unknown[<alias>]` resolves at the gate.
+    // ⟨0.24⟩ ANCHORED AT THE POLICY FILE, not at the target (SPEC §3.1 `99eb4e9`). Vocabulary travels with the
+    // policy that uses it. This route anchored at the TARGET while `gate --report` anchored at the POLICY, so
+    // with the policy filed outside the scan target the two expanded the SAME rule differently and §3.1's
+    // byte-equality MUST was breakable by a file that is neither the report nor the policy. `net-partner`
+    // (above, at the target) is deliberately NOT moved: it describes the thing being scanned.
+    const policyErrs = [];
+    const unknownAliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(policyPath, target)), policyErrs);
+    const gatePolicy = parsePolicy(text, unknownAliases);
+    policyErrs.push(...gatePolicy.errors);
+    // ⟨0.24⟩ SPEC §6.2 (`382a7e0` + `be0b9a9`): an unrecognised value token — in a reason-class filter, a Net
+    // destination-class filter, or an alias DEFINITION — is a POLICY ERROR. Dropping it rewrites the policy
+    // into a different one: alone the rule WIDENS to the bare effect, beside valid tokens it NARROWS and stops
+    // gating what was spelled while the gate still looks armed. Exit 2, policy NOT evaluated.
+    if (policyErrs.length) {
+      const why = policyErrorText(policyPath, policyErrs);
+      console.error(why);
+      // ⟨0.24⟩ ONE `unevaluated` ENTRY PER POLICY LINE THAT COULD NOT BE HONOURED — the SHARED builder, so
+      // this document and `gate --report`'s stay byte-equal (§3.1's acceptance test for the two routes).
+      policyRefusal = { why, unevaluated: policyErrorUnevaluated(policyErrs) };
+    } else {
+      // ⟨0.24⟩ the config file that supplied vocabulary the verdict USED, so an ambient `.candor/config` — the
+      // walk goes up through every parent, and CANDOR_CONFIG overrides it outright — cannot move a verdict while
+      // staying unnamed in the output (SPEC §3.1 `99eb4e9`).
+      if (Object.keys(gatePolicy.aliasesUsed).length) {
+        const p = discoverConfigPath(policyVocabularyAnchor(policyPath, target));
+        if (p) policyVocabulary = { config: p, aliases: gatePolicy.aliasesUsed };
+      }
+      gateViolations = gateViolations.concat(evaluatePolicy(gatePolicy, functions, cg, incompleteMap, netPartners));
+      // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
+      // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
+      // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).
+      const disclosePolicy = gatePolicy;
+      const purityHoles = [];
+      for (const f of functions) {
+        // Same predicate + upgrade as `candor-ts-query unverified` (query-core.mjs) — one source of truth.
+        const r = unverifiedHoleRule(f.fn, f.inferred, disclosePolicy, scopeMatches);
+        if (r) purityHoles.push([f.fn, ruleUpgrade(r)[1]]);
+      }
+      if (purityHoles.length) {
+        console.error(`candor-ts: note — ${purityHoles.length} function(s) PASS the policy but are Unknown (purity NOT verified — the Unknown could hide a forbidden effect):`);
+        for (const [fn, up] of purityHoles) console.error(`    \`${fn}\`  → add  \`${up}\``);
+        console.error("  (advisory; add the upgrade(s) to REQUIRE provable purity, or run `candor-ts-query unverified` for detail — the gate verdict is unchanged)");
+      }
+    }
   }
 }
+// ⟨0.24⟩ PRECEDENCE BINDS THE VERDICT, NOT THE POLICY GATE (SPEC §3.1 `4c79958`). This is the only place
+// that decides between a VERDICT and a REFUSAL, and it now decides on what the run ESTABLISHED rather than
+// on where it ended. Measured before the repair — a pure function gains an `Fs` call, scanned against a
+// frozen baseline:
+//
+//     control (no policy)          -> exit 1, violations ["AS-EFF-005"]
+//     + a policy with a bad token  -> exit 2, NO `violations` key      <- the regression was DELETED
+//
+// So a typo in a policy token downgraded "your change added an effect" to "could not evaluate", and the
+// finding survived only on stderr — the human kept it and CI lost it. Three individually-correct decisions
+// composed into it: the AS-EFF-005 baseline guard runs FIRST by design, the precedence repair was scoped to
+// the policy gate's own violation list, and "a refusal document carries no `violations` key" was justified
+// by every exit-2 site running before anything could be recorded — a claim about ORDERING that reads as a
+// claim about SHAPE, and false the moment a producer's evidence sat upstream of the refusal.
+//
+// The refusal arm therefore keys on `gateViolations.length`, never on "this run ended refused". The
+// baseline guard's evidence is complete and certain; a policy this engine cannot READ or cannot HONOUR
+// says nothing about it, so by Lemma 2 the established violation stands however the policy would have
+// resolved — and the refusal rides ALONGSIDE it under `unevaluated` rather than replacing it.
 for (const x of gateViolations) emitViolation(`[${x.rule}] ${x.detail}`);
+if (policyRefusal && !gateViolations.length) {
+  // Nothing was established, so the refusal IS the whole answer and takes its documented shape (no
+  // `violations` key — an absent key, because the gate is making no claim about violations).
+  writeRefusal(policyRefusal.why, policyRefusal.unevaluated);
+  process.exit(2);
+}
 // --gate-json ⟨0.8⟩: the structured gate verdict { spec, ok, violations:[{rule,fn,effects,detail}] }, from
 // the SAME gateViolations that set the exit code (so it can't disagree). Written whenever the flag is set —
 // ok:true,[] when no gate is configured. Must precede the exit(1) below.
@@ -5252,6 +5287,11 @@ if (gateJsonPath) {
   // §3.1 makes byte-equality between the two routes the acceptance test. Omitted when no alias was used.
   if (policyVocabulary) verdictObj.policyVocabulary = policyVocabulary;
   verdictObj.violations = gateViolations;
+  // ⟨0.24⟩ …and when a certain violation DOMINATED a policy refusal, the refusal is disclosed here rather
+  // than deleted (SPEC §3.1: "the RAW policy line, verbatim", one entry per rule, omitted when empty). A
+  // consumer reading exit 1 must be able to see that the POLICY half of the gate never ran — the same
+  // `unevaluated` key, in the same position, that `gate --report` uses for its answerability refusals.
+  if (policyRefusal) verdictObj.unevaluated = policyRefusal.unevaluated;
   // ⟨0.21⟩ (Gap 2) the machine-legible incompleteness: the units candor couldn't analyze, so a CI/agent
   // reading the JSON learns WHY the gate can't certify (the stderr warning alone used to hide this from a
   // machine). `incomplete:true` + the list; the run exits 2 (could-not-fully-evaluate) below. ok:false +
@@ -5284,6 +5324,8 @@ if (gateViolations.length) {
   // FAILURE-only pointer at the engine's own remedy verb (append-only, same stream as the summary; a
   // zero-violation run is byte-identical — the exit code, violation lines and summary text are pinned
   // by the conformance suite and stay untouched).
+  if (policyRefusal)
+    console.error(`candor-ts: …and the policy at ${policyPath === "" ? "(configured empty)" : policyPath} could not be evaluated (disclosed above and under \`unevaluated\`) — the violation(s) named are certain regardless of how it would have resolved`);
   console.error("→ candor-ts-query fix-gate names the remedy for each");
   process.exit(1);
 }

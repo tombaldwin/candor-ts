@@ -25,7 +25,8 @@ import { fileURLToPath } from "node:url";
 
 import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, discoverConfigText,
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
-         policyVocabularyAnchor, policyErrorText, refusalVerdict, unanswerableScoped } from "./policy.mjs";
+         policyVocabularyAnchor, policyErrorText, policyErrorUnevaluated, policyUnreadable, refusalVerdict,
+         unanswerableScoped } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
@@ -1090,9 +1091,12 @@ switch (cmd) {
     let gtext;
     try { gtext = fs.readFileSync(policyFile, "utf8"); }
     catch {
-      const why = `policy ${policyFile === "" ? "(configured empty)" : policyFile} could not be read — failing (exit 2), policy NOT evaluated`;
+      // The SHARED sentence + disclosure (policyUnreadable), so this document and the scan route's are
+      // byte-equal for this refusal cause too — they carried two different `reason` strings, and the
+      // equality row only ever exercised the UNHONOURABLE policy, so nothing could see it.
+      const { why, unevaluated } = policyUnreadable(policyFile);
       console.error(`candor-ts: ${why}`);
-      grefuse(why);
+      grefuse(why, unevaluated);
     }
     // ⟨0.19⟩ `unknown-alias` expansion for an `Unknown[<alias>]` filter, anchored to the POLICY file — an
     // alias is part of the policy's own vocabulary, not of the report. ⟨0.24⟩ SPEC §3.1 `99eb4e9` makes that
@@ -1107,7 +1111,11 @@ switch (cmd) {
     gerrors.push(...gpol.errors);
     // ⟨0.24⟩ SPEC §6.2 (`382a7e0` + `be0b9a9`): a policy that cannot be honoured AS WRITTEN is a POLICY
     // ERROR, not a rule to silently rewrite — exit 2, the unreadable-policy posture, before any evaluation.
-    if (gerrors.length) { const why = policyErrorText(policyFile, gerrors); console.error(why); grefuse(why); }
+    // ⟨0.24⟩ …and the refusal DISCLOSES which lines went unevaluated, from the SAME builder the scan route
+    // uses (SPEC §3.1 makes byte-equality between the two documents the acceptance test — the scan route
+    // needed this list so a dominating baseline regression could carry the refusal beside it, and a list on
+    // one route only would break the equality on the very change that repaired the precedence).
+    if (gerrors.length) { const why = policyErrorText(policyFile, gerrors); console.error(why); grefuse(why, policyErrorUnevaluated(gerrors)); }
     // ⟨0.24⟩ THE CONFIG FILE THAT SUPPLIED VOCABULARY THE VERDICT USED (SPEC §3.1 `99eb4e9`) — named on a
     // REFERENCE, not only on a firing, because the measured harm was a GREEN verdict a vocabulary file made
     // green. Omitted when no alias was used, so every other verdict stays byte-identical to before.

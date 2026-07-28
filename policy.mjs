@@ -278,6 +278,40 @@ export function policyErrorText(policyFile, errors) {
     + "  Fix the spelling, or define it in `.candor/config` as `unknown-alias <name> = <class,…>`.";
 }
 
+// ⟨0.24⟩ THE `unevaluated` DISCLOSURE FOR A POLICY THIS ENGINE CANNOT HONOUR AS WRITTEN — one entry per
+// RAW POLICY LINE (SPEC §3.1: "the RAW policy line, verbatim"), grouped because one line can carry two bad
+// tokens. ONE builder, because BOTH gate routes emit it and §3.1 makes byte-equality between their
+// documents the acceptance test: the scan route gained it first (a certain baseline regression must ride
+// exit 1 with the refusal disclosed beside it) and `gate --report` has to say the same thing in the same
+// bytes or the equality MUST breaks on the very change that repaired the precedence.
+//
+// The wording is written FOR THE DOCUMENT rather than reusing `policyErrorText`, which ends "Refusing
+// (exit 2)" — true of a refusal document and FALSE beside a dominating violation, and a machine-consumer
+// channel is exactly where a stale sentence about the exit code does damage.
+export function policyErrorUnevaluated(errors) {
+  const byLine = new Map();
+  for (const e of errors) {
+    if (!byLine.has(e.where)) byLine.set(e.where, []);
+    byLine.get(e.where).push(`\`${e.token}\` is not a recognised ${e.vocabulary} (known: ${e.accepted})`);
+  }
+  return [...byLine.entries()].map(([rule, ts]) => ({ rule,
+    why: `NOT EVALUATED — this line cannot be honoured as written: ${ts.join("; ")}. Dropping the token `
+       + `would gate a DIFFERENT policy than the one spelled (alone the rule widens to the bare effect; `
+       + `beside valid tokens it narrows while the gate still looks armed).` }));
+}
+
+// ⟨0.24⟩ …and the same for a policy that could not be READ at all. ONE sentence and one `unevaluated`
+// entry for both gate routes: they had two different `reason` strings, so §3.1's byte-equality MUST was
+// already broken for this cause and no test could see it (the equality row only exercises the UNHONOURABLE
+// policy). `rule` names the WHOLE FILE, parenthesised so it cannot be mistaken for a policy line — an
+// unreadable policy has no lines to name, and a consumer of a verdict where a certain violation DOMINATED
+// this refusal must still be able to see from the DOCUMENT that the policy half of the gate never ran.
+export function policyUnreadable(policyFile) {
+  const shown = policyFile === "" ? "(configured empty)" : policyFile;
+  const why = `policy ${shown} could not be read — the gate was NOT enforced from it`;
+  return { why, unevaluated: [{ rule: `(entire policy ${shown} — unreadable, no rules parsed)`, why }] };
+}
+
 // ⟨0.24⟩ THE REFUSAL DOCUMENT (SPEC §3.1 `107755b`, carve-outs removed by `1503368`). A refusal used to
 // write NO `--gate-json` document at all, so a CI wrapper reading that path unconditionally re-read THE
 // PREVIOUS RUN'S document as current — a green file from yesterday's clean run, still on disk, is how a
