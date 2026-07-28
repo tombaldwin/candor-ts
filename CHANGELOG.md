@@ -8,6 +8,22 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**⚠ ⟨0.24⟩ …AND THE SAME RULE ON THE CHAINED-DEP ROUTE, where it was broken worse.** A chained dependency
+report with a present-but-unparseable §2 key bought the consumer **strictly more confidence than not
+chaining the package at all** — the ⟨0.24⟩ `analyzed.count: 0` defect arriving through a different key.
+Measured on the standing ratesdep fixture under `deny Fs`: with `functions: "oops"`, `functions: {}` or an
+entry's `inferred: null`, the caller `go` came out **ABSENT from `functions`** (a ⟨0.21⟩ positive purity
+claim) with no `invisible`, no `coverage.uncovered` and no verdict coverage block, where the *unchained*
+arm discloses all four. Its fabrication mirror rode the same line: an entry's `inferred: "Fs"` was
+**iterated into characters** and shipped into the consumer's own report as the effect set `['F','s']`, and
+`inferred: [7]` arrived as `[7]`. The fix is a **fourth conjunct on the dep-coverage ladder**
+(`corruptDepPkgs`, beside stale / incomplete / judged-nothing) plus a corrupt entry registering **no
+`crossDeps` cell** — withholding coverage alone was not enough, because a cell short-circuits the ladder
+before the coverage check and handed the caller an empty hit. All five corrupt arms now answer *exactly as
+the unchained arm does* across entry, coverage, verdict and exit. Strictly additive: only unreadable
+values are dropped, every entry that reads cleanly is joined untouched, and a corrupt entry does not
+withdraw an intact sibling.
+
 **⚠ ⟨0.24⟩ A PRESENT-BUT-UNPARSEABLE §2 KEY IS CORRUPT INPUT, NOT ITS EMPTY VALUE** (SPEC §2: "a reader
 that recovers from a type mismatch by substituting the default … the language's convenience default is the
 fail-open direction on every key in this format"). Under ⟨0.21⟩ an entry with no effects is a **positive
