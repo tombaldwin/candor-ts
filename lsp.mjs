@@ -297,6 +297,19 @@ function diagnosticsFor(docPath) {
   const text = activePolicy();
   if (text === null || !hasReport(reportPrefix)) return [];
   const fns = Q.loadReport(reportPrefix);
+  // ⟨0.24⟩ A report that JUDGED NOTHING is not a clean bill of health, and this surface is where that is
+  // hardest to notice: the live gate's whole vocabulary is squiggles, and a report with `analyzed.count: 0`
+  // has no entries, so it produces none — an empty editor reads as "the gate is green" when the truth is
+  // that nothing was ever judged. SPEC §2's three-row table, bound here by §3.1 ⟨0.24⟩ ("the obligation is
+  // on the reading, not on the route by which the report arrived"); this route takes a `report` locator,
+  // so a FOREIGN report arrives by it. The channel is the LOG and `warnOnce` rather than a diagnostic on
+  // every publish, because there is no line to pin it to and a per-keystroke popup is how an advisory gets
+  // turned off. The verdict is untouched: no effect is asserted that the report does not carry.
+  if (Q.reportJudgedNothing(reportPrefix))
+    warnOnce(`candor-lsp: the report at ${reportPrefix} judged NOTHING (⟨0.24⟩ \`analyzed.count\` is 0, absent with no `
+      + `entries, or unreadable) — no gate diagnostics can come from it, and their absence is NOT an all-clear: `
+      + `absence from \`functions\` licenses no purity claim about any unit. Re-scan the sources you meant to gate `
+      + `(candor-ts <src> --out ${reportPrefix}).`);
   // ⟨0.24⟩ `netClass` VERBATIM off the wire — the same report-route rule as the MCP `candor_gate` tool and
   // `gate --report`; re-deriving it here would answer with the CONSUMER's `net-partner` evidence about the
   // producer's project, in both the fabricating and the fail-open direction (see reportNetClasses).

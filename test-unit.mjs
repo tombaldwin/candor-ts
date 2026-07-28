@@ -19,6 +19,7 @@ import {
   fix, fixGate, unverified,
   containment, loadReport, loadCallgraph, loadHierarchy, callersFrontier, blindspots, blindspotsStats, isReport,
   reportCoverage, gainsCoverage, parseClassFilter, ClassFilterError,
+  claimsToHaveJudgedNothing, loadGateReport, reportJudgedNothing,
 } from "./query-core.mjs";
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
@@ -1440,4 +1441,58 @@ test("surface.nearestSource: iterates callees in SORTED order (deterministic tie
   assert.equal(f1[0].source, "aaa.doSend", "sorted BFS picks the first-sorting source regardless of insertion order");
   assert.equal(f2[0].source, "aaa.doSend");
   assert.equal(f1[0].source, f2[0].source, "the source is insertion-order-independent (deterministic)");
+});
+
+// ⟨0.24⟩ SPEC §2's THREE-ROW TABLE, at the function boundary. The behavioural suite drives it through the
+// chain and through `gate --report`; this pins the predicate itself, because ONE integer separates a
+// dependency that judged nothing from one that judged n units and found none of them effectful, and the
+// second is a claim §2 chaining rule 3 requires a consumer to BELIEVE. Every row is a shape a real report
+// takes; the `count > 0` rows are the control that a fix keyed on `functions` being empty would fail.
+test("⟨0.24⟩ claimsToHaveJudgedNothing: the three-row table plus the fail-closed row", () => {
+  const T = (analyzed, fns) => claimsToHaveJudgedNothing(analyzed === undefined ? { functions: fns } : { analyzed, functions: fns }, fns);
+  // row 1 — count 0: judged nothing, whatever `functions` says.
+  assert.equal(T({ count: 0 }, []), true);
+  assert.equal(T({ count: 0, digest: "ab" }, []), true);
+  assert.equal(T({ count: -1 }, []), true, "a negative count is not a judgment either");
+  assert.equal(T({ count: 0 }, [{ fn: "a" }]), true, "count 0 while LISTING functions is contradictory: fail closed");
+  // row 2 — count n > 0: judged n units. THE CONTROL: an empty `functions` here is an all-pure CLAIM.
+  assert.equal(T({ count: 2 }, []), false, "count n>0 with functions:[] is rule 3's all-pure claim — believe it");
+  assert.equal(T({ count: 1 }, [{ fn: "a" }]), false, "the ordinary report");
+  assert.equal(T({ count: 1e6 }, []), false);
+  // row 3 — manifest ABSENT: judged-nothing IFF there are no entries.
+  assert.equal(T(undefined, []), true, "a pre-⟨0.21⟩ producer with nothing to show makes no claim");
+  assert.equal(T(undefined, [{ fn: "a" }]), false, "…but its ENTRIES are the claim it could make");
+  // the fail-closed row: a judgment claim that cannot be READ is not a claim. A denylist, not an allowlist.
+  for (const bad of ["oops", {}, null, [], 7, { count: "2" }, { count: null }, { count: NaN }, { count: Infinity }])
+    assert.equal(T(bad, [{ fn: "a" }]), true, `garbled manifest ${JSON.stringify(bad)} grants nothing`);
+  // and the shapes that are not objects at all — a legacy bare ARRAY report has no envelope, so its
+  // entries are its only claim (reading it off a summed count would call every one of them unjudged).
+  assert.equal(claimsToHaveJudgedNothing([{ fn: "a" }], [{ fn: "a" }]), false);
+  assert.equal(claimsToHaveJudgedNothing([], []), true);
+  assert.equal(claimsToHaveJudgedNothing(null, []), true);
+});
+
+test("⟨0.24⟩ the prefix readers agree: loadGateReport and reportJudgedNothing read one rule", () => {
+  const D = fs.mkdtempSync(path.join(os.tmpdir(), "candor-unjudged-"));
+  const w = (n, doc) => { fs.writeFileSync(path.join(D, `${n}.json`), JSON.stringify(doc)); return path.join(D, n); };
+  const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app" };
+  const zero = w("zero", { ...V, analyzed: { count: 0 }, functions: [] });
+  const allpure = w("allpure", { ...V, analyzed: { count: 2 }, functions: [] });
+  assert.equal(loadGateReport(zero).judgedNothing, true);
+  assert.equal(loadGateReport(allpure).judgedNothing, false, "the control: a believed all-pure report");
+  assert.equal(reportJudgedNothing(zero), true);
+  assert.equal(reportJudgedNothing(allpure), false);
+  // a prefix naming NO report is not "judged nothing" — it is nothing at all, and each caller owns its
+  // own loud not-found path. Answering true here would put a caveat on a missing file.
+  assert.equal(reportJudgedNothing(path.join(D, "absent")), false);
+  // MULTI-REPORT siblings (the Rust/workspace form): the union has judged something as soon as ONE has.
+  const M = fs.mkdtempSync(path.join(os.tmpdir(), "candor-unjudged-multi-"));
+  fs.writeFileSync(path.join(M, "r.a.scan.json"), JSON.stringify({ ...V, analyzed: { count: 0 }, functions: [] }));
+  fs.writeFileSync(path.join(M, "r.b.scan.json"), JSON.stringify({ ...V, analyzed: { count: 4 }, functions: [] }));
+  assert.equal(reportJudgedNothing(path.join(M, "r")), false);
+  assert.equal(loadGateReport(path.join(M, "r")).judgedNothing, false);
+  fs.writeFileSync(path.join(M, "r.b.scan.json"), JSON.stringify({ ...V, analyzed: { count: 0 }, functions: [] }));
+  assert.equal(reportJudgedNothing(path.join(M, "r")), true, "…and nothing has, when none has");
+  fs.rmSync(D, { recursive: true, force: true });
+  fs.rmSync(M, { recursive: true, force: true });
 });

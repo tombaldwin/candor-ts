@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText, reasonClass } from "./policy.mjs";
-import { unverifiedHoleRule, ruleUpgrade, byCodePoint } from "./query-core.mjs";
+import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
          modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf } from "./scan-core.mjs";
@@ -711,6 +711,59 @@ function resolveInheritedWhy(entries) {
 // answered key still answers, an unanswered one falls back to the κ ledger's `invisible: [pkg]` hedge.
 // Nothing is downgraded and no effect is ever removed.
 const incompleteDepPkgs = new Set();
+// ⟨0.24⟩ Packages whose ONLY chained report JUDGED NOTHING — `analyzed.count: 0`. The THIRD answer to the
+// one question this door asks ("may this report's SILENCE speak?"), after staleness (§2.1, the report is
+// not ours to repeat) and incompleteness (⟨0.21⟩, the report says it could not read some of its own
+// source). Here the report is well-formed AND trusted AND complete; it simply judged no units at all, so
+// there is nothing for its silence to be silent ABOUT.
+//
+// THE DEFECT, MEASURED ON THIS ENGINE BEFORE A LINE WAS WRITTEN (dep `hit()` reads /etc/hosts, app `go()`
+// calls it, `deny Fs`):
+//
+//   unchained          go -> inferred: [], invisible: ['ratesdep'], coverage.uncovered, κ nudge   exit 0
+//   trusted            go -> inferred: ['Fs']                                                     exit 1
+//   count: 0   (pre)   go -> ABSENT FROM `functions`, no coverage, no verdict block, no nudge      exit 0
+//
+// — chaining a report that judged nothing bought a consumer MORE confidence than not chaining the package
+// at all, which is the one thing a degraded report may never do. State the harm precisely: an empty report
+// carries no effects, so this arm cannot itself TRIP a gate — it and the unchained arm both exit 0 on
+// `deny Fs`, and the exit-1 flip exists only against the TRUSTED arm. What it DELETES is the DISCLOSURE:
+// the per-fn `invisible` marker, the envelope's `coverage.uncovered`, the κ nudge on stderr and
+// `--gate-json`'s coverage block, which is the machine-consumer channel. So the fix restores the
+// DISCLOSURE, not the verdict — re-asserting `Fs` here would fabricate an effect the consumer has no
+// evidence for. Conformance PART 26 measured the same door four-way and printed all four
+// INDISTINGUISHABLE; this engine's waiver was the largest at 56 live cells ABSENT.
+//
+// THE WIRE ALREADY DISTINGUISHED THE TWO CASES AND NOTHING READ IT. `functions: []` is two completely
+// different statements depending on one integer:
+//
+//   `analyzed.count: 0`   "I judged nothing here"            — an `export * from` facade package scans to
+//                                                              exactly this. No unit was ever looked at,
+//                                                              so absence carries no purity claim: NOT
+//                                                              COVERED, exactly as if never chained.
+//   `analyzed.count: n>0` "I judged n units, none effectful" — a positive all-pure claim SPEC §2 rule 3
+//                                                              requires a consumer to BELIEVE: COVERED,
+//                                                              and it MUST NOT be hedged.
+//
+// KEYED ON THE INTEGER, NEVER ON THE EMPTINESS OF `functions`, and the ratio is why that is not a style
+// preference. Measured over 1997 deduplicated JVM dependency jars: 79 (4.0%) emit `count: 0` and only 6 of
+// those actually granted coverage — but 104 (5.2%) are the LEGITIMATE all-pure kind. A fix keyed on
+// emptiness would have withdrawn 104 real claims to catch 6: the plausible-but-wrong fix is MORE
+// destructive than the defect it treats. The count-n arm is therefore carried in the test suite as an
+// in-band control, and both prior engines report the same signature — hedging on emptiness fails the
+// control WHILE THE COUNT-0 ROW STAYS GREEN, so the floor arm alone cannot catch it.
+//
+// TREATMENT follows the ⟨0.21⟩ incomplete arm, not the §2.1 stale one: entries untouched, only COVERAGE
+// withheld, so this is strictly additive — it can add a hedge, never remove an effect. In the ordinary
+// case a count-0 report has no entries to touch at all; the branch matters for the CONTRADICTORY report
+// that claims zero while listing functions, where dropping its entries would be the mirror sin.
+const unjudgedDepPkgs = new Set();
+// The predicate itself is `claimsToHaveJudgedNothing` in query-core.mjs — SPEC §2's three-row table plus
+// the fail-closed row it implies, kept in ONE place because `gate --report` must read the same integer the
+// same way (§3.1 ⟨0.24⟩ puts the obligation on the reading, not on the route the report arrived by). The
+// two rows that matter here: `analyzed` ABSENT with entries present is a pre-⟨0.21⟩ producer that judged
+// something and said so the only way it could, so it KEEPS its coverage; `analyzed` present but garbled has
+// made no claim, so it grants none.
 {
   // --workspace's auto-scanned deps dir is prepended to the explicit CANDOR_DEPS/config spec (both chain).
   const spec = [workspaceDepsDir, depInitsDir, process.env.CANDOR_DEPS ?? candorConfig.deps ?? ""].filter(Boolean).join(":");
@@ -742,7 +795,18 @@ const incompleteDepPkgs = new Set();
       // absence as incompleteness would withhold coverage from every ordinary report.
       const incomplete = !stale && d.unanalyzed !== undefined
         && !(Array.isArray(d.unanalyzed) && d.unanalyzed.length === 0);
-      const covers = stale ? staleDepPkgs : incomplete ? incompleteDepPkgs : depCoveredPkgs;   // an untrusted or self-declared-incomplete report grants no coverage
+      // ⟨0.24⟩ …and neither does one that judged NOTHING (see `unjudgedDepPkgs`). Ordered LAST of the
+      // three because it is the weakest claim about the report: staleness says we may not repeat it,
+      // incompleteness says it could not read its own source, and this says only that there is nothing in
+      // it to repeat. A report that is stale AND count-0 is disclosed as stale, which is the more specific
+      // remedy (re-scan with a matching build, not "point the scan at real sources").
+      const judgedNothing = !stale && !incomplete && claimsToHaveJudgedNothing(d, d.functions);
+      // COVERAGE IS ANCHORED TWICE — the envelope's `package` key AND each entry's `hash` prefix below —
+      // so `covers` is chosen ONCE here and both anchors write through it. Gating one and not the other is
+      // a no-op wearing a fix's clothes: an all-pure report carries the envelope key and no entries, and a
+      // contradictory count-0-with-entries report carries the second and would have re-granted itself the
+      // coverage the first withheld.
+      const covers = stale ? staleDepPkgs : incomplete ? incompleteDepPkgs : judgedNothing ? unjudgedDepPkgs : depCoveredPkgs;   // an untrusted, self-declared-incomplete or unjudged report grants no coverage
       if (typeof d.package === "string" && d.package) covers.add(d.package);
       const inheritedWhy = stale ? new Map() : resolveInheritedWhy(d.functions ?? []);
       for (const e of d.functions ?? []) {
@@ -819,6 +883,11 @@ const incompleteDepPkgs = new Set();
   // complete report. A COMPLETE report is a coverage claim on its own, so it must not inherit the other's
   // hedge — the same "must not pick up the disclosure on top of a real answer" rule one line up.
   for (const p of depCoveredPkgs) incompleteDepPkgs.delete(p);
+  // ⟨0.24⟩ …and a package chained twice, once judged and once not, IS covered — the same rule a third
+  // time, and here the argument is the strongest of the three: a count-0 report makes NO claim in either
+  // direction, so it adds nothing to a report that judged something and subtracts nothing from it either.
+  // Letting a report with no content withdraw another's earned purity claim is the mirror sin.
+  for (const p of depCoveredPkgs) unjudgedDepPkgs.delete(p);
   if (staleDepPkgs.size)
     console.error(`candor-ts: ${staleDepPkgs.size} chained dependency report(s) were produced by a DIFFERENT engine build — `
       + `downgraded to Unknown and granted no coverage (§2.1): ${[...staleDepPkgs].sort().join(", ")}`);
@@ -826,6 +895,14 @@ const incompleteDepPkgs = new Set();
     console.error(`candor-ts: ${incompleteDepPkgs.size} chained dependency report(s) declare source they could not analyze `
       + `(\`unanalyzed\`) — entries kept, but granted no coverage, so a key they do not answer discloses instead of reading `
       + `pure: ${[...incompleteDepPkgs].sort().join(", ")}`);
+  // Named on stderr for the same reason the two arms above are: the disclosure IS the fix, and a remedy is
+  // named because `analyzed.count: 0` is nearly always a MIS-TARGETED scan (a facade package of re-exports,
+  // an `--out` pointed at a directory with no sources) rather than a fact about the dependency.
+  if (unjudgedDepPkgs.size)
+    console.error(`candor-ts: ${unjudgedDepPkgs.size} chained dependency report(s) judged NOTHING (⟨0.24⟩ `
+      + `\`analyzed.count\` is 0, absent-with-no-functions, or unreadable) — a report with no judgment in it is `
+      + `not an all-clear, so it grants NO coverage and its package stays in the κ ledger exactly as if it were `
+      + `never chained: ${[...unjudgedDepPkgs].sort().join(", ")}`);
 }
 
 if (allowJs) { compilerOptions.allowJs = true; compilerOptions.checkJs = false; }

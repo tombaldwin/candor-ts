@@ -8,6 +8,51 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**⚠ ⟨0.24⟩ A CHAINED REPORT WITH `analyzed.count: 0` NO LONGER BUYS COVERAGE — "I judged nothing" must not
+read as full coverage** (SPEC §2's three-row table). A report carrying `functions: []` **and**
+`analyzed.count: 0` was strictly MORE confident than not chaining the package at all: every call into it
+dropped out of `functions`, which under ⟨0.21⟩ is a positive purity claim, with no `invisible`, no
+`coverage.uncovered`, no coverage block in `--gate-json` and no line on stderr — while the same scan with
+`CANDOR_DEPS` unset disclosed all four. Measured here first, on a two-package fixture (dep `hit()` reads
+`/etc/hosts`, app `go()` calls it, `deny Fs`):
+
+    unchained          go -> inferred: [], invisible: ['ratesdep'], coverage.uncovered, κ nudge   exit 0
+    trusted            go -> inferred: ['Fs']                                                     exit 1
+    count: 0   (pre)   go -> ABSENT FROM `functions`, no coverage, no verdict block, no nudge      exit 0
+    count: 0   (post)  go -> identical to the UNCHAINED row, plus a named stderr line              exit 0
+
+**What the fix restores is the DISCLOSURE, not the verdict.** The empty report carries no effects, so this
+arm cannot itself trip a gate — it and the unchained arm both exit 0, and the exit-1 flip exists only
+against the *trusted* arm. Re-asserting `Fs` here would fabricate an effect the consumer has no evidence
+for. The rule lands in `scan.mjs`'s dep loader as a **third conjunct on the covered set**, beside the §2.1
+staleness gate and the ⟨0.21⟩ incompleteness one — coverage is the single mechanism that turns a report's
+silence into a purity claim, so this is the third answer to "may this silence speak?", and the existing
+`invisible` / `coverage.uncovered` / verdict caveat all fall out of it. Not in the gate: a gate reads its
+verdict off a coverage decision already made.
+
+**The second row is the control, and it is why this is not a one-liner.** `functions: []` is equally the
+shape of an all-pure dependency, whose empty report §2 chaining rule 3 requires a consumer to BELIEVE.
+⟨0.21⟩'s `analyzed.count` is the only thing on the wire that separates them, so the predicate is keyed on
+that integer and **never** on the emptiness of `functions`: over 1997 JVM dependency jars, 79 emit
+`count: 0` (6 granting coverage) against **104 legitimate all-pure reports** — keying on emptiness would
+have withdrawn 104 real claims to catch 6. Both directions are mutation-verified. `analyzed` ABSENT is
+judged-nothing **iff** there are no entries (row 3 — a pre-⟨0.21⟩ producer that LISTS functions keeps its
+standing); `analyzed` present but unreadable fails **closed**. Entries are never touched, so the change is
+strictly additive, and a package chained twice — once judged, once not — keeps its coverage.
+
+**The same rule binds every route a report arrives by, not just the chain** (SPEC §3.1 ⟨0.24⟩: "the
+obligation is on the reading, not on the route"). `gate --report`, the MCP `candor_gate` tool and the LSP's
+live gate all read a report this engine did not produce and are **not** version-checked, so they are where
+a foreign count-0 report actually lands: `gate --report` now prints the caveat beside "no violations" (exit
+code and verdict document unchanged — byte-equality with `scan --policy` is §3.1's acceptance test, and a
+scan that analyzed nothing writes `{ok: true, analyzed: {count: 0}}` and exits 0), `candor_gate` returns an
+additive `judgedNothing` + `caveat`, and the LSP logs it once (an empty editor over such a report is not an
+all-clear). Blast radius on real code: of 83 packages scanned out of `node_modules`, **0 emit `count: 0`**
+— this engine mints a `<module>` unit per file and refuses to write a report at all when a directory has no
+TypeScript sources — while **13 (15.7%)** are the legitimate all-pure kind, the same ratio argument from
+the other side. Conformance PART 26's CONTROL SEPARATION for ts moves from `INDISTINGUISHABLE` to
+**`SEPARATED on 64/80 cells`**, and its `empty_zero` arm from 56 ABSENT cells to **0**.
+
 **⟨0.24⟩ `gate --report <locator> --policy <file>` — THE GATE AS A FUNCTION OF A GIVEN SIGNATURE.** SPEC
 §3.1 makes it a MUST and candor-ts did not have it; PART 27's R6 row printed `NOSURF`, and the 0.24
 changelog entry in candor-spec had to be publicly corrected to "pinned 2-of-4" because of it. It lands

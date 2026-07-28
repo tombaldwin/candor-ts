@@ -1110,6 +1110,26 @@ switch (cmd) {
       console.error(`candor-ts: every report found at prefix '${prefix}' failed to load — refusing to gate an empty (all-clear) signature over a corrupt report; re-run the scan.`);
       process.exit(2);
     }
+    // ⟨0.24⟩ …AND A REPORT THAT JUDGED NOTHING IS NOT AN ALL-CLEAR EITHER (SPEC §2's three-row table,
+    // bound to this verb by §3.1: "a report presented DIRECTLY to the gate with `analyzed.count: 0` makes
+    // the same claim as a chained one, and must be read the same way … the obligation is on the reading,
+    // not on the route by which the report arrived"). The chained half of this rule lives in scan.mjs, on
+    // the coverage decision; here there is no coverage decision to hang it on — the report IS the whole
+    // input — so what the rule buys is the DISCLOSURE beside the verdict.
+    //
+    // NOT the exit code and NOT the verdict document, deliberately, on two independent grounds. §3.1 makes
+    // byte-equality with `scan --policy`'s `--gate-json` the acceptance test, and a scan that analyzed
+    // nothing writes `{ok: true, analyzed: {count: 0}, violations: []}` and exits 0 — so diverging here
+    // would split the verb this rung exists to keep single. And a verdict is an ASSERTION: the consumer has
+    // no evidence of any effect, so manufacturing one would be the fabrication mirror of the silent
+    // under-report. The machine channel is already correct and already byte-equal — `analyzed.count` rides
+    // the document, which is what ⟨0.21⟩ put it there for. What was missing is that a human reading "no
+    // violations" had nothing telling them the gate had judged nothing at all.
+    if (g.judgedNothing)
+      console.error(`candor-ts: the report at '${prefix}' judged NOTHING (⟨0.24⟩ \`analyzed.count\` is 0, absent with no `
+        + `entries, or unreadable) — a report with no judgment in it is not an all-clear, so a green verdict below `
+        + `certifies nothing: absence from \`functions\` licenses no purity claim about any unit. Re-scan the sources `
+        + `you meant to gate (candor-ts <src> --out ${prefix}), or gate the report of the package that has them.`);
     // THE REPORT ROUTE'S `(S, D)`: `S` = each entry's `inferred`, verbatim; `D` = the reason classes
     // resolved over the entries' OWN `calls` edges (the sidecar is NOT passed — that is the MUST NOT), by
     // the SAME resolution the scan gate and `unverified --class` use. `netClass` verbatim, likewise.

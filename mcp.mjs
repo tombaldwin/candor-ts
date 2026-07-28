@@ -243,6 +243,19 @@ const TOOLS = {
       // derivation, which is floored at `unknown-host` — the direction that cannot un-narrow the filter.
       const gfns = loadReportLoud(p);
       const v = evaluatePolicy(parsePolicy(text), gfns, Q.loadCallgraph(p), new Map(), new Set(), reportNetClasses(gfns));
+      // ⟨0.24⟩ …and a report that JUDGED NOTHING is not an all-clear (SPEC §2's three-row table, bound to
+      // every report-reading route by §3.1: "the obligation is on the reading, not on the route by which
+      // the report arrived"). This tool is exactly such a route — it gates whatever `report` points at,
+      // which is how a FOREIGN report arrives here — and `{ok: true, violations: []}` over a report with
+      // `analyzed.count: 0` tells an agent the code is clean when nothing in it was ever judged. The
+      // caveat is ADDITIVE (the two existing keys keep their shape and meaning, and the field is absent
+      // on every ordinary report) because the verdict itself must not move: the report asserts no effect,
+      // so asserting one here would be the fabrication mirror of the silence being disclosed.
+      if (Q.reportJudgedNothing(p))
+        return { ok: v.length === 0, violations: v, judgedNothing: true,
+                 caveat: "⟨0.24⟩ this report judged NOTHING (`analyzed.count` is 0, absent with no entries, or unreadable) — "
+                       + "a green verdict here certifies nothing: absence from `functions` licenses no purity claim about any "
+                       + "unit. Re-scan the sources you meant to gate, or point `report` at the package that has them." };
       return { ok: v.length === 0, violations: v };
     },
   },

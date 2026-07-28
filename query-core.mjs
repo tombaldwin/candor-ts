@@ -44,6 +44,10 @@ export function hasReport(p) {
       f.startsWith(base + ".") && f.endsWith(".json") && isReport(f));
   } catch { return false; }
 }
+// The report FILE(S) a prefix names: the exact `<prefix>.json`, else its multi-report siblings. ONE copy,
+// because the loaders and the ⟨0.24⟩ judged-nothing check must read the same file set — a helper reading a
+// narrower one would answer about a report the gate never gated.
+const reportFilesAt = (prefix) => (fs.existsSync(`${prefix}.json`) ? [`${prefix}.json`] : siblings(prefix, isReport));
 
 // Defend the queries against a partial/old-engine/hand-edited report: the §2 required fields are
 // defaulted, and a WRONG-TYPE field is coerced — a non-array `inferred` (e.g. the string "Net") must
@@ -189,6 +193,55 @@ const isCleanEmptyReport = (parsed) =>
   (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.functions) && parsed.functions.length === 0)
   || (Array.isArray(parsed) && parsed.length === 0);
 
+/** ⟨0.24⟩ Does this report say it judged NOTHING? SPEC §2's three-row table, plus the fail-closed row the
+ *  table implies. ONE rule, TWO routes: `scan.mjs` asks it of every CHAINED dep report (where the answer
+ *  decides coverage — see `unjudgedDepPkgs` there for the defect and the measurement) and `gate --report`
+ *  asks it of the report it was handed DIRECTLY, because §3.1 ⟨0.24⟩ puts the obligation on the READING,
+ *  not on the route the report arrived by. It lives here so the two can never drift into two readings of
+ *  the same integer. `fns` is the report's entries, consulted ONLY on the manifest-absent row.
+ *
+ *   · `analyzed.count` numeric and <= 0  → judged nothing. A report with no judgment in it is not an
+ *     all-clear: its silence licenses no purity claim about any unit.
+ *   · `analyzed.count` numeric and > 0   → judged n units. UNCHANGED — including the ordinary non-empty
+ *     `functions` case, and including `n > 0` with `functions: []`, which is a legitimate all-pure claim
+ *     §2 rule 3 requires a consumer to BELIEVE. That row is the CONTROL: keying this on the emptiness of
+ *     `functions` instead would not implement the rule, it would disable the claim rule 3 protects (java
+ *     measured 1997 dependency jars: 79 count-0 reports of which 6 granted coverage, against 104
+ *     legitimate all-pure ones — the plausible fix withdraws 104 real claims to catch 6).
+ *   · `analyzed` ABSENT → a pre-⟨0.21⟩ producer with no manifest: judged-nothing IFF there are no
+ *     entries (spec row 3). One that LISTS functions demonstrably judged units and said so the only way
+ *     it could, so it keeps the standing it has always had.
+ *   · `analyzed` PRESENT but unreadable (`"oops"`, `{}`, `null`, a non-numeric `count`) → a judgment
+ *     claim that cannot be READ is not a claim: FAIL CLOSED. A denylist of proven-safe shapes. */
+export const claimsToHaveJudgedNothing = (parsed, fns) => {
+  if (!parsed || typeof parsed !== "object" || !("analyzed" in parsed)) return !(fns ?? []).length;
+  const a = parsed.analyzed;
+  if (!a || typeof a !== "object" || Array.isArray(a)) return true;      // unreadable manifest → not a claim
+  if (typeof a.count !== "number" || !Number.isFinite(a.count)) return true;
+  return a.count <= 0;
+};
+
+/** ⟨0.24⟩ The same question asked of a PREFIX rather than of one parsed doc — for the consumers that read
+ *  a report they did not produce and hold no envelope: the MCP `candor_gate` tool and the LSP's live gate.
+ *  Both take a `--report`/`initializationOptions.report` locator and both answer "no violations" off it,
+ *  so a report that judged nothing reaches an AGENT as a clean bill of health by the exact route SPEC §3.1
+ *  ⟨0.24⟩ describes ("the obligation is on the reading, not on the route by which the report arrived").
+ *  A prefix with NO report files is not judged-nothing — it is nothing at all, and each caller already has
+ *  a loud not-found path for it (`hasReport`). ANDed across the multi-report siblings for the reason
+ *  `loadGateReport` records: the union has judged something as soon as one member has. */
+export function reportJudgedNothing(prefix) {
+  const files = reportFilesAt(prefix);
+  if (!files.length) return false;
+  return files.every((f) => {
+    let parsed;
+    try { parsed = JSON.parse(fs.readFileSync(f, "utf8")); } catch { return true; }   // unreadable → no claim
+    // The raw entries, read QUIETLY: this is an advisory, and its caller has already run the loud loader
+    // over the same bytes, so re-disclosing a malformed shape here would double every such line.
+    const raw = parsed && typeof parsed === "object" && parsed.functions !== undefined ? parsed.functions : parsed;
+    return claimsToHaveJudgedNothing(parsed, Array.isArray(raw) ? raw : []);
+  });
+}
+
 // Load ONE report file → { entries, hardFail }. A read/parse throw, or an empty result over a doc that
 // is NOT a clean-empty report, is a hard fail (the file was found but carries no trustworthy functions —
 // letting it read as [] would be the §4 false all-clear). Discloses every failure mode on stderr.
@@ -243,14 +296,22 @@ export function loadReport(prefix) {
  * `net-partner` re-mapping of the `netClass` this report already states. The reach the reason-class
  * fixpoint runs over is the entries' OWN §2 `calls` field — report data in, report data out.
  *
- * Returns `{functions, analyzed, unanalyzed, coverage, hardFail}`. `hardFail` carries the `loadReport`
- * meaning exactly: a file was FOUND and yielded nothing trustworthy (never "there was no file" — the
- * caller's `requireReport` owns that), so a corrupt report can be refused instead of gated green.
+ * Returns `{functions, analyzed, unanalyzed, coverage, judgedNothing, hardFail}`. `hardFail` carries the
+ * `loadReport` meaning exactly: a file was FOUND and yielded nothing trustworthy (never "there was no
+ * file" — the caller's `requireReport` owns that), so a corrupt report can be refused instead of gated
+ * green. `judgedNothing` is the ⟨0.24⟩ reading of `analyzed.count` (see `claimsToHaveJudgedNothing`).
  */
 export function loadGateReport(prefix) {
-  const files = fs.existsSync(`${prefix}.json`) ? [`${prefix}.json`] : siblings(prefix, isReport);
+  const files = reportFilesAt(prefix);
   const functions = [], unanalyzed = [], cov = new Map();
   let hardFail = false, analyzed = 0;
+  // ⟨0.24⟩ did the report handed to the gate judge ANYTHING? Per FILE, then ANDed across the multi-report
+  // siblings, because the union of several reports has judged something as soon as ONE of them has — the
+  // same union the `functions` arrays and the `analyzed` counts take one line down. Answered by the SHARED
+  // predicate (see `claimsToHaveJudgedNothing`), never re-derived from the summed count: a bare-array
+  // legacy report `continue`s past the envelope block below with a count of 0 and would read as
+  // judged-nothing on the sum alone, while its entries are exactly the evidence that it judged units.
+  let judgedNothing = true;
   for (const f of files) {
     let parsed;
     try { parsed = JSON.parse(fs.readFileSync(f, "utf8")); }
@@ -260,6 +321,7 @@ export function loadGateReport(prefix) {
       console.error(`candor-ts: report ${f} yielded no usable functions — OMITTED (malformed report); re-run the scan`);
       hardFail = true;
     }
+    if (!claimsToHaveJudgedNothing(parsed, entries)) judgedNothing = false;
     functions.push(...entries);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;  // legacy bare array: no envelope
     // ⟨0.21⟩ the completeness manifest. `count` SUMS across siblings, exactly as the multi-report `functions`
@@ -284,7 +346,7 @@ export function loadGateReport(prefix) {
   }
   const coverage = [...cov.entries()].sort((a, b) => b[1] - a[1] || byCodePoint(a[0], b[0]))
     .map(([name, calls]) => ({ name, calls }));
-  return { functions, analyzed, unanalyzed, coverage, hardFail };
+  return { functions, analyzed, unanalyzed, coverage, judgedNothing, hardFail };
 }
 // The returned graph carries a non-enumerable `partial` flag (the loadReport `hardFail` precedent):
 // true iff a sidecar file was MATCHED but failed to read/parse — its edges were DROPPED (disclosed on

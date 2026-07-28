@@ -576,5 +576,32 @@ fs.rmSync(W, { recursive: true, force: true });
   fs.rmSync(F, { recursive: true, force: true });
 }
 
+// ⟨0.24⟩ A REPORT THAT JUDGED NOTHING IS NOT A CLEAN BILL OF HEALTH — SPEC §2's three-row table, bound
+// to this surface by §3.1 ("the obligation is on the reading, not on the route by which the report
+// arrived"). This tool gates whatever `report` points at, with no version check, so it is exactly how a
+// foreign count-0 report reaches an AGENT — and `{ok: true, violations: []}` over one says the code is
+// clean when nothing in it was ever judged. The caveat is ADDITIVE: `ok`/`violations` keep their meaning
+// (the report asserts no effect, so asserting one here would be fabrication) and the field is absent on
+// every ordinary report, which is what the CONTROL row pins.
+{
+  const F = fs.mkdtempSync("/tmp/candor-mcp-unjudged-");
+  const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app" };
+  fs.writeFileSync(`${F}/zero.json`, JSON.stringify({ ...V, analyzed: { count: 0, digest: "0" }, functions: [] }));
+  fs.writeFileSync(`${F}/allpure.json`, JSON.stringify({ ...V, analyzed: { count: 2, digest: "0" }, functions: [] }));
+  fs.writeFileSync(`${F}/p.pol`, "deny Net\n");
+  const ucall = (id, rep) => ({ jsonrpc: "2.0", id, method: "tools/call",
+    params: { name: "candor_gate", arguments: { report: `${F}/${rep}`, policy: `${F}/p.pol` } } });
+  const ur = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+                               ucall(2, "zero"), ucall(3, "allpure")], [], { CANDOR_REPORT: `${F}/zero` });
+  const ut = (id) => JSON.parse(ur.find((r) => r.id === id).result.content[0].text);
+  ok("candor_gate: ⟨0.24⟩ a count-0 report is flagged `judgedNothing` with a caveat — a green verdict over it certifies nothing",
+     ut(2).ok === true && ut(2).judgedNothing === true && /judged NOTHING/.test(ut(2).caveat ?? ""),
+     JSON.stringify(ut(2)).slice(0, 240));
+  ok("candor_gate: ⟨0.24⟩ CONTROL — count n>0 with the SAME empty `functions` carries no caveat (§2 rule 3's all-pure claim, believed)",
+     ut(3).ok === true && ut(3).judgedNothing === undefined && ut(3).caveat === undefined,
+     JSON.stringify(ut(3)).slice(0, 240));
+  fs.rmSync(F, { recursive: true, force: true });
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

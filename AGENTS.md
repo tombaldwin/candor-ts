@@ -87,6 +87,14 @@ same reason read one step earlier: spec §2 rule 3 makes a report's silence a pu
 just said it never read some of its own source. Its entries are kept unchanged (they were derived from source
 it *did* read); only its silence hedges, and an `import` backed only by such a report discloses
 `Unknown[incomplete-dep:<pkg>]`. Chaining an incomplete report is therefore never worse than not chaining it.
+**And a report that JUDGED NOTHING** — ⟨0.24⟩ `analyzed.count: 0`, or no manifest and no entries, or a manifest
+too garbled to read — grants **no coverage** either: rule 3 turns a report's silence into a purity claim, and a
+report that judged nothing is all silence, so its package stays in the κ ledger exactly as if it were never
+chained. Keyed on the COUNT and never on `functions` being empty — `count: n > 0` with `functions: []` is a
+legitimate all-pure claim rule 3 says to believe, and it is untouched. The same reading binds every route a
+report arrives by (`gate --report`, MCP `candor_gate`, the LSP gate), each of which discloses the count-0 case
+rather than answering "no violations" flat; the verdict itself does not move, because the report gives no
+evidence of an effect and asserting one would be fabrication.
 Caveat: a type-only boundary (`import type` …, the tRPC style) has no runtime calls to inherit through —
 nothing to join.
 

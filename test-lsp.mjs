@@ -609,5 +609,48 @@ export function handler(): void { mid(); }
   fs.rmSync(AC, { recursive: true, force: true });
 }
 
+// ── ⟨0.24⟩ A REPORT THAT JUDGED NOTHING IS NOT A CLEAN BILL OF HEALTH ──────────────────────────────
+// SPEC §2's three-row table, bound to this surface by §3.1 ("the obligation is on the reading, not on the
+// route by which the report arrived"). The live gate's whole vocabulary is squiggles, and a report with
+// `analyzed.count: 0` has no entries to squiggle — so an empty editor reads as "the gate is green" when
+// nothing was ever judged, and this route takes a `report` locator, which is how a FOREIGN report gets
+// here. The channel is the log (there is no line to pin it to) and the CONTROL row is what makes the
+// first meaningful: `count: n > 0` with the SAME empty `functions` is §2 rule 3's all-pure claim, which
+// must arrive with no advisory at all.
+{
+  const mk = (analyzed) => {
+    const U = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-unjudged-"));
+    fs.mkdirSync(path.join(U, ".candor"));
+    fs.writeFileSync(path.join(U, ".candor", "report.json"),
+                     JSON.stringify({ candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed, functions: [] }));
+    fs.writeFileSync(path.join(U, "arch.policy"), "deny Net\n");
+    fs.writeFileSync(path.join(U, ".candor", "config"), "policy arch.policy\n");
+    return U;
+  };
+  const open = (U) => ({ jsonrpc: "2.0", method: "textDocument/didOpen",
+    params: { textDocument: { uri: pathToFileURL(path.join(U, "src", "app.ts")).href, languageId: "typescript", version: 1, text: "" } } });
+  const U0 = mk({ count: 0, digest: "0" });
+  const { inbound: zeroReplies } = await lspSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(U0).href } },
+    { jsonrpc: "2.0", method: "initialized", params: {} },
+    open(U0),
+  ], 3);  // init + the ⟨0.24⟩ logMessage + diagnostics
+  const zeroLog = zeroReplies.find((r) => r.method === "window/logMessage");
+  ok("⟨0.24⟩ lsp: a count-0 report is DISCLOSED — an empty editor over it is not an all-clear",
+     zeroLog && /judged NOTHING/.test(zeroLog.params?.message ?? "")
+     && /licenses no purity claim/.test(zeroLog.params?.message ?? ""), JSON.stringify(zeroLog)?.slice(0, 220));
+  fs.rmSync(U0, { recursive: true, force: true });
+  const U2 = mk({ count: 2, digest: "0" });
+  const { inbound: apReplies } = await lspSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(U2).href } },
+    { jsonrpc: "2.0", method: "initialized", params: {} },
+    open(U2),
+  ], 2);  // init + diagnostics, and NO logMessage
+  ok("⟨0.24⟩ lsp: CONTROL — count n>0 with the SAME empty `functions` logs nothing (rule 3's claim, believed)",
+     !apReplies.some((r) => r.method === "window/logMessage"),
+     JSON.stringify(apReplies.map((r) => r.method ?? r.id)));
+  fs.rmSync(U2, { recursive: true, force: true });
+}
+
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -3065,6 +3065,159 @@ export function wrap(): void { (opaque as any)(); }`,
         ifaceGate.status === 1, String(ifaceGate.status) + ifaceGate.stdout);
 }
 
+// ── 11e. ⟨0.24⟩ a chained report that JUDGED NOTHING grants no coverage ───────────────────────────
+// SPEC §2's three-row table. The same door as 11a with a third key: staleness says the report is not ours
+// to repeat, incompleteness says it could not read its own source, and this says there is nothing in it to
+// repeat at all. MEASURED here before a line was written (dep `hit()` reads /etc/hosts, app `go()` calls
+// it, `deny Fs`):
+//
+//   unchained          go -> inferred: [], invisible: ['ratesdep'], coverage.uncovered, κ nudge   exit 0
+//   trusted            go -> inferred: ['Fs']                                                     exit 1
+//   count: 0   (pre)   go -> ABSENT FROM `functions`, no coverage, no verdict block, no nudge      exit 0
+//
+// State the harm precisely, because the loose form sends you after the wrong symptom: an empty report
+// carries no effects, so the count-0 arm cannot itself TRIP a gate — it and the unchained arm both exit 0.
+// What it DELETES is the DISCLOSURE, so the FLOOR assertion below is EQUALITY WITH THE UNCHAINED ARM
+// rather than a literal: "exactly as if unchained" is what §2 states, and a literal would pass for a fix
+// that happened to hedge differently. The count-n arm beside it is a CONTROL, not decoration — both prior
+// engines report that keying the rule on the emptiness of `functions` fails the control while the count-0
+// row stays GREEN, so the FLOOR arm alone cannot catch the destructive fix.
+{
+  const pol = (dir, body) => { const p = path.join(dir, "p.policy"); fs.writeFileSync(p, body); return p; };
+  const dep = project({
+    "package.json": `{"name":"ratesdep"}`,
+    "src/index.ts": `import * as fsm from "node:fs";
+export function hit(): string { return fsm.readFileSync("/etc/hosts", "utf8"); }
+export function calc(a: number): number { return a + 1; }`,
+  });
+  const depRep = scan(dep).report;
+  check("⟨0.24⟩ control: the report the arms are derived from judged units and names its package",
+        depRep.analyzed?.count > 0 && depRep.package === "ratesdep"
+        && depRep.functions.some((e) => e.hash === "ratesdep#hit"),
+        JSON.stringify({ analyzed: depRep.analyzed, package: depRep.package }));
+  // `calc` is PURE, so the dep's report OMITS it — that absence is the §2 rule 3 purity claim, and the
+  // second app is how coverage (rather than the entry join) is observed on its own.
+  // EVERY arm is the same package in a different directory: the entry `hash` is `<package>#<fn>`, and the
+  // FLOOR row below asserts the count-0 arm's entry EQUALS the unchained arm's, which a per-arm package
+  // name would break for a reason that has nothing to do with the rule.
+  const mkApp = (call) => project({
+    "package.json": `{"name":"ratesapp","dependencies":{"ratesdep":"1.0.0"}}`,
+    "node_modules/ratesdep/package.json": `{"name":"ratesdep","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/ratesdep/index.d.ts": `export declare function hit(): string;\nexport declare function calc(a: number): number;`,
+    "node_modules/ratesdep/index.js": ``,
+    "src/main.ts": call === "calc"
+      ? `import { calc } from "ratesdep";\nexport function go(): number { return calc(1); }`
+      : `import { hit } from "ratesdep";\nexport function go(): string { return hit(); }`,
+  });
+  // ONE arm = one app, scanned once with `deny Fs` and a `--gate-json`, so the FOUR channels the defect
+  // deleted are all observable: the per-fn entry, the envelope `coverage`, the verdict's coverage block
+  // and stderr.
+  const arm = (doc, call) => {
+    const app = mkApp(call);
+    const env = { ...process.env };
+    if (doc !== null) {
+      const f = path.join(app, "dep.json");
+      fs.writeFileSync(f, JSON.stringify(doc, null, 1));
+      env.CANDOR_DEPS = f;
+    } else delete env.CANDOR_DEPS;
+    const run = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", pol(app, "deny Fs\n"),
+                                   "--gate-json", path.join(app, "v.json")], { encoding: "utf8", env });
+    const rep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+    return { rep, go: entry(rep, "src.main.go"), coverage: rep.coverage ?? null,
+             verdict: JSON.parse(fs.readFileSync(path.join(app, "v.json"), "utf8")),
+             status: run.status, stderr: run.stderr };
+  };
+  const JUDGED_NOTHING = /judged NOTHING/;
+  const withFns = (fns) => ({ ...JSON.parse(JSON.stringify(depRep)), functions: fns });
+  const emptied = (analyzed) => {
+    const d = withFns([]);
+    if (analyzed === undefined) delete d.analyzed; else d.analyzed = analyzed;
+    return d;
+  };
+  const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+  const unchained = arm(null);
+  const trusted = arm(depRep);
+  const zero = arm(emptied({ count: 0, digest: depRep.analyzed.digest }));
+  const allpure = arm(emptied({ count: 2, digest: depRep.analyzed.digest }));
+
+  // NON-VACUITY: the reference arms have to differ, or every equality below is trivially satisfied.
+  check("⟨0.24⟩ reference arms: trusted knows `Fs` (exit 1); unchained hedges `invisible` + `coverage` (exit 0)",
+        trusted.go?.inferred.includes("Fs") && trusted.status === 1
+        && unchained.go?.invisible?.includes("ratesdep") && unchained.coverage?.uncovered?.[0]?.name === "ratesdep"
+        && unchained.status === 0,
+        JSON.stringify({ trusted: trusted.go, unchained: unchained.go, cov: unchained.coverage, ex: [trusted.status, unchained.status] }));
+  // THE FLOOR, asserted as EQUALITY with the unchained arm across all four channels.
+  check("⟨0.24⟩ FLOOR: a count-0 chain answers EXACTLY as the UNCHAINED arm does (entry, coverage, verdict, exit)",
+        same(zero.go, unchained.go) && same(zero.coverage, unchained.coverage)
+        && same(zero.verdict.coverage, unchained.verdict.coverage) && zero.status === unchained.status,
+        JSON.stringify({ zero: [zero.go, zero.coverage, zero.verdict.coverage, zero.status],
+                         unchained: [unchained.go, unchained.coverage, unchained.verdict.coverage, unchained.status] }));
+  check("⟨0.24⟩ …and it is DISCLOSED by name on stderr, with a remedy (the disclosure IS the fix)",
+        JUDGED_NOTHING.test(zero.stderr) && /ratesdep/.test(zero.stderr) && /analyzed\.count/.test(zero.stderr),
+        zero.stderr.slice(0, 300));
+  // THE CONTROL. Byte-identical to the arm above apart from ONE integer, and it must stay UNTOUCHED: §2
+  // rule 3 makes an all-pure dependency's empty report a CLAIM. A fix keyed on `functions.length` passes
+  // the two rows above and fails exactly here.
+  check("⟨0.24⟩ CONTROL: count n>0 with the SAME empty `functions` is still believed all-pure (unchanged)",
+        allpure.go === undefined && allpure.coverage === null && allpure.verdict.coverage === undefined
+        && allpure.status === 0 && !JUDGED_NOTHING.test(allpure.stderr),
+        JSON.stringify({ go: allpure.go, cov: allpure.coverage, v: allpure.verdict, ex: allpure.status }));
+
+  // ROW 3 of the table, and the anti-flood row beside it. A pre-⟨0.21⟩ producer's manifest-less report
+  // says nothing about whether it judged anything, so an EMPTY one falls back to the unchained reading —
+  // a deliberate retirement of the old affordance — while one that LISTS functions judged units and said
+  // so the only way it could, and keeps the coverage it has always had.
+  const noManifest = arm(emptied(undefined));
+  check("⟨0.24⟩ row 3: a manifest-less EMPTY report falls back to the unchained reading",
+        same(noManifest.go, unchained.go) && same(noManifest.coverage, unchained.coverage)
+        && JUDGED_NOTHING.test(noManifest.stderr),
+        JSON.stringify({ go: noManifest.go, cov: noManifest.coverage }));
+  const noManifestFns = (() => { const d = JSON.parse(JSON.stringify(depRep)); delete d.analyzed; return d; })();
+  const legacy = arm(noManifestFns);
+  check("⟨0.24⟩ anti-flood: a manifest-less report that LISTS functions keeps its standing (entries + coverage)",
+        legacy.go?.inferred.includes("Fs") && !JUDGED_NOTHING.test(legacy.stderr), JSON.stringify(legacy.go));
+  // FAIL CLOSED: a judgment claim that cannot be READ is not a claim. A denylist of proven-safe shapes,
+  // the posture 11a's malformed-`unanalyzed` row already takes one key over.
+  for (const [label, a] of [["a string", "oops"], ["an empty object", {}], ["null", null],
+                            ["a non-numeric count", { count: "2" }]]) {
+    const garbled = arm(emptied(a));
+    check(`⟨0.24⟩ fail-closed: a manifest that is ${label} grants no coverage`,
+          same(garbled.go, unchained.go) && JUDGED_NOTHING.test(garbled.stderr), JSON.stringify(garbled.go));
+  }
+
+  // COVERAGE IS ANCHORED TWICE — the envelope `package` key AND each entry's `hash` prefix — so gating one
+  // is a no-op wearing a fix's clothes. The CONTRADICTORY report (count 0 while listing functions) is the
+  // only shape that reaches the entry anchor, and it must fail closed there too: the arm below calls
+  // `calc`, which the dep's report legitimately OMITS, so the answer turns on COVERAGE alone.
+  const contradictory = withFns(depRep.functions);
+  contradictory.analyzed = { count: 0, digest: depRep.analyzed.digest };
+  const calcTrusted = arm(depRep, "calc");
+  const calcContra = arm(contradictory, "calc");
+  check("⟨0.24⟩ control: a trusted report's SILENCE about the pure `calc` is its purity claim (no hedge)",
+        calcTrusted.go === undefined || !calcTrusted.go.invisible?.includes("ratesdep"), JSON.stringify(calcTrusted.go));
+  check("⟨0.24⟩ the ENTRY-hash anchor is gated too: a count-0 report LISTING functions grants no coverage",
+        calcContra.go?.invisible?.includes("ratesdep"), JSON.stringify(calcContra.go));
+  // …and the other half of that shape: withholding coverage may never take a real ANSWER with it. The
+  // entries stay ungated, so the key the contradictory report DOES carry is still applied unchanged.
+  const hitContra = arm(contradictory);
+  check("⟨0.24⟩ …while its entries stay UNGATED — a key it does answer is applied unchanged (strictly additive)",
+        hitContra.go?.inferred.includes("Fs"), JSON.stringify(hitContra.go));
+
+  // A package chained TWICE — once judged, once not — IS covered. The direction follows from what the
+  // second report SAYS: a count-0 report makes no claim in either direction, so letting it withdraw
+  // another report's earned purity claim would be the mirror sin.
+  const bothApp = mkApp("calc");
+  const zeroFile = path.join(bothApp, "zero.json"), realFile = path.join(bothApp, "real.json");
+  fs.writeFileSync(zeroFile, JSON.stringify(emptied({ count: 0, digest: "x" }), null, 1));
+  fs.writeFileSync(realFile, JSON.stringify(depRep, null, 1));
+  spawnSync("node", [path.join(HERE, "scan.mjs"), bothApp], { encoding: "utf8",
+    env: { ...process.env, CANDOR_DEPS: `${zeroFile}:${realFile}` } });
+  const goBothZ = entry(JSON.parse(fs.readFileSync(path.join(bothApp, ".candor", "report.json"), "utf8")), "src.main.go");
+  check("⟨0.24⟩ a package chained twice — count-0 AND judged — keeps the JUDGED report's coverage",
+        goBothZ === undefined || !goBothZ.invisible?.includes("ratesdep"), JSON.stringify(goBothZ));
+}
+
 // ── 11b. ⟨0.20⟩ the dep's Net-surface INCOMPLETENESS crosses the boundary with its hosts ──────────
 // A trust marker failing OPEN at the scan boundary: `hosts` is a LOWER bound and `netClass`'s
 // `unknown-host` is the producer's published judgment that it is one. The join copied the literals and
@@ -7495,6 +7648,53 @@ export function all(db: DatabaseSync, o: any) {
   const r = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"));
   check("gate --report: a corrupt report is exit 2 — never an empty signature gated green (the §4 cardinal sin)",
         r.status === 2, `exit=${r.status}`);
+}
+
+// ── (h) ⟨0.24⟩ A REPORT THAT JUDGED NOTHING IS NOT AN ALL-CLEAR (SPEC §2's table, bound by §3.1) ────
+// "A report presented DIRECTLY to the gate with `analyzed.count: 0` makes the same claim as a chained
+// one, and must be read the same way … the obligation is on the reading, not on the route by which the
+// report arrived." This verb IS the foreign-report route — nothing here is version-checked, so the count-0
+// report a chain would send down the §2.1 stale path arrives at full trust. What the rule buys is the
+// DISCLOSURE beside "no violations": the exit code and the verdict document must NOT move, because §3.1
+// makes byte-equality with `scan --policy`'s the acceptance test (a scan that analyzed nothing writes
+// `{ok: true, analyzed: {count: 0}}` and exits 0) and because a verdict is an assertion the report gives
+// no evidence for. The CONTROL rows are the same three the chained half carries, for the same reason.
+{
+  const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app" };
+  const F = [{ fn: "app.f", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] }];
+  const d = handReport({
+    "zero.json": { ...V, analyzed: { count: 0, digest: "0" }, functions: [] },
+    "allpure.json": { ...V, analyzed: { count: 2, digest: "0" }, functions: [] },
+    "nomanifest.json": { ...V, functions: [] },
+    "garbled.json": { ...V, analyzed: "oops", functions: [] },
+    "legacy.json": F,                                             // a bare-array report: its ENTRIES are its claim
+    "ordinary.json": { ...V, analyzed: { count: 3, digest: "0" }, functions: F },
+    "p.pol": "deny Net\n",
+  });
+  const say = (rep) => gateCli("--report", path.join(d, rep), "--policy", path.join(d, "p.pol"), "--json");
+  const judged = (r) => /judged NOTHING/.test(r.stderr);
+  const z = say("zero.json");
+  check("⟨0.24⟩ gate --report: a count-0 report is DISCLOSED as having judged nothing, beside the verdict",
+        judged(z) && /analyzed\.count/.test(z.stderr) && /licenses no purity claim/.test(z.stderr), z.stderr.slice(0, 300));
+  check("⟨0.24⟩ gate --report: …and the VERDICT and EXIT do not move (byte-equality with `scan --policy` is the acceptance test)",
+        z.status === 0 && JSON.parse(z.stdout).ok === true && JSON.parse(z.stdout).analyzed.count === 0
+        && JSON.parse(z.stdout).violations.length === 0, `exit=${z.status} ${z.stdout.slice(0, 200)}`);
+  // THE CONTROL: one integer apart from the row above, and §2 rule 3 requires the gate to believe it.
+  const a = say("allpure.json");
+  check("⟨0.24⟩ gate --report: CONTROL — count n>0 with the SAME empty `functions` gets NO caveat",
+        !judged(a) && a.status === 0 && JSON.parse(a.stdout).analyzed.count === 2, a.stderr.slice(0, 200));
+  const o = say("ordinary.json");
+  check("⟨0.24⟩ gate --report: CONTROL — an ordinary report with entries gets NO caveat",
+        !judged(o) && o.status === 0, o.stderr.slice(0, 200));
+  // The legacy bare array is why the check is the SHARED predicate and not the summed `analyzed.count`:
+  // it has no envelope to sum, so a count-derived test would call the one report shape whose entries ARE
+  // its judgment claim "unjudged" and hedge every pre-⟨0.21⟩ consumer.
+  check("⟨0.24⟩ gate --report: a legacy bare-array report with entries gets NO caveat (its entries are the claim)",
+        !judged(say("legacy.json")), say("legacy.json").stderr.slice(0, 200));
+  check("⟨0.24⟩ gate --report: row 3 — a manifest-less EMPTY report reads as judged-nothing",
+        judged(say("nomanifest.json")));
+  check("⟨0.24⟩ gate --report: fail-closed — a manifest that cannot be READ is not a claim",
+        judged(say("garbled.json")));
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
