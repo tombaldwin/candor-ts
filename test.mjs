@@ -8468,5 +8468,51 @@ export function all(db: DatabaseSync, o: any) {
         both.map((r) => `${r.status} ${r.stdout.slice(0, 80)}`).join(" | "));
 }
 
+// ── ⟨0.24⟩ `policyVocabulary.aliases` IS THE OBJECT FORM, ON BOTH ROUTES (SPEC §3.1 `b4e9155`) ──────
+// A measured three-to-one divergence, KEPT: candor-ts emits `{"corp": ["reflect"]}` where rust, java and
+// swift emit `["corp"]`. The clause's written shape is `{"config": "<path>", "aliases": { … }}` — braces —
+// and its ARGUMENT settles it one level down: it rejects swift's `configSources: [path]` because a
+// disclosure that "names the source but not the content leaves the reader knowing they were affected and
+// not how". `aliases: ["corp"]` fails that same sentence — `corp = reflect` and `corp = reflect,native`
+// gate differently under one unchanged policy line, so a reader who sees only the NAME cannot tell which
+// gate ran. The object is a strict superset (`Object.keys` recovers the array), so nothing is lost.
+//
+// The pre-existing row pins the SCAN route. This one pins `gate --report`, because §3.1 makes byte-equality
+// between the two documents the acceptance test and a shape held on one route only is the divergence this
+// field already produced once.
+{
+  const d = project({ "src/app.ts": "export function dyn(o: any, k: string) { return o[k](); }\n" });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8" });
+  const home = path.join(d, "polhome");
+  fs.mkdirSync(path.join(home, ".candor"), { recursive: true });
+  const cfg = path.join(home, ".candor", "config");
+  fs.writeFileSync(cfg, "unknown-alias corp = indirect\n");
+  const apol = path.join(home, "a.pol");
+  fs.writeFileSync(apol, "deny Unknown[corp] src\n");
+  const gj = path.join(d, "vocab.gate.json"), sj = path.join(d, "vocab.scan.json");
+  const g = gateCli("--report", path.join(d, ".candor", "report.json"), "--policy", apol, "--gate-json", gj);
+  spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", apol, "--gate-json", sj], { encoding: "utf8" });
+  const gdoc = (() => { try { return JSON.parse(fs.readFileSync(gj, "utf8")); } catch { return null; } })();
+  check("⟨0.24⟩ policyVocabulary: `gate --report` discloses `aliases` as the OBJECT name→classes, not a bare name list — a reader must be able to see WHAT the ambient definition was, not merely that one existed",
+        g.status === 1 && gdoc?.policyVocabulary?.config === cfg
+          && gdoc.policyVocabulary.aliases && !Array.isArray(gdoc.policyVocabulary.aliases)
+          && JSON.stringify(gdoc.policyVocabulary.aliases.corp) === JSON.stringify(["indirect"]),
+        `exit=${g.status} ${JSON.stringify(gdoc?.policyVocabulary)}`);
+  check("⟨0.24⟩ policyVocabulary: …and the two routes agree BYTE for BYTE on the whole document (§3.1's acceptance test — a shape held on one route only is how this field diverged in the first place)",
+        fs.existsSync(sj) && fs.readFileSync(gj).equals(fs.readFileSync(sj)),
+        `${fs.existsSync(sj) ? "differ" : "no scan document"}`);
+  // AND THE DISCRIMINATING CONTROL: the object must carry the DEFINITION, so a config whose alias resolves
+  // to a DIFFERENT class set must produce a different disclosure under the identical policy line. An array
+  // of names cannot tell these two apart, which is the whole of the argument above.
+  fs.writeFileSync(cfg, "unknown-alias corp = indirect,reflect\n");
+  const gj2 = path.join(d, "vocab2.gate.json");
+  gateCli("--report", path.join(d, ".candor", "report.json"), "--policy", apol, "--gate-json", gj2);
+  const gdoc2 = (() => { try { return JSON.parse(fs.readFileSync(gj2, "utf8")); } catch { return null; } })();
+  check("⟨0.24⟩ policyVocabulary CONTROL: a config that resolves the SAME alias to a DIFFERENT class set produces a DIFFERENT disclosure under an unchanged policy line — the array form cannot express this, which is why the object stands",
+        JSON.stringify(gdoc2?.policyVocabulary?.aliases?.corp) === JSON.stringify(["indirect", "reflect"])
+          && JSON.stringify(gdoc2?.policyVocabulary?.aliases) !== JSON.stringify(gdoc?.policyVocabulary?.aliases),
+        JSON.stringify(gdoc2?.policyVocabulary));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

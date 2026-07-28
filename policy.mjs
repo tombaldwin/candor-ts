@@ -342,6 +342,28 @@ export function parsePolicy(text, aliases = null) {
   // ⟨0.24⟩ `aliasesUsed` is name -> THE CLASSES IT RESOLVED TO, not a bare name list (SPEC §3.1
   // `b4e9155`): naming the source without the content leaves a reader knowing they were affected and not
   // how. Key order is sorted so the disclosure is deterministic across runs and across the two routes.
+  //
+  // ⟨0.24⟩ THIS IS THE OBJECT FORM AND IT IS DELIBERATE — a measured three-to-one divergence, KEPT.
+  // candor-ts emits `policyVocabulary.aliases` as `{"corp": ["reflect"]}` where rust, java and swift emit
+  // the ARRAY `["corp"]`; conformance R9's shape walk was blind one level down and scored all four OK.
+  // The object stands, on `b4e9155`'s own argument rather than on preference:
+  //
+  //   · The clause's SHAPE is `{ "config": "<path>", "aliases": { … } }` — braces, i.e. an object. The
+  //     array is a departure from the written pin, not the pin.
+  //   · Its ARGUMENT is decisive and is about the array, one level down. It rejects swift's
+  //     `configSources: [path]` because that "names the file but drops the alias names, and the file is
+  //     the lesser half — an operator reading a verdict changed by an ambient definition needs to see WHAT
+  //     THE DEFINITION WAS, not merely that one existed. A disclosure that names the source but not the
+  //     content leaves the reader knowing they were affected and not how." `aliases: ["corp"]` fails that
+  //     sentence for exactly the same reason `configSources` does: it names the alias and drops the
+  //     definition. And the definition is the whole of what moved the verdict — `corp = reflect` and
+  //     `corp = reflect,native` gate differently under one unchanged policy line, so a reader who sees
+  //     only the NAME cannot tell which gate ran.
+  //   · The object is a strict superset: `Object.keys(aliases)` recovers the array exactly, so nothing a
+  //     consumer of the array form can do is lost.
+  //
+  // Being outnumbered is not the argument against it, and this family has twice found the outlier to be
+  // the correct one on `gate --report` questions. Recorded for the spec to adjudicate.
   return { deny, allow, forbid, errors,
            aliasesUsed: Object.fromEntries([...aliasesUsed.entries()].sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))) };
 }
