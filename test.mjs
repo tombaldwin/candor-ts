@@ -7477,7 +7477,7 @@ export function all(db: DatabaseSync, o: any) {
   const out = path.join(d, "verdicts");
   fs.mkdirSync(out, { recursive: true });
   const diffs = [];
-  let fired = 0, refusedOnSelfProduced = 0, sawNetClass = false, sawReasonClass = false;
+  let fired = 0, firedDoc = 0, refusedOnSelfProduced = 0, sawNetClass = false, sawReasonClass = false;
   for (const [name, text] of POLICIES) {
     const pol = path.join(d, `${name}.pol`);
     fs.writeFileSync(pol, text);
@@ -7490,6 +7490,24 @@ export function all(db: DatabaseSync, o: any) {
     if (!av.equals(bv)) diffs.push(`${name}: NOT byte-equal\n  scan ${av.toString().slice(0, 400)}\n  gate ${bv.toString().slice(0, 400)}`);
     if (s.status !== g.status) diffs.push(`${name}: exit ${s.status} (scan) vs ${g.status} (gate)`);
     if (s.status === 1) fired++;
+    // ⟨0.24⟩ PER-ROUTE CONTENT, and this is what a byte-equality matrix cannot see by construction.
+    // AUDITED by building the adversary rather than reasoning about it: a mutant serializer that keeps
+    // every exit code and writes `violations: []` unconditionally on BOTH routes. ALL 22 comparison rows
+    // passed it — the two routes stayed byte-equal BECAUSE THEY WERE MAKING THE SAME MISTAKE, and every
+    // finding vanished from the only channel a machine consumer reads while the exit code still said
+    // "fail". So each row now asserts, PER ROUTE, that exit 1 ⟺ the document carries at least one
+    // violation RECORD, and flags the mirror (an exit-0 document that carries violations) with it.
+    for (const [route, buf, st] of [["scan", av, s.status], ["gate", bv, g.status]]) {
+      let doc = null;
+      try { doc = JSON.parse(buf.toString()); } catch { diffs.push(`${name}/${route}: the verdict did not parse`); continue; }
+      const n = Array.isArray(doc.violations) ? doc.violations.length : -1;
+      if (n < 0) { diffs.push(`${name}/${route}: a VERDICT document with no \`violations\` array`); continue; }
+      if (st === 1 && n === 0)
+        diffs.push(`${name}/${route}: exit 1 but the document carries NO violation record — the finding was computed, set the exit code, and was then deleted from the machine-consumer channel`);
+      if (st === 0 && n > 0)
+        diffs.push(`${name}/${route}: exit 0 but the document carries ${n} violation record(s) — the mirror defect`);
+      if (st === 1 && n > 0) firedDoc++;
+    }
     // "Refusing costs nothing on a self-produced report" (SPEC §3.1) — netClass is emitted for every
     // Net-bearing entry and floored at unknown-host, and an in-scope Unknown always resolves. A refusal
     // here would mean the producer dropped a channel its own consumer needs.
@@ -7500,8 +7518,13 @@ export function all(db: DatabaseSync, o: any) {
   check(`gate --report: --gate-json is BYTE-EQUAL to scan --policy's over ${POLICIES.length} policies, same exit`,
         diffs.length === 0, diffs.join("\n"));
   // The row is VACUOUS unless a policy actually fired — byte-equal empty verdicts prove little.
-  check("gate --report: the equivalence matrix is NON-VACUOUS (policies that violate, and the ⟨0.19⟩/⟨0.20⟩ class fields ride the verdict)",
-        fired >= 5 && sawNetClass && sawReasonClass, `fired=${fired} netClass=${sawNetClass} reasonClass=${sawReasonClass}`);
+  // ⟨0.24⟩ `fired` COUNTED THE SCAN'S EXIT CODE, which is the same hole as above one level up: a route
+  // that computed the violations, exited 1 and then wrote an empty list satisfied the guard AND the byte
+  // comparison. Under the mutant it read `fired=16` — comfortably past its own threshold — while not one
+  // document carried a record. The guard now counts rows whose VERDICT carries a violation record.
+  check("gate --report: the equivalence matrix is NON-VACUOUS (policies that violate WITH RECORDS IN THE DOCUMENT, and the ⟨0.19⟩/⟨0.20⟩ class fields ride the verdict)",
+        firedDoc >= 10 && sawNetClass && sawReasonClass,
+        `firedDoc=${firedDoc} (route-rows whose document carries a record) fired=${fired} (exit-1 rows) netClass=${sawNetClass} reasonClass=${sawReasonClass}`);
   check("gate --report: no answerability refusal fires on a report this engine produced",
         refusedOnSelfProduced === 0);
 
@@ -7519,8 +7542,44 @@ export function all(db: DatabaseSync, o: any) {
     if (!fs.existsSync(a) || !fs.existsSync(b) || !fs.readFileSync(a).equals(fs.readFileSync(b)) || s.status !== g.status)
       inc.push(`${name}: scan ${s.status} / gate ${g.status}`);
     if (name === "i_clipboard" && g.status !== 2) inc.push("i_clipboard: an unanalyzed unit must make the gate exit 2, not certify");
+    // ⟨0.24⟩ the same per-route content rule. `i_net` fires AND is incomplete — a real violation dominates
+    // (§3.3), so exit 1 here must still be backed by a record, and the mutant proved these two rows could
+    // not see its absence either.
+    if (name === "i_net") for (const [route, f, st] of [["scan", a, s.status], ["gate", b, g.status]]) {
+      let doc = null;
+      try { doc = JSON.parse(fs.readFileSync(f, "utf8")); } catch { inc.push(`${name}/${route}: unparseable verdict`); continue; }
+      if (st === 1 && !(doc.violations ?? []).length)
+        inc.push(`${name}/${route}: exit 1 with an EMPTY violation list — the finding never reached the consumer`);
+    }
   }
   check("gate --report: the ⟨0.21⟩ `unanalyzed` manifest carries the same exit-2 verdict, byte-equal", inc.length === 0, inc.join("; "));
+
+  // ⟨0.24⟩ A NEW ARM, for a state nothing above can reach: a POLICY the engine cannot honour as written.
+  // Every row above uses a well-formed policy, so the matrix had no opinion on what the two routes do
+  // when the policy itself is the problem — and "both routes refuse identically" is itself a byte-equality
+  // claim. It is asserted as a PAIR with `parsepolicy` (SPEC §3.1 `6929dce`): the two ENFORCERS must
+  // refuse and write byte-equal refusal documents, while the WITNESS must answer at exit 0. Putting the
+  // error in the parser is what took the four-way conformance suite offline at PART 4, and the arm that
+  // would have caught that is this one.
+  const perr = [];
+  for (const [label, text] of [["typo_beside", "deny Unknown[dispatch,nativ]\n"],
+                               ["typo_sole", "deny Net[unkown-host]\n"]]) {
+    const pol = path.join(d, `${label}.pol`);
+    fs.writeFileSync(pol, text);
+    const a2 = path.join(out, `${label}.scan.json`), b2 = path.join(out, `${label}.gate.json`);
+    for (const f of [a2, b2]) if (fs.existsSync(f)) fs.rmSync(f);
+    const s2 = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", pol, "--gate-json", a2], { encoding: "utf8" });
+    const g2 = gateCli("--report", path.join(d, ".candor", "report.json"), "--policy", pol, "--gate-json", b2);
+    if (s2.status !== 2 || g2.status !== 2) perr.push(`${label}: exit ${s2.status} (scan) / ${g2.status} (gate), both must be 2`);
+    if (!fs.existsSync(a2) || !fs.existsSync(b2)) { perr.push(`${label}: a refusal document was not written on both routes`); continue; }
+    if (!fs.readFileSync(a2).equals(fs.readFileSync(b2))) perr.push(`${label}: the two refusal documents are NOT byte-equal`);
+    if (!isRefusal(fs.readFileSync(a2, "utf8"))) perr.push(`${label}: the document is not a ⟨0.24⟩ refusal (ok:false + refused:true + NO violations key)`);
+    const pp = spawnSync("node", [path.join(HERE, "query.mjs"), "parsepolicy", pol], { encoding: "utf8" });
+    if (pp.status !== 0) perr.push(`${label}: parsepolicy exit ${pp.status} — the WITNESS must not refuse`);
+    else if (!(JSON.parse(pp.stdout).errors ?? []).length) perr.push(`${label}: parsepolicy reported no \`errors\``);
+  }
+  check("⟨0.24⟩ gate --report: an UNHONOURABLE POLICY refuses identically on both routes (byte-equal refusal documents) while `parsepolicy` still reports it at exit 0",
+        perr.length === 0, perr.join("\n"));
 }
 
 // ── (b) THE MUST NOT: an ABSENT entry is absent, past THREE back-fill channels at once ─────────────
