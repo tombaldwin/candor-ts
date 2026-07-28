@@ -45,7 +45,7 @@ import { createRequire } from "node:module";
 import nodePath from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as Q from "./query-core.mjs";
-import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses } from "./policy.mjs";
+import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText } from "./policy.mjs";
 
 // Version: from the sibling package.json when running inside the npm package; a single-file BUNDLE of
 // this server (the IDE-plugin embedding) has no sibling package.json — fall back rather than crash.
@@ -280,17 +280,45 @@ function hoverAt(docPath, line) {
 // ---- Diagnostics (the live gate) ---------------------------------------------------------------------
 const warned = new Set();
 function warnOnce(message) { if (!warned.has(message)) { warned.add(message); logMessage(message); } }
+// ⟨0.24⟩ the file `activePolicy()` last read, so the vocabulary anchor can be the POLICY FILE's dir.
+let activePolicyPath = null;
 function activePolicy() {
   const env = process.env.CANDOR_POLICY;
   if (env) {
-    if (fs.existsSync(env)) return fs.readFileSync(env, "utf8");
+    if (fs.existsSync(env)) { activePolicyPath = env; return fs.readFileSync(env, "utf8"); }
     // Set-but-missing must be LOUD (the family's configured-but-unusable posture — scan exits 2 here).
     // This is an advisory surface, so: disclose the policy-source swap, then fall through to discovery.
     warnOnce(`candor-lsp: CANDOR_POLICY is set but ${env} does not exist — falling back to .candor/config discovery (diagnostics may reflect a different policy than you configured)`);
   }
   const from = reportPrefix ? nodePath.dirname(nodePath.resolve(reportPrefix)) : rootPath;
   const cfg = from ? discoverConfigPolicy(from) : null;
-  if (cfg && fs.existsSync(cfg.policyPath)) return fs.readFileSync(cfg.policyPath, "utf8");
+  if (cfg && fs.existsSync(cfg.policyPath)) { activePolicyPath = cfg.policyPath; return fs.readFileSync(cfg.policyPath, "utf8"); }
+  activePolicyPath = null;
+  return null;
+}
+
+/**
+ * ⟨0.24⟩ ONE policy PARSE for this surface — the LSP twin of query.mjs's `loadPolicyOrDie` and mcp.mjs's
+ * `policyOrThrow`, and it closes the same drift. Every call site here parsed with NO alias map, so a rule
+ * written against a checked-in `unknown-alias` was silently WIDENED to the bare effect: the editor drew
+ * squiggles for a class the operator had deliberately excluded, and drew none for the one they had named.
+ * The vocabulary anchors at the POLICY FILE, as it does on both CLI routes, so the same policy means the
+ * same thing in the editor and in the gate that judges the edit.
+ *
+ * On a policy this engine CANNOT HONOUR AS WRITTEN (§6.2 `be0b9a9`), it returns null and says so ONCE.
+ * This surface has no exit code, so the enforcement posture cannot be borrowed wholesale — but evaluating
+ * a policy the engine has silently rewritten is the fail-open the ruling exists to close, and it is worse
+ * here than elsewhere because a squiggle that does not appear is invisible. What the disclosure buys is
+ * that the empty editor is EXPLAINED rather than read as a clean bill of health, which is the same
+ * argument this file already makes about a report that judged nothing.
+ */
+function activePolicyParsed(text) {
+  const errs = [];
+  const aliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(activePolicyPath, rootPath || process.cwd())), errs);
+  const pol = parsePolicy(text, aliases);
+  errs.push(...pol.errors);
+  if (!errs.length) return pol;
+  warnOnce(`candor-lsp: ${policyErrorText(activePolicyPath ?? "(policy)", errs)}\n  No gate diagnostics are produced from it — their ABSENCE here is the refusal, not an all-clear.`);
   return null;
 }
 function diagnosticsFor(docPath) {
@@ -313,7 +341,9 @@ function diagnosticsFor(docPath) {
   // ⟨0.24⟩ `netClass` VERBATIM off the wire — the same report-route rule as the MCP `candor_gate` tool and
   // `gate --report`; re-deriving it here would answer with the CONSUMER's `net-partner` evidence about the
   // producer's project, in both the fabricating and the fail-open direction (see reportNetClasses).
-  const violations = evaluatePolicy(parsePolicy(text), fns, Q.loadCallgraph(reportPrefix),
+  const dpol = activePolicyParsed(text);
+  if (dpol === null) return [];
+  const violations = evaluatePolicy(dpol, fns, Q.loadCallgraph(reportPrefix),
                                     new Map(), new Set(), reportNetClasses(fns));
   const locByFn = new Map(fns.filter((e) => e.loc).map((e) => [e.fn, locParts(e.loc)]));
   const out = [];
@@ -377,7 +407,8 @@ function codeActions(docPath, uri, range) {
   // function that actually violates the boundary. Same policy source as the diagnostics + the whatif action.
   const policyText = activePolicy();
   if (policyText !== null && hasReport(reportPrefix)) {
-    const pol = parsePolicy(policyText);
+    const pol = activePolicyParsed(policyText);
+    if (pol === null) return out;
     const cg = Q.loadCallgraph(reportPrefix);
     const fns = Q.loadReport(reportPrefix);
     for (const eff of Q.CONTAINED) {
@@ -437,7 +468,7 @@ function runWhatif(a) {
   }
   const policyText = activePolicy();
   const r = Q.whatif(Q.loadCallgraph(reportPrefix), a.fn, a.effect,
-                     policyText === null ? null : parsePolicy(policyText), scopeMatches);
+                     policyText === null ? null : activePolicyParsed(policyText), scopeMatches);
   if (r === null) {
     showMessage(2, `candor: no function matching \`${a.fn}\` in the call graph — the report may be stale`);
     return null;
@@ -483,8 +514,10 @@ function runFix(a) {
     showMessage(2, "candor: no policy discovered — a fix is defined relative to a boundary; set CANDOR_POLICY or check one into .candor/config");
     return null;
   }
+  const fpol = activePolicyParsed(policyText);
+  if (fpol === null) return null;
   const r = Q.fix(Q.loadCallgraph(reportPrefix), Q.loadReport(reportPrefix), a.fn, a.effect,
-                  parsePolicy(policyText), scopeMatches);
+                  fpol, scopeMatches);
   if (r === null) {
     showMessage(2, `candor: no function matching \`${a.fn}\` in the call graph — the report may be stale`);
     return null;

@@ -49,9 +49,15 @@ const DOC = pathToFileURL(path.join(W, "src", "app.ts")).href;
 // exercised (the coverage policy names this exact trap). The exit code rides back with the replies so a
 // server that stops exiting cleanly on stdin end FAILS a pin below; a hung server is killed after a
 // deadline and surfaces as exitCode null (loud), never a silent hang.
-function lspSession(messages, expectedInbound, extraEnv = {}) {
+// ⟨0.24⟩ AN OVERALL DEADLINE, because a row that HANGS is a worse failure than a row that goes red: it
+// gives CI a timeout with no diagnosis instead of a named assertion. This was latent until a regression
+// row expected a `window/logMessage` that a broken build never emits, at which point the session waited
+// forever. The deadline finishes with WHATEVER ARRIVED, so a missing message lands as the assertion it
+// belongs to rather than as a stalled runner.
+function lspSession(messages, expectedInbound, extraEnv = {}, deadlineMs = 20000) {
   return new Promise((resolve) => {
     const srv = spawn("node", [path.join(HERE, "lsp.mjs")], { env: { ...process.env, ...extraEnv } });
+    const overall = setTimeout(() => finish(), deadlineMs);
     let buf = Buffer.alloc(0);
     const inbound = [];
     const times = [];    // arrival timestamp per inbound message — the perf fixture reads reply gaps
@@ -59,6 +65,7 @@ function lspSession(messages, expectedInbound, extraEnv = {}) {
     const finish = () => {
       if (finishing) return;
       finishing = true;
+      clearTimeout(overall);
       const deadline = setTimeout(() => srv.kill("SIGKILL"), 15000);
       srv.on("exit", (code) => { clearTimeout(deadline); resolve({ inbound, times, exitCode: code }); });
       srv.stdin.end();
@@ -650,6 +657,56 @@ export function handler(): void { mid(); }
      !apReplies.some((r) => r.method === "window/logMessage"),
      JSON.stringify(apReplies.map((r) => r.method ?? r.id)));
   fs.rmSync(U2, { recursive: true, force: true });
+}
+
+// ── ⟨0.24⟩ THE EDITOR RESOLVES THE POLICY'S VOCABULARY, AND SAYS SO WHEN IT CANNOT ────────────────
+// Every policy parse on this surface ran with NO alias map, so a rule written against a checked-in
+// `unknown-alias` was silently WIDENED to the bare effect: the editor drew squiggles for a class the
+// operator had deliberately EXCLUDED, and would have drawn none for the one they had named. A squiggle
+// that does not appear is invisible, which is what makes this the worst surface to rewrite a policy on.
+{
+  const mkp = (policy, config) => {
+    const U = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-vocab-"));
+    fs.mkdirSync(path.join(U, "src"), { recursive: true });
+    fs.writeFileSync(path.join(U, "src", "app.ts"),
+      "export function dyn(o: any, k: string) { return o[k](); }\n");
+    execFileSync("node", [path.join(HERE, "scan.mjs"), U, "--out", path.join(U, ".candor", "report")],
+                 { stdio: "ignore" });
+    fs.writeFileSync(path.join(U, "arch.policy"), policy);
+    fs.writeFileSync(path.join(U, ".candor", "config"), `policy arch.policy\n${config}`);
+    return U;
+  };
+  const openDoc = (U) => ({ jsonrpc: "2.0", method: "textDocument/didOpen",
+    params: { textDocument: { uri: pathToFileURL(path.join(U, "src", "app.ts")).href,
+                              languageId: "typescript", version: 1, text: "" } } });
+  const drive = async (U, n) => {
+    const { inbound } = await lspSession([
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(U).href } },
+      { jsonrpc: "2.0", method: "initialized", params: {} },
+      openDoc(U),
+    ], n);
+    const diag = inbound.find((r) => r.method === "textDocument/publishDiagnostics");
+    const log = inbound.find((r) => r.method === "window/logMessage");
+    return { n: diag?.params?.diagnostics?.length ?? 0, log: log?.params?.message ?? "" };
+  };
+  // The entry's Unknown is `callback:`-caused ⇒ class `indirect`. THE PAIR is the discrimination: a rule
+  // whose alias names `indirect` must squiggle, and one whose alias names `reflect` must not. A dropped
+  // token widens the rule to a bare `deny Unknown`, which squiggles on BOTH — so the firing row alone
+  // proves nothing, exactly as it did on the MCP surface.
+  const F = mkp("deny Unknown[fires] src\n", "unknown-alias fires = indirect\n");
+  const T = mkp("deny Unknown[tolerates] src\n", "unknown-alias tolerates = reflect\n");
+  const fired = await drive(F, 2), tolerated = await drive(T, 2);
+  ok("⟨0.24⟩ lsp: a `.candor/config` alias RESOLVES for the live diagnostics — the class it names squiggles, a class it does not name does NOT (a dropped-and-widened rule would squiggle on both)",
+     fired.n === 1 && tolerated.n === 0, `fires=${fired.n} tolerates=${tolerated.n}`);
+  fs.rmSync(F, { recursive: true, force: true });
+  fs.rmSync(T, { recursive: true, force: true });
+  // A policy this engine cannot honour AS WRITTEN produces NO diagnostics — and the absence is EXPLAINED,
+  // because on a surface whose whole vocabulary is squiggles an unexplained empty editor reads as green.
+  const E = mkp("deny Unknown[dispatch,nativ] src\n", "");
+  const bad = await drive(E, 3);
+  ok("⟨0.24⟩ lsp: an unhonourable policy yields NO gate diagnostics and the absence is DISCLOSED, naming the token — an unexplained empty editor would read as an all-clear",
+     bad.n === 0 && /nativ/.test(bad.log) && /not an all-clear/.test(bad.log), `n=${bad.n} log=${bad.log.slice(0, 200)}`);
+  fs.rmSync(E, { recursive: true, force: true });
 }
 
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);
