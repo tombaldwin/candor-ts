@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText, reasonClass } from "./policy.mjs";
-import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing } from "./query-core.mjs";
+import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
          modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf } from "./scan-core.mjs";
@@ -758,6 +758,34 @@ const incompleteDepPkgs = new Set();
 // case a count-0 report has no entries to touch at all; the branch matters for the CONTRADICTORY report
 // that claims zero while listing functions, where dropping its entries would be the mirror sin.
 const unjudgedDepPkgs = new Set();
+// ⟨0.24⟩ …AND THE FOURTH CONJUNCT: a chained report with a §2 key that is PRESENT BUT UNPARSEABLE (SPEC §2:
+// "a reader that recovers from a type mismatch by substituting the default … the language's convenience
+// default is the fail-open direction on every key in this format"). MEASURED on the ratesdep fixture below,
+// `deny Fs`, against the two controls this file already carries:
+//
+//   unchained                go -> inferred: [], invisible: ['ratesdep'], coverage.uncovered   exit 0
+//   trusted (whole report)   go -> inferred: ['Fs']                                            exit 1
+//   `functions: "oops"`      go -> ABSENT FROM `functions`, no invisible, no coverage          exit 0
+//   `functions: {}`          go -> ABSENT FROM `functions`, no invisible, no coverage          exit 0
+//   entry `inferred: null`   go -> ABSENT FROM `functions`, no invisible, no coverage          exit 0
+//   entry `inferred: "Fs"`   go -> inferred: ['F','s']                                         exit 0
+//   entry `inferred: [7]`    go -> inferred: [7]                                               exit 0
+//
+// The first three rows are the count-0 defect arriving through a different key, and STRICTLY WORSE than not
+// chaining at all: the caller drops out of `functions`, which under ⟨0.21⟩ is a positive purity claim, with
+// none of the four disclosure channels the unchained arm produces. The last two are its fabrication mirror
+// — a non-array `inferred` ITERATED INTO CHARACTERS and shipped to the consumer's own report as the effect
+// set `['F','s']`, the exact bug `normFn` in query-core.mjs exists to prevent and which this loader,
+// reading the same wire without going through it, reproduced.
+//
+// TREATMENT is the ⟨0.21⟩ incomplete arm's, for the same reason and with the same strictly-additive
+// property: COVERAGE is withheld (so the silence stops speaking and the caller reads the unchained hedge),
+// while the entries that ARE readable are joined untouched — dropping those would be the silent
+// under-report this whole ladder exists to prevent. Only the UNREADABLE VALUES are dropped, so no effect
+// that could be read is lost and no character-soup effect is invented. Ordered AFTER `incomplete` because
+// a garbled `unanalyzed` is already caught there and "declares source it could not analyze" is the more
+// specific remedy; before `judgedNothing`, which is the weakest claim of the four.
+const corruptDepPkgs = new Set();
 // The predicate itself is `claimsToHaveJudgedNothing` in query-core.mjs — SPEC §2's three-row table plus
 // the fail-closed row it implies, kept in ONE place because `gate --report` must read the same integer the
 // same way (§3.1 ⟨0.24⟩ puts the obligation on the reading, not on the route the report arrived by). The
@@ -800,28 +828,52 @@ const unjudgedDepPkgs = new Set();
       // incompleteness says it could not read its own source, and this says only that there is nothing in
       // it to repeat. A report that is stale AND count-0 is disclosed as stale, which is the more specific
       // remedy (re-scan with a matching build, not "point the scan at real sources").
-      const judgedNothing = !stale && !incomplete && claimsToHaveJudgedNothing(d, d.functions);
+      // ⟨0.24⟩ the fourth conjunct (see `corruptDepPkgs`) — a §2 key that is THERE and of the wrong shape.
+      const corruptKeys = stale || incomplete ? [] : reportCorruptKeys(d);
+      const corrupt = corruptKeys.length > 0;
+      const judgedNothing = !stale && !incomplete && !corrupt && claimsToHaveJudgedNothing(d, d.functions);
       // COVERAGE IS ANCHORED TWICE — the envelope's `package` key AND each entry's `hash` prefix below —
       // so `covers` is chosen ONCE here and both anchors write through it. Gating one and not the other is
       // a no-op wearing a fix's clothes: an all-pure report carries the envelope key and no entries, and a
       // contradictory count-0-with-entries report carries the second and would have re-granted itself the
       // coverage the first withheld.
-      const covers = stale ? staleDepPkgs : incomplete ? incompleteDepPkgs : judgedNothing ? unjudgedDepPkgs : depCoveredPkgs;   // an untrusted, self-declared-incomplete or unjudged report grants no coverage
+      const covers = stale ? staleDepPkgs : incomplete ? incompleteDepPkgs : corrupt ? corruptDepPkgs
+                   : judgedNothing ? unjudgedDepPkgs : depCoveredPkgs;   // an untrusted, self-declared-incomplete, corrupt or unjudged report grants no coverage
+      if (corrupt) console.error(`candor-ts: chained dependency report ${f} has ${corruptKeys.length} present-but-unparseable §2 key(s)`
+        + ` — granted NO coverage, so calls into it read as INVISIBLE rather than pure (SPEC §2 ⟨0.24⟩): ${corruptKeys.join("; ")}`);
       if (typeof d.package === "string" && d.package) covers.add(d.package);
-      const inheritedWhy = stale ? new Map() : resolveInheritedWhy(d.functions ?? []);
-      for (const e of d.functions ?? []) {
-        if (!e.hash) continue;
+      // NEVER ITERATE AN UNREADABLE VALUE. `d.functions ?? []` walked the CHARACTERS of `functions: "oops"`,
+      // and `strs()` is why `inferred: "Fs"` can no longer arrive at the consumer as the effect set
+      // `['F','s']` — the `??` idiom only guards null/undefined, and every other wrong type in this format
+      // is iterable or index-able into something that looks like data.
+      const strs = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
+      const entries = Array.isArray(d.functions) ? d.functions : [];
+      const inheritedWhy = stale ? new Map() : resolveInheritedWhy(entries);
+      for (const e of entries) {
+        if (!e || typeof e !== "object") continue;
+        if (typeof e.hash !== "string" || !e.hash) continue;
+        // A CORRUPT ENTRY REGISTERS NO CELL. It is not enough to withhold the package's coverage: a cell
+        // in `crossDeps` SHORT-CIRCUITS the ladder in `chargeExternalDecl` (`if (hit) { applyDepHit; return }`)
+        // BEFORE the `depCoveredPkgs` check, so an entry whose `inferred` was dropped as unreadable would
+        // hand the caller an EMPTY hit and return — the caller reads pure and never reaches the `invisible`
+        // arm. Measured: with coverage withheld but the cell still registered, `go` came out ABSENT from
+        // `functions` with no `invisible` and no `coverage.uncovered`. Skipping the cell lets the caller
+        // fall through to exactly the ladder an UNCHAINED package takes. Per ENTRY, not per report, so a
+        // report with one bad row still delivers every row that reads cleanly (strictly additive), and the
+        // `continue` is placed before the `crossDeps.get` so a GOOD report's cell for the same hash — a
+        // package chained twice — is never clobbered by the bad one.
+        if (!stale && entryCorruptKeys(e).length) continue;
         const hashPkg = e.hash.split("#")[0];
         if (hashPkg) covers.add(hashPkg);
         const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [], netIncomplete: false };
-        for (const x of stale ? ["Unknown"] : e.inferred ?? []) cell.inferred.add(x);
+        for (const x of stale ? ["Unknown"] : strs(e.inferred)) cell.inferred.add(x);
         // ⟨0.19⟩ THE REASON CLASS TRAVELS WITH THE UNKNOWN. Without this the join copied `inferred` and
         // `invisible` only, so a dependency's `Unknown[reflect:eval]` arrived at the consumer as a bare
         // Unknown and fell back to the generic `unresolved` — and `deny Net Unknown[reflect]`, a rule
         // written to bite exactly that hole, stopped biting one package boundary away. The ts sibling of
         // candor-java `6ab26e4`. A STALE report keeps the bare Unknown: its reasons are assertions from a
         // build we do not trust, and `unresolved` is the honest class for "we cannot say why".
-        if (!stale) for (const w of e.unknownWhy ?? []) cell.why.add(w);
+        if (!stale) for (const w of strs(e.unknownWhy)) cell.why.add(w);
         // …AND THE CLASS OF AN UNKNOWN THE DEP UNIT ITSELF ONLY INHERITED. ⟨0.6⟩ makes `unknownWhy`
         // DIRECT-ONLY — required on a unit that introduces `Unknown`, absent on one that merely inherited
         // it — so a dependency's EXPORTED function publishes `inferred: ['Unknown']` with no reason at all
@@ -852,9 +904,9 @@ const unjudgedDepPkgs = new Set();
         // that consumer's `invisible` — the transitive disclosure the workspace chain exists to carry (a
         // sibling package's `SnsTopic.publish → invisible:[@aws-sdk/client-sns]` must not read pure across
         // the boundary). A stale report is already downgraded to Unknown above, so its blind is not trusted.
-        if (!stale) for (const b of e.invisible ?? []) cell.invisible.add(b);
+        if (!stale) for (const b of strs(e.invisible)) cell.invisible.add(b);
         if (!stale) for (const m of ["hosts", "cmds", "paths", "tables"])
-          for (const v of e[m] ?? []) if (!cell[m].includes(v)) cell[m].push(v);
+          for (const v of strs(e[m])) if (!cell[m].includes(v)) cell[m].push(v);
         // ⟨0.20⟩ THE NET SURFACE'S INCOMPLETENESS TRAVELS WITH ITS HOSTS. `hosts` is a LOWER bound — the
         // producer marks a masked/hostless Net internally (`rec.incomplete`) and publishes that judgment as
         // `unknown-host` in `netClass`. The join copied the host LITERALS and not the judgment, so the
@@ -871,7 +923,7 @@ const unjudgedDepPkgs = new Set();
         // about the hosts already copied above, and re-deriving them from those literals is what keeps the
         // consumer's `netClass` a function of the surface it can see (the property `netClassesOf` exists to
         // hold). A stale report's assertions are not ours to repeat, and it contributes no Net at all.
-        if (!stale && (e.netClass ?? []).includes("unknown-host")) cell.netIncomplete = true;
+        if (!stale && strs(e.netClass).includes("unknown-host")) cell.netIncomplete = true;
         crossDeps.set(e.hash, cell);
       }
     } catch { console.error(`candor-ts: CANDOR_DEPS report unparsable, skipped: ${f}`); }
@@ -887,6 +939,7 @@ const unjudgedDepPkgs = new Set();
   // time, and here the argument is the strongest of the three: a count-0 report makes NO claim in either
   // direction, so it adds nothing to a report that judged something and subtracts nothing from it either.
   // Letting a report with no content withdraw another's earned purity claim is the mirror sin.
+  for (const p of depCoveredPkgs) corruptDepPkgs.delete(p);
   for (const p of depCoveredPkgs) unjudgedDepPkgs.delete(p);
   if (staleDepPkgs.size)
     console.error(`candor-ts: ${staleDepPkgs.size} chained dependency report(s) were produced by a DIFFERENT engine build — `
@@ -898,6 +951,11 @@ const unjudgedDepPkgs = new Set();
   // Named on stderr for the same reason the two arms above are: the disclosure IS the fix, and a remedy is
   // named because `analyzed.count: 0` is nearly always a MIS-TARGETED scan (a facade package of re-exports,
   // an `--out` pointed at a directory with no sources) rather than a fact about the dependency.
+  if (corruptDepPkgs.size)
+    console.error(`candor-ts: ${corruptDepPkgs.size} chained dependency report(s) carry a §2 key that is PRESENT `
+      + `but UNPARSEABLE (⟨0.24⟩ corrupt input is not an empty value) — granted no coverage, so calls into them `
+      + `read as INVISIBLE rather than pure. Re-produce the report with a current engine: `
+      + `${[...corruptDepPkgs].sort().join(", ")}`);
   if (unjudgedDepPkgs.size)
     console.error(`candor-ts: ${unjudgedDepPkgs.size} chained dependency report(s) judged NOTHING (⟨0.24⟩ `
       + `\`analyzed.count\` is 0, absent-with-no-functions, or unreadable) — a report with no judgment in it is `

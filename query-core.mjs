@@ -85,11 +85,30 @@ function normFn(e) {
 const VERDICT_STR_ARRAY_KEYS = ["inferred", "direct", "calls", "unknownWhy", "netClass", "hosts",
                                 "declared", "undeclared", "overdeclared"];
 const isStrArray = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
-function entryCorruptKeys(e) {
+export function entryCorruptKeys(e) {
   if (!e || typeof e !== "object" || Array.isArray(e)) return ["<entry is not an object>"];
   const bad = [];
   if (typeof e.fn !== "string") bad.push("fn");
   for (const k of VERDICT_STR_ARRAY_KEYS) if (k in e && !isStrArray(e[k])) bad.push(k);
+  return bad;
+}
+
+/** ⟨0.24⟩ The same present-but-unparseable question asked of a WHOLE PARSED REPORT rather than one entry —
+ *  for the CHAINED-dep route in scan.mjs, which reads a foreign report it did not produce and joins it into
+ *  its own. It lives here beside `entryCorruptKeys` for the reason `claimsToHaveJudgedNothing` does: the
+ *  chained route and the `gate --report` route must read the same key the same way, or a report refused by
+ *  one is believed by the other. `functions` present-but-not-an-array short-circuits (there are no entries
+ *  to walk). `unanalyzed` is deliberately NOT here — scan.mjs's `incomplete` conjunct already fails closed
+ *  on a malformed one, and its "declares source it could not analyze" remedy is the more specific message.
+ *  Returns [] for an intact report, so the caller's conjunct is `.length > 0`. */
+export function reportCorruptKeys(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+  if ("functions" in parsed && !Array.isArray(parsed.functions)) return ["`functions` (present but not an array)"];
+  const bad = [];
+  for (const e of parsed.functions ?? []) {
+    const k = entryCorruptKeys(e);
+    if (k.length) bad.push(`${typeof e?.fn === "string" ? `entry \`${e.fn}\`` : "an entry"}: ${k.map((x) => `\`${x}\``).join(", ")}`);
+  }
   return bad;
 }
 

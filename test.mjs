@@ -3216,6 +3216,54 @@ export function calc(a: number): number { return a + 1; }`,
   const goBothZ = entry(JSON.parse(fs.readFileSync(path.join(bothApp, ".candor", "report.json"), "utf8")), "src.main.go");
   check("⟨0.24⟩ a package chained twice — count-0 AND judged — keeps the JUDGED report's coverage",
         goBothZ === undefined || !goBothZ.invisible?.includes("ratesdep"), JSON.stringify(goBothZ));
+
+  // ── ⟨0.24⟩ THE FOURTH CONJUNCT: a §2 key that is PRESENT BUT UNPARSEABLE (SPEC §2) ───────────────
+  // The same defect as the count-0 rows above, arriving through a different key, and MEASURED strictly
+  // worse: `functions: "oops"` / entry `inferred: null` put `go` ABSENT from `functions` — a ⟨0.21⟩
+  // positive purity claim — with no `invisible`, no `coverage.uncovered` and no verdict coverage block,
+  // where the UNCHAINED arm discloses all four. Its fabrication mirror rode the same line: `inferred:
+  // "Fs"` was iterated into CHARACTERS and shipped to the consumer's own report as `['F','s']`.
+  // The floor is the same one §2 states for count-0 — "exactly as if unchained" — asserted as EQUALITY
+  // across all four channels, with the trusted arm above as the non-vacuity control.
+  const mut = (f) => { const d = JSON.parse(JSON.stringify(depRep)); f(d); return d; };
+  const CORRUPT = [
+    ["`functions` is a string", mut((d) => { d.functions = "oops"; })],
+    ["`functions` is an object", mut((d) => { d.functions = {}; })],
+    ["entry `inferred` is null", mut((d) => { for (const e of d.functions) { e.inferred = null; e.direct = null; } })],
+    ["entry `inferred` is a bare string", mut((d) => { for (const e of d.functions) { e.inferred = "Fs"; e.direct = "Fs"; } })],
+    ["entry `inferred` holds a non-string", mut((d) => { for (const e of d.functions) { e.inferred = [7]; e.direct = [7]; } })],
+    ["entry `unknownWhy` holds a non-string", mut((d) => { for (const e of d.functions) e.unknownWhy = [7]; })],
+    ["an entry has no `fn`", mut((d) => { for (const e of d.functions) delete e.fn; })],
+  ];
+  const cbad = [];
+  for (const [label, doc] of CORRUPT) {
+    const a = arm(doc);
+    if (!(same(a.go, unchained.go) && same(a.coverage, unchained.coverage)
+          && same(a.verdict.coverage, unchained.verdict.coverage) && a.status === unchained.status))
+      cbad.push(`${label}: ${JSON.stringify({ go: a.go, cov: a.coverage, vcov: a.verdict.coverage, exit: a.status })}`);
+    // The fabrication half: no character-soup effect may reach the consumer's report under ANY row.
+    if ((a.go?.inferred ?? []).some((x) => typeof x !== "string" || !/^[A-Z]/.test(x)))
+      cbad.push(`${label}: FABRICATED effect(s) ${JSON.stringify(a.go.inferred)}`);
+  }
+  check(`⟨0.24⟩ FLOOR: all ${CORRUPT.length} present-but-unparseable §2 keys on a chained dep answer EXACTLY as the UNCHAINED arm (entry, coverage, verdict, exit), and none fabricates an effect`,
+        cbad.length === 0, cbad.join("\n"));
+  const cdis = arm(CORRUPT[3][1]);
+  check("⟨0.24⟩ …and the corrupt chain is DISCLOSED by name on stderr, with a remedy",
+        /present.but.UNPARSEABLE|present-but-unparseable/i.test(cdis.stderr) && /ratesdep/.test(cdis.stderr),
+        cdis.stderr.slice(0, 400));
+  // STRICTLY ADDITIVE, and this is the row that stops the fix from becoming a silent under-report of its
+  // own: one corrupt entry must not withdraw a SIBLING entry that reads cleanly. `hit` is garbled, `calc`
+  // is intact, and `calc`'s absence from the report is still the dep's purity claim about it.
+  const partial = mut((d) => { d.functions[0].inferred = [7]; d.functions[0].direct = [7];
+                               d.functions.push({ fn: "src.index.calc", hash: "ratesdep#calc", loc: "x:1:1",
+                                                  inferred: ["Exec"], direct: ["Exec"], cmds: ["git"] }); });
+  const pa = arm(partial, "calc");
+  check("⟨0.24⟩ STRICTLY ADDITIVE: a corrupt entry does not withdraw a SIBLING entry that reads cleanly (`calc` still delivers Exec)",
+        pa.go?.inferred?.includes("Exec"), JSON.stringify(pa.go));
+  // CONTROL for the whole block: the untouched report still delivers, so the rows above are not passing
+  // because the fixture stopped joining at all.
+  check("⟨0.24⟩ CONTROL: the UNMUTATED report still delivers `Fs` and fires the gate (exit 1)",
+        trusted.go?.inferred.includes("Fs") && trusted.status === 1, JSON.stringify(trusted.go));
 }
 
 // ── 11b. ⟨0.20⟩ the dep's Net-surface INCOMPLETENESS crosses the boundary with its hosts ──────────
