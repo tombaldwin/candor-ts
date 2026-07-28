@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 
 import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, discoverConfigText,
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
-         policyVocabularyAnchor, policyErrorText, refusalVerdict } from "./policy.mjs";
+         policyVocabularyAnchor, policyErrorText, refusalVerdict, unanswerableScoped } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
@@ -443,93 +443,6 @@ function resolveGateReportVerb(rawArgs) {
   }
   const prefix = requireReport(reportLocator !== null ? locatorToPrefix(reportLocator) : discoverReportPrefix());
   return { prefix, policyFile: resolvePolicy(policyFile, null).policyFile, gateJsonPath, json };
-}
-
-/**
- * ⟨0.24⟩ THE THIRD ANSWERABILITY CASE (SPEC §3.1) — a class-scoped `deny` over a report that cannot answer
- * the narrowing question. Returns the refusal message, or null when every scoped filter is answerable.
- *
- * A bare `deny Net` / `deny Unknown` asks a question the effect set alone answers. A SCOPED one —
- * `deny Net[unknown-host]`, `deny Unknown[dispatch]` — asks a second question ("…and is the destination /
- * the reason class one of THESE?") and NARROWS the gate on the answer. Where the report does not carry the
- * evidence, the field is simply absent, the matcher sees an empty set, nothing intersects, and the effect
- * is dropped from the violation: **the narrowing succeeds BECAUSE the evidence is missing**. Measured on
- * the reference engine — `deny Net[unknown-host]` over a `Net`-bearing entry with no `netClass` returned
- * exit 0 where bare `deny Net` returns 1, an absent optional field silently un-scoping a fail-closed gate.
- *
- * THE REFUSAL IS MINIMAL, and the minimality is the subtle half. §3.1 ⟨0.24⟩: a scoped `deny` is NOT
- * unanswerable merely because some datum is missing. The class set only ever GROWS as evidence arrives
- * (§6.2 CONTRIBUTES, never retracts) and `Reject` is upward-closed in it, so
- *   · if the classes determinable from the entry ALONE already INTERSECT the filter, the rule FIRES and the
- *     answer is certain — missing data could only have added more matches. That case never reaches here:
- *     it is `evaluatePolicy`'s ordinary path.
- *   · only where the determinable set is EMPTY does the rule fail to fire AND could the missing datum still
- *     make it fire. That, and only that, is refused.
- * A NON-empty set that does not intersect is answered (tolerated), because on the wire both fields are
- * total by construction for the entries this can reach: `netClass` is emitted for EVERY `Net`-bearing entry
- * and floored at `unknown-host`, and an in-scope `Unknown` always resolves — a DIRECT one CONTRIBUTES
- * `unresolved` at its own entry (resolveReasonClasses, §6.2 requirement 3) and an INHERITED one has the
- * callee that raised it in `calls`, because that callee carries `Unknown` and is therefore effectful and
- * present. So a non-empty set means the channel is carried and the producer's set is the whole answer.
- *
- * That entry-level CONTRIBUTION is also why this engine does not repeat the over-broad refusal the spec
- * records against candor-swift: a function whose direct `Unknown` names no reason is answerable here under
- * `deny E Unknown[unresolved]` — the class comes from the entry itself, with no transitive step — so it
- * FIRES rather than exiting 2.
- *
- * PER (RULE, FUNCTION), not per policy — §3.1's granularity ruling. A scoped rule whose own matches all
- * carry their evidence evaluates normally; only the rule that would have been silently narrowed is refused.
- *
- * ⟨0.24⟩ IT NO LONGER SHORT-CIRCUITS THE GATE (SPEC §3.1 `7271c69` + `5a8cf48`), and that is the whole of
- * this rung's precedence correction. It used to return the FIRST refusal message and the verb exited 2 on
- * the spot — so a policy carrying a firing `deny Fs` BESIDE one unanswerable scoped rule exited 2 and wrote
- * no `--gate-json` document at all, DELETING A CERTAIN VIOLATION from the machine-consumer channel. `Reject`
- * is upward-closed (PAPER3 Lemma 2): if a rule fires on evidence the report carries, however the
- * unanswerable rule would have resolved cannot un-reject it, so exit 1 is not merely fail-closed there, it
- * is CERTAIN — and it names the violation where exit 2 names nothing.
- *
- * So it now returns EVERY unanswerable (rule, function, effect) triple, as a disclosure that travels
- * ALONGSIDE a verdict rather than as the whole output, plus the `withhold` predicate `evaluatePolicy` needs
- * to keep the unevidenced pairs from FIRING (see the note on that parameter — flooring an empty class set
- * at `unresolved` is right for a matcher and wrong for a firing).
- */
-function unanswerableScoped(pol, functions, reasonAcc, netMap) {
-  const held = new Set(), byRule = new Map();
-  const key = (raw, fn, eff) => `${raw}\u0000${fn}\u0000${eff}`;
-  const note = (r, fn, eff, why) => {
-    held.add(key(r.raw, fn, eff));
-    let e = byRule.get(r.raw);
-    if (!e) { e = { rule: r.raw, fns: [], why }; byRule.set(r.raw, e); }
-    e.fns.push(fn);
-  };
-  for (const r of pol.deny) {
-    for (const f of functions) {
-      if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
-      const inf = f.inferred ?? [];
-      if (r.netClasses?.length && inf.includes("Net") && !(netMap.get(f.fn)?.length))
-        note(r, f.fn, "Net", "narrows on the Net DESTINATION CLASS, but %F carr%S Net with no "
-          + "`netClass` in this report — the field the filter reads is absent, so the narrowing would "
-          + "succeed for lack of evidence and drop a Net the bare `deny Net` catches. NOT EVALUATED for "
-          + "those functions rather than passed: an absent optional field must not relax a fail-closed "
-          + "gate. Use the bare `deny Net`, or gate at scan time (candor-ts <src> --policy <file>).");
-      if (r.unknownClasses?.length && inf.includes("Unknown") && !(reasonAcc.get(f.fn)?.size))
-        note(r, f.fn, "Unknown", "narrows on the Unknown REASON CLASS, but %F carr%S Unknown with no "
-          + "reason reachable in this report — neither %P own `unknownWhy` nor a `calls` edge to one. "
-          + "§6.2 resolves the class set TRANSITIVELY over the gate's reach; with the channel missing, "
-          + "every narrowed filter silently tolerates while only the bare `deny Unknown` fires. NOT "
-          + "EVALUATED for those functions rather than passed. Use the bare `deny Unknown`, or gate at "
-          + "scan time (candor-ts <src> --policy <file>).");
-    }
-  }
-  // EVERY withheld function is named, never one witness standing for the rest: the operator has to be able
-  // to see which part of the policy went unenforced, and a count cannot be acted on.
-  const unevaluated = [...byRule.values()].map(({ rule, fns, why }) => {
-    const names = [...new Set(fns)].sort();
-    const list = names.map((n) => `\`${n}\``).join(", ");
-    return { rule, why: `\`${rule}\` ` + why.replace("%F", list).replace("%S", names.length === 1 ? "ies" : "y")
-                                            .replace("%P", names.length === 1 ? "its" : "their") };
-  });
-  return { unevaluated, withhold: held.size ? (r, fn, eff) => held.has(key(r.raw, fn, eff)) : null };
 }
 
 /**

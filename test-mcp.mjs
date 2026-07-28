@@ -694,5 +694,94 @@ fs.rmSync(W, { recursive: true, force: true });
   fs.rmSync(G, { recursive: true, force: true });
 }
 
+// ── ⟨0.24⟩ THE AGENT-FACING GATE HAD NO WITHHOLD PATH, AND BOTH DIRECTIONS OF HARM WERE LIVE ───────
+// SPEC §3.1's answerability rule reached `gate --report` and stopped there, because that is where it was
+// written. `mcp.mjs` called the SAME `evaluatePolicy` with no `withhold` predicate and the DEFAULT
+// netClass mode, so on the surface an agent trusts and no human reads, one report and one policy gave:
+//
+//   deny Unknown[reflect] app   -> CLI exit 2 (refused);  MCP {"ok":true,"violations":[]}   FALSE ALL-CLEAR
+//   deny Net[unknown-host] app  -> CLI exit 2 (refused);  MCP FIRES, asserting
+//                                                         "netClass":["unknown-host"] the report never carried
+//
+// The report is FOREIGN and handwritten on purpose: `app.handler`'s `Unknown` is INHERITED with no
+// `unknownWhy` and no `calls` edge (the reason channel is simply absent), and `app.fetcher` carries `Net`
+// with no `netClass` — the two shapes the two narrowing filters read. THE CONTROL is what makes the rows
+// mean anything: bare `deny Unknown` must still FIRE, or a tool that had simply stopped gating would pass
+// the first two rows. The last row is the precedence half (SPEC §3.1 `7271c69`): a certain `deny Fs`
+// beside the unanswerable rule must produce the violation AND the disclosure, never one or the other.
+{
+  const A = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-withhold-"));
+  fs.writeFileSync(`${A}/r.json`, JSON.stringify({
+    candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 3, digest: "0" },
+    functions: [
+      { fn: "app.handler", inferred: ["Unknown"], direct: [], unresolved: true },
+      { fn: "app.fetcher", inferred: ["Net"], direct: ["Net"], hosts: ["example.com"] },
+      { fn: "app.writes", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] },
+    ],
+  }));
+  fs.writeFileSync(`${A}/reflect.pol`, "deny Unknown[reflect] app\n");
+  fs.writeFileSync(`${A}/net.pol`, "deny Net[unknown-host] app\n");
+  fs.writeFileSync(`${A}/control.pol`, "deny Unknown app\n");
+  fs.writeFileSync(`${A}/both.pol`, "deny Fs app\ndeny Unknown[reflect] app\n");
+  const wcall = (id, pol) => ({ jsonrpc: "2.0", id, method: "tools/call",
+    params: { name: "candor_gate", arguments: { report: `${A}/r`, policy: `${A}/${pol}` } } });
+  const wr = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+                               wcall(2, "reflect.pol"), wcall(3, "net.pol"),
+                               wcall(4, "control.pol"), wcall(5, "both.pol")], [], { CANDOR_REPORT: `${A}/r` });
+  const wt = (id) => JSON.parse(wr.find((r) => r.id === id).result.content[0].text);
+  ok("⟨0.24⟩ candor_gate: a scoped `deny Unknown[reflect]` the report cannot answer is REFUSED, not answered green — `ok:false`, `refused:true`, and NO `violations` key (an absent key, never `[]`)",
+     wt(2).ok === false && wt(2).refused === true && !("violations" in wt(2))
+     && wt(2).unevaluated?.[0]?.rule === "deny Unknown[reflect] app"
+     && /no reason reachable/.test(wt(2).unevaluated?.[0]?.why ?? ""),
+     JSON.stringify(wt(2)).slice(0, 260));
+  ok("⟨0.24⟩ candor_gate: a scoped `deny Net[unknown-host]` over a `netClass`-less entry is REFUSED — it no longer FIRES asserting a destination class the report never carried",
+     wt(3).ok === false && wt(3).refused === true && !("violations" in wt(3))
+     && wt(3).unevaluated?.[0]?.rule === "deny Net[unknown-host] app"
+     // and the ASSERTION is gone, not merely relabelled: nothing in the result STATES a `netClass` the
+     // report never carried. The disclosure NAMES the absent field in prose, by design, so the test looks
+     // for the JSON key rather than the word.
+     && !/"netClass"/.test(JSON.stringify(wt(3))),
+     JSON.stringify(wt(3)).slice(0, 260));
+  ok("⟨0.24⟩ candor_gate CONTROL: the bare `deny Unknown` still FIRES on the same entry — the channel is narrowed, not dead",
+     wt(4).ok === false && wt(4).violations?.length === 1 && wt(4).violations[0].fn === "app.handler"
+     && wt(4).refused === undefined,
+     JSON.stringify(wt(4)).slice(0, 260));
+  ok("⟨0.24⟩ candor_gate PRECEDENCE: a certain `deny Fs` violation beside the unanswerable rule is IN the result, with `unevaluated` alongside — a refusal never deletes a certain violation",
+     wt(5).ok === false && wt(5).violations?.length === 1 && wt(5).violations[0].rule === "AS-EFF-006"
+     && wt(5).violations[0].fn === "app.writes" && wt(5).unevaluated?.length === 1
+     && wt(5).refused === undefined,
+     JSON.stringify(wt(5)).slice(0, 300));
+  fs.rmSync(A, { recursive: true, force: true });
+}
+
+// ── ⟨0.21⟩ candor_gate IMPLEMENTED NO INCOMPLETENESS RULE AT ALL ───────────────────────────────────
+// A report DECLARING `unanalyzed` says candor could not see part of the code it is describing; a `deny`
+// that "passes" over invisible effects is a false-pure. `scan --policy` exits 2 on its own manifest and
+// `gate --report` exits 2 on the report's, and this tool returned `{ok:true,violations:[]}` over the same
+// bytes. The CONTROL is the identical report with the manifest removed, so the row cannot pass on a tool
+// that has started flagging everything.
+{
+  const I = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-incomplete-"));
+  const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app",
+              analyzed: { count: 1, digest: "0" },
+              functions: [{ fn: "app.fetcher", inferred: ["Net"], direct: ["Net"], hosts: ["x"], netClass: ["unknown-host"] }] };
+  fs.writeFileSync(`${I}/inc.json`, JSON.stringify({ ...V, unanalyzed: [{ path: "src/broken.ts", reason: "parse error" }] }));
+  fs.writeFileSync(`${I}/ok.json`, JSON.stringify(V));
+  fs.writeFileSync(`${I}/p.pol`, "deny Fs app\n");
+  const icall = (id, rep) => ({ jsonrpc: "2.0", id, method: "tools/call",
+    params: { name: "candor_gate", arguments: { report: `${I}/${rep}`, policy: `${I}/p.pol` } } });
+  const ir = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+                               icall(2, "inc"), icall(3, "ok")], [], { CANDOR_REPORT: `${I}/inc` });
+  const it = (id) => JSON.parse(ir.find((r) => r.id === id).result.content[0].text);
+  ok("⟨0.21⟩ candor_gate: a report declaring `unanalyzed` cannot gate GREEN — ok:false, incomplete:true, and the units named (the CLI exits 2 on the same bytes)",
+     it(2).ok === false && it(2).incomplete === true && it(2).unanalyzed?.[0]?.path === "src/broken.ts"
+     && Array.isArray(it(2).violations) && it(2).violations.length === 0,
+     JSON.stringify(it(2)).slice(0, 260));
+  ok("⟨0.21⟩ candor_gate CONTROL: the SAME report without the manifest gates green and carries no `incomplete` key",
+     it(3).ok === true && it(3).incomplete === undefined && it(3).unanalyzed === undefined,
+     JSON.stringify(it(3)).slice(0, 260));
+  fs.rmSync(I, { recursive: true, force: true });
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

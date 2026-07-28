@@ -45,7 +45,7 @@ import { createRequire } from "node:module";
 import nodePath from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as Q from "./query-core.mjs";
-import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText } from "./policy.mjs";
+import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, resolveReasonClasses } from "./policy.mjs";
 
 // Version: from the sibling package.json when running inside the npm package; a single-file BUNDLE of
 // this server (the IDE-plugin embedding) has no sibling package.json — fall back rather than crash.
@@ -343,8 +343,25 @@ function diagnosticsFor(docPath) {
   // producer's project, in both the fabricating and the fail-open direction (see reportNetClasses).
   const dpol = activePolicyParsed(text);
   if (dpol === null) return [];
+  // ⟨0.24⟩ THE ANSWERABILITY WITHHOLD, which this surface ran WITHOUT — `evaluatePolicy` was called with no
+  // `withhold` predicate and the DEFAULT netClass mode, so both directions of the §3.1 harm were live in the
+  // editor. Measured against the CLI on one report and one policy: `deny Unknown[reflect]` drew NO squiggle
+  // where `gate --report` exits 2 (a squiggle that does not appear is the least visible false all-clear this
+  // project has), and `deny Net[unknown-host]` drew one whose message ASSERTS a destination class the report
+  // never carried. `authoritative: true` for the same reason the MCP gate takes it: an entry without
+  // `netClass` gets the EMPTY set rather than a derivation from `hosts`, so the report is the only source of
+  // the class and nothing is re-classified with this machine's evidence about the producer's project.
+  const dnet = reportNetClasses(fns, { authoritative: true });
+  const { unevaluated: dunevaluated, withhold: dwithhold } =
+    unanswerableScoped(dpol, fns, resolveReasonClasses(fns, Q.loadCallgraph(reportPrefix)), dnet);
+  // The surface has no exit code, so the refusal is carried the way this file already carries its other two
+  // (the unhonourable policy, the judged-nothing report): ONE log line naming the rules, so the missing
+  // squiggle is EXPLAINED rather than read as a clean bill of health. Per rule, not per keystroke — warnOnce
+  // keys on the message, and the message is a function of the policy and the report, not of the edit.
+  for (const u of dunevaluated)
+    warnOnce(`candor-lsp: ${u.why}\n  NO diagnostics are drawn for that rule — their ABSENCE here is the refusal, not an all-clear.`);
   const violations = evaluatePolicy(dpol, fns, Q.loadCallgraph(reportPrefix),
-                                    new Map(), new Set(), reportNetClasses(fns));
+                                    new Map(), new Set(), dnet, dwithhold);
   const locByFn = new Map(fns.filter((e) => e.loc).map((e) => [e.fn, locParts(e.loc)]));
   const out = [];
   for (const v of violations) {

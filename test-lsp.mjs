@@ -709,5 +709,65 @@ export function handler(): void { mid(); }
   fs.rmSync(E, { recursive: true, force: true });
 }
 
+// ── ⟨0.24⟩ THE LIVE GATE HAD NO WITHHOLD PATH EITHER, AND A MISSING SQUIGGLE IS THE QUIETEST LIE ────
+// `diagnosticsFor` called `evaluatePolicy` with no `withhold` predicate and the DEFAULT netClass mode,
+// so both directions of the §3.1 answerability harm were live in the editor over the SAME report and
+// policy the CLI exits 2 on: `deny Unknown[reflect]` drew NOTHING (a false all-clear that is invisible
+// by construction — there is no artifact to inspect), and `deny Net[unknown-host]` drew a squiggle whose
+// message ASSERTS a destination class the report never carried.
+//
+// The report is handwritten and FOREIGN, which is a route this surface takes by design (it accepts a
+// `report` locator): `unanswered.handler`'s Unknown is inherited with no reason channel at all, and
+// `unanswered.fetcher` carries Net with no `netClass`. THE CONTROL is the same report under a bare
+// `deny Unknown`, which must still squiggle — otherwise a server that had stopped gating would pass.
+{
+  const mkr = (policy) => {
+    const U = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-withhold-"));
+    fs.mkdirSync(path.join(U, "src"), { recursive: true });
+    fs.mkdirSync(path.join(U, ".candor"), { recursive: true });
+    fs.writeFileSync(path.join(U, "src", "app.ts"),
+      "export function handler() { return 1; }\nexport function fetcher() { return 2; }\n");
+    fs.writeFileSync(path.join(U, ".candor", "report.json"), JSON.stringify({
+      candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 2, digest: "0" },
+      functions: [
+        { fn: "app.handler", loc: "app.ts:1:1", inferred: ["Unknown"], direct: [], unresolved: true },
+        { fn: "app.fetcher", loc: "app.ts:2:1", inferred: ["Net"], direct: ["Net"], hosts: ["example.com"] },
+      ],
+    }));
+    fs.writeFileSync(path.join(U, "arch.policy"), policy);
+    fs.writeFileSync(path.join(U, ".candor", "config"), "policy arch.policy\n");
+    return U;
+  };
+  const driveW = async (U, n) => {
+    const { inbound } = await lspSession([
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(U).href } },
+      { jsonrpc: "2.0", method: "initialized", params: {} },
+      { jsonrpc: "2.0", method: "textDocument/didOpen",
+        params: { textDocument: { uri: pathToFileURL(path.join(U, "src", "app.ts")).href,
+                                  languageId: "typescript", version: 1, text: "" } } },
+    ], n);
+    const diag = inbound.find((r) => r.method === "textDocument/publishDiagnostics");
+    const logs = inbound.filter((r) => r.method === "window/logMessage")
+                        .map((r) => r.params?.message ?? "").join("\n");
+    return { diags: diag?.params?.diagnostics ?? [], logs };
+  };
+  const RU = mkr("deny Unknown[reflect] app\n");
+  const RN = mkr("deny Net[unknown-host] app\n");
+  const RC = mkr("deny Unknown app\n");
+  const wu = await driveW(RU, 3), wn = await driveW(RN, 3), wc = await driveW(RC, 2);
+  ok("⟨0.24⟩ lsp: a scoped `deny Unknown[reflect]` the report cannot answer draws NO squiggle and the absence is DISCLOSED — an unexplained empty editor is the least visible false all-clear there is",
+     wu.diags.length === 0 && /deny Unknown\[reflect\] app/.test(wu.logs)
+     && /no reason reachable/.test(wu.logs) && /not an all-clear/.test(wu.logs),
+     `n=${wu.diags.length} log=${wu.logs.slice(0, 220)}`);
+  ok("⟨0.24⟩ lsp: a scoped `deny Net[unknown-host]` over a `netClass`-less entry draws NO squiggle asserting a class the report never carried — it is refused and said so",
+     wn.diags.length === 0 && /deny Net\[unknown-host\] app/.test(wn.logs)
+     && /not an all-clear/.test(wn.logs),
+     `n=${wn.diags.length} log=${wn.logs.slice(0, 220)}`);
+  ok("⟨0.24⟩ lsp CONTROL: the bare `deny Unknown` still squiggles on the SAME entry — the gate is narrowed, not switched off",
+     wc.diags.length === 1 && wc.diags[0].code === "AS-EFF-006",
+     `n=${wc.diags.length} ${JSON.stringify(wc.diags).slice(0, 200)}`);
+  for (const d of [RU, RN, RC]) fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

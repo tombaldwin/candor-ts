@@ -20,7 +20,8 @@ import { createRequire } from "node:module";
 import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses,
-         parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText } from "./policy.mjs";
+         parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText,
+         unanswerableScoped, resolveReasonClasses } from "./policy.mjs";
 
 const VERSION = createRequire(import.meta.url)("./package.json").version; // single-sourced, like scan.mjs
 
@@ -259,7 +260,7 @@ const TOOLS = {
     },
   },
   candor_gate: {
-    description: "The policy verdict over this report: { ok, violations:[{rule, fn, effects, detail}] } — 'would this repo pass its architecture gate?'. Uses `policy` if given, else the repo's checked-in .candor/config policy (spec §3.4). Computed from the report — the engine's own --gate-json run is the authoritative CI form: it additionally fails an allow rule whose literal surface is INCOMPLETE (a masked/invisible endpoint), which is not a report field, so a green here can still be red in CI.",
+    description: "The policy verdict over this report: { ok, violations:[{rule, fn, effects, detail}] } — 'would this repo pass its architecture gate?'. Uses `policy` if given, else the repo's checked-in .candor/config policy (spec §3.4). ALWAYS CHECK `ok`, never the length of `violations`: a rule whose narrowing evidence the report does not carry is NOT EVALUATED, and then the result is `{ ok:false, refused:true, reason, unevaluated:[{rule, why}] }` WITH NO `violations` KEY — an absent key, not an empty list, because the gate is making no claim there. `unevaluated` also rides a firing verdict (a certain violation dominates a refusal). `{ incomplete:true, unanalyzed }` means the report declares code candor could not analyze, so the gate cannot be green. Computed from the report — the engine's own --gate-json run is the authoritative CI form: it additionally fails an allow rule whose literal surface is INCOMPLETE (a masked/invisible endpoint), which is not a report field, so a green here can still be red in CI.",
     schema: { type: "object", properties: { policy: { type: "string", description: "path to a §6.2 policy file (optional; defaults to the repo's .candor/config `policy`)" }, ...reportArg }, required: [] },
     run: (a, p) => {
       let text, polPath = a.policy ?? null;
@@ -270,15 +271,50 @@ const TOOLS = {
         if (!cfg) throw new Error("no policy: pass `policy`, or check one into the repo's .candor/config (spec §3.4)");
         text = confinedPolicyRead(cfg.policyPath, p, cfg.repoRoot);
       }
-      // ⟨0.24⟩ `netClass` VERBATIM off the wire (reportNetClasses). This is a REPORT route — like
-      // `gate --report`, and unlike a scan it holds neither the producer's `net-partner` config nor the
-      // masked-surface flag, so re-deriving the destination class from `hosts` answered with THIS
-      // machine's evidence about the PRODUCER's project: a `known-partner` host re-read as `unknown-host`
-      // (a FABRICATED `deny Net[unknown-host]` hit) and a masked surface re-read from its one benign
-      // literal (the fail-open mirror). An entry carrying no `netClass` still falls back to the
-      // derivation, which is floored at `unknown-host` — the direction that cannot un-narrow the filter.
-      const gfns = loadReportLoud(p, { partialIsFatal: true });
-      const v = evaluatePolicy(policyOrThrow(text, polPath), gfns, Q.loadCallgraph(p), new Map(), new Set(), reportNetClasses(gfns));
+      // ⟨0.24⟩ THE SAME THREE-PIECE GATE THE CLI RUNS, because this tool is a REPORT route exactly as
+      // `gate --report` is, and the two pieces it was missing were BOTH live harms on the surface an
+      // agent trusts and no human reads. Measured, same report, same policy, against the CLI:
+      //
+      //   deny Unknown[reflect] app   -> CLI exit 2 (refused);  here {"ok":true,"violations":[]}
+      //   deny Net[unknown-host] app  -> CLI exit 2 (refused);  here FIRES, asserting
+      //                                                         "netClass":["unknown-host"] the report never carried
+      //
+      // (1) `authoritative` netClass. The DEFAULT mode maps only entries that CARRY the field and lets the
+      // rest fall back to `netClassesOf`, which floors an empty surface at `unknown-host`. That was chosen
+      // as a hedge because "neither surface can refuse a question" — but a hedge that ASSERTS a destination
+      // class in the violation record is not a hedge, it is the re-derivation §3.1 ⟨0.24⟩ forbids, in a
+      // field a consumer reads as the PRODUCER's judgment. Now that the tool discloses (3), it can refuse,
+      // so the authoritative mode is the correct one and the two routes read one report identically.
+      // (2) `withhold` (unanswerableScoped). A scoped `deny` whose narrowing evidence the wire does not
+      // carry is NOT EVALUATED, per (rule, function, effect) — never scored as a filter that succeeded for
+      // lack of evidence, and never fired on `reasonClassesMatch`'s empty-set floor, which is right for a
+      // MATCHER and wrong for a FIRING.
+      // (3) the disclosure, which is what makes (1) and (2) safe here: an unevaluated rule rides the tool
+      // result, so the agent sees WHICH part of its policy went unenforced rather than an empty list.
+      //
+      // ONE PASS over the report files (`loadGateReport`), the same reader `gate --report` uses: it yields
+      // the entries AND the ⟨0.21⟩/⟨0.15⟩ envelope out of the same bytes. Three separate reads (functions,
+      // judged-nothing, and — newly — `unanalyzed`) could disagree with each other on a file another
+      // process rewrites between them.
+      const pol = policyOrThrow(text, polPath);
+      const g = Q.loadGateReport(p);
+      if (g.hardFail)
+        throw new Error((g.corrupt.length
+            ? `the report at prefix \`${clip(p)}\` has ${g.corrupt.length} present-but-unparseable §2 key(s) — a key that is THERE but of the wrong shape is corrupt input, not an empty one (SPEC §2 ⟨0.24⟩); coercing it to its empty value would turn corruption into a purity claim: ${g.corrupt.join("; ")}. `
+            : "")
+          + (g.functions.length === 0
+            ? `every report found at prefix \`${clip(p)}\` failed to load — refusing to report an empty (all-clear) answer over a corrupt report; re-run the scan`
+            : `a report found at prefix \`${clip(p)}\` failed to load — refusing to gate over a report that did not load cleanly; a partial signature makes a green verdict meaningless (the effects of the report that did not load are exactly the ones a violation would come from). Re-run the scan`));
+      const gfns = g.functions;
+      const cg = Q.loadCallgraph(p);
+      const gnet = reportNetClasses(gfns, { authoritative: true });
+      const { unevaluated, withhold } = unanswerableScoped(pol, gfns, resolveReasonClasses(gfns, cg), gnet);
+      const v = evaluatePolicy(pol, gfns, cg, new Map(), new Set(), gnet, withhold);
+      // ⟨0.21⟩ COMPLETENESS MANIFEST — this tool implemented no incompleteness rule at all: it answered
+      // `{ok:true, violations:[]}` over a report DECLARING `unanalyzed`, where the CLI exits 2. A gate
+      // cannot be green over code candor never analyzed, and the manifest travels ON the report, so the
+      // same verdict follows from it here. Additive to the pinned `{ok, violations}` shape.
+      const incomplete = g.unanalyzed.length > 0;
       // ⟨0.24⟩ …and a report that JUDGED NOTHING is not an all-clear (SPEC §2's three-row table, bound to
       // every report-reading route by §3.1: "the obligation is on the reading, not on the route by which
       // the report arrived"). This tool is exactly such a route — it gates whatever `report` points at,
@@ -287,12 +323,25 @@ const TOOLS = {
       // caveat is ADDITIVE (the two existing keys keep their shape and meaning, and the field is absent
       // on every ordinary report) because the verdict itself must not move: the report asserts no effect,
       // so asserting one here would be the fabrication mirror of the silence being disclosed.
-      if (Q.reportJudgedNothing(p))
-        return { ok: v.length === 0, violations: v, judgedNothing: true,
-                 caveat: "⟨0.24⟩ this report judged NOTHING (`analyzed.count` is 0, absent with no entries, or unreadable) — "
-                       + "a green verdict here certifies nothing: absence from `functions` licenses no purity claim about any "
-                       + "unit. Re-scan the sources you meant to gate, or point `report` at the package that has them." };
-      return { ok: v.length === 0, violations: v };
+      const judged = g.judgedNothing ? { judgedNothing: true,
+        caveat: "⟨0.24⟩ this report judged NOTHING (`analyzed.count` is 0, absent with no entries, or unreadable) — "
+              + "a green verdict here certifies nothing: absence from `functions` licenses no purity claim about any "
+              + "unit. Re-scan the sources you meant to gate, or point `report` at the package that has them." } : {};
+      const inc = incomplete ? { incomplete: true, unanalyzed: g.unanalyzed } : {};
+      // ⟨0.24⟩ PRECEDENCE (SPEC §3.1 `7271c69`/`4c79958`): violation (1) > refusal (2) > incomplete (2), and
+      // the REFUSAL SHAPE is the one the CLI writes — `ok:false`, `refused:true`, and NO `violations` KEY AT
+      // ALL, because the gate is making no claim about violations and `[]` is precisely the claim it cannot
+      // make. THE TOOL-RESULT SHAPE DECISION, stated: a refusal is returned as this structured document and
+      // NOT as `isError`. `isError` flattens to a text blob, and the machine-actionable half of a refusal is
+      // `unevaluated` — WHICH rules went unenforced and why — which is exactly what an agent needs to fix it.
+      // The document is still fail-closed to the naivest possible reader (`ok` is false), and it is the same
+      // shape the agent would get from `--gate-json`, so one consumer parses both routes.
+      if (v.length) return { ok: false, violations: v, ...(unevaluated.length ? { unevaluated } : {}), ...inc, ...judged };
+      if (unevaluated.length)
+        return { ok: false, refused: true,
+                 reason: `${unevaluated.length} policy rule(s) could not be evaluated against this report`,
+                 unevaluated, ...inc, ...judged };
+      return { ok: !incomplete, violations: v, ...inc, ...judged };
     },
   },
   candor_unverified: {
