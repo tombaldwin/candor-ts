@@ -8646,6 +8646,38 @@ export function all(db: DatabaseSync, o: any) {
   check("⟨0.24⟩ …and its MIRROR on the same channel: where the class MATCHES it is a violation the gate reports (exit 1) and the note must NOT double-report it; the unfiltered `pure app` control still discloses",
         sMatch.status === 1 && !NOTE.test(sMatch.stderr) && sPure.status === 0 && NOTE.test(sPure.stderr),
         `match=${sMatch.status}/${JSON.stringify(sMatch.stderr.slice(0, 160))} pure=${sPure.status}/${NOTE.test(sPure.stderr)}`);
+
+  // (E) THE `Net[…]` AXIS OF THE SAME CHANNEL, which nothing above reaches. (B) covers the destination-class
+  // filter on the REPORT route, where `netClass` arrives on the wire; (D) covers the scan route on the
+  // REASON-class axis. The scan route's Net half is the one the two cannot compose to, and it is the one
+  // that needs real DATA THREADED rather than a conjunct added: a destination class is NOT derivable from
+  // the fields a hole record carries — it needs the host surface, the masked-surface flag AND the config
+  // `net-partner` list, none of which travels on the wire. So the scan-time context is built from the run's
+  // LIVE evidence, and this row is what says that threading actually happened.
+  //
+  // MEASURED on the pre-fix build over these bytes: NO note under EITHER policy — the same silent
+  // under-report as the CLI's, on the channel a scan operator actually reads. `api.acme.example` classifies
+  // `known-partner` ONLY because `.candor/config` says so, which is exactly the evidence a consumer-side
+  // re-derivation would lose, so the row would also catch a fix that re-derived instead of threading.
+  const nd = project({
+    "src/app.ts": "export async function send(go: () => void): Promise<void> {\n"
+                + "  await fetch(\"https://api.acme.example/v1/x\");\n  go();\n}\n",
+    ".candor/config": "net-partner acme.example\n",
+    "excl.policy": "deny Net[unknown-host] app\n",      // excludes `known-partner` → PASSES → note
+    "match.policy": "deny Net[known-partner] app\n",    // matches → a VIOLATION → no note
+  });
+  const nExclR = runScan(nd, "--policy", path.join(nd, "excl.policy"));
+  const nMatchR = runScan(nd, "--policy", path.join(nd, "match.policy"));
+  check("⟨0.24⟩ the scan-time note reads the `Net[…]` DESTINATION-class filter too, off the run's own live evidence: a config-declared partner host PASSES `deny Net[unknown-host]` (exit 0) and the note names the pass-but-Unknown hole",
+        nExclR.status === 0 && NOTE.test(nExclR.stderr) && /deny Net\[unknown-host\] Unknown app/.test(nExclR.stderr),
+        `status=${nExclR.status} ${JSON.stringify(nExclR.stderr.slice(0, 300))}`);
+  // The violation RECORD rides stdout and the advisory note rides stderr, so the mirror reads BOTH streams:
+  // asserting only "no note" would be satisfied by a run that also lost the violation.
+  check("⟨0.24⟩ …and its MIRROR: under the MATCHING destination class the same function is a violation the gate REPORTS (exit 1, an AS-EFF-006 record naming the narrowed rule), with no note double-reporting it — the row that fails if the filter is applied in the wrong direction",
+        nMatchR.status === 1 && !NOTE.test(nMatchR.stderr)
+          && /\[AS-EFF-006\][^\n]*deny Net\[known-partner\] app/.test(nMatchR.stdout),
+        `status=${nMatchR.status} out=${JSON.stringify(nMatchR.stdout.slice(-200))} err=${JSON.stringify(nMatchR.stderr.slice(0, 200))}`);
+  fs.rmSync(nd, { recursive: true, force: true });
   fs.rmSync(sd, { recursive: true, force: true });
   fs.rmSync(d, { recursive: true, force: true });
 }
