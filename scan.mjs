@@ -28,7 +28,8 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText,
-         reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyErrorUnevaluated, policyUnreadable, fatalPolicyErrors, refusalVerdict } from "./policy.mjs";
+         reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyErrorUnevaluated, policyUnreadable, fatalPolicyErrors, refusalVerdict,
+         netClassResolver, resolveReasonClasses } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
@@ -5236,10 +5237,20 @@ if (policyPath !== null) {
       // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
       // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).
       const disclosePolicy = gatePolicy;
+      // ⟨0.24⟩ the SAME narrowing context `evaluatePolicy` just used — this is the scan-time CHANNEL of the
+      // `unverified` disclosure, and the class filter has to reach it too or the note names a hole the gate
+      // beside it already excluded. Built from the scan's LIVE evidence (hosts + the masked-surface flag +
+      // the config `net-partner` list), none of which travels on the wire, so it is strictly better-informed
+      // than the report route's — and correspondingly it is the route where a re-derivation would be wrong.
+      const discloseNetClassOf = netClassResolver(incompleteMap, netPartners, null);
+      const discloseReasonAcc = resolveReasonClasses(functions, cg);
+      const discloseByName = new Map(functions.map((f) => [f.fn, f]));
+      const discloseCtx = { reasonAcc: discloseReasonAcc, netClassOf: discloseNetClassOf,
+                            entry: (fn) => discloseByName.get(fn) ?? null };
       const purityHoles = [];
       for (const f of functions) {
         // Same predicate + upgrade as `candor-ts-query unverified` (query-core.mjs) — one source of truth.
-        const r = unverifiedHoleRule(f.fn, f.inferred, disclosePolicy, scopeMatches);
+        const r = unverifiedHoleRule(f.fn, f.inferred, disclosePolicy, scopeMatches, discloseCtx);
         if (r) purityHoles.push([f.fn, ruleUpgrade(r)[1]]);
       }
       if (purityHoles.length) {

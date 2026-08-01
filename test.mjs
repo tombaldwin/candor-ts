@@ -8514,5 +8514,141 @@ export function all(db: DatabaseSync, o: any) {
         JSON.stringify(gdoc2?.policyVocabulary));
 }
 
+// ── ⟨0.24⟩ THE ADVISORY VERBS AND THE RULE'S `Unknown[…]`/`Net[…]` CLASS FILTER (SPEC §6.2) ─────────
+// `gate --report` reads a rule's narrowing filter; `fix-gate` and `unverified` computed from the EFFECT
+// SET ALONE, so over a report whose only hole is a class the policy EXCLUDES the three verbs disagreed:
+//
+//   gate --report        exit 0, no violations          <- correct, the class is excluded
+//   fix-gate --strict    exit 1 + a remedy naming it    <- OVER-CHARGE: a red CI check and a hoist
+//                                                          instruction for a boundary nothing denies
+//   unverified --strict  exit 0, ok:true, []            <- UNDER-REPORT, and the worse half
+//
+// The under-report is the half that matters: the layer PASSES while carrying an Unknown, so it IS a
+// pass-but-Unknown hole — and `unverified`, the verb whose entire job is "your green gate is not provably
+// green", certified it clean. Both halves are fixed in one change; closing only the over-charge would kill
+// a fabrication and leave its silent mirror standing.
+//
+// EVERY ARM CARRIES ITS MIRROR. A filter can only NARROW what a verb reports, so the regression to guard
+// is LOST DISCLOSURE: each excluded-class row is paired with a row whose policy classes DO match, asserted
+// still named — and with the BARE (unfiltered) rule, which must be untouched.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-classfilter-"));
+  const rep = (fns) => JSON.stringify({ candor: { version: "ttttttt", spec: "0.23" }, functions: fns });
+  const W = (n, o) => fs.writeFileSync(path.join(d, n), typeof o === "string" ? o : JSON.stringify(o));
+  const pol = (n, text) => { W(n, text); return path.join(d, n); };
+  const J = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
+
+  // (A) THE UNKNOWN HALF. One function, one hole, class `native` — under a policy that denies `Unknown`
+  // narrowed to `reflect,unresolved`, i.e. every class BUT this one.
+  W("u.json", rep([{ fn: "app.loader", inferred: ["Unknown"], direct: ["Unknown"],
+                     unknownWhy: ["native:dlopen"], calls: [], loc: "a.ts:1" }]));
+  W("u.callgraph.json", { "app.loader": [] });
+  const U = path.join(d, "u");
+  const pExcl = pol("u-excl.policy", "deny Unknown[reflect,unresolved] app\n");  // excludes `native`
+  const pMatch = pol("u-match.policy", "deny Unknown[native] app\n");            // MATCHES `native`
+  const pBare = pol("u-bare.policy", "deny Unknown app\n");                      // no filter at all
+  const gate = (P) => runQuery("gate", "--report", U, "--policy", P);
+  const fg = (P) => { const r = runQuery("fix-gate", "--report", U, "--policy", P, "--strict"); return { s: r.status, j: J(r) }; };
+  const uv = (P) => { const r = runQuery("unverified", "--report", U, "--policy", P, "--strict"); return { s: r.status, j: J(r) }; };
+
+  // The GATE is the oracle every other row is measured against — it was always right, which is what makes
+  // the other two verbs' disagreement a defect rather than a policy question.
+  check("⟨0.24⟩ class filter: the GATE excludes the unmatched class (exit 0) and FIRES on the matching one (exit 1) — the oracle",
+        gate(pExcl).status === 0 && gate(pMatch).status === 1 && gate(pBare).status === 1,
+        `excl=${gate(pExcl).status} match=${gate(pMatch).status} bare=${gate(pBare).status}`);
+  // THE OVER-CHARGE, closed: no remedy for a boundary the policy does not deny.
+  const fgExcl = fg(pExcl);
+  check("⟨0.24⟩ fix-gate reads the rule's `Unknown[…]` filter: no remedy, ok:true, exit 0 for a class the policy EXCLUDES",
+        fgExcl.s === 0 && fgExcl.j?.ok === true && fgExcl.j?.remedies.length === 0, JSON.stringify(fgExcl));
+  // …and its MIRROR: the remedy is NOT lost where the classes DO meet, nor under the bare rule.
+  const fgMatch = fg(pMatch), fgBare = fg(pBare);
+  check("⟨0.24⟩ fix-gate MIRROR — the remedy SURVIVES when the policy's class matches, and under the bare rule (the filter narrows, it does not disable)",
+        fgMatch.s === 1 && fgMatch.j?.remedies?.[0]?.fn === "app.loader" && fgMatch.j.remedies[0].effect === "Unknown"
+          && fgBare.s === 1 && fgBare.j?.remedies?.[0]?.fn === "app.loader",
+        `match=${JSON.stringify(fgMatch)} bare=${JSON.stringify(fgBare)}`);
+  // THE UNDER-REPORT, closed — the half that matters. The layer PASSES the gate while carrying an Unknown.
+  const uvExcl = uv(pExcl);
+  check("⟨0.24⟩ unverified reads the rule's `Unknown[…]` filter: the PASS-but-Unknown hole is NAMED (ok:false, exit 1) where the gate is green — the false all-clear this verb exists to prevent",
+        uvExcl.s === 1 && uvExcl.j?.ok === false && uvExcl.j?.unverified?.[0]?.fn === "app.loader",
+        JSON.stringify(uvExcl));
+  // …and its MIRROR: where the rule really DOES fire, the function is a VIOLATION (the gate's job), never
+  // double-reported here. This is the row that fails if the filter is applied in the wrong direction.
+  const uvMatch = uv(pMatch), uvBare = uv(pBare);
+  check("⟨0.24⟩ unverified MIRROR — a function the gate REPORTS is not also an unverified hole (ok:true), under the matching filter AND the bare rule",
+        uvMatch.s === 0 && uvMatch.j?.unverified.length === 0 && uvBare.s === 0 && uvBare.j?.unverified.length === 0,
+        `match=${JSON.stringify(uvMatch)} bare=${JSON.stringify(uvBare)}`);
+
+  // (B) THE `Net[…]` SIBLING, same shape: a function reaching only a `known-partner` destination, under
+  // `deny Net[unknown-host]`. The report CARRIES `netClass`, so the class is taken verbatim off the wire.
+  W("n.json", rep([{ fn: "app.send", inferred: ["Net", "Unknown"], direct: ["Net", "Unknown"],
+                     hosts: ["api.partner.example"], netClass: ["known-partner"],
+                     unknownWhy: ["native:dlopen"], calls: [], loc: "n.ts:1" }]));
+  W("n.callgraph.json", { "app.send": [] });
+  const N = path.join(d, "n");
+  const nExcl = pol("n-excl.policy", "deny Net[unknown-host] app\n");
+  const nMatch = pol("n-match.policy", "deny Net[known-partner] app\n");
+  const nfg = (P) => { const r = runQuery("fix-gate", "--report", N, "--policy", P, "--strict"); return { s: r.status, j: J(r) }; };
+  const nuv = (P) => { const r = runQuery("unverified", "--report", N, "--policy", P, "--strict"); return { s: r.status, j: J(r) }; };
+  const nfgE = nfg(nExcl), nfgM = nfg(nMatch), nuvE = nuv(nExcl), nuvM = nuv(nMatch);
+  check("⟨0.24⟩ class filter, `Net[…]` sibling: fix-gate charges NO remedy for a destination class the policy excludes — and STILL charges one when it matches",
+        nfgE.s === 0 && nfgE.j?.remedies.length === 0 && nfgM.s === 1 && nfgM.j?.remedies?.[0]?.effect === "Net",
+        `excl=${JSON.stringify(nfgE)} match=${JSON.stringify(nfgM)}`);
+  check("⟨0.24⟩ class filter, `Net[…]` sibling: unverified NAMES the pass-but-Unknown hole under the excluded class, and does NOT under the matching one",
+        nuvE.s === 1 && nuvE.j?.unverified?.[0]?.fn === "app.send" && nuvM.s === 0 && nuvM.j?.unverified.length === 0,
+        `excl=${JSON.stringify(nuvE)} match=${JSON.stringify(nuvM)}`);
+
+  // (C) THE HAZARD THE FIX CREATED, which is the fourth time on this rung: making the predicate
+  // filter-aware is exactly what first lets a NARROWED rule BE the rule a hole is disclosed under, and the
+  // reconstruction dropped the bracket. It printed the operator's narrowed line back as the WIDE one and
+  // advised the nonsense `deny Unknown Unknown app`; on the Net sibling it advised `deny Net Unknown app`,
+  // SILENTLY UN-NARROWING a rule scoped to one destination class — an instruction that reddens a gate on
+  // traffic the operator had accepted. Dormant until the fix reached it.
+  check("⟨0.24⟩ the disclosed rule keeps its BRACKET — the operator's narrowed line is not printed back as the wide one",
+        uvExcl.j?.unverified?.[0]?.rule === "deny Unknown[reflect,unresolved] app"
+          && nuvE.j?.unverified?.[0]?.rule === "deny Net[unknown-host] app",
+        `unknown=${uvExcl.j?.unverified?.[0]?.rule} net=${nuvE.j?.unverified?.[0]?.rule}`);
+  check("⟨0.24⟩ the UPGRADE widens a narrowed `Unknown` rather than appending a second one, and never un-narrows a `Net[…]` the operator scoped",
+        uvExcl.j?.unverified?.[0]?.upgrade === "deny Unknown app"
+          && nuvE.j?.unverified?.[0]?.upgrade === "deny Net[unknown-host] Unknown app",
+        `unknown=${uvExcl.j?.unverified?.[0]?.upgrade} net=${nuvE.j?.unverified?.[0]?.upgrade}`);
+  // …and the CONTROL that keeps conformance PARTs 12c/12d unmoved: a rule with NO filter renders exactly
+  // as it always did, `pure` branch and multi-effect `deny` branch alike.
+  const pPure = pol("p.policy", "pure app\n");
+  const pMulti = pol("m.policy", "deny Db Net app\n");
+  W("p.json", rep([{ fn: "app.leaf", inferred: ["Unknown"], direct: ["Unknown"], unknownWhy: ["dispatch:x"], calls: [], loc: "p.ts:1" }]));
+  W("p.callgraph.json", { "app.leaf": [] });
+  const pj = (P) => J(runQuery("unverified", "--report", path.join(d, "p"), "--policy", P));
+  check("⟨0.24⟩ CONTROL: an UNFILTERED rule renders byte-identically to before — `pure app` → `deny Unknown app`, `deny Db Net app` → `deny Db Net Unknown app` (conformance 12c/12d unmoved)",
+        pj(pPure)?.unverified?.[0]?.rule === "pure app" && pj(pPure)?.unverified?.[0]?.upgrade === "deny Unknown app"
+          && pj(pMulti)?.unverified?.[0]?.rule === "deny Db Net app"
+          && pj(pMulti)?.unverified?.[0]?.upgrade === "deny Db Net Unknown app",
+        `pure=${JSON.stringify(pj(pPure)?.unverified?.[0])} multi=${JSON.stringify(pj(pMulti)?.unverified?.[0])}`);
+
+  // (D) THE OTHER CHANNEL. The scan-time gate note is a SECOND copy of the `unverified` disclosure and it
+  // shares the predicate, so the filter has to reach it too — a verb with two channels needs the claim
+  // withdrawn from both, and a test that reads one channel is evidence about one channel. Note the
+  // DIRECTION: a hole is a function that PASSES its rule while Unknown, so it is the EXCLUDING policy that
+  // must produce the note (the gate is green there and the note is the only thing saying why that green is
+  // not proof), and the MATCHING one that must not (there it is a violation, and the gate reports it).
+  // `callback:param#0` classifies `indirect`, verified against the emitted report rather than assumed.
+  const sd = project({
+    "src/app.ts": `export function loader(go: () => void): void { go(); }\n`,
+    "excl.policy": "deny Unknown[reflect] app\n",       // excludes `indirect` → PASSES → note
+    "match.policy": "deny Unknown[indirect] app\n",     // matches → a VIOLATION → no note
+    "pure.policy": "pure app\n",                        // unfiltered control → note, unchanged
+  });
+  const scanOf = (p) => runScan(sd, "--policy", path.join(sd, p));
+  const NOTE = /PASS the policy but are Unknown/;
+  const sExcl = scanOf("excl.policy"), sMatch = scanOf("match.policy"), sPure = scanOf("pure.policy");
+  check("⟨0.24⟩ the SCAN-TIME gate note reads the filter too — the green gate over an EXCLUDED class now carries the note that says why that green is not proof (it was silent, matching the CLI's under-report)",
+        sExcl.status === 0 && NOTE.test(sExcl.stderr),
+        `status=${sExcl.status} ${JSON.stringify(sExcl.stderr.slice(0, 240))}`);
+  check("⟨0.24⟩ …and its MIRROR on the same channel: where the class MATCHES it is a violation the gate reports (exit 1) and the note must NOT double-report it; the unfiltered `pure app` control still discloses",
+        sMatch.status === 1 && !NOTE.test(sMatch.stderr) && sPure.status === 0 && NOTE.test(sPure.stderr),
+        `match=${sMatch.status}/${JSON.stringify(sMatch.stderr.slice(0, 160))} pure=${sPure.status}/${NOTE.test(sPure.stderr)}`);
+  fs.rmSync(sd, { recursive: true, force: true });
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -662,6 +662,55 @@ export function unanswerableScoped(pol, functions, reasonAcc, netMap) {
 // It is per (rule, function, effect), never whole-policy and never whole-rule: `deny Fs Net[unknown-host]`
 // over a function carrying BOTH a certain `Fs` and a `netClass`-less `Net` must still report the `Fs`.
 // Withholding the pair would delete a certain violation — the very harm the precedence ruling is fixing.
+/** ⟨0.24⟩ ONE definition of a function's Net destination classes for a run: the report's own field when it
+ *  carries one (reportNetClasses), else the derivation from the surfaces the caller supplied. Exported so
+ *  the ADVISORY verbs resolve the class the same way the gate does — see `classFilterExcludes`. */
+export function netClassResolver(incomplete = new Map(), partners = new Set(), netClasses = null) {
+  // `has`, not `get(…) ?? derive`: an entry mapped to the EMPTY set is a report that carried no class, and
+  // on the authoritative route that absence is the answer — deriving one there would re-classify.
+  return (f) => (netClasses && netClasses.has(f.fn))
+    ? netClasses.get(f.fn)
+    : netClassesOf(f.hosts ?? [], incomplete.get(f.fn)?.has("Net") ?? false, partners);
+}
+
+/**
+ * ⟨0.24⟩ THE CLASS FILTER, AS A PREDICATE ON ONE (rule, function, effect) — does `r`'s `Unknown[…]` /
+ * `Net[…]` narrowing EXCLUDE `eff` at `entry`? Factored out of `evaluatePolicy` because it was inlined
+ * there, and inlined there meant the two ADVISORY verbs that ask the same question computed from the
+ * effect set ALONE. Measured on this engine, `deny Unknown[reflect,unresolved] app` over a report whose
+ * only hole is `native:dlopen` — the class the policy EXCLUDES:
+ *
+ *     gate --report        exit 0, no violations           <- correct, the class is excluded
+ *     fix-gate --strict    exit 1 + a remedy naming it     <- OVER-CHARGE: a red CI check and a hoist
+ *                                                             instruction for a boundary nothing denies
+ *     unverified --strict  exit 0, ok:true, []             <- UNDER-REPORT, and the worse half: the layer
+ *                                                             PASSES while carrying an Unknown, so it is a
+ *                                                             pass-but-Unknown hole, and the verb whose whole
+ *                                                             job is "your green gate is not provably green"
+ *                                                             certified it clean
+ *
+ * Same shape on the `Net[…]` sibling (`deny Net[unknown-host]` over a `known-partner` entry). SPEC §6.2:
+ * "THE GATE AND THE DISCLOSURE MUST APPLY THE SAME RULE, AND SHOULD SHARE THE SAME CODE" — this is that
+ * code, and both halves existed because the disclosure side never reached it.
+ *
+ * THE MATCHER QUESTION, NOT THE FIRING ONE. `reasonClassesMatch` floors an empty class set at `unresolved`,
+ * which the note on `withhold` records as the correct fail-closed default for a MATCHER ("could this rule
+ * apply?") and the wrong basis for a FIRING ("did it?"). The advisory verbs ask the matcher question — they
+ * emit no violation record that could assert a reason nobody recorded — so they use this predicate WITHOUT
+ * `withhold`, whose paired `unevaluated` disclosure has no ruled shape on those verbs anyway.
+ *
+ * An entry ABSENT from the report excludes NOTHING: a missing entry is missing evidence, and the direction
+ * that cannot turn a boundary crossing into a silent pass is "the rule still applies".
+ */
+export function classFilterExcludes(r, entry, eff, reasonAcc, netClassOf) {
+  if (!entry) return false;
+  if (eff === "Unknown" && r.unknownClasses?.length)
+    return !reasonClassesMatch(reasonAcc.get(entry.fn), r.unknownClasses);
+  if (eff === "Net" && r.netClasses?.length)
+    return !netClassOf(entry).some((c) => r.netClasses.includes(c));
+  return false;
+}
+
 export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map(), partners = new Set(), netClasses = null, withhold = null) {
   const out = [];
   // `Llm` ⟨0.13⟩ reaches the SAME hosts surface as Net (an Llm host WAS captured as a Net host literal).
@@ -677,14 +726,10 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
   // Reason-scoped Unknown: the Unknown reason CLASS travels the call graph the same way the Unknown
   // EFFECT does. ONE copy of that resolution, shared with the disclosure side — see resolveReasonClasses.
   const reasonAcc = resolveReasonClasses(functions, callgraph);
-  // ⟨0.24⟩ ONE definition of a function's Net destination classes for this run: the report's own field when
-  // it carries one (see reportNetClasses), else the derivation from the surfaces the caller supplied. The
-  // gate's TEST and the class list it REPORTS both read it, so the two can't disagree about one function.
-  // `has`, not `get(…) ?? derive`: an entry mapped to the EMPTY set is a report that carried no class,
-  // and on the authoritative route that absence is the answer — deriving one there would re-classify.
-  const netClassOf = (f) => (netClasses && netClasses.has(f.fn))
-    ? netClasses.get(f.fn)
-    : netClassesOf(f.hosts ?? [], incomplete.get(f.fn)?.has("Net") ?? false, partners);
+  // ⟨0.24⟩ ONE definition of a function's Net destination classes for this run (netClassResolver above):
+  // the report's own field when it carries one, else the derivation from the surfaces the caller supplied.
+  // The gate's TEST and the class list it REPORTS both read it, so the two can't disagree about one function.
+  const netClassOf = netClassResolver(incomplete, partners, netClasses);
   for (const f of functions) {
     for (const r of pol.deny) {
       if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
@@ -696,18 +741,13 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
         ? f.inferred.filter((e) => e !== "Unknown")
         : f.inferred.filter((e) => r.effects.includes(e));
       // Reason-scoped Unknown: a `deny E Unknown[classes]` keeps its Unknown hit only for a fn whose
-      // TRANSITIVE reason classes include one of those. Same rule object as `unverified --class`.
-      let kept = hits;
-      if (hits.includes("Unknown") && (r.unknownClasses?.length)
-          && !reasonClassesMatch(reasonAcc.get(f.fn), r.unknownClasses)) kept = hits.filter((e) => e !== "Unknown");
-      // Net destination-class: a `deny Net[dest…]` keeps its Net hit only for a fn reaching one of those
-      // destination classes; else tolerate (only asserted-safe destinations). Fail-closed: a masked surface /
-      // a Net with no visible host is unknown-host (netClassesOf). The class travels the call graph via
-      // f.hosts + f.incomplete, both propagated transitively before the gate (scan.mjs).
-      if (kept.includes("Net") && (r.netClasses?.length)) {
-        const fnNet = netClassOf(f);
-        if (!fnNet.some((c) => r.netClasses.includes(c))) kept = kept.filter((e) => e !== "Net");
-      }
+      // TRANSITIVE reason classes include one of those; Net destination-class: a `deny Net[dest…]` keeps its
+      // Net hit only for a fn reaching one of those destinations, else tolerates (only asserted-safe ones).
+      // Fail-closed: a masked surface / a Net with no visible host is unknown-host (netClassesOf); the class
+      // travels the call graph via f.hosts + f.incomplete, propagated transitively before the gate (scan.mjs).
+      // ⟨0.24⟩ BOTH now live in `classFilterExcludes`, so `fix-gate` and `unverified` apply the same filter
+      // instead of computing from the effect set alone (see that function's measurement).
+      let kept = hits.filter((e) => !classFilterExcludes(r, f, e, reasonAcc, netClassOf));
       // ⟨0.24⟩ …and LAST, because it overrides the matchers rather than joining them: an effect whose match
       // this report cannot evidence is neither a violation nor a pass. The caller lists it as `unevaluated`.
       if (withhold && kept.length) kept = kept.filter((e) => !withhold(r, f.fn, e));

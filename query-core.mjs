@@ -10,7 +10,8 @@
  */
 import fs from "node:fs";
 import nodePath from "node:path";
-import { reasonClass, REASON_CLASSES, DYNAMIC_CLASSES, resolveReasonClasses, reasonClassesMatch } from "./policy.mjs";
+import { reasonClass, REASON_CLASSES, DYNAMIC_CLASSES, resolveReasonClasses, reasonClassesMatch,
+         classFilterExcludes, netClassResolver, reportNetClasses } from "./policy.mjs";
 
 // Sibling report/callgraph files of a multi-report prefix (candor-scan writes <prefix>.<crate>.scan.json,
 // one per workspace member) — so the loaders read ANY engine's output, not just candor-ts's <prefix>.json.
@@ -1025,19 +1026,50 @@ export function whatif(cg, target, eff, policyParsed, scopeMatches) {
 // deniedLayer: the deny/`pure` scope (the "layer") forbidding `eff` at `fn`, or null if allowed there.
 // Mirrors the gate's AS-EFF-006 predicate (candor-java/candor-query): a `deny` fires when it names the
 // effect; a `pure` rule (empty effects) forbids every real effect but not Unknown.
-function deniedLayer(fn, eff, policyParsed, scopeMatches) {
+//
+// ⟨0.24⟩ …AND ITS `Unknown[…]`/`Net[…]` CLASS FILTER (SPEC §6.2), which this predicate did not read. It
+// computed from the effect NAME alone, so `deny Unknown[reflect] app` "denied" a function whose only hole
+// is `native:dlopen` — a boundary the policy explicitly excludes — and `fix-gate --strict` returned exit 1
+// plus a hoist instruction for it while the gate over the same bytes exited 0. `ctx` is the narrowing
+// context (narrowingContext below); absent, nothing is excluded and the old behaviour stands.
+function deniedLayer(fn, eff, policyParsed, scopeMatches, ctx = null) {
   for (const r of policyParsed.deny) {
     const denies = r.effects.length === 0 ? eff !== "Unknown" : r.effects.includes(eff);
-    if (denies && (!r.scope || scopeMatches(fn, r.scope))) return r.scope ?? "";
+    if (!denies || (r.scope && !scopeMatches(fn, r.scope))) continue;
+    if (ctx && classFilterExcludes(r, ctx.entry(fn), eff, ctx.reasonAcc, ctx.netClassOf)) continue;
+    return r.scope ?? "";
   }
   return null;
+}
+
+/**
+ * ⟨0.24⟩ The narrowing context the class filter needs, over a LOADED report: a function's transitive
+ * Unknown reason classes and its Net destination classes, plus the entry lookup both read.
+ *
+ * `reportNetClasses` in its DEFAULT (non-authoritative) mode, which is the documented reading for a surface
+ * that cannot refuse a question: an entry CARRYING `netClass` is taken verbatim off the wire, and one
+ * without it falls back to the derivation — fail-CLOSED, since `netClassesOf` floors an empty or masked
+ * surface at `unknown-host`, so a pre-⟨0.20⟩ or foreign report stays narrowed-through rather than silently
+ * un-narrowed. `fix-gate` and `unverified` have no refusal channel, so a hedge beats a hole.
+ *
+ * `resolveReasonClasses` unions the sidecar with the entries' own §2 `calls`, so the answer is the same
+ * whether or not the caller loaded a callgraph — which is why MCP's `candor_unverified`, which loads no
+ * sidecar, gets the same narrowing as the CLI.
+ */
+export function narrowingContext(fns, cg = {}) {
+  const byName = indexFns(fns);
+  return {
+    reasonAcc: resolveReasonClasses(fns, cg),
+    netClassOf: netClassResolver(new Map(), new Set(), reportNetClasses(fns)),
+    entry: (fn) => byName.get(fn) ?? null,
+  };
 }
 
 // The site-anchored cut (integrations/FIX-SPEC.md), shared by fix + fixGate — the byte-for-byte port of
 // candor-query / candor-java's computeRemedy. Forward-BFS to the direct site(s), then climb UP through the
 // denied layer so the pure span is the same whichever inheriting function triggered it (root-independent);
 // the allowed-layer callers where the climb stops are the hoist frontier.
-function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMatches) {
+function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMatches, ctx = null) {
   const sites = new Set();
   const fseen = new Set([start]);
   const fq = [start];
@@ -1055,7 +1087,7 @@ function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMa
   const hoistTo = new Set();
   const up = [];
   for (const a of anchors) {
-    if (deniedLayer(a, eff, policyParsed, scopeMatches) !== null) deniedSpan.add(a);
+    if (deniedLayer(a, eff, policyParsed, scopeMatches, ctx) !== null) deniedSpan.add(a);
     up.push(a);
   }
   while (up.length) {
@@ -1065,7 +1097,7 @@ function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMa
       // skip a caller that doesn't route the effect — INCLUDING one absent from the report (a pure
       // callgraph-only node never carries the effect). Matches candor-swift. (/code-review — was `ce && !…`.)
       if (!ce || !(ce.inferred ?? []).includes(eff)) continue;
-      if (deniedLayer(caller, eff, policyParsed, scopeMatches) !== null) {
+      if (deniedLayer(caller, eff, policyParsed, scopeMatches, ctx) !== null) {
         if (!deniedSpan.has(caller)) { deniedSpan.add(caller); up.push(caller); }
       } else {
         hoistTo.add(caller);
@@ -1087,7 +1119,7 @@ function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMa
     for (const caller of rev.get(cur) ?? []) {
       const ce = byName.get(caller);
       if (!ce || !(ce.inferred ?? []).includes(eff)) continue;
-      if (deniedLayer(caller, eff, policyParsed, scopeMatches) !== null) {
+      if (deniedLayer(caller, eff, policyParsed, scopeMatches, ctx) !== null) {
         sandwiched = true;
       } else if (!hseen.has(caller)) {
         hseen.add(caller);
@@ -1114,6 +1146,7 @@ function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMa
 // embed inline `calls`, so the sidecar is the only graph; the CLI/MCP callers fail loud when it's absent
 // rather than compute a degenerate empty-graph remedy. (/code-review.)
 export function fix(cg, fns, target, eff, policyParsed, scopeMatches) {
+  const ctx = narrowingContext(fns, cg);   // ⟨0.24⟩ the rule's Unknown[…]/Net[…] filter, same code as the gate
   // Resolve against REPORT function names only (not callgraph nodes, which include pure fns absent from the
   // report) — so `fix <pure-fn>` is a uniform "no such fn" across engines, not a TS-only crossing:false.
   // (/code-review — candor-query/java/swift all match report fns only.)
@@ -1125,17 +1158,18 @@ export function fix(cg, fns, target, eff, policyParsed, scopeMatches) {
   const se = byName.get(start);
   if (!se || !(se.inferred ?? []).includes(eff))
     return { fn: start, effect: eff, crossing: false, reason: "does-not-perform" };
-  const layer = deniedLayer(start, eff, policyParsed, scopeMatches);
+  const layer = deniedLayer(start, eff, policyParsed, scopeMatches, ctx);
   if (layer === null)
     return { fn: start, effect: eff, crossing: false, reason: "not-forbidden" };
   const rev = reverseGraph(cg);
-  return { crossing: true, ...computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMatches) };
+  return { crossing: true, ...computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMatches, ctx) };
 }
 
 // fixGate: a remedy for EVERY deny/`pure` (AS-EFF-006) crossing in the report, collapsing the inheritors of
 // one root cause to a single plan (keyed by effect|layer|site|hoist). Returns { ok, remedies } — the shape
 // the edit-time loop folds into its block message.
 export function fixGate(cg, fns, policyParsed, scopeMatches) {
+  const ctx = narrowingContext(fns, cg);   // ⟨0.24⟩ the rule's Unknown[…]/Net[…] filter, same code as the gate
   const byName = indexFns(fns);
   const rev = reverseGraph(cg);
   const plans = new Map();
@@ -1143,9 +1177,9 @@ export function fixGate(cg, fns, policyParsed, scopeMatches) {
   // remedy is deterministic across engines (candor-query/java/swift all iterate a sorted key set).
   for (const e of [...fns].sort((a, b) => (a.fn < b.fn ? -1 : a.fn > b.fn ? 1 : 0))) {
     for (const eff of [...(e.inferred ?? [])].sort()) {
-      const layer = deniedLayer(e.fn, eff, policyParsed, scopeMatches);
+      const layer = deniedLayer(e.fn, eff, policyParsed, scopeMatches, ctx);
       if (layer !== null) {
-        const p = computeRemedy(e.fn, eff, layer, cg, rev, byName, policyParsed, scopeMatches);
+        const p = computeRemedy(e.fn, eff, layer, cg, rev, byName, policyParsed, scopeMatches, ctx);
         const key = `${p.effect}|${p.layer}|${p.site}|${p.hoistTo}`;
         if (!plans.has(key)) plans.set(key, p);
       }
@@ -1162,12 +1196,39 @@ export function fixGate(cg, fns, policyParsed, scopeMatches) {
 // forbids (the fn/closure-port hole). Returns each such function + the `deny E Unknown <scope>` upgrade.
 /** Reconstruct a rule's source form and its `Unknown`-forbidding upgrade: `[source, upgrade]`. `pure
  *  <scope>` → ["pure <scope>", "deny Unknown <scope>"]; `deny <E…> <scope>` → ["deny <E…> <scope>",
- *  "deny <E…> Unknown <scope>"]. Shared so the gate note and `unverified` name the identical upgrade. */
+ *  "deny <E…> Unknown <scope>"]. Shared so the gate note and `unverified` name the identical upgrade.
+ *
+ *  ⟨0.24⟩ THE NARROWING FILTERS ARE RENDERED, and they had to start being rendered in the SAME change that
+ *  made them reachable here. Making `unverifiedHoleRule` filter-aware is exactly what first lets a
+ *  `deny Unknown[reflect]` / `deny Net[unknown-host]` rule BE the rule a hole is disclosed under — and this
+ *  reconstruction dropped the bracket, so the fix printed the operator's narrowed rule back to them as the
+ *  WIDE one (`deny Unknown app`) and advised the nonsense upgrade `deny Unknown Unknown app`; on the Net
+ *  sibling it advised `deny Net Unknown app`, which SILENTLY UN-NARROWS a rule the operator scoped to one
+ *  destination class. Dormant until the fix reached it — the standing shape on this rung is code that was
+ *  correct only because nothing upstream ever handed it the case it mishandles.
+ *
+ *  A rule carrying NO filter renders byte-identically to before, which is what keeps conformance PARTs
+ *  12c/12d (`deny Db Net Unknown domain`, four-way) unmoved.
+ *
+ *  THE UPGRADE SPLITS on whether the rule already denies `Unknown`. If it does, it can only be here
+ *  NARROWED — a bare `deny … Unknown` fires on every Unknown, so the function would be a violation and not
+ *  a hole — and the upgrade is that term WIDENED to bare `Unknown`, never a second `Unknown` appended.
+ *  Byte-aligned with candor-rust `rule_and_upgrade`. */
 export function ruleUpgrade(r) {
   const suffix = r.scope ? ` ${r.scope}` : "";
-  return r.effects.length === 0
-    ? [`pure${suffix}`, `deny Unknown${suffix}`]
-    : [`deny ${r.effects.join(" ")}${suffix}`, `deny ${r.effects.join(" ")} Unknown${suffix}`];
+  // `pure` forbids real effects but not Unknown; to REQUIRE provable purity, add a deny-Unknown.
+  if (r.effects.length === 0) return [`pure${suffix}`, `deny Unknown${suffix}`];
+  // One effect term, with its narrowing filter if it has one. Both class lists are stored sorted by
+  // `parsePolicy`, so the dump and the disclosure spell one rule one way.
+  const term = (e) =>
+    e === "Unknown" && r.unknownClasses?.length ? `Unknown[${r.unknownClasses.join(",")}]`
+    : e === "Net" && r.netClasses?.length ? `Net[${r.netClasses.join(",")}]`
+    : e;
+  const effs = r.effects.map(term).join(" ");
+  if (r.effects.includes("Unknown"))
+    return [`deny ${effs}${suffix}`,
+            `deny ${r.effects.map((e) => (e === "Unknown" ? "Unknown" : term(e))).join(" ")}${suffix}`];
+  return [`deny ${effs}${suffix}`, `deny ${effs} Unknown${suffix}`];
 }
 
 /** The single predicate for a provable-purity hole (eval/fixloop/DISPATCH-NOTE.md): a function that is
@@ -1175,15 +1236,30 @@ export function ruleUpgrade(r) {
  *  so its compliance is asserted but not verified (the Unknown could hide the very effect the rule forbids;
  *  the classic case is a fn/closure-injected port). A *real* violation is the gate's job, not this. Returns
  *  the first governing rule under which the function is such a hole, or null. Shared by the gate note
- *  (scan.mjs) and `unverified` so "what a hole is" has ONE definition (conformance PART 12d pins agreement). */
-export function unverifiedHoleRule(fn, inferred, policyParsed, scopeMatches) {
+ *  (scan.mjs) and `unverified` so "what a hole is" has ONE definition (conformance PART 12d pins agreement).
+ *
+ *  ⟨0.24⟩ …AND `violates` NOW READS THE RULE'S `Unknown[…]`/`Net[…]` CLASS FILTER (SPEC §6.2) — the
+ *  UNDER-REPORT half of the same defect `deniedLayer` carried, and the worse half. `deny Unknown[reflect]
+ *  app` over a function whose only hole is `native:dlopen` computed `violates = true` from the effect set
+ *  alone and fell through to "a real violation the gate already reports" — but the gate does NOT report it:
+ *  the class is excluded, the layer PASSES, and it passes WHILE CARRYING an Unknown. That is precisely a
+ *  pass-but-Unknown hole, and `unverified --strict` answered `ok: true` with an empty array over it — the
+ *  verb whose entire job is "your green gate is not provably green" certifying a green gate it cannot see
+ *  through. Closing only the `fix-gate` over-charge would have killed a fabrication and left its silent
+ *  mirror standing. `ctx` is the narrowing context; absent, nothing is excluded and the old behaviour
+ *  stands (the scan-time gate note in scan.mjs builds its own from the scan's live evidence). */
+export function unverifiedHoleRule(fn, inferred, policyParsed, scopeMatches, ctx = null) {
   const inf = inferred ?? [];
   if (!inf.includes("Unknown")) return null;
+  const entry = ctx ? ctx.entry(fn) : null;
+  // An effect the rule NAMES but whose class filter excludes here is not a violation — it is exactly what
+  // the gate tolerates, so the pass is real, and the Unknown it passes with makes that pass unverified.
+  const fires = (r, x) => !(ctx && classFilterExcludes(r, entry, x, ctx.reasonAcc, ctx.netClassOf));
   for (const r of policyParsed.deny) {
     if (r.scope && !scopeMatches(fn, r.scope)) continue;
     const violates = r.effects.length === 0
-      ? inf.some((x) => x !== "Unknown")        // pure: any real effect is a violation
-      : inf.some((x) => r.effects.includes(x)); // deny: a named effect is a violation
+      ? inf.some((x) => x !== "Unknown" && fires(r, x))        // pure: any real effect is a violation
+      : inf.some((x) => r.effects.includes(x) && fires(r, x)); // deny: a named effect is a violation
     if (!violates) return r;                    // else it's a real violation the gate already reports
   }
   return null;
@@ -1198,12 +1274,15 @@ export function unverifiedHoleRule(fn, inferred, policyParsed, scopeMatches) {
 // narrowed. Measured on three real targets, unfiltered → `--class dynamic`: 207→173, 268→158, 64→21.
 export function unverified(fns, policyParsed, scopeMatches, classSpec = null, cg = {}) {
   const cf = parseClassFilter(classSpec);   // ⟨0.20⟩ --class: keep only holes of a matching reason class
-  const reasonAcc = cf ? resolveReasonClasses(fns, cg) : null;
+  // ⟨0.24⟩ the POLICY's own `Unknown[…]`/`Net[…]` narrowing, which is a different question from `--class`
+  // (the reader's drill-down) and was never asked at all: `reasonAcc` here rides the ctx, so the two
+  // narrowings resolve the class set exactly once and from the same code as the gate.
+  const ctx = narrowingContext(fns, cg);
   const holes = [];
   for (const e of fns) {
     // Same predicate + upgrade as the gate note (scan.mjs) — one source of truth for a hole.
-    const r = unverifiedHoleRule(e.fn, e.inferred, policyParsed, scopeMatches);
-    if (!r || (cf && !reasonClassesMatch(reasonAcc.get(e.fn), cf))) continue;
+    const r = unverifiedHoleRule(e.fn, e.inferred, policyParsed, scopeMatches, ctx);
+    if (!r || (cf && !reasonClassesMatch(ctx.reasonAcc.get(e.fn), cf))) continue;
     const [rule, upgrade] = ruleUpgrade(r);
     holes.push({ fn: e.fn, rule, unknownWhy: e.unknownWhy ?? [], upgrade });
   }

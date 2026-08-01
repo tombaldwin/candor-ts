@@ -8,6 +8,38 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**⚠ ⟨0.24⟩ `fix-gate` AND `unverified` NEVER READ THE RULE'S `Unknown[…]`/`Net[…]` CLASS FILTER — the
+over-charge and its silent mirror, closed together** (SPEC §6.2: "THE GATE AND THE DISCLOSURE MUST APPLY
+THE SAME RULE, AND SHOULD SHARE THE SAME CODE"). Both verbs computed from the EFFECT SET ALONE, two rungs
+after rules acquired a narrowing filter. Measured on a report whose only hole is `native:dlopen`, under
+`deny Unknown[reflect,unresolved] app` — a policy that explicitly excludes that class:
+
+    gate --report        exit 0, no violations          <- correct, the class is excluded
+    fix-gate --strict    exit 1 + a remedy naming it    <- OVER-CHARGE: a red CI check and a hoist
+                                                           instruction for a boundary nothing denies
+    unverified --strict  exit 0, ok:true, []            <- UNDER-REPORT, and the worse half
+
+**The under-report is the half that matters.** The layer PASSES the gate *while carrying an `Unknown`*, so
+it is by definition a pass-but-Unknown hole — and `unverified`, the verb whose entire job is to say *"your
+green gate is not provably green"*, certified it clean. `unverifiedHoleRule` computed `violates = true`
+from the effect name and fell through to "a real violation the gate already reports", over a violation the
+gate does not report. Same shape on the `Net[…]` sibling (`deny Net[unknown-host]` over a `known-partner`
+entry). Closing only the `fix-gate` over-charge would have killed a fabrication and left its silent mirror
+standing, which is the standing hazard on fabrication fixes.
+
+The narrowing now lives in **one** predicate (`classFilterExcludes`), factored out of `evaluatePolicy`
+where it was inlined — and inlined there is precisely why the two disclosure verbs could not reach it. The
+scan-time gate note, a second copy of the `unverified` disclosure, shares it too.
+
+**And the fix created its own mirror, for the fourth time on this rung.** Making the predicate filter-aware
+is exactly what first lets a NARROWED rule *be* the rule a hole is disclosed under — and `ruleUpgrade`'s
+reconstruction dropped the bracket. It printed the operator's narrowed line back as the WIDE one
+(`deny Unknown app`) and advised the nonsense `deny Unknown Unknown app`; on the Net sibling it advised
+`deny Net Unknown app`, **silently un-narrowing** a rule the operator scoped to one destination class — an
+instruction that reddens a gate on traffic they had accepted. The rendering now moves with the predicate: a
+narrowed `Unknown` term is WIDENED rather than duplicated, a `Net[…]` narrowing is preserved, and a rule
+carrying no filter renders byte-identically to before (conformance PARTs 12c/12d unmoved).
+
 **⚠ ⟨0.24⟩ A CERTAIN VIOLATION DOMINATES A REFUSAL, AND A REFUSAL STILL WRITES A DOCUMENT** (SPEC §3.1
 `7271c69` / `107755b` / `1503368` / `5a8cf48` / `01d5c6b`). Measured on a hand-built report carrying one
 unambiguous `Fs` and one `Net` with no `netClass`: a policy holding a firing `deny Fs` **plus** one
