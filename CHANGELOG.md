@@ -8,6 +8,50 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**⚠ ⟨0.24⟩ AN ADVISORY VERB MAY BE LESS CERTAIN THAN THE GATE, NEVER MORE — `unverified` AND `fix-gate`
+ANSWERED FROM A FALLBACK DERIVATION WHERE `gate --report` REFUSED** (SPEC §3.2 `4fd140c`, pinned by
+conformance PART 27 row R11). This is the third instance of one defect and the one that forced the law to
+be stated rather than patched a third time. Measured on a report carrying `hosts` but **no `netClass`**,
+under `deny Net[unknown-host] app`:
+
+    gate --report        exit 2   §3.1 answerability refusal — it CANNOT judge `app.noClass`
+    unverified --strict  exit 0   CLEARS `app.noClass`, and names a DIFFERENT hole instead
+    fix-gate  --strict   exit 0   a full hoist plan for `app.noClass`, from the DERIVED class
+    fix … Net            exit 0   `crossing:false, reason:"not-forbidden"` — the same guess, asserted
+
+`netClassesOf` floors an absent surface at `unknown-host`, so the class the gate declined to invent was
+being invented one call away. The code documented that as intentional — *"no refusal channel, so a hedge
+beats a hole"* — and the first half is true. **A hedge does beat a hole. But a derivation is not a hedge;
+it is a second opinion, and it is the one opinion an advisory verb is not entitled to.**
+
+So where the gate would refuse for want of evidence: **`unverified` NAMES the function**, because a
+function the gate could not judge is an unverified hole in the strongest sense the verb has, and the reason
+recorded is **the missing evidence** — never the derived class, which would restate the defect as a
+disclosure. It carries no `upgrade`: whether that function passes at all is the open question, so there is
+nothing to upgrade yet. **`fix-gate` offers no remedy** premised on evidence the gate refused to read, and
+**`fix` refuses with NO `crossing` key at all** (absent, never `false` — "no boundary fix needed" is a
+claim). Both list-verbs carry the gate's own `unevaluated: [{rule, why}]` rather than a second spelling of
+it, **omit `ok`** for the reason the `unanalyzed` rule above omits it, and **`--strict` exits 2**. The
+narrowing context reads `netClass` `authoritative`ly now — off the wire or not at all — which is how
+`gate --report`, MCP `candor_gate` and the LSP diagnostics already read it.
+
+**Dropping the plan is not the fix; dropping it silently would trade a fabricated instruction for a false
+all-clear** — the standing hazard on every fabrication repair in this project. So the disclosure lands on
+**every channel each verb answers on**: CLI JSON, the printed line (candor-rust built a mutant that kept
+the whole JSON fix and deleted only that line, and it survived that engine's entire suite), **MCP**
+`candor_unverified`/`candor_fix`, and the **LSP** `candor.fix` code action — which read the answer through
+`if (!r.crossing)` and so told the user who had explicitly asked for a fix that *"Net isn't forbidden here;
+no boundary fix needed"*, the derived all-clear delivered as a clean bill of health.
+
+The containment is computed by the **gate's own** `unanswerableScoped`, not restated beside it, so
+`U_clear ⊆ G_clear` holds because one predicate decides both. Ordering matters: the withhold is consulted
+only where **no rule certainly denied**, since a rule firing on evidence the report does carry is certain
+and dominates (PAPER3 Lemma 2) — a remedy for a certain crossing is still offered. **MIRRORS MEASURED, all
+unchanged:** `netClass` on the wire and firing (remedy offered, `--strict` exit 1), `netClass` on the wire
+and excluded (silent), the **bare** `deny Net` over the same evidence-less report (narrows on nothing, so
+nothing is refused and the remedy stands), and the `Unknown[…]` provable-purity hole with its upgrade.
+21 new rows across `test.mjs`/`test-mcp.mjs`/`test-lsp.mjs`; 9-mutant audit.
+
 **⚠ ⟨0.24⟩ `whatif` NOW NAMES THE OPERATOR'S OWN RULE, AND SAYS WHAT A NARROWED VERDICT RESTS ON —
 `violations[].conditional`** (SPEC §3.1 `6f30540`, shape corrected by `901f14d`). The field was
 **one-engine** (candor-rust) before this, and the ground truth below was read off *that engine's JSON

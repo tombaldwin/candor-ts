@@ -769,5 +769,69 @@ export function handler(): void { mid(); }
   for (const d of [RU, RN, RC]) fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.24⟩ …AND candor.fix IS A SECOND CHANNEL ON THE SAME SURFACE (SPEC §3.2 `4fd140c`) ────────────
+// The withhold above stops the DIAGNOSTICS asserting a class the report never carried. `runFix` is a
+// different path through the same server, and it read `Q.fix`'s answer through `if (!r.crossing)` — so over
+// the identical bytes it told the user "`app.fetcher` — Net isn't forbidden here; no boundary fix needed":
+// the fallback derivation delivered as a clean bill of health, TO THE ONE USER WHO EXPLICITLY ASKED.
+// `Q.fix` now returns `{refused:true, unevaluated}` with NO `crossing` key, and that branch is no longer
+// where the refusal lands.
+//
+// THE MIRROR is the same fixture with `netClass` on the wire: the remedy must still compute, or the
+// refusal was bought by breaking the verb.
+{
+  const mkf = (netClass) => {
+    const U = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-fixrefuse-"));
+    fs.mkdirSync(path.join(U, "src"), { recursive: true });
+    fs.mkdirSync(path.join(U, ".candor"), { recursive: true });
+    fs.writeFileSync(path.join(U, "src", "app.ts"), "export function fetcher() { return 2; }\n");
+    fs.writeFileSync(path.join(U, ".candor", "report.json"), JSON.stringify({
+      candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 1, digest: "0" },
+      functions: [{ fn: "app.fetcher", loc: "app.ts:1:1", inferred: ["Net"], direct: ["Net"],
+                    hosts: ["example.com"], ...(netClass ? { netClass } : {}) }],
+    }));
+    fs.writeFileSync(path.join(U, "arch.policy"), "deny Net[unknown-host] app\n");
+    fs.writeFileSync(path.join(U, ".candor", "config"), "policy arch.policy\n");
+    return U;
+  };
+  const driveF = async (U, n) => {
+    const uri = pathToFileURL(path.join(U, "src", "app.ts")).href;
+    const { inbound } = await lspSession([
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(U).href } },
+      { jsonrpc: "2.0", method: "initialized", params: {} },
+      { jsonrpc: "2.0", method: "textDocument/didOpen",
+        params: { textDocument: { uri, languageId: "typescript", version: 1, text: "" } } },
+      { jsonrpc: "2.0", id: 20, method: "textDocument/codeAction",
+        params: { textDocument: { uri }, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+                  context: { diagnostics: [] } } },
+      { jsonrpc: "2.0", id: 21, method: "workspace/executeCommand",
+        params: { command: "candor.fix", arguments: [{ fn: "app.fetcher", effect: "Net", uri, line: 0 }] } },
+    ], n, {}, 4000);
+    const msgs = inbound.filter((r) => r.method === "window/showMessage").map((r) => r.params?.message ?? "");
+    const logs = inbound.filter((r) => r.method === "window/logMessage").map((r) => r.params?.message ?? "").join("\n");
+    return { result: inbound.find((r) => r.id === 21)?.result,
+             actions: inbound.find((r) => r.id === 20)?.result ?? [], msgs: msgs.join("\n"), logs };
+  };
+  const RF = mkf(null), RM = mkf(["unknown-host"]);
+  const refused = await driveF(RF, 30), okd = await driveF(RM, 30);
+
+  ok("⟨0.24⟩ advisory-bound (LSP): `candor.fix` REFUSES over a `netClass`-less entry — `refused:true`, NO `crossing` key, and the gate's `unevaluated` rides back",
+     refused.result?.refused === true && !("crossing" in (refused.result ?? {}))
+     && refused.result?.unevaluated?.length === 1,
+     JSON.stringify(refused.result).slice(0, 300));
+  ok("⟨0.24⟩ advisory-bound (LSP): …and the user who ASKED for the fix is told why, not told 'no boundary fix needed' — the derived all-clear is gone from the message channel too",
+     /no fix computed/.test(refused.msgs) && /could NOT judge/.test(refused.msgs)
+     && !/isn't forbidden here/.test(refused.msgs) && /not an all-clear/.test(refused.logs),
+     `msgs=${refused.msgs.slice(0, 240)} logs=${refused.logs.slice(0, 160)}`);
+  ok("⟨0.24⟩ advisory-bound (LSP): no `candor fix` code action is OFFERED for a boundary the gate could not adjudicate — a remedy premised on refused evidence is not advertised either",
+     refused.actions.every((a) => a.command?.command !== "candor.fix"),
+     JSON.stringify(refused.actions.map((a) => a.title)));
+  ok("⟨0.24⟩ advisory-bound (LSP) MIRROR: with `netClass` on the wire the SAME command still computes the remedy (crossing:true) and the action is offered — the refusal did not buy itself by breaking the verb",
+     okd.result?.crossing === true && okd.result?.refused === undefined
+     && okd.actions.some((a) => a.command?.command === "candor.fix"),
+     `${JSON.stringify(okd.result).slice(0, 200)} actions=${JSON.stringify(okd.actions.map((a) => a.title))}`);
+  for (const d of [RF, RM]) fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

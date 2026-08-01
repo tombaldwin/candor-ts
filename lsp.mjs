@@ -555,6 +555,18 @@ function runFix(a) {
     showMessage(2, `candor: no function matching \`${a.fn}\` in the call graph — the report may be stale`);
     return null;
   }
+  // ⟨0.24⟩ SPEC §3.2 `4fd140c` — THE REFUSAL, BEFORE the `crossing` test and not folded into it. `Q.fix`
+  // now returns `{refused:true, unevaluated}` with NO `crossing` key where the gate could not adjudicate the
+  // boundary, and a falsy-`crossing` reading of that lands on "isn't forbidden here; no boundary fix
+  // needed" — the derived second opinion, delivered as a clean bill of health, on the surface that ASKED
+  // for a fix. Same disclosure the diagnostics path already makes (dunevaluated), repeated here because a
+  // code action can be invoked on a file whose diagnostics were never published.
+  if (r.refused) {
+    showMessage(2, `candor: \`${a.fn}\` — no fix computed: the gate could NOT judge ${a.effect} here (this report does not carry the evidence the policy narrows on), and a hoist plan for a boundary the gate could not adjudicate would rest on a guess`);
+    for (const u of r.unevaluated ?? [])
+      logMessage(`candor-lsp: ${u.why}\n  NO fix is offered for that rule — the ABSENCE of a remedy here is the refusal, not an all-clear.`);
+    return r;
+  }
   if (!r.crossing) {
     showMessage(3, `candor: \`${a.fn}\` — ${a.effect} isn't forbidden here; no boundary fix needed`);
     return r;

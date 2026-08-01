@@ -8777,6 +8777,181 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.24⟩ AN ADVISORY VERB MAY BE LESS CERTAIN THAN THE GATE, NEVER MORE (SPEC §3.2 `4fd140c`) ─────
+// THE GENERAL LAW behind the omit-`ok` block above, and this is its third instance — the one that forced
+// the law to be stated rather than patched a third time. Over a report carrying `hosts` but NO `netClass`,
+// under `deny Net[unknown-host] app`, MEASURED on this engine before the change:
+//
+//   gate --report   exit 2   §3.1 answerability refusal — it CANNOT judge `app.noClass`
+//   unverified      exit 0   CLEARS `app.noClass` and names a DIFFERENT hole instead
+//   fix-gate        exit 0   a full hoist plan for `app.noClass`, computed from the DERIVED class
+//   fix … Net       exit 0   `crossing:false, reason:"not-forbidden"` — the same guess, asserted
+//
+// The advisory verbs answered from a FALLBACK DERIVATION: `netClassesOf` floors an absent surface at
+// `unknown-host`, so the class the gate declined to invent was invented one call away. The code documented
+// that as intentional — "no refusal channel, so a hedge beats a hole" — and the first half is true. A hedge
+// does beat a hole. But a DERIVATION is not a hedge; it is a SECOND OPINION, and it is the one opinion an
+// advisory verb is not entitled to.
+//
+// THE ASSERTIONS ARE PER FUNCTION, and that is not a stylistic choice. A weaker form of this row — "the
+// gate withheld, so the verb names SOMETHING" — PASSED on all four engines while the defect stood, because
+// `unverified` names a different hole (`app.nativeHole`, which the same policy makes a provable-purity
+// hole). The fixture below carries that decoy deliberately: a test that only counts entries cannot see this
+// defect at all.
+//
+// THE MIRROR IS THE OVER-REPORT, and it is the risk this change actually runs: a function the gate CAN
+// clear must not start being named, and a remedy for a CERTAIN crossing must still be offered. Four mirror
+// rows below — netClass carried and firing, netClass carried and excluded, the BARE `deny Net` over the
+// same evidence-less report (no narrowing ⇒ nothing to refuse), and the `Unknown[…]` hole that must still
+// be found.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-advisory-bound-"));
+  const W = (n, o) => fs.writeFileSync(path.join(d, n), typeof o === "string" ? o : JSON.stringify(o));
+  const J = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
+  // The conformance R11 report, verbatim in shape: (a) a decoy Unknown hole the policy's class filter
+  // EXCLUDES, (b) the Net entry with hosts and no `netClass` — the one the gate cannot judge, (c) a plain
+  // violator so the gate has something certain to charge.
+  W("r.json", { candor: { version: "ttttttt", spec: "0.23" }, package: "app",
+                analyzed: { count: 3, digest: "0" },
+                functions: [
+                  { fn: "app.nativeHole", inferred: ["Unknown"], direct: ["Unknown"], unknownWhy: ["native:dlopen"] },
+                  { fn: "app.noClass", inferred: ["Net"], direct: ["Net"], hosts: ["api.example.com"] },
+                  { fn: "app.writes", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] }] });
+  W("r.callgraph.json", { "app.nativeHole": [], "app.noClass": [], "app.writes": [] });
+  // The MIRROR report: the same two Net shapes with the evidence PRESENT — one class the rule names, one it
+  // excludes. Nothing here is unanswerable, so nothing here may change.
+  W("m.json", { candor: { version: "ttttttt", spec: "0.23" }, package: "app",
+                analyzed: { count: 2, digest: "0" },
+                functions: [
+                  { fn: "app.hasClass", inferred: ["Net"], direct: ["Net"], hosts: ["api.example.com"], netClass: ["unknown-host"] },
+                  { fn: "app.partner", inferred: ["Net"], direct: ["Net"], hosts: ["p.example.com"], netClass: ["known-partner"] }] });
+  W("m.callgraph.json", { "app.hasClass": [], "app.partner": [] });
+  W("net.policy", "deny Net[unknown-host] app\n");
+  W("bare.policy", "deny Net app\n");
+  W("unk.policy", "deny Unknown[reflect,unresolved] app\n");
+  const P = (n) => path.join(d, n);
+  const run = (verb, rep, pol, ...extra) => {
+    const r = runQuery(verb, "--report", P(rep), "--policy", P(pol), ...extra);
+    return { s: r.status, j: J(r), err: r.stderr };
+  };
+  const named = (j) => new Set((j?.unverified ?? []).map((h) => h.fn));
+
+  // THE ORACLE: the gate over the identical bytes. Every row below is a comparison against it, because the
+  // invariant is a COMPARISON — the advisory verb's confidence bounded above by the gate's — not a shape.
+  const gN = runQuery("gate", "--report", P("r"), "--policy", P("net.policy"), "--json");
+  check("⟨0.24⟩ advisory-bound: the ORACLE — `gate --report` REFUSES over `hosts` with no `netClass`, exit 2, naming `app.noClass` as the entry it could not judge",
+        gN.status === 2 && J(gN)?.refused === true && !("violations" in (J(gN) ?? {}))
+          && /app\.noClass/.test(J(gN)?.unevaluated?.[0]?.why ?? ""),
+        `status=${gN.status} ${gN.stdout.slice(0, 300)}`);
+
+  const uRef = run("unverified", "r", "net.policy", "--strict");
+  check("⟨0.24⟩ advisory-bound: `unverified` NAMES the function the gate could not judge — per FUNCTION, because it also names a DIFFERENT hole and a bare non-empty check passes on that alone",
+        named(uRef.j).has("app.noClass") && named(uRef.j).has("app.nativeHole"),
+        `named=${[...named(uRef.j)]} ${JSON.stringify(uRef.j)}`);
+  check("⟨0.24⟩ advisory-bound: …and the recorded reason is THE MISSING EVIDENCE, never the derived class — recording the derivation would restate the defect as a disclosure",
+        (() => { const h = (uRef.j?.unverified ?? []).find((x) => x.fn === "app.noClass");
+                 return h && /no `netClass` in this report/.test(h.why ?? "") && !("upgrade" in h)
+                        && !/unknown-host"|netClass":/.test(JSON.stringify(h).replace(/why":"[^"]*"/, "")); })(),
+        JSON.stringify((uRef.j?.unverified ?? []).find((x) => x.fn === "app.noClass")));
+  check("⟨0.24⟩ advisory-bound: `unverified` carries the GATE'S OWN `unevaluated:[{rule,why}]` shape (§3.1) rather than a second spelling, OMITS `ok`, and `--strict` exits 2 — matching the gate",
+        uRef.s === 2 && !("ok" in (uRef.j ?? { ok: 1 }))
+          && uRef.j?.unevaluated?.length === 1 && uRef.j.unevaluated[0].rule === "deny Net[unknown-host] app"
+          && typeof uRef.j.unevaluated[0].why === "string",
+        `status=${uRef.s} ${JSON.stringify(uRef.j)}`);
+
+  const fRef = run("fix-gate", "r", "net.policy", "--strict");
+  check("⟨0.24⟩ advisory-bound: `fix-gate` offers NO remedy premised on evidence the gate refused to read — a hoist plan for a boundary the gate could not adjudicate is a confident instruction resting on a guess",
+        (fRef.j?.remedies ?? []).every((p) => p.fn !== "app.noClass"),
+        JSON.stringify(fRef.j));
+  check("⟨0.24⟩ advisory-bound: …and dropping the plan is NOT the whole fix — `fix-gate` discloses `unevaluated`, omits `ok`, and `--strict` exits 2, else a fabricated instruction is traded for a false all-clear",
+        fRef.s === 2 && !("ok" in (fRef.j ?? { ok: 1 })) && fRef.j?.unevaluated?.length === 1
+          && Array.isArray(fRef.j?.remedies),
+        `status=${fRef.s} ${JSON.stringify(fRef.j)}`);
+
+  // `fix` is the SINGLE-FUNCTION sibling — the one the LSP code action and the MCP tool run. Its refusal
+  // takes the gate's document shape: NO `crossing` key at all, because `crossing:false` reads as "nothing
+  // forbids this here", which is precisely the claim it cannot make.
+  const one = runQuery("fix", "app.noClass", "Net", "--report", P("r"), "--policy", P("net.policy"));
+  const oj = J(one);
+  check("⟨0.24⟩ advisory-bound: `fix` REFUSES rather than answering `crossing:false, reason:\"not-forbidden\"` — an ABSENT key, not a false one, because 'no boundary fix needed' is a claim",
+        oj?.refused === true && !("crossing" in (oj ?? {})) && oj?.unevaluated?.length === 1
+          && oj?.fn === "app.noClass",
+        JSON.stringify(oj));
+
+  // THE OTHER CHANNEL. candor-rust built a mutant that kept the whole JSON fix and deleted only the printed
+  // line, and it survived that engine's entire suite.
+  check("⟨0.24⟩ advisory-bound, THE OTHER CHANNEL: the printed line withdraws the claim on all three verbs, quotes the rule, and says why — a test that reads one channel is evidence about one channel",
+        /could NOT fully evaluate/.test(uRef.err) && /no `netClass` in this report/.test(uRef.err)
+          && /could NOT fully evaluate/.test(fRef.err) && /never MORE/.test(fRef.err)
+          && /could NOT fully evaluate/.test(one.stderr) && /refused: true/.test(one.stderr),
+        `uv=${JSON.stringify(uRef.err.slice(0, 200))} fg=${JSON.stringify(fRef.err.slice(0, 120))} fix=${JSON.stringify(one.stderr.slice(0, 120))}`);
+
+  // ── THE MIRRORS: a function the gate CAN clear must not start being named ────────────────────────────
+  const gM = runQuery("gate", "--report", P("m"), "--policy", P("net.policy"), "--json");
+  const uM = run("unverified", "m", "net.policy", "--strict"), fM = run("fix-gate", "m", "net.policy", "--strict");
+  check("⟨0.24⟩ advisory-bound MIRROR — with `netClass` ON THE WIRE the gate JUDGES (exit 1 on `app.hasClass`), so nothing is refused: `ok` is present on both verbs and no `unevaluated` key appears",
+        gM.status === 1 && "ok" in (uM.j ?? {}) && "ok" in (fM.j ?? {})
+          && uM.j.unevaluated === undefined && fM.j.unevaluated === undefined,
+        `gate=${gM.status} uv=${JSON.stringify(uM.j)} fg=${JSON.stringify(fM.j)}`);
+  check("⟨0.24⟩ advisory-bound MIRROR — and the CERTAIN crossing still gets its remedy: `fix-gate` names `app.hasClass`, `--strict` exits 1, and `app.partner` (a class the rule EXCLUDES) is still silent",
+        fM.s === 1 && (fM.j?.remedies ?? []).some((p) => p.fn === "app.hasClass")
+          && (fM.j?.remedies ?? []).every((p) => p.fn !== "app.partner") && !named(uM.j).has("app.partner"),
+        `status=${fM.s} ${JSON.stringify(fM.j)}`);
+  const gB = runQuery("gate", "--report", P("r"), "--policy", P("bare.policy"), "--json");
+  const fB = run("fix-gate", "r", "bare.policy", "--strict");
+  check("⟨0.24⟩ advisory-bound MIRROR — a BARE `deny Net` over the SAME evidence-less report narrows on nothing, so the gate FIRES (exit 1) and the remedy for `app.noClass` is still offered: the refusal keys on the FILTER, not on the missing field",
+        gB.status === 1 && fB.s === 1 && fB.j?.ok === false && fB.j.unevaluated === undefined
+          && (fB.j?.remedies ?? []).some((p) => p.fn === "app.noClass"),
+        `gate=${gB.status} fg=${fB.s}/${JSON.stringify(fB.j)}`);
+  const gU = runQuery("gate", "--report", P("r"), "--policy", P("unk.policy"), "--json");
+  const uU = run("unverified", "r", "unk.policy", "--strict");
+  check("⟨0.24⟩ advisory-bound MIRROR — under `deny Unknown[reflect,unresolved]` the gate CLEARS (exit 0, the class is excluded) and `unverified` still finds the provable-purity hole with its upgrade: the ⟨0.24⟩ class-filter fix is intact",
+        gU.status === 0 && uU.s === 1 && uU.j?.ok === false && named(uU.j).has("app.nativeHole")
+          && uU.j.unevaluated === undefined
+          && uU.j.unverified.find((h) => h.fn === "app.nativeHole")?.upgrade === "deny Unknown app",
+        `gate=${gU.status} uv=${uU.s}/${JSON.stringify(uU.j)}`);
+
+  // ── THE UNKNOWN AXIS, ADDED BY THE MUTANT AUDIT ────────────────────────────────────────────────────
+  // A mutant that deleted the withhold from `deniedLayer`, restoring `fix-gate`'s remedy, SURVIVED the
+  // battery above — because on the `Net` axis the authoritative empty class set already excludes the rule,
+  // so the two halves of the fix are individually redundant THERE. On the `Unknown` axis they are not:
+  // `reasonClassesMatch` FLOORS an empty reason set at `unresolved`, so `deny Unknown[unresolved]` over a
+  // reasonless Unknown MATCHES, and with the withhold removed `fix-gate` came back with a full hoist plan
+  // for `app.blind`, `ok:false`, exit 1 — and no `unevaluated` beside it, since the disclosure is gathered
+  // only where nothing certainly denied. Measured, mutant applied:
+  //
+  //   gate --report      exit 2, refused                     <- unchanged, the oracle
+  //   fix-gate (mutant)  remedy for app.blind, ok:false       <- the ruled defect, live
+  //   fix-gate (fixed)   remedies: [], unevaluated: [1]
+  //
+  // Which is the audit doing its job: the fixture that proved one axis closed could not see the other.
+  const dU = fs.mkdtempSync(path.join(os.tmpdir(), "candor-advisory-bound-unk-"));
+  fs.writeFileSync(path.join(dU, "r.json"), JSON.stringify({
+    candor: { version: "ttttttt", spec: "0.23" }, package: "app", analyzed: { count: 1, digest: "0" },
+    functions: [{ fn: "app.blind", inferred: ["Unknown"], direct: [], unresolved: true }] }));
+  fs.writeFileSync(path.join(dU, "r.callgraph.json"), JSON.stringify({ "app.blind": [] }));
+  fs.writeFileSync(path.join(dU, "u.policy"), "deny Unknown[unresolved] app\n");
+  const runU = (verb, ...extra) => {
+    const r = runQuery(verb, "--report", path.join(dU, "r"), "--policy", path.join(dU, "u.policy"), ...extra);
+    return { s: r.status, j: J(r), err: r.stderr };
+  };
+  const gUn = runQuery("gate", "--report", path.join(dU, "r"), "--policy", path.join(dU, "u.policy"), "--json");
+  const fUn = runU("fix-gate", "--strict"), uUn = runU("unverified", "--strict");
+  check("⟨0.24⟩ advisory-bound, UNKNOWN axis: the ORACLE — `gate --report` REFUSES a `deny Unknown[unresolved]` over an Unknown with NO reachable reason (an empty class set is not evidence of that class)",
+        gUn.status === 2 && J(gUn)?.refused === true && /no reason reachable/.test(J(gUn)?.unevaluated?.[0]?.why ?? ""),
+        `status=${gUn.status} ${gUn.stdout.slice(0, 250)}`);
+  check("⟨0.24⟩ advisory-bound, UNKNOWN axis: `fix-gate` offers NO remedy and discloses instead — the axis where the withhold is LOAD-BEARING, found by a mutant the Net fixture could not catch",
+        fUn.s === 2 && (fUn.j?.remedies ?? []).length === 0 && !("ok" in (fUn.j ?? { ok: 1 }))
+          && fUn.j?.unevaluated?.[0]?.rule === "deny Unknown[unresolved] app",
+        `status=${fUn.s} ${JSON.stringify(fUn.j)}`);
+  check("⟨0.24⟩ advisory-bound, UNKNOWN axis: `unverified` NAMES `app.blind` with the missing evidence, beside the ordinary provable-purity hole it is ALSO an instance of",
+        uUn.s === 2 && (uUn.j?.unverified ?? []).some((h) => h.fn === "app.blind" && /no reason reachable/.test(h.why ?? ""))
+          && (uUn.j?.unverified ?? []).some((h) => h.fn === "app.blind" && h.upgrade === "deny Unknown app"),
+        `status=${uUn.s} ${JSON.stringify(uUn.j)}`);
+  fs.rmSync(dU, { recursive: true, force: true });
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── ⟨0.24⟩ `whatif` NAMES THE OPERATOR'S OWN RULE, AND SAYS WHAT A NARROWED VERDICT RESTS ON ────────
 // SPEC §3.1 (`6f30540`, shape corrected by `901f14d`): `violations[].conditional: "<the narrowing left
 // unevaluated>"`, a STRING, omitted on rules that do not narrow. `conditional` was ONE-ENGINE (candor-rust)

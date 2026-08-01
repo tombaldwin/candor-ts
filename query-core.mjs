@@ -11,7 +11,7 @@
 import fs from "node:fs";
 import nodePath from "node:path";
 import { reasonClass, REASON_CLASSES, DYNAMIC_CLASSES, resolveReasonClasses, reasonClassesMatch,
-         classFilterExcludes, netClassResolver, reportNetClasses } from "./policy.mjs";
+         classFilterExcludes, netClassResolver, reportNetClasses, unanswerableScoped } from "./policy.mjs";
 
 // Sibling report/callgraph files of a multi-report prefix (candor-scan writes <prefix>.<crate>.scan.json,
 // one per workspace member) — so the loaders read ANY engine's output, not just candor-ts's <prefix>.json.
@@ -378,11 +378,22 @@ export function reportUnanalyzed(prefix) {
  * the fix: over a report declaring one unparsed unit, `gate --report` exits 2 with the manifest while both
  * `unverified --strict` and `fix-gate --strict` returned `ok: true` and exit 0 — and `--strict` is how CI
  * consumes both. Byte-aligned with candor-swift `emitAdvisoryAnswer`.
+ *
+ * ⟨0.24⟩ THE SECOND TRIGGER: `body.unevaluated` (SPEC §3.2 `4fd140c`). The general law behind the manifest
+ * rule above is that an advisory verb may be LESS certain than the gate and never MORE — and a rule the
+ * gate REFUSED for want of evidence withdraws `ok` for the identical reason an unread file does. Neither
+ * boolean is honest: `ok: true` certifies a function the gate could not judge, and `ok: false` asserts the
+ * named entries are unverified PASSES when whether they pass is the open question. The trigger is read off
+ * the BODY rather than taken as a third parameter, so a verb that computes the disclosure cannot forget to
+ * declare it — the ⟨0.24⟩ measurement that the CLI and MCP had drifted on exactly this began with a second
+ * channel forgetting to pass an argument.
  */
 export function advisoryAnswer(body, unanalyzed) {
-  if (!unanalyzed?.length) return body;                 // COMPLETE: unchanged, byte for byte, `ok` and all.
+  const unevaluated = body?.unevaluated;
+  if (!unanalyzed?.length && !unevaluated?.length) return body;  // COMPLETE: unchanged, byte for byte, `ok` and all.
   const { ok, ...rest } = body;                          // eslint-disable-line no-unused-vars -- omitted BY DESIGN
-  return { ...rest, incomplete: true, unanalyzed };
+  // Key order matches the gate's verdict document: the finding, then `unevaluated`, then the manifest.
+  return unanalyzed?.length ? { ...rest, incomplete: true, unanalyzed } : rest;
 }
 
 export function loadReport(prefix) {
@@ -1140,11 +1151,18 @@ export function whatif(cg, target, eff, policyParsed, scopeMatches) {
 // is `native:dlopen` — a boundary the policy explicitly excludes — and `fix-gate --strict` returned exit 1
 // plus a hoist instruction for it while the gate over the same bytes exited 0. `ctx` is the narrowing
 // context (narrowingContext below); absent, nothing is excluded and the old behaviour stands.
+//
+// ⟨0.24⟩ …AND IT NOW HONOURS THE GATE'S ANSWERABILITY WITHHOLD (SPEC §3.2 `4fd140c`). A (rule, fn, effect)
+// whose narrowing evidence the report does not carry is NOT EVALUATED — so it neither denies nor clears
+// here, and the caller must DISCLOSE it rather than compute a remedy from it. `continue` is the whole
+// mechanism: the rule is skipped, a later rule may still deny, and if none does, `deniedLayer` returns null
+// and the caller reads `ctx.held(fn, eff)` to tell "nothing forbids this" from "the gate could not say".
 function deniedLayer(fn, eff, policyParsed, scopeMatches, ctx = null) {
   for (const r of policyParsed.deny) {
     const denies = r.effects.length === 0 ? eff !== "Unknown" : r.effects.includes(eff);
     if (!denies || (r.scope && !scopeMatches(fn, r.scope))) continue;
     if (ctx && classFilterExcludes(r, ctx.entry(fn), eff, ctx.reasonAcc, ctx.netClassOf)) continue;
+    if (ctx?.withhold && ctx.withhold(r, fn, eff)) continue;
     return r.scope ?? "";
   }
   return null;
@@ -1152,25 +1170,93 @@ function deniedLayer(fn, eff, policyParsed, scopeMatches, ctx = null) {
 
 /**
  * ⟨0.24⟩ The narrowing context the class filter needs, over a LOADED report: a function's transitive
- * Unknown reason classes and its Net destination classes, plus the entry lookup both read.
+ * Unknown reason classes and its Net destination classes, plus the entry lookup both read — and, since
+ * SPEC §3.2 `4fd140c`, THE GATE'S OWN ANSWERABILITY REFUSAL over the same bytes.
  *
- * `reportNetClasses` in its DEFAULT (non-authoritative) mode, which is the documented reading for a surface
- * that cannot refuse a question: an entry CARRYING `netClass` is taken verbatim off the wire, and one
- * without it falls back to the derivation — fail-CLOSED, since `netClassesOf` floors an empty or masked
- * surface at `unknown-host`, so a pre-⟨0.20⟩ or foreign report stays narrowed-through rather than silently
- * un-narrowed. `fix-gate` and `unverified` have no refusal channel, so a hedge beats a hole.
+ * ⟨0.24⟩ THE FALLBACK DERIVATION IS GONE (`authoritative: true`), AND THAT IS THE POINT. This built its
+ * `netClass` map in the DEFAULT (non-authoritative) mode, so an entry carrying `hosts` and no `netClass`
+ * fell back to `netClassesOf` — and the comment here argued that was a hedge, because "`fix-gate` and
+ * `unverified` have no refusal channel, so a hedge beats a hole". The first half of that is true and this
+ * change keeps it. But a DERIVATION is not a hedge; it is a SECOND OPINION, and it is the one opinion an
+ * advisory verb is not entitled to. MEASURED on this engine, report with `hosts` and no `netClass`, policy
+ * `deny Net[unknown-host] app`:
+ *
+ *     gate --report        exit 2, §3.1 answerability refusal — it CANNOT judge `app.noClass`
+ *     unverified           exit 0, CLEARS `app.noClass` and names a different hole instead
+ *     fix-gate             exit 0, a hoist plan for `app.noClass` premised on the DERIVED class
+ *
+ * The verb was more confident than the gate over identical bytes, in both directions at once: silent where
+ * the gate refused, and instructing where the gate declined to read. So the class now comes off the wire or
+ * not at all (`authoritative`), exactly as `gate --report`, the MCP gate and the LSP diagnostics already
+ * read it — and the refusal channel the old comment said did not exist is the one this context now carries:
+ *
+ *   `withhold(rule, fn, eff)`  the gate's own per-(rule, function, effect) predicate (unanswerableScoped).
+ *   `unevaluated: [{rule, why}]`  the gate's own DISCLOSURE SHAPE (§3.1) — not a second spelling of it.
+ *   `held(fn, eff?)`  the same facts keyed by FUNCTION, because an advisory verb answers per function.
+ *
+ * COMPUTED FROM THE SAME CODE, not a re-statement of it: `unanswerableScoped` is the gate's function, so
+ * containment (`U_clear ⊆ G_clear`) holds because one predicate decides both, not because two authors
+ * agreed. `policyParsed` is optional and defaults to null — the scan route (scan.mjs) builds its own ctx
+ * from LIVE evidence where no field is missing and nothing is refused, and it keeps the old behaviour.
+ *
+ * MEASURED, AND WORTH KNOWING BEFORE YOU EDIT EITHER LINE: given the withhold, `authoritative` carries NO
+ * behaviour of its own. A mutant restoring the derivation was BYTE-IDENTICAL across the whole fixture
+ * battery, because `unanswerableScoped` withholds exactly when the authoritative class set is empty and
+ * treats "absent from the map" and "mapped to `[]`" the same — so the derivation is only ever reachable for
+ * triples the withhold has already removed. It stays because the two routes should READ one report
+ * identically and because a live fallback is a loaded gun for the next call site added here, not because a
+ * test can tell. The withhold, by contrast, IS load-bearing on the `Unknown` axis, where
+ * `reasonClassesMatch` floors an empty set at `unresolved` and the filter therefore MATCHES: removing it
+ * there brought back a full hoist plan for a reasonless `Unknown` under `deny Unknown[unresolved]`. Both
+ * facts came out of the mutant audit, and only the second one was a missing test.
  *
  * `resolveReasonClasses` unions the sidecar with the entries' own §2 `calls`, so the answer is the same
  * whether or not the caller loaded a callgraph — which is why MCP's `candor_unverified`, which loads no
  * sidecar, gets the same narrowing as the CLI.
  */
-export function narrowingContext(fns, cg = {}) {
+export function narrowingContext(fns, cg = {}, policyParsed = null) {
   const byName = indexFns(fns);
+  const reasonAcc = resolveReasonClasses(fns, cg);
+  // VERBATIM OFF THE WIRE: every `Net`-bearing entry maps to its `netClass` or to the EMPTY set, so the
+  // derivation is unreachable and the report is the only source of the class (reportNetClasses' argument).
+  const netMap = reportNetClasses(fns, { authoritative: true });
+  const { unevaluated, withhold } = policyParsed
+    ? unanswerableScoped(policyParsed, fns, reasonAcc, netMap)
+    : { unevaluated: [], withhold: null };
+  // The disclosure, keyed by FUNCTION. `unanswerableScoped` groups by RULE because that is the granularity
+  // a gate verdict lists; an advisory verb names FUNCTIONS, so the same triples are indexed both ways here
+  // rather than re-derived by each caller — one computation, two readings, no chance of them disagreeing.
+  const byRaw = new Map(unevaluated.map((u) => [u.rule, u]));
+  const heldByFn = new Map();
+  if (withhold)
+    for (const f of fns)
+      for (const r of policyParsed.deny)
+        for (const eff of f.inferred ?? []) {
+          if (!withhold(r, f.fn, eff)) continue;
+          const u = byRaw.get(r.raw);
+          if (!u) continue;                                  // unreachable: every held triple has a group
+          const cur = heldByFn.get(f.fn) ?? new Map();
+          cur.set(`${r.raw} ${eff}`, { fn: f.fn, rule: r.raw, effect: eff, why: u.why });
+          heldByFn.set(f.fn, cur);
+        }
   return {
-    reasonAcc: resolveReasonClasses(fns, cg),
-    netClassOf: netClassResolver(new Map(), new Set(), reportNetClasses(fns)),
+    reasonAcc,
+    netClassOf: netClassResolver(new Map(), new Set(), netMap),
     entry: (fn) => byName.get(fn) ?? null,
+    withhold,
+    unevaluated,
+    held: (fn, eff = null) =>
+      [...(heldByFn.get(fn)?.values() ?? [])].filter((h) => eff === null || h.effect === eff),
   };
+}
+
+/** ⟨0.24⟩ SPEC §3.2 — the `unevaluated: [{rule, why}]` disclosure for a SUBSET of held triples, in the
+ *  gate's own shape and deduplicated by rule (a rule withheld on two effects of one function is ONE
+ *  unevaluated rule, exactly as the gate lists it). */
+function unevaluatedOf(held) {
+  const byRule = new Map();
+  for (const h of held) if (!byRule.has(h.rule)) byRule.set(h.rule, { rule: h.rule, why: h.why });
+  return [...byRule.values()];
 }
 
 // The site-anchored cut (integrations/FIX-SPEC.md), shared by fix + fixGate — the byte-for-byte port of
@@ -1253,8 +1339,15 @@ function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMa
 // NOTE: `cg` (the callgraph sidecar) is REQUIRED — unlike candor-query/java/swift, a candor-ts report does not
 // embed inline `calls`, so the sidecar is the only graph; the CLI/MCP callers fail loud when it's absent
 // rather than compute a degenerate empty-graph remedy. (/code-review.)
+//
+// ⟨0.24⟩ …AND `crossing: false` IS A CLAIM, so it is not the answer where the gate REFUSED (SPEC §3.2
+// `4fd140c`). `reason: "not-forbidden"` says "no policy forbids this effect here" — over an entry whose
+// narrowing evidence the report does not carry, that is the derived second opinion, asserted to the one
+// caller (the LSP code action) that acts on it. The refusal takes the GATE'S OWN document shape (§3.1
+// `107755b`): `refused: true`, the `unevaluated` disclosure, and **NO `crossing` KEY AT ALL** — absent, not
+// `false`, because a claim it cannot make must not be spelled as a claim it can.
 export function fix(cg, fns, target, eff, policyParsed, scopeMatches) {
-  const ctx = narrowingContext(fns, cg);   // ⟨0.24⟩ the rule's Unknown[…]/Net[…] filter, same code as the gate
+  const ctx = narrowingContext(fns, cg, policyParsed);   // ⟨0.24⟩ the rule's class filter + the gate's refusal
   // Resolve against REPORT function names only (not callgraph nodes, which include pure fns absent from the
   // report) — so `fix <pure-fn>` is a uniform "no such fn" across engines, not a TS-only crossing:false.
   // (/code-review — candor-query/java/swift all match report fns only.)
@@ -1267,8 +1360,15 @@ export function fix(cg, fns, target, eff, policyParsed, scopeMatches) {
   if (!se || !(se.inferred ?? []).includes(eff))
     return { fn: start, effect: eff, crossing: false, reason: "does-not-perform" };
   const layer = deniedLayer(start, eff, policyParsed, scopeMatches, ctx);
-  if (layer === null)
+  if (layer === null) {
+    // ORDER MATTERS: the withhold is checked only where NO rule denied, because a rule that fires on
+    // evidence the report DOES carry is certain and dominates (PAPER3 Lemma 2 — the same precedence the
+    // gate applies). A remedy for a certain crossing is not premised on the refused evidence.
+    const held = ctx.held(start, eff);
+    if (held.length)
+      return { fn: start, effect: eff, refused: true, unevaluated: unevaluatedOf(held) };
     return { fn: start, effect: eff, crossing: false, reason: "not-forbidden" };
+  }
   const rev = reverseGraph(cg);
   return { crossing: true, ...computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMatches, ctx) };
 }
@@ -1276,11 +1376,21 @@ export function fix(cg, fns, target, eff, policyParsed, scopeMatches) {
 // fixGate: a remedy for EVERY deny/`pure` (AS-EFF-006) crossing in the report, collapsing the inheritors of
 // one root cause to a single plan (keyed by effect|layer|site|hoist). Returns { ok, remedies } — the shape
 // the edit-time loop folds into its block message.
+//
+// ⟨0.24⟩ …AND IT OFFERS NO REMEDY PREMISED ON EVIDENCE THE GATE REFUSED TO READ (SPEC §3.2 `4fd140c`). A
+// hoist plan for a boundary the gate could not adjudicate is a confident instruction resting on a guess —
+// MEASURED on this engine: over a report carrying `hosts` and no `netClass` under `deny Net[unknown-host]
+// app`, `gate --report` exited 2 while this verb printed a full hoist plan for `app.noClass`, computed from
+// the class the gate had just declined to invent. `deniedLayer` now skips the withheld triple, so no plan is
+// built — and the `unevaluated` disclosure rides out beside the remedies so that SILENCE IS NOT THE FIX
+// EITHER. Dropping the plan without the disclosure would trade a fabricated instruction for a false
+// all-clear, which is the failure this project keeps measuring in fabrication repairs.
 export function fixGate(cg, fns, policyParsed, scopeMatches) {
-  const ctx = narrowingContext(fns, cg);   // ⟨0.24⟩ the rule's Unknown[…]/Net[…] filter, same code as the gate
+  const ctx = narrowingContext(fns, cg, policyParsed);   // ⟨0.24⟩ the class filter + the gate's refusal
   const byName = indexFns(fns);
   const rev = reverseGraph(cg);
   const plans = new Map();
+  const held = [];
   // Iterate functions in sorted-name order so the first-writer-wins `fn` representative of a collapsed
   // remedy is deterministic across engines (candor-query/java/swift all iterate a sorted key set).
   for (const e of [...fns].sort((a, b) => (a.fn < b.fn ? -1 : a.fn > b.fn ? 1 : 0))) {
@@ -1290,12 +1400,18 @@ export function fixGate(cg, fns, policyParsed, scopeMatches) {
         const p = computeRemedy(e.fn, eff, layer, cg, rev, byName, policyParsed, scopeMatches, ctx);
         const key = `${p.effect}|${p.layer}|${p.site}|${p.hoistTo}`;
         if (!plans.has(key)) plans.set(key, p);
+      } else {
+        held.push(...ctx.held(e.fn, eff));   // see `fix`: only where nothing certain denied
       }
     }
   }
   // Emit remedies in dedup-key order (candor-query BTreeMap / java TreeMap / swift sorted-keys all do).
   const remedies = [...plans.keys()].sort().map((k) => plans.get(k));
-  return { ok: remedies.length === 0, remedies };
+  const unevaluated = unevaluatedOf(held);
+  // `ok` STAYS in the body and `advisoryAnswer` removes it when `unevaluated` is non-empty — the §3.2
+  // omit-`ok` rule lives in ONE place so this verb, `unverified` and `whatif` cannot drift apart on it.
+  return unevaluated.length ? { ok: remedies.length === 0, remedies, unevaluated }
+                            : { ok: remedies.length === 0, remedies };
 }
 
 // unverified: the PROVABLE-PURITY disclosure (eval/fixloop/DISPATCH-NOTE.md, mirrors candor-query). A
@@ -1355,14 +1471,22 @@ export function ruleUpgrade(r) {
  *  verb whose entire job is "your green gate is not provably green" certifying a green gate it cannot see
  *  through. Closing only the `fix-gate` over-charge would have killed a fabrication and left its silent
  *  mirror standing. `ctx` is the narrowing context; absent, nothing is excluded and the old behaviour
- *  stands (the scan-time gate note in scan.mjs builds its own from the scan's live evidence). */
+ *  stands (the scan-time gate note in scan.mjs builds its own from the scan's live evidence).
+ *
+ *  ⟨0.24⟩ …AND A WITHHELD (rule, fn, effect) DOES NOT COUNT AS A FIRING EITHER (SPEC §3.2 `4fd140c`). The
+ *  fall-through reads "else it's a real violation the gate already reports" — over an effect whose narrowing
+ *  evidence the report does not carry, the gate reports NOTHING; it refuses. Treating the withheld effect as
+ *  a violation would silently drop the function from this list on the strength of a violation nobody made,
+ *  which is the same silence in a second place. Withheld ⇒ not a firing ⇒ the function stays a hole here,
+ *  the LESS-confident direction, which is the one this verb is allowed to move in. */
 export function unverifiedHoleRule(fn, inferred, policyParsed, scopeMatches, ctx = null) {
   const inf = inferred ?? [];
   if (!inf.includes("Unknown")) return null;
   const entry = ctx ? ctx.entry(fn) : null;
   // An effect the rule NAMES but whose class filter excludes here is not a violation — it is exactly what
   // the gate tolerates, so the pass is real, and the Unknown it passes with makes that pass unverified.
-  const fires = (r, x) => !(ctx && classFilterExcludes(r, entry, x, ctx.reasonAcc, ctx.netClassOf));
+  const fires = (r, x) => !(ctx && classFilterExcludes(r, entry, x, ctx.reasonAcc, ctx.netClassOf))
+                       && !(ctx?.withhold && ctx.withhold(r, fn, x));
   for (const r of policyParsed.deny) {
     if (r.scope && !scopeMatches(fn, r.scope)) continue;
     const violates = r.effects.length === 0
@@ -1380,19 +1504,53 @@ export function unverifiedHoleRule(fn, inferred, policyParsed, scopeMatches, ctx
 // names every genuine class and must therefore exclude nothing. That made the one verb whose job is to
 // surface the holes a green gate is hiding under-report them, and under-report MORE the more the user
 // narrowed. Measured on three real targets, unfiltered → `--class dynamic`: 207→173, 268→158, 64→21.
+//
+// ⟨0.24⟩ AND IT NAMES THE FUNCTION THE GATE COULD NOT JUDGE (SPEC §3.2 `4fd140c`). A function the gate
+// COULD NOT JUDGE is an unverified hole in the strongest sense this verb has — it is precisely "your green
+// gate is not provably green" — and clearing it because a fallback derivation happened to decide it is the
+// verb contradicting its own purpose. MEASURED before the fix, report with `hosts` and no `netClass` under
+// `deny Net[unknown-host] app`: `gate --report` exited 2 naming `app.noClass` as the entry it could not
+// judge, and this verb exited 0 having cleared `app.noClass` AND NAMED A DIFFERENT HOLE — which is why the
+// conformance row asserts per FUNCTION: "the verb names something" passed on all four engines while the
+// defect stood.
+//
+// THE RECORDED REASON IS THE MISSING EVIDENCE, NEVER THE DERIVED CLASS. Recording the class would restate
+// the defect as a disclosure — the second opinion, published. So the entry carries the gate's OWN sentence
+// (`unanswerableScoped`'s `why`, verbatim, the same string the gate's `unevaluated[].why` carries) and
+// carries NO `upgrade`: an upgrade is a remedy, and a remedy premised on evidence the gate refused to read
+// is exactly what the same ruling forbids `fix-gate` to offer.
+//
+// `--class` DOES NOT FILTER THESE. That flag is the reader's drill-down over Unknown REASON classes; a
+// function the gate could not judge may carry no Unknown at all (the measured one carries `Net`), and
+// dropping it for failing a filter it is not an instance of would put the silence back under exactly the
+// narrowing that hid it — the shape §3.1 calls "every narrowed filter silently tolerates".
 export function unverified(fns, policyParsed, scopeMatches, classSpec = null, cg = {}) {
   const cf = parseClassFilter(classSpec);   // ⟨0.20⟩ --class: keep only holes of a matching reason class
   // ⟨0.24⟩ the POLICY's own `Unknown[…]`/`Net[…]` narrowing, which is a different question from `--class`
   // (the reader's drill-down) and was never asked at all: `reasonAcc` here rides the ctx, so the two
   // narrowings resolve the class set exactly once and from the same code as the gate.
-  const ctx = narrowingContext(fns, cg);
+  const ctx = narrowingContext(fns, cg, policyParsed);
   const holes = [];
+  const held = [];
   for (const e of fns) {
     // Same predicate + upgrade as the gate note (scan.mjs) — one source of truth for a hole.
     const r = unverifiedHoleRule(e.fn, e.inferred, policyParsed, scopeMatches, ctx);
-    if (!r || (cf && !reasonClassesMatch(ctx.reasonAcc.get(e.fn), cf))) continue;
-    const [rule, upgrade] = ruleUpgrade(r);
-    holes.push({ fn: e.fn, rule, unknownWhy: e.unknownWhy ?? [], upgrade });
+    if (r && !(cf && !reasonClassesMatch(ctx.reasonAcc.get(e.fn), cf))) {
+      const [rule, upgrade] = ruleUpgrade(r);
+      holes.push({ fn: e.fn, rule, unknownWhy: e.unknownWhy ?? [], upgrade });
+    }
+    // …and, INDEPENDENTLY of whether it is also a provable-purity hole, every rule the gate withheld on
+    // this function: one entry per (function, rule), in report order, beside the holes rather than in a
+    // separate array a consumer reading `unverified[]` would never look at.
+    const h = ctx.held(e.fn);
+    for (const u of unevaluatedOf(h)) holes.push({ fn: e.fn, rule: u.rule, why: u.why });
+    held.push(...h);
   }
-  return { ok: holes.length === 0, unverified: holes };
+  const unevaluated = unevaluatedOf(held);
+  // `ok` STAYS here and `advisoryAnswer` removes it when `unevaluated` is non-empty (the §3.2 omit-`ok`
+  // rule, in one place). Neither boolean is a statement this input licenses: `ok: true` would certify a set
+  // the verb could not judge, and `ok: false` would assert these entries are unverified PASSES — but the
+  // gate could not decide whether they pass at all.
+  return unevaluated.length ? { ok: holes.length === 0, unverified: holes, unevaluated }
+                            : { ok: holes.length === 0, unverified: holes };
 }

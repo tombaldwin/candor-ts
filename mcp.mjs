@@ -240,7 +240,7 @@ const TOOLS = {
     },
   },
   candor_fix: {
-    description: "THE BOUNDARY FIX: when `fn` performs `effect` in a layer the policy forbids (a violation candor_whatif/candor_gate reports), compute the architectural REMEDY — not just 'the domain can't do Net', but WHERE the effect belongs and the refactor to put it there: the direct call site to hoist, the forbidden-layer functions that become pure and thread the value as a parameter, and the nearest allowed-layer caller to perform the effect ({ crossing, site, deniedSpan, hoistTo, policyAlternative }). The remedial inverse of candor_whatif. Call this INSTEAD OF guessing a fix (adding `allow` to the domain, moving the I/O one call up, threading a handle the wrong way). Advisory: it names the structure, you write the code; the gate re-scan verifies. Uses `policy` if given, else the repo's checked-in .candor/config policy (spec §3.4).",
+    description: "THE BOUNDARY FIX: when `fn` performs `effect` in a layer the policy forbids (a violation candor_whatif/candor_gate reports), compute the architectural REMEDY — not just 'the domain can't do Net', but WHERE the effect belongs and the refactor to put it there: the direct call site to hoist, the forbidden-layer functions that become pure and thread the value as a parameter, and the nearest allowed-layer caller to perform the effect ({ crossing, site, deniedSpan, hoistTo, policyAlternative }). The remedial inverse of candor_whatif. Call this INSTEAD OF guessing a fix (adding `allow` to the domain, moving the I/O one call up, threading a handle the wrong way). Advisory: it names the structure, you write the code; the gate re-scan verifies. Uses `policy` if given, else the repo's checked-in .candor/config policy (spec §3.4). ALWAYS CHECK `refused` BEFORE `crossing`: where the policy narrows on evidence this report does not carry, candor_gate REFUSES and no remedy is computed — the result is `{ fn, effect, refused:true, unevaluated:[{rule, why}] }` WITH NO `crossing` KEY, an absent key rather than `crossing:false`, because 'no boundary fix needed' is a claim and that is the one thing the tool cannot claim here (spec §3.2: an advisory verb may be LESS certain than the gate, never MORE). Re-scan so the report carries the narrowing evidence, or widen the rule; do not read the missing plan as an all-clear.",
     schema: { type: "object", properties: { fn: { type: "string" }, effect: { type: "string" }, policy: { type: "string", description: "path to a §6.2 policy file (optional; defaults to the repo's .candor/config `policy`)" }, ...reportArg }, required: ["fn", "effect"] },
     run: (a, p) => {
       // The fix is defined relative to a boundary — a policy is required. Given → confined fail-closed read;
@@ -358,7 +358,14 @@ const TOOLS = {
                  + "over a report declaring code candor could NOT analyze, `ok` IS ABSENT and `{incomplete:true, "
                  + "unanalyzed}` takes its place — a function in an unanalyzed file is missing from the report "
                  + "entirely, so it cannot be enumerated as an unverified pass, and an empty array there is not "
-                 + "an all-clear (spec §3.2).",
+                 + "an all-clear (spec §3.2). `ok` is ABSENT for a second reason too, and the entries that come "
+                 + "with it are the sharpest ones: where the policy narrows on evidence this report does not carry, "
+                 + "candor_gate REFUSES — and this verb then NAMES each function the gate could not judge, as "
+                 + "`{fn, rule, why}` where `why` is THE MISSING EVIDENCE and never a derived class, plus the gate's "
+                 + "own `unevaluated:[{rule, why}]`. Those entries carry no `upgrade`: whether they pass at all is "
+                 + "the open question, so there is nothing to upgrade yet — re-scan so the report carries the "
+                 + "evidence, or widen the rule (spec §3.2: an advisory verb may be LESS certain than the gate, "
+                 + "never MORE).",
     schema: { type: "object", properties: { policy: { type: "string", description: "path to a §6.2 policy file (optional; defaults to the repo's .candor/config `policy`)" }, ...reportArg }, required: [] },
     run: (a, p) => {
       let text, polPath = a.policy ?? null;

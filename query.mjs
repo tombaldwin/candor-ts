@@ -57,6 +57,20 @@ const advisoryIncompleteNote = (verb, unanalyzed) => {
   for (const u of unanalyzed) console.error(`    ${u.path}${u.reason ? `  (${u.reason})` : ""}`);
   console.error(`  (\`ok\` is OMITTED — neither value is a statement this input licenses; \`--strict\` exits 2, the could-not-evaluate code)`);
 };
+// ⟨0.24⟩ SPEC §3.2 `4fd140c` — the SAME other channel, for the OTHER thing an advisory verb cannot be more
+// certain about than the gate: a rule whose narrowing evidence the report does not carry. The JSON withdraws
+// `ok` and carries `unevaluated`; this says it where a human is looking. Written as a sibling of the note
+// above rather than folded into it because the two causes are different — an unread FILE versus an
+// unanswerable RULE — and a reader who is told the wrong one goes to the wrong place to fix it.
+// `tail` is per-verb because the CONSEQUENCE is: `fix-gate`/`unverified` withdraw `ok` and their `--strict`
+// exits 2, while `fix` answers about ONE function and has neither field nor flag — a note that promised
+// both would be describing a document the reader is not holding.
+const advisoryUnevaluatedNote = (verb, unevaluated, tail) => {
+  console.error(`candor-ts: ${verb} could NOT fully evaluate — ${unevaluated.length} policy rule(s) could not be evaluated against this report; \`gate --report\` REFUSES over these (exit 2, SPEC §3.1 answerability), and an advisory verb may be LESS certain than the gate, never MORE (SPEC §3.2)`);
+  for (const u of unevaluated) console.error(`    ${u.why}`);
+  console.error(`  ${tail}`);
+};
+const UNEVAL_TAIL_STRICT = "(`ok` is OMITTED — neither value is a statement this input licenses; no remedy is offered for a boundary the gate could not adjudicate; `--strict` exits 2, the could-not-evaluate code)";
 // The §6 effect vocabulary — used to reject a typo'd effect name in `where` (corpus-audit #3). Kept in step
 // with SPEC §6 / the umbrella's list; an unknown name PRESENT in a report (a spec extension) is still allowed.
 const KNOWN_EFFECTS = ["Net", "Fs", "Db", "Llm", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Unknown"];
@@ -595,6 +609,10 @@ OPTIONS  (uniform across every engine)
   --strict                  make an advisory verb a CI gate — exit 1 while a finding remains:
                             unverified (an unverified-purity hole), fix-gate (a boundary
                             crossing), gains (ANY gained effect). Advisory (exit 0) otherwise.
+                            ⟨0.24⟩ EXIT 2 — could-not-fully-evaluate, the gate's own code — when the
+                            report declares \`unanalyzed\`, or when a policy rule's narrowing
+                            evidence the report does not carry made \`gate --report\` refuse: an
+                            advisory verb may be LESS certain than the gate, never MORE (SPEC §3.2).
   -V, --version             print the installed version + upgrade line (offline)
   -h, --help                show this help
 
@@ -1024,6 +1042,10 @@ switch (cmd) {
     if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
     const r = coreFix(cg, loadReportOrDie(prefix), target, eff, loadPolicyOrDie(policyFile, ptext), scopeMatches);
     if (r === null) { console.error(`candor: no function matching \`${target}\` in the call graph`); process.exit(2); }
+    // ⟨0.24⟩ SPEC §3.2 `4fd140c` — the printed channel for a REFUSED remedy (`refused: true`, no `crossing`
+    // key). Without it the terminal shows a document with no plan in it and no reason for the absence.
+    if (r.unevaluated?.length) advisoryUnevaluatedNote("fix", r.unevaluated,
+      "(no remedy is offered for a boundary the gate could not adjudicate — the result carries `refused: true` and NO `crossing` key; re-scan so the report carries the evidence, or widen the rule)");
     emit(r);
     break;
   }
@@ -1046,8 +1068,12 @@ switch (cmd) {
     // uses for the same situation — rather than the 1 that would claim a finding or the 0 that certified.
     const fgUnan = reportUnanalyzed(prefix);
     if (fgUnan.length) advisoryIncompleteNote("fix-gate", fgUnan);
+    // ⟨0.24⟩ SPEC §3.2 `4fd140c` — and the same posture for a rule the GATE refused: no remedy is computed
+    // from evidence the gate declined to read, the refusal is disclosed on both channels, and `--strict`
+    // exits 2 (could-not-evaluate) rather than the 0 that would read as "no crossings left to fix".
+    if (fgr.unevaluated?.length) advisoryUnevaluatedNote("fix-gate", fgr.unevaluated, UNEVAL_TAIL_STRICT);
     emit(advisoryAnswer(fgr, fgUnan));
-    process.exit(fgUnan.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
+    process.exit(fgUnan.length || fgr.unevaluated?.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
     break; // unreachable
   }
   case "unverified": {
@@ -1081,8 +1107,11 @@ switch (cmd) {
     // unverified pass — and that absence is exactly what this verb would have to report.
     const uUnan = reportUnanalyzed(prefix);
     if (uUnan.length) advisoryIncompleteNote("unverified", uUnan);
+    // ⟨0.24⟩ SPEC §3.2 `4fd140c` — the function the gate could not judge is NAMED in `unverified` above,
+    // with the missing evidence as its reason; this is the human channel for the same fact.
+    if (r.unevaluated?.length) advisoryUnevaluatedNote("unverified", r.unevaluated, UNEVAL_TAIL_STRICT);
     emit(advisoryAnswer(r, uUnan));
-    process.exit(uUnan.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
+    process.exit(uUnan.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
     break; // unreachable
   }
   case "gate": {

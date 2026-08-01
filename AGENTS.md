@@ -124,6 +124,12 @@ Q whatif   $P <fn> <Effect> [policy]  # pre-edit gate verdict (exit 1 if it woul
 Q fix      $P <fn> <Effect> <policy>  # the boundary FIX: where the effect belongs + the hoist refactor
 Q unverified $P <policy> [--strict]  # pure/deny layers that PASS but are Unknown (not PROVABLY clean)
 Q fix-gate $P <policy>              # a fix for EVERY crossing — the loop's block-message remedy
+                                    # ⟨0.24⟩ BOTH, and `fix`: an advisory verb may be LESS certain than
+                                    # the gate, never MORE (SPEC §3.2). Where `gate --report` REFUSES a
+                                    # narrowed rule for want of evidence, `unverified` NAMES the function
+                                    # with the MISSING EVIDENCE as its reason (never a derived class),
+                                    # `fix-gate`/`fix` offer NO remedy premised on it, both carry the
+                                    # gate's `unevaluated:[{rule,why}]`, `ok` is OMITTED, `--strict` → 2.
 Q gate --report $P --policy <file> [--json] [--gate-json <f>]
                                     # ⟨0.24⟩ apply a policy to an EXISTING report, NO scan (exit 0/1/2).
                                     # The supply-chain verb: gate a DEPENDENCY's published report. Reads

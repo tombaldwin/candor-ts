@@ -815,5 +815,67 @@ fs.rmSync(W, { recursive: true, force: true });
   fs.rmSync(I, { recursive: true, force: true });
 }
 
+// ── ⟨0.24⟩ THE ADVISORY-CONFIDENCE LAW ON THE AGENT SURFACE (SPEC §3.2 `4fd140c`) ───────────────────
+// An advisory verb may be LESS certain than the gate, NEVER MORE. Over a report carrying `hosts` and no
+// `netClass`, `candor_gate` REFUSES (`refused:true`, no `violations` key) while `candor_unverified` cleared
+// the function from a FALLBACK DERIVATION and `candor_fix` answered `crossing:false, reason:"not-forbidden"`
+// — a derived all-clear, delivered to an agent, about the one boundary the gate declined to adjudicate.
+// Asserted HERE rather than inferred from the CLI rows: the rule binds every channel a verb answers on, and
+// this channel has no exit code and no human reading it.
+//
+// THE DECOY IS DELIBERATE. `app.nativeHole` is a provable-purity hole under the same policy, so a check that
+// only asks "did the verb return anything?" passes while `app.noClass` is silently cleared — which is
+// exactly how the weaker form of the conformance row passed on all four engines while the defect stood.
+{
+  const B = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-bound-"));
+  const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app",
+              analyzed: { count: 2, digest: "0" },
+              functions: [{ fn: "app.nativeHole", inferred: ["Unknown"], direct: ["Unknown"],
+                            unknownWhy: ["native:dlopen"], calls: [] },
+                          { fn: "app.noClass", inferred: ["Net"], direct: ["Net"],
+                            hosts: ["api.example.com"], calls: [] }] };
+  // The MIRROR: the identical shape with the evidence ON THE WIRE. Nothing here is unanswerable, so the
+  // tools must answer exactly as before — this is the row that fails if the fix over-reports.
+  const M = { ...V, functions: [{ fn: "app.hasClass", inferred: ["Net"], direct: ["Net"],
+                                  hosts: ["api.example.com"], netClass: ["unknown-host"], calls: [] }] };
+  fs.writeFileSync(`${B}/r.json`, JSON.stringify(V));
+  fs.writeFileSync(`${B}/r.callgraph.json`, JSON.stringify({ "app.nativeHole": [], "app.noClass": [] }));
+  fs.writeFileSync(`${B}/m.json`, JSON.stringify(M));
+  fs.writeFileSync(`${B}/m.callgraph.json`, JSON.stringify({ "app.hasClass": [] }));
+  fs.writeFileSync(`${B}/p.pol`, "deny Net[unknown-host] app\n");
+  const bcall = (id, name, args) => ({ jsonrpc: "2.0", id, method: "tools/call",
+    params: { name, arguments: { policy: `${B}/p.pol`, ...args } } });
+  const br = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+                               bcall(2, "candor_gate", { report: `${B}/r` }),
+                               bcall(3, "candor_unverified", { report: `${B}/r` }),
+                               bcall(4, "candor_fix", { report: `${B}/r`, fn: "app.noClass", effect: "Net" }),
+                               bcall(5, "candor_unverified", { report: `${B}/m` }),
+                               bcall(6, "candor_fix", { report: `${B}/m`, fn: "app.hasClass", effect: "Net" })],
+                              [], { CANDOR_REPORT: `${B}/r` });
+  const bt = (id) => JSON.parse(br.find((r) => r.id === id).result.content[0].text);
+  ok("⟨0.24⟩ advisory-bound (MCP): the ORACLE — `candor_gate` REFUSES over `hosts` with no `netClass`, naming `app.noClass`, with NO `violations` key",
+     bt(2).ok === false && bt(2).refused === true && !("violations" in bt(2))
+     && /app\.noClass/.test(bt(2).unevaluated?.[0]?.why ?? ""),
+     JSON.stringify(bt(2)).slice(0, 300));
+  ok("⟨0.24⟩ advisory-bound (MCP): `candor_unverified` NAMES `app.noClass` — the function the gate could not judge — and not merely the decoy hole a bare non-empty check would accept",
+     (bt(3).unverified ?? []).some((h) => h.fn === "app.noClass")
+     && (bt(3).unverified ?? []).some((h) => h.fn === "app.nativeHole"),
+     JSON.stringify(bt(3)).slice(0, 400));
+  ok("⟨0.24⟩ advisory-bound (MCP): …with THE MISSING EVIDENCE as the reason and no `upgrade`, `ok` ABSENT, and the gate's own `unevaluated:[{rule,why}]` beside it",
+     !("ok" in bt(3)) && bt(3).unevaluated?.[0]?.rule === "deny Net[unknown-host] app"
+     && (() => { const h = (bt(3).unverified ?? []).find((x) => x.fn === "app.noClass");
+                 return /no `netClass` in this report/.test(h?.why ?? "") && !("upgrade" in (h ?? {})); })(),
+     JSON.stringify(bt(3)).slice(0, 400));
+  ok("⟨0.24⟩ advisory-bound (MCP): `candor_fix` REFUSES instead of answering `crossing:false` — NO `crossing` key at all, because 'no boundary fix needed' is the one claim it cannot make here",
+     bt(4).refused === true && !("crossing" in bt(4)) && bt(4).unevaluated?.length === 1
+     && bt(4).fn === "app.noClass",
+     JSON.stringify(bt(4)).slice(0, 300));
+  ok("⟨0.24⟩ advisory-bound (MCP) MIRROR: with `netClass` on the wire nothing is refused — `candor_unverified` carries `ok` with no `unevaluated`, and `candor_fix` still returns a real `crossing:true` remedy",
+     bt(5).ok === true && bt(5).unevaluated === undefined && bt(5).unverified?.length === 0
+     && bt(6).crossing === true && bt(6).refused === undefined,
+     `uv=${JSON.stringify(bt(5)).slice(0, 200)} fix=${JSON.stringify(bt(6)).slice(0, 200)}`);
+  fs.rmSync(B, { recursive: true, force: true });
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
