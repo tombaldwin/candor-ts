@@ -495,16 +495,29 @@ function runWhatif(a) {
   }
   const callers = r.affected.filter((f) => !r.of.includes(f));   // affected minus the target(s) themselves
   const rules = [...new Set(r.violations.map((v) => v.rule))];
+  // ⟨0.24⟩ THE EDITOR IS A CHANNEL THIS VERB ANSWERS ON, so the `conditional` has to reach it or this
+  // surface becomes the one place the defect still lives — and it is the sharpest place for it, because
+  // `rules[0]` is now the operator's RAW line. Without the condition the squiggle would read
+  // `✗ deny Net[unknown-host] app would fire`: a narrowed rule beside an unconditional verdict, which SPEC
+  // §3.1 calls WORSE than printing the rule stripped of its filter, since it reads as a narrowing candor
+  // evaluated and did not.
+  const condOf = new Map(r.violations.filter((v) => v.conditional).map((v) => [v.rule, v.conditional]));
   const verdict = policyText === null
     ? `candor: no policy discovered — blast radius only: ${callers.length} caller(s) would inherit ${a.effect}`
     : rules.length
-      ? `✗ ${rules[0]} would fire — ${callers.length} caller(s) inherit ${a.effect}`
+      ? `✗ ${rules[0]} would fire${condOf.has(rules[0]) ? ` IF ${condOf.get(rules[0])}` : ""} — ${callers.length} caller(s) inherit ${a.effect}`
       : `✓ no policy rule fires — ${callers.length} caller(s) would inherit ${a.effect}`;
   showMessage(rules.length ? 2 : 3, verdict);                    // warning when a rule fires, info otherwise
   if (typeof a.uri === "string" && Number.isInteger(a.line)) {   // the detail, pinned at the fn's line
     const head = callers.slice(0, 10);
     const lines = [`what if ${r.of.join(", ")} performed ${a.effect}? ${verdict}`];
     if (rules.length > 1) lines.push(`rules: ${rules.join("; ")}`);
+    // The one-liner has room for the condition but not for WHY there is one; the pinned detail has room for
+    // both, and the reason is the half that stops an operator reading a fail-closed hedge as a false alarm.
+    for (const [rule, c] of condOf)
+      lines.push(`conditional — \`${rule}\` fires IF ${c}. That rule NARROWS, and the effect you have not `
+                 + "written yet has no class to match, so candor charges it fail-closed rather than guessing "
+                 + "which class your edit would land in.");
     lines.push(head.length
       ? `callers: ${head.join(", ")}${callers.length > head.length ? ` +${callers.length - head.length} more` : ""}`
       : "no callers — the blast radius is the function itself");

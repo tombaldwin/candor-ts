@@ -8745,5 +8745,93 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.24⟩ `whatif` NAMES THE OPERATOR'S OWN RULE, AND SAYS WHAT A NARROWED VERDICT RESTS ON ────────
+// SPEC §3.1 (`6f30540`, shape corrected by `901f14d`): `violations[].conditional: "<the narrowing left
+// unevaluated>"`, a STRING, omitted on rules that do not narrow. `conditional` was ONE-ENGINE (candor-rust)
+// when this landed; the ground truth below was read off that engine's OUTPUT, not off a description of it —
+// the spec's own first pin of this field was mis-transcribed from prose and had to be corrected.
+//
+// WHY THE FIELD EXISTS. `whatif` asks about an effect the code does not have yet, so a narrowing filter
+// quantifies over a CLASS of something that does not exist and cannot be matched. Charging it is the right
+// fail-closed default for a pre-edit gate — the edit could land in any class — but the verdict is therefore
+// CONDITIONAL, and §3.1's rule for exactly this shape is that an unanswerable condition is DISCLOSED, never
+// scored as a failed one.
+//
+// AND THE TWO HALVES ONLY WORK TOGETHER. MEASURED on this engine before the change, over one hand-built
+// report, against candor-rust over byte-identical inputs:
+//
+//   `deny Unknown[reflect] app.nat`        rust `deny Unknown[reflect] app.nat`   ts `deny Unknown app.nat`
+//   `deny Net[unknown-host,known-partner] app`  rust verbatim                     ts `deny Net app`
+//   `deny Net Db  app  # comment`          rust `deny Net Db  app`                ts `deny Db Net app`
+//   `pure app`                             rust `pure app`                        ts `deny (pure) app`
+//   …and `conditional` on the first two    rust present                           ts absent everywhere
+//
+// The narrowed rows are the sharp ones: the operator's own scoping erased in the verb an agent reads BEFORE
+// editing. But printing `raw` while the verdict stayed filter-blind would be WORSE than that bug — the same
+// unconditional "would violate", now attributed to the narrowed line, reading as a filter candor evaluated
+// and did not. So the raw line and the condition land in one change.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-whatif-cond-"));
+  fs.writeFileSync(path.join(d, "r.json"), JSON.stringify({
+    candor: { version: "ttttttt", spec: "0.24" }, package: "app", analyzed: { count: 1, digest: "0" },
+    functions: [{ fn: "app.nat", inferred: ["Unknown"], direct: ["Unknown"], unknownWhy: ["native:extern fn"], calls: [], loc: "a.ts:1" }],
+  }));
+  fs.writeFileSync(path.join(d, "r.callgraph.json"), JSON.stringify({ "app.nat": [] }));
+  const R = path.join(d, "r"), P = path.join(d, "w.policy");
+  const wi = (text, eff) => {
+    fs.writeFileSync(P, `${text}\n`);
+    const r = runQuery("whatif", "app.nat", eff, "--report", R, "--policy", P, "--json");
+    try { return JSON.parse(r.stdout).violations[0] ?? {}; } catch { return {}; }
+  };
+
+  // ARM 1 — the rule is named VERBATIM: comment stripped and ends trimmed, but the operator's own effect
+  // ORDER, internal spacing and rule KIND survive. `pure app` reads back as itself, not as `deny (pure) app`.
+  const vNarrowU = wi("deny Unknown[reflect,unresolved] app.nat", "Unknown");
+  const vNarrowN = wi("deny Net[unknown-host,known-partner] app", "Net");
+  check("⟨0.24⟩ whatif names the operator's OWN rule — a narrowed line keeps its bracket instead of being printed back as the WIDE rule they did not write",
+        vNarrowU.rule === "deny Unknown[reflect,unresolved] app.nat"
+          && vNarrowN.rule === "deny Net[unknown-host,known-partner] app",
+        `unknown=${vNarrowU.rule} net=${vNarrowN.rule}`);
+  check("⟨0.24⟩ …and so does an UNNARROWED one: effect order, internal spacing and the `pure` kind are the operator's, not a normalization (`deny Net Db  app` never `deny Db Net app`; `pure app` never `deny (pure) app`)",
+        wi("deny Net Db  app     # keep the app layer pure", "Net").rule === "deny Net Db  app"
+          && wi("pure app", "Net").rule === "pure app",
+        `multi=${wi("deny Net Db  app     # keep the app layer pure", "Net").rule} pure=${wi("pure app", "Net").rule}`);
+
+  // ARM 2 — the half that keeps ARM 1 from lying: the verdict on a narrowed rule is CONDITIONAL and says so.
+  // Byte-equal to candor-rust's strings, read off that engine's JSON: classes sorted, joined ` / `.
+  check("⟨0.24⟩ a narrowed `Unknown[…]` rule discloses the condition its verdict rests on — the class an effect that does not exist yet cannot be matched against",
+        vNarrowU.conditional === "the `Unknown` you introduce is of reason class reflect / unresolved",
+        JSON.stringify(vNarrowU));
+  check("⟨0.24⟩ …and the `Net[…]` sibling names the DESTINATION class, classes sorted and ` / `-joined (byte-equal to candor-rust, the engine this field was read off)",
+        vNarrowN.conditional === "the `Net` you introduce reaches destination class known-partner / unknown-host",
+        JSON.stringify(vNarrowN));
+  check("⟨0.24⟩ `dynamic` discloses the classes it RESOLVED TO, not the alias — the condition names what would have to be true, and `dynamic` is not a class",
+        wi("deny Unknown[dynamic] app.nat", "Unknown").conditional
+          === "the `Unknown` you introduce is of reason class dispatch / indirect / native / reflect / unresolved",
+        JSON.stringify(wi("deny Unknown[dynamic] app.nat", "Unknown")));
+
+  // THE MIRROR, and the reason it is the mirror the brief asks for: a `conditional` on EVERY violation would
+  // train the reader to ignore it, which is the same failure as naming a config that moved nothing. A rule
+  // that does not narrow rests on no condition, so the KEY IS ABSENT and the document is byte-identical to a
+  // pre-⟨0.24⟩ one. `in`, never falsiness — an empty-string `conditional` would satisfy a `!c` test while
+  // being the invention this row exists to forbid.
+  const noCond = (t, e) => !("conditional" in wi(t, e));
+  check("⟨0.24⟩ MIRROR — a rule that does NOT narrow emits no `conditional` at all: bare `deny`, `pure`, and the explicit `[*]`/bare-`Unknown` wildcards, whose empty filter matches everything",
+        noCond("deny Unknown app.nat", "Unknown") && noCond("deny Net app", "Net")
+          && noCond("pure app", "Net") && noCond("deny Unknown[*] app.nat", "Unknown")
+          && noCond("deny Net[*] app", "Net"),
+        JSON.stringify([wi("deny Unknown app.nat", "Unknown"), wi("deny Net[*] app", "Net")]));
+  // …and the filter keys on the effect being INTRODUCED, not on the rule merely CARRYING a bracket. A
+  // `deny Net[unknown-host] Fs app` asked about `Fs` charges `Fs` unconditionally: the `Net` narrowing says
+  // nothing about it, and quoting it there would attach a condition to a verdict that does not rest on one.
+  const mixedFs = wi("deny Net[unknown-host] Fs app", "Fs");
+  const mixedNet = wi("deny Unknown[reflect,unresolved] Net[unknown-host] app", "Net");
+  check("⟨0.24⟩ MIRROR — the condition keys on the effect being INTRODUCED, not on the rule carrying a bracket: `Fs` under `deny Net[unknown-host] Fs app` is charged unconditionally, and a two-filter rule quotes only the asked-about one",
+        !("conditional" in mixedFs) && mixedFs.rule === "deny Net[unknown-host] Fs app"
+          && mixedNet.conditional === "the `Net` you introduce reaches destination class unknown-host",
+        `fs=${JSON.stringify(mixedFs)} net=${JSON.stringify(mixedNet)}`);
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

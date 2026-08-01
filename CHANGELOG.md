@@ -8,6 +8,49 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**⚠ ⟨0.24⟩ `whatif` NOW NAMES THE OPERATOR'S OWN RULE, AND SAYS WHAT A NARROWED VERDICT RESTS ON —
+`violations[].conditional`** (SPEC §3.1 `6f30540`, shape corrected by `901f14d`). The field was
+**one-engine** (candor-rust) before this, and the ground truth below was read off *that engine's JSON
+output* — the spec's own first pin of it was written from a description of rust's behaviour and had to be
+corrected, because a pin written without running the thing is a fifth guess, not a constraint.
+
+`whatif` REBUILT the rule it printed, from `effects` + `scope`, normalizing away everything the operator
+wrote. MEASURED against candor-rust over byte-identical inputs:
+
+    policy line                                  candor-rust          candor-ts (before)
+    `deny Unknown[reflect] app.nat`              verbatim             `deny Unknown app.nat`
+    `deny Net[unknown-host,known-partner] app`   verbatim             `deny Net app`
+    `deny Net Db  app  # keep app pure`          `deny Net Db  app`   `deny Db Net app`
+    `pure app`                                   `pure app`           `deny (pure) app`
+    …and `conditional` on the narrowed rows      present              absent everywhere
+
+The narrowed rows are the sharp ones: **the operator's own scoping erased in the verb an agent reads before
+editing**, at exactly the moment they are deciding whether that scoping protects them.
+
+**And the two halves only work together, which is why they land in one change.** `whatif` asks about an
+effect the code does not have yet, so a narrowing filter quantifies over a CLASS of something that does not
+exist and cannot be matched. Charging it stays the right fail-closed default for a pre-edit gate — the edit
+could land in any class — but printing the raw line while the verdict stayed filter-blind would be **worse
+than the bug it fixes**: the same unconditional *"would violate"*, now attributed to the narrowed line,
+reading as a filter candor evaluated and did not. §3.1's rule for exactly this shape settles it — an
+unanswerable condition is DISCLOSED, never scored as a failed one — so the verdict and the exit code are
+unchanged and the condition rides beside them:
+
+    "violations": [ { "fn": "app.nat", "rule": "deny Net[unknown-host] app",
+                      "conditional": "the `Net` you introduce reaches destination class unknown-host" } ]
+
+`conditional` is **omitted** on a rule that does not narrow, so every document from an unfiltered policy —
+nearly all of them — stays byte-identical; a `conditional` on every violation would train the reader to
+ignore it. It keys on the effect being INTRODUCED, not on the rule merely carrying a bracket, so
+`deny Net[unknown-host] Fs app` asked about `Fs` charges `Fs` unconditionally. `dynamic` and config aliases
+disclose the classes they RESOLVED TO, since the condition has to name what would have to be *true*.
+
+**It reaches the editor too.** The LSP `candor.whatif` one-liner now reads `✗ deny Net[unknown-host] app
+would fire IF …`, and the pinned diagnostic carries the reason there is a condition at all — that surface is
+where the operator meets the raw rule mid-edit, so leaving it filter-blind would have moved the defect
+rather than fixed it. MCP `candor_whatif` and the CLI share the one query-core evaluation and needed no
+change of their own. All 14 differential rows are now byte-equal to candor-rust's `violations` array.
+
 **⚠ ⟨0.24⟩ THE ADVISORY VERBS CERTIFIED A REPORT THEY KNEW THEY COULD NOT SEE ALL OF — `ok` is now OMITTED
 over an incomplete report** (SPEC §3.2 `0075987` / `ec1a441`). `gate --report` has refused to read green
 over a declared `unanalyzed` manifest since ⟨0.21⟩. `unverified`, `fix-gate` and `whatif` read the same

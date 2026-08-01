@@ -1056,8 +1056,53 @@ export function gains(curFns, baseFns, baseCg = {}) {
   return { gained: [...gained].sort(), byFunction };
 }
 
+/**
+ * ⟨0.24⟩ THE CONDITION A `whatif` VERDICT RESTS ON, when the matched rule NARROWS the effect being
+ * INTRODUCED — `null` when it does not, which is the ordinary case and keeps the key absent.
+ *
+ * WHY IT IS NOT A `classFilterExcludes` CALL, which is the obvious-looking move and the wrong one. That
+ * predicate closed `fix-gate`/`unverified`, and it does not carry over here: those two read a signature that
+ * EXISTS, so a class is available to match. `whatif` asks about an effect the code has NOT GOT — a
+ * `deny Net[unknown-host]` rule quantifies over the destination of a call that does not exist — so there is
+ * nothing to match and the question is genuinely unanswerable. Charging it stays the right default for a
+ * PRE-EDIT gate (the edit could land in any class, so fail closed); what was wrong was showing that
+ * unconditional verdict beside a rule rebuilt WITHOUT its filter.
+ *
+ * SPEC §3.1 ⟨0.24⟩'s rule for exactly this shape: an unanswerable condition is DISCLOSED, never scored as a
+ * failed one. So the verdict is unchanged and the condition rides beside it.
+ *
+ * The class lists are stored sorted by `parsePolicy` (and `dynamic`/aliases are already RESOLVED there, so
+ * the condition names classes rather than the alias the operator typed — the condition has to say what would
+ * have to be TRUE, and `dynamic` is not something an Unknown can be). Byte-aligned with candor-rust
+ * `narrowing_condition`, read off that engine's JSON rather than off a description of it.
+ */
+export function narrowingCondition(r, eff) {
+  if (eff === "Unknown" && r.unknownClasses?.length)
+    return `the \`Unknown\` you introduce is of reason class ${r.unknownClasses.join(" / ")}`;
+  if (eff === "Net" && r.netClasses?.length)
+    return `the \`Net\` you introduce reaches destination class ${r.netClasses.join(" / ")}`;
+  return null;
+}
+
 // whatif: hypothetically add `eff` to `target` and report the blast radius + any policy violations.
 // `policyParsed` is an already-parsed policy object (or null); kept I/O-free for the core.
+//
+// ⟨0.24⟩ THE RULE IS NAMED VERBATIM, AND A NARROWED VERDICT SAYS WHAT IT RESTS ON (SPEC §6.2 for the first
+// half, §3.1 `6f30540`/`901f14d` for the second). `rule` was REBUILT from `effects` + `scope`, which
+// normalized away everything the operator wrote. MEASURED on this engine against candor-rust over
+// byte-identical inputs:
+//
+//   `deny Unknown[reflect] app.nat`             rust: verbatim      ts: `deny Unknown app.nat`
+//   `deny Net[unknown-host,known-partner] app`  rust: verbatim      ts: `deny Net app`
+//   `deny Net Db  app  # comment`               rust: verbatim      ts: `deny Db Net app`
+//   `pure app`                                  rust: `pure app`    ts: `deny (pure) app`
+//
+// The narrowed rows are the sharp ones — the operator's own scoping ERASED in the verb an agent reads before
+// editing, at exactly the moment they are deciding whether that scoping protects them. And the two halves
+// only work together: printing `raw` while the verdict stayed filter-blind would be WORSE than the bug, the
+// same unconditional "would violate" now attributed to the narrowed line, reading as a filter candor
+// evaluated and did not. `raw` is the line with its comment stripped and its ends trimmed (parsePolicy) —
+// the same field `unevaluated[].rule` already ships, so one rule reads back one way everywhere.
 export function whatif(cg, target, eff, policyParsed, scopeMatches) {
   const targets = matches(Object.keys(cg), target);
   if (targets.length === 0) return null; // caller decides how to surface "no such fn"
@@ -1072,9 +1117,15 @@ export function whatif(cg, target, eff, policyParsed, scopeMatches) {
   if (policyParsed) {
     for (const r of policyParsed.deny) {
       if (r.effects.length && !r.effects.includes(eff)) continue; // pure ([]) forbids ANY effect
+      // OMITTED unless this rule narrows the effect being INTRODUCED, so every document from an unfiltered
+      // policy — which is nearly all of them — stays byte-identical, and the key keeps its meaning. A
+      // `conditional` on every violation would train the reader to ignore it, the same failure as naming a
+      // config that moved nothing. It also keys on the INTRODUCED effect, not on the rule merely carrying a
+      // bracket: `deny Net[unknown-host] Fs app` asked about `Fs` charges `Fs` unconditionally.
+      const cond = narrowingCondition(r, eff);
       for (const fn of affected)
         if (!r.scope || scopeMatches(fn, r.scope))
-          violations.push({ fn, rule: `deny ${r.effects.join(" ") || "(pure)"} ${r.scope}`.trim() });
+          violations.push(cond ? { fn, rule: r.raw, conditional: cond } : { fn, rule: r.raw });
     }
   }
   return { of: targets, effect: eff, affected: [...affected].sort(), violations, ok: violations.length === 0 };
