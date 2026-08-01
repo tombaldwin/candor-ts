@@ -783,5 +783,37 @@ fs.rmSync(W, { recursive: true, force: true });
   fs.rmSync(I, { recursive: true, force: true });
 }
 
+// ── ⟨0.24⟩ THE SAME RULE ON candor_unverified — the OTHER CHANNEL (SPEC §3.2 `ec1a441`) ─────────────
+// `candor_gate` above refuses to read green over a declared manifest. `candor_unverified` read the same
+// bytes and returned `ok: true` with an empty array — on the surface an agent trusts and no human reads,
+// for the verb whose entire job is "your green gate is not provably green". The rule binds EVERY channel
+// a verb answers on, not just the CLI's JSON, so this is asserted here and not inferred from the CLI row.
+// ABSENCE is asserted, never falsiness: `ok:false` would satisfy a `!ok` test while being the fabrication
+// the rule forbids (a hole claimed beside an empty array).
+{
+  const I = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-uvinc-"));
+  const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app",
+              analyzed: { count: 1, digest: "0" },
+              functions: [{ fn: "app.port", inferred: ["Unknown"], direct: ["Unknown"],
+                            unknownWhy: ["dispatch:x"], calls: [] }] };
+  fs.writeFileSync(`${I}/inc.json`, JSON.stringify({ ...V, unanalyzed: [{ path: "src/broken.ts", reason: "parse error" }] }));
+  fs.writeFileSync(`${I}/ok.json`, JSON.stringify(V));
+  fs.writeFileSync(`${I}/p.pol`, "pure app\n");
+  const ucall = (id, rep) => ({ jsonrpc: "2.0", id, method: "tools/call",
+    params: { name: "candor_unverified", arguments: { report: `${I}/${rep}`, policy: `${I}/p.pol` } } });
+  const ur = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+                               ucall(2, "inc"), ucall(3, "ok")], [], { CANDOR_REPORT: `${I}/inc` });
+  const ut = (id) => JSON.parse(ur.find((r) => r.id === id).result.content[0].text);
+  ok("⟨0.24⟩ candor_unverified over a report declaring `unanalyzed`: `ok` is ABSENT, incomplete:true + the manifest take its place (the agent surface is a channel this rule binds)",
+     !("ok" in ut(2)) && ut(2).incomplete === true && ut(2).unanalyzed?.[0]?.path === "src/broken.ts"
+     && Array.isArray(ut(2).unverified),
+     JSON.stringify(ut(2)).slice(0, 260));
+  ok("⟨0.24⟩ candor_unverified CONTROL: the SAME report without the manifest still carries `ok`, still finds the hole, and has no `incomplete` key",
+     ut(3).ok === false && ut(3).incomplete === undefined && ut(3).unanalyzed === undefined
+     && ut(3).unverified?.[0]?.fn === "app.port",
+     JSON.stringify(ut(3)).slice(0, 260));
+  fs.rmSync(I, { recursive: true, force: true });
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

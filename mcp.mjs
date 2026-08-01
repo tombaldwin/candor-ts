@@ -354,7 +354,11 @@ const TOOLS = {
                  + "case is a fn/closure-injected 'port' — the domain reads as Unknown, so `deny Net domain`/`pure "
                  + "domain` clear it though it may reach Net at runtime. Returns each such function + the `deny <E> "
                  + "Unknown <scope>` upgrade that makes the layer PROVABLY clean. Uses `policy` if given, else the "
-                 + "repo's checked-in .candor/config policy.",
+                 + "repo's checked-in .candor/config policy. ALWAYS CHECK `ok`, never the length of `unverified`: "
+                 + "over a report declaring code candor could NOT analyze, `ok` IS ABSENT and `{incomplete:true, "
+                 + "unanalyzed}` takes its place — a function in an unanalyzed file is missing from the report "
+                 + "entirely, so it cannot be enumerated as an unverified pass, and an empty array there is not "
+                 + "an all-clear (spec §3.2).",
     schema: { type: "object", properties: { policy: { type: "string", description: "path to a §6.2 policy file (optional; defaults to the repo's .candor/config `policy`)" }, ...reportArg }, required: [] },
     run: (a, p) => {
       let text, polPath = a.policy ?? null;
@@ -365,7 +369,12 @@ const TOOLS = {
         if (!cfg) throw new Error("no policy: pass `policy`, or check one into the repo's .candor/config (spec §3.4)");
         text = confinedPolicyRead(cfg.policyPath, p, cfg.repoRoot);
       }
-      return Q.unverified(loadReportLoud(p), policyOrThrow(text, polPath), scopeMatches);
+      // ⟨0.24⟩ SPEC §3.2 — the agent surface is a CHANNEL this verb answers on, and the rule binds every
+      // one of them. `candor_gate` already refuses to read green over `unanalyzed`; this returned
+      // `ok:true` with an empty array over the identical bytes, on the surface an agent trusts and no
+      // human reads. Same `advisoryAnswer` the CLI applies, so the two cannot drift.
+      return Q.advisoryAnswer(Q.unverified(loadReportLoud(p), policyOrThrow(text, polPath), scopeMatches),
+                              Q.reportUnanalyzed(p));
     },
   },
   candor_containment: {

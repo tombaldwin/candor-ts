@@ -328,6 +328,63 @@ function loadOneReport(file, label) {
   return { entries, hardFail: corrupt.length > 0, corrupt };
 }
 
+/**
+ * ⟨0.24⟩ SPEC §3.2 — the `unanalyzed` COMPLETENESS MANIFEST at a prefix, for the ADVISORY verbs, merged
+ * across sibling reports. A SECOND, LENIENT reader beside `loadGateReport`'s, and the leniency is the
+ * point: the gate route is CERTIFYING, so a malformed manifest there is a hard fail that names the key;
+ * these verbs are advisory, and refusing to answer at all is strictly less than the partial answer §3.2
+ * asks for. So it reads silently and never fails a load. (candor-swift `mergeUnanalyzed`, same reasoning.)
+ *
+ * The ELEMENT rule is candor-ts's own gate normalization rather than swift's, deliberately: swift skips a
+ * member with no string `path`, ts's gate normalizes it to `{path:"", reason:""}` and still trips the
+ * incompleteness. Skipping here would make the advisory verb LESS sensitive than the gate over the same
+ * bytes — a report the gate exits 2 on, and `unverified` answers `ok: true` over. That is the exact
+ * under-report this rung exists to close, so the manifest counts an element the moment it is an object.
+ */
+export function reportUnanalyzed(prefix) {
+  const out = [];
+  for (const f of reportFilesAt(prefix)) {
+    let parsed;
+    try { parsed = JSON.parse(fs.readFileSync(f, "utf8")); } catch { continue; }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue; // legacy bare array: no envelope
+    const us = parsed.unanalyzed;
+    if (!Array.isArray(us)) continue;
+    for (const u of us)
+      if (u && typeof u === "object" && !Array.isArray(u))
+        out.push({ path: typeof u.path === "string" ? u.path : "", reason: typeof u.reason === "string" ? u.reason : "" });
+  }
+  return out;
+}
+
+/**
+ * ⟨0.24⟩ SPEC §3.2 — THE OMIT-`ok` RULE, IN ONE PLACE so `unverified`, `fix-gate`, `whatif` and any later
+ * sibling cannot drift apart on it. Over a report declaring `unanalyzed`, an advisory verb emits
+ * `incomplete: true` plus the manifest and **OMITS `ok`**.
+ *
+ * NEITHER BOOLEAN IS HONEST THERE. `ok: true` asserts "nothing here is denied / everything is provably
+ * clean" over a universe the verb knows it cannot see all of — a function in an unparsed file is absent
+ * from `functions`, so it cannot be enumerated at all, and its absence is exactly what the verb would have
+ * to report. `ok: false` would assert "a hole exists, here it is" beside an EMPTY array — the fabrication
+ * mirror, and worse than the silence it replaces. So the field goes: a consumer writing `if (r.ok)` gets a
+ * falsy value and fails safe, one that looks further learns precisely what went unread.
+ *
+ * This is deliberately NOT the refusal document's shape (`ok:false` + `refused:true`, §3.1): there
+ * `ok:false` is TRUE — the gate did not certify — whereas here neither value is. A shape is copied for its
+ * reasoning, not its familiarity. And the GATE keeps its `ok:false` for the same reason; it is not changed
+ * to match.
+ *
+ * `unverified` is the sharpest case in the family — the verb whose entire job is to say "your green gate
+ * is not provably green", certifying a set it knows it cannot see all of. MEASURED on this engine before
+ * the fix: over a report declaring one unparsed unit, `gate --report` exits 2 with the manifest while both
+ * `unverified --strict` and `fix-gate --strict` returned `ok: true` and exit 0 — and `--strict` is how CI
+ * consumes both. Byte-aligned with candor-swift `emitAdvisoryAnswer`.
+ */
+export function advisoryAnswer(body, unanalyzed) {
+  if (!unanalyzed?.length) return body;                 // COMPLETE: unchanged, byte for byte, `ok` and all.
+  const { ok, ...rest } = body;                          // eslint-disable-line no-unused-vars -- omitted BY DESIGN
+  return { ...rest, incomplete: true, unanalyzed };
+}
+
 export function loadReport(prefix) {
   if (fs.existsSync(`${prefix}.json`)) {
     const { entries, hardFail } = loadOneReport(`${prefix}.json`, `${prefix}.json`);

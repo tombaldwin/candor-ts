@@ -43,8 +43,20 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          where as coreWhere, map as coreMap, whatif as coreWhatif,
          fix as coreFix, fixGate as coreFixGate, unverified as coreUnverified,
          matches as coreMatches, gainsCoverage, parseClassFilter, ClassFilterError,
-         loadReport, loadCallgraph, loadGateReport, reportVersion, reportPackage } from "./query-core.mjs";
+         loadReport, loadCallgraph, loadGateReport, reportVersion, reportPackage,
+         reportUnanalyzed, advisoryAnswer } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
+// ⟨0.24⟩ SPEC §3.2 — THE OTHER CHANNEL. `advisoryAnswer` withdraws the claim from the JSON; this withdraws
+// it from the one a human reads, and the spec requires both because a test that reads one channel is
+// evidence about one channel. candor-rust built a mutant that kept the whole JSON fix and deleted only the
+// printed line, and it SURVIVED that engine's entire suite — absence-asserts on `ok` cannot see stderr.
+// candor-java found the same hole independently: `✓ within policy` IS the prose `ok: true`, so removing the
+// JSON field while leaving the sentence standing MOVES the false all-clear rather than removing it.
+const advisoryIncompleteNote = (verb, unanalyzed) => {
+  console.error(`candor-ts: ${verb} could NOT fully evaluate — the report declares ${unanalyzed.length} unit(s) candor could not analyze; a function in an unanalyzed file is absent from \`functions\`, so it cannot be enumerated here at all`);
+  for (const u of unanalyzed) console.error(`    ${u.path}${u.reason ? `  (${u.reason})` : ""}`);
+  console.error(`  (\`ok\` is OMITTED — neither value is a statement this input licenses; \`--strict\` exits 2, the could-not-evaluate code)`);
+};
 // The §6 effect vocabulary — used to reject a typo'd effect name in `where` (corpus-audit #3). Kept in step
 // with SPEC §6 / the umbrella's list; an unknown name PRESENT in a report (a spec extension) is still allowed.
 const KNOWN_EFFECTS = ["Net", "Fs", "Db", "Llm", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Unknown"];
@@ -980,7 +992,17 @@ switch (cmd) {
       console.error(`candor: no function matching \`${target}\` in the call graph`);
       process.exit(2);
     }
-    emit(r);
+    // ⟨0.24⟩ SPEC §3.2 — over a report declaring `unanalyzed`, `ok` is OMITTED (advisoryAnswer). `affected`
+    // is computed over a universe this cannot see all of: a caller in an unparsed file is invisible, so
+    // `true` is a claim the input does not license, and `false` would invent a violation nothing found.
+    // The arrays still ship — a partial answer that says it is partial beats a refusal, and `whatif` is
+    // consulted BEFORE an edit, where the alternative is the operator guessing. The exit is UNCHANGED:
+    // this verb has no `--strict`, §3.2 rules no exit for it, and inventing one is the failure mode the
+    // clause it lives beside exists to prevent.
+    const wunan = reportUnanalyzed(prefix);
+    if (wunan.length)
+      console.error(`candor-ts: whatif is NOT a complete answer — the report declares ${wunan.length} unit(s) candor could not analyze (disclosed under \`unanalyzed\`); \`ok\` is omitted because neither value is a statement the input licenses`);
+    emit(advisoryAnswer(r, wunan));
     process.exit(r.violations.length ? 1 : 0);
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }
@@ -1019,8 +1041,13 @@ switch (cmd) {
     const cg = loadCallgraph(prefix);
     if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix-gate needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
     const fgr = coreFixGate(cg, loadReportOrDie(prefix), loadPolicyOrDie(policyFile, ptext), scopeMatches);
-    emit(fgr);
-    process.exit(strict && !fgr.ok ? 1 : 0);
+    // ⟨0.24⟩ SPEC §3.2 — see `advisoryAnswer`. Over a report declaring `unanalyzed` this OMITS `ok`, adds
+    // the manifest, and `--strict` (the CI form) exits 2 — could-not-fully-evaluate, the same code the gate
+    // uses for the same situation — rather than the 1 that would claim a finding or the 0 that certified.
+    const fgUnan = reportUnanalyzed(prefix);
+    if (fgUnan.length) advisoryIncompleteNote("fix-gate", fgUnan);
+    emit(advisoryAnswer(fgr, fgUnan));
+    process.exit(fgUnan.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
     break; // unreachable
   }
   case "unverified": {
@@ -1048,8 +1075,14 @@ switch (cmd) {
       console.error(`candor-ts: no call-graph sidecar for '${prefix}' and no \`calls\` edges in the report — \`--class\` resolved each hole's reason class from its OWN \`unknownWhy\` only; a hole whose Unknown is INHERITED reads \`unresolved\` here (re-run: candor-ts <src> --out ${prefix})`);
     const r = coreUnverified(ufns, loadPolicyOrDie(policyFile, ptext), scopeMatches,
                              uci >= 0 ? args[uci + 1] : null, ucg);
-    emit(r);
-    process.exit(strict && !r.ok ? 1 : 0);
+    // ⟨0.24⟩ SPEC §3.2 — see `advisoryAnswer`, and this is the SHARPEST case in the family: the verb whose
+    // entire job is "your green gate is not provably green" was certifying a set it knows it cannot see all
+    // of. A function in an unparsed file is absent from `functions`, so it cannot be enumerated as an
+    // unverified pass — and that absence is exactly what this verb would have to report.
+    const uUnan = reportUnanalyzed(prefix);
+    if (uUnan.length) advisoryIncompleteNote("unverified", uUnan);
+    emit(advisoryAnswer(r, uUnan));
+    process.exit(uUnan.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
     break; // unreachable
   }
   case "gate": {

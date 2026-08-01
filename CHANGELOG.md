@@ -8,6 +8,45 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [Unreleased]
 
+**⚠ ⟨0.24⟩ THE ADVISORY VERBS CERTIFIED A REPORT THEY KNEW THEY COULD NOT SEE ALL OF — `ok` is now OMITTED
+over an incomplete report** (SPEC §3.2 `0075987` / `ec1a441`). `gate --report` has refused to read green
+over a declared `unanalyzed` manifest since ⟨0.21⟩. `unverified`, `fix-gate` and `whatif` read the same
+bytes and answered `ok: true` with an empty array, at exit 0, with no disclosure on any channel — and
+`--strict` is how CI consumes the first two:
+
+    over a report declaring `unanalyzed`:
+      gate --report        exit 2, incomplete, manifest        <- correct
+      unverified --strict  exit 0, ok:true, no disclosure
+      fix-gate  --strict   exit 0, ok:true, no disclosure
+      whatif               ok present, no disclosure
+
+`unverified` is the sharpest case in the family: it is the verb that exists to say *"your green gate is not
+provably green"*. A function in an unparsed file is absent from `functions` altogether, so it cannot be
+enumerated as an unverified pass — and that absence is exactly what the verb would have to report.
+
+**Neither boolean is honest, so the field goes.** `ok: true` asserts a claim the input does not license;
+`ok: false` would assert *"a hole exists, here it is"* beside an EMPTY array — the fabrication mirror, and
+worse than the silence it replaces. An advisory verb over an incomplete report now emits `incomplete: true`
+plus the `unanalyzed` manifest, **omits `ok`**, and `--strict` exits **2** (could-not-fully-evaluate, the
+gate's code for the same situation). A consumer writing `if (r.ok)` gets a falsy value and fails safe; one
+that looks further learns exactly what went unread. Deliberately NOT the refusal document's shape
+(`ok:false` + `refused:true`): there `ok:false` is *true* — the gate did not certify — whereas here neither
+value is. The gate keeps its `ok:false` and is not changed to match.
+
+**The disclosure reaches every channel each verb answers on**, which is the half a test suite cannot see:
+candor-rust built a mutant that kept the whole JSON fix and deleted only the printed human line, and it
+survived that engine's entire suite, because absence-asserts on `ok` cannot see stderr. So the CLI prints
+the withdrawal too, and **MCP `candor_unverified`** — the surface an agent trusts and no human reads — goes
+through the same shared `advisoryAnswer`, with its tool description updated to say that an empty
+`unverified` array beside an absent `ok` is not an all-clear. Without `--strict` these verbs stay advisory
+at exit 0: the agent fix-loop reads the body, and reddening its exit would be a different change.
+
+The manifest reader for these verbs is deliberately LENIENT where the gate's is loud — the gate is
+certifying, so a malformed manifest there is a hard fail that names the key, while refusing to answer at
+all here is strictly less than the partial answer §3.2 asks for. Its ELEMENT rule is candor-ts's own gate
+normalization rather than candor-swift's: an element that is an object counts, even with no usable `path`,
+so the advisory verb can never be LESS sensitive to incompleteness than the gate over the same bytes.
+
 **⚠ ⟨0.24⟩ `fix-gate` AND `unverified` NEVER READ THE RULE'S `Unknown[…]`/`Net[…]` CLASS FILTER — the
 over-charge and its silent mirror, closed together** (SPEC §6.2: "THE GATE AND THE DISCLOSURE MUST APPLY
 THE SAME RULE, AND SHOULD SHARE THE SAME CODE"). Both verbs computed from the EFFECT SET ALONE, two rungs

@@ -8650,5 +8650,100 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.24⟩ THE OMIT-`ok` RULE, ON EVERY ADVISORY VERB THAT ANSWERS `ok` (SPEC §3.2) ─────────────────
+// `gate --report` has refused to read green over a declared `unanalyzed` manifest since ⟨0.21⟩.
+// `unverified`, `fix-gate` and `whatif` read the SAME bytes and answered `ok: true` with an empty array,
+// exit 0, no disclosure on any channel — and `--strict` is how CI consumes the first two.
+//
+//   gate --report        exit 2, incomplete, manifest        <- correct
+//   unverified --strict  exit 0, ok:true, no disclosure
+//   fix-gate  --strict   exit 0, ok:true, no disclosure
+//
+// `unverified` is the sharpest case in the family: the verb that exists to say "your green gate is not
+// provably green", certifying a set it knows it cannot see all of. A function in an unparsed file is
+// ABSENT from `functions`, so it cannot be enumerated as an unverified pass at all — and that absence is
+// exactly what the verb would have to report.
+//
+// NEITHER BOOLEAN IS HONEST, so the field goes: `true` asserts a claim the input does not license, and
+// `false` would assert "a hole exists, here it is" beside an EMPTY array — the fabrication mirror. The
+// assertions below check ABSENCE (`"ok" in j`), never falsiness: `ok:false` would satisfy a `!j.ok` test
+// while being the invention the rule exists to forbid.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-advisory-inc-"));
+  const W = (n, o) => fs.writeFileSync(path.join(d, n), typeof o === "string" ? o : JSON.stringify(o));
+  const J = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
+  const env = (extra) => ({ candor: { version: "ttttttt", spec: "0.23" }, ...extra,
+    functions: [{ fn: "app.svc", inferred: ["Unknown"], direct: ["Unknown"],
+                  unknownWhy: ["dispatch:x"], calls: [], loc: "s.ts:1" }] });
+  const MANIFEST = [{ path: "src/broken.ts", reason: "source failed to parse" }];
+  W("inc.json", env({ unanalyzed: MANIFEST }));           // declares one unit it could not analyze
+  W("cmp.json", env({}));                                  // the SAME report, complete — the mirror
+  W("inc.callgraph.json", { "app.svc": [] });
+  W("cmp.callgraph.json", { "app.svc": [] });
+  W("p.policy", "deny Net app\n");
+  const POL = path.join(d, "p.policy");
+  const run = (verb, pfx, ...extra) => {
+    const r = runQuery(verb, "--report", path.join(d, pfx), "--policy", POL, ...extra);
+    return { s: r.status, j: J(r), err: r.stderr };
+  };
+
+  // THE ORACLE: the gate over the identical manifest. Every row below is measured against it.
+  const g = runQuery("gate", "--report", path.join(d, "inc"), "--policy", POL, "--json");
+  check("⟨0.24⟩ advisory `ok`: the ORACLE — `gate --report` over the same bytes exits 2, incomplete, with the manifest",
+        g.status === 2 && J(g)?.incomplete === true && J(g)?.unanalyzed?.[0]?.path === "src/broken.ts",
+        `status=${g.status} ${g.stdout.slice(0, 200)}`);
+
+  const uInc = run("unverified", "inc", "--strict"), fInc = run("fix-gate", "inc", "--strict");
+  check("⟨0.24⟩ `unverified --strict` over an incomplete report OMITS `ok`, emits incomplete+manifest, exits 2 — the verb whose job is 'your green gate is not provably green' had been certifying it",
+        uInc.s === 2 && !("ok" in (uInc.j ?? { ok: 1 })) && uInc.j?.incomplete === true
+          && uInc.j?.unanalyzed?.[0]?.path === "src/broken.ts" && Array.isArray(uInc.j?.unverified),
+        `status=${uInc.s} ${JSON.stringify(uInc.j)}`);
+  check("⟨0.24⟩ `fix-gate --strict` over an incomplete report does the same (the rule binds every advisory sibling, not the verb its defect was found in)",
+        fInc.s === 2 && !("ok" in (fInc.j ?? { ok: 1 })) && fInc.j?.incomplete === true
+          && fInc.j?.unanalyzed?.[0]?.reason === "source failed to parse" && Array.isArray(fInc.j?.remedies),
+        `status=${fInc.s} ${JSON.stringify(fInc.j)}`);
+  // `whatif` is where the rule was first ruled (`0075987`) and it was never implemented here either. Its
+  // ARRAYS still ship — a partial answer that says it is partial beats a refusal, and `whatif` is consulted
+  // BEFORE an edit, where the alternative is the operator guessing.
+  const w = runQuery("whatif", "--report", path.join(d, "inc"), "--policy", POL, "app.svc", "Net");
+  const wj = J(w);
+  check("⟨0.24⟩ `whatif` over an incomplete report OMITS `ok` too, and its `affected`/`violations` arrays still ship",
+        !("ok" in (wj ?? { ok: 1 })) && wj?.incomplete === true && Array.isArray(wj?.affected)
+          && Array.isArray(wj?.violations) && wj?.unanalyzed?.length === 1,
+        `status=${w.status} ${JSON.stringify(wj)}`);
+
+  // THE MIRROR, and the one that guards against the fix eating the ordinary case: a COMPLETE report is
+  // UNCHANGED, byte for byte — `ok` present, `--strict` exit follows it, no `incomplete`/`unanalyzed` key.
+  const uCmp = run("unverified", "cmp", "--strict"), fCmp = run("fix-gate", "cmp", "--strict");
+  const wCmp = J(runQuery("whatif", "--report", path.join(d, "cmp"), "--policy", POL, "app.svc", "Net"));
+  check("⟨0.24⟩ MIRROR — a COMPLETE report still carries `ok` on all three verbs, with no `incomplete`/`unanalyzed` key (a pre-⟨0.24⟩ consumer's document is untouched)",
+        "ok" in (uCmp.j ?? {}) && uCmp.j.incomplete === undefined && uCmp.j.unanalyzed === undefined
+          && "ok" in (fCmp.j ?? {}) && fCmp.j.incomplete === undefined
+          && "ok" in (wCmp ?? {}) && wCmp.incomplete === undefined,
+        `uv=${JSON.stringify(uCmp.j)} fg=${JSON.stringify(fCmp.j)} whatif=${JSON.stringify(wCmp)}`);
+  check("⟨0.24⟩ MIRROR — and on the complete report `--strict` still follows `ok` (exit 1 on a finding, 0 on none): the incompleteness arm did not swallow the ordinary exit contract",
+        uCmp.s === 1 && uCmp.j.ok === false && uCmp.j.unverified.length === 1 && fCmp.s === 0 && fCmp.j.ok === true,
+        `uv=${uCmp.s}/${JSON.stringify(uCmp.j)} fg=${fCmp.s}/${JSON.stringify(fCmp.j)}`);
+  // ADVISORY BY DEFAULT is preserved: without `--strict` these verbs still exit 0 (the agent fix-loop reads
+  // the body). The DOCUMENT still discloses — the exit code is not the disclosure.
+  const uAdv = run("unverified", "inc"), fAdv = run("fix-gate", "inc");
+  check("⟨0.24⟩ without `--strict` the advisory verbs still exit 0 over an incomplete report — and the document still discloses (the exit code was never the disclosure)",
+        uAdv.s === 0 && uAdv.j?.incomplete === true && fAdv.s === 0 && fAdv.j?.incomplete === true,
+        `uv=${uAdv.s} fg=${fAdv.s}`);
+
+  // THE OTHER CHANNEL — the half a suite cannot see by construction. candor-rust built a mutant that kept
+  // the whole JSON fix and deleted only the printed line, and it SURVIVED that engine's entire suite,
+  // because absence-asserts on `ok` cannot see stderr. A verb with two output channels needs the claim
+  // withdrawn from BOTH, so the printed withdrawal is asserted here as its own row.
+  check("⟨0.24⟩ THE OTHER CHANNEL: the printed line withdraws the claim too, names the count and the unit, and says `ok` was omitted — a test that reads one channel is evidence about one channel",
+        /could NOT fully evaluate/.test(uInc.err) && /src\/broken\.ts/.test(uInc.err) && /`ok` is OMITTED/.test(uInc.err)
+          && /could NOT fully evaluate/.test(fInc.err) && /src\/broken\.ts/.test(fInc.err),
+        `uv=${JSON.stringify(uInc.err.slice(0, 300))} fg=${JSON.stringify(fInc.err.slice(0, 200))}`);
+  check("⟨0.24⟩ …and its MIRROR on that channel: a COMPLETE report prints no withdrawal (the note fires on the condition, not on every run)",
+        !/could NOT fully evaluate/.test(uCmp.err) && !/could NOT fully evaluate/.test(fCmp.err),
+        `uv=${JSON.stringify(uCmp.err.slice(0, 200))}`);
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
