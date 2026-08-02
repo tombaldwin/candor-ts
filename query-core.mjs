@@ -696,13 +696,37 @@ export const byCodePoint = (a, b) => {
 };
 
 // Reflexive+transitive subtype test over the hierarchy sidecar.
-function isSubtypeOf(type, owner, hierarchy) {
-  if (type === owner) return true;
+//
+// ⟨0.26⟩ THREE-VALUED, because the format now distinguishes what it could not before. SPEC §2.2 makes the
+// KEY SET the manifest: a producer emits a key for every type it indexed, `[]` included, so a type with NO
+// key is one the pass never looked at. `hierarchy[t] ?? []` read those two cases alike and answered
+// `false` — a positive claim about a type nobody analysed.
+//
+// MEASURED before the rung, doctoring only the sidecar of a real scan: removing the REACHING implementor's
+// entry silently dropped the dispatcher from `possibleViaUnknownDispatch` (`[]` where the control gives
+// `[Dispatcher.run]`), while removing the sidecar ENTIRELY left it correct — the ⟨0.24⟩ per-file rule
+// over-lists. LESS information was SAFER than partial information. candor-java behaved identically, which
+// is what said the defect was the FORMAT rather than either consumer.
+//
+// A POSITIVE DOMINATES: if a known path reaches `owner` the answer is YES even when another branch ran
+// into an unindexed type — the relation is established and an unknown branch cannot un-establish it. NO is
+// reserved for a walk that stayed entirely inside types the sidecar answers for.
+function subtypeOf(type, owner, hierarchy) {
+  if (type === owner) return "YES";
+  let sawUnindexed = false;
   const seen = new Set(), stack = [type];
   while (stack.length) {
-    for (const s of hierarchy[stack.pop()] ?? []) { if (s === owner) return true; if (!seen.has(s)) { seen.add(s); stack.push(s); } }
+    const cur = stack.pop();
+    if (!Object.prototype.hasOwnProperty.call(hierarchy, cur)) { sawUnindexed = true; continue; }
+    for (const s of hierarchy[cur]) { if (s === owner) return "YES"; if (!seen.has(s)) { seen.add(s); stack.push(s); } }
   }
-  return false;
+  return sawUnindexed ? "UNANSWERABLE" : "NO";
+}
+
+// The two-valued form. UNANSWERABLE collapses to TRUE — disclose, never drop — which is the direction
+// §2.2 ⟨0.26⟩ requires and the opposite of what absence used to do.
+function isSubtypeOf(type, owner, hierarchy) {
+  return subtypeOf(type, owner, hierarchy) !== "NO";
 }
 
 // callers + the unresolved-dispatch frontier (--include-unknown, SPEC §3.1/§4 0.7): the CONFIRMED set,

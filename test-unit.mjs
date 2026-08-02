@@ -879,7 +879,10 @@ test("loadHierarchy → callersFrontier: a loaded sidecar actually drives the su
   // The wiring pin: hierarchy from DISK (not a hand object) rules the unrelated dispatch out and the
   // genuine override in — the loader and the frontier agree on shape.
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
-  fs.writeFileSync(path.join(d, "r.hierarchy.json"), JSON.stringify({ "m.Impl": ["m.Base"] }));
+  // ⟨0.26⟩ `m.Base` carries its OWN key with an empty array. §2.2 makes the key set the manifest, so the
+  // root is not optional bookkeeping: without it the walk reaches an unindexed type and must answer
+  // UNANSWERABLE. See the pre-rung test below for what that costs.
+  fs.writeFileSync(path.join(d, "r.hierarchy.json"), JSON.stringify({ "m.Impl": ["m.Base"], "m.Base": [] }));
   const hier = loadHierarchy(path.join(d, "r"));
   const cg = { "m.Impl.run": ["m.Sink.touch"], "m.Sink.touch": [], "m.Go.go": [] };
   const fns = [{ fn: "m.Go.go", unknownWhy: ["dispatch:m.Base.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
@@ -897,7 +900,7 @@ test("loadHierarchy → callersFrontier: a DOT-FREE dispatch detail is disclosed
   // where the drop was seen. The controls (no-reason fn, unrelated-owner fn) are what prove the widening
   // is not a blanket.
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
-  fs.writeFileSync(path.join(d, "r.hierarchy.json"), JSON.stringify({ "m.Impl": ["m.Base"] }));
+  fs.writeFileSync(path.join(d, "r.hierarchy.json"), JSON.stringify({ "m.Impl": ["m.Base"], "m.Base": [] }));  // ⟨0.26⟩ root key
   const hier = loadHierarchy(path.join(d, "r"));
   const cg = { "m.Impl.handle": ["m.Sink.touch"], "m.Sink.touch": [], "m.Dotted.go": [], "m.Untyped.go": [], "m.Unrelated.go": [], "m.NoReason.go": [] };
   const raw = "untyped cross-package receiver";   // candor-rust's dot-free detail
@@ -939,7 +942,7 @@ test("loadHierarchy → callersFrontier: ABSENT ≡ EMPTY sidecar, and neither c
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
   fs.writeFileSync(path.join(d, "empty.hierarchy.json"), "{}");
   const absent = loadHierarchy(path.join(d, "nosuch")), empty = loadHierarchy(path.join(d, "empty"));
-  fs.writeFileSync(path.join(d, "full.hierarchy.json"), JSON.stringify({ "m.Impl": ["m.Base"] }));
+  fs.writeFileSync(path.join(d, "full.hierarchy.json"), JSON.stringify({ "m.Impl": ["m.Base"], "m.Base": [] }));  // ⟨0.26⟩ root key
   const full = loadHierarchy(path.join(d, "full"));
   const cg = { "m.Impl.handle": ["m.Sink.touch"], "m.Sink.touch": [], "m.Ok.go": [], "m.Unrelated.go": [] };
   const fns = [
@@ -969,7 +972,7 @@ test("loadHierarchy → callersFrontier: a METADATA key cannot narrow the fronti
   // NO-CHANGE DIRECTION FIRST. A real type beside the metadata key: the subtype test still rules the
   // unrelated owner out and admits the genuine override, exactly as without the metadata key.
   fs.writeFileSync(path.join(d, "both.hierarchy.json"),
-    JSON.stringify({ "m.Impl": ["m.Base"], "@superclass": { "m.Impl": "m.Base" } }));
+    JSON.stringify({ "m.Impl": ["m.Base"], "m.Base": [], "@superclass": { "m.Impl": "m.Base" } }));  // ⟨0.26⟩ root key
   const both = loadHierarchy(path.join(d, "both"));
   assert.deepEqual(callersFrontier(cg, unrelated, both, "m.Sink.touch").possibleViaUnknownDispatch, []);
   assert.deepEqual(callersFrontier(cg, genuine, both, "m.Sink.touch").possibleViaUnknownDispatch,
@@ -986,6 +989,60 @@ test("loadHierarchy → callersFrontier: a METADATA key cannot narrow the fronti
   assert.deepEqual(callersFrontier(cg, unrelated, meta, "m.Sink.touch").possibleViaUnknownDispatch,
     [{ fn: "m.Go.go", viaDispatchOn: "run" }]);
   fs.rmSync(d, { recursive: true, force: true });
+});
+test("callersFrontier: an UNINDEXED type on the walk is UNANSWERABLE, not NO ⟨0.26⟩", () => {
+  // §2.2 ⟨0.26⟩: the sidecar's KEY SET is its manifest. A type WITH a key was indexed (`[]` = "indexed,
+  // no supertypes", a real answer); a type with NO key was never looked at, and no claim about it is
+  // available. `hierarchy[t] ?? []` read those two alike and returned FALSE for both — a purity-shaped
+  // claim about a type nobody analysed, which here silently removes a reacher from a disclosure.
+  //
+  // The three arms are the point. PARTIAL must not beat ABSENT: it was measured doing exactly that.
+  const cg = { "m.Impl.run": ["m.Sink.touch"], "m.Sink.touch": [], "m.Go.go": [] };
+  const fns = [{ fn: "m.Go.go", unknownWhy: ["dispatch:m.Base.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
+  const at = (h) => callersFrontier(cg, fns, h, "m.Sink.touch").possibleViaUnknownDispatch;
+  const expected = [{ fn: "m.Go.go", viaDispatchOn: "run" }];
+
+  // The hierarchy is deliberately TWO levels — `m.Impl` → `m.Mid` → `m.Base`. A one-level fixture cannot
+  // see this defect at all: the walk hits `owner` as an immediate supertype and returns YES before it
+  // ever reaches an unindexed type, so both the old and new code pass it. (Written flat first; it stayed
+  // green against a restored `?? []`, which is what said the fixture, not the code, was wrong.) The gap
+  // must be IN the path.
+  //
+  // COMPLETE sidecar: every type on the walk is indexed and the chain reaches `m.Base` — YES, disclosed.
+  assert.deepEqual(at({ "m.Impl": ["m.Mid"], "m.Mid": ["m.Base"], "m.Base": [] }), expected);
+  // PARTIAL sidecar: `m.Impl` is indexed and names `m.Mid`, but `m.Mid` was never indexed, so the chain
+  // beyond it is unreadable and the relation cannot be ruled out. UNANSWERABLE → disclose. Pre-⟨0.26⟩
+  // this arm returned `[]` — the reacher vanished because a type nobody analysed was read as "no supers".
+  assert.deepEqual(at({ "m.Impl": ["m.Mid"] }), expected);
+  // ABSENT sidecar: the documented over-listing fallback. Partial information must not be WORSE than
+  // none, so this arm and the partial arm agree — which is the invariant the defect broke.
+  assert.deepEqual(at({ "m.Impl": ["m.Mid"] }), at({}));
+
+  // THE NEGATIVE CONTROL, so the widening is not a blanket "always disclose". Here every type the walk
+  // touches IS indexed, and the chain ends without reaching `m.Base` — a complete NO, and the reacher
+  // drops out. Without this row the tri-state would pass by answering YES to everything.
+  assert.deepEqual(at({ "m.Impl": ["m.Mid"], "m.Mid": [], "m.Base": [] }), []);
+  // And the shortest complete NO: an indexed type with no supertypes at all.
+  assert.deepEqual(at({ "m.Impl": [], "m.Base": [] }), []);
+
+  // A POSITIVE DOMINATES an unknown branch. `m.Impl` reaches `m.Base` down one arm and an unindexed type
+  // down another; the established relation is not weakened by the branch nobody analysed, so this is YES
+  // (disclose) for a REASON — not by falling through to the unanswerable rule.
+  assert.deepEqual(at({ "m.Impl": ["m.Base", "m.Unseen"], "m.Base": [] }), expected);
+});
+test("callersFrontier: a PRE-RUNG sidecar over-lists rather than dropping silently ⟨0.26⟩", () => {
+  // The adoption cost, stated as a test so it is a known price and not a surprise. A sidecar written by a
+  // producer older than ⟨0.26⟩ omits keys for supertypeless types, so walks run off the indexed set and
+  // this consumer answers UNANSWERABLE where the old one answered NO. That is a WIDENING of a disclosure
+  // that is explicitly allowed to over-list — the safe direction — and it is the reason the rung needed a
+  // format change rather than a consumer-only patch: without the manifest, the consumer cannot tell a
+  // producer's silence from its answer.
+  const cg = { "m.Impl.run": ["m.Sink.touch"], "m.Sink.touch": [], "m.Go.go": [] };
+  // An UNRELATED dispatch owner: under a complete sidecar this is a confident NO and drops out.
+  const unrelated = [{ fn: "m.Go.go", unknownWhy: ["dispatch:m.Elsewhere.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
+  const at = (h) => callersFrontier(cg, unrelated, h, "m.Sink.touch").possibleViaUnknownDispatch;
+  assert.deepEqual(at({ "m.Impl": ["m.Mid"], "m.Mid": [] }), []);                          // ⟨0.26⟩ producer
+  assert.deepEqual(at({ "m.Impl": ["m.Mid"] }), [{ fn: "m.Go.go", viaDispatchOn: "run" }]);  // pre-rung
 });
 
 // ── query-core: blindspots ranking over real unknownWhy sources (the ⟨0.6⟩ shape) ──────────────────

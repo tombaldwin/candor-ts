@@ -4329,7 +4329,7 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
 {
   const cg = { "m.Impl.run": ["m.Sink.touch"], "m.Sink.touch": [], "m.Frontier.go": [] };
   const fns = [{ fn: "m.Frontier.go", unknownWhy: ["dispatch:m.Base.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
-  const hier = { "m.Impl": ["m.Base"] }; // Impl <: Base
+  const hier = { "m.Impl": ["m.Base"], "m.Base": [] }; // Impl <: Base; ⟨0.26⟩ the root carries its own key
   const r = callersFrontier(cg, fns, hier, "m.Sink.touch");
   check("frontier: a dispatch:Base.run is disclosed when a confirmed reacher overrides Base.run",
         r.transitive.includes("m.Impl.run")
@@ -4351,7 +4351,7 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
 // the dropped one. The CONTROLS below are what separate this fix from a blanket "disclose everything". ──
 {
   const cg = { "m.Impl.handle": ["m.Sink.touch"], "m.Sink.touch": [], "m.Dotted.go": [], "m.Untyped.go": [], "m.Unrelated.go": [], "m.NoReason.go": [] };
-  const hier = { "m.Impl": ["m.Base"] }; // Impl <: Base
+  const hier = { "m.Impl": ["m.Base"], "m.Base": [] }; // Impl <: Base; ⟨0.26⟩ the root carries its own key
   const fns = [
     { fn: "m.Impl.handle", unknownWhy: [] },
     { fn: "m.Dotted.go", unknownWhy: ["dispatch:m.Base.handle"] },                   // dotted, condition (3) HOLDS
@@ -4503,7 +4503,7 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
 // half is what proves the entry is present, is class `dispatch`, and is nonetheless kept out.
 {
   const cg = { "m.Impl.run": ["m.Sink.touch"], "m.Sink.touch": [], "m.Dotted.go": [], "m.Ambig.go": [], "m.Banana.go": [] };
-  const hier = { "m.Impl": ["m.Base"] }; // Impl <: Base
+  const hier = { "m.Impl": ["m.Base"], "m.Base": [] }; // Impl <: Base; ⟨0.26⟩ the root carries its own key
   const fns = [
     { fn: "m.Impl.run", inferred: [], unknownWhy: [] },
     { fn: "m.Dotted.go", inferred: ["Unknown"], unknownWhy: ["dispatch:m.Base.run"] },  // kind dispatch, class dispatch

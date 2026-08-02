@@ -4909,7 +4909,13 @@ for (const sf of sources) {
           supers.push(d && d.name ? `${moduleOf(d.getSourceFile())}.${namespacePrefixOf(d)}${d.name.getText()}` : t.expression.getText());
         }
       }
-      if (supers.length) hierarchy[`${mod}.${namespacePrefixOf(node)}${node.name.getText()}`] = supers;
+      // ⟨0.26⟩ A KEY FOR EVERY TYPE INDEXED, `[]` INCLUDED — the key set IS the manifest (SPEC §2.2).
+      // This was `if (supers.length)`, so a type with no supertypes was OMITTED and absence meant BOTH
+      // "no supertypes" and "never indexed". Measured: removing one entry from a real sidecar silently
+      // dropped a `callers --include-unknown` frontier row, while removing the sidecar ENTIRELY left it
+      // correct — so LESS information was SAFER than partial information. §2.2's own example has always
+      // shown `"app.Base": []`; this producer contradicted it.
+      hierarchy[`${mod}.${namespacePrefixOf(node)}${node.name.getText()}`] = supers;
     }
     ts.forEachChild(node, walk);
   })(sf);
