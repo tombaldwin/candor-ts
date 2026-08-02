@@ -6,6 +6,25 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## Unreleased — ⟨spec 0.26⟩
+
+### ⟨0.26⟩ THE HIERARCHY SIDECAR'S KEY SET IS ITS MANIFEST — both halves
+
+SPEC §2.2 `caeda66`. PRODUCER: `scan.mjs` no longer gates on `if (supers.length)`, so every type the
+pass indexed gets a key, `[]` included — 16 keys for a 16-type fixture where three supertypeless ones were
+simply missing. CONSUMER: `query-core.mjs`'s `subtypeOf` is three-valued; a walk that runs off the indexed
+set is UNANSWERABLE and discloses rather than dropping.
+
+MEASURED on a real scan with only the sidecar doctored: removing the REACHING implementor's entry gave
+`[]` where the control gives `[Dispatcher.run]`, while removing the sidecar ENTIRELY left it correct.
+Partial information was worse than none — which is why this needed a format change and not a consumer
+patch. `loadHierarchy` needed nothing: it already DROPS `@`-prefixed and non-array values rather than
+coercing them, so the new `@unanalyzed` diagnostic is ignored and a garbled entry becomes absent →
+unanswerable → over-list.
+
+Seven pre-rung fixtures across both suites now carry the root's `[]`. The adoption cost is pinned as its
+own test: a pre-rung sidecar WIDENS a disclosure that is explicitly allowed to over-list.
+
 ## [0.25.0] — 2026-08-02
 
 ⟨spec 0.25⟩ **Floor bump only — no behaviour change in this engine.** SPEC §2 chaining rule 1 now states
@@ -13,7 +32,6 @@ that an ambiguous join key is UNIONED rather than dropped; this engine already i
 (conformance PARTs 25/26 pin it four-way), so 0.25 records the contract catching up with the code. See
 candor-spec/CHANGELOG.md for the measurement and the reversal note.
 
-## [Unreleased]
 
 **⚠ ⟨0.24⟩ AN ADVISORY VERB MAY BE LESS CERTAIN THAN THE GATE, NEVER MORE — `unverified` AND `fix-gate`
 ANSWERED FROM A FALLBACK DERIVATION WHERE `gate --report` REFUSED** (SPEC §3.2 `4fd140c`, pinned by
