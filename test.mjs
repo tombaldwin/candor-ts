@@ -1442,7 +1442,7 @@ export function place(db: DatabaseSync): void { save(db); }`,
   check("--gate-json + violation still exits 1", r.status === 1, `status=${r.status}`);
   let v = null;
   try { v = JSON.parse(fs.readFileSync(gp, "utf8")); } catch { /* null → checks fail with raw */ }
-  check("--gate-json verdict declares spec 0.24", v?.spec === "0.24", JSON.stringify(v)?.slice(0, 120));
+  check("--gate-json verdict declares spec 0.25", v?.spec === "0.25", JSON.stringify(v)?.slice(0, 120));
   check("--gate-json verdict ok:false on a failing gate", v?.ok === false, `ok=${v?.ok}`);
   const viol = v?.violations?.find((x) => x.fn === "src.domain.place");
   check("--gate-json names the violating fn with its rule", viol?.rule === "AS-EFF-006", JSON.stringify(v?.violations)?.slice(0, 160));
@@ -6132,7 +6132,7 @@ export function z(): void { readFileSync("/etc/z"); }`;
 //   FORM. The old detector was `/spec 0\.2[0-3]\b/` — a SPACE. README's envelope row writes
 //   `spec: "0.23"`, with a colon and quotes, so the stale string walked straight past a check whose
 //   whole job was catching it. The separator is now any 1-4 of quote/colon/space/hyphen, which covers
-//   `spec 0.24`, `spec: "0.24"`, `spec-0.24` and `candor-spec 0.24` (package.json's npm description —
+//   `spec 0.25`, `spec: "0.24"`, `spec-0.24` and `candor-spec 0.25` (package.json's npm description —
 //   the most externally visible copy of all, and the one that shipped to the registry stale).
 //   Deliberately NOT `[^0-9A-Za-z]`: that class matches the `§` in a lowercase `spec §6.1`, turning a
 //   section reference into the version "6.1".
@@ -7725,7 +7725,7 @@ export function all(db: DatabaseSync, o: any) {
   const j = gateCli("--report", R, "--policy", P, "--json");
   let jv = null; try { jv = JSON.parse(j.stdout); } catch { /* below */ }
   check("gate --report: `--json` puts the VERDICT on stdout as pure JSON (prose routed to stderr)",
-        jv !== null && jv.spec === "0.24" && jv.ok === true && Array.isArray(jv.violations), j.stdout.slice(0, 300));
+        jv !== null && jv.spec === "0.25" && jv.ok === true && Array.isArray(jv.violations), j.stdout.slice(0, 300));
   const gj = gateCli("--report", R, "--policy", P, "--gate-json", "-");
   check("gate --report: `--gate-json -` writes the SAME document to stdout — the two spellings are one flag",
         gj.stdout === j.stdout, `${gj.stdout.slice(0, 200)} vs ${j.stdout.slice(0, 200)}`);

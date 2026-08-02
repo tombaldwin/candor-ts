@@ -6,6 +6,13 @@ CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
+## [0.25.0] — 2026-08-02
+
+⟨spec 0.25⟩ **Floor bump only — no behaviour change in this engine.** SPEC §2 chaining rule 1 now states
+that an ambiguous join key is UNIONED rather than dropped; this engine already implemented the union
+(conformance PARTs 25/26 pin it four-way), so 0.25 records the contract catching up with the code. See
+candor-spec/CHANGELOG.md for the measurement and the reversal note.
+
 ## [Unreleased]
 
 **⚠ ⟨0.24⟩ AN ADVISORY VERB MAY BE LESS CERTAIN THAN THE GATE, NEVER MORE — `unverified` AND `fix-gate`
