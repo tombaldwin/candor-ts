@@ -1496,3 +1496,33 @@ test("⟨0.24⟩ the prefix readers agree: loadGateReport and reportJudgedNothin
   fs.rmSync(D, { recursive: true, force: true });
   fs.rmSync(M, { recursive: true, force: true });
 });
+
+// ── SOURCE HYGIENE ────────────────────────────────────────────────────────────────────────────────
+test("no shipped .mjs holds a raw NUL byte (it makes the file INVISIBLE to grep)", async () => {
+  // A RAW NUL MAKES A FILE BINARY TO grep, WHICH REPORTS NO MATCHES AND EXITS 1.
+  //
+  // Found live in `query-core.mjs` (101KB, one NUL at offset 80998, a template-literal key separator
+  // `${r.raw}<NUL>${eff}`): `grep -c Hierarchy query-core.mjs` printed nothing and exited 1, so a search
+  // over candor-ts silently SKIPPED its largest query module and read as "not here". It was found only by
+  // accident, while looking for `callersFrontier` — which sits at line 745 of the file grep would not show.
+  //
+  // The failure mode is the one that hides itself: the search that would have found the answer comes back
+  // empty. candor-java carries this guard as `SourceHygieneTest.noMainSourceFileHoldsARawNulByte` after the
+  // identical defect in `Policy.java`; candor-ts had the defect before and no guard, so it came back.
+  // Write the `\0` ESCAPE instead — it compiles to the identical string.
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const offenders = [];
+  let scanned = 0;
+  for (const f of fs.readdirSync(here)) {
+    if (!f.endsWith(".mjs")) continue;
+    scanned++;
+    if (fs.readFileSync(path.join(here, f)).includes(0)) offenders.push(f);
+  }
+  // The control: a guard that walked an empty tree would pass just as loudly.
+  assert.ok(scanned > 5, `scanned only ${scanned} .mjs files — the guard proved nothing`);
+  assert.deepEqual(offenders, [],
+    `these hold a raw NUL, so grep treats them as BINARY and reports no matches for anything in them — ` +
+    `write the \\0 escape, which compiles to the identical string: ${offenders.join(", ")}`);
+});

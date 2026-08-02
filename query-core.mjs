@@ -1236,7 +1236,7 @@ export function narrowingContext(fns, cg = {}, policyParsed = null) {
           const u = byRaw.get(r.raw);
           if (!u) continue;                                  // unreachable: every held triple has a group
           const cur = heldByFn.get(f.fn) ?? new Map();
-          cur.set(`${r.raw} ${eff}`, { fn: f.fn, rule: r.raw, effect: eff, why: u.why });
+          cur.set(`${r.raw}\0${eff}`, { fn: f.fn, rule: r.raw, effect: eff, why: u.why });
           heldByFn.set(f.fn, cur);
         }
   return {
