@@ -4371,9 +4371,13 @@ for (const [name, rec] of fns) {
     hash: `${pkgName}#${rec.local}`, // SPEC §2: the cross-package join key (package + local tail)
     inferred: inf,
     direct: [...rec.direct].sort(),
-    declared: [],
-    undeclared: [],
-    overdeclared: [],
+    // ⟨0.26⟩ `declared`/`undeclared`/`overdeclared` are DELIBERATELY ABSENT. They are the §5
+    // capability-reconciliation outputs and this engine runs no such pass, so emitting `[]` would be a
+    // positive claim — `undeclared: []` reads as "this function performs no undeclared effect", an
+    // AS-EFF-001 all-clear from a check that never ran. SPEC §2 ⟨0.26⟩: present means the pass ran,
+    // absent means it did not, and `[]` from an engine that computed nothing is forbidden.
+    // They were emitted as hardcoded constants "for cross-engine schema parity" — a schema-parity check
+    // is exactly what made that look conforming, which is why the rule now forbids requiring them.
     unresolved: inf.includes("Unknown"),
   };
   // Inline call edges (§2 `calls`) — the SAME edges the callgraph sidecar carries, embedded per entry so a
