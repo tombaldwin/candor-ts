@@ -27,7 +27,7 @@ import {
   resolveReasonClasses,
 } from "./policy.mjs";
 import {
-  isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
+  isTestPath, kappa, kappaKnows, fsKind, commandHeadEffects, hostLiteral, tablesInSql,
   isModelHost, modelHostEffects, isModelSdkPackage, netDestClass,
 } from "./scan-core.mjs";
 import { bestFind, bestFinds, tokenize } from "./surface.mjs";
@@ -1582,4 +1582,41 @@ test("no shipped .mjs holds a raw NUL byte (it makes the file INVISIBLE to grep)
   assert.deepEqual(offenders, [],
     `these hold a raw NUL, so grep treats them as BINARY and reports no matches for anything in them — ` +
     `write the \\0 escape, which compiles to the identical string: ${offenders.join(", ")}`);
+});
+
+// ── SPEC §2 `fs`: the read/write refinement of a PROVED Fs ─────────────────────────────────────────
+// The field's whole discipline is the EMPTY case. §2: "when `Fs` is reached but its kind is unknown …
+// the field MUST be omitted rather than guessed. An empty or partial `fs` would be read as a positive
+// claim ('reads but never writes'), which is the §4 trust contract's forbidden direction." So most of
+// what these assert is what the classifier REFUSES to say.
+test("fs kind: write verbs", () => {
+  for (const m of ["writeFile", "writeFileSync", "appendFile", "mkdir", "rm", "unlink", "rename",
+                   "createWriteStream", "chmod"])
+    assert.deepEqual(fsKind("node:fs", m), ["write"], `${m} mutates the disk`);
+});
+
+test("fs kind: read verbs", () => {
+  for (const m of ["readFile", "readFileSync", "readdir", "stat", "access", "realpath",
+                   "createReadStream", "opendir"])
+    assert.deepEqual(fsKind("node:fs", m), ["read"], `${m} observes without mutating`);
+});
+
+test("fs kind: a copy reads the source AND writes the destination", () => {
+  for (const m of ["copyFile", "copyFileSync", "cp", "cpSync"])
+    assert.deepEqual(fsKind("node:fs", m), ["read", "write"]);
+});
+
+// THE LOAD-BEARING CASE. `open`/`openSync` take a MODE — "r", "w", "a" — so the verb alone does not say,
+// and guessing the common case would let a function claim a direction on the strength of a verb that
+// revealed none. An unrecognised verb must likewise contribute nothing at all.
+test("fs kind: a verb that does not reveal direction makes NO claim", () => {
+  for (const m of ["open", "openSync", "someFutureVerb", "close", "fsync"])
+    assert.deepEqual(fsKind("node:fs", m), [], `${m} must not claim a direction it did not reveal`);
+});
+
+// The sync/promise variants are the same verb; stripping the suffix is what keeps one rule per verb
+// rather than a table that silently misses whichever spelling nobody listed.
+test("fs kind: Sync variants resolve to the same kind as the async verb", () => {
+  for (const base of ["readFile", "writeFile", "mkdir", "copyFile"])
+    assert.deepEqual(fsKind("node:fs", base + "Sync"), fsKind("node:fs", base), base);
 });

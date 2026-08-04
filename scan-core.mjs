@@ -215,6 +215,45 @@ export const MODEL_SDK_RE =
 export function isModelSdkPackage(moduleName) {
   return MODEL_SDK_RE.test(moduleName);
 }
+/// SPEC §2 `fs` — for a call ALREADY classified `Fs`, the read/write direction its verb implies.
+/// Returns ["read"], ["write"], ["read","write"], or [] when the verb does not say.
+///
+/// THE EMPTY CASE IS THE POINT. §2: "when `Fs` is reached but its kind is unknown … the field MUST be
+/// omitted rather than guessed. An empty or partial `fs` would be read as a positive claim ('reads but
+/// never writes'), which is the §4 trust contract's forbidden direction." So an unrecognised verb
+/// contributes nothing and the field stays absent — absence means "kind undetermined", never "read-only".
+///
+/// A syntactic refinement of an effect candor already proved, NOT a soundness claim: a wrong direction
+/// misreports a detail, a wrong EFFECT is the cardinal sin, and those are different failures. Deliberately
+/// the same vocabulary and shape as candor-java's `fsKind` and candor-swift's — the surface is spec'd
+/// four-way, and three engines inventing three verb tables for one field is how a shared field stops
+/// meaning one thing. Node's sync/promise variants are handled by stripping the `Sync` suffix rather than
+/// by listing every pair.
+export function fsKind(moduleName, member) {
+  if (!member) return [];
+  const m = member.endsWith("Sync") ? member.slice(0, -4) : member;
+  // Reads the source AND writes the destination, in one call.
+  if (m === "copyFile" || m === "cp") return ["read", "write"];
+  const WRITE = new Set([
+    "writeFile", "appendFile", "write", "writev", "mkdir", "mkdtemp", "rmdir", "rm", "unlink",
+    "rename", "truncate", "ftruncate", "chmod", "fchmod", "lchmod", "chown", "fchown", "lchown",
+    "utimes", "futimes", "lutimes", "symlink", "link", "createWriteStream", "outputFile", "ensureDir",
+    "ensureFile", "emptyDir", "remove", "move", "outputJson", "writeJson", "writeJSON",
+  ]);
+  const READ = new Set([
+    "readFile", "readdir", "read", "readv", "stat", "lstat", "fstat", "statfs", "access", "exists",
+    "realpath", "readlink", "createReadStream", "opendir", "watch", "watchFile", "readJson",
+    "readJSON", "pathExists", "lstatSync",
+  ]);
+  if (WRITE.has(m)) return ["write"];
+  if (READ.has(m)) return ["read"];
+  // `open`/`openSync` take a MODE — "r", "w", "a" — so the verb alone does not say. Deliberately no claim
+  // rather than a guess at the common case.
+  if (m.startsWith("write") || m.startsWith("append")) return ["write"];
+  if (m.startsWith("read")) return ["read"];
+  return [];
+}
+
 export function kappa(moduleName, member) {
   for (const [mre, vre, eff] of KAPPA_RULES) {
     if (mre.test(moduleName) && (!vre || vre.test(member))) return eff;

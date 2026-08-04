@@ -32,7 +32,7 @@ import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNe
          netClassResolver, resolveReasonClasses } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
-import { isTestPath, kappa, kappaKnows, commandHeadEffects, hostLiteral, tablesInSql,
+import { isTestPath, kappa, kappaKnows, fsKind, commandHeadEffects, hostLiteral, tablesInSql,
          modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
@@ -1729,7 +1729,7 @@ for (const sf of sources) {
       const ctorQual = `${mod}.${namespacePrefixOf(node)}${node.name.text}.constructor`;
       if (!fns.has(ctorQual)) {
         const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
-        fns.set(ctorQual, { local: `${node.name.text}.constructor`, direct: new Set(), edges: new Set(),
+        fns.set(ctorQual, { local: `${node.name.text}.constructor`, direct: new Set(), fsKinds: new Set(), edges: new Set(),
                             hosts: new Set(), tables: new Set(), cmds: new Set(), paths: new Set(),
                             blind: new Set(), incomplete: new Set(), why: new Set(), entry: false,
                             loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}`,
@@ -1753,7 +1753,7 @@ for (const sf of sources) {
       // producer's namespace nesting, so widening the hash would break report chaining.
       const nsp = namespacePrefixOf(node);
       const qual = isFunctionScoped(node) ? `${mod}.${nsp}${n}#${line + 1}:${character + 1}` : `${mod}.${nsp}${n}`;
-      fns.set(qual, { local: n, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
+      fns.set(qual, { local: n, direct: new Set(), fsKinds: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
                       cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(), entry: false, isCjsExport,
                       loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}`,
                       endLine: sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1 });
@@ -2054,7 +2054,7 @@ function moduleUnit(sf) {
   const qual = `${mod}.<module>`;
   let rec = fns.get(qual);
   if (!rec) {
-    rec = { local: qual, direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
+    rec = { local: qual, direct: new Set(), fsKinds: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
             cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(),
             entry: false, unitKind: "initializer",
             loc: `${path.relative(rootDir, sf.fileName)}:1:1`,
@@ -2077,7 +2077,7 @@ function staticBlockUnit(node) {
   const qual = `${mod}.${cname}.<static-init>`;
   let rec = fns.get(qual);
   if (!rec) {
-    rec = { local: "<static-init>", direct: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
+    rec = { local: "<static-init>", direct: new Set(), fsKinds: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
             cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(),
             entry: false, unitKind: "initializer",
             loc: `${path.relative(rootDir, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart()).line + 1}:1`,
@@ -3403,6 +3403,11 @@ function visitCalls(node) {
             eff = null;
           if (eff) {
             rec.direct.add(eff);
+            // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. DIRECT only
+            // (never propagated over edges): a caller reaching one writer and one undetermined callee would
+            // otherwise inherit ["write"] and thereby claim "writes but never reads" — the partial claim §2
+            // forbids. An unrecognised verb adds nothing, so the field stays absent rather than half-true.
+            if (eff === "Fs") for (const k of fsKind(mod, member)) rec.fsKinds.add(k);
             // a κ rule that resolves to the Unknown trust-marker (node:vm code execution) is a direct
             // Unknown SOURCE — SPEC §4 requires a why on it, like eval's `reflect:eval`. (The rest of
             // the κ table is concrete effects, which carry no why.)
@@ -4393,6 +4398,14 @@ for (const [name, rec] of fns) {
   if (inf.includes("Db") && rec.tables.size) entry.tables = [...rec.tables].sort();
   if (inf.includes("Exec") && rec.cmds.size) entry.cmds = [...rec.cmds].sort();
   if (inf.includes("Fs") && rec.paths.size) entry.paths = [...rec.paths].sort();
+  // SPEC §2 `fs` — the read/write kinds this fn's OWN Fs calls revealed. Gated on `inferred` carrying Fs
+  // (the spec: "applies only when `inferred` contains `Fs`") and omitted when empty.
+  //
+  // NOTE `fsKinds` is deliberately ABSENT from the surface-propagation loop above. hosts/cmds/paths travel
+  // the call graph; a read/write KIND must not, because a caller reaching one writer and one
+  // undetermined-kind callee would inherit ["write"] and thereby claim "writes but never reads" — the
+  // partial claim §2 forbids. Direct-only, matching candor-java's `fsDirect` and candor-swift.
+  if (inf.includes("Fs") && rec.fsKinds.size) entry.fs = [...rec.fsKinds].sort();
   // ⟨0.6⟩ unknownWhy — REQUIRED on a DIRECT Unknown SOURCE (this fn's own body has the unresolvable call,
   // so `rec.direct` carries Unknown), absent on a purely-transitive Unknown. The rich per-site reasons
   // (rec.why: callback:/dispatch:/dynamic-key:) when recorded, else a generic fallback so a source is

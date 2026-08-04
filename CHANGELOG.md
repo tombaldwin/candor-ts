@@ -8,6 +8,29 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+### SPEC §2 `fs` — candor-ts now emits the read/write refinement
+
+`fs` has been in SPEC §2 for a long time and rust and java carry it; candor-ts did not. With candor-swift
+gaining it in the same pass, all four engines now answer "does this function read the disk or mutate it"
+instead of two answering and two staying silent.
+
+It went unnoticed because the spec's own rule makes partial implementation HONEST — an absent `fs` means
+"kind undetermined", never "read-only". The design working is not the same as the gap being closed.
+
+DIRECT ONLY. `fsKinds` is deliberately absent from the surface-propagation loop that carries
+hosts/cmds/paths over call edges: a caller reaching one writer and one undetermined-kind callee would
+inherit `["write"]` and thereby claim "writes but never reads" — the partial claim §2 forbids. Matches
+candor-java's `fsDirect` and candor-swift.
+
+Node's sync/promise variants resolve by stripping the `Sync` suffix rather than by listing every pair,
+which is what keeps one rule per verb instead of a table that silently misses whichever spelling nobody
+listed. `open`/`openSync` take a MODE, so the verb alone does not say and they get NO claim — guessing the
+common case would let a function claim a direction on the strength of a verb that revealed none.
+
+Measured: `copyFileSync` → `["read","write"]`, `readFileSync` → `["read"]`, `writeFileSync` → `["write"]`,
+a function that merely REACHES a writer → omitted, `openSync` → omitted. Identical to candor-swift's and
+candor-java's answers on the same shapes.
+
 ## [0.26.0] — 2026-08-04 ⟨spec 0.26⟩
 
 ### ⟨0.26⟩ THE HIERARCHY SIDECAR'S KEY SET IS ITS MANIFEST — both halves
