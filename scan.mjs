@@ -44,7 +44,7 @@ const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 // literal stamped into the envelope's `spec` field, so the doc lines and the report can never drift.
 // Reused, never re-littered.
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
-const SPEC_VERSION = "0.26";
+const SPEC_VERSION = "0.27";
 
 // --version: a print-and-exit MODE, handled before the main arg walk so it never depends on a target.
 // Fully OFFLINE — candor never phones home. Staying current is the AGENT's job: read the installed
@@ -4856,8 +4856,13 @@ function fnv1aHex(sortedQuals) {
 
 // `package` names what this report COVERS — a consumer chaining it registers coverage even when
 // `functions` is empty (an all-pure package's report is its purity claim, SPEC §2 rule 3).
+// ⟨0.27⟩ SPEC §2.1 `resolves`: the OPTIONAL refinement surfaces this producer computes. Without it the
+// absence of such a field is overloaded between "does not compute this" and "computed and could not
+// determine it", and a consumer cannot read the omission at all. candor-ts resolves `fs` read/write kinds,
+// so it says so. A producer MUST NOT list a surface it does not compute — that turns "unimplemented" into a
+// false "undetermined", which is the inversion the field exists to prevent.
 const envelope = { candor: { version: ENGINE_VERSION, toolchain: `node-${process.versions.node}`, spec: SPEC_VERSION },
-                   package: pkgName, functions };
+                   resolves: ["fs"], package: pkgName, functions };
 // ⟨0.15 staged⟩ the κ-coverage ledger as DATA (COVERAGE-DESIGN.md §1): ONE sorted form (count desc,
 // name asc — exactly the stderr line's order) feeds the envelope field, the stderr receipt below, and
 // the --gate-json advisory, so the three can never tell different stories.
