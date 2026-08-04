@@ -3407,7 +3407,13 @@ function visitCalls(node) {
             // (never propagated over edges): a caller reaching one writer and one undetermined callee would
             // otherwise inherit ["write"] and thereby claim "writes but never reads" — the partial claim §2
             // forbids. An unrecognised verb adds nothing, so the field stays absent rather than half-true.
-            if (eff === "Fs") for (const k of fsKind(mod, member)) rec.fsKinds.add(k);
+            if (eff === "Fs") {
+              // A verb revealing no direction records the POISON marker "?" rather than nothing. Abstaining
+              // would let a caller inherit a neighbour's ["write"] and claim "writes but never reads" over a
+              // reach whose kind was never determined — the partial claim §2 forbids. Suppressed at emit.
+              const ks = fsKind(mod, member);
+              if (ks.length === 0) rec.fsKinds.add("?"); else for (const k of ks) rec.fsKinds.add(k);
+            }
             // a κ rule that resolves to the Unknown trust-marker (node:vm code execution) is a direct
             // Unknown SOURCE — SPEC §4 requires a why on it, like eval's `reflect:eval`. (The rest of
             // the κ table is concrete effects, which carry no why.)
@@ -4344,7 +4350,10 @@ const inferred = new Map([...fns.keys()].map((k) => [k, new Set(fns.get(k).direc
         if (!queued.has(c)) { queued.add(c); queue.push(c); }
   }
 }
-for (const m of ["hosts", "tables", "cmds", "paths", "blind", "incomplete"]) {
+// `fsKinds` joins the propagated surfaces: kinds TRAVEL the call graph (a caller that transitively only
+// writes IS a writer), and the "?" poison travels with them so a caller of an undetermined-kind function
+// inherits the SUPPRESSION rather than a half-answer. Pinned by conformance PART 31.
+for (const m of ["hosts", "tables", "cmds", "paths", "blind", "incomplete", "fsKinds"]) {
   const queue = [...fns.keys()];
   const queued = new Set(queue);
   for (let head = 0; head < queue.length; head++) {
@@ -4401,11 +4410,11 @@ for (const [name, rec] of fns) {
   // SPEC §2 `fs` — the read/write kinds this fn's OWN Fs calls revealed. Gated on `inferred` carrying Fs
   // (the spec: "applies only when `inferred` contains `Fs`") and omitted when empty.
   //
-  // NOTE `fsKinds` is deliberately ABSENT from the surface-propagation loop above. hosts/cmds/paths travel
-  // the call graph; a read/write KIND must not, because a caller reaching one writer and one
-  // undetermined-kind callee would inherit ["write"] and thereby claim "writes but never reads" — the
-  // partial claim §2 forbids. Direct-only, matching candor-java's `fsDirect` and candor-swift.
-  if (inf.includes("Fs") && rec.fsKinds.size) entry.fs = [...rec.fsKinds].sort();
+  // Kinds TRAVEL (see the propagation loop); the "?" poison is what stops a PARTIAL answer travelling with
+  // them. Present ⇒ some contributing Fs had no determined kind ⇒ suppress the whole field, because
+  // ["write"] there would claim "writes but never reads" about a function that may do both.
+  if (inf.includes("Fs") && rec.fsKinds.size && !rec.fsKinds.has("?"))
+    entry.fs = [...rec.fsKinds].sort();
   // ⟨0.6⟩ unknownWhy — REQUIRED on a DIRECT Unknown SOURCE (this fn's own body has the unresolvable call,
   // so `rec.direct` carries Unknown), absent on a purely-transitive Unknown. The rich per-site reasons
   // (rec.why: callback:/dispatch:/dynamic-key:) when recorded, else a generic fallback so a source is

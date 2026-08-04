@@ -17,10 +17,10 @@ instead of two answering and two staying silent.
 It went unnoticed because the spec's own rule makes partial implementation HONEST — an absent `fs` means
 "kind undetermined", never "read-only". The design working is not the same as the gap being closed.
 
-DIRECT ONLY. `fsKinds` is deliberately absent from the surface-propagation loop that carries
-hosts/cmds/paths over call edges: a caller reaching one writer and one undetermined-kind callee would
-inherit `["write"]` and thereby claim "writes but never reads" — the partial claim §2 forbids. Matches
-candor-java's `fsDirect` and candor-swift.
+**CORRECTED before release.** The first version was direct-only, from misreading candor-java's `fsDirect`
+comment without following it to `fsFixpoint()`. Kinds DO propagate — `fsKinds` now joins the surface loop —
+and a `"?"` poison propagates with them: any contributing `Fs` with no determined kind suppresses the whole
+field, because `["write"]` there would claim "writes but never reads" about a function that may do both.
 
 Node's sync/promise variants resolve by stripping the `Sync` suffix rather than by listing every pair,
 which is what keeps one rule per verb instead of a table that silently misses whichever spelling nobody
