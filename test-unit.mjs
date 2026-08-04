@@ -1620,3 +1620,47 @@ test("fs kind: Sync variants resolve to the same kind as the async verb", () => 
   for (const base of ["readFile", "writeFile", "mkdir", "copyFile"])
     assert.deepEqual(fsKind("node:fs", base + "Sync"), fsKind("node:fs", base), base);
 });
+
+// ── EVERY fn-RECORD CONSTRUCTION SITE MUST PRODUCE THE SAME KEY SET ───────────────────────────────
+// candor-swift has `NameKeyedStateTests`, which requires every stored property of its CallCollector to be
+// classified — its docstring records that SEVEN defects came from that decision being skipped, and it
+// caught two additions in one session. candor-ts had no equivalent, and the same class of mistake landed
+// here on 2026-08-04: `fsKinds` was added to TWO of the FOUR places `scan.mjs` builds a fn record, so a
+// synthesized or static-init record had `rec.fsKinds` undefined, `.add()` threw, the scan aborted, and the
+// integration suite died on a null report.
+//
+// It was loud, and therefore cheap — but loud BY LUCK. An accumulator that is merely read (not written)
+// would have produced a silent wrong answer instead. This asserts the sites agree, so the next one is a
+// named failure rather than a crash that happens to be well-timed.
+test("scan.mjs: every fn-record site initialises the same ACCUMULATORS", () => {
+  const src = fs.readFileSync(new URL("./scan.mjs", import.meta.url), "utf8");
+  const sites = [];
+  const re = /\{\s*local:/g;
+  let m;
+  while ((m = re.exec(src))) {
+    let i = m.index, depth = 0, end = -1;
+    for (let k = i; k < src.length; k++) {
+      if (src[k] === "{") depth++;
+      else if (src[k] === "}") { depth--; if (depth === 0) { end = k; break; } }
+    }
+    if (end < 0) continue;
+    const body = src.slice(i, end + 1);
+    if (!body.includes("direct: new Set()")) continue;      // not a fn record
+    // ONLY the accumulators. A first draft compared full key sets and flagged `unitKind`, which the two
+    // SYNTHESIZED records carry and the ordinary ones deliberately do not — its absence means "not an
+    // initializer", a semantic difference rather than a shape bug. The invariant that actually broke is
+    // narrower and exact: a key whose value is a fresh Set is written to later by `.add()`, so it must
+    // exist on EVERY record or that call throws on whichever path took the other branch.
+    sites.push(new Set([...body.matchAll(/(\w+):\s*new Set\(\)/g)].map((x) => x[1])));
+  }
+  assert.ok(sites.length >= 4, `expected the known fn-record sites, found ${sites.length}`);
+  const union = new Set(sites.flatMap((s) => [...s]));
+  for (const [i, s] of sites.entries()) {
+    const missing = [...union].filter((k) => !s.has(k));
+    assert.deepEqual(missing, [],
+      `fn-record site #${i + 1} does not initialise ${JSON.stringify(missing)} — every site must, or a ` +
+      `later .add() is a crash on whichever record took the other path (this is exactly how fsKinds ` +
+      `aborted the scan on 2026-08-04)`);
+  }
+});
+
