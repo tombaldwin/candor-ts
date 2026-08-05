@@ -796,6 +796,32 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       if (hit) push("AS-EFF-009", fn, [], `\`${fn}\` reaches into a forbidden layer (via \`${hit}\`), violating policy: \`${r.raw}\``);
     }
   }
+  // ⟨0.27⟩ SPEC §4 — A RULE WHOSE SCOPE BOUND NO FUNCTION IS UNANSWERABLE, AND IS DISCLOSED RATHER THAN
+  // SCORED AS SATISFIED. Measured on this engine before the fix: `deny Fs orders` exits 1 on a real
+  // violation while `deny Fs ordrs` exits 0 in silence — a one-character typo in a layer name is a
+  // permanently green gate, and `unverified` then calls the layer "PROVABLY clean". The asymmetry is the
+  // tell: a typo'd EFFECT token already exits 2 naming the accepted vocabulary.
+  //
+  // Carried as a PROPERTY on the returned array rather than as a second return value, so every existing
+  // caller keeps working unchanged and `--gate-json` is untouched: JSON.stringify ignores non-index
+  // properties on an array, so the verdict document cannot acquire a field the spec has not pinned.
+  //
+  // A `deny`/`pure` with NO scope applies to every function and so can never be this kind of typo —
+  // excluded. A `forbid` counts a match on either endpoint. Counted over the same names the gate saw.
+  const zeroCount = new Map();
+  for (const r of pol.deny) if (r.scope) zeroCount.set(r.raw, 0);
+  for (const r of pol.forbid) zeroCount.set(r.raw, 0);
+  if (zeroCount.size) {
+    const names = new Set(functions.map((f) => f.fn));
+    for (const k of Object.keys(callgraph ?? {})) names.add(k);
+    for (const n of names) {
+      for (const r of pol.deny) if (r.scope && scopeMatches(n, r.scope)) zeroCount.set(r.raw, zeroCount.get(r.raw) + 1);
+      for (const r of pol.forbid) {
+        if (scopeMatches(n, r.from) || scopeMatches(n, r.to)) zeroCount.set(r.raw, zeroCount.get(r.raw) + 1);
+      }
+    }
+  }
+  out.zeroMatch = [...zeroCount].filter(([, c]) => c === 0).map(([raw]) => raw).sort();
   return out;
 }
 

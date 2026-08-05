@@ -5272,7 +5272,17 @@ if (policyPath !== null) {
         const p = discoverConfigPath(policyVocabularyAnchor(policyPath, target));
         if (p) policyVocabulary = { config: p, aliases: gatePolicy.aliasesUsed };
       }
-      gateViolations = gateViolations.concat(evaluatePolicy(gatePolicy, functions, cg, incompleteMap, netPartners));
+      const gateOut = evaluatePolicy(gatePolicy, functions, cg, incompleteMap, netPartners);
+      // ⟨0.27⟩ SPEC §4 — a rule that bound NO function is disclosed, never scored as satisfied. The exit
+      // code is deliberately untouched: a zero-match rule is legitimate when one policy is shared across
+      // repositories and a layer exists in only some of them, so refusal would make a shared policy
+      // unusable. Printed before the violations so a typo'd layer name is visible above the verdict.
+      for (const raw of gateOut.zeroMatch ?? []) {
+        console.error(`candor: policy rule matched NO function — \`${raw}\`. It was evaluated and bound `
+          + `nothing, so it cannot have caught anything. Legitimate when one policy is shared across `
+          + `repos; a typo'd layer name otherwise.`);
+      }
+      gateViolations = gateViolations.concat(gateOut);
       // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
       // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
       // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).
