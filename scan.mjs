@@ -156,7 +156,10 @@ if (target === null) { console.error(usage); process.exit(2); }
 // never vanish silently (the §6.2 unreadable-policy posture). Only genuine absence is an empty config.
 // Keys are the shared FAMILY vocabulary; a key OUTSIDE it warns (typo protection: a misspelt `policy`
 // must not silently drop the gate).
-const CONFIG_KEYS = new Set(["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "net-partner", "unknown-ratchet"]);
+// ⟨0.28 PROPOSED⟩ `engine` is in the vocabulary and NOT implemented here on purpose: candor-java enforces
+// the pin, and a key this spec defines must never be reported as an unknown one — that would tell an
+// operator their pin was ignored while a sibling engine was enforcing it.
+const CONFIG_KEYS = new Set(["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "net-partner", "unknown-ratchet", "engine"]);
 // The subset this engine actually wires to a mode — `policy` (the gate), `baseline` (AS-EFF-005),
 // `deps` (the cross-package report chain) and `unknown-ratchet` (the baseline guard's opt-in). The rest
 // of the vocabulary is spec-inert HERE: it drives other engines' gates. But a checked-in enforcement key
