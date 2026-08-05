@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.27.0] — 2026-08-05
+
 ### SPEC §2 `fs` — candor-ts now emits the read/write refinement
 
 `fs` has been in SPEC §2 for a long time and rust and java carry it; candor-ts did not. With candor-swift
