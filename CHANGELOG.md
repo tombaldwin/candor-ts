@@ -8,6 +8,14 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **A baseline DECLARED in `.candor/config` but missing is now exit 2, not a green pass.** An adopter
+  review measured this as the second-likeliest first-commit mistake (`.candor/` committed, the baseline
+  not) and found every engine printing a note and exiting **0** — the gate quietly not gating. The split
+  is by SOURCE, because the same absence means two different things: `CANDOR_BASELINE` is set
+  unconditionally by the adopt workflow, so a path that is not there means "the ratchet is not adopted
+  yet" and stays a note; a checked-in `baseline` line DECLARES that this repo has one, so an absent file
+  was deleted or never committed. Verified four-way: config-declared → 2, env-named → 0.
+
 ## [0.27.0] — 2026-08-05
 
 - **Panel review: the pin grammar disagreed across engines on a shared config.** Three confirmed

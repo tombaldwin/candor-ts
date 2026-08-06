@@ -316,7 +316,12 @@ if (policyPath === null && candorConfig.policy !== undefined) policyPath = cando
 // (path-valued keys are already resolved against the config's anchor above). No CLI flag — matching
 // candor-java, the reference engine (env/config only). A BARE `baseline` line ("") fails loud below.
 let baselinePath = process.env.CANDOR_BASELINE ?? null;
-if (baselinePath === null && candorConfig.baseline !== undefined) baselinePath = candorConfig.baseline;
+// WHICH SOURCE supplied it decides what a MISSING file means: `CANDOR_BASELINE` is set unconditionally
+// by the adopt workflow, so an absent path there is "the ratchet is not adopted yet"; a checked-in
+// `baseline` line DECLARES this repo has one, so an absent path there was deleted or never committed —
+// and the guard passing green over it is a gate that silently stopped gating.
+let baselineFromConfig = false;
+if (baselinePath === null && candorConfig.baseline !== undefined) { baselinePath = candorConfig.baseline; baselineFromConfig = true; }
 // ⟨unknown-ratchet⟩ OPT-IN (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET, default OFF): flip an
 // Unknown-ONLY gain vs the baseline from advisory to an AS-EFF-005 failure (exit 1). Env-override truthy
 // semantics mirror candor-java's Config.flag exactly — env var PRESENCE means on (env can't express off);
@@ -5177,7 +5182,15 @@ const writeRefusal = (reason, unevaluated = null) => {
 //    must not silently NARROW the guard back to report-only.
 if (baselinePath !== null) {
   const shownB = baselinePath === "" ? "(configured empty)" : baselinePath;
-  if (baselinePath !== "" && !fs.existsSync(baselinePath)) {
+  if (baselinePath !== "" && !fs.existsSync(baselinePath) && baselineFromConfig) {
+    // A CHECKED-IN DECLARATION IS NOT THE SAME ABSENCE — see baselineFromConfig above. Exit 2: the
+    // gateless-green class, and an adopter review measured this as the second-likeliest first-commit
+    // mistake (`.candor/` committed, the baseline not).
+    console.error(`candor-ts: .candor/config declares \`baseline ${baselinePath}\` but that file is not `
+      + `there — failing (exit 2). A checked-in declaration says this repo HAS a baseline, so an absent `
+      + `one was deleted or never committed. Commit it, or record one: candor-ts <target> --out <prefix>.`);
+    process.exit(2);
+  } else if (baselinePath !== "" && !fs.existsSync(baselinePath)) {
     console.error(`candor-ts: CANDOR_BASELINE ${baselinePath} does not exist — the regression guard is `
       + `not active (record one: candor-ts <target> --out <prefix>, then point at the report .json).`);
   } else {
