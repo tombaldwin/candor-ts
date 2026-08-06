@@ -437,9 +437,81 @@ function resolveGateVerb(rawArgs, { strict = false } = {}) {
 // deprecated-alias machinery, because it has NO POSITIONALS: a stray argument is a usage error, never
 // probed as a report or a policy. Kept out of parseCanonical for that reason — the peel helpers exist to
 // accept the old grammar, and there is no old grammar for a verb introduced at ⟨0.24⟩.
+// ── SPEC §3.3.1 ⟨0.27⟩ sink-arming helpers, shared by the gate verb. The scan entry point has its own
+// copies (scan.mjs) because it must not import from this file; the RULES are the spec's, not shared code.
+
+/** Learn `--gate-json` and `--policy` from a verb's argv with NO side effects. */
+function preScanGateArgs(av) {
+  let gate = null, policy = null;
+  for (let i = 0; i < av.length; i++) {
+    const a = av[i], v = av[i + 1];
+    if (a !== "--gate-json" && a !== "--policy") continue;
+    if (v === undefined || (v.startsWith("-") && v !== "-")) continue;
+    if (a === "--gate-json") gate = v; else policy = v;
+    i++;
+  }
+  return { gate, policy };
+}
+
+/** Artifact identity, not string identity — `--policy /w/P --gate-json ./P` from /w is one file. */
+function sameArtifactPath(a, b) {
+  if (!a || !b || a === "-" || b === "-") return false;
+  const resolve = (p) => {
+    try { return fs.realpathSync(p); } catch { /* not there yet — resolve the parent */ }
+    try { return path.join(fs.realpathSync(path.dirname(path.resolve(p))), path.basename(p)); }
+    catch { return null; }
+  };
+  const x = resolve(a);
+  return x !== null && x === resolve(b);
+}
+
+/** Refuse a sink that names an input of this run, having written nothing. */
+function refuseGateJsonOverInput(gate, other, flag) {
+  if (!sameArtifactPath(gate, other)) return;
+  console.error(`candor-ts-query: --gate-json ${gate} names the SAME FILE as ${flag} ${other} — refusing `
+    + `(exit 2). The verdict is armed before the policy is read, so this would overwrite your policy and `
+    + `then gate on the wreckage. Nothing was written; give the verdict its own path.`);
+  process.exit(2);
+}
+
+/** `.candor/config` is never a verdict sink, wherever it is. */
+function refuseGateJsonAtConfig(gate) {
+  if (!gate || gate === "-") return;
+  const abs = path.resolve(gate);
+  if (path.basename(abs) !== "config" || path.basename(path.dirname(abs)) !== ".candor") return;
+  console.error(`candor-ts-query: --gate-json ${gate} is a .candor/config — refusing (exit 2). This would `
+    + `destroy the config that configures this run. Nothing was written; give the verdict its own path.`);
+  process.exit(2);
+}
+
+/** Write the fail-closed refusal every later exit inherits unless a real verdict replaces it. */
+function armQueryGateJson(p) {
+  try {
+    fs.writeFileSync(p, JSON.stringify(
+      refusalVerdict(SPEC_VERSION, "the gate did not complete — this document was written when the run "
+        + "STARTED and was never replaced by a verdict, so the run failed, crashed or was killed before "
+        + "it could decide. It is NOT a verdict about the code; see the run's stderr for the cause."),
+      null, 1) + "\n");
+  } catch (e) {
+    console.error(`candor-ts-query: could not arm --gate-json ${p} fail-closed (${e.message})`);
+  }
+}
+
 function resolveGateReportVerb(rawArgs) {
   const usageLine = "usage: candor-ts-query gate --report <locator> --policy <file> [--json] [--gate-json <file>]";
   let reportLocator = null, policyFile = null, gateJsonPath = null, json = false;
+  // SPEC §3.3.1 ⟨0.27⟩ — ARM FIRST, AND NEVER OVER AN INPUT. A pre-pass with no side effects, so both
+  // the collision refusal and the arming precede every exit in the loop below. See the note where the
+  // arming used to live for why the previous ordering was wrong.
+  {
+    const { gate, policy } = preScanGateArgs(rawArgs);
+    if (gate) {
+      refuseGateJsonOverInput(gate, policy, "--policy");
+      refuseGateJsonOverInput(gate, process.env.CANDOR_POLICY, "CANDOR_POLICY");
+      refuseGateJsonAtConfig(gate);
+      if (gate !== "-") armQueryGateJson(gate);
+    }
+  }
   for (let i = 0; i < rawArgs.length; i++) {
     const a = rawArgs[i];
     if (a === "--report") {
@@ -469,31 +541,16 @@ function resolveGateReportVerb(rawArgs) {
     console.error(`candor-ts-query gate: unexpected argument '${a}' — \`gate\` takes no positionals; the report is a --report locator and the policy a --policy file\n  ${usageLine}`);
     process.exit(2);
   }
-  // ARMED AFTER USAGE VALIDATION, BEFORE THE REPORT IS RESOLVED — and the order is a ⟨0.24⟩ ruling, not
-  // a detail. A USAGE error (a missing `--policy`, an unknown flag) was never a gate invocation, so it
-  // must write NOTHING: a document there would put a verdict where the operator's own shell already
-  // failed. candor-java draws the line in the same place, and putting the arming above `resolvePolicy`
-  // broke the test that pins it. A bad REPORT locator is on the other side of that line — the command
-  // WAS a gate invocation, it just could not be evaluated.
+  // ARMING MOVED ABOVE THE FLAG LOOP (SPEC §3.3.1 ⟨0.27⟩).
+  //
+  // It used to sit here, and the comment justified it with a ⟨0.24⟩ ruling of my own: "a USAGE error was
+  // never a gate invocation, so it must write NOTHING". SPEC §3.3 says the opposite in terms — it names
+  // an unknown flag as a broken-gate-config exit-2 cause, and §3.1 adds that "if `--gate-json` was
+  // requested and the run exits 2 for ANY reason, a fail-closed document is written", calling a
+  // carve-out "a fail-open path with a reason attached". The ruling I built here was that carve-out, and
+  // the test pinning it pinned a reading the spec had already superseded. The stale green does not care
+  // that the operator's shell also failed.
   const _policy = resolvePolicy(policyFile, null).policyFile;
-  // ARM THE VERDICT BEFORE RESOLVING THE REPORT. `requireReport` exits 2 on a bad or missing locator —
-  // a typo'd `--report` path in CI — and that exit left the PREVIOUS run's `--gate-json` document on
-  // disk, so a wrapper reading the artifact saw a pass. java, rust and swift all write a refusal on this
-  // exact path; ts was the hole. Files only: a `-` stream has no stale document to replace.
-  // …and only when a POLICY was actually supplied. `resolvePolicy` returns null rather than exiting, so
-  // the "no --policy" usage error is raised further down — arming before that check wrote a document for
-  // a command that was never a gate invocation, which is precisely the boundary above.
-  if (_policy && gateJsonPath && gateJsonPath !== "-") {
-    try {
-      fs.writeFileSync(gateJsonPath, JSON.stringify(
-        refusalVerdict(SPEC_VERSION, "the gate did not complete — this document was written when the run "
-          + "STARTED and was never replaced by a verdict, so the run failed, crashed or was killed before "
-          + "it could decide. It is NOT a verdict about the code; see the run's stderr for the cause."),
-        null, 1) + "\n");
-    } catch (e) {
-      console.error(`candor-ts-query: could not arm --gate-json ${gateJsonPath} fail-closed (${e.message})`);
-    }
-  }
   const prefix = requireReport(reportLocator !== null ? locatorToPrefix(reportLocator) : discoverReportPrefix());
   return { prefix, policyFile: _policy, gateJsonPath, json };
 }

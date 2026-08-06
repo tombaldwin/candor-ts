@@ -8137,12 +8137,29 @@ export function all(db: DatabaseSync, o: any) {
           live.status === 1 && (readDoc(liveOut)?.violations ?? []).length === 1
             && pure.status === 0 && Array.isArray(readDoc(pureOut)?.violations) && readDoc(pureOut).violations.length === 0,
           `live=${live.status} pure=${pure.status}`);
-    // A USAGE error is NOT a refusal: the command was never a gate invocation, so there is nothing to
-    // refuse and nothing a wrapper could be reading a verdict from. The stale document stays untouched.
+    // ⟨0.27⟩ REVERSED, and it is worth saying why the old row was wrong rather than just deleting it.
+    // It asserted that a USAGE error (no `--policy`) leaves the stale document untouched, on the ground
+    // that "the command was never a gate invocation". But `--gate-json <path>` WAS requested: the
+    // operator asked for a verdict at that path and misconfigured how to reach it, and a green document
+    // from yesterday sitting there is exactly as dangerous as it is after any other exit 2. SPEC §3.3
+    // names an unknown flag as a broken-gate-config exit-2 cause, §3.1 requires a fail-closed document
+    // on EVERY exit-2 cause, and §1916 calls a carve-out "a fail-open path with a reason attached".
+    // This row was that carve-out; the reason was only ever that the case felt different.
+    //
+    // The one thing that still writes nothing is a sink that cannot BE a sink — no value, or the same
+    // artifact as an input this run must read. That is not a carve-out: the path was never a verdict
+    // path, so there is no stale verdict at it.
     const useOut = seedStale(path.join(d, "usage.json"));
     const use = gateCli("--report", path.join(d, "r.json"), "--gate-json", useOut);
-    check("⟨0.24⟩ refusal document BOUNDARY: a USAGE error (no --policy) writes NO document — it was never a gate invocation",
-          use.status === 2 && fs.readFileSync(useOut, "utf8") === STALE + "\n", `exit=${use.status}`);
+    check("⟨0.27⟩ refusal document: a USAGE error (no --policy) ALSO replaces a stale green — the sink was requested, so it is armed",
+          use.status === 2 && readDoc(useOut)?.ok === false && readDoc(useOut)?.refused === true
+            && !("violations" in (readDoc(useOut) ?? {})), `exit=${use.status}`);
+    // …and the genuinely unusable sink, which must leave the input alone.
+    const polPath = path.join(d, "collide.pol");
+    fs.writeFileSync(polPath, "deny Fs\n");
+    const collide = gateCli("--report", path.join(d, "r.json"), "--policy", polPath, "--gate-json", polPath);
+    check("⟨0.27⟩ a --gate-json that names the --policy is refused (exit 2) with the policy INTACT and nothing written",
+          collide.status === 2 && fs.readFileSync(polPath, "utf8") === "deny Fs\n", `exit=${collide.status}`);
   }
 
   // ── ITEM 3: AN UNRECOGNISED VALUE TOKEN IS A POLICY ERROR — AND `parsepolicy` STILL REPORTS ─────

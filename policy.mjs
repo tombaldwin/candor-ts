@@ -839,7 +839,13 @@ export function discoverConfigPolicy(fromDir) {
   for (;;) {
     const cand = nodePath.join(dir, ".candor", "config");
     if (fs.existsSync(cand)) {
-      const m = fs.readFileSync(cand, "utf8").split(/\r?\n/)
+      // A config that EXISTS but cannot be READ is configured-but-unusable, which §3.4 makes exit 2 —
+      // never a silent "absent" and never an uncaught throw. The bare `readFileSync` here let an EACCES
+      // escape as an uncaught exception: node exits 1, which is the POLICY VIOLATION code, and the
+      // armed sentinel survived because nothing replaced it. Two wrong answers from one missing catch.
+      // The siblings below swallow to null, which is the other wrong answer — an unreadable pin or
+      // policy silently not enforced — so all three now refuse the same way.
+      const m = readConfigOrRefuse(cand).split(/\r?\n/)
         .map((l) => l.split("#", 1)[0].trim()).filter(Boolean)
         .map((l) => l.match(/^(\S+)\s*(.*)$/)).find((mm) => mm && mm[1].toLowerCase() === "policy");
       if (!m) return null;
@@ -855,11 +861,11 @@ export function discoverConfigPolicy(fromDir) {
 // nearest `.candor/config` walking UP, else null. Read-only + lenient (the caller decides fail-closed).
 export function discoverConfigText(fromDir) {
   const env = process.env.CANDOR_CONFIG;
-  if (env) { try { return fs.readFileSync(env, "utf8"); } catch { return null; } }
+  if (env) { return readConfigOrRefuse(env, "CANDOR_CONFIG"); }
   let dir = nodePath.resolve(fromDir);
   for (;;) {
     const cand = nodePath.join(dir, ".candor", "config");
-    if (fs.existsSync(cand)) { try { return fs.readFileSync(cand, "utf8"); } catch { return null; } }
+    if (fs.existsSync(cand)) { return readConfigOrRefuse(cand); }
     const parent = nodePath.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -872,9 +878,31 @@ export function discoverConfigText(fromDir) {
 // see named anywhere in the output — can decide the verdict. That is the ambient-input failure this format
 // exists to refuse, and the remedy is the usual one: not to forbid the input, but to make it unable to act
 // unnamed. Same walk as `discoverConfigText`, deliberately, so the two cannot name different files.
+/**
+ * Read a `.candor/config` that DISCOVERY has already found, or refuse (exit 2).
+ *
+ * The three readers in this file each handled an unreadable-but-present config differently: one let the
+ * exception escape (node exits 1 — the POLICY VIOLATION code — with a stack trace, and an armed
+ * `--gate-json` sentinel left in place), and two swallowed it to `null`, which reads as "no config" and
+ * silently drops whatever the file configured: a policy, a baseline, or an engine pin the operator
+ * believes is guarding them. §3.4's posture is the unreadable-policy one — configured-but-unusable
+ * fails loud — so all three route through here.
+ */
+function readConfigOrRefuse(p, via = null) {
+  try {
+    return fs.readFileSync(p, "utf8");
+  } catch (e) {
+    console.error(`candor-ts: ${via ? `${via}=` : ""}${p} exists but could not be read (${e.code ?? e.message}) `
+      + `— failing (exit 2, unevaluable). A config that cannot be read is a guard the operator believes `
+      + `is on: it may name a policy, a baseline or an engine pin, and treating it as absent would run `
+      + `without them.`);
+    process.exit(2);
+  }
+}
+
 export function discoverConfigPath(fromDir) {
   const env = process.env.CANDOR_CONFIG;
-  if (env) { try { fs.readFileSync(env, "utf8"); return nodePath.resolve(env); } catch { return null; } }
+  if (env) { readConfigOrRefuse(env, "CANDOR_CONFIG"); return nodePath.resolve(env); }
   let dir = nodePath.resolve(fromDir);
   for (;;) {
     const cand = nodePath.join(dir, ".candor", "config");

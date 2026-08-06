@@ -8,6 +8,24 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **No collision guard was added here when rust's was.** `--policy P --gate-json P` armed the refusal
+  over the policy, every line of it warned as an unknown rule, the gate ran over zero rules, and the run
+  exited **0 with `"ok": true`** while the policy was gone. Now refused (exit 2, nothing written), on
+  both `scan` and the `gate` verb, with sameness resolved as artifacts and `.candor/config` refused by
+  shape.
+- **Arming moved ahead of the flag loop.** It ran after, so the loop's own unknown-flag exit left the
+  previous run's green in place — the contract depended on argv order.
+- **⟨0.27⟩ the `gate` verb's usage boundary is REVERSED, and the test with it.** It held that a usage
+  error "was never a gate invocation" and must write nothing. SPEC §3.3 names an unknown flag as a
+  broken-gate-config exit-2 cause and §3.1 requires a document on every exit-2 cause, calling a
+  carve-out "a fail-open path with a reason attached" — this was that carve-out. `--gate-json <path>`
+  WAS requested; a green document from yesterday sitting there is exactly as dangerous however the run
+  failed.
+- **An unreadable `.candor/config` crashed the `gate` verb.** A bare `readFileSync` let `EACCES` escape:
+  node exits **1** — the POLICY VIOLATION code — with a stack trace, and the armed sentinel survived. Two
+  sibling readers swallowed the same error to `null`, which silently drops whatever the file configured.
+  All three now refuse the same way (exit 2, unevaluable).
+
 ## [0.27.0] — 2026-08-05
 
 - **`gate --report` with a bad locator left the previous verdict on disk.** Fixed — but the arming sits
