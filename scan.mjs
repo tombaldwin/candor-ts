@@ -119,6 +119,71 @@ See https://github.com/tombaldwin/candor`);
 // value-consuming skip handles, nor produce a "lying unknown flag" error for a real flag given first.
 const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--allow-js] [--workspace] [--agents] [--version] [--help]";
 const argv = process.argv.slice(2);
+// ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
+//
+// This pre-pass learns the sink and this run's inputs with NO side effects, before the parse loop
+// below, for two reasons the loop cannot serve:
+//
+//  (1) the loop's own `unknown flag` exit(2) runs BEFORE the arming did, so `--frobnicate --gate-json G`
+//      exited leaving the PREVIOUS run's green document at G. §3.3 names an unknown flag as a
+//      broken-gate-config exit-2 cause, which MUST leave a refusal — the contract cannot depend on
+//      argv order, and it did.
+//  (2) arming WRITES, so a sink that names the policy DESTROYS it. Measured: `--policy P --gate-json P`
+//      on violating code exited 0 with `ok: true` — the armed JSON replaced P, every line of it parsed
+//      as an unknown rule, and the gate ran over zero rules. A machine-readable all-clear produced by
+//      deleting the question.
+const preScan = (av) => {
+  let gate = null, policy = null;
+  for (let i = 0; i < av.length; i++) {
+    const a = av[i], v = av[i + 1];
+    if (a !== "--gate-json" && a !== "--policy") continue;
+    if (v === undefined || (v !== "-" && v.startsWith("--"))) continue;
+    if (a === "--gate-json") gate = v; else policy = v;
+    i++;
+  }
+  return { gate, policy };
+};
+// Artifact identity, not string identity: `--policy /w/P --gate-json ./P` from /w is one file, and the
+// engine that already had this check compared path spellings and lost to exactly that. realpath resolves
+// `.`, `..` and symlinks; for a sink that does not exist yet its parent is resolved instead.
+const sameArtifact = (a, b) => {
+  if (!a || !b || a === "-" || b === "-") return false;
+  const resolve = (p) => {
+    try { return fs.realpathSync(p); } catch { /* not there yet — resolve the parent */ }
+    try { return path.join(fs.realpathSync(path.dirname(path.resolve(p))), path.basename(p)); } catch { return null; }
+  };
+  const [x, y] = [resolve(a), resolve(b)];
+  return x !== null && x === y;
+};
+{
+  const { gate, policy } = preScan(argv);
+  for (const [other, flag] of [[policy, "--policy"], [process.env.CANDOR_POLICY, "CANDOR_POLICY"]]) {
+    if (gate && sameArtifact(gate, other)) {
+      console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as ${flag} ${other} — refusing `
+        + `(exit 2). The verdict is armed before the policy is read, so this would overwrite your policy `
+        + `and then gate on the wreckage. Nothing was written; give the verdict its own path.`);
+      process.exit(2);
+    }
+  }
+  // `.candor/config` is never a verdict sink, wherever it is. The per-input checks above can only name
+  // inputs the run was TOLD about; the config is DISCOVERED by walking up from the target, so by the
+  // time its path is known the arming has already destroyed it. A check on the SHAPE needs no
+  // discovery, so it runs before the first write and covers a config found anywhere up the tree.
+  if (gate && gate !== "-") {
+    const abs = path.resolve(gate);
+    if (path.basename(abs) === "config" && path.basename(path.dirname(abs)) === ".candor") {
+      console.error(`candor-ts: --gate-json ${gate} is a .candor/config — refusing (exit 2). The verdict `
+        + `is armed before the config is read, so this would destroy the config that configures this `
+        + `run. Nothing was written; give the verdict its own path.`);
+      process.exit(2);
+    }
+  }
+  if (gate && sameArtifact(gate, process.env.CANDOR_CONFIG)) {
+    console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as CANDOR_CONFIG — refusing (exit 2).`);
+    process.exit(2);
+  }
+  if (gate && gate !== "-") armGateJsonFailClosed(gate);
+}
 let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, gateJsonPath = null, allowJs = false, wantAgents = false, wantJson = false, wantWorkspace = false, wantDepInits = false;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -311,6 +376,31 @@ function loadCandorConfig(targetPath) {
   if (cfg.deps) cfg.deps = cfg.deps.split(/[\s:,]+/).filter(Boolean).map((t) => path.resolve(anchor, t)).join(":");
   return cfg;
 }
+// ⟨0.24⟩/⟨0.27⟩ ARM THE VERDICT FAIL-CLOSED. Every exit path then leaves a refusal behind unless the run
+// got far enough to replace it with a real verdict. A review found the pin refusal leaving the PREVIOUS
+// run's document on disk — a CI wrapper reading the artifact instead of the exit code then reports a pass
+// over a run that refused. candor-java's `armGateJson` is the model; the wording is about the RUN, not
+// about the code.
+//
+// A `function` declaration, not a `const`: it is CALLED from the pre-pass above the arg loop, and only a
+// hoisted declaration can be. The write is inlined rather than calling `writeAtomic` for the same reason
+// in reverse — that helper is a `const` declared ~4700 lines below, so calling it would be a
+// temporal-dead-zone throw.
+function armGateJsonFailClosed(p) {
+  try {
+    const _tmp = `${p}.${process.pid}.arm`;
+    fs.writeFileSync(_tmp, JSON.stringify({
+      spec: SPEC_VERSION, ok: false, refused: true,
+      reason: "the gate did not complete — this document was written when the run STARTED and was never "
+        + "replaced by a verdict, so the run failed, crashed or was killed before it could decide. It is "
+        + "NOT a verdict about the code; see the run's stderr for the cause.",
+    }, null, 1) + "\n");
+    fs.renameSync(_tmp, p);
+  } catch (e) {
+    console.error(`candor-ts: could not arm --gate-json ${p} fail-closed (${e.message}) — if this run `
+      + `does not complete, that path may still hold a PREVIOUS run's verdict`);
+  }
+}
 // MOVED ABOVE THE CONFIG LOAD. `loadCandorConfig` is ITSELF an exit-2 cause (an unusable
 // CANDOR_CONFIG, or a committed `.candor/config` that cannot be read), and arming after it left a
 // config refusal exiting 2 with the PREVIOUS run's green still on disk — while the comment below
@@ -320,23 +410,8 @@ function loadCandorConfig(targetPath) {
 // of the exit code then reports a pass over a run that refused. Arming at the START makes this a CLASS
 // fix: every exit path leaves a refusal unless the run got far enough to replace it. candor-java's
 // `armGateJson` is the model, and the wording is about the RUN, not about the code.
-if (gateJsonPath && gateJsonPath !== "-") {
-  try {
-    // The write is inlined rather than calling `writeAtomic`: that helper is a `const` declared ~4700
-    // lines below, so calling it here is a temporal-dead-zone throw. Arming must happen this early.
-    const _tmp = `${gateJsonPath}.${process.pid}.arm`;
-    fs.writeFileSync(_tmp, JSON.stringify({
-      spec: SPEC_VERSION, ok: false, refused: true,
-      reason: "the gate did not complete — this document was written when the run STARTED and was never "
-        + "replaced by a verdict, so the run failed, crashed or was killed before it could decide. It is "
-        + "NOT a verdict about the code; see the run's stderr for the cause.",
-    }, null, 1) + "\n");
-    fs.renameSync(_tmp, gateJsonPath);
-  } catch (e) {
-    console.error(`candor-ts: could not arm --gate-json ${gateJsonPath} fail-closed (${e.message}) — if `
-      + `this run does not complete, that path may still hold a PREVIOUS run's verdict`);
-  }
-}
+// (armed by the pre-pass above, before the arg loop — see SPEC §3.3.1 ⟨0.27⟩. Arming HERE was still
+// after the loop's unknown-flag exit, so the contract depended on argv order.)
 const candorConfig = loadCandorConfig(target);
 enforceEnginePin(target);   // ⟨0.27⟩ §3.4 — AFTER the arming, so its exit 2 cannot leave a stale verdict
 // precedence: the --policy flag / CANDOR_POLICY env already populated policyPath; the config is the floor.
