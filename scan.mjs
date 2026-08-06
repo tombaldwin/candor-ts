@@ -308,7 +308,29 @@ function loadCandorConfig(targetPath) {
   return cfg;
 }
 const candorConfig = loadCandorConfig(target);
-enforceEnginePin(target);   // ⟨0.27⟩ §3.4 — before any analysis: a wrong engine costs a message, not a scan
+// ⟨0.24⟩ ARM THE VERDICT FAIL-CLOSED BEFORE ANYTHING THAT CAN EXIT. A review found the pin refusal
+// leaving the PREVIOUS run's `--gate-json` document on disk — a CI wrapper reading the artifact instead
+// of the exit code then reports a pass over a run that refused. Arming at the START makes this a CLASS
+// fix: every exit path leaves a refusal unless the run got far enough to replace it. candor-java's
+// `armGateJson` is the model, and the wording is about the RUN, not about the code.
+if (gateJsonPath && gateJsonPath !== "-") {
+  try {
+    // The write is inlined rather than calling `writeAtomic`: that helper is a `const` declared ~4700
+    // lines below, so calling it here is a temporal-dead-zone throw. Arming must happen this early.
+    const _tmp = `${gateJsonPath}.${process.pid}.arm`;
+    fs.writeFileSync(_tmp, JSON.stringify({
+      spec: SPEC_VERSION, ok: false, refused: true,
+      reason: "the gate did not complete — this document was written when the run STARTED and was never "
+        + "replaced by a verdict, so the run failed, crashed or was killed before it could decide. It is "
+        + "NOT a verdict about the code; see the run's stderr for the cause.",
+    }, null, 1) + "\n");
+    fs.renameSync(_tmp, gateJsonPath);
+  } catch (e) {
+    console.error(`candor-ts: could not arm --gate-json ${gateJsonPath} fail-closed (${e.message}) — if `
+      + `this run does not complete, that path may still hold a PREVIOUS run's verdict`);
+  }
+}
+enforceEnginePin(target);   // ⟨0.27⟩ §3.4 — AFTER the arming, so its exit 2 cannot leave a stale verdict
 // precedence: the --policy flag / CANDOR_POLICY env already populated policyPath; the config is the floor.
 // A BARE `policy` line ("" value) means configured-with-empty → the unreadable-policy path fails loud.
 if (policyPath === null && candorConfig.policy !== undefined) policyPath = candorConfig.policy;
