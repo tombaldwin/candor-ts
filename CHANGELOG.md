@@ -8,6 +8,15 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ The collision guard keyed on the FLAG, so a policy from `.candor/config` was invisible to it** —
+  the checked-in form, i.e. the one CI actually uses. `--gate-json <that policy>` destroyed it and exited
+  0 with `"ok": true`, in all four engines, after the flag-based rows were already green. It now
+  enumerates every channel a policy can arrive through, reading the config leniently so it cannot
+  pre-empt the real load's refusal.
+- **⚠ `gate --report R --gate-json R` destroyed the report it was asked to judge**, then blamed the
+  report rather than the collision. §3.3.1 names a report being read as an input. Caught by the new
+  conformance rows, not by hand.
+
 - **No collision guard was added here when rust's was.** `--policy P --gate-json P` armed the refusal
   over the policy, every line of it warned as an unknown rule, the gate ran over zero rules, and the run
   exited **0 with `"ok": true`** while the policy was gone. Now refused (exit 2, nothing written), on

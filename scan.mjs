@@ -133,15 +133,73 @@ const argv = process.argv.slice(2);
 //      as an unknown rule, and the gate ran over zero rules. A machine-readable all-clear produced by
 //      deleting the question.
 const preScan = (av) => {
-  let gate = null, policy = null;
+  let gate = null, policy = null, target = null;
   for (let i = 0; i < av.length; i++) {
     const a = av[i], v = av[i + 1];
-    if (a !== "--gate-json" && a !== "--policy") continue;
-    if (v === undefined || (v !== "-" && v.startsWith("--"))) continue;
-    if (a === "--gate-json") gate = v; else policy = v;
-    i++;
+    if (a === "--gate-json" || a === "--policy" || a === "--out") {
+      if (v === undefined || (v !== "-" && v.startsWith("--"))) continue;
+      if (a === "--gate-json") gate = v; else if (a === "--policy") policy = v;
+      i++;
+      continue;
+    }
+    // The scan TARGET, needed to discover the `.candor/config` whose `policy` key may name an input
+    // this sink must not overwrite.
+    if (!a.startsWith("-") && target === null) target = a;
   }
-  return { gate, policy };
+  return { gate, policy, target };
+};
+
+// Every path this run READS, whatever channel it arrived through (SPEC §3.3.1 ⟨0.27⟩).
+//
+// THE FIRST VERSION OF THIS GUARD KEYED ON THE FLAG. With the policy declared by `.candor/config` — the
+// checked-in form, i.e. the one a CI job actually has — `--gate-json <that policy>` destroyed it and
+// exited 0 with `"ok": true` in ALL FOUR ENGINES. A policy does not change what it is according to how
+// the operator handed it over. The config is read LENIENTLY (no exit, no diagnostic): this runs before
+// the real config load and must not pre-empt its refusal.
+const runInputs = (target, policyFlag) => {
+  const out = [];
+  if (policyFlag) out.push([policyFlag, "--policy"]);
+  for (const [v, label] of [["CANDOR_POLICY", "CANDOR_POLICY"], ["CANDOR_BASELINE", "CANDOR_BASELINE"],
+                            ["CANDOR_CONFIG", "CANDOR_CONFIG"]]) {
+    if (process.env[v]) out.push([process.env[v], label]);
+  }
+  for (const d of (process.env.CANDOR_DEPS ?? "").split(":").filter(Boolean)) {
+    out.push([d, "a CANDOR_DEPS report"]);
+  }
+  let cfg = null;
+  try {
+    if (process.env.CANDOR_CONFIG && fs.statSync(process.env.CANDOR_CONFIG).isFile()) {
+      cfg = process.env.CANDOR_CONFIG;
+    } else {
+      let dir = path.resolve(target ?? ".");
+      if (fs.existsSync(dir) && fs.statSync(dir).isFile()) dir = path.dirname(dir);
+      for (;;) {
+        const c = path.join(dir, ".candor", "config");
+        if (fs.existsSync(c)) { cfg = c; break; }
+        const up = path.dirname(dir);
+        if (up === dir) break;
+        dir = up;
+      }
+    }
+  } catch { /* lenient by design */ }
+  if (cfg) {
+    out.push([cfg, "the discovered .candor/config"]);
+    const home = path.dirname(path.dirname(path.resolve(cfg)));
+    try {
+      for (const raw of fs.readFileSync(cfg, "utf8").split(/\r?\n/)) {
+        const line = raw.split("#", 1)[0].trim();
+        const m = line.match(/^(\S+)\s+(.*)$/);
+        if (!m) continue;
+        const key = m[1].toLowerCase();
+        if (!["policy", "baseline", "deps"].includes(key)) continue;
+        const vals = key === "deps" ? m[2].split(/[\s:,]+/).filter(Boolean) : [m[2].trim()];
+        for (const one of vals) {
+          if (one) out.push([path.isAbsolute(one) ? one : path.join(home, one), `the config's \`${key}\``]);
+        }
+      }
+    } catch { /* lenient by design */ }
+  }
+  return out;
 };
 // Artifact identity, not string identity: `--policy /w/P --gate-json ./P` from /w is one file, and the
 // engine that already had this check compared path spellings and lost to exactly that. realpath resolves
@@ -156,8 +214,8 @@ const sameArtifact = (a, b) => {
   return x !== null && x === y;
 };
 {
-  const { gate, policy } = preScan(argv);
-  for (const [other, flag] of [[policy, "--policy"], [process.env.CANDOR_POLICY, "CANDOR_POLICY"]]) {
+  const { gate, policy, target: preTarget } = preScan(argv);
+  for (const [other, flag] of (gate ? runInputs(preTarget, policy) : [])) {
     if (gate && sameArtifact(gate, other)) {
       console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as ${flag} ${other} — refusing `
         + `(exit 2). The verdict is armed before the policy is read, so this would overwrite your policy `

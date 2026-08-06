@@ -442,15 +442,15 @@ function resolveGateVerb(rawArgs, { strict = false } = {}) {
 
 /** Learn `--gate-json` and `--policy` from a verb's argv with NO side effects. */
 function preScanGateArgs(av) {
-  let gate = null, policy = null;
+  let gate = null, policy = null, report = null;
   for (let i = 0; i < av.length; i++) {
     const a = av[i], v = av[i + 1];
-    if (a !== "--gate-json" && a !== "--policy") continue;
+    if (a !== "--gate-json" && a !== "--policy" && a !== "--report") continue;
     if (v === undefined || (v.startsWith("-") && v !== "-")) continue;
-    if (a === "--gate-json") gate = v; else policy = v;
+    if (a === "--gate-json") gate = v; else if (a === "--policy") policy = v; else report = v;
     i++;
   }
-  return { gate, policy };
+  return { gate, policy, report };
 }
 
 /** Artifact identity, not string identity — `--policy /w/P --gate-json ./P` from /w is one file. */
@@ -504,9 +504,13 @@ function resolveGateReportVerb(rawArgs) {
   // the collision refusal and the arming precede every exit in the loop below. See the note where the
   // arming used to live for why the previous ordering was wrong.
   {
-    const { gate, policy } = preScanGateArgs(rawArgs);
+    const { gate, policy, report } = preScanGateArgs(rawArgs);
     if (gate) {
       refuseGateJsonOverInput(gate, policy, "--policy");
+      // §3.3.1 names "a report being read (`gate --report`)" as an input. Writing the verdict there
+      // destroys the very report the gate was asked to judge, and the diagnostic then blames the report
+      // rather than the collision.
+      refuseGateJsonOverInput(gate, report, "--report");
       refuseGateJsonOverInput(gate, process.env.CANDOR_POLICY, "CANDOR_POLICY");
       refuseGateJsonAtConfig(gate);
       if (gate !== "-") armQueryGateJson(gate);
