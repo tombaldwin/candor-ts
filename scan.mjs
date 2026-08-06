@@ -206,8 +206,11 @@ function enginePinFor(text, implName) {
     const slot = (cur, v) => (cur !== null && cur !== v ? `${cur} / ${v}` : v);
     if (rest.length === 0) bad = true;
     else if (rest.length === 1) wild = slot(wild, rest[0]);
-    else if (rest.length === 2 && ENGINE_IMPLS.has(rest[0].toLowerCase())) {
-      if (rest[0].toLowerCase() === implName) qual = slot(qual, rest[1]);
+    else if (ENGINE_IMPLS.has(rest[0].toLowerCase())) {
+      // A KNOWN qualifier decides the line's OWNER before anything else is judged: a junked line naming
+      // ANOTHER engine is that engine's problem (SPEC §3.4 whole-line skip), and refusing here would
+      // turn one typo into a family-wide outage.
+      if (rest[0].toLowerCase() === implName) { if (rest.length === 2) qual = slot(qual, rest[1]); else bad = true; }
     } else bad = true;
   }
   if (bad) return "<unreadable>";

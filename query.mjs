@@ -1305,6 +1305,17 @@ switch (cmd) {
     // Route the human output exactly as a scan does: to stderr whenever stdout carries the verdict
     // document, so `candor-ts-query gate … --json | jq` sees pure JSON.
     const gsay = (json || gateJsonPath === "-") ? (l) => console.error(l) : (l) => console.log(l);
+    // ⟨0.27⟩ SPEC §4 — THE ZERO-MATCH DISCLOSURE BELONGS ON THIS ROUTE TOO. Its absence was found by a
+    // cross-engine differential: java and swift disclosed on `gate --report`, rust and ts did not, so
+    // the same typo'd policy was reported by two engines and silently scored as satisfied by two. §4's
+    // MUST carries no route qualifier, and this is the SUPPLY-CHAIN gate — a consumer pointing a policy
+    // at a report someone else produced. ALWAYS on stderr, never through `gsay`: this is a disclosure
+    // about the policy, not a verdict line, and stdout may be carrying the verdict document.
+    for (const raw of gviol.zeroMatch ?? []) {
+      console.error(`candor: policy rule matched NO function — \`${raw}\`. It was evaluated and bound `
+        + `nothing, so it cannot have caught anything. Legitimate when one policy is shared across `
+        + `repos; a typo'd layer name otherwise.`);
+    }
     for (const x of gviol) gsay(`[${x.rule}] ${x.detail}`);
     // ⟨0.21⟩ COMPLETENESS MANIFEST: a gate cannot be green over code candor never analyzed. The scan path
     // exits 2 on its OWN `unanalyzed`; here the same manifest travels ON the report, so the same verdict
