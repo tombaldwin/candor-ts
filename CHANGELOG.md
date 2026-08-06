@@ -8,6 +8,18 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **Panel review: the pin grammar disagreed across engines on a shared config.** Three confirmed
+  divergences, each a case conformance PART 33 had not thought of, all now fixed and pinned there:
+  a junked line qualified for ANOTHER implementation (`engine swift 0.99.0 junk`) killed this engine's
+  own run — SPEC §3.4 now rules the skip WHOLE-LINE, because a malformed line naming another engine is
+  that engine's problem and it refuses on it, while refusing everywhere turns one typo into a
+  family-wide outage; `vv0.27.0` was accepted as a version by engines that stripped every leading `v`;
+  and a CRLF config broke a MATCHING pin where `\r` was not treated as whitespace.
+- **The zero-match disclosure was missing on the `gate --report` route.** java and swift disclosed
+  there, this engine did not — so on the supply-chain gate, the surface a consumer points at a report
+  someone else produced, a typo'd layer name was still scored as satisfied in silence. SPEC §4's MUST
+  carries no route qualifier.
+
 ## [0.27.0] — 2026-08-05
 
 - **⟨0.27⟩ SPEC §3.4 `engine` — the engine↔baseline coupling, enforced here too.** A build that is not
