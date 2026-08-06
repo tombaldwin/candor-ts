@@ -10,6 +10,13 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [0.27.0] — 2026-08-05
 
+- **A refusal must never leave the last run's green: `--gate-json` is now armed FAIL-CLOSED at run
+  start.** With a mismatched or unreadable `engine` pin this engine exited 2 and left the PREVIOUS run's
+  verdict document on disk, so a CI wrapper reading the artifact rather than the exit code reported a
+  **pass over a run that refused** — from the release's flagship guard. Arming at the start makes it a
+  class fix rather than a branch fix: every exit path leaves a refusal unless the run got far enough to
+  replace it. candor-java's `armGateJson` is the model.
+
 - **A bare `engine <impl>` still split the family five ways.** `engine swift` — an operator forgetting
   the version on a qualified line — was skipped by candor-java and treated by the other four as a
   WILDCARD pin whose version is the literal `swift`, so it exited 2 in every engine that is *not* swift:
