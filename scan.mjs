@@ -156,9 +156,9 @@ if (target === null) { console.error(usage); process.exit(2); }
 // never vanish silently (the §6.2 unreadable-policy posture). Only genuine absence is an empty config.
 // Keys are the shared FAMILY vocabulary; a key OUTSIDE it warns (typo protection: a misspelt `policy`
 // must not silently drop the gate).
-// ⟨0.28 PROPOSED⟩ `engine` is in the vocabulary and NOT implemented here on purpose: candor-java enforces
-// the pin, and a key this spec defines must never be reported as an unknown one — that would tell an
-// operator their pin was ignored while a sibling engine was enforcing it.
+// ⟨0.27⟩ `engine` (SPEC §3.4) is RECOGNIZED and IMPLEMENTED here — see enforceEnginePin. It must be in
+// BOTH sets: missing from the vocabulary it is reported as unknown, and missing from IMPLEMENTED it is
+// disclosed as inert — both tell an operator their pin was ignored while the engine is enforcing it.
 const CONFIG_KEYS = new Set(["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "net-partner", "unknown-ratchet", "engine"]);
 // The subset this engine actually wires to a mode — `policy` (the gate), `baseline` (AS-EFF-005),
 // `deps` (the cross-package report chain) and `unknown-ratchet` (the baseline guard's opt-in). The rest
@@ -166,7 +166,7 @@ const CONFIG_KEYS = new Set(["policy", "baseline", "strict", "no-ambient", "clos
 // that silently does nothing is a DECLARED-GATE-SILENTLY-OFF — the reader believes the gate is on — so
 // an inert recognized key DISCLOSES loudly (stderr only; verdict/report/exit code untouched) instead of
 // staying mute. Same posture + message shape as candor-scan's CONFIG_KEYS_IMPLEMENTED.
-const CONFIG_KEYS_IMPLEMENTED = new Set(["policy", "baseline", "deps", "unknown-ratchet"]);
+const CONFIG_KEYS_IMPLEMENTED = new Set(["policy", "baseline", "deps", "unknown-ratchet", "engine"]);
 // The ANCHOR a config file's RELATIVE path values (policy/deps) resolve against: the repo the config
 // belongs to — the parent of its `.candor/` directory (the standard layout; candor-init scaffolds
 // `policy arch.policy` meaning the repo root's), else the config file's own directory. NEVER the
@@ -177,6 +177,74 @@ function configAnchor(file) {
   const dir = path.dirname(path.resolve(file));
   return path.basename(dir) === ".candor" ? path.dirname(dir) : dir;
 }
+// ⟨0.27⟩ SPEC §3.4 `engine` — THE ENGINE↔BASELINE COUPLING, enforced instead of hoped for.
+//
+// The committed baseline is a snapshot of what ONE engine build reported, and an engine swap is
+// baseline-invalidating. What a PIN adds over the provenance checks already in place is that it is
+// DECLARATIVE — a build id is a hash nobody can write down, so the intended version lived in CI config,
+// decoupled from the baseline it is married to. It also tells tooling which engine to FETCH, and it
+// reaches a run with NO baseline configured at all.
+//
+// TWO OF THE FIVE VERDICTS MUST NOT CHANGE THE EXIT CODE: an ABSENT pin (the key is opt-in by
+// construction) and an UNDETERMINED one, where §3.1's unanswerable-condition rule applies — disclosed,
+// never scored, INCLUDING as satisfied. Exit 2 on a mismatch, never 1: unevaluable, not violating.
+//
+// A pin qualified for another implementation is not ours to check — one config serves the whole family,
+// and the family versions as a LADDER, so a bare version in a polyglot repo would fail whichever engine
+// had not yet caught up.
+const ENGINE_IMPLS = new Set(["java", "rust", "ts", "swift", "agents"]);
+function enginePinFor(text, implName) {
+  let wild = null, qual = null, bad = false;
+  for (const rawLine of (text ?? "").split("\n")) {
+    const line = rawLine.split("#")[0].trim();
+    if (!line) continue;
+    const parts = line.split(/\s+/);
+    if (parts[0].toLowerCase() !== "engine") continue;
+    const rest = parts.slice(1);
+    // Two lines that DISAGREE about the same key are kept BOTH, so they cannot parse as a version and
+    // surface as malformed. One silently discarding the other is the failure this key exists to stop.
+    const slot = (cur, v) => (cur !== null && cur !== v ? `${cur} / ${v}` : v);
+    if (rest.length === 0) bad = true;
+    else if (rest.length === 1) wild = slot(wild, rest[0]);
+    else if (rest.length === 2 && ENGINE_IMPLS.has(rest[0].toLowerCase())) {
+      if (rest[0].toLowerCase() === implName) qual = slot(qual, rest[1]);
+    } else bad = true;
+  }
+  if (bad) return "<unreadable>";
+  return qual ?? wild;
+}
+function normalizePinVersion(raw) {
+  const s = String(raw ?? "").trim().replace(/^[vV]/, "");
+  if (!/^\d+\.\d+(\.\d+)?$/.test(s)) return null;
+  return s.split(".").length === 2 ? `${s}.0` : s;
+}
+function enforceEnginePin(targetPath) {
+  const pin = enginePinFor(discoverConfigText(targetPath), "ts");
+  if (pin === null || pin === undefined) return;                       // ABSENT
+  const want = normalizePinVersion(pin);
+  if (want === null) {
+    console.error(`candor-ts: .candor/config has an \`engine\` line that is not an engine version.`);
+    console.error(`        want \`engine <version>\` (e.g. \`engine v${PKG_VERSION}\`) or \`engine <impl> <version>\``);
+    console.error(`        (e.g. \`engine ts v${PKG_VERSION}\`) for a repo scanned by more than one engine.`);
+    console.error(`        Failing (exit 2) rather than ignoring it: a pin that cannot be read is a`);
+    console.error(`        guard the operator believes is on.`);
+    process.exit(2);
+  }
+  const running = normalizePinVersion(PKG_VERSION) ?? String(PKG_VERSION ?? "").trim();
+  if (!running || running === "unknown") {                             // UNDETERMINED — disclose, never score
+    console.error(`candor-ts: .candor/config pins engine ${pin}, and this build does not know its own release,`);
+    console.error(`        so the pin CANNOT be checked. Disclosed, not scored — neither passed nor failed.`);
+    return;
+  }
+  if (want === running) return;                                        // MATCH
+  console.error(`candor-ts: .candor/config pins engine ${pin} but this build is candor-ts ${PKG_VERSION}.`);
+  console.error(`        The pin and the committed baseline move together — a newer engine resolves more`);
+  console.error(`        dispatch, so its report is not comparable with a baseline the pinned engine wrote.`);
+  console.error(`        Either run the pinned engine, or update the pin and regenerate the baseline in the`);
+  console.error(`        same change. Exit 2 (unevaluable), not 1 — this is not a policy violation.`);
+  process.exit(2);
+}
+
 function loadCandorConfig(targetPath) {
   let file = process.env.CANDOR_CONFIG ?? null;
   if (file !== null) {
@@ -237,6 +305,7 @@ function loadCandorConfig(targetPath) {
   return cfg;
 }
 const candorConfig = loadCandorConfig(target);
+enforceEnginePin(target);   // ⟨0.27⟩ §3.4 — before any analysis: a wrong engine costs a message, not a scan
 // precedence: the --policy flag / CANDOR_POLICY env already populated policyPath; the config is the floor.
 // A BARE `policy` line ("" value) means configured-with-empty → the unreadable-policy path fails loud.
 if (policyPath === null && candorConfig.policy !== undefined) policyPath = candorConfig.policy;
