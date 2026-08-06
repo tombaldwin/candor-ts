@@ -214,6 +214,10 @@ function enginePinFor(text, implName) {
     else bad = true;
   }
   if (bad) return "<unreadable>";
+  // AN UNREADABLE UNQUALIFIED LINE IS NOT HIDDEN BY A QUALIFIED PIN. `qual ?? wild` returned the qualifi
+  // ed value, so `engine garbage` beside a good qualified line passed SILENTLY here while candor-java exited 
+  // 2 — the exact mirror of the bug just fixed in java, four engines the other way. Unreadability is a property of the LINE; precedence only decides which VERSION applies.
+  if (wild !== null && normalizePinVersion(wild) === null) return wild;
   return qual ?? wild;
 }
 function normalizePinVersion(raw) {
@@ -307,7 +311,10 @@ function loadCandorConfig(targetPath) {
   if (cfg.deps) cfg.deps = cfg.deps.split(/[\s:,]+/).filter(Boolean).map((t) => path.resolve(anchor, t)).join(":");
   return cfg;
 }
-const candorConfig = loadCandorConfig(target);
+// MOVED ABOVE THE CONFIG LOAD. `loadCandorConfig` is ITSELF an exit-2 cause (an unusable
+// CANDOR_CONFIG, or a committed `.candor/config` that cannot be read), and arming after it left a
+// config refusal exiting 2 with the PREVIOUS run's green still on disk — while the comment below
+// said "BEFORE ANYTHING THAT CAN EXIT". The rule only holds if the arming really is first.
 // ⟨0.24⟩ ARM THE VERDICT FAIL-CLOSED BEFORE ANYTHING THAT CAN EXIT. A review found the pin refusal
 // leaving the PREVIOUS run's `--gate-json` document on disk — a CI wrapper reading the artifact instead
 // of the exit code then reports a pass over a run that refused. Arming at the START makes this a CLASS
@@ -330,6 +337,7 @@ if (gateJsonPath && gateJsonPath !== "-") {
       + `this run does not complete, that path may still hold a PREVIOUS run's verdict`);
   }
 }
+const candorConfig = loadCandorConfig(target);
 enforceEnginePin(target);   // ⟨0.27⟩ §3.4 — AFTER the arming, so its exit 2 cannot leave a stale verdict
 // precedence: the --policy flag / CANDOR_POLICY env already populated policyPath; the config is the floor.
 // A BARE `policy` line ("" value) means configured-with-empty → the unreadable-policy path fails loud.
