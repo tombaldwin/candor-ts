@@ -10,6 +10,10 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [0.27.0] — 2026-08-05
 
+- **`gate --report` with a bad locator left the previous verdict on disk.** Fixed — but the arming sits
+  *after* usage validation, because ⟨0.24⟩ rules that a usage error was never a gate invocation and must
+  write nothing. A test pins that line, and it caught the first attempt.
+
 - **A refusal must never leave the last run's green: `--gate-json` is now armed FAIL-CLOSED at run
   start.** With a mismatched or unreadable `engine` pin this engine exited 2 and left the PREVIOUS run's
   verdict document on disk, so a CI wrapper reading the artifact rather than the exit code reported a
