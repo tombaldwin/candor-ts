@@ -469,8 +469,33 @@ function resolveGateReportVerb(rawArgs) {
     console.error(`candor-ts-query gate: unexpected argument '${a}' — \`gate\` takes no positionals; the report is a --report locator and the policy a --policy file\n  ${usageLine}`);
     process.exit(2);
   }
+  // ARMED AFTER USAGE VALIDATION, BEFORE THE REPORT IS RESOLVED — and the order is a ⟨0.24⟩ ruling, not
+  // a detail. A USAGE error (a missing `--policy`, an unknown flag) was never a gate invocation, so it
+  // must write NOTHING: a document there would put a verdict where the operator's own shell already
+  // failed. candor-java draws the line in the same place, and putting the arming above `resolvePolicy`
+  // broke the test that pins it. A bad REPORT locator is on the other side of that line — the command
+  // WAS a gate invocation, it just could not be evaluated.
+  const _policy = resolvePolicy(policyFile, null).policyFile;
+  // ARM THE VERDICT BEFORE RESOLVING THE REPORT. `requireReport` exits 2 on a bad or missing locator —
+  // a typo'd `--report` path in CI — and that exit left the PREVIOUS run's `--gate-json` document on
+  // disk, so a wrapper reading the artifact saw a pass. java, rust and swift all write a refusal on this
+  // exact path; ts was the hole. Files only: a `-` stream has no stale document to replace.
+  // …and only when a POLICY was actually supplied. `resolvePolicy` returns null rather than exiting, so
+  // the "no --policy" usage error is raised further down — arming before that check wrote a document for
+  // a command that was never a gate invocation, which is precisely the boundary above.
+  if (_policy && gateJsonPath && gateJsonPath !== "-") {
+    try {
+      fs.writeFileSync(gateJsonPath, JSON.stringify(
+        refusalVerdict(SPEC_VERSION, "the gate did not complete — this document was written when the run "
+          + "STARTED and was never replaced by a verdict, so the run failed, crashed or was killed before "
+          + "it could decide. It is NOT a verdict about the code; see the run's stderr for the cause."),
+        null, 1) + "\n");
+    } catch (e) {
+      console.error(`candor-ts-query: could not arm --gate-json ${gateJsonPath} fail-closed (${e.message})`);
+    }
+  }
   const prefix = requireReport(reportLocator !== null ? locatorToPrefix(reportLocator) : discoverReportPrefix());
-  return { prefix, policyFile: resolvePolicy(policyFile, null).policyFile, gateJsonPath, json };
+  return { prefix, policyFile: _policy, gateJsonPath, json };
 }
 
 /**
