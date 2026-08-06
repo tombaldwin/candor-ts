@@ -204,14 +204,14 @@ function enginePinFor(text, implName) {
     // Two lines that DISAGREE about the same key are kept BOTH, so they cannot parse as a version and
     // surface as malformed. One silently discarding the other is the failure this key exists to stop.
     const slot = (cur, v) => (cur !== null && cur !== v ? `${cur} / ${v}` : v);
+    // A KNOWN QUALIFIER DECIDES OWNERSHIP BEFORE ARITY. Checking the one-token case first made `engine swift` a WILDCARD pin whose version is the literal "swift" -> MALFORMED -> exit 2 in every engine, so one operator forgetting a version on a qualified line killed the whole family. SPEC 3.4 says the skip is whole-line 'whatever follows it' -- and nothing following it is a case of that too.
+    if (rest.length && ENGINE_IMPLS.has(rest[0].toLowerCase())) {
+      if (rest[0].toLowerCase() === implName) { if (rest.length === 2) qual = slot(qual, rest[1]); else bad = true; }
+      continue;                                    // another impl's line, whatever follows it
+    }
     if (rest.length === 0) bad = true;
     else if (rest.length === 1) wild = slot(wild, rest[0]);
-    else if (ENGINE_IMPLS.has(rest[0].toLowerCase())) {
-      // A KNOWN qualifier decides the line's OWNER before anything else is judged: a junked line naming
-      // ANOTHER engine is that engine's problem (SPEC §3.4 whole-line skip), and refusing here would
-      // turn one typo into a family-wide outage.
-      if (rest[0].toLowerCase() === implName) { if (rest.length === 2) qual = slot(qual, rest[1]); else bad = true; }
-    } else bad = true;
+    else bad = true;
   }
   if (bad) return "<unreadable>";
   return qual ?? wild;
@@ -5189,6 +5189,11 @@ if (baselinePath !== null) {
     console.error(`candor-ts: .candor/config declares \`baseline ${baselinePath}\` but that file is not `
       + `there — failing (exit 2). A checked-in declaration says this repo HAS a baseline, so an absent `
       + `one was deleted or never committed. Commit it, or record one: candor-ts <target> --out <prefix>.`);
+    // WRITE THE REFUSAL DOCUMENT BEFORE EXITING. Without this the `--gate-json` file keeps whatever the
+    // LAST run left there — so a CI wrapper that reads the artifact instead of the exit code sees the
+    // previous run's `ok: true` and reports a pass, which is the stale-artifact false green this format
+    // exists to refuse. java, rust and swift all overwrite on this branch; ts alone did not.
+    writeRefusal(`.candor/config declares \`baseline ${baselinePath}\` but that file is not there`);
     process.exit(2);
   } else if (baselinePath !== "" && !fs.existsSync(baselinePath)) {
     console.error(`candor-ts: CANDOR_BASELINE ${baselinePath} does not exist — the regression guard is `
