@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 
 import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, discoverConfigText,
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
-         policyVocabularyAnchor, policyErrorText, policyErrorUnevaluated, policyUnreadable,
+         policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable,
          fatalPolicyErrors, refusalVerdict,
          unanswerableScoped } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
@@ -1285,7 +1285,9 @@ switch (cmd) {
     // uses (SPEC §3.1 makes byte-equality between the two documents the acceptance test — the scan route
     // needed this list so a dominating baseline regression could carry the refusal beside it, and a list on
     // one route only would break the equality on the very change that repaired the precedence).
-    if (gfatal.length) { const why = policyErrorText(policyFile, gfatal); console.error(why); grefuse(why, policyErrorUnevaluated(gfatal)); }
+    // ⟨0.27⟩ …listing EVERY rule of the refused policy, not only the unhonourable lines — the shared
+    // builder with the scan route (SPEC §3.1's composed-document clause; byte-equality binds the two).
+    if (gfatal.length) { const why = policyErrorText(policyFile, gfatal); console.error(why); grefuse(why, policyRefusalUnevaluated(gtext, gfatal)); }
     // ⟨0.24⟩ THE CONFIG FILE THAT SUPPLIED VOCABULARY THE VERDICT USED (SPEC §3.1 `99eb4e9`) — named on a
     // REFERENCE, not only on a firing, because the measured harm was a GREEN verdict a vocabulary file made
     // green. Omitted when no alias was used, so every other verdict stays byte-identical to before.
@@ -1439,6 +1441,9 @@ switch (cmd) {
     if (gvocab) gverdictObj.policyVocabulary = gvocab;
     gverdictObj.violations = gviol;
     if (gunevaluated.length) gverdictObj.unevaluated = gunevaluated;
+    // ⟨0.27⟩ SPEC §4 `zeroMatch` — the same list the stderr lines above carry, in the machine channel,
+    // in the same position the scan route puts it (§3.1's byte-equality MUST binds the two documents).
+    if (gviol.zeroMatch?.length) gverdictObj.zeroMatch = gviol.zeroMatch;
     if (gincomplete) { gverdictObj.incomplete = true; gverdictObj.unanalyzed = g.unanalyzed; }
     if (g.coverage.length)
       gverdictObj.coverage = { uncovered: g.coverage.length, packages: g.coverage.map((c) => c.name) };

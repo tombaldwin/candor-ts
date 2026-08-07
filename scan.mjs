@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText,
-         reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyErrorUnevaluated, policyUnreadable, fatalPolicyErrors, refusalVerdict,
+         reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, fatalPolicyErrors, refusalVerdict,
          netClassResolver, resolveReasonClasses } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
@@ -240,6 +240,18 @@ const runInputs = (target, policyFlag) => {
   }
   if (gate && gate !== "-") armGateJsonFailClosed(gate);
 }
+// ⟨0.27⟩ THE STREAM SINK'S ANALOG OF ARMING — SPEC §3.1's stream-sink clause. `--gate-json -` cannot be
+// armed (a stream has no stale previous document, and a placeholder would put TWO documents in a
+// consumer's pipe), but the document-on-every-exit rule applies in full: an exit-2 cause that fires
+// before the gate tail — an unknown flag, a valueless gate-adjacent flag, a missing target — must still
+// leave the fail-closed refusal as the stream's only content. Measured: an unhonourable policy wrote the
+// refusal to stdout while an unknown flag exited 2 leaving stdout EMPTY — the same operator mistake,
+// answered or not according to which early exit fired, and an empty stream throws the consumer back to
+// scraping stderr. File sinks need nothing here: the arming above already left a refusal in place.
+const preGateSink = preScan(argv).gate;
+const refuseEarlyToStream = (why) => {
+  if (preGateSink === "-") console.log(JSON.stringify(refusalVerdict(SPEC_VERSION, why, null), null, 1));
+};
 let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, gateJsonPath = null, allowJs = false, wantAgents = false, wantJson = false, wantWorkspace = false, wantDepInits = false;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -253,7 +265,11 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--dep-inits") wantDepInits = true;
   else if (a === "--out" || a === "--policy" || a === "--gate-json") {
     const v = argv[i + 1];
-    if (v === undefined || v.startsWith("--")) { console.error(`candor-ts: ${a} requires a value (${usage})`); process.exit(2); }
+    if (v === undefined || v.startsWith("--")) {
+      console.error(`candor-ts: ${a} requires a value (${usage})`);
+      refuseEarlyToStream(`${a} requires a value`);
+      process.exit(2);
+    }
     if (a === "--out") outPrefix = v; else if (a === "--policy") policyPath = v; else gateJsonPath = v;
     i++;
   }
@@ -261,13 +277,27 @@ for (let i = 0; i < argv.length; i++) {
   // (SPEC §6.2/§7). `-h`/`-V`/`--help`/`--version` are print-and-exit modes consumed above, so by here
   // a single-dash token (`-x`, the typo `-policy`) can only be a mistake; treating it as the scan
   // target would silently scan the wrong thing.
-  else if (a.startsWith("-")) { console.error(`candor-ts: unknown flag ${a} (${usage})`); process.exit(2); }
+  else if (a.startsWith("-")) {
+    console.error(`candor-ts: unknown flag ${a} (${usage})`);
+    // ⟨0.27⟩ §3.3 names an unknown flag as a broken-gate-config exit-2 cause; the stream sink gets the
+    // refusal document too (see refuseEarlyToStream — the file sink is already armed).
+    refuseEarlyToStream(`unknown flag ${a}`);
+    process.exit(2);
+  }
   else if (target === null) target = a;
   else if (outPrefix === null) outPrefix = a; // legacy positional prefix
-  else { console.error(`candor-ts: unexpected extra argument ${a} (${usage})`); process.exit(2); }
+  else {
+    console.error(`candor-ts: unexpected extra argument ${a} (${usage})`);
+    refuseEarlyToStream(`unexpected extra argument ${a}`);
+    process.exit(2);
+  }
 }
 if (wantAgents) { printAgents(); process.exit(0); }
-if (target === null) { console.error(usage); process.exit(2); }
+if (target === null) {
+  console.error(usage);
+  refuseEarlyToStream("no scan target");
+  process.exit(2);
+}
 
 // ---- .candor/config (candor-spec §config; the checked-in alternative to the CANDOR_* env vars) -----
 // Discovery is anchored to the SCAN TARGET (walk up from the target dir to the repo root's
@@ -5315,6 +5345,11 @@ if (!wantJson) {
 // a `… | jq` / `… | candor-sarif` pipe never breaks.
 const emitViolation = (wantJson || gateJsonPath === "-") ? (l) => console.error(l) : (l) => console.log(l);
 let gateViolations = [];
+// ⟨0.27⟩ SPEC §4 `zeroMatch` — the raw text of every rule whose SCOPE bound no function, captured off the
+// gate evaluation and emitted onto the verdict document. The stderr lines alone left a machine consumer
+// unable to see that a rule bound nothing — the typo'd-scope silent green, one channel over. Disclosure
+// only: `ok` and the exit code never consult it.
+let gateZeroMatch = [];
 // ⟨0.24⟩ the `.candor/config` that supplied POLICY VOCABULARY this verdict actually used — named on the
 // document (SPEC §3.1 `99eb4e9`), null when no alias was referenced so the verdict stays byte-identical.
 let policyVocabulary = null;
@@ -5390,6 +5425,10 @@ if (baselinePath !== null) {
     if (!Array.isArray(arr)) {
       console.error(`candor-ts: baseline ${shownB} exists but could not be parsed (corrupt/truncated?) — `
         + `failing (exit 2); the guard must not silently pass on an unreadable baseline. Regenerate it with this build.`);
+      // ⟨0.27⟩ the refusal document has no exempt cause AND no exempt sink (SPEC §3.1): a file sink holds
+      // the armed placeholder, but `--gate-json -` is not armed, so without this write the stream carried
+      // NOTHING on this cause. Writing here also replaces the placeholder with the specific reason.
+      writeRefusal(`baseline ${shownB} exists but could not be parsed — guard NOT evaluated`);
       process.exit(2);
     }
     const baseVersion = !Array.isArray(root) && root.candor && typeof root.candor === "object"
@@ -5397,12 +5436,14 @@ if (baselinePath !== null) {
     if (baseVersion === null) {
       console.error(`candor-ts: the baseline ${shownB} has no provenance header (a legacy/bare-array report) — `
         + `a baseline is comparable only to its producing build (§2.1). Failing (exit 2); regenerate it with this build.`);
+      writeRefusal(`baseline ${shownB} has no provenance header — guard NOT evaluated`);   // ⟨0.27⟩ see above
       process.exit(2);
     }
     if (baseVersion !== ENGINE_VERSION) {
       console.error(`candor-ts: the baseline ${shownB} was produced by engine build ${baseVersion} but this is `
         + `build ${ENGINE_VERSION} — an engine swap is baseline-invalidating and the gate cannot evaluate `
         + `(exit 2; never a silent skip, never a bogus AS-EFF-005 wave). Regenerate deliberately with this build.`);
+      writeRefusal(`baseline ${shownB} was produced by engine build ${baseVersion}, not this build — guard NOT evaluated`);   // ⟨0.27⟩ see above
       process.exit(2);
     }
     const base = new Map();
@@ -5429,6 +5470,7 @@ if (baselinePath !== null) {
         console.error(`candor-ts: the baseline callgraph ${sidecarPath} is present but could not be parsed `
           + `(corrupt/truncated?) — failing (exit 2); a broken sidecar must not silently narrow the guard to `
           + `report-only. Regenerate the baseline with this build.`);
+        writeRefusal(`baseline callgraph ${sidecarPath} could not be parsed — guard NOT evaluated`);   // ⟨0.27⟩ see above
         process.exit(2);
       }
       // The node set = every caller key + every callee (a pure leaf appears only as a callee), exactly
@@ -5536,9 +5578,11 @@ if (policyPath !== null) {
     if (policyErrs.length) {
       const why = policyErrorText(policyPath, policyErrs);
       console.error(why);
-      // ⟨0.24⟩ ONE `unevaluated` ENTRY PER POLICY LINE THAT COULD NOT BE HONOURED — the SHARED builder, so
-      // this document and `gate --report`'s stay byte-equal (§3.1's acceptance test for the two routes).
-      policyRefusal = { why, unevaluated: policyErrorUnevaluated(policyErrs) };
+      // ⟨0.27⟩ ONE `unevaluated` ENTRY PER RULE OF THE POLICY — not only the unhonourable lines (SPEC
+      // §3.1's composed-document clause). Measured: listing only the bad token's line let a consumer read
+      // `deny Fs`, absent from the exit-1 document's list, as evaluated-and-passed. The SHARED builder,
+      // so this document and `gate --report`'s stay byte-equal (§3.1's acceptance test for the routes).
+      policyRefusal = { why, unevaluated: policyRefusalUnevaluated(text, policyErrs) };
     } else {
       // ⟨0.24⟩ the config file that supplied vocabulary the verdict USED, so an ambient `.candor/config` — the
       // walk goes up through every parent, and CANDOR_CONFIG overrides it outright — cannot move a verdict while
@@ -5557,6 +5601,9 @@ if (policyPath !== null) {
           + `nothing, so it cannot have caught anything. Legitimate when one policy is shared across `
           + `repos; a typo'd layer name otherwise.`);
       }
+      // ⟨0.27⟩ captured BEFORE the concat below — `concat` returns a plain array, so the `zeroMatch`
+      // property riding `gateOut` would be silently lost with it (see the gateZeroMatch declaration).
+      gateZeroMatch = gateOut.zeroMatch ?? [];
       gateViolations = gateViolations.concat(gateOut);
       // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
       // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
@@ -5632,6 +5679,9 @@ if (gateJsonPath) {
   // consumer reading exit 1 must be able to see that the POLICY half of the gate never ran — the same
   // `unevaluated` key, in the same position, that `gate --report` uses for its answerability refusals.
   if (policyRefusal) verdictObj.unevaluated = policyRefusal.unevaluated;
+  // ⟨0.27⟩ SPEC §4 `zeroMatch` — the same list the stderr lines carry, in the machine channel. Omitted
+  // when empty so a fully-binding verdict is byte-identical; never consulted for `ok` or the exit code.
+  if (gateZeroMatch.length) verdictObj.zeroMatch = gateZeroMatch;
   // ⟨0.21⟩ (Gap 2) the machine-legible incompleteness: the units candor couldn't analyze, so a CI/agent
   // reading the JSON learns WHY the gate can't certify (the stderr warning alone used to hide this from a
   // machine). `incomplete:true` + the list; the run exits 2 (could-not-fully-evaluate) below. ok:false +

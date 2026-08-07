@@ -8,6 +8,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.27⟩ The three verdict-document cells (SPEC §3.1/§4, conformance PART 36).** (1) The composed
+  document's `unevaluated` now lists EVERY rule of a refused policy, not only the offending line — a
+  rule absent from the list on an exit-1 document read as evaluated-and-passed (`policyRefusalUnevaluated`,
+  shared by both routes; this engine's composed shape was otherwise already the pinned one). (2) The
+  stream sink: the early exit-2 causes (unknown flag, valueless gate-adjacent flag, missing target) and
+  the baseline-invalid causes now write the fail-closed refusal to `--gate-json -` instead of leaving an
+  empty stream; file sinks get the specific reason in place of the armed placeholder. (3) `zeroMatch`:
+  the §4 zero-match list now rides the verdict document on BOTH routes, code-point sorted (explicitly —
+  JS default sort is UTF-16 order), deduplicated; it was stderr-only.
+
 - **⚠ A configured dep that cannot be read now refuses (exit 2)** — see the spec ruling. This engine
   skipped it with only a "skipped" note, so the omission was not qualified even in the channel a human
   reads, let alone in the report a chained consumer and `gate --report` actually read, where the caller

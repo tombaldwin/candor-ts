@@ -821,7 +821,40 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       }
     }
   }
-  out.zeroMatch = [...zeroCount].filter(([, c]) => c === 0).map(([raw]) => raw).sort();
+  // ⟨0.27⟩ CODE-POINT order, explicitly — the `zeroMatch` verdict key pins the `viaDispatchOn` collation
+  // (SPEC §4), and JS's default sort orders by UTF-16 code unit, which disagrees above the BMP. The raw
+  // line is built from user identifiers, so this is reachable rather than theoretical.
+  out.zeroMatch = [...zeroCount].filter(([, c]) => c === 0).map(([raw]) => raw)
+    .sort((a, b) => {
+      const ai = [...a], bi = [...b];
+      for (let i = 0; i < Math.min(ai.length, bi.length); i++) {
+        const d = ai[i].codePointAt(0) - bi[i].codePointAt(0);
+        if (d) return d;
+      }
+      return ai.length - bi.length;
+    });
+  return out;
+}
+
+// ⟨0.27⟩ EVERY RULE OF A REFUSED POLICY, one `unevaluated` entry per raw line (SPEC §3.1's
+// composed-document clause; candor-java `unhonouredRules` is the model). `policyErrorUnevaluated` above
+// names only the UNHONOURABLE lines — measured, that let a consumer read `deny Fs`, absent from the list
+// on an exit-1 document, as evaluated-and-passed: a per-rule false all-clear arriving through the
+// disclosure itself. The unhonourable lines keep their specific `why`; every other rule line carries the
+// whole-policy refusal, because a policy is evaluated as a whole or not at all. ONE builder for both gate
+// routes, for the same byte-equality reason as its siblings above.
+export function policyRefusalUnevaluated(policyText, errors) {
+  const fatal = new Map(policyErrorUnevaluated(errors).map((e) => [e.rule, e.why]));
+  const out = [];
+  for (const raw of policyText.split(/\r?\n/)) {
+    const line = raw.split("#", 1)[0].trim();
+    if (!line) continue;
+    out.push({ rule: line,
+      why: fatal.get(line)
+        ?? "NOT EVALUATED — a rule elsewhere in this policy cannot be honoured as written (named beside "
+         + "its own entry in this list), and a policy is evaluated as a whole or not at all: a verdict "
+         + "from its readable subset would be a verdict on a policy nobody wrote." });
+  }
   return out;
 }
 
