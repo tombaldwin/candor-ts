@@ -8,6 +8,19 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ The config channel of the sink guard was silently empty.** `CONFIG_KEYS` and
+  `CONFIG_KEYS_IMPLEMENTED` were declared BELOW the guard, so the `loadCandorConfig` call inside it threw
+  a temporal-dead-zone error and the `catch` around that call swallowed it — the guard enumerated no
+  config-declared inputs at all and a config-declared policy was destroyed at exit 0. A `catch` that
+  hides a programming error is a fail-open with a reason attached. The constants are lifted above the
+  guard and the discovery is shared with the loader (`discoverConfigFile`).
+- **⚠ `deps` paths were split on JS `\\s`, which includes U+00A0**, so a dep path containing a
+  non-breaking space became two halves that were both "skipped" — a green run with the dep silently
+  unchained, where java and rust loaded it. Paths separate on ASCII whitespace; only key/value is
+  Unicode-aware.
+- **⚠ `gate --report` did not enumerate the config-declared policy**, so the checked-in form was
+  destroyed at exit 0 while the `--policy` form refused.
+
 - **⚠ The collision guard keyed on the FLAG, so a policy from `.candor/config` was invisible to it** —
   the checked-in form, i.e. the one CI actually uses. `--gate-json <that policy>` destroyed it and exited
   0 with `"ok": true`, in all four engines, after the flag-based rows were already green. It now

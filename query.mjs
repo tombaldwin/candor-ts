@@ -465,6 +465,18 @@ function sameArtifactPath(a, b) {
   return x !== null && x === resolve(b);
 }
 
+/** The files the CWD-discovered \`.candor/config\` names, resolved as the loader resolves them. */
+function configDeclaredInputs() {
+  const out = [];
+  try {
+    const disc = discoverConfigPolicy(process.cwd());
+    if (disc?.policyPath) out.push([disc.policyPath, "the config policy key"]);
+    const cfgPath = discoverConfigPath(process.cwd());
+    if (cfgPath) out.push([cfgPath, 'the discovered .candor/config']);
+  } catch { /* lenient: the real load refuses on its own terms */ }
+  return out;
+}
+
 /** Refuse a sink that names an input of this run, having written nothing. */
 function refuseGateJsonOverInput(gate, other, flag) {
   if (!sameArtifactPath(gate, other)) return;
@@ -512,6 +524,11 @@ function resolveGateReportVerb(rawArgs) {
       // rather than the collision.
       refuseGateJsonOverInput(gate, report, "--report");
       refuseGateJsonOverInput(gate, process.env.CANDOR_POLICY, "CANDOR_POLICY");
+      // THE CONFIG-DECLARED POLICY. This verb's policy ladder falls back to the \`policy\` key of the
+      // config discovered from the CWD, and the guard checked only the flags — so the checked-in form,
+      // which is the one a CI job has, was destroyed at exit 0 while the flag form refused. The same
+      // hole the scan route closed, one route across.
+      for (const [p2, label] of configDeclaredInputs()) refuseGateJsonOverInput(gate, p2, label);
       refuseGateJsonAtConfig(gate);
       if (gate !== "-") armQueryGateJson(gate);
     }

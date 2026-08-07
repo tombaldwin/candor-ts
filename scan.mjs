@@ -119,6 +119,14 @@ See https://github.com/tombaldwin/candor`);
 // value-consuming skip handles, nor produce a "lying unknown flag" error for a real flag given first.
 const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--allow-js] [--workspace] [--agents] [--version] [--help]";
 const argv = process.argv.slice(2);
+// Declared HERE, above the sink guard, because the guard calls `loadCandorConfig` and that reads
+// these: left below, they were in the temporal dead zone, the call threw, and the `catch` around it
+// swallowed the throw — so the config channel the guard exists to enumerate was silently empty and a
+// config-declared policy was destroyed at exit 0 again. A `catch` that hides a programming error is a
+// fail-open with a reason attached.
+const CONFIG_KEYS = new Set(["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "net-partner", "unknown-ratchet", "engine"]);
+const CONFIG_KEYS_IMPLEMENTED = new Set(["policy", "baseline", "deps", "unknown-ratchet", "engine"]);
+
 // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
 //
 // This pre-pass learns the sink and this run's inputs with NO side effects, before the parse loop
@@ -156,53 +164,8 @@ const preScan = (av) => {
 // exited 0 with `"ok": true` in ALL FOUR ENGINES. A policy does not change what it is according to how
 // the operator handed it over. The config is read LENIENTLY (no exit, no diagnostic): this runs before
 // the real config load and must not pre-empt its refusal.
-const runInputs = (target, policyFlag) => {
-  const out = [];
-  if (policyFlag) out.push([policyFlag, "--policy"]);
-  for (const [v, label] of [["CANDOR_POLICY", "CANDOR_POLICY"], ["CANDOR_BASELINE", "CANDOR_BASELINE"],
-                            ["CANDOR_CONFIG", "CANDOR_CONFIG"]]) {
-    if (process.env[v]) out.push([process.env[v], label]);
-  }
-  for (const d of (process.env.CANDOR_DEPS ?? "").split(":").filter(Boolean)) {
-    out.push([d, "a CANDOR_DEPS report"]);
-  }
-  let cfg = null;
-  try {
-    if (process.env.CANDOR_CONFIG && fs.statSync(process.env.CANDOR_CONFIG).isFile()) {
-      cfg = process.env.CANDOR_CONFIG;
-    } else {
-      let dir = path.resolve(target ?? ".");
-      if (fs.existsSync(dir) && fs.statSync(dir).isFile()) dir = path.dirname(dir);
-      for (;;) {
-        const c = path.join(dir, ".candor", "config");
-        if (fs.existsSync(c)) { cfg = c; break; }
-        const up = path.dirname(dir);
-        if (up === dir) break;
-        dir = up;
-      }
-    }
-  } catch { /* lenient by design */ }
-  if (cfg) {
-    out.push([cfg, "the discovered .candor/config"]);
-    const home = path.dirname(path.dirname(path.resolve(cfg)));
-    try {
-      for (const raw of fs.readFileSync(cfg, "utf8").split(/\r?\n/)) {
-        const line = raw.split("#", 1)[0].trim();
-        const m = line.match(/^(\S+)\s+(.*)$/);
-        if (!m) continue;
-        const key = m[1].toLowerCase();
-        if (!["policy", "baseline", "deps"].includes(key)) continue;
-        const vals = key === "deps" ? m[2].split(/[\s:,]+/).filter(Boolean) : [m[2].trim()];
-        for (const one of vals) {
-          if (one) out.push([path.isAbsolute(one) ? one : path.join(home, one), `the config's \`${key}\``]);
-        }
-      }
-    } catch { /* lenient by design */ }
-  }
-  return out;
-};
 // Artifact identity, not string identity: `--policy /w/P --gate-json ./P` from /w is one file, and the
-// engine that already had this check compared path spellings and lost to exactly that. realpath resolves
+// engine that already had this guard compared path spellings and lost to exactly that. realpath resolves
 // `.`, `..` and symlinks; for a sink that does not exist yet its parent is resolved instead.
 const sameArtifact = (a, b) => {
   if (!a || !b || a === "-" || b === "-") return false;
@@ -210,9 +173,44 @@ const sameArtifact = (a, b) => {
     try { return fs.realpathSync(p); } catch { /* not there yet — resolve the parent */ }
     try { return path.join(fs.realpathSync(path.dirname(path.resolve(p))), path.basename(p)); } catch { return null; }
   };
-  const [x, y] = [resolve(a), resolve(b)];
-  return x !== null && x === y;
+  const x = resolve(a);
+  return x !== null && x === resolve(b);
 };
+
+const runInputs = (target, policyFlag) => {
+  const out = [];
+  if (policyFlag) out.push([policyFlag, "--policy"]);
+  for (const [v, label] of [["CANDOR_POLICY", "CANDOR_POLICY"], ["CANDOR_BASELINE", "CANDOR_BASELINE"],
+                            ["CANDOR_CONFIG", "CANDOR_CONFIG"]]) {
+    if (process.env[v]) out.push([process.env[v], label]);
+  }
+  // The SEPARATOR SET the dep loader accepts, not just `:` — a space-separated list registered as one
+  // unresolvable token, so no dep in it was protected.
+  for (const d of (process.env.CANDOR_DEPS ?? "").split(/[ \t:,]+/).filter(Boolean)) {
+    out.push([d, "a CANDOR_DEPS report"]);
+  }
+  // …AND THE CONFIG'S OWN KEYS, THROUGH THE ENGINE'S OWN LOADER AND ITS OWN DISCOVERY. This used to
+  // re-derive both, and a review took it apart: the home directory was computed as parent-of-parent
+  // unconditionally where the loader only steps out of a trailing `.candor/` segment, so an out-of-tree
+  // CANDOR_CONFIG had its relative values anchored one level too high and the guard protected a path
+  // the run never reads. A second parser is a second set of holes; `loadCandorConfig` is called inside a
+  // try so it can still refuse for real a moment later.
+  const cfgFile = discoverConfigFile(target ?? ".");
+  if (cfgFile) {
+    out.push([cfgFile, "the discovered .candor/config"]);
+    try {
+      const cfg = loadCandorConfig(target ?? ".");
+      for (const key of ["policy", "baseline"]) {
+        if (cfg[key]) out.push([cfg[key], `the config's \`${key}\``]);
+      }
+      for (const one of (cfg.deps ?? "").split(":").filter(Boolean)) {
+        out.push([one, "the config's `deps`"]);
+      }
+    } catch { /* lenient: the real load refuses on its own terms */ }
+  }
+  return out;
+};
+
 {
   const { gate, policy, target: preTarget } = preScan(argv);
   for (const [other, flag] of (gate ? runInputs(preTarget, policy) : [])) {
@@ -282,14 +280,12 @@ if (target === null) { console.error(usage); process.exit(2); }
 // ⟨0.27⟩ `engine` (SPEC §3.4) is RECOGNIZED and IMPLEMENTED here — see enforceEnginePin. It must be in
 // BOTH sets: missing from the vocabulary it is reported as unknown, and missing from IMPLEMENTED it is
 // disclosed as inert — both tell an operator their pin was ignored while the engine is enforcing it.
-const CONFIG_KEYS = new Set(["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "net-partner", "unknown-ratchet", "engine"]);
 // The subset this engine actually wires to a mode — `policy` (the gate), `baseline` (AS-EFF-005),
 // `deps` (the cross-package report chain) and `unknown-ratchet` (the baseline guard's opt-in). The rest
 // of the vocabulary is spec-inert HERE: it drives other engines' gates. But a checked-in enforcement key
 // that silently does nothing is a DECLARED-GATE-SILENTLY-OFF — the reader believes the gate is on — so
 // an inert recognized key DISCLOSES loudly (stderr only; verdict/report/exit code untouched) instead of
 // staying mute. Same posture + message shape as candor-scan's CONFIG_KEYS_IMPLEMENTED.
-const CONFIG_KEYS_IMPLEMENTED = new Set(["policy", "baseline", "deps", "unknown-ratchet", "engine"]);
 // The ANCHOR a config file's RELATIVE path values (policy/deps) resolve against: the repo the config
 // belongs to — the parent of its `.candor/` directory (the standard layout; candor-init scaffolds
 // `policy arch.policy` meaning the repo root's), else the config file's own directory. NEVER the
@@ -375,6 +371,24 @@ function enforceEnginePin(targetPath) {
   process.exit(2);
 }
 
+// WHICH config file this run reads, with NO side effects (SPEC §3.4). Extracted so the §3.3.1 sink
+// guard asks the same question the loader answers instead of re-deriving the walk — a review took the
+// guard's own copy apart on exactly that divergence.
+function discoverConfigFile(targetPath) {
+  const env = process.env.CANDOR_CONFIG;
+  if (env) {
+    try { return fs.statSync(env).isFile() ? env : null; } catch { return null; }
+  }
+  let dir = path.resolve(targetPath ?? ".");
+  try { if (!fs.statSync(dir).isDirectory()) dir = path.dirname(dir); } catch { dir = path.dirname(dir); }
+  for (let d = dir; ; d = path.dirname(d)) {
+    const cand = path.join(d, ".candor", "config");
+    if (fs.existsSync(cand)) return cand;
+    if (path.dirname(d) === d) break;                         // filesystem root
+  }
+  return fs.existsSync(".candor/config") ? ".candor/config" : null;
+}
+
 function loadCandorConfig(targetPath) {
   let file = process.env.CANDOR_CONFIG ?? null;
   if (file !== null) {
@@ -383,14 +397,7 @@ function loadCandorConfig(targetPath) {
       process.exit(2);
     }
   } else {
-    let dir = path.resolve(targetPath);
-    try { if (!fs.statSync(dir).isDirectory()) dir = path.dirname(dir); } catch { dir = path.dirname(dir); }
-    for (let d = dir; ; d = path.dirname(d)) {
-      const cand = path.join(d, ".candor", "config");
-      if (fs.existsSync(cand)) { file = cand; break; }
-      if (path.dirname(d) === d) break;                       // filesystem root
-    }
-    if (file === null && fs.existsSync(".candor/config")) file = ".candor/config";
+    file = discoverConfigFile(targetPath);
     if (file === null) return {};
   }
   let text;
@@ -431,7 +438,10 @@ function loadCandorConfig(targetPath) {
   const anchor = configAnchor(file);
   if (cfg.policy) cfg.policy = path.resolve(anchor, cfg.policy);
   if (cfg.baseline) cfg.baseline = path.resolve(anchor, cfg.baseline);
-  if (cfg.deps) cfg.deps = cfg.deps.split(/[\s:,]+/).filter(Boolean).map((t) => path.resolve(anchor, t)).join(":");
+  // ASCII whitespace ONLY, like java and swift: these are PATHS, and JS `\s` includes U+00A0, so a dep
+  // path containing a non-breaking space split into two halves that were then both "skipped" — a green
+  // run with the dep silently unchained, where java and rust loaded it.
+  if (cfg.deps) cfg.deps = cfg.deps.split(/[ \t:,]+/).filter(Boolean).map((t) => path.resolve(anchor, t)).join(":");
   return cfg;
 }
 // ⟨0.24⟩/⟨0.27⟩ ARM THE VERDICT FAIL-CLOSED. Every exit path then leaves a refusal behind unless the run
