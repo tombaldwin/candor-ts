@@ -1056,7 +1056,19 @@ const corruptDepPkgs = new Set();
       if (fs.statSync(tok).isDirectory())
         for (const f of fs.readdirSync(tok)) if (f.endsWith(".json") && !f.endsWith(".callgraph.json") && !f.endsWith(".hierarchy.json") && !f.endsWith(".locs.json")) files.push(path.join(tok, f));
       if (fs.statSync(tok).isFile()) files.push(tok);
-    } catch { console.error(`candor-ts: CANDOR_DEPS entry unreadable, skipped: ${tok}`); }
+    } catch {
+      // ⟨0.27⟩ SPEC §2: A CONFIGURED DEP THAT CANNOT BE READ IS UNEVALUABLE, NOT REDUCED COVERAGE.
+      // Skipping it continued the run, and the caller of that dep then serialised `inferred: []` — a
+      // ⟨0.21⟩ purity claim, published in the REPORT, about a function whose dependency the operator
+      // configured precisely so it would not be one. This engine's note said only "skipped", so the
+      // omission was not even qualified in the channel a human reads, let alone the artifact a chained
+      // consumer reads. java and swift already refused; this engine and rust continued.
+      console.error(`candor-ts: CANDOR_DEPS names ${tok} but it is not a readable file or directory — `
+        + `failing (exit 2, unevaluable). A configured dep that is not there is not reduced coverage: `
+        + `its callers would serialise \`inferred: []\`, which is a purity claim about code this scan `
+        + `never saw. Scan that dependency, or remove it from the \`deps\` config / CANDOR_DEPS.`);
+      process.exit(2);
+    }
   }
   for (const f of files) {
     try {

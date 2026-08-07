@@ -8,6 +8,13 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ A configured dep that cannot be read now refuses (exit 2)** — see the spec ruling. This engine
+  skipped it with only a "skipped" note, so the omission was not qualified even in the channel a human
+  reads, let alone in the report a chained consumer and `gate --report` actually read, where the caller
+  published `inferred: []`.
+
+## [0.27.0] — 2026-08-07
+
 - **⚠ The config channel of the sink guard was silently empty.** `CONFIG_KEYS` and
   `CONFIG_KEYS_IMPLEMENTED` were declared BELOW the guard, so the `loadCandorConfig` call inside it threw
   a temporal-dead-zone error and the `catch` around that call swallowed it — the guard enumerated no
@@ -48,7 +55,6 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   sibling readers swallowed the same error to `null`, which silently drops whatever the file configured.
   All three now refuse the same way (exit 2, unevaluable).
 
-## [0.27.0] — 2026-08-05
 
 - **`gate --report` with a bad locator left the previous verdict on disk.** Fixed — but the arming sits
   *after* usage validation, because ⟨0.24⟩ rules that a usage error was never a gate invocation and must
