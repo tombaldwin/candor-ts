@@ -9,6 +9,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 ## Unreleased
 
 
+
+- **A config-driven exit no longer leaves a stale GREEN verdict at the file sink.** The collision
+  pre-pass loads `.candor/config` inside a `try` under the comment "the real load refuses on its own
+  terms" — which assumes the failure arrives as an exception. It does not: `loadCandorConfig` calls
+  `process.exit(2)`, and a `catch` cannot intercept that, so an unreadable config killed the run before
+  arming and left a previous run's `ok: true` on disk. SPEC §3.3 names that outcome exactly: "a refusal
+  that writes nothing leaves the previous run's green document on disk"; java answers the same input
+  with `refused: true`. The pre-pass now loads leniently. Nothing is lost — a config nobody can read
+  declares no inputs anyone can name, so the collision check over them is vacuous — and the real load
+  refuses a moment later with the sink armed.
 - **A configured dep that cannot be READ now refuses, not just a missing one**, and **the `gate` verb
   arms its `--gate-json -` stream sink.** The first is SPEC §2s MUST, of which only the "does not
   exist" clause was implemented — an unopenable or malformed report was skipped at exit 0, letting its

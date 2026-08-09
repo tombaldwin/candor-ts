@@ -199,7 +199,7 @@ const runInputs = (target, policyFlag) => {
   if (cfgFile) {
     out.push([cfgFile, "the discovered .candor/config"]);
     try {
-      const cfg = loadCandorConfig(target ?? ".");
+      const cfg = loadCandorConfig(target ?? ".", { lenient: true });
       for (const key of ["policy", "baseline"]) {
         if (cfg[key]) out.push([cfg[key], `the config's \`${key}\``]);
       }
@@ -419,10 +419,24 @@ function discoverConfigFile(targetPath) {
   return fs.existsSync(".candor/config") ? ".candor/config" : null;
 }
 
-function loadCandorConfig(targetPath) {
+/// `lenient: true` THROWS where this would otherwise `process.exit(2)`.
+///
+/// The collision pre-pass needs the config's DECLARED input paths before the sink is armed, and it
+/// wrapped this call in a try under the comment "the real load refuses on its own terms" — which
+/// assumes the failure arrives as an exception. It does not: `process.exit` is not catchable, so an
+/// unreadable config killed the run INSIDE that try, before arming, leaving a pre-seeded green verdict
+/// intact at the file sink. SPEC §3.3's own words for that: "a refusal that writes nothing leaves the
+/// previous run's green document on disk." java answers the same input with `refused: true`.
+///
+/// Nothing is lost by leniency here. If the config cannot be read it declares no inputs anyone can
+/// name, so the collision check over them is vacuous; arming then proceeds and the REAL load refuses a
+/// moment later — now with the sink armed, so the refusal reaches it. A second parser was the
+/// alternative, and a second parser is a second set of holes.
+function loadCandorConfig(targetPath, { lenient = false } = {}) {
   let file = process.env.CANDOR_CONFIG ?? null;
   if (file !== null) {
     if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
+      if (lenient) throw new Error(`CANDOR_CONFIG set but ${file} is not a readable file`);
       console.error(`candor-ts: CANDOR_CONFIG set but ${file} is not a readable file — failing (exit 2)`);
       process.exit(2);
     }
@@ -433,6 +447,7 @@ function loadCandorConfig(targetPath) {
   let text;
   try { text = fs.readFileSync(file, "utf8"); }
   catch (e) {
+    if (lenient) throw new Error(`config ${file} exists but could not be read (${e.message})`);
     console.error(`candor-ts: config ${file} exists but could not be read (${e.message}) — failing (exit 2)`);
     process.exit(2);
   }
