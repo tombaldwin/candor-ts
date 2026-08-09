@@ -531,6 +531,26 @@ function resolveGateReportVerb(rawArgs) {
       for (const [p2, label] of configDeclaredInputs()) refuseGateJsonOverInput(gate, p2, label);
       refuseGateJsonAtConfig(gate);
       if (gate !== "-") armQueryGateJson(gate);
+      // …AND THE STREAM'S ANALOG OF ARMING. `armQueryGateJson` writes a fail-closed placeholder to a
+      // FILE; a stream cannot hold one, so the equivalent is a hook that emits the refusal on any
+      // exit-2 path that has not already written a verdict.
+      //
+      // Without it, this verb exited 2 during ARGUMENT PARSING with stdout EMPTY, while the same verb
+      // refusing later from inside the gate streamed the document — the same operator mistake, two
+      // answers, decided by how early it was caught. A machine consumer reading an empty stream after
+      // exit 2 cannot tell it from a clean gate.
+      //
+      // Measured at the 0.27 go/no-go: java, swift and ts all had this hole on the `gate` verb, and
+      // PART 36's stream rows never reached it because every one of them runs the SCAN route. The row
+      // that catches it is now there.
+      else {
+        process.on("exit", (code) => {
+          if (code === 2 && !globalThis.__candorGateVerdictWritten) {
+            console.log(JSON.stringify(refusalVerdict(SPEC_VERSION,
+              "the gate did not complete — this run exited before a verdict could be produced", null), null, 1));
+          }
+        });
+      }
     }
   }
   for (let i = 0; i < rawArgs.length; i++) {
@@ -1239,6 +1259,9 @@ switch (cmd) {
     // run declined to overwrite it. A USAGE error deliberately does not: the command was never a gate
     // invocation, so there is nothing to refuse and nothing a wrapper could be reading a verdict from.
     const gdests = [...new Set([json ? "-" : null, gateJsonPath].filter((d) => d !== null && d !== undefined))];
+    // The hook installed in the pre-pass emits a refusal on exit 2 only if nothing real was written;
+    // reaching here means the gate ran and will write its own document.
+    if (gdests.includes("-")) globalThis.__candorGateVerdictWritten = true;
     const gwrite = (obj) => {
       const text = JSON.stringify(obj, null, 1);
       for (const dest of gdests) {

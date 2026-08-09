@@ -1101,8 +1101,38 @@ const corruptDepPkgs = new Set();
     }
   }
   for (const f of files) {
+    // ⟨0.27⟩ READ AND PARSE OUTSIDE THE TRY, because SPEC §2 binds them and the try was swallowing them.
+    // The rule is one sentence — a configured dep path that "does not exist OR CANNOT BE READ MUST exit
+    // 2, naming it" — and the 0.27 work implemented only the first half, at the token check above. A path
+    // that resolved to a file which then failed to open, or held malformed JSON, was SKIPPED at exit 0,
+    // and the caller of that dep serialised `inferred: []`: the ⟨0.21⟩ purity claim the token check
+    // exists to prevent, reached by a different door.
+    //
+    // Found by the 0.27 go/no-go panel, which tested this engine's own changelog claim instead of
+    // believing it. java and swift refused on both halves already; this and rust made the family 2-v-2
+    // on a MUST. The surviving `catch` below still guards the PROCESSING of a well-formed document,
+    // which is a different failure and stays a skip.
+    let raw;
     try {
-      const d = JSON.parse(fs.readFileSync(f, "utf8"));
+      raw = fs.readFileSync(f, "utf8");
+    } catch {
+      console.error(`candor-ts: CANDOR_DEPS report ${f} could not be read —`);
+      console.error(`        failing (exit 2, unevaluable). A configured dep this scan cannot read is not`);
+      console.error(`        reduced coverage: its callers would serialise \`inferred: []\`, a purity claim`);
+      console.error(`        about code this scan never saw.`);
+      process.exit(2);
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      console.error(`candor-ts: CANDOR_DEPS report ${f} is not valid JSON —`);
+      console.error(`        failing (exit 2, unevaluable). Same reason as an unreadable one: a report`);
+      console.error(`        that cannot be parsed makes no claim, and continuing would publish one.`);
+      process.exit(2);
+    }
+    try {
+      const d = parsed;
       // A report whose version can't be VERIFIED is not trusted (§2.1) — a missing header is as
       // untrustworthy as a mismatched one (the Rust engine's rule; the engines split on this).
       const stale = d.candor?.version !== ENGINE_VERSION;
@@ -1223,7 +1253,7 @@ const corruptDepPkgs = new Set();
         if (!stale && strs(e.netClass).includes("unknown-host")) cell.netIncomplete = true;
         crossDeps.set(e.hash, cell);
       }
-    } catch { console.error(`candor-ts: CANDOR_DEPS report unparsable, skipped: ${f}`); }
+    } catch { console.error(`candor-ts: CANDOR_DEPS report could not be processed, skipped: ${f}`); }
   }
   // A package chained TWICE — once fresh, once stale — is covered by the fresh report, so it is not a
   // stale-only package and must not pick up the disclosure below on top of a real answer.
