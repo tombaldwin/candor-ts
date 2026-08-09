@@ -7,6 +7,8 @@ soundness-increasing direction (the §4 trust contract) — and a **⚠** marks 
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
 ## Unreleased
+## [0.27.0] — 2026-08-07
+
 
 
 
@@ -65,7 +67,6 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   reads, let alone in the report a chained consumer and `gate --report` actually read, where the caller
   published `inferred: []`.
 
-## [0.27.0] — 2026-08-07
 
 - **⚠ The config channel of the sink guard was silently empty.** `CONFIG_KEYS` and
   `CONFIG_KEYS_IMPLEMENTED` were declared BELOW the guard, so the `loadCandorConfig` call inside it threw
