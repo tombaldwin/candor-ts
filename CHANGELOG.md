@@ -13,6 +13,11 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 
 
+
+- **Two more exit-2 causes now reach the machine channel: an ENGINE PIN this build does not satisfy,
+  and an EMPTY SCAN.** Both are ordinary CI accidents — a pin bumped ahead of the installed engine, a
+  source path that moved — and §3.1 exempts no cause. Neither had a conformance row; measured before
+  they did, the stream was empty for both here. Pinned by PART 36 (b16)/(b17).
 - **⚠ A `--gate-json` sink INSIDE a `deps` DIRECTORY destroyed the operator's dep report.** `deps`
   accepts a directory — `--workspace` writes `.candor/deps/` and hands that back, so it is the common
   spelling — and the loader walks it and reads each report inside. The §3.3.1 sink-over-input guard

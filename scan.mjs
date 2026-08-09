@@ -434,6 +434,11 @@ function enforceEnginePin(targetPath) {
   console.error(`        dispatch, so its report is not comparable with a baseline the pinned engine wrote.`);
   console.error(`        Either run the pinned engine, or update the pin and regenerate the baseline in the`);
   console.error(`        same change. Exit 2 (unevaluable), not 1 — this is not a policy violation.`);
+  // ONE call, not two: an insertion script matched both pin branches to this single exit, and the
+  // duplicate put TWO documents on the stream — which parses as neither. The other branch (a build that
+  // cannot determine its own release) RETURNS rather than exiting: disclosed, not scored, so no refusal
+  // belongs there.
+  refuseEarlyToStream(`.candor/config pins engine ${pin}, which this build does not satisfy`);
   process.exit(2);
 }
 
@@ -662,7 +667,13 @@ if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
     })(rootDir);
   }
 }
-if (fileNames.length === 0) { console.error(`candor-ts: no TypeScript sources under ${target}`); process.exit(2); }
+if (fileNames.length === 0) {
+  console.error(`candor-ts: no TypeScript sources under ${target}`);
+  // An empty scan is an exit-2 cause like any other: a consumer reading the stream after it must not
+  // get nothing. §3.1 exempts no cause, and this one is easy to hit in CI (a path that moved).
+  refuseEarlyToStream(`no TypeScript sources under ${target}`);
+  process.exit(2);
+}
 // Builtin typings FALLBACK: the engine ships @types/node as its own dependency, so a target that
 // hasn't installed it still resolves node:fs/node:net/… (found by the first npx-distribution
 // probe: a bare fixture read Unknown for fs.readFileSync because nothing supplied the builtin
