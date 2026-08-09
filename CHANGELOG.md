@@ -12,6 +12,15 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 
 
+
+- **⚠ A `--gate-json` sink INSIDE a `deps` DIRECTORY destroyed the operator's dep report.** `deps`
+  accepts a directory — `--workspace` writes `.candor/deps/` and hands that back, so it is the common
+  spelling — and the loader walks it and reads each report inside. The §3.3.1 sink-over-input guard
+  registered only the DIRECTORY, which never equals a file within it, so `--gate-json <depdir>/lib.json`
+  was unguarded: arming destroyed the report, the run chained the wreckage and exited 0 with `ok: true`
+  written over the input. All four engines. The FILE spelling of this channel had been guarded for a
+  release; the directory spelling had not, and no row posed it. Now pinned by conformance PART 36 (b14),
+  which asserts both the refusal AND that nothing was written.
 - **The config-unreadable cause reaches the stream too.** It is the EARLIEST exit-2 cause and the one
   the sink is least likely to be armed for, which is why it was the last one still leaving stdout empty
   after every other cause had been routed. Found by a conformance row written before the fix.

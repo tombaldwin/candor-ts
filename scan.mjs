@@ -204,6 +204,26 @@ const runInputs = (target, policyFlag) => {
   // deleting the question". Measured live before this change.
   for (const d of (process.env.CANDOR_DEPS ?? "").split(DEP_SEPARATORS).filter(Boolean)) {
     out.push([d, "a CANDOR_DEPS report"]);
+    // A DIRECTORY DEP IS EVERY REPORT INSIDE IT. `deps` accepts a directory — `--workspace` writes
+    // `.candor/deps/` and hands that back, so it is the common spelling — and the loader then walks it
+    // and reads each `*.json`. Registering only the DIRECTORY left those files unnamed, so
+    // `--gate-json <depdir>/lib.json` was unguarded: arming destroyed the operator's dep report, the
+    // run chained the wreckage and exited 0 with `ok: true` over it. Measured in all four engines.
+    //
+    // EXPANDED HERE, not by making `sameArtifact` directory-aware. That was tried and is far too
+    // broad: the scan TARGET is an input too, and a verdict written into the tree being scanned is
+    // ordinary usage — the general rule refused it and took 33 tests with it. Only a DEP directory has
+    // its CONTENTS read, so only a dep directory expands.
+    try {
+      if (fs.statSync(d).isDirectory()) {
+        for (const f of fs.readdirSync(d)) {
+          if (f.endsWith(".json") && !f.endsWith(".callgraph.json") && !f.endsWith(".hierarchy.json")
+              && !f.endsWith(".locs.json")) {
+            out.push([path.join(d, f), "a CANDOR_DEPS report"]);
+          }
+        }
+      }
+    } catch { /* not a directory, or unreadable — the token itself is still registered above */ }
   }
   // …AND THE CONFIG'S OWN KEYS, THROUGH THE ENGINE'S OWN LOADER AND ITS OWN DISCOVERY. This used to
   // re-derive both, and a review took it apart: the home directory was computed as parent-of-parent
