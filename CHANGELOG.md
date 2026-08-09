@@ -10,6 +10,13 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 
 
+
+- **The NBSP dep-path fix reached the loader that actually loads deps.** `\s` in JS includes U+00A0, so
+  a dep path holding a non-breaking space split into two halves. The CONFIG loader was fixed; the
+  DEP-CHAIN loader — which every config-declared dep is also routed through — was not, so the same path
+  java and rust load became a hard exit 2 here naming a truncated path the operator never wrote (harder
+  than before, because ⟨0.27⟩ made an unresolvable dep token fatal). One rule, two spellings, and the
+  entry claiming it fixed described only the first.
 - **A config-driven exit no longer leaves a stale GREEN verdict at the file sink.** The collision
   pre-pass loads `.candor/config` inside a `try` under the comment "the real load refuses on its own
   terms" — which assumes the failure arrives as an exception. It does not: `loadCandorConfig` calls

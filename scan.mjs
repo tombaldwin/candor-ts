@@ -1104,7 +1104,12 @@ const corruptDepPkgs = new Set();
   // --workspace's auto-scanned deps dir is prepended to the explicit CANDOR_DEPS/config spec (both chain).
   const spec = [workspaceDepsDir, depInitsDir, process.env.CANDOR_DEPS ?? candorConfig.deps ?? ""].filter(Boolean).join(":");
   const files = [];
-  for (const tok of spec.split(/[\s:,]+/).filter(Boolean)) {
+  // ASCII WHITESPACE ONLY, the same rule as the config loader above and as java, rust and swift. JS
+  // `\s` includes U+00A0, so a dep path holding a non-breaking space split into two halves — and since
+  // ⟨0.27⟩ made an unresolvable dep token FATAL, that turned a path the other three engines load into a
+  // hard exit 2 naming a truncated path the operator never wrote. The config loader was fixed and this
+  // one, which every config-declared dep is also routed through, was not: one rule, two spellings.
+  for (const tok of spec.split(/[ \t\n\r:,]+/).filter(Boolean)) {
     try {
       if (fs.statSync(tok).isDirectory())
         for (const f of fs.readdirSync(tok)) if (f.endsWith(".json") && !f.endsWith(".callgraph.json") && !f.endsWith(".hierarchy.json") && !f.endsWith(".locs.json")) files.push(path.join(tok, f));
