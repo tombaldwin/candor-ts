@@ -573,7 +573,15 @@ function fromTsconfig(cfgPath, baseDir) {
   return names.filter((f) => !isTestPath(path.relative(baseDir, f)));
 }
 const stat = fs.existsSync(target) ? fs.statSync(target) : null;
-if (!stat) { console.error(`candor-ts: no such path: ${target}`); process.exit(2); }
+if (!stat) {
+  console.error(`candor-ts: no such path: ${target}`);
+  // The SAME two lines as every other early exit in this file. `refuseEarlyToStream` WRITES AND
+  // RETURNS — it is not a `Never`, and calling it INSTEAD of the exit lets the run continue past its
+  // own refusal (measured, while getting this wrong: an unreadable dep wrote its refusal and then
+  // exited 0). rust's equivalent is typed `-> !`, which is why the same slip could not happen there.
+  refuseEarlyToStream(`no such path: ${target}`);
+  process.exit(2);
+}
 if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
   rootDir = path.dirname(path.resolve(target));
   fileNames = fromTsconfig(path.resolve(target), rootDir);
@@ -1097,6 +1105,10 @@ const corruptDepPkgs = new Set();
         + `failing (exit 2, unevaluable). A configured dep that is not there is not reduced coverage: `
         + `its callers would serialise \`inferred: []\`, which is a purity claim about code this scan `
         + `never saw. Scan that dependency, or remove it from the \`deps\` config / CANDOR_DEPS.`);
+      // The TOKEN arm needed this too. The read and parse arms below were routed to the stream and this
+      // one was not — three exits for one rule, two of them answered on the machine channel and one
+      // silent, which a conformance row (PART 36 b8) caught immediately once the cause was posed at all.
+      refuseEarlyToStream(`configured dependency ${tok} is not a readable file or directory`);
       process.exit(2);
     }
   }
@@ -1120,6 +1132,7 @@ const corruptDepPkgs = new Set();
       console.error(`        failing (exit 2, unevaluable). A configured dep this scan cannot read is not`);
       console.error(`        reduced coverage: its callers would serialise \`inferred: []\`, a purity claim`);
       console.error(`        about code this scan never saw.`);
+      refuseEarlyToStream(`configured dependency report ${f} could not be read`);
       process.exit(2);
     }
     let parsed;
@@ -1129,6 +1142,7 @@ const corruptDepPkgs = new Set();
       console.error(`candor-ts: CANDOR_DEPS report ${f} is not valid JSON —`);
       console.error(`        failing (exit 2, unevaluable). Same reason as an unreadable one: a report`);
       console.error(`        that cannot be parsed makes no claim, and continuing would publish one.`);
+      refuseEarlyToStream(`configured dependency report ${f} is not valid JSON`);
       process.exit(2);
     }
     try {
