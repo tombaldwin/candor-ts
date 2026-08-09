@@ -45,6 +45,17 @@ const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 // Reused, never re-littered.
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
 const SPEC_VERSION = "0.27";
+/** The `deps` / `CANDOR_DEPS` separator set — ASCII whitespace plus `:` and `,`.
+ *
+ * ONE CONSTANT BECAUSE TWO SPELLINGS WERE A SILENT GREEN. The §3.3.1 sink-over-input guard and the
+ * dep-chain loader each carried their own regex; they disagreed on `\n`, so a newline-separated
+ * `CANDOR_DEPS` was one unresolvable token to the guard and two real paths to the loader. A
+ * `--gate-json` naming one of those reports was therefore unguarded: arming overwrote it, the scan
+ * finished, and the operator's dep report ended up holding this run's `{"ok": true}` at exit 0.
+ *
+ * NOT JS `\s`, which includes U+00A0: these are PATHS, and a non-breaking space inside one is part of
+ * the path, not a separator — java, rust and swift all treat it that way. */
+const DEP_SEPARATORS = /[ \t\n\r:,]+/;
 
 // --version: a print-and-exit MODE, handled before the main arg walk so it never depends on a target.
 // Fully OFFLINE — candor never phones home. Staying current is the AGENT's job: read the installed
@@ -184,9 +195,14 @@ const runInputs = (target, policyFlag) => {
                             ["CANDOR_CONFIG", "CANDOR_CONFIG"]]) {
     if (process.env[v]) out.push([process.env[v], label]);
   }
-  // The SEPARATOR SET the dep loader accepts, not just `:` — a space-separated list registered as one
-  // unresolvable token, so no dep in it was protected.
-  for (const d of (process.env.CANDOR_DEPS ?? "").split(/[ \t:,]+/).filter(Boolean)) {
+  // ONE DEFINITION, shared with the loader — see DEP_SEPARATORS. This comment used to claim it was
+  // "the separator set the dep loader accepts" while spelling a DIFFERENT set one screen away, and the
+  // gap between the two was a silent green: a newline-separated `CANDOR_DEPS` registered here as one
+  // unresolvable token, so the guard protected nothing, while the loader split it into real paths.
+  // `--gate-json` naming one of those reports then DESTROYED it and the run exited 0 with `ok: true`
+  // written over the operator's input — §3.3.1's own words, "a machine-readable all-clear produced by
+  // deleting the question". Measured live before this change.
+  for (const d of (process.env.CANDOR_DEPS ?? "").split(DEP_SEPARATORS).filter(Boolean)) {
     out.push([d, "a CANDOR_DEPS report"]);
   }
   // …AND THE CONFIG'S OWN KEYS, THROUGH THE ENGINE'S OWN LOADER AND ITS OWN DISCOVERY. This used to
@@ -1109,7 +1125,7 @@ const corruptDepPkgs = new Set();
   // ⟨0.27⟩ made an unresolvable dep token FATAL, that turned a path the other three engines load into a
   // hard exit 2 naming a truncated path the operator never wrote. The config loader was fixed and this
   // one, which every config-declared dep is also routed through, was not: one rule, two spellings.
-  for (const tok of spec.split(/[ \t\n\r:,]+/).filter(Boolean)) {
+  for (const tok of spec.split(DEP_SEPARATORS).filter(Boolean)) {
     try {
       if (fs.statSync(tok).isDirectory())
         for (const f of fs.readdirSync(tok)) if (f.endsWith(".json") && !f.endsWith(".callgraph.json") && !f.endsWith(".hierarchy.json") && !f.endsWith(".locs.json")) files.push(path.join(tok, f));
