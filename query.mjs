@@ -1259,13 +1259,16 @@ switch (cmd) {
     // run declined to overwrite it. A USAGE error deliberately does not: the command was never a gate
     // invocation, so there is nothing to refuse and nothing a wrapper could be reading a verdict from.
     const gdests = [...new Set([json ? "-" : null, gateJsonPath].filter((d) => d !== null && d !== undefined))];
-    // The hook installed in the pre-pass emits a refusal on exit 2 only if nothing real was written;
-    // reaching here means the gate ran and will write its own document.
-    if (gdests.includes("-")) globalThis.__candorGateVerdictWritten = true;
     const gwrite = (obj) => {
       const text = JSON.stringify(obj, null, 1);
       for (const dest of gdests) {
-        if (dest === "-") { console.log(text); continue; }
+        // THE FLAG IS SET WHERE THE WRITE HAPPENS, not where the gate is entered. It was set on
+        // entering this verb, under the comment "reaching here means the gate ran and will write its
+        // own document" — which is a claim about the future, and false: the `--policy` fallback ladder
+        // can still exit 2 below without writing. That suppressed the pre-pass hook and returned the
+        // run to EMPTY stdout after exit 2, which is the exact channel the hook was added to close.
+        // Caught by the second go/no-go panel; the first flag placement lasted about an hour.
+        if (dest === "-") { globalThis.__candorGateVerdictWritten = true; console.log(text); continue; }
         // A SURFACING side-output: an unwritable path is one stderr line, never a raw ENOENT crash whose
         // exit 1 would read as a policy violation on a clean run (the scan path's rule).
         try {

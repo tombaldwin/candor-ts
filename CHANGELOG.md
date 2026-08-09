@@ -8,6 +8,13 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+
+- **A configured dep that cannot be READ now refuses, not just a missing one**, and **the `gate` verb
+  arms its `--gate-json -` stream sink.** The first is SPEC §2s MUST, of which only the "does not
+  exist" clause was implemented — an unopenable or malformed report was skipped at exit 0, letting its
+  caller publish `inferred: []`. The second closed an empty-stream-after-exit-2 channel on the
+  supply-chain verb: a consumer reading nothing on stdout after exit 2 cannot tell it from a clean gate.
+  Conformance gained PART 35 rows (d)/(e) and PART 36 rows (b4)-(b6).
 - **⟨0.27⟩ The three verdict-document cells (SPEC §3.1/§4, conformance PART 36).** (1) The composed
   document's `unevaluated` now lists EVERY rule of a refused policy, not only the offending line — a
   rule absent from the list on an exit-1 document read as evaluated-and-passed (`policyRefusalUnevaluated`,
@@ -142,7 +149,9 @@ listed. `open`/`openSync` take a MODE, so the verb alone does not say and they g
 common case would let a function claim a direction on the strength of a verb that revealed none.
 
 Measured: `copyFileSync` → `["read","write"]`, `readFileSync` → `["read"]`, `writeFileSync` → `["write"]`,
-a function that merely REACHES a writer → omitted, `openSync` → omitted. Identical to candor-swift's and
+a function that merely REACHES a writer → `["write"]` (it PROPAGATES — an earlier draft of this row said
+"omitted", describing the direct-only version corrected before release, and contradicting both the
+sentence above it and conformance PART 31), `openSync` → omitted. Identical to candor-swift's and
 candor-java's answers on the same shapes.
 
 ## [0.26.0] — 2026-08-04 ⟨spec 0.26⟩
