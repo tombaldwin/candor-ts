@@ -11,6 +11,10 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 
 
+
+- **The config-unreadable cause reaches the stream too.** It is the EARLIEST exit-2 cause and the one
+  the sink is least likely to be armed for, which is why it was the last one still leaving stdout empty
+  after every other cause had been routed. Found by a conformance row written before the fix.
 - **The NBSP dep-path fix reached the loader that actually loads deps.** `\s` in JS includes U+00A0, so
   a dep path holding a non-breaking space split into two halves. The CONFIG loader was fixed; the
   DEP-CHAIN loader — which every config-declared dep is also routed through — was not, so the same path

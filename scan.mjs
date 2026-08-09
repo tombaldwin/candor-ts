@@ -454,6 +454,10 @@ function loadCandorConfig(targetPath, { lenient = false } = {}) {
     if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
       if (lenient) throw new Error(`CANDOR_CONFIG set but ${file} is not a readable file`);
       console.error(`candor-ts: CANDOR_CONFIG set but ${file} is not a readable file — failing (exit 2)`);
+      // The config is the EARLIEST exit-2 cause, and the one the stream sink is least likely to be
+      // armed for — which is exactly why it was the last one still leaving stdout empty. Found by
+      // PART 36 (b11), a row written before this line was.
+      refuseEarlyToStream(`CANDOR_CONFIG set but ${file} is not a readable file`);
       process.exit(2);
     }
   } else {
@@ -465,6 +469,7 @@ function loadCandorConfig(targetPath, { lenient = false } = {}) {
   catch (e) {
     if (lenient) throw new Error(`config ${file} exists but could not be read (${e.message})`);
     console.error(`candor-ts: config ${file} exists but could not be read (${e.message}) — failing (exit 2)`);
+    refuseEarlyToStream(`config ${file} exists but could not be read`);
     process.exit(2);
   }
   const cfg = {};
