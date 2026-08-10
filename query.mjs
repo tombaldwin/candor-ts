@@ -518,6 +518,23 @@ function resolveGateReportVerb(rawArgs) {
   {
     const { gate, policy, report } = preScanGateArgs(rawArgs);
     if (gate) {
+      // THE STREAM HOOK IS INSTALLED FIRST, before anything that can exit. It WRITES NOTHING until the
+      // process exits, so unlike the file arming below it cannot land on an input and has no reason to
+      // wait behind the collision checks.
+      //
+      // It used to be installed after them, and `configDeclaredInputs()` — one of those checks — reads
+      // the config, which exits 2 through a shared helper when the config is unreadable. So the earliest
+      // exit-2 cause there is left stdout EMPTY on this route while java and swift wrote the refusal.
+      // Found by the gate-verb cells in candor/bin/probe-causes.sh; candor-scan had the same gap through
+      // the same shared loader, one language across.
+      if (gate === "-") {
+        process.on("exit", (code) => {
+          if (code === 2 && !globalThis.__candorGateVerdictWritten) {
+            console.log(JSON.stringify(refusalVerdict(SPEC_VERSION,
+              "the gate did not complete — this run exited before a verdict could be produced", null), null, 1));
+          }
+        });
+      }
       refuseGateJsonOverInput(gate, policy, "--policy");
       // §3.3.1 names "a report being read (`gate --report`)" as an input. Writing the verdict there
       // destroys the very report the gate was asked to judge, and the diagnostic then blames the report
@@ -531,7 +548,7 @@ function resolveGateReportVerb(rawArgs) {
       for (const [p2, label] of configDeclaredInputs()) refuseGateJsonOverInput(gate, p2, label);
       refuseGateJsonAtConfig(gate);
       if (gate !== "-") armQueryGateJson(gate);
-      // …AND THE STREAM'S ANALOG OF ARMING. `armQueryGateJson` writes a fail-closed placeholder to a
+      // …AND THE STREAM'S ANALOG OF ARMING — now installed at the top of this block, see the note there. `armQueryGateJson` writes a fail-closed placeholder to a
       // FILE; a stream cannot hold one, so the equivalent is a hook that emits the refusal on any
       // exit-2 path that has not already written a verdict.
       //
@@ -543,14 +560,6 @@ function resolveGateReportVerb(rawArgs) {
       // Measured at the 0.27 go/no-go: java, swift and ts all had this hole on the `gate` verb, and
       // PART 36's stream rows never reached it because every one of them runs the SCAN route. The row
       // that catches it is now there.
-      else {
-        process.on("exit", (code) => {
-          if (code === 2 && !globalThis.__candorGateVerdictWritten) {
-            console.log(JSON.stringify(refusalVerdict(SPEC_VERSION,
-              "the gate did not complete — this run exited before a verdict could be produced", null), null, 1));
-          }
-        });
-      }
     }
   }
   for (let i = 0; i < rawArgs.length; i++) {
