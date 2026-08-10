@@ -286,6 +286,17 @@ const runInputs = (target, policyFlag) => {
     if (!_distinct0.some((k) => k === g || (k !== "-" && g !== "-" && sameArtifact(k, g)))) _distinct0.push(g);
   }
   const singleSink = _distinct0.length < 2;
+  // ⟨0.28⟩ `--json` BESIDE `--gate-json -`: a report and a verdict cannot share one stream. Decided here,
+  // in the pre-pass, so the refusal is stdout's ONLY content — refusing after the report has gone out is
+  // the defect, not the fix. On this engine `--json` is stdout-only, so the sink alone decides it.
+  if (gate === "-" && argv.includes("--json")) {
+    console.error("candor-ts: --json and --gate-json - both name STDOUT — refusing (exit 2). `--json` "
+      + "writes the REPORT there and `--gate-json -` the VERDICT, so this would put two JSON documents on "
+      + "one stream and a consumer parsing it gets neither. Send one to a file, or run the scan twice.");
+    console.log(JSON.stringify(refusalVerdict(SPEC_VERSION,
+      "--json and --gate-json - both name stdout — a report and a verdict cannot share one stream", null), null, 1));
+    process.exit(2);
+  }
   for (const [other, flag] of (gate && singleSink ? runInputs(preTarget, policy) : [])) {
     if (gate && sameArtifact(gate, other)) {
       console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as ${flag} ${other} — refusing `
