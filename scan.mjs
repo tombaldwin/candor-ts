@@ -275,6 +275,47 @@ const runInputs = (target, policyFlag) => {
   return out;
 };
 
+// ⟨0.27⟩ THE STREAM SINK'S ANALOG OF ARMING — SPEC §3.1's stream-sink clause. `--gate-json -` cannot be
+// armed (a stream has no stale previous document, and a placeholder would put TWO documents in a
+// consumer's pipe), but the document-on-every-exit rule applies in full: an exit-2 cause that fires
+// before the gate tail — an unknown flag, a valueless gate-adjacent flag, a missing target — must still
+// leave the fail-closed refusal as the stream's only content. Measured: an unhonourable policy wrote the
+// refusal to stdout while an unknown flag exited 2 leaving stdout EMPTY — the same operator mistake,
+// answered or not according to which early exit fired, and an empty stream throws the consumer back to
+// scraping stderr. File sinks need nothing here: the arming above already left a refusal in place.
+// DECLARED HERE, above the pre-arg-loop `{ … }` block: those guards can themselves exit 2, and the
+// helper has to exist BEFORE its first caller — a `const` doesn't hoist, so left below where it used to
+// live (before the arg loop but after this block) it was in the temporal dead zone at every gate-input
+// refusal, and stdout stayed empty on every one of them. Measured while writing this move.
+const preGateSink = preScan(argv).gate;
+// ⟨0.28⟩ SPEC §3.3.1 (4) — THE SAME RULE ONE HOP UPSTREAM, FOR THE REPORT STREAM. `--json` is the
+// stdout REPORT sink; on any exit-2 the fail-closed ⟨0.21⟩ Row-1 report is written to stdout as the
+// stream's only content. Measured 2026-08-10 across all four engines: `--json --zzz-not-a-flag` exited
+// 2 with stdout ZERO BYTES, so a downstream JSON consumer parsing stdout throws and is thrown back to
+// scraping stderr — the same defect ⟨0.27⟩ closed on the verdict stream, arriving through the report
+// sink because that rule was written for the verdict sink and no engine extended it. Detected here
+// pre-arg-loop by `argv.includes("--json")`: this flag is stdout-only, and the value-consuming flags
+// exit 2 rather than swallow it as their value, so a `--json` token in argv IS the request.
+const preWantJson = argv.includes("--json");
+// `reportStreamWritten` latch: mirrors the rust reference's `REPORT_STREAM_WRITTEN` OnceLock. Set
+// once, at the successful `wantJson` print further down the file (search for this comment tag), so a
+// later exit-2 site does not put a SECOND JSON document on the stream — two documents on one pipe
+// parses as neither.
+let reportStreamWritten = false;
+const refuseEarlyToStream = (why) => {
+  if (preGateSink === "-") console.log(JSON.stringify(refusalVerdict(SPEC_VERSION, why, null), null, 1));
+  else if (preWantJson && !reportStreamWritten) {
+    // The ⟨0.21⟩ Row-1 manifest-carrying empty: `functions: []` + `analyzed.count: 0` + `unanalyzed`
+    // naming the cause. A ⟨0.24⟩ consumer already reads this as *nothing was judged, no purity licence*
+    // and a `gate --report` records the file `invisible` — no new reader logic. Skipped when stdout is
+    // already claimed by `--gate-json -` (the two-stream case is refused earlier with a verdict on stdout).
+    // The version/toolchain match the ordinary envelope so a consumer's provenance check reads the same.
+    const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/[\n\r]/g, " ");
+    console.log(`{\n "candor": {\n  "version": "candor-ts-${PKG_VERSION}",\n  "toolchain": "node-${process.versions.node}",\n  "spec": "${SPEC_VERSION}"\n },\n "functions": [],\n "analyzed": { "count": 0 },\n "unanalyzed": [\n  { "path": "<run>", "reason": "refused: ${esc(why)}" }\n ]\n}`);
+    reportStreamWritten = true;
+  }
+};
+
 {
   const { gate, policy, target: preTarget } = preScan(argv);
   // ⟨0.28⟩ The DUPLICATE case is decided below, and the single-sink guards here must not pre-empt it:
@@ -302,6 +343,7 @@ const runInputs = (target, policyFlag) => {
       console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as ${flag} ${other} — refusing `
         + `(exit 2). The verdict is armed before the policy is read, so this would overwrite your policy `
         + `and then gate on the wreckage. Nothing was written; give the verdict its own path.`);
+      refuseEarlyToStream(`--gate-json ${gate} names the same file as ${flag} ${other}`);
       process.exit(2);
     }
   }
@@ -315,11 +357,13 @@ const runInputs = (target, policyFlag) => {
       console.error(`candor-ts: --gate-json ${gate} is a .candor/config — refusing (exit 2). The verdict `
         + `is armed before the config is read, so this would destroy the config that configures this `
         + `run. Nothing was written; give the verdict its own path.`);
+      refuseEarlyToStream(`--gate-json ${gate} is a .candor/config`);   // ⟨0.28⟩ report stream too
       process.exit(2);
     }
   }
   if (gate && singleSink && sameArtifact(gate, process.env.CANDOR_CONFIG)) {
     console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as CANDOR_CONFIG — refusing (exit 2).`);
+    refuseEarlyToStream(`--gate-json ${gate} names the same file as CANDOR_CONFIG`);   // ⟨0.28⟩
     process.exit(2);
   }
   // ⟨0.28⟩ A REPEATED `--gate-json` IS REFUSED, AND EVERY PATH NAMED GETS THE REFUSAL. Placed after the
@@ -364,7 +408,10 @@ const runInputs = (target, policyFlag) => {
       }
       if (bad) offending.add(g);
     }
-    if (offending.size === distinct.length) process.exit(2);
+    if (offending.size === distinct.length) {
+      refuseEarlyToStream(`every named --gate-json path collides with an input`);   // ⟨0.28⟩ report stream
+      process.exit(2);
+    }
   }
   if (distinct.length > 1) {
     const list = distinct.join(", ");
@@ -379,22 +426,16 @@ const runInputs = (target, policyFlag) => {
       else try { writeSinkAtomic(g, doc + "\n"); }
       catch (e) { console.error(`candor-ts: could not write the refusal to --gate-json ${g} (${e.message})`); }
     }
+    // ⟨0.28⟩ report stream: only fire the helper when stdout wasn't ALREADY claimed by a `--gate-json -`
+    // verdict written in the loop above — the helper would otherwise write a second document to stdout
+    // (its verdict arm keys on `preGateSink === "-"` and doesn't know one was just printed). When `-`
+    // isn't in the list, refuseEarlyToStream's report arm handles the `--json` case; when it is, the
+    // verdict is already there and `--json` was refused earlier (line 333), so nothing more is owed.
+    if (!distinct.includes("-")) refuseEarlyToStream(`--gate-json was given more than once (${list})`);
     process.exit(2);
   }
   if (gate && gate !== "-") armGateJsonFailClosed(gate);
 }
-// ⟨0.27⟩ THE STREAM SINK'S ANALOG OF ARMING — SPEC §3.1's stream-sink clause. `--gate-json -` cannot be
-// armed (a stream has no stale previous document, and a placeholder would put TWO documents in a
-// consumer's pipe), but the document-on-every-exit rule applies in full: an exit-2 cause that fires
-// before the gate tail — an unknown flag, a valueless gate-adjacent flag, a missing target — must still
-// leave the fail-closed refusal as the stream's only content. Measured: an unhonourable policy wrote the
-// refusal to stdout while an unknown flag exited 2 leaving stdout EMPTY — the same operator mistake,
-// answered or not according to which early exit fired, and an empty stream throws the consumer back to
-// scraping stderr. File sinks need nothing here: the arming above already left a refusal in place.
-const preGateSink = preScan(argv).gate;
-const refuseEarlyToStream = (why) => {
-  if (preGateSink === "-") console.log(JSON.stringify(refusalVerdict(SPEC_VERSION, why, null), null, 1));
-};
 let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, gateJsonPath = null, allowJs = false, wantAgents = false, wantJson = false, wantWorkspace = false, wantDepInits = false;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -5380,6 +5421,10 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
       + `NO report written (a consumer cannot detect this from the outside):`);
     for (const c of contradictions.slice(0, 20)) console.error(`  ${c}`);
     if (contradictions.length > 20) console.error(`  … and ${contradictions.length - 20} more`);
+    // ⟨0.28⟩ report stream: this exit-2 fires BEFORE the envelope is printed, so a `--json` run would
+    // otherwise leave stdout empty for the whole class of trust-marker contradictions. The latch is
+    // still unset at this point; the helper writes the fail-closed doc as stdout's only content.
+    refuseEarlyToStream(`${contradictions.length} report entr${contradictions.length === 1 ? "y contradicts its" : "ies contradict their"} own trust markers`);
     process.exit(2);
   }
 }
@@ -5457,6 +5502,12 @@ const writeAtomic = (file, text) => writeSinkAtomic(file, text);
 // --json: print the §2 envelope to STDOUT instead of writing the report files (matches candor-scan/Rust).
 if (wantJson) {
   console.log(JSON.stringify(envelope, null, 1));
+  // ⟨0.28⟩ REPORT STREAM LATCH — a successful envelope went to stdout, so a later exit-2 site (baseline
+  // corrupt, policy refusal, gate NOT certified over unanalyzed) MUST NOT also write a fail-closed
+  // placeholder there. Two documents on one stream parses as neither — the same shape the two-stream
+  // refusal exists to prevent, arriving through a different door. The rust reference sets the mirror
+  // `REPORT_STREAM_WRITTEN` OnceLock at the analog site (crates/candor-scan/src/scan.rs).
+  reportStreamWritten = true;
 } else {
   writeAtomic(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
   writeAtomic(`${outPrefix}.callgraph.json`, JSON.stringify(cg, null, 1));
