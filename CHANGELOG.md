@@ -8,6 +8,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ ⟨0.28⟩ never reached the `gate --report` verb** (`query.mjs` has its own argv pre-pass, and the rung
+  went into `scan.mjs` only). Measured: exit 1, red verdict at the last sink, a pre-seeded `{"ok": true}`
+  untouched at the first. Conformance PART 36 (b21).
+- **⚠ The input exemption took the whole run down**, leaving an innocent second sink publishing a previous
+  run's green — and the stream zero bytes. Scoped to the offending path (b22). The duplicate case is now
+  decided before the single-sink guards, which act on the last sink alone.
+- The mostly-Unknown note on the QUERY route no longer names a build cause: `tour --report R` reads a
+  report it did not produce, so "a missing tsconfig" was a guess about a build it never ran. Four-way, and
+  PART 4l now pins the cause and not only the counts — which is how all four engines drifted there.
+
 - **⚠ `--gate-json -` was left EMPTY by the `gate --report` route on an unreadable config**, while java and
   swift wrote the refusal. The ordering was the whole bug: `configDeclaredInputs()` — one of the §3.3.1
   collision checks — READS the config, and it ran before the stream hook was installed, so the earliest
