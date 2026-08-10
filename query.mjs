@@ -547,6 +547,40 @@ function resolveGateReportVerb(rawArgs) {
       // hole the scan route closed, one route across.
       for (const [p2, label] of configDeclaredInputs()) refuseGateJsonOverInput(gate, p2, label);
       refuseGateJsonAtConfig(gate);
+      // ⟨0.28⟩ THE RUNG BINDS EVERY ROUTE. It shipped on scan.mjs only, so this verb kept last-wins and a
+      // gate that FIRED left the first named sink holding a previous run's `{"ok": true}`. Every named
+      // sink also gets the input checks, and the input exemption covers that PATH, not the run — so the
+      // other sinks still receive the refusal.
+      const namedSinks = [];
+      for (let k = 0; k < rawArgs.length; k++) {
+        if (rawArgs[k] !== "--gate-json") continue;
+        const v = rawArgs[k + 1];
+        if (v === undefined || (v !== "-" && v.startsWith("-"))) continue;
+        if (!namedSinks.some((x) => x === v || (x !== "-" && v !== "-" && sameArtifactPath(x, v)))) namedSinks.push(v);
+        k++;
+      }
+      for (const g of namedSinks) {
+        refuseGateJsonOverInput(g, policy, "--policy");
+        refuseGateJsonOverInput(g, report, "--report");
+        refuseGateJsonOverInput(g, process.env.CANDOR_POLICY, "CANDOR_POLICY");
+        refuseGateJsonOverInput(g, process.env.CANDOR_CONFIG, "CANDOR_CONFIG");
+        for (const [p2, label] of configDeclaredInputs()) refuseGateJsonOverInput(g, p2, label);
+        refuseGateJsonAtConfig(g);
+      }
+      if (namedSinks.length > 1) {
+        const list = namedSinks.join(", ");
+        console.error(`candor-ts-query: --gate-json given more than once (${list}) — refusing (exit 2). A `
+          + `gate publishes ONE verdict. Naming two sinks says where it goes twice, and the reader of the `
+          + `path that loses cannot tell it lost. Name one, or run the gate twice.`);
+        const doc = JSON.stringify(refusalVerdict(SPEC_VERSION,
+          `--gate-json was given more than once (${list}) — a run publishes one verdict to one sink`, null), null, 1);
+        for (const g of namedSinks) {
+          if (g === "-") { globalThis.__candorGateVerdictWritten = true; console.log(doc); continue; }
+          try { fs.writeFileSync(g, doc + "\n"); }
+          catch (e) { console.error(`candor-ts-query: could not write the refusal to --gate-json ${g} (${e.message})`); }
+        }
+        process.exit(2);
+      }
       if (gate !== "-") armQueryGateJson(gate);
       // …AND THE STREAM'S ANALOG OF ARMING — now installed at the top of this block, see the note there. `armQueryGateJson` writes a fail-closed placeholder to a
       // FILE; a stream cannot hold one, so the equivalent is a hook that emits the refusal on any

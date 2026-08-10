@@ -264,7 +264,16 @@ const runInputs = (target, policyFlag) => {
 
 {
   const { gate, policy, target: preTarget } = preScan(argv);
-  for (const [other, flag] of (gate ? runInputs(preTarget, policy) : [])) {
+  // ⟨0.28⟩ The DUPLICATE case is decided below, and the single-sink guards here must not pre-empt it:
+  // they act on `gate` alone — the LAST sink — so `--gate-json - --gate-json <the policy>` exited on the
+  // policy before the STREAM could be told anything (measured: exit 2, stdout zero bytes).
+  const _named0 = allGateSinks(argv);
+  const _distinct0 = [];
+  for (const g of _named0) {
+    if (!_distinct0.some((k) => k === g || (k !== "-" && g !== "-" && sameArtifact(k, g)))) _distinct0.push(g);
+  }
+  const singleSink = _distinct0.length < 2;
+  for (const [other, flag] of (gate && singleSink ? runInputs(preTarget, policy) : [])) {
     if (gate && sameArtifact(gate, other)) {
       console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as ${flag} ${other} — refusing `
         + `(exit 2). The verdict is armed before the policy is read, so this would overwrite your policy `
@@ -276,7 +285,7 @@ const runInputs = (target, policyFlag) => {
   // inputs the run was TOLD about; the config is DISCOVERED by walking up from the target, so by the
   // time its path is known the arming has already destroyed it. A check on the SHAPE needs no
   // discovery, so it runs before the first write and covers a config found anywhere up the tree.
-  if (gate && gate !== "-") {
+  if (gate && singleSink && gate !== "-") {
     const abs = path.resolve(gate);
     if (path.basename(abs) === "config" && path.basename(path.dirname(abs)) === ".candor") {
       console.error(`candor-ts: --gate-json ${gate} is a .candor/config — refusing (exit 2). The verdict `
@@ -285,7 +294,7 @@ const runInputs = (target, policyFlag) => {
       process.exit(2);
     }
   }
-  if (gate && sameArtifact(gate, process.env.CANDOR_CONFIG)) {
+  if (gate && singleSink && sameArtifact(gate, process.env.CANDOR_CONFIG)) {
     console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as CANDOR_CONFIG — refusing (exit 2).`);
     process.exit(2);
   }
@@ -303,27 +312,35 @@ const runInputs = (target, policyFlag) => {
   // only `gate` (the last), so with `--policy P --gate-json P --gate-json B` the guard never saw P and
   // this refusal DESTROYED the policy — measured against the other three engines, which kept it. The
   // input exemption outranks this refusal: a sink that is an input is refused having written nothing.
+  // ⟨0.28⟩ THE INPUT EXEMPTION COVERS THE PATH, NOT THE RUN. Refusing the whole run on the first
+  // offending sink left the OTHER named sink holding whatever it held — measured: exit 2, the policy
+  // correctly intact, and an innocent sink still publishing a previous run's `{"ok": true}` to its
+  // reader. The offending path gets nothing; every other one gets the refusal.
+  const offending = new Set();
   if (distinct.length > 1) {
     for (const g of distinct) {
+      let bad = false;
       for (const [other, flag] of runInputs(preTarget, policy)) {
         if (sameArtifact(g, other)) {
           console.error(`candor-ts: --gate-json ${g} names the SAME FILE as ${flag} ${other} — refusing `
-            + `(exit 2). Nothing was written; give the verdict its own path.`);
-          process.exit(2);
+            + `(exit 2). Nothing was written there.`);
+          bad = true;
         }
       }
       if (g !== "-") {
         const abs = path.resolve(g);
         if (path.basename(abs) === "config" && path.basename(path.dirname(abs)) === ".candor") {
-          console.error(`candor-ts: --gate-json ${g} is a .candor/config — refusing (exit 2). Nothing was written.`);
-          process.exit(2);
+          console.error(`candor-ts: --gate-json ${g} is a .candor/config — refusing (exit 2). Nothing was written there.`);
+          bad = true;
         }
       }
       if (sameArtifact(g, process.env.CANDOR_CONFIG)) {
         console.error(`candor-ts: --gate-json ${g} names the SAME FILE as CANDOR_CONFIG — refusing (exit 2).`);
-        process.exit(2);
+        bad = true;
       }
+      if (bad) offending.add(g);
     }
+    if (offending.size === distinct.length) process.exit(2);
   }
   if (distinct.length > 1) {
     const list = distinct.join(", ");
@@ -333,6 +350,7 @@ const runInputs = (target, policyFlag) => {
     const doc = JSON.stringify(refusalVerdict(SPEC_VERSION,
       `--gate-json was given more than once (${list}) — a run publishes one verdict to one sink`, null), null, 1);
     for (const g of distinct) {
+      if (offending.has(g)) continue;                 // the exemption is scoped to this path
       if (g === "-") console.log(doc);
       else try { fs.writeFileSync(g, doc + "\n"); }
       catch (e) { console.error(`candor-ts: could not write the refusal to --gate-json ${g} (${e.message})`); }
