@@ -168,6 +168,21 @@ const preScan = (av) => {
   return { gate, policy, target };
 };
 
+// SPEC §3.3.1 ⟨0.28⟩ — every `--gate-json` this argv names. `preScan` keeps only the last, which is what
+// the parse loop honours and exactly the behaviour this rung refuses: measured, three engines wrote the
+// verdict to the LAST path and left the first holding a previous run's `{"ok": true}` while the gate
+// fired — the ⟨0.27⟩ stale green, reached by a spelling nobody had considered.
+const allGateSinks = (av) => {
+  const out = [];
+  for (let i = 0; i < av.length; i++) {
+    if (av[i] !== "--gate-json") continue;
+    const v = av[i + 1];
+    if (v === undefined || (v !== "-" && v.startsWith("--"))) continue;
+    out.push(v); i++;
+  }
+  return out;
+};
+
 // Every path this run READS, whatever channel it arrived through (SPEC §3.3.1 ⟨0.27⟩).
 //
 // THE FIRST VERSION OF THIS GUARD KEYED ON THE FLAG. With the policy declared by `.candor/config` — the
@@ -272,6 +287,56 @@ const runInputs = (target, policyFlag) => {
   }
   if (gate && sameArtifact(gate, process.env.CANDOR_CONFIG)) {
     console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as CANDOR_CONFIG — refusing (exit 2).`);
+    process.exit(2);
+  }
+  // ⟨0.28⟩ A REPEATED `--gate-json` IS REFUSED, AND EVERY PATH NAMED GETS THE REFUSAL. Placed after the
+  // input-collision guards above and before arming: a sink that is an INPUT is refused having written
+  // nothing, and that exemption outranks this one — this write must not be the thing that destroys a
+  // policy. Two spellings of one path are ONE sink (the same artifact rule), so `--gate-json P
+  // --gate-json ./P` from P's own directory is not a duplicate.
+  const named = allGateSinks(argv);
+  const distinct = [];
+  for (const g of named) {
+    if (!distinct.some((k) => k === g || (k !== "-" && g !== "-" && sameArtifact(k, g)))) distinct.push(g);
+  }
+  // EVERY named sink gets the input checks, not just the one the parse honours. The first draft checked
+  // only `gate` (the last), so with `--policy P --gate-json P --gate-json B` the guard never saw P and
+  // this refusal DESTROYED the policy — measured against the other three engines, which kept it. The
+  // input exemption outranks this refusal: a sink that is an input is refused having written nothing.
+  if (distinct.length > 1) {
+    for (const g of distinct) {
+      for (const [other, flag] of runInputs(preTarget, policy)) {
+        if (sameArtifact(g, other)) {
+          console.error(`candor-ts: --gate-json ${g} names the SAME FILE as ${flag} ${other} — refusing `
+            + `(exit 2). Nothing was written; give the verdict its own path.`);
+          process.exit(2);
+        }
+      }
+      if (g !== "-") {
+        const abs = path.resolve(g);
+        if (path.basename(abs) === "config" && path.basename(path.dirname(abs)) === ".candor") {
+          console.error(`candor-ts: --gate-json ${g} is a .candor/config — refusing (exit 2). Nothing was written.`);
+          process.exit(2);
+        }
+      }
+      if (sameArtifact(g, process.env.CANDOR_CONFIG)) {
+        console.error(`candor-ts: --gate-json ${g} names the SAME FILE as CANDOR_CONFIG — refusing (exit 2).`);
+        process.exit(2);
+      }
+    }
+  }
+  if (distinct.length > 1) {
+    const list = distinct.join(", ");
+    console.error(`candor-ts: --gate-json given more than once (${list}) — refusing (exit 2). A gate `
+      + `publishes ONE verdict. Naming two sinks says where it goes twice, and the reader of the path `
+      + `that loses cannot tell it lost. Name one, or run the gate twice.`);
+    const doc = JSON.stringify(refusalVerdict(SPEC_VERSION,
+      `--gate-json was given more than once (${list}) — a run publishes one verdict to one sink`, null), null, 1);
+    for (const g of distinct) {
+      if (g === "-") console.log(doc);
+      else try { fs.writeFileSync(g, doc + "\n"); }
+      catch (e) { console.error(`candor-ts: could not write the refusal to --gate-json ${g} (${e.message})`); }
+    }
     process.exit(2);
   }
   if (gate && gate !== "-") armGateJsonFailClosed(gate);
