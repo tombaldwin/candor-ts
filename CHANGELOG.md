@@ -7,6 +7,24 @@ soundness-increasing direction (the §4 trust contract) — and a **⚠** marks 
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
 ## Unreleased
+
+- **⚠ `--gate-json -` was left EMPTY by the `gate --report` route on an unreadable config**, while java and
+  swift wrote the refusal. The ordering was the whole bug: `configDeclaredInputs()` — one of the §3.3.1
+  collision checks — READS the config, and it ran before the stream hook was installed, so the earliest
+  exit-2 cause there is exited through a hook that did not exist yet. The hook writes nothing until exit,
+  so it is now installed first; the FILE arming stays behind the collision checks, because arming writes.
+- **⟨0.28⟩ a repeated `--gate-json` is refused, and every path named gets the refusal** (SPEC §3.3.1). The
+  first draft of this ran the input checks against the LAST sink only, so `--policy P --gate-json P
+  --gate-json B` DESTROYED the policy while the other three engines kept it — a fix closing one channel by
+  opening another, caught only because the check was run against all four engines rather than against
+  itself. Every named sink now gets the same input checks.
+- **The mostly-Unknown note names the cause that applies, not the usual one.** Found on a real Angular app:
+  candor-ts reported "32 of 32 function(s) are Unknown … a missing tsconfig.json … are the usual cause"
+  while `tsconfig.json` sat in the project root and that run had just read it — and two lines above, the
+  same run had already named the real cause (seven `@angular/*` packages the classifier does not cover).
+  The scan route now names the uncovered packages when they exist, rules the tsconfig out by name when one
+  was read, and says so plainly when none was found; the query route stops guessing at a build it never
+  saw. Pinned by conformance PART 4l.
 ## [0.27.0] — 2026-08-07
 
 
