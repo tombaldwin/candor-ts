@@ -497,9 +497,39 @@ function refuseGateJsonAtConfig(gate) {
 }
 
 /** Write the fail-closed refusal every later exit inherits unless a real verdict replaces it. */
+// ⟨0.28⟩ RESOLVE THE SINK TO ITS FINAL ARTIFACT BEFORE WRITING, and preserve the operator's layout.
+// `renameSync` REPLACES a symlink rather than following it, so an `artifacts/verdict.json` linked into a
+// shared directory kept a previous run's `{"ok": true}` while this run's document landed on the link — a
+// stale green with a single `--gate-json` and no operator mistake. And rename gives the destination a NEW
+// inode, so a multiply-linked target strands its other name with the previous document; there the write
+// goes in place, trading the atomicity window for not publishing a stale verdict at a name the operator
+// wired up. SPEC §3.3.1 states identity about ARTIFACTS; this family had it in the comparison only.
+function resolveSinkArtifact(p) {
+  let cur = p;
+  for (let i = 0; i < 32; i++) {
+    let st;
+    try { st = fs.lstatSync(cur); } catch { return cur; }
+    if (!st.isSymbolicLink()) return cur;
+    let t;
+    try { t = fs.readlinkSync(cur); } catch { return cur; }
+    cur = path.isAbsolute(t) ? t : path.join(path.dirname(cur), t);
+  }
+  return cur;
+}
+
+function writeSinkAtomic(p, text) {
+  const target = resolveSinkArtifact(p);
+  try {
+    if (fs.statSync(target).nlink > 1) { fs.writeFileSync(target, text); return; }
+  } catch { /* not there yet — the ordinary temp+rename path is right */ }
+  const tmp = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, text);
+  fs.renameSync(tmp, target);
+}
+
 function armQueryGateJson(p) {
   try {
-    fs.writeFileSync(p, JSON.stringify(
+    writeSinkAtomic(p, JSON.stringify(
       refusalVerdict(SPEC_VERSION, "the gate did not complete — this document was written when the run "
         + "STARTED and was never replaced by a verdict, so the run failed, crashed or was killed before "
         + "it could decide. It is NOT a verdict about the code; see the run's stderr for the cause."),
@@ -576,7 +606,7 @@ function resolveGateReportVerb(rawArgs) {
           `--gate-json was given more than once (${list}) — a run publishes one verdict to one sink`, null), null, 1);
         for (const g of namedSinks) {
           if (g === "-") { globalThis.__candorGateVerdictWritten = true; console.log(doc); continue; }
-          try { fs.writeFileSync(g, doc + "\n"); }
+          try { writeSinkAtomic(g, doc + "\n"); }
           catch (e) { console.error(`candor-ts-query: could not write the refusal to --gate-json ${g} (${e.message})`); }
         }
         process.exit(2);
@@ -1315,9 +1345,7 @@ switch (cmd) {
         // A SURFACING side-output: an unwritable path is one stderr line, never a raw ENOENT crash whose
         // exit 1 would read as a policy violation on a clean run (the scan path's rule).
         try {
-          const tmp = `${dest}.${process.pid}.tmp`;
-          fs.writeFileSync(tmp, text + "\n");
-          fs.renameSync(tmp, dest);
+          writeSinkAtomic(dest, text + "\n");
         } catch (e) { console.error(`candor-ts: could not write --gate-json ${dest}: ${e.message}`); }
       }
     };

@@ -195,6 +195,19 @@ const allGateSinks = (av) => {
 // `.`, `..` and symlinks; for a sink that does not exist yet its parent is resolved instead.
 const sameArtifact = (a, b) => {
   if (!a || !b || a === "-" || b === "-") return false;
+  // ⟨0.28⟩ DEVICE+INODE FIRST. Path equality alone called two HARDLINKS to one inode two sinks and
+  // refused a legal command — the mirror of the stale green. And a symlink whose target does not exist
+  // YET still names that target, which `realpathSync` cannot resolve, so resolve it explicitly.
+  try {
+    const sa = fs.statSync(a), sb = fs.statSync(b);
+    if (sa.dev === sb.dev && sa.ino === sb.ino) return true;
+  } catch { /* one of them is not there yet — fall through */ }
+  try {
+    const ra = resolveSinkArtifact(a), rb = resolveSinkArtifact(b);
+    if (ra !== a || rb !== b) {
+      if (path.resolve(ra) === path.resolve(rb)) return true;
+    }
+  } catch { /* fall through to the path forms below */ }
   const resolve = (p) => {
     try { return fs.realpathSync(p); } catch { /* not there yet — resolve the parent */ }
     try { return path.join(fs.realpathSync(path.dirname(path.resolve(p))), path.basename(p)); } catch { return null; }
@@ -352,7 +365,7 @@ const runInputs = (target, policyFlag) => {
     for (const g of distinct) {
       if (offending.has(g)) continue;                 // the exemption is scoped to this path
       if (g === "-") console.log(doc);
-      else try { fs.writeFileSync(g, doc + "\n"); }
+      else try { writeSinkAtomic(g, doc + "\n"); }
       catch (e) { console.error(`candor-ts: could not write the refusal to --gate-json ${g} (${e.message})`); }
     }
     process.exit(2);
@@ -628,16 +641,44 @@ function loadCandorConfig(targetPath, { lenient = false } = {}) {
 // hoisted declaration can be. The write is inlined rather than calling `writeAtomic` for the same reason
 // in reverse — that helper is a `const` declared ~4700 lines below, so calling it would be a
 // temporal-dead-zone throw.
+// ⟨0.28⟩ RESOLVE THE SINK TO ITS FINAL ARTIFACT BEFORE WRITING, and preserve the operator's layout.
+// `renameSync` REPLACES a symlink rather than following it, so an `artifacts/verdict.json` linked into a
+// shared directory kept a previous run's `{"ok": true}` while this run's document landed on the link — a
+// stale green with a single `--gate-json` and no operator mistake. And rename gives the destination a NEW
+// inode, so a multiply-linked target strands its other name with the previous document; there the write
+// goes in place, trading the atomicity window for not publishing a stale verdict at a name the operator
+// wired up. SPEC §3.3.1 states identity about ARTIFACTS; this family had it in the comparison only.
+function resolveSinkArtifact(p) {
+  let cur = p;
+  for (let i = 0; i < 32; i++) {
+    let st;
+    try { st = fs.lstatSync(cur); } catch { return cur; }
+    if (!st.isSymbolicLink()) return cur;
+    let t;
+    try { t = fs.readlinkSync(cur); } catch { return cur; }
+    cur = path.isAbsolute(t) ? t : path.join(path.dirname(cur), t);
+  }
+  return cur;
+}
+
+function writeSinkAtomic(p, text) {
+  const target = resolveSinkArtifact(p);
+  try {
+    if (fs.statSync(target).nlink > 1) { fs.writeFileSync(target, text); return; }
+  } catch { /* not there yet — the ordinary temp+rename path is right */ }
+  const tmp = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, text);
+  fs.renameSync(tmp, target);
+}
+
 function armGateJsonFailClosed(p) {
   try {
-    const _tmp = `${p}.${process.pid}.arm`;
-    fs.writeFileSync(_tmp, JSON.stringify({
+    writeSinkAtomic(p, JSON.stringify({
       spec: SPEC_VERSION, ok: false, refused: true,
       reason: "the gate did not complete — this document was written when the run STARTED and was never "
         + "replaced by a verdict, so the run failed, crashed or was killed before it could decide. It is "
         + "NOT a verdict about the code; see the run's stderr for the cause.",
     }, null, 1) + "\n");
-    fs.renameSync(_tmp, p);
   } catch (e) {
     console.error(`candor-ts: could not arm --gate-json ${p} fail-closed (${e.message}) — if this run `
       + `does not complete, that path may still hold a PREVIOUS run's verdict`);
@@ -5399,7 +5440,9 @@ for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
 // `candor-ts-watch` re-scans (the recommended agent setup runs both) — must never observe a
 // half-written report. An in-place writeFileSync leaves a truncation window where JSON.parse throws;
 // rename(2) is atomic within a filesystem, so a reader sees either the old report or the new one whole.
-const writeAtomic = (file, text) => { const tmp = `${file}.${process.pid}.tmp`; fs.writeFileSync(tmp, text); fs.renameSync(tmp, file); };
+// ⟨0.28⟩ …and through `writeSinkAtomic`, so a symlinked or multiply-linked destination is written where
+// the operator points rather than replaced. Reports have the same layout exposure as verdicts.
+const writeAtomic = (file, text) => writeSinkAtomic(file, text);
 // --json: print the §2 envelope to STDOUT instead of writing the report files (matches candor-scan/Rust).
 if (wantJson) {
   console.log(JSON.stringify(envelope, null, 1));
