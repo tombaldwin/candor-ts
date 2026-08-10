@@ -1039,8 +1039,8 @@ switch (cmd) {
       if (teff > 0 && tunk * 3 >= teff) {
         console.log(
           `candor: no surprising reaches — but ${tunk} of ${teff} function(s) are Unknown `
-          + `(unresolved calls; their transitive effects are NOT analyzed). Run \`candor blindspots\`; `
-          + `a missing tsconfig.json or unresolvable imports are the usual cause.`,
+          + `(unresolved calls; their transitive effects are NOT analyzed). Run \`candor blindspots\` — `
+          + `the report records a reason for each.`,
         );
       } else {
         console.log("candor: nothing hidden — every effect sits where its name says it should.");
