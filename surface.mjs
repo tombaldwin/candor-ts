@@ -213,7 +213,10 @@ export function bestFind(inferred, direct, calls, isTest = () => false) {
 
 // Emit the surface note to STDERR. `loc` is a Map<qual, "file:line"> for the source callout; `log` is
 // the sink (defaults to console.error). Mirrors surface.rs::emit exactly.
-export function emitSurface(inferred, direct, calls, loc, isTest = () => false, log = console.error) {
+// `cause` (optional) lets the CALLER name why the graph is unresolved, because only the caller knows.
+// See the qualification below: naming a cause the run can RULE OUT is the false-disclosure class this
+// project treats as worse than saying nothing.
+export function emitSurface(inferred, direct, calls, loc, isTest = () => false, log = console.error, cause = null) {
   const res = bestFind(inferred, direct, calls, isTest);
   // A real SURPRISING reach is a genuine finding — show it (below), even amid Unknowns.
   if (res !== null && res.winner !== null) { /* fall through to the surprising-reach message */ }
@@ -227,10 +230,20 @@ export function emitSurface(inferred, direct, calls, loc, isTest = () => false, 
     const total = [...inferred.values()].filter((s) => s.size > 0).length; // EFFECTFUL fns (pure units excluded)
     const unknown = [...inferred.values()].filter((s) => s.has("Unknown")).length;
     if (total > 0 && unknown * 3 >= total) { // ≥ ~1/3 of effectful functions Unknown → meaningfully unresolved
+      // NAME THE CAUSE THAT APPLIES, not the usual one. This sentence used to end "a missing tsconfig.json
+      // or unresolvable imports are the usual cause" UNCONDITIONALLY — including on runs that had just
+      // found and used a tsconfig, and had already printed the real cause two lines above (the packages
+      // the classifier does not cover). Measured on a real Angular app: candor-ts reported 32 of 32
+      // functions Unknown and blamed a missing tsconfig while `tsconfig.json` sat in the project root and
+      // had been read. A disclosure that names a cause the run can rule out sends the operator to fix
+      // something that is not broken, and this family already treats that as worse than a missing one
+      // (`net-partner` was once reported "ignoring unknown config key" WHILE BEING HONOURED).
+      const why = cause
+        ?? "unresolvable imports are the usual cause";
       log(
         `candor: no surprising reaches — but ${unknown} of ${total} function(s) are Unknown `
         + `(unresolved calls; their transitive effects are NOT analyzed). Run \`candor blindspots\`; `
-        + `a missing tsconfig.json or unresolvable imports are the usual cause.`,
+        + `${why}.`,
       );
       return;
     }

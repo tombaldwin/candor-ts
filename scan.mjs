@@ -708,8 +708,11 @@ if (!stat) {
   refuseEarlyToStream(`no such path: ${target}`);
   process.exit(2);
 }
+let usedTsconfig = null;   // the tsconfig this run actually read, so a later disclosure can name the
+                           // cause that APPLIES rather than the one that usually does.
 if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
   rootDir = path.dirname(path.resolve(target));
+  usedTsconfig = path.resolve(target);
   fileNames = fromTsconfig(path.resolve(target), rootDir);
 } else if (stat.isFile()) {
   rootDir = path.dirname(path.resolve(target));
@@ -718,6 +721,7 @@ if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
   rootDir = path.resolve(target);
   const tsconfig = path.join(rootDir, "tsconfig.json");
   if (fs.existsSync(tsconfig) && !allowJs) {
+    usedTsconfig = tsconfig;
     fileNames = fromTsconfig(tsconfig, rootDir);
   } else {
     fileNames = [];
@@ -5517,7 +5521,17 @@ if (!wantJson) {
   // A qual is test code iff its recorded loc (file:line[:col]) lies on a test path — the same predicate
   // the scan already uses to keep test files out of the report.
   const isTestQual = (q) => { const l = locMap.get(q); return l ? isTestPath(l) : false; };
-  emitSurface(inferred, directMap, callsMap, locMap, isTestQual);
+  // The cause this run can actually stand behind, in the order the evidence supports: packages the
+  // classifier does not cover (already enumerated above) beats a tsconfig guess, and a tsconfig this run
+  // READ rules the tsconfig guess out entirely.
+  const unresolvedCause = unlistedSeen.size > 0
+    ? `the ${uncoveredLedger.length} package${uncoveredLedger.length === 1 ? "" : "s"} named above are not `
+      + `covered by the classifier, so calls into them resolve to Unknown`
+    : (usedTsconfig
+        ? `this scan read ${path.relative(rootDir, usedTsconfig) || path.basename(usedTsconfig)}, so the `
+          + `cause is unresolvable imports rather than a missing tsconfig`
+        : `no tsconfig.json was found for this target, so imports resolve poorly — point candor at one`);
+  emitSurface(inferred, directMap, callsMap, locMap, isTestQual, console.error, unresolvedCause);
 }
 
 // ---- the gate surfaces: the AS-EFF-005 baseline guard + the standing §6.2 policy gate --------------
