@@ -342,9 +342,10 @@ const refuseEarlyToStream = (why) => {
 // Armed from the pre-pass, before the arg loop's own unknown-flag exit — the exit this rung is most
 // often reached through. Each report the run does write overwrites its placeholder a moment later.
 //
-// SIDECARS (`.callgraph`/`.hierarchy`/`.locs`) ARE NOT TOUCHED, deliberately: whether they must arm
-// alongside their report is an OPEN question against §2.2 ⟨0.26⟩'s own manifest rules, and answering it
-// here would put a second answer in the family.
+// SIDECARS ARE NOT TOUCHED, deliberately: whether they must arm alongside their report is an OPEN
+// question against §2.2 ⟨0.26⟩'s own manifest rules, and answering it here would put a second answer in
+// the family. They are left out by POSITIVE IDENTIFICATION of the report, not by a name list — see the
+// loop below for why the list was the wrong mechanism and not merely the wrong length.
 const OUT_ARM_DOC = failClosedReportDoc(
   "armed: this report was written when the run STARTED and was never replaced, so the run failed, "
   + "crashed or was killed before it could describe this package. It is NOT a claim about any code; "
@@ -359,11 +360,30 @@ const armOutPrefixFailClosed = (prefix, inputs) => {
   let names;
   try { names = fs.readdirSync(dir); } catch { return; }   // no previous run under this prefix: nothing to arm
   for (const name of names.sort()) {
-    // `<stem>.json` and `<stem>.….json`, minus the §2.2 reserved sidecar segments.
     if (!name.startsWith(`${stem}.`) || !name.endsWith(".json")) continue;
-    if (name.endsWith(".callgraph.json") || name.endsWith(".hierarchy.json") || name.endsWith(".locs.json")) continue;
     const full = path.join(dir, name);
     try { if (!fs.statSync(full).isFile()) continue; } catch { continue; }
+    // ONLY FILES POSITIVELY IDENTIFIED AS THIS ENGINE'S OWN §2 REPORT — never a name denylist.
+    //
+    // The first version excluded `.callgraph`/`.hierarchy`/`.locs` by suffix and armed everything else
+    // under the prefix. SPEC §2.2 ⟨0.24⟩ (the "reserved set, family-wide" paragraph) lists SEVEN reserved
+    // trailing segments — `callgraph`, `hierarchy`, `calibrated`, `layerreach`, `locs`, `gate` and the
+    // `encountered-*` family — and records that the engines were already drifting on it, one carving out
+    // six and another two. This carved out three. Measured on the rust reference: the armer overwrote
+    // `<prefix>.calibrated.json`, `.layerreach.json`, `.encountered-hosts.json` and — worst —
+    // `<prefix>.gate.json`, a GATE VERDICT, each replaced by a report-shaped placeholder. A run whose
+    // report sink is armed was silently destroying the verdict sink's document beside it.
+    //
+    // THE MECHANISM WAS WRONG, NOT JUST THE LIST. This project's denylist-over-allowlist rule is about
+    // CLASSIFYING, where over-approximating is the safe direction. For a WRITER it inverts:
+    // over-approximating destroys a file. §2.2 can call an incomplete denylist "loud" because an
+    // unregistered suffix there merely falls back into a candidate set and gets disclosed; in an armer it
+    // is silent and destructive. So this writes only what it recognises as its own report — a JSON object
+    // carrying both a `candor` envelope and `functions` — which needs no list and cannot drift as the
+    // reserved family grows. (The placeholder itself carries both, so an already-armed file re-arms.)
+    let doc;
+    try { doc = JSON.parse(fs.readFileSync(full, "utf8")); } catch { continue; }
+    if (!doc || typeof doc !== "object" || Array.isArray(doc) || doc.candor === undefined || doc.functions === undefined) continue;
     // THE ⟨0.27⟩ (2) INPUT EXEMPTION APPLIES TO THIS WRITER TOO. Arming happens before the run knows its
     // answer, so a prefix whose expansion collides with something this run READS would destroy it — the
     // same hazard that made `--policy P --gate-json P` a machine-readable all-clear. A policy or a
