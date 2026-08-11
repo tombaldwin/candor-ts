@@ -8,6 +8,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ ⟨0.28⟩ the §2.2 sidecars go with the armed report — deleted, not emptied** (SPEC §3.3.1). An armed
+  report beside a LIVE `.callgraph`/`.hierarchy`/`.locs` is a pair that contradicts itself, and §2.2 gives
+  the sidecar no provenance to arbitrate with. Not decorative: `callers`/`whatif`/`fix` are answered FROM
+  the callgraph, because a currently-pure function is absent from the report by §2 rule 3. Measured on
+  this engine — baseline `f` pure with caller `g`; the new version gives `f` an `fs.readFileSync` and adds
+  caller `h`; the run exits 2 on an unknown flag — `callers f` answered exit 0 with `direct: [src.app.g]`,
+  confident and wrong, and an agent reads that as safe-to-edit. `<stem>.gate.json` and `encountered-*` are
+  NOT taken: a gate verdict is the verdict sink's own document. The sidecars follow only if the report
+  write SUCCEEDED, and an orphan handed back by the ⟨0.28⟩ disarm brings its sidecars back with it.
+  Conformance PART 37 (d) SKIP → PASS.
 - **⚠ ⟨0.28⟩ never reached the `gate --report` verb** (`query.mjs` has its own argv pre-pass, and the rung
   went into `scan.mjs` only). Measured: exit 1, red verdict at the last sink, a pre-seeded `{"ok": true}`
   untouched at the first. Conformance PART 36 (b21).

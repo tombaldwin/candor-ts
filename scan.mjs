@@ -342,16 +342,87 @@ const refuseEarlyToStream = (why) => {
 // Armed from the pre-pass, before the arg loop's own unknown-flag exit — the exit this rung is most
 // often reached through. Each report the run does write overwrites its placeholder a moment later.
 //
-// SIDECARS ARE NOT TOUCHED, deliberately: whether they must arm alongside their report is an OPEN
-// question against §2.2 ⟨0.26⟩'s own manifest rules, and answering it here would put a second answer in
-// the family. They are left out by POSITIVE IDENTIFICATION of the report, not by a name list — see the
-// loop below for why the list was the wrong mechanism and not merely the wrong length.
+// ⟨0.28⟩ AND THE §2.2 SIDECARS GO WITH THE REPORT — DELETED, NOT EMPTIED. That question is no longer
+// open: an armed report beside a LIVE sidecar is a pair that contradicts itself, and §2.2 gives the
+// sidecar no provenance of its own to arbitrate with. See `removeArmedReportSidecars` below.
 const OUT_ARM_DOC = failClosedReportDoc(
   "armed: this report was written when the run STARTED and was never replaced, so the run failed, "
   + "crashed or was killed before it could describe this package. It is NOT a claim about any code; "
   + "see the run's stderr for the cause.") + "\n";
 /** `[path, bytes-before-arming]` for every report armed under the out prefix. */
 const outArmed = [];
+/** `[reportPath, sidecarPath, bytes-before-deletion]` for every §2.2 sidecar deleted while arming. */
+const outArmedSidecars = [];
+
+// ⟨0.28⟩ THIS REPORT'S §2.2 SIDECARS, DELETED WITH IT.
+//
+// `callers`/`whatif`/`rewire` are answered FROM THE SIDECAR, not from the report: a currently-pure
+// function is absent from the report by §2 rule 3, so only `<stem>.callgraph.json` records it. Leaving
+// the sidecar live beside an armed report is therefore not an untidy pair, it is the cardinal sin one
+// file over. MEASURED ON THIS ENGINE — baseline `f` pure, reached by `g`; the new version gives `f` an
+// `fs.readFileSync` and adds a second caller `h`; the run exits 2 on an unknown flag with the report
+// armed to the ⟨0.21⟩ Row-1 empty:
+//
+//   callers f  ->  exit 0, direct: ["src.app.g"], transitive: ["src.app.g", "src.app.main"]
+//
+// Confident, exit 0, and WRONG: `h` calls `f` too, and an agent reads that as safe-to-edit. After this
+// change the same query takes its absence arm ("no function in the call graph matches that name") and a
+// recovering run answers `g` AND `h`. NOT the whole of ⟨0.28⟩: the CONSUMER half — the pairing rule,
+// which makes a verb reading a sidecar whose report is a Row-1 empty SAY so rather than answer emptily —
+// is a separate clause this engine has not implemented, and the `--json` channel is silent here.
+//
+// DELETED RATHER THAN `{}`, and NOT by reading the report's own anti-deletion rule (§3.3.1) across. That
+// rule exists because a consumer treating a missing REPORT as "nothing to report" fails open. No sidecar
+// consumer has that failure mode: §2.2 makes the sidecar OPTIONAL, so every consumer was forced to define
+// an absence arm from the start and every specified arm is safe (over-listing §3.1, `origin: "unknown"`,
+// refusal on a corrupt one). And ⟨0.24⟩ has already RULED empty ≡ absent ≡ unparseable for the hierarchy.
+// `{}` is a file this family has declared meaningless.
+//
+// THE GUESS RUNS OPPOSITE TO THE ARMER'S, deliberately. The armer above identifies its own report
+// POSITIVELY by content, because there a miss leaves a stale report and an over-reach destroys a file.
+// Here a miss merely leaves a sidecar behind — the pre-rung state, and the ⟨0.28⟩ pairing rule catches it
+// consumer-side — while an over-reach deletes something that is not ours. So this one goes by the §2.2
+// reserved segment NAMES scoped to the report's own stem. Both directions chosen so the WRONG guess costs
+// least; neither is a template for the other.
+//
+// `gate` AND `encountered-*` ARE NOT TAKEN, though §2.2 reserves them in the same family-wide list. A
+// gate verdict is the VERDICT sink's document — separately armed, separately named by the operator — and
+// destroying it from the report sink is precisely the cross-sink harm §3.3.1 measures, failing OPEN in
+// the way `armGateJsonFailClosed` refuses to. `encountered-*` is a prefix family rather than a segment
+// and belongs to no report's pair. Exclusion by argument, not by a shorter list.
+const REPORT_SIDECAR_SEGMENTS = ["callgraph", "hierarchy", "locs", "calibrated", "layerreach"];
+const removeArmedReportSidecars = (report, prefix, inputs) => {
+  const stem = report.replace(/\.json$/i, "");
+  for (const seg of REPORT_SIDECAR_SEGMENTS) {
+    const side = `${stem}.${seg}.json`;
+    if (!fs.existsSync(side)) continue;
+    // THE INPUT EXEMPTION COVERS THE SIDECARS, asked of the same `runInputs`/`sameArtifact` the report
+    // and verdict sink guards use — "do not touch what this run READS" does not stop at the report half.
+    // A `--policy`, a chained `CANDOR_DEPS` report or the discovered config can perfectly well be named
+    // `<stem>.locs.json`, and deleting it silently would be worse than the pair it repairs.
+    const hit = inputs.find(([other]) => sameArtifact(side, other));
+    if (hit) {
+      console.error(`candor-ts: --out ${prefix} armed the report ${report}, but its \`${seg}\` sidecar `
+        + `${side} is what this run READS as ${hit[1]} — leaving it in place. That report and that `
+        + `sidecar are now a MISMATCHED PAIR: read the sidecar as unanswerable until a run completes.`);
+      continue;
+    }
+    // Remember the bytes first, so a report the run turns out not to own can hand its sidecars back too.
+    let prev;
+    try { prev = fs.readFileSync(side); } catch { prev = null; }
+    // Through the SAME artifact resolution `writeSinkAtomic` publishes with. A sidecar that is a symlink
+    // into a shared directory holds its stale bytes at the TARGET — that is where this engine wrote them
+    // — so unlinking the link alone would leave the stale call graph readable under its other name while
+    // silently destroying the operator's layout for the next good run.
+    try { fs.rmSync(resolveSinkArtifact(side), { force: true }); if (prev !== null) outArmedSidecars.push([report, side, prev]); }
+    catch (e) {
+      console.error(`candor-ts: could not remove ${side} beside the armed report ${report} (${e.message}) `
+        + `— it is a STALE half-pair: any callers/whatif answer computed from it describes the last run `
+        + `that completed, not this tree.`);
+    }
+  }
+};
+
 const armOutPrefixFailClosed = (prefix, inputs) => {
   if (!prefix) return;
   const abs = path.resolve(prefix);
@@ -407,11 +478,20 @@ const armOutPrefixFailClosed = (prefix, inputs) => {
     // out not to own (see disarmUnwrittenOutReports).
     let prev;
     try { prev = fs.readFileSync(full); } catch { continue; }
-    try { writeSinkAtomic(full, OUT_ARM_DOC); outArmed.push([full, prev]); }
+    // THE SIDECARS FOLLOW ONLY IF THE REPORT ACTUALLY ARMED (raised on candor-java's arm of this rung;
+    // the rust reference deleted them unconditionally in f23a993 and was corrected by ff8cc09). A write that
+    // FAILS leaves the PREVIOUS run's report on disk; removing its sidecars there would produce a
+    // stale-report/no-callgraph pair no run has ever written — strictly worse than the pre-rung state,
+    // because the half that survives is the one a gate reads while the half that made `callers`
+    // answerable is gone. A pair degrades together or not at all.
+    let armed = false;
+    try { writeSinkAtomic(full, OUT_ARM_DOC); outArmed.push([full, prev]); armed = true; }
     catch (e) {
-      console.error(`candor-ts: could not arm the report ${full} fail-closed (${e.message}) — if this run `
-        + `does not complete, that path may still hold a PREVIOUS run's report`);
+      console.error(`candor-ts: could not arm the report ${full} fail-closed (${e.message}) — leaving it `
+        + `AND its §2.2 sidecars exactly as they are; if this run does not complete, that path may still `
+        + `hold a PREVIOUS run's report`);
     }
+    if (armed) removeArmedReportSidecars(full, prefix, inputs);
   }
 };
 
@@ -442,6 +522,23 @@ const disarmUnwrittenOutReports = () => {
     catch (e) {
       console.error(`candor-ts: could not restore ${file}, which this run armed but did not write `
         + `(${e.message}) — it still holds the fail-closed placeholder`);
+      continue;
+    }
+    // ⟨0.28⟩ …AND THIS REPORT'S SIDECARS COME BACK WITH IT. A report the run turned out not to own is an
+    // ORPHAN, left exactly as found — and "as found" included its sidecars. Handing back the report while
+    // leaving them deleted is a THIRD state neither the pre-run tree nor the armed tree ever had: it
+    // degrades every `callers`/`whatif` answer over that package to the absence arm with nothing on disk
+    // saying why. This engine really does reach here (unlike candor-java, which arms exactly the one path
+    // the operator named): the armer arms the whole PREVIOUS set under the prefix, and this run writes
+    // only `<prefix>.json`, so any other report the previous run left there is armed and handed back.
+    for (const [owner, side, sprev] of outArmedSidecars) {
+      if (owner !== file || fs.existsSync(side)) continue;  // not this report's, or the run rewrote it
+      try { writeSinkAtomic(side, sprev); }
+      catch (e) {
+        console.error(`candor-ts: could not restore ${side}, the §2.2 sidecar of ${file}, which this run `
+          + `armed but did not write (${e.message}) — that report is now missing a sidecar it had before `
+          + `this run started`);
+      }
     }
   }
 };

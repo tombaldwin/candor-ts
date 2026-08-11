@@ -73,6 +73,13 @@ pure functions are omitted** — a function present in the callgraph sidecar but
 `.functions[]` is pure (as far as the engine resolved). In *neither* file = never analyzed
 (a test file? an unexported arrow inside an object literal?) — conclude nothing.
 
+**A report with `analyzed.count: 0` is a run that FAILED, not a clean codebase.** A scan that exits 2
+leaves that fail-closed shape (`functions: []`, `analyzed.count: 0`, a non-empty `unanalyzed`) at the
+`--out` report, and it DELETES that report's `.callgraph`/`.hierarchy`/`.locs` sidecars with it — so
+`callers`/`whatif` answer from an absent call graph rather than from the last successful run. Read the
+two together: **a sidecar whose report is one of these empties tells you nothing, whatever it says.**
+Re-scan; do not conclude from either half.
+
 A dist-CJS export unit (a `module.exports` surface scanned with `--allow-js`) carries
 `unitKind: "export"` (spec 0.8, informative); ordinary functions omit the field.
 

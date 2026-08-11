@@ -9157,5 +9157,107 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.28⟩ THE §2.2 SIDECARS GO WITH THE ARMED REPORT — DELETED, NOT EMPTIED (SPEC §3.3.1) ─────────
+// An armed report beside a LIVE sidecar is a pair that contradicts itself, and it is not decorative:
+// `callers`/`whatif`/`rewire` are answered FROM THE SIDECAR, because a currently-pure function is absent
+// from the report by §2 rule 3. MEASURED on this engine before the fix — baseline `f` pure with caller
+// `g`, new version gives `f` an `fs.readFileSync` and adds caller `h`, run exits 2 on an unknown flag:
+// `callers f` answered exit 0 with direct `[src.app.g]`. Confident, and wrong.
+//
+// THE PREMISE ROW IS FIRST AND IS LOAD-BEARING: "no sidecars afterwards" and "this engine never wrote
+// one" are the same directory listing, so a block that only counts what is left can pass vacuously.
+{
+  const d = project({
+    "tsconfig.json": '{ "compilerOptions": { "target": "ES2020", "module": "ESNext", "strict": true }, "include": ["src/**/*.ts"] }\n',
+    "src/app.ts": 'export function f(): number { return 1; }\n'
+      + 'export function g(): number { return f(); }\n'
+      + 'export function main(): void { console.log(g()); }\n',
+  });
+  const SEGS = ["callgraph", "hierarchy", "locs"];
+  const pfx = path.join(d, "out", "p");
+  fs.mkdirSync(path.dirname(pfx), { recursive: true });
+  const run = (...a) => spawnSync("node", [path.join(HERE, "scan.mjs"), d, ...a], { encoding: "utf8" });
+  const there = (p) => fs.existsSync(p);
+  const sidecars = (stem) => SEGS.map((s) => `${stem}.${s}.json`);
+
+  run("--out", pfx);
+  check("⟨0.28⟩ sidecar PREMISE: a clean `--out` run really writes all three §2.2 sidecars — without this row the block below passes on an engine that never wrote one",
+        sidecars(pfx).every(there), sidecars(pfx).map((p) => `${path.basename(p)}=${there(p)}`).join(" "));
+
+  // The neighbours that must SURVIVE. A gate verdict is the VERDICT sink's document — separately armed,
+  // separately named by the operator — so the report sink deleting it is §3.3.1's cross-sink harm; and
+  // `encountered-*` is a prefix family belonging to no report's pair. Both are in §2.2's reserved list,
+  // which is why the exclusion is argued rather than assumed.
+  fs.writeFileSync(`${pfx}.gate.json`, '{"spec":"0.27","ok":true,"violations":[]}\n');
+  fs.writeFileSync(`${pfx}.encountered-hosts.json`, '{"api.example.com":1}\n');
+  // …and an ORPHAN: a second report under the same prefix that this run arms but never writes.
+  for (const [from, to] of [[`${pfx}.json`, `${pfx}.orphanA.json`], [`${pfx}.callgraph.json`, `${pfx}.orphanA.callgraph.json`]]) fs.copyFileSync(from, to);
+  const gateBefore = fs.readFileSync(`${pfx}.gate.json`, "utf8");
+  const encBefore = fs.readFileSync(`${pfx}.encountered-hosts.json`, "utf8");
+
+  fs.writeFileSync(path.join(d, "src/app.ts"),
+    'import * as fs from "fs";\n'
+    + 'export function f(): number { return fs.readFileSync("/etc/hosts").length; }\n'
+    + 'export function g(): number { return f(); }\n'
+    + 'export function h(): number { return f(); }\n'
+    + 'export function main(): void { console.log(g() + h()); }\n');
+  const armedRun = run("--out", pfx, "--zzz-not-a-flag");
+  const armedDoc = JSON.parse(fs.readFileSync(`${pfx}.json`, "utf8"));
+  check("⟨0.28⟩ sidecar: the run exits 2 with the report armed to the ⟨0.21⟩ Row-1 empty (the premise the sidecar rule hangs off)",
+        armedRun.status === 2 && armedDoc.functions.length === 0 && armedDoc.analyzed.count === 0 && armedDoc.unanalyzed?.length > 0,
+        `status=${armedRun.status} ${JSON.stringify(armedDoc).slice(0, 200)}`);
+  check("⟨0.28⟩ sidecar: …and all three of the armed report's §2.2 sidecars are GONE — deleted, not emptied (an empty file would be a claim ⟨0.24⟩ has already ruled meaningless)",
+        sidecars(pfx).every((p) => !there(p)), sidecars(pfx).filter(there).join(" "));
+  check("⟨0.28⟩ sidecar: `<stem>.gate.json` SURVIVES byte-identical — a gate verdict is the VERDICT sink's document, and taking it from the report sink is §3.3.1's cross-sink harm",
+        fs.readFileSync(`${pfx}.gate.json`, "utf8") === gateBefore, "gate.json changed");
+  check("⟨0.28⟩ sidecar: `<stem>.encountered-hosts.json` survives too — a prefix family that belongs to no report's pair",
+        fs.readFileSync(`${pfx}.encountered-hosts.json`, "utf8") === encBefore, "encountered-hosts.json changed");
+  check("⟨0.28⟩ sidecar: an ORPHAN report armed under the same prefix loses ITS sidecar as well — the rule is per REPORT, not per `--out` value",
+        !there(`${pfx}.orphanA.callgraph.json`), "the orphan's callgraph is still there");
+
+  // RECOVERY. The absence arm is a state a completing run leaves, not a state it gets stuck in.
+  // A SECOND orphan, seeded here so the run that arms it is the one that COMPLETES: only a completing
+  // run reaches `disarmUnwrittenOutReports`, which is what hands an unowned report back.
+  fs.writeFileSync(`${pfx}.orphanB.json`, JSON.stringify({ candor: { version: "candor-ts-x", spec: "0.27" }, functions: [], analyzed: { count: 3 } }, null, 1));
+  fs.writeFileSync(`${pfx}.orphanB.callgraph.json`, JSON.stringify({ "gone.pkg.a": ["gone.pkg.b"], "gone.pkg.b": [] }, null, 1));
+  const orphanBefore = [`${pfx}.orphanB.json`, `${pfx}.orphanB.callgraph.json`].map((p) => [p, fs.readFileSync(p, "utf8")]);
+  const rec = run("--out", pfx);
+  const cg = JSON.parse(fs.readFileSync(`${pfx}.callgraph.json`, "utf8"));
+  check("⟨0.28⟩ sidecar: a recovering run writes all three back, and the call graph now answers `h` — the caller the stale sidecar hid",
+        rec.status === 0 && sidecars(pfx).every(there) && (cg["src.app.h"] ?? []).includes("src.app.f") && (cg["src.app.g"] ?? []).includes("src.app.f"),
+        `status=${rec.status} ${JSON.stringify(cg).slice(0, 200)}`);
+  // …and the orphan is handed back WHOLE. Restoring the report while leaving its sidecars deleted is a
+  // third state neither the pre-run tree nor the armed tree ever had.
+  check("⟨0.28⟩ sidecar: the ORPHAN this run turned out not to own comes back with its sidecar — report AND callgraph byte-identical",
+        orphanBefore.every(([p, v]) => fs.existsSync(p) && fs.readFileSync(p, "utf8") === v),
+        orphanBefore.filter(([p, v]) => !fs.existsSync(p) || fs.readFileSync(p, "utf8") !== v).map(([p]) => path.basename(p)).join(" "));
+
+  // THE INPUT EXEMPTION COVERS THE SIDECARS. "Do not touch what this run READS" does not stop at the
+  // report half: a `--policy`, a chained dep report or the config can be named `<stem>.locs.json`.
+  const locsBefore = fs.readFileSync(`${pfx}.locs.json`, "utf8");
+  const exempt = run("--out", pfx, "--policy", `${pfx}.locs.json`, "--zzz-not-a-flag");
+  check("⟨0.28⟩ sidecar: a sidecar that is ALSO an input of this run is left in place and SAID SO on stderr — the exemption is asked of the same `sameArtifact`/`runInputs` the sink guards use",
+        fs.readFileSync(`${pfx}.locs.json`, "utf8") === locsBefore
+          && /is what this run READS as --policy — leaving it in place/.test(exempt.stderr),
+        `${exempt.stderr}`.slice(0, 300));
+
+  // AND THE SIDECARS FOLLOW ONLY IF THE REPORT ACTUALLY ARMED. A write that FAILS leaves the PREVIOUS
+  // run's report on disk; removing its sidecars there is a stale-report/no-callgraph pair no run has
+  // ever written — worse than the state the failure left. A pair degrades together or not at all.
+  run("--out", pfx);
+  const before = [`${pfx}.json`, ...sidecars(pfx)].map((p) => [p, fs.readFileSync(p, "utf8")]);
+  fs.chmodSync(path.dirname(pfx), 0o555);
+  const ro = run("--out", pfx, "--zzz-not-a-flag");
+  fs.chmodSync(path.dirname(pfx), 0o755);
+  check("⟨0.28⟩ sidecar PREMISE: a read-only directory really does fail the arm write (else the row below is vacuous)",
+        /could not arm the report/.test(ro.stderr), `${ro.stderr}`.slice(0, 300));
+  check("⟨0.28⟩ sidecar: an arm that FAILED to write leaves BOTH halves exactly as found — report and all three sidecars byte-identical — and says so on stderr",
+        before.every(([p, v]) => fs.existsSync(p) && fs.readFileSync(p, "utf8") === v)
+          && /leaving it AND its §2\.2 sidecars exactly as they are/.test(ro.stderr),
+        before.filter(([p, v]) => !fs.existsSync(p) || fs.readFileSync(p, "utf8") !== v).map(([p]) => path.basename(p)).join(" ") || `${ro.stderr}`.slice(0, 300));
+
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
