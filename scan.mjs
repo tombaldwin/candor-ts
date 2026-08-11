@@ -152,20 +152,27 @@ const CONFIG_KEYS_IMPLEMENTED = new Set(["policy", "baseline", "deps", "unknown-
 //      as an unknown rule, and the gate ran over zero rules. A machine-readable all-clear produced by
 //      deleting the question.
 const preScan = (av) => {
-  let gate = null, policy = null, target = null;
+  let gate = null, policy = null, target = null, out = null, posOut = null;
   for (let i = 0; i < av.length; i++) {
     const a = av[i], v = av[i + 1];
     if (a === "--gate-json" || a === "--policy" || a === "--out") {
       if (v === undefined || (v !== "-" && v.startsWith("--"))) continue;
-      if (a === "--gate-json") gate = v; else if (a === "--policy") policy = v;
+      if (a === "--gate-json") gate = v; else if (a === "--policy") policy = v; else out = v;
       i++;
       continue;
     }
     // The scan TARGET, needed to discover the `.candor/config` whose `policy` key may name an input
     // this sink must not overwrite.
-    if (!a.startsWith("-") && target === null) target = a;
+    if (!a.startsWith("-")) {
+      if (target === null) target = a;
+      // ⟨0.28⟩ …AND THE LEGACY POSITIONAL PREFIX (`scan.mjs f.ts out`), which the arg loop honours as
+      // `outPrefix`. Learning only the flag form would have had the ⟨0.28⟩ report armer arm the DEFAULT
+      // prefix — a sink this run is not going to write — so a stale-report fix would have destroyed a
+      // different run's good report and left a placeholder nothing restores.
+      else if (posOut === null) posOut = a;
+    }
   }
-  return { gate, policy, target };
+  return { gate, policy, target, out: out ?? posOut };
 };
 
 // SPEC §3.3.1 ⟨0.28⟩ — every `--gate-json` this argv names. `preScan` keeps only the last, which is what
@@ -302,22 +309,118 @@ const preWantJson = argv.includes("--json");
 // later exit-2 site does not put a SECOND JSON document on the stream — two documents on one pipe
 // parses as neither.
 let reportStreamWritten = false;
+// The ⟨0.21⟩ Row-1 manifest-carrying empty: `functions: []` + `analyzed.count: 0` + `unanalyzed`
+// naming the cause. A ⟨0.24⟩ consumer already reads this as *nothing was judged, no purity licence*
+// and a `gate --report` records the file `invisible` — no new reader logic. The version/toolchain
+// match the ordinary envelope so a consumer's provenance check reads the same.
+// ONE BUILDER FOR BOTH SINKS: the stream form below and the ⟨0.28⟩ `--out` file armer emit the SAME
+// bytes for the same reason string. Two spellings of one document is how a consumer ends up with two
+// shapes to recognise, and the file form is the one a `gate --report` parses.
+const failClosedReportDoc = (reason) => {
+  const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/[\n\r]/g, " ");
+  return `{\n "candor": {\n  "version": "candor-ts-${PKG_VERSION}",\n  "toolchain": "node-${process.versions.node}",\n  "spec": "${SPEC_VERSION}"\n },\n "functions": [],\n "analyzed": { "count": 0 },\n "unanalyzed": [\n  { "path": "<run>", "reason": "${esc(reason)}" }\n ]\n}`;
+};
 const refuseEarlyToStream = (why) => {
   if (preGateSink === "-") console.log(JSON.stringify(refusalVerdict(SPEC_VERSION, why, null), null, 1));
   else if (preWantJson && !reportStreamWritten) {
-    // The ⟨0.21⟩ Row-1 manifest-carrying empty: `functions: []` + `analyzed.count: 0` + `unanalyzed`
-    // naming the cause. A ⟨0.24⟩ consumer already reads this as *nothing was judged, no purity licence*
-    // and a `gate --report` records the file `invisible` — no new reader logic. Skipped when stdout is
-    // already claimed by `--gate-json -` (the two-stream case is refused earlier with a verdict on stdout).
-    // The version/toolchain match the ordinary envelope so a consumer's provenance check reads the same.
-    const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/[\n\r]/g, " ");
-    console.log(`{\n "candor": {\n  "version": "candor-ts-${PKG_VERSION}",\n  "toolchain": "node-${process.versions.node}",\n  "spec": "${SPEC_VERSION}"\n },\n "functions": [],\n "analyzed": { "count": 0 },\n "unanalyzed": [\n  { "path": "<run>", "reason": "refused: ${esc(why)}" }\n ]\n}`);
+    // Skipped when stdout is already claimed by `--gate-json -` (the two-stream case is refused
+    // earlier with a verdict on stdout).
+    console.log(failClosedReportDoc(`refused: ${why}`));
     reportStreamWritten = true;
   }
 };
 
+// ── SPEC §3.3.1 ⟨0.28⟩ — ARM THE `--out <prefix>` REPORT SET, AND HAND BACK WHAT THE RUN DID NOT OWN.
+//
+// The verdict sink arms by writing to a path the run is about to own. A report PREFIX cannot: at parse
+// time the run does not know which files it will write (this engine writes `<prefix>.json`, a workspace
+// engine fans out to one per member), so the set it DOES know is the one the PREVIOUS run left on disk —
+// and that is exactly the set at risk of being read as current after this run fails. Measured on this
+// engine: `node scan.mjs <target> --out p --zzz-not-a-flag` exited 2 with `p.json` byte-identical to the
+// previous good run, and a downstream `gate --report p.json` then reads a green report the failed run
+// never produced.
+//
+// Armed from the pre-pass, before the arg loop's own unknown-flag exit — the exit this rung is most
+// often reached through. Each report the run does write overwrites its placeholder a moment later.
+//
+// SIDECARS (`.callgraph`/`.hierarchy`/`.locs`) ARE NOT TOUCHED, deliberately: whether they must arm
+// alongside their report is an OPEN question against §2.2 ⟨0.26⟩'s own manifest rules, and answering it
+// here would put a second answer in the family.
+const OUT_ARM_DOC = failClosedReportDoc(
+  "armed: this report was written when the run STARTED and was never replaced, so the run failed, "
+  + "crashed or was killed before it could describe this package. It is NOT a claim about any code; "
+  + "see the run's stderr for the cause.") + "\n";
+/** `[path, bytes-before-arming]` for every report armed under the out prefix. */
+const outArmed = [];
+const armOutPrefixFailClosed = (prefix, inputs) => {
+  if (!prefix) return;
+  const abs = path.resolve(prefix);
+  const dir = path.dirname(abs), stem = path.basename(abs);
+  if (!stem) return;
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return; }   // no previous run under this prefix: nothing to arm
+  for (const name of names.sort()) {
+    // `<stem>.json` and `<stem>.….json`, minus the §2.2 reserved sidecar segments.
+    if (!name.startsWith(`${stem}.`) || !name.endsWith(".json")) continue;
+    if (name.endsWith(".callgraph.json") || name.endsWith(".hierarchy.json") || name.endsWith(".locs.json")) continue;
+    const full = path.join(dir, name);
+    try { if (!fs.statSync(full).isFile()) continue; } catch { continue; }
+    // THE ⟨0.27⟩ (2) INPUT EXEMPTION APPLIES TO THIS WRITER TOO. Arming happens before the run knows its
+    // answer, so a prefix whose expansion collides with something this run READS would destroy it — the
+    // same hazard that made `--policy P --gate-json P` a machine-readable all-clear. A policy or a
+    // chained dep report can perfectly well be named `<prefix>.something.json`. Same resolver as every
+    // other sink guard (`sameArtifact`: device+inode, then the resolved path).
+    const hit = inputs.find(([other]) => sameArtifact(full, other));
+    if (hit) {
+      console.error(`candor-ts: --out ${prefix} would arm over ${full}, which this run READS as ${hit[1]} `
+        + `— leaving it untouched. Give the report set its own prefix.`);
+      continue;
+    }
+    // Remember the bytes BEFORE overwriting, so a run that completes can hand back anything it turned
+    // out not to own (see disarmUnwrittenOutReports).
+    let prev;
+    try { prev = fs.readFileSync(full); } catch { continue; }
+    try { writeSinkAtomic(full, OUT_ARM_DOC); outArmed.push([full, prev]); }
+    catch (e) {
+      console.error(`candor-ts: could not arm the report ${full} fail-closed (${e.message}) — if this run `
+        + `does not complete, that path may still hold a PREVIOUS run's report`);
+    }
+  }
+};
+
+// HAND BACK WHAT THIS RUN TURNED OUT NOT TO OWN. Arming cannot know at parse time which files the run
+// will write, so it arms the whole previous set. Once the run has finished writing, a file STILL holding
+// the placeholder is one the run never claimed — a leftover from a package that is no longer in the scan.
+//
+// THAT IS NOT AN INCOMPLETE ANALYSIS, AND LEAVING THE PLACEHOLDER THERE ASSERTS ONE. The rust reference's
+// first version kept them and described it as closing the orphaned-report defect for free; it did not. A
+// placeholder's non-empty `unanalyzed` is the ⟨0.21⟩ incomplete-analysis trigger, so a COMPLETE scan
+// began refusing with exit 2 and went on refusing until someone deleted the leftover by hand. The run did
+// not fail to analyze that package; the package is not there. Claiming an incompleteness the run never
+// experienced is the mirror of the staleness this rung exists to close.
+//
+// So the previous bytes go back and THE ORPHAN IS LEFT EXACTLY AS FOUND — still an open defect (a report
+// for code that is gone still reaches a gate over the prefix), deliberately: it is pre-existing, it has
+// its own wire question (delete it? mark it not-in-scan? a prefix can legitimately be shared), and
+// resolving it inside a staleness fix would be deciding it by accident. Deleting the placeholder instead
+// of restoring is rejected for §3.3.1's own reason: a consumer treating a missing file as "nothing to
+// report" fails open by another route.
+const disarmUnwrittenOutReports = () => {
+  const armed = Buffer.from(OUT_ARM_DOC);
+  for (const [file, prev] of outArmed) {
+    let now;
+    try { now = fs.readFileSync(file); } catch { continue; }
+    if (!now.equals(armed)) continue;                      // this run rewrote it — a real report
+    try { writeSinkAtomic(file, prev); }
+    catch (e) {
+      console.error(`candor-ts: could not restore ${file}, which this run armed but did not write `
+        + `(${e.message}) — it still holds the fail-closed placeholder`);
+    }
+  }
+};
+
 {
-  const { gate, policy, target: preTarget } = preScan(argv);
+  const { gate, policy, target: preTarget, out: preOut } = preScan(argv);
   // ⟨0.28⟩ The DUPLICATE case is decided below, and the single-sink guards here must not pre-empt it:
   // they act on `gate` alone — the LAST sink — so `--gate-json - --gate-json <the policy>` exited on the
   // policy before the STREAM could be told anything (measured: exit 2, stdout zero bytes).
@@ -435,6 +538,18 @@ const refuseEarlyToStream = (why) => {
     process.exit(2);
   }
   if (gate && gate !== "-") armGateJsonFailClosed(gate);
+  // ⟨0.28⟩ …AND ARM THE REPORT SET, still before the arg loop below can exit on an unknown flag.
+  // `--json` publishes the report to STDOUT and writes no files at all, so there is no file sink to arm
+  // there — that form is the stream rule above, and arming under it would rewrite files this run is
+  // never going to touch. The DEFAULT prefix (`<target>/.candor/report`) is armed for the same reason
+  // the flag form is: an operator who never passes `--out` still has a previous run's report on disk to
+  // go stale, and a rung applied only where the flag appears is the same sink under another spelling.
+  if (!preWantJson) {
+    const t = preTarget ?? ".";
+    let base = t;
+    try { if (!fs.statSync(t).isDirectory()) base = path.dirname(t); } catch { base = path.dirname(t); }
+    armOutPrefixFailClosed(preOut ?? path.join(base, ".candor", "report"), runInputs(preTarget, policy));
+  }
 }
 let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, gateJsonPath = null, allowJs = false, wantAgents = false, wantJson = false, wantWorkspace = false, wantDepInits = false;
 for (let i = 0; i < argv.length; i++) {
@@ -5558,6 +5673,12 @@ if (!wantJson) {
   writeAtomic(`${outPrefix}.hierarchy.json`, JSON.stringify(hierarchy, null, 1));
   console.error(`candor-ts: wrote ${functions.length} effectful functions (${fns.size} analyzed, ${sources.length} files) to ${outPrefix}.json`);
 }
+// ⟨0.28⟩ The run has finished writing its report set: hand back any file it armed and turned out not to
+// own (see disarmUnwrittenOutReports). Placed HERE rather than at the exit sites because everything
+// below — the policy gate, the baseline ratchet, the unanalyzed certification — can exit 1 or 2 having
+// already published a complete report, and a leftover placeholder past this point is a claim of
+// incompleteness this run did not experience.
+disarmUnwrittenOutReports();
 {
   // Effect breakdown — make the result visible at a glance, not just a count + a file path.
   const counts = {};
