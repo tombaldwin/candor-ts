@@ -8,6 +8,26 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ ⟨0.28⟩ `impact` and `path` gate a BAD TARGET** (corpus-audit #3, conformance §17 (1b)). A
+  nonexistent function answered `{"fn":"zzz","affectedCount":0,"affected":[],"entryPoints":[]}` and
+  `{"effect":"Net","fn":"zzz","path":[]}` at **exit 0** — an authoritative all-clear about a question
+  never posed. On the blast-radius verb `affectedCount: 0` is the strongest claim in the vocabulary
+  ("nothing calls this, safe to change"), and a typo in a CI script or an agent's generated query read
+  back as reassurance. Measured four-way on a valid report: rust exit 2 / exit 2, java exit 2 / exit 2,
+  swift (no `impact` verb) / exit 2 — a one-engine divergence, and §17 (1b)'s comment already assumed it
+  closed ("path/impact already gate"). Both verbs now exit 2 with `no function matching '<target>'`, on
+  BOTH arms: `path`'s human arm always gated while `--json` — the arm a CI script and an agent read — did
+  not, so the gate is hoisted above the JSON/human split rather than left on one route. The target
+  resolves against the callgraph keys UNIONed with the report's fn names, the same set mcp.mjs's
+  fn-existence guard uses, so the CLI and the MCP surface refuse the same names.
+  **Three answers, not two**, and the separation is the point: *there is no call graph* keeps its
+  ⟨0.28⟩ `unanswerable` document; *the graph says no* is still a determined negative at exit 0 (a fn that
+  genuinely affects nothing still answers `affectedCount: 0`, one that genuinely does not reach an effect
+  still answers `path: []` — withdrawing those to catch the fabricated one is the ⟨0.24⟩ count-0 mirror
+  defect); *there is no such function* is the new stderr usage error, carrying no `unanswerable` key.
+  Unchanged, and NOT part of this rung: a typo'd EFFECT on `path` (`path <real fn> Netwerk`) still exits
+  0 with `path: []` — measured, that is what rust, java and swift all do, so gating it here would be a
+  fresh one-engine divergence. Worth a four-way rung of its own, since `where` refuses the same typo.
 - **⚠ ⟨0.28⟩ the §2.2 sidecars go with the armed report — deleted, not emptied** (SPEC §3.3.1). An armed
   report beside a LIVE `.callgraph`/`.hierarchy`/`.locs` is a pair that contradicts itself, and §2.2 gives
   the sidecar no provenance to arbitrate with. Not decorative: `callers`/`whatif`/`fix` are answered FROM

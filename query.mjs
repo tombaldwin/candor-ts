@@ -184,6 +184,18 @@ const P = {
   },
 };
 
+// The fn-name UNIVERSE a `<fn>` target resolves against: the callgraph keys UNIONed with the report's fn
+// names. Not a new set — this is byte-for-byte the one mcp.mjs's fn-existence guard already builds, so
+// the CLI and the MCP surface refuse exactly the same names (a name the agent tool calls nonexistent must
+// not be one the CLI silently answers `0` for). Used by the `impact`/`path` bad-target gates below.
+//
+// THE UNION IS THE SAFE DIRECTION. §2.2 makes every fn a callgraph key and the report is the effectful
+// SUBSET, so today the union IS the keys; the union is what keeps that an observation rather than an
+// assumption. Refusing only a name that resolves in NEITHER set means no answer these verbs can actually
+// compute is ever withdrawn — gating on one set alone would be the ⟨0.24⟩ count-0 mirror defect the day
+// the two disagreed.
+const knownFnNames = (cg, fns) => [...new Set([...Object.keys(cg), ...fns.map((e) => e.fn)])];
+
 // Render `path` in HUMAN (non-`--json`) form — the indented provenance chain, BYTE-IDENTICAL to the
 // Rust reference (candor-query/src/callers.rs) and the Java port (Query.java). The `--json` shape is
 // UNTOUCHED (conformance PART 5 pins `{effect, fn, path:[{fn,loc,source}]}` four-way): this path is
@@ -1072,6 +1084,30 @@ switch (cmd) {
       put(args, { fn: q, unanswerable: why }, () => console.log(`candor: ${why}`));
       process.exit(2);
     }
+    // BAD TARGET → LOUD exit 2 (corpus-audit #3), the rule `callers` applies one verb up and the rule
+    // rust/java ALREADY apply here — measured four-way, array-quoted, on a valid report: rust and java
+    // both exit 2 with `impact: no function matching '…'`, and candor-ts was the ONE arm that printed
+    // `{"fn":"zzz_no_such_fn","affectedCount":0,"affected":[],"entryPoints":[]}` at exit 0. On the
+    // BLAST-RADIUS verb, `affectedCount: 0` is the strongest claim in the vocabulary — "nothing calls
+    // this, safe to change" — and here it was asserted about a function that does not exist. A typo in a
+    // CI script or an agent's query reads back as reassurance (§4); the truth is the question was never
+    // posed. This is the same shape conformance §17 (1b) already pins for `where`/`callers`, on the two
+    // verbs whose comment there wrongly assumed "path/impact already gate".
+    //
+    // A DIFFERENT CONDITION FROM THE UNANSWERABLE GATE ABOVE, and keeping them distinguishable is the
+    // load-bearing half. That one is "there is no call graph" — nothing was judged, so the machine
+    // channel carries an `unanswerable` key. This one is "the graph is fine and the NAME does not
+    // resolve" — a USAGE error, reported the way `where`/`callers`/`show` report one: stderr, and NO
+    // `unanswerable` key, because the run judged plenty. Hence the ORDER: unanswerable first, so an
+    // absent sidecar is never misreported as a bad name (a wrong cause reads as an answer, 5091905).
+    //
+    // NOT THE OTHER DIRECTION: a REAL fn that genuinely affects nothing still answers `affectedCount: 0`
+    // at exit 0 below. "No such function" and "that function affects nothing" must not collapse into one
+    // another — withdrawing the determined negative to catch the fabricated one is the ⟨0.24⟩ count-0
+    // mirror defect, where the plausible fix withdrew 104 real claims to catch 6.
+    if (coreMatches(knownFnNames(impCg, impFns), q).length === 0) {
+      console.error(`candor-ts-query impact: no function matching '${q}'`); process.exit(2);
+    }
     put(args, coreImpact(impFns, impCg, q), P.impact);
     break;
   }
@@ -1256,6 +1292,27 @@ switch (cmd) {
       if (wantJson) emit({ effect: eff, fn, unanswerable: why });
       else console.log(`candor: ${why}`);
       process.exit(2);
+    }
+    // BAD TARGET → LOUD exit 2 (corpus-audit #3), the `impact` argument above on the verb that answers
+    // the OTHER direction, and the ONE-ENGINE divergence was HALF a divergence here: the HUMAN arm
+    // (renderPathHuman) has always exited 2 with "no function matching", while `--json` printed
+    // `{"effect":"Net","fn":"zzz_no_such_fn","path":[]}` at exit 0 — "there is no route by which this
+    // function reaches that effect", the precise reassurance a reader asks `path` for, about a function
+    // that does not exist. The MACHINE arm being the lenient one is the worse half: the human at least
+    // saw an error. rust/java/swift all exit 2 on both arms (measured).
+    //
+    // HOISTED ABOVE THE SPLIT so ONE gate covers both arms — the divergence existed because the check
+    // lived inside the human renderer only, and a rule that lives on one route is a rule the sibling
+    // route does not have. renderPathHuman keeps its own resolution (over the REPORT entries, where
+    // `inferred` lives) as the stricter downstream case; this gate refuses only what neither set knows.
+    //
+    // DISTINCT FROM THE UNANSWERABLE GATE ABOVE and ordered after it: "there is no graph" carries the
+    // `unanswerable` key in the machine channel, "the graph is fine and the name is not in it" is a
+    // usage error on stderr. NOT the mirror: a real fn that genuinely does not reach the effect still
+    // answers `path: []` at exit 0 below — the graph SAID no, and "the graph says no", "there is no
+    // graph" and "there is no such function" are three answers, not one.
+    if (coreMatches(knownFnNames(cg, fns), fn).length === 0) {
+      console.error(`candor-ts-query path: no function matching '${fn}'`); process.exit(2);
     }
     if (wantJson) emit(corePath(fns, cg, fn, eff));           // conformance PART 5 shape — UNCHANGED
     else {

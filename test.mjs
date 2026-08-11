@@ -9341,18 +9341,50 @@ export function all(db: DatabaseSync, o: any) {
         noReach.status === 0 && !!noReachDoc && !("unanswerable" in noReachDoc)
           && Array.isArray(noReachDoc.path) && noReachDoc.path.length === 0 && noReachDoc.effect === "Net",
         `status=${noReach.status} ${noReach.stdout}`.slice(0, 220));
-  // The nonexistent-name control. The DISCRIMINATING assertion is the absence of the disclosure — a graph
-  // WAS read, the name is simply not in it. The exit-0 is pinned as UNCHANGED, not as correct: unlike
-  // `callers`, this engine's `impact`/`path --json` have no bad-target gate at all (conformance run.sh's
-  // §17 (1b) comment says "path/impact already gate", and on candor-ts they do not — its `badtarget` rows
-  // only ever probe where/callers, so nothing measured it). That is a separate rung; when it is closed,
-  // this row is the one to change deliberately rather than by surprise.
+  // THE NONEXISTENT-NAME ROW, and it is now a GATE rather than a control. It used to pin exit 0 as
+  // UNCHANGED-not-correct, with a note saying "when that rung is closed, change this row deliberately
+  // rather than by surprise" — this is that deliberate change. The rung: `impact`/`path` had no
+  // bad-target gate at all on candor-ts (conformance §17 (1b)'s comment claims "path/impact already
+  // gate"; measured four-way with array quoting, rust/java/swift exit 2 and candor-ts alone answered
+  // `affectedCount: 0` / `path: []` at exit 0 — an authoritative all-clear about a fn that does not
+  // exist). Both verbs now exit 2 naming the target, like `callers`.
+  //
+  // TWO ASSERTIONS, and the second is the one that keeps the ⟨0.28⟩ fix above intact: exit 2 AND no
+  // `unanswerable` anywhere. "There is no call graph" and "the graph is fine, the name is not in it"
+  // are different answers with the same exit code, and a reader who is handed the wrong cause goes to
+  // the wrong place to fix it. The unanswerable rows above assert the converse (disclosure, and no
+  // "no function matching"), so the pair cannot collapse in either direction.
   const nofnI = impactQ("zzzNoSuchFn", "--json");
   const nofnP = pathQ("zzzNoSuchFn", "Fs", "--json");
-  check("⟨0.28⟩ CONTROL: a nonexistent fn over a REAL graph gets NO unanswerable disclosure from impact/path — unchanged (exit 0, the pre-existing missing bad-target gate, a rung of its own)",
-        nofnI.status === 0 && nofnP.status === 0
+  check("⟨0.28⟩ a nonexistent fn over a REAL graph is a BAD TARGET on impact/path too — exit 2 naming it, never `affectedCount: 0` / `path: []` at exit 0 (corpus-audit #3, the rung §17 (1b) assumed was already closed)",
+        nofnI.status === 2 && nofnP.status === 2
+          && /impact: no function matching 'zzzNoSuchFn'/.test(nofnI.stderr)
+          && /path: no function matching 'zzzNoSuchFn'/.test(nofnP.stderr)
           && !/unanswerable/.test(nofnI.stdout + nofnI.stderr) && !/unanswerable/.test(nofnP.stdout + nofnP.stderr),
-        `impact=${nofnI.status} ${nofnI.stdout.slice(0, 90)} path=${nofnP.status} ${nofnP.stdout.slice(0, 90)}`);
+        `impact=${nofnI.status} ${nofnI.stdout.slice(0, 90)}${nofnI.stderr.slice(0, 90)} path=${nofnP.status} ${nofnP.stdout.slice(0, 90)}${nofnP.stderr.slice(0, 90)}`);
+  // BOTH ARMS, because the divergence lived on ONE route: `path`'s HUMAN arm always exited 2 here while
+  // `--json` — the arm a CI script and an agent read — answered `path: []` at exit 0, and `impact` was
+  // lenient on both. A gate that only the prose reader gets is the sibling-route habit, so the no-flag
+  // form is measured rather than assumed.
+  const nofnIh = impactQ("zzzNoSuchFn");
+  const nofnPh = pathQ("zzzNoSuchFn", "Fs");
+  check("⟨0.28⟩ …and on the NO-FLAG (human) arm of both verbs — the machine arm was the lenient one, so neither route is left ungated",
+        nofnIh.status === 2 && nofnPh.status === 2
+          && /no function matching/.test(nofnIh.stderr) && /no function matching/.test(nofnPh.stderr),
+        `impact=${nofnIh.status} ${nofnIh.stderr.slice(0, 90)} path=${nofnPh.status} ${nofnPh.stderr.slice(0, 90)}`);
+  // THE SCOPE BOUNDARY OF THE ROWS ABOVE, pinned as UNCHANGED rather than as correct — the same discipline
+  // the bad-target row itself was held under until this commit. A typo'd EFFECT (`path <real fn> Netwerk`)
+  // is arguably a bad target too, and `where` refuses exactly that typo (exit 2, "unknown effect"). But
+  // MEASURED on a valid report, rust, java AND swift all answer `path: []` at exit 0 here — so `path` and
+  // `where` disagree in all four engines, uniformly. Gating it in candor-ts alone would manufacture a
+  // fresh one-engine divergence out of the fix for one, which is the whole failure mode this rung exists
+  // to close. It is a FOUR-WAY rung of its own; when it is opened, this row changes deliberately.
+  const typoEff = pathQ("src.app.g", "Netwerk", "--json");
+  let typoDoc = null; try { typoDoc = JSON.parse(typoEff.stdout); } catch { /* stays null */ }
+  check("⟨0.28⟩ SCOPE: a typo'd EFFECT on `path` is NOT part of this rung — still `path: []` at exit 0, which is what rust/java/swift all do (a four-way rung, not a one-engine fix)",
+        typoEff.status === 0 && !!typoDoc && !("unanswerable" in typoDoc)
+          && Array.isArray(typoDoc.path) && typoDoc.path.length === 0 && typoDoc.effect === "Netwerk",
+        `status=${typoEff.status} ${typoEff.stdout}`.slice(0, 220));
 
   // …and the orphan is handed back WHOLE. Restoring the report while leaving its sidecars deleted is a
   // third state neither the pre-run tree nor the armed tree ever had.

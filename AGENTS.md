@@ -90,6 +90,13 @@ Over a REAL graph the negatives stand: a function with genuinely no callers stil
 one that affects nothing still answers `affectedCount: 0`, and one that does not reach an effect still
 answers `path: []`, all at exit 0 — those are determined negatives, and they are correct.
 
+⟨0.28⟩ **A target NAME that does not resolve is a THIRD answer, and it is exit 2 as well** — `callers`,
+`impact` and `path` print `no function matching '<target>'` on stderr instead of answering `direct: []` /
+`affectedCount: 0` / `path: []`. So a query gets one of three, and a typo gets the third, not the second:
+*there is no call graph* (an `unanswerable` document), *the graph says no* (a real empty answer, exit 0),
+and *there is no such function* (stderr, and NO `unanswerable` key — a graph WAS read). If you generate
+query targets, read exit 2 + `no function matching` as **fix the name**, never as a finding.
+
 A dist-CJS export unit (a `module.exports` surface scanned with `--allow-js`) carries
 `unitKind: "export"` (spec 0.8, informative); ordinary functions omit the field.
 
