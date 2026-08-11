@@ -363,7 +363,26 @@ const armOutPrefixFailClosed = (prefix, inputs) => {
     if (!name.startsWith(`${stem}.`) || !name.endsWith(".json")) continue;
     const full = path.join(dir, name);
     try { if (!fs.statSync(full).isFile()) continue; } catch { continue; }
-    // ONLY FILES POSITIVELY IDENTIFIED AS THIS ENGINE'S OWN §2 REPORT — never a name denylist.
+    // THE ⟨0.27⟩ (2) INPUT EXEMPTION APPLIES TO THIS WRITER TOO, AND IT IS ASKED FIRST. Arming happens
+    // before the run knows its answer, so a prefix whose expansion collides with something this run READS
+    // would destroy it — the same hazard that made `--policy P --gate-json P` a machine-readable
+    // all-clear. A policy or a chained dep report can perfectly well be named `<prefix>.something.json`.
+    // Same resolver as every other sink guard (`sameArtifact`: device+inode, then the resolved path).
+    //
+    // ORDER MATTERS, and identification-first had it backwards (candor-swift's arm of this rung caught
+    // it). A `--policy <prefix>.policy.json` holding ordinary rule lines is not JSON, so it fails
+    // identification and gets skipped SILENTLY — the operator never learns their policy sat in the arming
+    // path, and losing a disclosure is the thing this project does not do. The exemption also has to
+    // OUTRANK identification for the case where the colliding input IS a valid report (a chained
+    // `CANDOR_DEPS` dep report under the same prefix): "do not touch what this run reads" is the stronger
+    // claim, whatever the file turns out to be.
+    const hit = inputs.find(([other]) => sameArtifact(full, other));
+    if (hit) {
+      console.error(`candor-ts: --out ${prefix} would arm over ${full}, which this run READS as ${hit[1]} `
+        + `— leaving it untouched. Give the report set its own prefix.`);
+      continue;
+    }
+    // …AND THEN ONLY FILES POSITIVELY IDENTIFIED AS THIS ENGINE'S OWN §2 REPORT — never a name denylist.
     //
     // The first version excluded `.callgraph`/`.hierarchy`/`.locs` by suffix and armed everything else
     // under the prefix. SPEC §2.2 ⟨0.24⟩ (the "reserved set, family-wide" paragraph) lists SEVEN reserved
@@ -384,17 +403,6 @@ const armOutPrefixFailClosed = (prefix, inputs) => {
     let doc;
     try { doc = JSON.parse(fs.readFileSync(full, "utf8")); } catch { continue; }
     if (!doc || typeof doc !== "object" || Array.isArray(doc) || doc.candor === undefined || doc.functions === undefined) continue;
-    // THE ⟨0.27⟩ (2) INPUT EXEMPTION APPLIES TO THIS WRITER TOO. Arming happens before the run knows its
-    // answer, so a prefix whose expansion collides with something this run READS would destroy it — the
-    // same hazard that made `--policy P --gate-json P` a machine-readable all-clear. A policy or a
-    // chained dep report can perfectly well be named `<prefix>.something.json`. Same resolver as every
-    // other sink guard (`sameArtifact`: device+inode, then the resolved path).
-    const hit = inputs.find(([other]) => sameArtifact(full, other));
-    if (hit) {
-      console.error(`candor-ts: --out ${prefix} would arm over ${full}, which this run READS as ${hit[1]} `
-        + `— leaving it untouched. Give the report set its own prefix.`);
-      continue;
-    }
     // Remember the bytes BEFORE overwriting, so a run that completes can hand back anything it turned
     // out not to own (see disarmUnwrittenOutReports).
     let prev;
