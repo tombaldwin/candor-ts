@@ -80,11 +80,15 @@ leaves that fail-closed shape (`functions: []`, `analyzed.count: 0`, a non-empty
 two together: **a sidecar whose report is one of these empties tells you nothing, whatever it says.**
 Re-scan; do not conclude from either half.
 
-⟨0.28⟩ **And `callers` SAYS so in the machine channel over such a pair** — `{"of": […], "unanswerable":
-"<why>"}` at **exit 2**, never an empty `direct` at exit 0. An empty `direct` means *nothing calls this*;
-with no call graph the engine does not know that, so do not read `d.direct ?? []` without checking
-`unanswerable` first. A function that genuinely has no callers over a REAL graph still answers
-`direct: []` at exit 0 — that one is a determined negative, and it is correct.
+⟨0.28⟩ **And `callers`, `impact` and `path` SAY so in the machine channel over such a pair** — a document
+carrying `"unanswerable": "<why>"` and NO answer keys, at **exit 2**, never an empty `direct` /
+`affectedCount: 0` / `path: []` at exit 0. All three resolve their target over the call graph, and each of
+those empties is the reassurance you asked the verb for: *nothing calls this*, *safe to change*, *it does
+not reach that effect*. With no call graph the engine knows none of it — so do not read
+`d.direct ?? []`, `d.affectedCount ?? 0` or `d.path ?? []` without checking `unanswerable` first.
+Over a REAL graph the negatives stand: a function with genuinely no callers still answers `direct: []`,
+one that affects nothing still answers `affectedCount: 0`, and one that does not reach an effect still
+answers `path: []`, all at exit 0 — those are determined negatives, and they are correct.
 
 A dist-CJS export unit (a `module.exports` surface scanned with `--allow-js`) carries
 `unitKind: "export"` (spec 0.8, informative); ordinary functions omit the field.

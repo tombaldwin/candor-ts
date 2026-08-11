@@ -34,6 +34,24 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   cannot decay into `callers` refusing everything. The MCP `candor_callers` already failed closed here
   (`isError: true` from its fn-existence guard), measured rather than assumed.
   Conformance PART 37 (e) SKIP → PASS.
+- **⚠ ⟨0.28⟩ `impact` and `path` discloses UNANSWERABLE too** (SPEC §3.3.1). The rung `callers` (above)
+  measured on its two siblings and left open. Over the same armed pair, `impact <f>` answered
+  `affectedCount: 0` and `path <f> <Effect>` answered `path: []`, both at **exit 0**, where candor-rust and
+  candor-java exit 2 on both — a one-engine divergence against three arms. These are not report-only
+  descriptive verbs: both resolve their TARGET over the §2.2 call graph, so with no sidecar every answer is
+  vacuous, and each vacuum spells itself as exactly the reassurance the verb exists to give —
+  `affectedCount: 0` is the blast-radius verb saying *nothing calls this, safe to change*, `path: []` is
+  *there is no route by which this reaches that effect*. Now a document carrying `unanswerable` with the
+  ANSWER keys OMITTED rather than zeroed (nothing left for a `d.affectedCount ?? 0` reader to mistake for a
+  finding) AND exit 2, on both the `--json` and the human arm. `path`'s human arm is repaired, not merely
+  forwarded: it exited 2 already but blamed the NAME ("no function matching 'f'") when the truth is about
+  the graph, and over a VALID report with the sidecar gone it reached "does not perform Fs" /
+  "not statically traceable" at exit 0. **Only "no graph at all" is unanswerable**: over a complete graph a
+  function that genuinely affects nothing still answers `affectedCount: 0` and one that genuinely does not
+  reach the effect still answers `path: []`, both at exit 0 — the graph SAID no, and withdrawing that is
+  the ⟨0.24⟩ count-0 mirror defect. Five control rows pin it. MCP `candor_impact`/`candor_path` already
+  failed closed (`isError: true`), measured rather than assumed. Conformance PART 5 `impact`/`path` shapes
+  are untouched — the new key appears only on the branch with no graph.
 - **⚠ ⟨0.28⟩ never reached the `gate --report` verb** (`query.mjs` has its own argv pre-pass, and the rung
   went into `scan.mjs` only). Measured: exit 1, red verdict at the last sink, a pre-seeded `{"ok": true}`
   untouched at the first. Conformance PART 36 (b21).

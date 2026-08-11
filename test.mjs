@@ -9240,6 +9240,45 @@ export function all(db: DatabaseSync, o: any) {
           `status=${ah.status} ${ah.stdout}`.slice(0, 220));
   }
 
+  // ── ⟨0.28⟩ …AND `impact`/`path` TOO. 5091905 measured both as still silent here and named them as a
+  // rung of their own; this is that rung. They are not descriptive report-only verbs — both resolve their
+  // TARGET over the §2.2 call graph, so with no sidecar every answer is vacuous, and each vacuum spells
+  // itself as the reassurance the verb exists to give. `affectedCount: 0` is the blast-radius verb saying
+  // NOTHING CALLS THIS, SAFE TO CHANGE; `path: []` is "there is no route by which this reaches that
+  // effect". Both at exit 0, over a run that judged nothing. rust and java exit 2 on both — a one-engine
+  // divergence against three arms, not a design question. As above, the key AND the exit are asserted,
+  // and the empty ANSWER keys must be GONE rather than zeroed: a `d.affectedCount ?? 0` reader must have
+  // nothing left to mistake for a finding.
+  const impactQ = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), "impact", ...a, "--report", pfx], { encoding: "utf8" });
+  const pathQ = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), "path", ...a, "--report", pfx], { encoding: "utf8" });
+  const ij = impactQ("src.app.f", "--json");
+  let ijDoc = null; try { ijDoc = JSON.parse(ij.stdout); } catch { /* stays null → the row fails loudly */ }
+  check("⟨0.28⟩ impact --json over an armed pair carries `unanswerable` and NO `affectedCount`/`affected` — a 0 blast radius is the strongest safe-to-change claim this format has",
+        !!ijDoc && typeof ijDoc.unanswerable === "string" && ijDoc.unanswerable.length > 0
+          && !("affectedCount" in ijDoc) && !("affected" in ijDoc) && !("entryPoints" in ijDoc),
+        `${ij.stdout}`.slice(0, 220));
+  check("⟨0.28⟩ …and impact exits non-zero, so an exit-only consumer fails closed too",
+        ij.status !== 0, `status=${ij.status}`);
+  const ih = impactQ("src.app.f", "--text");
+  check("⟨0.28⟩ …and impact's human arm says there is NO CALL GRAPH, same non-zero exit",
+        ih.status !== 0 && /no call graph in the report/.test(ih.stdout),
+        `status=${ih.status} ${ih.stdout}`.slice(0, 220));
+  const pj = pathQ("src.app.f", "Fs", "--json");
+  let pjDoc = null; try { pjDoc = JSON.parse(pj.stdout); } catch { /* stays null */ }
+  check("⟨0.28⟩ path --json over an armed pair carries `unanswerable` and NO `path` key — an empty chain reads as `this effect is not reachable from here`",
+        !!pjDoc && typeof pjDoc.unanswerable === "string" && pjDoc.unanswerable.length > 0 && !("path" in pjDoc),
+        `${pj.stdout}`.slice(0, 220));
+  check("⟨0.28⟩ …and path exits non-zero",
+        pj.status !== 0, `status=${pj.status}`);
+  // path's human arm is REPAIRED, not merely forwarded: it exited 2 already, but blamed the NAME ("no
+  // function matching 'src.app.f'") when the truth is about the GRAPH — the same wrong-cause-reads-as-an-
+  // answer correction `callers` needed. Its other two human exits were worse still: over a VALID report
+  // with the sidecar gone it reached "does not perform Fs" / "not statically traceable" at exit 0.
+  const ph = pathQ("src.app.f", "Fs", "--text");
+  check("⟨0.28⟩ …and path's human arm says NO CALL GRAPH rather than blaming the function name, same non-zero exit",
+        ph.status !== 0 && /no call graph in the report/.test(ph.stdout) && !/no function matching/.test(ph.stderr),
+        `status=${ph.status} ${ph.stdout}${ph.stderr}`.slice(0, 220));
+
   // RECOVERY. The absence arm is a state a completing run leaves, not a state it gets stuck in.
   // A SECOND orphan, seeded here so the run that arms it is the one that COMPLETES: only a completing
   // run reaches `disarmUnwrittenOutReports`, which is what hands an unowned report back.
@@ -9274,6 +9313,46 @@ export function all(db: DatabaseSync, o: any) {
   check("⟨0.28⟩ CONTROL: a nonexistent fn over a REAL graph is still `no function matching` at exit 2 — not the unanswerable disclosure (a graph WAS read; the name is not in it)",
         nofn.status === 2 && /no function matching/.test(nofn.stderr) && !/unanswerable/.test(nofn.stdout + nofn.stderr),
         `status=${nofn.status} ${nofn.stdout}${nofn.stderr}`.slice(0, 220));
+
+  // …AND THE SAME CONTROLS FOR `impact`/`path`, which is where the mirror defect would actually land:
+  // both verbs answer a NEGATIVE in the same shape as their unanswerable one, so "the graph says no" and
+  // "there is no graph" have to stay distinguishable or the fix has simply moved the lie.
+  const okImp = impactQ("src.app.f", "--json");
+  let okImpDoc = null; try { okImpDoc = JSON.parse(okImp.stdout); } catch { /* stays null */ }
+  check("⟨0.28⟩ CONTROL: over the RECOVERED pair `impact` still answers the real affected list at exit 0",
+        okImp.status === 0 && !!okImpDoc && !("unanswerable" in okImpDoc) && okImpDoc.affectedCount === 3
+          && ["src.app.g", "src.app.h", "src.app.main"].every((f) => okImpDoc.affected.includes(f)),
+        `status=${okImp.status} ${okImp.stdout}`.slice(0, 220));
+  const zeroImp = impactQ("src.app.main", "--json");
+  let zeroImpDoc = null; try { zeroImpDoc = JSON.parse(zeroImp.stdout); } catch { /* stays null */ }
+  check("⟨0.28⟩ CONTROL: a fn that GENUINELY affects nothing over a complete graph still answers `affectedCount: 0` at exit 0 — a determined negative, not a refusal (the ⟨0.24⟩ count-0 mirror)",
+        zeroImp.status === 0 && !!zeroImpDoc && !("unanswerable" in zeroImpDoc)
+          && zeroImpDoc.affectedCount === 0 && zeroImpDoc.affected.length === 0 && zeroImpDoc.fn === "src.app.main",
+        `status=${zeroImp.status} ${zeroImp.stdout}`.slice(0, 220));
+  const okPath = pathQ("src.app.g", "Fs", "--json");
+  let okPathDoc = null; try { okPathDoc = JSON.parse(okPath.stdout); } catch { /* stays null */ }
+  check("⟨0.28⟩ CONTROL: over the RECOVERED pair `path` still answers the real chain at exit 0, source and all",
+        okPath.status === 0 && !!okPathDoc && !("unanswerable" in okPathDoc)
+          && okPathDoc.path.length === 2 && okPathDoc.path.at(-1).fn === "src.app.f" && okPathDoc.path.at(-1).source === true,
+        `status=${okPath.status} ${okPath.stdout}`.slice(0, 220));
+  const noReach = pathQ("src.app.main", "Net", "--json");
+  let noReachDoc = null; try { noReachDoc = JSON.parse(noReach.stdout); } catch { /* stays null */ }
+  check("⟨0.28⟩ CONTROL: a fn that GENUINELY does not reach the effect over a complete graph still answers `path: []` at exit 0 — the graph SAID no, and withdrawing that is the mirror defect",
+        noReach.status === 0 && !!noReachDoc && !("unanswerable" in noReachDoc)
+          && Array.isArray(noReachDoc.path) && noReachDoc.path.length === 0 && noReachDoc.effect === "Net",
+        `status=${noReach.status} ${noReach.stdout}`.slice(0, 220));
+  // The nonexistent-name control. The DISCRIMINATING assertion is the absence of the disclosure — a graph
+  // WAS read, the name is simply not in it. The exit-0 is pinned as UNCHANGED, not as correct: unlike
+  // `callers`, this engine's `impact`/`path --json` have no bad-target gate at all (conformance run.sh's
+  // §17 (1b) comment says "path/impact already gate", and on candor-ts they do not — its `badtarget` rows
+  // only ever probe where/callers, so nothing measured it). That is a separate rung; when it is closed,
+  // this row is the one to change deliberately rather than by surprise.
+  const nofnI = impactQ("zzzNoSuchFn", "--json");
+  const nofnP = pathQ("zzzNoSuchFn", "Fs", "--json");
+  check("⟨0.28⟩ CONTROL: a nonexistent fn over a REAL graph gets NO unanswerable disclosure from impact/path — unchanged (exit 0, the pre-existing missing bad-target gate, a rung of its own)",
+        nofnI.status === 0 && nofnP.status === 0
+          && !/unanswerable/.test(nofnI.stdout + nofnI.stderr) && !/unanswerable/.test(nofnP.stdout + nofnP.stderr),
+        `impact=${nofnI.status} ${nofnI.stdout.slice(0, 90)} path=${nofnP.status} ${nofnP.stdout.slice(0, 90)}`);
 
   // …and the orphan is handed back WHOLE. Restoring the report while leaving its sidecars deleted is a
   // third state neither the pre-run tree nor the armed tree ever had.

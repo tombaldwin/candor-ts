@@ -1047,7 +1047,32 @@ switch (cmd) {
     // A missing/empty <query> is a LOUD usage error (exit 2, like candor-java) — never an
     // affectedCount:0 blast radius at exit 0 for a function that was never named.
     if (!q) { console.error("usage: candor-ts-query impact <query> [--report <locator>] [--json]"); process.exit(2); }
-    put(args, coreImpact(loadReportOrDie(prefix), loadCallgraph(prefix), q), P.impact);
+    const impFns = loadReportOrDie(prefix);
+    const impCg = loadCallgraph(prefix);
+    // ⟨0.28⟩ UNANSWERABLE MUST REACH THE MACHINE CHANNEL (SPEC §3.3.1), the `callers` fix (5091905) on
+    // the verb its own commit message named as still open. Over an armed pair — report armed to the
+    // ⟨0.21⟩ Row-1 empty, §2.2 sidecars deleted, the STANDARD post-failure state since the ⟨0.28⟩
+    // sidecar rung — this printed `{"fn":…,"affectedCount":0,"affected":[],"entryPoints":[]}` at exit 0.
+    // `affectedCount: 0` is the blast-radius verb's strongest claim: NOTHING CALLS THIS, SAFE TO CHANGE.
+    // With no call graph the engine has not judged that; it has judged nothing. rust/java exit 2 here.
+    //
+    // BOTH CHANNELS FAIL CLOSED (the exit alone leaves a JSON consumer holding a document; the key alone
+    // lets `d.affectedCount ?? 0` read as a determined negative), and the empty ANSWER keys are OMITTED
+    // rather than zeroed, so there is nothing left for a defaulting reader to mistake for a finding.
+    //
+    // THE GATE IS THE EMPTY GRAPH, NOT THE EMPTY ANSWER, and that separation is the load-bearing half.
+    // `impact` resolves its target over the CALLGRAPH keys, so an absent graph makes every answer a
+    // vacuous 0 — that is the unanswerable case. A function that genuinely affects nothing over a REAL
+    // graph still answers `affectedCount: 0` at exit 0 below: a determined negative, and withdrawing it
+    // would be the mirror defect (the ⟨0.24⟩ count-0 lesson, where the plausible fix withdrew 104 real
+    // claims to catch 6). The MCP `candor_impact` was measured, not assumed, and already fails closed —
+    // its fn-existence guard unions the callgraph keys with the report's, both empty here.
+    if (Object.keys(impCg).length === 0) {
+      const why = "no call graph in the report — the §2.2 sidecar is absent, so what this function affects is UNANSWERABLE, not empty (SPEC §3.3.1 ⟨0.28⟩)";
+      put(args, { fn: q, unanswerable: why }, () => console.log(`candor: ${why}`));
+      process.exit(2);
+    }
+    put(args, coreImpact(impFns, impCg, q), P.impact);
     break;
   }
   case "blindspots": {
@@ -1209,6 +1234,29 @@ switch (cmd) {
     if (!fn || !eff) { console.error("usage: candor-ts-query path <fn> <Effect> [--report <locator>] [--json]"); process.exit(2); }
     const fns = loadReportOrDie(prefix);
     const cg = loadCallgraph(prefix);
+    // ⟨0.28⟩ UNANSWERABLE MUST REACH THE MACHINE CHANNEL (SPEC §3.3.1) — the `impact` argument above,
+    // on the verb that answers the OTHER direction. Over an armed pair this emitted
+    // `{"effect":…,"fn":…,"path":[]}` at exit 0: "there is no route by which this function reaches that
+    // effect", which is precisely the reassurance a reader asks `path` for, over a run that traced
+    // nothing. rust/java exit 2 here.
+    //
+    // BEFORE THE SPLIT, so BOTH arms fail closed, and the human arm is REPAIRED not merely forwarded —
+    // it exited 2 already, but said "no function matching 'f'", a determined negative about the NAME
+    // when the truth is about the GRAPH. (Its other two exits are worse: with a valid report and no
+    // sidecar, `path` reached "does not perform Fs" / "not statically traceable" at exit 0.) Same
+    // correction `callers` needed in 5091905, for the same reason: a wrong cause reads as an answer.
+    //
+    // THE GATE IS THE EMPTY GRAPH, NOT THE EMPTY PATH. `path` resolves its start over the CALLGRAPH
+    // keys, so with no graph every answer is a vacuous `[]`. A function that genuinely does not reach
+    // the effect over a REAL graph still answers `path: []` at exit 0 below — the graph SAID no, and
+    // withdrawing that is the ⟨0.24⟩ count-0 mirror defect. "The graph says no" and "there is no graph"
+    // must stay distinguishable. MCP `candor_path` was measured and already fails closed (`isError`).
+    if (Object.keys(cg).length === 0) {
+      const why = "no call graph in the report — the §2.2 sidecar is absent, so whether this function reaches that effect is UNANSWERABLE, not a determined `no` (SPEC §3.3.1 ⟨0.28⟩)";
+      if (wantJson) emit({ effect: eff, fn, unanswerable: why });
+      else console.log(`candor: ${why}`);
+      process.exit(2);
+    }
     if (wantJson) emit(corePath(fns, cg, fn, eff));           // conformance PART 5 shape — UNCHANGED
     else {
       // The accepted 0.11 default change (the human chain replaced JSON as the no-flag output) gets a

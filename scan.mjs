@@ -373,9 +373,13 @@ const outArmedSidecars = [];
 // sidecar removes the confidently WRONG answer; it does not by itself produce an honest one. The absence
 // arm here was an EMPTY caller set at exit 0 — human-fine, machine-silent, the split that makes a defect
 // a cardinal sin. `callers` (query.mjs) now emits an `unanswerable` key AND exits 2 over a pair with no
-// §2.2 sidecar; conformance PART 37 row (e) pins it. STILL OPEN, named so it stays measured: the
-// report-only DESCRIPTIVE verbs (`map`/`show`/`blindspots`/`where`/`reachable`/`containment`/`tour`, and
-// on this engine also `impact`/`path`, which fail closed on candor-java) answer flat at exit 0 over an
+// §2.2 sidecar; conformance PART 37 row (e) pins it. `impact` and `path` FOLLOWED — the sibling-route
+// habit caught early for once, and the line that separates them from the list below is not "graph verb"
+// but WHERE THE TARGET RESOLVES: both resolve theirs over the §2.2 call graph, so with no sidecar every
+// answer is vacuous, and each vacuum spells itself as the reassurance the verb exists to give
+// (`affectedCount: 0` = safe to change; `path: []` = it does not reach that effect). rust and java exit 2
+// on both. STILL OPEN, named so it stays measured: the report-only DESCRIPTIVE verbs
+// (`map`/`show`/`blindspots`/`where`/`reachable`/`containment`/`tour`) answer flat at exit 0 over an
 // armed report. That is a rung of its own — it wants the ⟨0.21⟩ manifest forwarded into descriptive-verb
 // JSON — not a patch to this one.
 //
