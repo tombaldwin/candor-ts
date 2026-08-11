@@ -42,7 +42,7 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          containment as coreContainment, diff as coreDiff,
          where as coreWhere, map as coreMap, whatif as coreWhatif,
          fix as coreFix, fixGate as coreFixGate, unverified as coreUnverified,
-         matches as coreMatches, gainsCoverage, parseClassFilter, ClassFilterError,
+         matches as coreMatches, gainsCoverage, gainsCompletenessFields, parseClassFilter, ClassFilterError,
          loadReport, loadCallgraph, loadGateReport, reportVersion, reportPackage,
          advisoryAnswer,
          reportCompleteness, mustHedge, completenessFields, absorbCompleteness } from "./query-core.mjs";
@@ -288,8 +288,17 @@ const P = {
     Object.entries(d.byClass).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1])
       .forEach(([k, v]) => console.log(`  ${k.padEnd(12)} ${String(v).padStart(4)}${k === "setup" ? "   ← fixable: the scan isn't configured, not a real blind spot" : ""}`));
   },
-  gains: (d) => {
-    if (!d.gained.length) { console.log("candor gains — no newly-reached effects vs the baseline. ✓"); return; }
+  // ⟨0.28⟩ `hedge` is true when EITHER side's report is incomplete (see the gains case). "No newly-reached
+  // effects ✓" IS the prose spelling of `gained: []`, and it is the determined negative this alarm verb
+  // exists to license — so it is withdrawn, not decorated. A non-empty list is left standing: it may be
+  // short, which the stderr note above says, but every entry in it was measured.
+  gains: (d, hedge) => {
+    if (!d.gained.length) {
+      console.log(hedge
+        ? `candor gains — no newly-reached effects candor COULD SEE vs the baseline ${NOT_A("this bump gained nothing")}.`
+        : "candor gains — no newly-reached effects vs the baseline. ✓");
+      return;
+    }
     console.log(`candor gains — the surface newly reaches: ${d.gained.join(", ")}`);
     for (const g of d.byFunction) console.log(`  \`${g.fn}\` gained ${g.effect}${g.origin ? `  (${g.origin})` : ""}`);
   },
@@ -1413,9 +1422,26 @@ switch (cmd) {
     // read as total), plus `coverageDelta` when the baseline names different blind packages. Both
     // OMITTED when nothing applies, so a coverage-free comparison is byte-identical to ⟨0.14⟩.
     // Shared with the MCP `candor_gains` tool (gainsCoverage — the parity rule).
+    // ⟨0.28⟩ SPEC §2 — …AND THE ⟨0.21⟩ MANIFEST TRAVELS ON THE SAME TERMS, WHICH IS THE STRONGER CAVEAT.
+    // The line above carries `coverage` because "no gains over an uncovered dep reads clean with false
+    // confidence"; measured, this same call dropped `unanalyzed` — *I could not read a file of your own
+    // code* — and `analyzed.count: 0` — *I judged nothing at all*. BOTH SIDES, disclosed separately
+    // (`gainsCompletenessFields`): an incomplete CURRENT means the gained set may be SHORT, an incomplete
+    // BASELINE means the comparison floor is soft and the existing/new split unreliable. Not `put`,
+    // because ONE trigger must reach BOTH channels — the JSON-only half is the mutant that survived a
+    // whole suite in candor-rust. Verdict-preserving: the exit below is untouched.
     const gainsResult = coreGains(loadReportOrDie(curPrefix), loadReportOrDie(basePrefix), loadCallgraph(basePrefix));
-    put(args, { baseline_version: gbv ?? "", engine_version: gv ?? "",
-           ...gainsResult, ...gainsCoverage(curPrefix, basePrefix) }, P.gains);
+    const gCur = reportCompleteness(curPrefix), gBase = reportCompleteness(basePrefix);
+    const gDoc = { baseline_version: gbv ?? "", engine_version: gv ?? "",
+           ...gainsResult, ...gainsCoverage(curPrefix, basePrefix), ...gainsCompletenessFields(gCur, gBase) };
+    if (wantJsonOut(args)) emit(gDoc);
+    else {
+      incompleteAnswerNote(gCur, "the gained set below names only effects candor read in the CURRENT tree and may be SHORT",
+        "An effect introduced in an unread unit of the current tree is not in the list below.");
+      incompleteAnswerNote(gBase, "the BASELINE half of this comparison is itself partial and the floor it sets is soft",
+        "An effect living in an unread unit of the baseline reads as NEWLY gained here — the existing/new origin split is unreliable until the baseline is re-scanned.");
+      P.gains(gDoc, mustHedge(gCur) || mustHedge(gBase));
+    }
     // Advisory by default (exit 0 — gains is a diff view); `--strict` fails on ANY gained effect so a
     // supply-chain CI job can require a bump introduce no new capability (mirrors `unverified --strict`).
     process.exit(strict && (gainsResult.gained?.length ?? 0) > 0 ? 1 : 0);

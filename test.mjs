@@ -9603,6 +9603,81 @@ export function all(db: DatabaseSync, o: any) {
           !/judgedNothing/.test(p2.stdout) && /"incomplete": true/.test(p2.stdout), `${p2.stdout}`.slice(0, 220));
   }
 
+  // ── …AND `gains`, THE LAST CELL OF THE §2 RE-DISCLOSURE MUST. This verb has carried the CURRENT
+  // report's `coverage` ledger since ⟨0.15⟩ — "a no-gains over an uncovered dep reads clean with false
+  // confidence" — and MEASURED, the same call on the same report dropped `unanalyzed`, the STRONGER
+  // caveat. BOTH SIDES SEPARATELY, because a gains answer rests on two reports that fail differently: an
+  // incomplete CURRENT means the gained set may be SHORT, an incomplete BASELINE means the comparison
+  // floor is soft and the existing/new `origin` split unreliable. One combined flag would say "something
+  // is incomplete" and leave a supply-chain reviewer unable to act. Key names are candor-scan's exactly
+  // (fe5d831) — conformance PART 39 greps this wire surface across all four engines.
+  const gq = (cur, base, ...flags) =>
+    spawnSync("node", [path.join(HERE, "query.mjs"), "gains", `${cur}.json`, `${base}.json`, ...flags], { encoding: "utf8" });
+  const gjson = (cur, base, ...flags) => { const r = gq(cur, base, "--json", ...flags);
+    let doc = null; try { doc = JSON.parse(r.stdout); } catch { /* null → the row fails loudly */ } return { r, doc }; };
+
+  // The BASELINE half — and the answer under it is `gained: []`, the determined negative this alarm verb
+  // exists to license. Only the `baseline*` keys move: the current side is intact and must stay silent.
+  {
+    const { r, doc } = gjson(intactP, partialP);
+    check("⟨0.28⟩ gains over a BASELINE that declares `unanalyzed` carries `baselineIncomplete` + `baselineUnanalyzed` — the comparison floor is soft, so the existing/new origin split is unreliable",
+          !!doc && doc.baselineIncomplete === true && doc.baselineUnanalyzed?.length === 1
+            && !("incomplete" in doc) && !("unanalyzed" in doc) && Array.isArray(doc.gained),
+          `${r.stdout}`.slice(0, 300));
+    check("⟨0.28⟩ …and gains still exits 0 over it — advisory by default, and this rung adds a caveat, never a verdict",
+          r.status === 0, `status=${r.status}`);
+    check("⟨0.28⟩ …and gains says it on the HUMAN channel too, naming the BASELINE as the soft half — the mutant this family keeps building keeps exactly one of these two",
+          /⚠ INCOMPLETE/.test(gq(intactP, partialP, "--text").stderr)
+            && /BASELINE half of this comparison/.test(gq(intactP, partialP, "--text").stderr),
+          `${gq(intactP, partialP, "--text").stderr}`.slice(0, 240));
+  }
+  // The CURRENT half, under BOTH causes — the side that makes the gained set SHORT.
+  for (const [cause, pfx, wantUnan] of [["an armed", armedP, true], ["a count-0, NO-`unanalyzed`,", count0P, false]]) {
+    const { r, doc } = gjson(pfx, intactP);
+    check(`⟨0.28⟩ gains over ${cause} CURRENT report carries \`incomplete: true\` — an empty gained set out of a report that judged nothing is a determined negative it cannot support`,
+          !!doc && doc.incomplete === true && doc.judgedNothing === true
+            && (wantUnan ? doc.unanalyzed?.length === 1 : !("unanalyzed" in doc))
+            && !("baselineIncomplete" in doc),
+          `${r.stdout}`.slice(0, 300));
+    check(`⟨0.28⟩ …and gains over ${cause} current still exits 0, and the reassuring "no newly-reached effects ✓" is WITHDRAWN from the prose`,
+          r.status === 0 && /NOT "this bump gained nothing"/.test(gq(pfx, intactP, "--text").stdout)
+            && !/vs the baseline\. ✓/.test(gq(pfx, intactP, "--text").stdout),
+          `status=${r.status} ${gq(pfx, intactP, "--text").stdout}`.slice(0, 240));
+  }
+  // BOTH sides at once — the two disclosures are SEPARATE keys, not one merged flag.
+  {
+    const { doc } = gjson(armedP, partialP);
+    check("⟨0.28⟩ gains with BOTH sides incomplete discloses them SEPARATELY — a reviewer can tell a short gained set from a soft floor, which one merged `incomplete` could not",
+          !!doc && doc.incomplete === true && doc.unanalyzed?.length === 1
+            && doc.baselineIncomplete === true && doc.baselineUnanalyzed?.length === 1,
+          `${JSON.stringify(doc)}`.slice(0, 300));
+  }
+  // THE CONTROL: two INTACT reports. Unhedged on both channels — the check that caught candor-rust's
+  // BTreeMap re-sort and candor-java's `Map.of` salting on ordinary runs.
+  {
+    const r = gq(intactP, intactP, "--json"), h = gq(intactP, intactP, "--text");
+    check("⟨0.28⟩ CONTROL: gains over two INTACT reports is UNHEDGED on both channels and exits 0 — a hedge on every run trains the reader to ignore it",
+          r.status === 0 && !/incomplete/.test(r.stdout) && !/judgedNothing/.test(r.stdout)
+            && r.stderr === "" && h.stderr === "" && /vs the baseline\. ✓/.test(h.stdout),
+          `json=${r.stdout}`.slice(0, 200) + ` err=${h.stderr}`.slice(0, 160));
+    // …and the ⟨0.24⟩ MIRROR CONTROL: an all-pure baseline (`analyzed.count: 7`, `functions: []`) is
+    // making a purity CLAIM, not a silence — hedging it would withdraw the claim §2 rule 3 protects.
+    const p = gjson(intactP, pureP);
+    check("⟨0.28⟩ CONTROL: gains against an ALL-PURE baseline does NOT hedge, and its real gains still stand — that empty baseline is a claim the report is entitled to make",
+          !!p.doc && !("baselineIncomplete" in p.doc) && !("incomplete" in p.doc) && p.doc.gained?.length > 0,
+          `${p.r.stdout}`.slice(0, 240));
+  }
+  // THE EXIT IS THE CONTROL. `--strict` keys on the GAINED SET, which this rung does not touch: it still
+  // fires over a caveat-bearing pair that gained something, and still does not fire when nothing was
+  // gained — including over a judged-nothing current, where ⟨0.24⟩ ruled the cause "a disclosure, not an
+  // exit code" and `gate --report` exits 0 over the same bytes.
+  check("⟨0.28⟩ CONTROL: `gains --strict` still exits 1 over a caveat-bearing pair that GAINED an effect — the strict exit keys on the gained set, not on the caveat",
+        gq(partialP, pureP, "--json", "--strict").status === 1,
+        `status=${gq(partialP, pureP, "--json", "--strict").status}`);
+  check("⟨0.28⟩ CONTROL: `gains --strict` over a judged-nothing CURRENT still exits 0 — the caveat travels, the verdict does not move",
+        gq(count0P, intactP, "--json", "--strict").status === 0,
+        `status=${gq(count0P, intactP, "--json", "--strict").status}`);
+
   fs.rmSync(d, { recursive: true, force: true });
 }
 

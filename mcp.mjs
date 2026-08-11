@@ -448,9 +448,13 @@ const TOOLS = {
       // ⟨0.15 staged⟩ coverage disclosure — the SAME gainsCoverage the CLI verb spreads (the parity
       // rule): optional `coverage` (current envelope's ledger) + `coverageDelta` (baseline names
       // differ), both omitted when nothing applies — no other field of the tool result changes.
+      // ⟨0.28⟩ …and the ⟨0.21⟩ manifest on the same terms, BOTH SIDES separately (`gainsCompleteness`,
+      // the same one the CLI verb spreads). SPEC §2 puts the obligation on the READING, not the route the
+      // report arrived by, and this is the route an agent takes: an "it gained nothing" over a report that
+      // judged nothing is the false all-clear, and no human sees this channel.
       return { baseline_version: Q.reportVersion(b) ?? "", engine_version: Q.reportVersion(p) ?? "",
                ...Q.gains(loadReportLoud(p), loadReportLoud(b), Q.loadCallgraph(b)),
-               ...Q.gainsCoverage(p, b) };
+               ...Q.gainsCoverage(p, b), ...Q.gainsCompleteness(p, b) };
     },
   },
   candor_activity: {

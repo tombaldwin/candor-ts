@@ -244,6 +244,48 @@ export function gainsCoverage(curPrefix, basePrefix) {
   return out;
 }
 
+/**
+ * ⟨0.28⟩ SPEC §2 — AND THE SAME MUST CARRIES THE ⟨0.21⟩ MANIFEST, WHICH IS THE STRONGER CAVEAT.
+ *
+ * `gainsCoverage` above has carried the CURRENT report's `coverage` ledger into this verb since ⟨0.15⟩,
+ * for the reason §2 gives: *a "no gains" over an uncovered dep reads clean with false confidence*.
+ * MEASURED: the same verb, on the same report, in the same output, dropped `unanalyzed`.
+ * `coverage.uncovered` says *I could not see into this dependency*; `unanalyzed` says *I could not read
+ * this file of your own code*, and `analyzed.count: 0` says *I judged nothing at all*. The mechanism was
+ * already here and pointed at the weaker field.
+ *
+ * BOTH SIDES, DISCLOSED SEPARATELY, because a gains answer rests on TWO reports and they fail in
+ * different directions:
+ *   · an incomplete CURRENT means the gained set may be SHORT — effects the reader is not being told
+ *     about, which is the whole thing this alarm verb exists to name;
+ *   · an incomplete BASELINE means the comparison FLOOR is soft, so the existing-vs-new `origin` split
+ *     is unreliable and an effect that was always there can read as newly appeared.
+ * One combined flag would say "something here is incomplete" and leave a supply-chain reviewer unable to
+ * act on it. This is why gains does NOT use `absorbCompleteness` (which `containment <baseline>` does):
+ * that verb's answer is a single leak set the two manifests both qualify, while these two qualify
+ * different halves of the answer. The prefixed spelling mirrors the shape already used for coverage
+ * (`coverage` for the current, `coverageDelta` for the difference) rather than inventing a new one, and
+ * `incomplete`/`unanalyzed`/`baselineIncomplete`/`baselineUnanalyzed` are candor-scan's key names exactly
+ * (fe5d831) — this is a cross-engine wire surface.
+ *
+ * ONE READER (`reportCompleteness`) and ONE KEY SET (`completenessFields`), shared with the six
+ * descriptive verbs, so the ⟨0.24⟩ count-0 arm cannot be answered one way here and another there. Both
+ * halves are `{}` on a complete report, so an ordinary comparison stays byte-identical to ⟨0.27⟩.
+ *
+ * Verdict-preserving: no exit code moves. `gains` is advisory by default and `--strict` keys on the
+ * GAINED SET, which this does not touch.
+ */
+export const gainsCompletenessFields = (cur, base) => ({
+  ...completenessFields(cur),
+  ...Object.fromEntries(Object.entries(completenessFields(base))
+    .map(([k, v]) => [`baseline${k[0].toUpperCase()}${k.slice(1)}`, v])),
+});
+
+/** The prefix-level form — the `gainsCoverage` signature, for callers that hold two locators and no
+ *  completeness objects (the MCP `candor_gains` tool; the parity rule). */
+export const gainsCompleteness = (curPrefix, basePrefix) =>
+  gainsCompletenessFields(reportCompleteness(curPrefix), reportCompleteness(basePrefix));
+
 // The returned array carries a non-enumerable `hardFail` flag: true iff a report file was FOUND but
 // yielded NO trustworthy functions — a parse failure OR a malformed shape (a `null`/array/wrong-typed
 // doc, a non-array `functions`, all-junk entries). The loud CLI wrapper (loadReportOrDie) needs it to
