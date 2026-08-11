@@ -152,27 +152,26 @@ const CONFIG_KEYS_IMPLEMENTED = new Set(["policy", "baseline", "deps", "unknown-
 //      as an unknown rule, and the gate ran over zero rules. A machine-readable all-clear produced by
 //      deleting the question.
 const preScan = (av) => {
-  let gate = null, policy = null, target = null, out = null, posOut = null;
+  let gate = null, policy = null, target = null, out = null;
   for (let i = 0; i < av.length; i++) {
     const a = av[i], v = av[i + 1];
     if (a === "--gate-json" || a === "--policy" || a === "--out") {
       if (v === undefined || (v !== "-" && v.startsWith("--"))) continue;
+      // ⟨0.28⟩ THE LAST `--out` WINS, BECAUSE THAT IS WHAT THE PARSE LOOP HONOURS — every assignment here
+      // overwrites, deliberately. candor-swift's arm of this rung caught the reference engine returning
+      // the FIRST: measured on `--out p1 --out p2 --zzz-not-a-flag`, p1 was armed and p2 — the prefix the
+      // run would actually have written — stayed STALE, so the rung did nothing for that argv while
+      // neutralising a set nobody was going to replace. A pre-pass that disagrees with the loop it exists
+      // to run ahead of arms the wrong thing.
       if (a === "--gate-json") gate = v; else if (a === "--policy") policy = v; else out = v;
       i++;
       continue;
     }
     // The scan TARGET, needed to discover the `.candor/config` whose `policy` key may name an input
     // this sink must not overwrite.
-    if (!a.startsWith("-")) {
-      if (target === null) target = a;
-      // ⟨0.28⟩ …AND THE LEGACY POSITIONAL PREFIX (`scan.mjs f.ts out`), which the arg loop honours as
-      // `outPrefix`. Learning only the flag form would have had the ⟨0.28⟩ report armer arm the DEFAULT
-      // prefix — a sink this run is not going to write — so a stale-report fix would have destroyed a
-      // different run's good report and left a placeholder nothing restores.
-      else if (posOut === null) posOut = a;
-    }
+    if (!a.startsWith("-") && target === null) target = a;
   }
-  return { gate, policy, target, out: out ?? posOut };
+  return { gate, policy, target, out };
 };
 
 // SPEC §3.3.1 ⟨0.28⟩ — every `--gate-json` this argv names. `preScan` keeps only the last, which is what
@@ -539,17 +538,26 @@ const disarmUnwrittenOutReports = () => {
   }
   if (gate && gate !== "-") armGateJsonFailClosed(gate);
   // ⟨0.28⟩ …AND ARM THE REPORT SET, still before the arg loop below can exit on an unknown flag.
+  //
+  // **ONLY AN EXPLICITLY NAMED `--out`, NEVER THE DEFAULT PREFIX.** The first version of this armed the
+  // default `<target>/.candor/report` too, reasoning that an operator who passes no `--out` still has
+  // yesterday's report there to go stale. That is right about staleness and wrong about OWNERSHIP, and
+  // the difference DESTROYS DATA: measured, `scan.mjs <repo> --zzz-not-a-flag` overwrote a COMMITTED
+  // `.candor/report.json` with the placeholder — and committed reports and baselines are the pattern
+  // this project recommends and ships in CI. A run that dies in argv parsing was never going to write
+  // there, and it had not been told it owned that path. (It bit for real: this engine's first version
+  // left candor-rust's committed report dirty while running a conformance probe.)
+  //
+  // ⟨0.27⟩'s arming rule never had to face this because `--gate-json` has no default — every verdict
+  // sink is NAMED. So "arm at the instant the sink is known" presumes a sink the operator named, and
+  // that presumption is explicit here: with `--out p` the operator has declared p is this run's output
+  // and arming is right even when p is checked in; with no flag there is no such declaration. The legacy
+  // positional prefix (`scan.mjs f.ts out`) is left alone for the same reason it was never armed here.
+  //
   // `--json` publishes the report to STDOUT and writes no files at all, so there is no file sink to arm
-  // there — that form is the stream rule above, and arming under it would rewrite files this run is
-  // never going to touch. The DEFAULT prefix (`<target>/.candor/report`) is armed for the same reason
-  // the flag form is: an operator who never passes `--out` still has a previous run's report on disk to
-  // go stale, and a rung applied only where the flag appears is the same sink under another spelling.
-  if (!preWantJson) {
-    const t = preTarget ?? ".";
-    let base = t;
-    try { if (!fs.statSync(t).isDirectory()) base = path.dirname(t); } catch { base = path.dirname(t); }
-    armOutPrefixFailClosed(preOut ?? path.join(base, ".candor", "report"), runInputs(preTarget, policy));
-  }
+  // in that form — it is the stream rule above, and arming under it would rewrite files this run is
+  // never going to touch.
+  if (preOut && !preWantJson) armOutPrefixFailClosed(preOut, runInputs(preTarget, policy));
 }
 let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, gateJsonPath = null, allowJs = false, wantAgents = false, wantJson = false, wantWorkspace = false, wantDepInits = false;
 for (let i = 0; i < argv.length; i++) {
