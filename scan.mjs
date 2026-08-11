@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText,
-         reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, fatalPolicyErrors, refusalVerdict,
+         reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules, fatalPolicyErrors, refusalVerdict,
          netClassResolver, resolveReasonClasses } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
@@ -5901,6 +5901,44 @@ if (policyPath !== null) {
       // `deny Fs`, absent from the exit-1 document's list, as evaluated-and-passed. The SHARED builder,
       // so this document and `gate --report`'s stay byte-equal (§3.1's acceptance test for the routes).
       policyRefusal = { why, unevaluated: policyRefusalUnevaluated(text, policyErrs) };
+    } else if (!gatePolicy.deny.length && !gatePolicy.allow.length && !gatePolicy.forbid.length) {
+      // ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDED ZERO RULES IS A BROKEN GATE CONFIG (SPEC §6.2) — the same
+      // refusal posture as the two branches above, and for the reason §6.2 already gives for an unreadable
+      // FILE: "a typo'd policy path that runs green is a gate that silently passes everything". MEASURED
+      // four-way 2026-08-10: `--policy <a README>` wrote `{"ok":true,"violations":[]}` and exited 0 on
+      // every engine — byte-identical to a gate that ran and found nothing, AND byte-identical to the
+      // no-gate-configured verdict (§3.3), so the one consumer this format exists for cannot tell "your
+      // code is clean" from "your gate had no rules". The per-line `ignoring policy rule` warnings above
+      // go to stderr, which is not the machine channel.
+      //
+      // The line-level ignore-with-a-warning leniency is UNTOUCHED and still right: silent reinterpretation
+      // is the one thing a security gate must not do, and an engine meeting a rule kind from a newer rung
+      // must not refuse the whole file over it. This rung is about what that leniency COMPOSES TO — a file
+      // in which EVERY line was ignored is a gate that asked nothing.
+      //
+      // THE CONTROL, which is what makes this a rule and not a blanket: reaching here at all means a policy
+      // was CONFIGURED (`--policy`, CANDOR_POLICY, or the `.candor/config` `policy` key — all three land in
+      // `policyPath`). A run that configured no gate never enters this block and stays exit 0; that is the
+      // honest way to say "I am not gating", and it is exactly why a configured zero-rule policy is never a
+      // legitimate expression of that intent.
+      //
+      // EVERY RULE VECTOR, and rust's first draft of this check read only its `rules`. `parsePolicy` splits
+      // the four kinds across THREE arrays — `deny` (both `deny` and `pure`), `allow` and `forbid` — so
+      // keying on one made an allow-only policy (`allow Net api.stripe.com`, an ordinary allowlist gate) or
+      // a forbid-only layer policy refuse as if it had no rules at all. A zero-rule test that inspects a
+      // subset of the rule kinds is the same false-answer shape this rung exists to close, pointed the
+      // other way.
+      const { why, unevaluated } = policyZeroRules(policyPath);
+      console.error(`candor-ts: ${why} — refusing (exit 2, gate NOT enforced). Every line was ignored (see `
+        + `the \`ignoring policy rule\` warnings above), the file is empty, or it holds only comments. A `
+        + `gate with no rules cannot have caught anything, and reporting \`ok: true\` here would be `
+        + `indistinguishable from a gate that ran and found nothing. If you did not mean to gate this run, `
+        + `remove the \`policy\` setting rather than pointing it at a file with no rules in it.`);
+      // …RECORDED, NOT EXECUTED, so it takes the SAME precedence as both branches above (SPEC §3.1
+      // `4c79958`): a certain violation dominates a refusal. No POLICY violation can exist with zero rules,
+      // but an AS-EFF-005 baseline regression is a finding from evidence this run already carries, and it
+      // rides exit 1 with this refusal disclosed beside it under `unevaluated`.
+      policyRefusal = { why, unevaluated };
     } else {
       // ⟨0.24⟩ the config file that supplied vocabulary the verdict USED, so an ambient `.candor/config` — the
       // walk goes up through every parent, and CANDOR_CONFIG overrides it outright — cannot move a verdict while

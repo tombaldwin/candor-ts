@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 
 import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, discoverConfigText,
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
-         policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable,
+         policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules,
          fatalPolicyErrors, refusalVerdict,
          unanswerableScoped } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
@@ -1385,6 +1385,20 @@ switch (cmd) {
     // ⟨0.27⟩ …listing EVERY rule of the refused policy, not only the unhonourable lines — the shared
     // builder with the scan route (SPEC §3.1's composed-document clause; byte-equality binds the two).
     if (gfatal.length) { const why = policyErrorText(policyFile, gfatal); console.error(why); grefuse(why, policyRefusalUnevaluated(gtext, gfatal)); }
+    // ⟨0.28⟩ …AND A CONFIGURED POLICY THAT YIELDED ZERO RULES REFUSES THE SAME WAY (SPEC §6.2). The scan
+    // route carries the same block with the same builder; this one is not optional beside it, on §6.2's own
+    // words ("Measured on the `gate --report` verb too — a route is not covered by its sibling") and on
+    // §3.1's byte-equality MUST, which a one-route rung would break on the `# nothing` policy. Every rule
+    // vector, never a subset: `deny` (deny + pure), `allow`, `forbid` — keying on one would refuse an
+    // ordinary allow-only or forbid-only gate as if it had no rules.
+    if (!gpol.deny.length && !gpol.allow.length && !gpol.forbid.length) {
+      const { why, unevaluated } = policyZeroRules(policyFile);
+      console.error(`candor-ts: gate: ${why} — refusing (exit 2, gate NOT enforced). Every line was ignored `
+        + `(see the \`ignoring policy rule\` warnings above), the file is empty, or it holds only comments. A `
+        + `gate with no rules cannot have caught anything, and \`ok: true\` here would be indistinguishable `
+        + `from a gate that ran and found nothing.`);
+      grefuse(why, unevaluated);
+    }
     // ⟨0.24⟩ THE CONFIG FILE THAT SUPPLIED VOCABULARY THE VERDICT USED (SPEC §3.1 `99eb4e9`) — named on a
     // REFERENCE, not only on a firing, because the measured harm was a GREEN verdict a vocabulary file made
     // green. Omitted when no alias was used, so every other verdict stays byte-identical to before.

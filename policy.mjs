@@ -424,6 +424,20 @@ export function policyUnreadable(policyFile) {
   return { why, unevaluated: [{ rule: `(entire policy ${shown} — unreadable, no rules parsed)`, why }] };
 }
 
+// ⟨0.28⟩ …and the same for a policy that READ PERFECTLY and yielded NO RULES AT ALL (SPEC §6.2). Same
+// builder shape as `policyUnreadable` directly above, because it is the same clause reached through a
+// different door: the harm §6.2 names for an unreadable file — "a typo'd policy path that runs green is a
+// gate that silently passes everything" — arrives just as easily through a README that parses to nothing.
+// `rule` names the WHOLE POLICY, parenthesised, the shape §3.1 pins for a policy with no lines to name
+// (here there are lines, but none of them became a rule, so there is no rule text to quote).
+export function policyZeroRules(policyFile) {
+  const shown = policyFile === "" ? "(configured empty)" : policyFile;
+  const why = `policy ${shown} yielded NO RULES — the gate was NOT enforced from it`;
+  return { why, unevaluated: [{ rule: `(entire policy ${shown} — no rules parsed)`,
+    why: `${why}. Every line was ignored, the file is empty, or it holds only comments; nothing was `
+       + `evaluated, so no rule can have passed.` }] };
+}
+
 // ⟨0.24⟩ THE REFUSAL DOCUMENT (SPEC §3.1 `107755b`, carve-outs removed by `1503368`). A refusal used to
 // write NO `--gate-json` document at all, so a CI wrapper reading that path unconditionally re-read THE
 // PREVIOUS RUN'S document as current — a green file from yesterday's clean run, still on disk, is how a

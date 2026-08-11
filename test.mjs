@@ -7500,6 +7500,17 @@ export function all(db: DatabaseSync, o: any) {
     for (const [route, buf, st] of [["scan", av, s.status], ["gate", bv, g.status]]) {
       let doc = null;
       try { doc = JSON.parse(buf.toString()); } catch { diffs.push(`${name}/${route}: the verdict did not parse`); continue; }
+      // ⟨0.28⟩ A REFUSAL ROW IS NOT A VERDICT ROW, and the assertions below are about verdicts. `comment_only`
+      // is a configured policy that yields ZERO RULES, which SPEC §6.2 ⟨0.28⟩ makes a REFUSAL on both routes
+      // — so `violations` is deliberately ABSENT and exit is 2. Held to the STRICTER contract instead of
+      // exempted: exit 2, `ok:false`, `refused:true`, and NO `violations` key (an empty array is exactly the
+      // claim a refusal cannot make). The byte-equality comparison above still binds the two routes.
+      if (doc.refused === true) {
+        if (st !== 2) diffs.push(`${name}/${route}: a refusal document but exit ${st}, not 2`);
+        if (doc.ok !== false) diffs.push(`${name}/${route}: a refusal document whose \`ok\` is not false — a naive consumer reads it as a pass`);
+        if ("violations" in doc) diffs.push(`${name}/${route}: a refusal document carrying a \`violations\` key — the gate is making no claim about violations, so the key must be ABSENT, not empty`);
+        continue;
+      }
       const n = Array.isArray(doc.violations) ? doc.violations.length : -1;
       if (n < 0) { diffs.push(`${name}/${route}: a VERDICT document with no \`violations\` array`); continue; }
       if (st === 1 && n === 0)
@@ -8344,6 +8355,95 @@ export function all(db: DatabaseSync, o: any) {
   check("⟨0.24⟩ precedence CONTROL 2: with nothing established, the refusal is still a REFUSAL — exit 2, `refused:true`, and NO `violations` key",
         ref.status === 2 && refDoc?.refused === true && refDoc.ok === false && !("violations" in refDoc),
         `status=${ref.status} ${JSON.stringify(refDoc)?.slice(0, 240)}`);
+}
+
+// ── ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDS ZERO RULES REFUSES (SPEC §6.2) ──────────────────────────
+// MEASURED four-way 2026-08-10: `--policy <a README>` wrote `{"ok":true,"violations":[]}` and exited 0 —
+// byte-identical to a gate that ran and found nothing, AND byte-identical to the no-gate-configured
+// verdict, so the machine channel cannot tell "your code is clean" from "your gate had no rules". The
+// per-line `ignoring policy rule` warnings go to stderr, which is not that channel.
+//
+// THE ROWS THAT MATTER MOST HERE ARE THE NEGATIVE ONES. candor-rust's first draft of this check read one
+// of its three rule vectors and made every allow-only and layer-only policy refuse — `allow Net
+// api.stripe.com` is an ordinary allowlist gate, not an absent one. A zero-rule check that inspects a
+// SUBSET of the rule kinds is the same false-answer shape this rung exists to close, pointed the other
+// way, so the allow-only / forbid-only / pure-only rows below are not padding.
+{
+  const d = project({ "src/app.ts": 'import fs from "node:fs";\nexport function saveIt(): void { fs.writeFileSync("/tmp/x", "d"); }\n' });
+  const W = (n, t) => { const p = path.join(d, n); fs.writeFileSync(p, t); return p; };
+  const readme = W("readme.md", "# Project README\n\nThis is documentation, not a policy file.\nSomeone pointed --policy at it by mistake.\n");
+  const empty = W("empty.pol", "");
+  const comments = W("comments.pol", "# just a comment\n\n# another\n");
+  const readDoc = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return null; } };
+  const run = (args, env = {}) => spawnSync("node", [path.join(HERE, "scan.mjs"), d, ...args],
+    { encoding: "utf8", env: { ...process.env, ...env } });
+
+  for (const [label, pol] of [["a README (every line ignored)", readme], ["an EMPTY file", empty], ["a comments-only file", comments]]) {
+    const g = path.join(d, "zr.json");
+    if (fs.existsSync(g)) fs.rmSync(g);
+    const r = run(["--policy", pol, "--gate-json", g]);
+    const doc = readDoc(g);
+    check(`⟨0.28⟩ zero-rule policy — ${label} REFUSES: exit 2, \`ok:false\`, \`refused:true\`, and NO \`violations\` key`,
+          r.status === 2 && doc?.ok === false && doc.refused === true && !("violations" in doc),
+          `status=${r.status} ${JSON.stringify(doc)?.slice(0, 240)}`);
+    check(`⟨0.28⟩ …and it names the WHOLE POLICY under \`unevaluated\` — ${label}`,
+          doc?.unevaluated?.length === 1 && /^\(entire policy .* — no rules parsed\)$/.test(doc.unevaluated[0].rule ?? ""),
+          JSON.stringify(doc?.unevaluated)?.slice(0, 300));
+  }
+
+  // THE CONTROL, and it is the row that makes this a rule rather than a blanket: NOT configuring a policy
+  // is the honest way to say "I am not gating". An engine that refuses here has broken the no-gate case,
+  // which is a worse defect than the one the rung closes.
+  const cg = path.join(d, "ctl.json");
+  const ctl = run(["--gate-json", cg]);
+  const ctlDoc = readDoc(cg);
+  check("⟨0.28⟩ zero-rule CONTROL: a run that configured NO policy still exits 0 with an ordinary verdict — the rung must not refuse a run that never asked for a gate",
+        ctl.status === 0 && ctlDoc?.ok === true && Array.isArray(ctlDoc.violations) && ctlDoc.violations.length === 0,
+        `status=${ctl.status} ${JSON.stringify(ctlDoc)?.slice(0, 240)}`);
+
+  // THE TRAP. Each of these policies has exactly one rule, in a DIFFERENT parser vector, and each is an
+  // ordinary gate. Whatever verdict they reach, it must not be a zero-rule refusal.
+  for (const [label, text] of [["allow-only (`allow Fs …`, an ordinary allowlist gate)", "allow Fs /tmp/x\n"],
+                               ["forbid-only (a layer rule)", "forbid ui -> db\n"],
+                               ["pure-only", "pure ZzzNoSuchScope\n"]]) {
+    const pol = W(`trap-${label.slice(0, 6).replace(/\W/g, "")}.pol`, text);
+    const r = run(["--policy", pol]);
+    check(`⟨0.28⟩ zero-rule NEGATIVE: a ${label} policy is a REAL gate and must NOT refuse as ruleless — the check reads EVERY rule vector, not one`,
+          r.status !== 2, `status=${r.status} ${(r.stdout + r.stderr).slice(-300)}`);
+  }
+  const fires = run(["--policy", W("fires.pol", "deny Fs\n")]);
+  check("⟨0.28⟩ zero-rule NEGATIVE: a `deny` that FIRES still exits 1", fires.status === 1, `status=${fires.status}`);
+  const clean = run(["--policy", W("clean.pol", "deny Net\n")]);
+  check("⟨0.28⟩ zero-rule NEGATIVE: a `deny` that does NOT fire still exits 0", clean.status === 0, `status=${clean.status}`);
+
+  // PRECEDENCE — the same rule the two refusal branches above it obey (SPEC §3.1 `4c79958`): a CERTAIN
+  // violation dominates. No POLICY violation can exist with zero rules, but an AS-EFF-005 baseline
+  // regression is a finding from evidence this run carries, and it must not be deleted by this refusal.
+  const bl = path.join(d, "baseline.json");
+  const pd = project({ "src/app.ts": "export function worker(): number { return 41 + 1; }\n" });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), pd], { encoding: "utf8" });
+  fs.copyFileSync(path.join(pd, ".candor", "report.json"), bl);
+  fs.copyFileSync(path.join(pd, ".candor", "report.callgraph.json"), path.join(d, "baseline.callgraph.json"));
+  fs.writeFileSync(path.join(pd, "src", "app.ts"), 'import fs from "node:fs";\nexport function worker(): number { fs.readFileSync("/tmp/x"); return 41 + 1; }\n');
+  const pg = path.join(d, "prec.json");
+  const prec = spawnSync("node", [path.join(HERE, "scan.mjs"), pd, "--policy", readme, "--gate-json", pg],
+    { encoding: "utf8", env: { ...process.env, CANDOR_BASELINE: bl } });
+  const precDoc = readDoc(pg);
+  check("⟨0.28⟩ zero-rule PRECEDENCE: a certain AS-EFF-005 regression dominates (exit 1, the violation IN the document) and the refusal rides beside it under `unevaluated`",
+        prec.status === 1 && precDoc?.violations?.some((v) => v.rule === "AS-EFF-005")
+          && /no rules parsed/.test(precDoc.unevaluated?.[0]?.rule ?? ""),
+        `status=${prec.status} ${JSON.stringify(precDoc)?.slice(0, 300)}`);
+
+  // BOTH ROUTES, because §6.2 says a route is not covered by its sibling and §3.1 makes byte-equality
+  // between the two gate documents the acceptance test.
+  const sJ = path.join(d, "eq.scan.json"), gJ = path.join(d, "eq.gate.json");
+  for (const f of [sJ, gJ]) if (fs.existsSync(f)) fs.rmSync(f);
+  const es = run(["--policy", comments, "--gate-json", sJ]);
+  const eg = gateCli("--report", path.join(d, ".candor", "report.json"), "--policy", comments, "--gate-json", gJ);
+  check("⟨0.28⟩ zero-rule on `gate --report` too, and its document is BYTE-EQUAL to the scan route's (same exit)",
+        es.status === 2 && eg.status === 2 && fs.existsSync(sJ) && fs.existsSync(gJ)
+          && fs.readFileSync(sJ).equals(fs.readFileSync(gJ)),
+        `scan=${es.status} gate=${eg.status}\n  scan ${readDoc(sJ) && JSON.stringify(readDoc(sJ)).slice(0, 200)}\n  gate ${readDoc(gJ) && JSON.stringify(readDoc(gJ)).slice(0, 200)}`);
 }
 
 // ── ⟨0.24⟩ THE `parsepolicy` `errors` SHAPE, AND ITS COVERAGE (SPEC §3.1 `195d45a` + `901f14d`) ─────
