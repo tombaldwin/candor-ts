@@ -8,6 +8,42 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.28⟩ the DESCRIPTIVE verbs carry the ⟨0.21⟩ completeness manifest too** (SPEC §2). The
+  re-disclosure MUST was written over the instance it was found in — "a report-consuming verb whose
+  VERDICT could change" — and ⟨0.28⟩ corrects it to the condition that makes it true: the obligation
+  binds **any verb whose output could be read as a negative finding about the code — a verdict, an empty
+  result set, or a zero count**. candor-ts implemented the narrow reading, so its six report-only verbs
+  were never taught about it. MEASURED over the standard post-failure artifact (`analyzed.count: 0` plus
+  a non-empty `unanalyzed` — what an armed run leaves on disk): `where Fs` →
+  `{"directly":[],"inherited":[]}`, `map` → `{}`, `blindspots` → `{"sources":[],"totalUnknown":0}`,
+  `reachable` → `{"entryPoints":0,"effects":{}}`, `containment` → `{"contained":[],"ambient":{}}`,
+  `tour` → `{"reaches":[]}` — six flat all-clears at exit 0 with no hedge on either channel, one of them
+  reporting *no blind spots* out of a report whose own manifest names a file candor could not read. A
+  consumer cannot tell *nobody performs Fs* from *nothing was examined*. All six now add
+  `"incomplete": true` (plus `unanalyzed` and/or `"judgedNothing": true`) to the same document and
+  withdraw the reassuring sentence from the human arm, with the INCOMPLETE note above the answer — it
+  qualifies a NON-empty result as much as an empty one. **Verdict-preserving: every exit code is
+  unchanged in all 414 measured (state × verb × mode) cells.** The same caveat rides the five MCP tools
+  (`candor_where`, `candor_map`, `candor_blindspots`, `candor_reachable`, `candor_containment`) — the
+  agent is the consumer that cannot ask a follow-up question — and `containment <baseline>` folds in the
+  BASELINE's manifest as well, since its answer is a difference and a partial baseline manufactures a
+  leak at exit 1 exactly as a partial current tree hides one at exit 0.
+  **The second cause was needed and absent:** `analyzed.count: 0` is read through the same
+  `reportJudgedNothing` predicate `gate --report`, the MCP gate and the LSP already use, because a report
+  that judged nothing carries no `unanalyzed` (there is no unread FILE to name) and a manifest-only
+  reader sees it as complete. It reaches both DISCLOSURE channels and stops at the exit code — ⟨0.24⟩
+  ruled that one explicitly ("a disclosure, not an exit code"), and the note says the opposite thing for
+  each cause rather than sending the reader to a CI job that will pass. The advisory verbs (`unverified`,
+  `fix-gate`, `whatif`) take the count-0 cause on their document and prose too — `unverified` was
+  answering `{ok: true, unverified: []}` over a report that judged nothing — while both `--strict` exits
+  stay keyed on the manifest alone. **Controls:** an INTACT report is byte-identical on both channels
+  (no key, no note, no re-ordering); a report with `analyzed.count > 0` and `functions: []` is NOT
+  hedged, because that is the all-pure claim §2 rule 3 requires a consumer to believe; and `map`'s
+  top-level user namespace discloses a colliding module row by name rather than dropping it silently.
+  `show` is deliberately NOT included: its document is a top-level JSON array with nowhere to hang a key,
+  and fixing only its human channel would move the false all-clear rather than remove it — it needs a
+  shape ruling, four-way.
+
 - **⚠ ⟨0.28⟩ `impact` and `path` gate a BAD TARGET** (corpus-audit #3, conformance §17 (1b)). A
   nonexistent function answered `{"fn":"zzz","affectedCount":0,"affected":[],"entryPoints":[]}` and
   `{"effect":"Net","fn":"zzz","path":[]}` at **exit 0** — an authoritative all-clear about a question

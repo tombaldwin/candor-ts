@@ -357,6 +357,91 @@ export function reportUnanalyzed(prefix) {
 }
 
 /**
+ * ⟨0.28⟩ SPEC §2 — THE SAME MANIFEST, READ FOR A *DESCRIPTIVE* VERB. `reportUnanalyzed` above was written
+ * for the ADVISORY verbs, because the clause it implements was written over the instance it was found in:
+ * "a report-consuming verb whose VERDICT could change". ⟨0.28⟩ corrects the clause to the condition that
+ * makes it true — the obligation binds **any verb whose output could be read as a negative finding about
+ * the code: a verdict, an EMPTY RESULT SET, or a ZERO COUNT**. MEASURED on this engine over the standard
+ * post-⟨0.28⟩ artifact (`analyzed.count: 0` + a non-empty `unanalyzed`, what an armed run leaves on disk):
+ *
+ *     where Fs     {"effect":"Fs","directly":[],"inherited":[]}    exit 0, no hedge
+ *     map          {}                                              exit 0, no hedge
+ *     blindspots   {"sources":[],"totalUnknown":0}                 exit 0, no hedge
+ *     reachable    {"entryPoints":0,"effects":{}}                  exit 0, no hedge
+ *     containment  {"contained":[],"ambient":{}}                   exit 0, no hedge
+ *     tour         {"reaches":[]}                                  exit 0, no hedge
+ *
+ * "no blind spots" out of a report whose own manifest names a file candor could not read. A consumer
+ * cannot distinguish *nobody performs Fs* from *nothing was examined*.
+ *
+ * ONE READER, TWO CAUSES, and the second cause is why this is a function rather than a call to
+ * `reportUnanalyzed` at six new sites:
+ *
+ *   · `unanalyzed` non-empty — candor could not READ a file of the target's own code;
+ *   · `analyzed.count: 0` — candor read what it read and JUDGED NOTHING. A report in that state carries
+ *     no `unanalyzed` at all (there is no unread FILE to name), so a manifest-only reader sees a complete
+ *     report and every verb answers `{}` over it just the same. SPEC §2 names both: *"a report-consuming
+ *     verb MUST re-disclose a non-empty `unanalyzed`, **and an `analyzed.count` of 0**, on the same
+ *     terms"*. Decided by `reportJudgedNothing` — the SAME predicate `gate --report`, the MCP gate and the
+ *     LSP already ask — so a report cannot be judged-nothing on one route and not on another.
+ *
+ * A report that is BOTH complete and has judged something yields `mustHedge() === false`, and every
+ * consumer below is then a no-op: an ordinary run stays byte-identical. That is not a nicety — a hedge on
+ * every run trains the reader to ignore it, the same reason ⟨0.15⟩ omits `coverage` when nothing is
+ * uncovered.
+ */
+export function reportCompleteness(prefix) {
+  return { unanalyzed: reportUnanalyzed(prefix), judgedNothing: reportJudgedNothing(prefix) };
+}
+
+/**
+ * ⟨0.28⟩ Is there anything to disclose? **The trigger for an ANSWER, where a non-empty `unanalyzed` alone
+ * is the trigger for a VERDICT** — and the difference is an exit code, not a mood.
+ *
+ * `unverified --strict` / `fix-gate --strict` answer 2 ("the gate refuses over these bytes, so do I") off
+ * the `unanalyzed` arm. ⟨0.24⟩ ruled the count-0 arm explicitly the other way for exactly those bytes: it
+ * is *a disclosure, not an exit code* — `gate --report` exits 0 over a judged-nothing report, and a verb
+ * exiting 2 there would claim it got LESS far than the gate on identical input, the mirror of the
+ * over-claim the strict exit exists to prevent. So count-0 reaches both DISCLOSURE channels through this
+ * predicate and stops at the exit code; see `advisoryAnswer`, whose exit-bearing callers still key their
+ * `--strict` on the manifest alone.
+ */
+export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing));
+
+/**
+ * ⟨0.28⟩ The disclosure KEYS, defined ONCE, for spreading into a verb's answer document — `{}` when there
+ * is nothing to disclose, so `{ ...data, ...completenessFields(c) }` is byte-identical to `data` on a
+ * complete report. (JS objects preserve insertion order, so the verb's own keys keep their pinned order
+ * and the caveat lands after them. candor-rust's first draft of this rung routed two verbs through a
+ * BTreeMap-backed serialiser to reach the same place and silently RE-SORTED both documents on ordinary
+ * runs — a disclosure rung must not reformat the answers it is disclosing about.)
+ *
+ * `incomplete: true` is the flag EITHER cause raises, so a consumer that only branches on it is safe under
+ * both; `judgedNothing`/`unanalyzed` name WHICH, because the two want different repairs — one wants a scan
+ * that can READ a file, the other a scan that reached a conclusion. Each is omitted when it does not
+ * apply, so a document raised by `unanalyzed` alone stays byte-identical to the pre-⟨0.28⟩ advisory shape.
+ * `judgedNothing: true` is the spelling the MCP gate tool already uses (⟨0.24⟩), not a second one.
+ */
+export function completenessFields(c) {
+  if (!mustHedge(c)) return {};
+  return { incomplete: true,
+           ...(c.unanalyzed?.length ? { unanalyzed: c.unanalyzed } : {}),
+           ...(c.judgedNothing ? { judgedNothing: true } : {}) };
+}
+
+/**
+ * ⟨0.28⟩ Union in a SECOND locator's manifest — for `containment <baseline>`, whose answer is a DIFFERENCE
+ * and is therefore unsound if EITHER side is partial, in opposite directions: a leak living in an unread
+ * file of the CURRENT tree is missed (a false all-clear), while one living in an unread file of the
+ * BASELINE reads as newly appeared (a fabricated leak, at exit 1). One merged object rather than two
+ * notes, because the keys are fixed and a second write would overwrite the first side's manifest.
+ */
+export const absorbCompleteness = (a, b) => ({
+  unanalyzed: [...(a.unanalyzed ?? []), ...(b.unanalyzed ?? [])],
+  judgedNothing: !!(a.judgedNothing || b.judgedNothing),
+});
+
+/**
  * ⟨0.24⟩ SPEC §3.2 — THE OMIT-`ok` RULE, IN ONE PLACE so `unverified`, `fix-gate`, `whatif` and any later
  * sibling cannot drift apart on it. Over a report declaring `unanalyzed`, an advisory verb emits
  * `incomplete: true` plus the manifest and **OMITS `ok`**.
@@ -387,13 +472,28 @@ export function reportUnanalyzed(prefix) {
  * the BODY rather than taken as a third parameter, so a verb that computes the disclosure cannot forget to
  * declare it — the ⟨0.24⟩ measurement that the CLI and MCP had drifted on exactly this began with a second
  * channel forgetting to pass an argument.
+ *
+ * ⟨0.28⟩ THE THIRD TRIGGER: `judgedNothing` — SPEC §2's `analyzed.count: 0` row, which this function did
+ * not read. MEASURED: over a report that judged nothing, `unverified` answered `{ok: true, unverified: []}`
+ * — the verb whose whole job is *"your green gate is not provably green"* certifying a package it never
+ * examined, from a report that names no unread FILE to trip the manifest arm. `ok` goes for the same
+ * reason it goes above: neither boolean is honest, and `if (r.ok)` must fail safe.
+ *
+ * AND THE EXIT CODE DOES NOT MOVE, which is the load-bearing half. Both `--strict` callers compute their
+ * exit from the MANIFEST alone, never from this document, because ⟨0.24⟩ ruled count-0 explicitly the other
+ * way: *"A DISCLOSURE, NOT AN EXIT CODE"*. `gate --report` exits 0 over these bytes, and an advisory verb
+ * exiting 2 there would claim it got LESS far than the gate on identical input — the mirror of the
+ * over-claim the strict exit exists to prevent. (`mustHedge` is the same distinction, stated for a verb
+ * that has no exit code for it to matter to.)
  */
-export function advisoryAnswer(body, unanalyzed) {
+export function advisoryAnswer(body, unanalyzed, judgedNothing = false) {
   const unevaluated = body?.unevaluated;
-  if (!unanalyzed?.length && !unevaluated?.length) return body;  // COMPLETE: unchanged, byte for byte, `ok` and all.
+  if (!unanalyzed?.length && !unevaluated?.length && !judgedNothing) return body;  // COMPLETE: unchanged, byte for byte, `ok` and all.
   const { ok, ...rest } = body;                          // eslint-disable-line no-unused-vars -- omitted BY DESIGN
+  const judged = judgedNothing ? { judgedNothing: true } : {};
   // Key order matches the gate's verdict document: the finding, then `unevaluated`, then the manifest.
-  return unanalyzed?.length ? { ...rest, incomplete: true, unanalyzed } : rest;
+  if (unanalyzed?.length) return { ...rest, incomplete: true, unanalyzed, ...judged };
+  return judgedNothing ? { ...rest, incomplete: true, ...judged } : rest;
 }
 
 export function loadReport(prefix) {

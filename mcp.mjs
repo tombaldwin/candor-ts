@@ -189,6 +189,30 @@ function capCallers(r) {
     truncated: true,
   };
 }
+// ⟨0.28⟩ SPEC §2 — THE COMPLETENESS CAVEAT, ON THE AGENT-FACING CHANNEL. The same reader and the same key
+// set as the CLI (`query-core`), never a second mechanism: the CLI and this server are one implementation,
+// and a caveat that exists on one of them is a caveat the other silently drops. MEASURED here, over the
+// standard post-⟨0.28⟩ artifact (`analyzed.count: 0` + a non-empty `unanalyzed`), before this wrapper:
+// `candor_where` → `{"effect":"Fs","directly":[],"inherited":[]}`, `candor_map` → `{}`,
+// `candor_blindspots` → `{"sources":[],"totalUnknown":0}`, `candor_reachable` →
+// `{"entryPoints":0,"effects":{}}`, `candor_containment` → `{"contained":[],"ambient":{}}` — five flat
+// all-clears with no hedge. `candor_show`/`candor_impact` already fail closed on the fn-existence guard.
+//
+// THE AGENT IS THE CONSUMER THAT CANNOT ASK A FOLLOW-UP QUESTION. A human running the CLI at least sees an
+// oddly bare answer; a loop reading `blindspots.sources.length === 0` records "no blind spots" and moves on.
+// Additive and a no-op on a complete report (`completenessFields` returns `{}`), so every pinned tool shape
+// is unchanged on an ordinary one.
+const withCompleteness = (p, doc) => {
+  const f = Q.completenessFields(Q.reportCompleteness(p));
+  // `candor_map`'s top level is a USER NAMESPACE — a module named `incomplete` can occupy the key. Nesting
+  // is not an escape (a consumer branching on `"incomplete" in doc` would never see it), so the hedge wins
+  // and the displaced row is named on the log channel. Asked of the fields ACTUALLY written, never of a
+  // hardcoded list: reporting a displacement that did not happen is a false disclosure.
+  for (const k of Object.keys(f))
+    if (Object.hasOwn(doc, k))
+      console.error(`candor-mcp: this report has a row literally named \`${k}\`, which collides with the ⟨0.28⟩ incompleteness disclosure this answer MUST carry — the disclosure wins and that row is NOT in the result.`);
+  return { ...doc, ...f };
+};
 const TOOLS = {
   candor_impact: {
     description: "Backward blast radius: every effectful function that transitively calls `fn`, and which runtime entry points are downstream. Answers 'if I change this, what surfaces at runtime?' — the cheapest possible alternative to tracing callers by hand.",
@@ -198,12 +222,12 @@ const TOOLS = {
   candor_where: {
     description: "Which functions perform a given effect (e.g. Net, Db, Exec, Fs) — `directly` vs `inherited` via a callee. The effect-surface map.",
     schema: { type: "object", properties: { effect: { type: "string", description: "Net|Fs|Db|Exec|Env|Clock|Ipc|Log|Rand|Clipboard|Unknown" }, ...reportArg }, required: ["effect"] },
-    run: (a, p) => capWhere(Q.where(loadReportLoud(p), a.effect)),
+    run: (a, p) => withCompleteness(p, capWhere(Q.where(loadReportLoud(p), a.effect))),
   },
   candor_reachable: {
     description: "What the program/fleet actually DOES at runtime: effects unioned over the entry points, with how many roots reach each and via which.",
     schema: { type: "object", properties: { ...reportArg } },
-    run: (_a, p) => Q.reachable(loadReportLoud(p)),
+    run: (_a, p) => withCompleteness(p, Q.reachable(loadReportLoud(p))),
   },
   candor_path: {
     description: "Forward provenance: the shortest call chain from `fn` to the nearest function that performs `effect` DIRECTLY — 'this reaches Net through WHAT?'.",
@@ -223,7 +247,7 @@ const TOOLS = {
   candor_map: {
     description: "Per-module effect overview: each module's union of effects and function count. The architecture-at-a-glance.",
     schema: { type: "object", properties: { ...reportArg } },
-    run: (_a, p) => Q.map(loadReportLoud(p)),
+    run: (_a, p) => withCompleteness(p, Q.map(loadReportLoud(p))),
   },
   candor_whatif: {
     description: "Hypothetically add `effect` to `fn` and report the blast radius; with `policy`, also the deny-rule violations it would cause. Pre-edit gate check.",
@@ -380,19 +404,23 @@ const TOOLS = {
       // one of them. `candor_gate` already refuses to read green over `unanalyzed`; this returned
       // `ok:true` with an empty array over the identical bytes, on the surface an agent trusts and no
       // human reads. Same `advisoryAnswer` the CLI applies, so the two cannot drift.
+      // ⟨0.28⟩ …and the `analyzed.count: 0` cause on the same terms (SPEC §2), read through the SAME
+      // `reportCompleteness` the CLI and the descriptive tools use — one reader, so the two channels
+      // cannot disagree about which reports judged nothing.
+      const ucomp = Q.reportCompleteness(p);
       return Q.advisoryAnswer(Q.unverified(loadReportLoud(p), policyOrThrow(text, polPath), scopeMatches),
-                              Q.reportUnanalyzed(p));
+                              ucomp.unanalyzed, ucomp.judgedNothing);
     },
   },
   candor_containment: {
     description: "Per boundary effect (Db/Net/Exec/Fs/Ipc/Clipboard): how contained it is in one architectural layer — the dispersion diagnostic (spec §6.1). Not a score; per-effect facts.",
     schema: { type: "object", properties: { ...reportArg } },
-    run: (_a, p) => Q.containment(loadReportLoud(p)),
+    run: (_a, p) => withCompleteness(p, Q.containment(loadReportLoud(p))),
   },
   candor_blindspots: {
     description: "The Unknown SOURCES — calls the engine genuinely could not resolve (reflection, wide dispatch, fn-pointers) — ranked by how many functions inherit Unknown through each. Turns a high-Unknown report into a short worklist.",
     schema: { type: "object", properties: { ...reportArg } },
-    run: (_a, p) => capBlindspots(Q.blindspots(loadReportLoud(p), Q.loadCallgraph(p))),
+    run: (_a, p) => withCompleteness(p, capBlindspots(Q.blindspots(loadReportLoud(p), Q.loadCallgraph(p)))),
   },
   candor_diff: {
     description: "The per-function effect delta versus a baseline report: gained (introduced vs inherited) and lost effects. 'What did this change do to the effect surface?'.",

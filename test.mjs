@@ -9419,5 +9419,192 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.28⟩ SPEC §2 — THE DESCRIPTIVE VERBS CARRY THE ⟨0.21⟩ MANIFEST TOO ────────────────────────────
+// The re-disclosure MUST was written over the instance it was found in ("a verb whose VERDICT could
+// change") and ⟨0.28⟩ widens it to the condition that makes it true: ANY verb whose output could be read
+// as a negative finding — a verdict, an EMPTY RESULT SET, or a ZERO COUNT. MEASURED on this engine before
+// the fix, over the standard post-failure artifact (`analyzed.count: 0` + a non-empty `unanalyzed`):
+//
+//     where Fs {"effect":"Fs","directly":[],"inherited":[]}   map {}   tour {"reaches":[]}
+//     blindspots {"sources":[],"totalUnknown":0}   reachable {"entryPoints":0,"effects":{}}
+//     containment {"contained":[],"ambient":{}}                     — six flat all-clears, exit 0, no hedge
+//
+// A matrix rather than six hand-written rows, because the defect IS the missing row: every verb here was
+// written by someone who had thought about incompleteness for the verb next to it. Each cell asserts BOTH
+// channels and the EXIT, which is the shape the mutants in this family survive through — candor-rust built
+// one that kept the whole JSON fix and deleted only the printed line, and it passed that engine's suite.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-desc-"));
+  fs.mkdirSync(path.join(d, "src"));
+  fs.writeFileSync(path.join(d, "src/app.ts"),
+    'import * as fs from "fs";\n'
+    + 'export function leaf(): number { return fs.readFileSync("/etc/hosts").length; }\n'
+    + 'export function mid(): number { return leaf(); }\n'
+    + 'export function main(): void { console.log(mid()); }\n');
+  spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out", path.join(d, "r")], { encoding: "utf8" });
+  const intact = JSON.parse(fs.readFileSync(path.join(d, "r.json"), "utf8"));
+
+  // The four artifact states, all derived from ONE real scan so a difference between them is the state and
+  // nothing else. `allpure` is the CONTROL that keeps this rung from becoming a hedge on every run: ⟨0.24⟩
+  // rules `analyzed.count > 0` with `functions: []` a legitimate purity claim a consumer MUST believe.
+  const state = (name, mut) => {
+    const dir = path.join(d, name); fs.mkdirSync(dir, { recursive: true });
+    const doc = JSON.parse(JSON.stringify(intact)); mut(doc);
+    fs.writeFileSync(path.join(dir, "r.json"), JSON.stringify(doc));
+    for (const s of ["callgraph", "hierarchy", "locs"]) {
+      const from = path.join(d, `r.${s}.json`);
+      if (fs.existsSync(from)) fs.copyFileSync(from, path.join(dir, `r.${s}.json`));
+    }
+    return path.join(dir, "r");
+  };
+  const armedP = state("armed", (o) => { o.functions = []; o.analyzed = { count: 0 };
+                                         o.unanalyzed = [{ path: "src/gone.ts", reason: "parse error" }]; });
+  const count0P = state("count0", (o) => { o.functions = []; o.analyzed = { count: 0 }; delete o.unanalyzed; });
+  const partialP = state("partial", (o) => { o.unanalyzed = [{ path: "src/gone.ts", reason: "parse error" }]; });
+  const pureP = state("allpure", (o) => { o.functions = []; o.analyzed = { count: 7 }; delete o.unanalyzed; });
+  const intactP = path.join(d, "r");
+
+  const VERBS = [
+    ["where", ["where", "Fs"], /0 functions perform Fs/, /NOT "nothing performs Fs"/],
+    ["map", ["map"], /no effectful modules in this report/, /NOT "the code performs no effects"/],
+    ["blindspots", ["blindspots"], /no Unknown sources/, /NOT "there are no blind spots"/],
+    ["blindspots --stats", ["blindspots", "--stats"], /no Unknown sources \(nothing to classify\)/, /NOT "there are no blind spots"/],
+    ["reachable", ["reachable"], /no effect reaches an entry point\./, /NOT "the program performs no effect at runtime"/],
+    ["containment", ["containment"], /no boundary effects in this report/, /NOT "there are no boundary effects"/],
+    ["tour", ["tour", "3"], /nothing hidden — every effect/, /NOT "nothing is hidden"/],
+  ];
+  const dq = (verb, pfx, ...flags) => spawnSync("node", [path.join(HERE, "query.mjs"), ...verb, "--report", `${pfx}.json`, ...flags], { encoding: "utf8" });
+
+  for (const [label, argv, calmRe, hedgeRe] of VERBS) {
+    // A — the manifest reaches the MACHINE channel, under BOTH causes, and the exit does not move. The
+    // `judgedNothing`/`unanalyzed` split is asserted per cause because the two want different repairs: one
+    // wants a scan that can READ a file, the other a scan that reached a conclusion.
+    for (const [cause, pfx, wantUnan] of [["an armed", armedP, true], ["a count-0, NO-`unanalyzed`,", count0P, false]]) {
+      const j = dq(argv, pfx, "--json");
+      let doc = null; try { doc = JSON.parse(j.stdout); } catch { /* stays null → the row fails loudly */ }
+      check(`⟨0.28⟩ ${label} over ${cause} report carries \`incomplete: true\` on the JSON channel — an empty answer over a report that judged nothing is a determined negative it cannot support`,
+            !!doc && doc.incomplete === true && doc.judgedNothing === true
+              && (wantUnan ? Array.isArray(doc.unanalyzed) && doc.unanalyzed.length === 1 : !("unanalyzed" in doc)),
+            `${j.stdout}`.slice(0, 260));
+      // C — exit codes. This rung adds a caveat; it does not refuse. ⟨0.24⟩ ruled count-0 explicitly:
+      // "A DISCLOSURE, NOT AN EXIT CODE" — `gate --report` exits 0 over these bytes, and a descriptive
+      // verb exiting non-zero would claim it got LESS far than the gate on identical input.
+      check(`⟨0.28⟩ …and ${label} still exits 0 over it — the caveat travels, the verdict does not move`,
+            j.status === 0, `status=${j.status}`);
+      // The OTHER channel, and it is asserted separately on purpose: "no Unknown sources ✓" IS the prose
+      // spelling of the empty JSON, so a fix that leaves the sentence standing MOVES the false all-clear.
+      const h = dq(argv, pfx, "--text");
+      check(`⟨0.28⟩ …and the HUMAN arm of ${label} withdraws its reassurance and prints the INCOMPLETE note`,
+            hedgeRe.test(h.stdout) && !calmRe.test(h.stdout) && /⚠ INCOMPLETE/.test(h.stderr),
+            `out=${h.stdout}`.slice(0, 200) + ` err=${h.stderr}`.slice(0, 200));
+    }
+
+    // …and the note tells the truth about what CI will do, which is the OPPOSITE for the two causes. §3.3
+    // makes `unanalyzed` an exit-2 gate cause; ⟨0.24⟩ makes count-0 an exit-0 one. A warning that sends the
+    // reader to a job which then passes teaches them the warning is noise.
+    check(`⟨0.28⟩ …and ${label}'s note says the gate REFUSES over \`unanalyzed\` and that NOTHING catches a count-0 report — the two causes get opposite sentences`,
+          /gate --report` exits 2 over these bytes/.test(dq(argv, armedP, "--text").stderr)
+            && /NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU/.test(dq(argv, count0P, "--text").stderr));
+
+    // B — THE CONTROL. Over an INTACT report the answer is byte-identical, on both channels, and no
+    // stderr note appears. candor-rust's first draft of this rung silently RE-SORTED two of these
+    // documents on ordinary runs (its serialiser is BTreeMap-backed) — a disclosure rung must not reformat
+    // the answers it is disclosing about, and no assertion that reads keys by name can see that.
+    const ij = dq(argv, intactP, "--json"), ih = dq(argv, intactP, "--text");
+    check(`⟨0.28⟩ CONTROL: ${label} over an INTACT report is UNHEDGED on both channels and exits 0 — a hedge on every run trains the reader to ignore it`,
+          ij.status === 0 && !/incomplete/.test(ij.stdout) && !/judgedNothing/.test(ij.stdout)
+            && ih.stderr === "" && !hedgeRe.test(ih.stdout),
+          `json=${ij.stdout}`.slice(0, 200) + ` err=${ih.stderr}`.slice(0, 160));
+
+    // …and the ⟨0.24⟩ MIRROR CONTROL: a report that judged 7 units and found none of them effectful is
+    // making a purity CLAIM, not a silence. Hedging it would withdraw the very claim §2 rule 3 protects
+    // (java measured 104 legitimate all-pure reports against 6 harmful count-0 ones).
+    const pj = dq(argv, pureP, "--json");
+    check(`⟨0.28⟩ CONTROL: ${label} over an ALL-PURE report (\`analyzed.count: 7\`, \`functions: []\`) does NOT hedge — that empty answer is a claim the report is entitled to make`,
+          pj.status === 0 && !/incomplete/.test(pj.stdout), `${pj.stdout}`.slice(0, 200));
+
+    // …and the caveat qualifies a NON-EMPTY answer just as much as an empty one: a function in an unread
+    // file performs the effect or does not, and no list the verb prints can say which.
+    const qj = dq(argv, partialP, "--json");
+    let qdoc = null; try { qdoc = JSON.parse(qj.stdout); } catch { /* null → fails loudly */ }
+    check(`⟨0.28⟩ ${label} over a report with REAL content that declares \`unanalyzed\` still discloses — the manifest qualifies a non-empty answer too, and carries \`unanalyzed\` without \`judgedNothing\``,
+          !!qdoc && qdoc.incomplete === true && qdoc.unanalyzed?.length === 1 && !("judgedNothing" in qdoc),
+          `${qj.stdout}`.slice(0, 260));
+  }
+
+  // `containment <baseline>` reads TWO locators, and its answer is a DIFFERENCE — unsound if either side
+  // is partial, in OPPOSITE directions: a leak in an unread file of the current tree is missed, one in an
+  // unread file of the baseline reads as NEWLY APPEARED, at exit 1. The baseline's manifest is the half
+  // that arrived here silently (a wholly-empty baseline already fails closed).
+  const ratchet = spawnSync("node", [path.join(HERE, "query.mjs"), "containment", `${partialP}.json`,
+                                     "--report", `${intactP}.json`, "--json"], { encoding: "utf8" });
+  let rdoc = null; try { rdoc = JSON.parse(ratchet.stdout); } catch { /* null → fails loudly */ }
+  check("⟨0.28⟩ containment vs a BASELINE that declares `unanalyzed` discloses the BASELINE's manifest — an unread baseline unit manufactures a leak, the mirror of the one an unread current unit hides",
+        !!rdoc && rdoc.incomplete === true && rdoc.unanalyzed?.length === 1 && "leaks" in rdoc,
+        `${ratchet.stdout}`.slice(0, 260));
+  const ratchetOk = spawnSync("node", [path.join(HERE, "query.mjs"), "containment", `${intactP}.json`,
+                                       "--report", `${intactP}.json`, "--json"], { encoding: "utf8" });
+  check("⟨0.28⟩ CONTROL: containment vs an INTACT baseline is unhedged and still exits 0 — the ratchet's exit follows the LEAKS, never the caveat",
+        ratchetOk.status === 0 && !/incomplete/.test(ratchetOk.stdout), `status=${ratchetOk.status} ${ratchetOk.stdout}`.slice(0, 200));
+
+  // `map`'s top level is a USER NAMESPACE — the one document whose own rows can collide with the keys this
+  // rung must add. The hedge WINS (a consumer branching on `"incomplete" in doc` must be able to see it)
+  // and the displaced row is named LOUDLY: a lost module row the operator has been told about beats a
+  // false all-clear nobody has. Disclosed off the fields ACTUALLY written, never a hardcoded name list —
+  // announcing a displacement that did not happen is the `net-partner` false disclosure pointed backwards.
+  const colP = state("collide", (o) => {
+    o.functions = o.functions.map((e) => ({ ...e, fn: e.fn.replace(/^src\.app\./, "incomplete.") }));
+    o.unanalyzed = [{ path: "src/gone.ts", reason: "parse error" }];
+  });
+  const col = spawnSync("node", [path.join(HERE, "query.mjs"), "map", "--report", `${colP}.json`, "--json"], { encoding: "utf8" });
+  let cdoc = null; try { cdoc = JSON.parse(col.stdout); } catch { /* null → fails loudly */ }
+  check("⟨0.28⟩ map: a module literally named `incomplete` does NOT silently displace the disclosure — the hedge wins and the lost row is disclosed by name on stderr",
+        !!cdoc && cdoc.incomplete === true && /row literally named `incomplete`/.test(col.stderr),
+        `${col.stdout}`.slice(0, 200) + ` err=${col.stderr}`.slice(0, 200));
+  check("⟨0.28⟩ CONTROL: the collision warning names ONLY a key that was really written — `unanalyzed` is not announced as displaced when no module is called that",
+        !/row literally named `unanalyzed`/.test(col.stderr) && !/row literally named `judgedNothing`/.test(col.stderr),
+        `${col.stderr}`.slice(0, 240));
+
+  // ── …AND THE ADVISORY VERBS TAKE THE SECOND CAUSE TOO, WITHOUT MOVING AN EXIT CODE. Their manifest arm
+  // has existed since ⟨0.24⟩; the `analyzed.count: 0` arm did not, and a report that judged nothing carries
+  // no `unanalyzed` to trip it. MEASURED: `unverified` answered `{ok: true, unverified: []}` over one —
+  // the verb whose whole job is "your green gate is not provably green", certifying a package nothing in
+  // it ever examined. Leaving these on the old trigger while the descriptive verbs moved would also split
+  // the two channels of one document: a remedy list under `ok: true`, beneath an INCOMPLETE note.
+  //
+  // THE EXIT IS THE CONTROL, AND IT IS THE POINT. ⟨0.24⟩ ruled count-0 "A DISCLOSURE, NOT AN EXIT CODE":
+  // `gate --report` exits 0 over these bytes, so a `--strict` advisory verb exiting 2 would claim it got
+  // LESS far than the gate on identical input. No conformance part gates this, so it is pinned here.
+  fs.writeFileSync(path.join(d, "p.pol"), "deny Net src.app\n");
+  const pol = ["--policy", path.join(d, "p.pol")];
+  const adv = (verb, pfx, ...flags) => spawnSync("node", [path.join(HERE, "query.mjs"), ...verb, "--report", `${pfx}.json`, ...pol, ...flags], { encoding: "utf8" });
+  for (const [label, argv] of [["unverified", ["unverified"]], ["fix-gate", ["fix-gate"]], ["whatif", ["whatif", "src.app.mid", "Net"]]]) {
+    const j = adv(argv, count0P, "--json");
+    let doc = null; try { doc = JSON.parse(j.stdout); } catch { /* null → fails loudly */ }
+    check(`⟨0.28⟩ ${label} over a judged-nothing report WITHDRAWS \`ok\` and carries \`incomplete: true\` + \`judgedNothing\` — the ⟨0.24⟩ manifest arm cannot see this cause, because there is no unread file to name`,
+          !!doc && !("ok" in doc) && doc.incomplete === true && doc.judgedNothing === true && !("unanalyzed" in doc),
+          `${j.stdout}`.slice(0, 240));
+    check(`⟨0.28⟩ …and ${label} says it on the HUMAN channel too — the mutant this family keeps building keeps exactly one of these two`,
+          /JUDGED NOTHING/.test(adv(argv, count0P, "--text").stderr), `${adv(argv, count0P, "--text").stderr}`.slice(0, 200));
+  }
+  for (const label of ["unverified", "fix-gate"]) {
+    const s = adv([label], count0P, "--strict", "--json");
+    check(`⟨0.28⟩ CONTROL: \`${label} --strict\` over a judged-nothing report still exits 0 — ⟨0.24⟩ ruled this cause a DISCLOSURE, and the gate exits 0 over the same bytes`,
+          s.status === 0, `status=${s.status}`);
+    const a2 = adv([label], armedP, "--strict", "--json");
+    check(`⟨0.28⟩ CONTROL: \`${label} --strict\` over an \`unanalyzed\` report still exits 2 — the manifest arm's exit is untouched by this rung`,
+          a2.status === 2, `status=${a2.status}`);
+    const c2 = adv([label], intactP, "--strict", "--json");
+    check(`⟨0.28⟩ CONTROL: \`${label} --strict\` over an INTACT report carries \`ok\` and no caveat — byte-identical to a pre-⟨0.28⟩ run`,
+          !/incomplete/.test(c2.stdout) && /"ok"/.test(c2.stdout) && c2.stderr === "",
+          `${c2.stdout}`.slice(0, 200) + ` err=${c2.stderr}`.slice(0, 160));
+    const p2 = adv([label], partialP, "--json");
+    check(`⟨0.28⟩ CONTROL: \`${label}\` over an \`unanalyzed\`-only report is UNCHANGED — \`incomplete\` + the manifest and NO \`judgedNothing\`, exactly the ⟨0.24⟩ document`,
+          !/judgedNothing/.test(p2.stdout) && /"incomplete": true/.test(p2.stdout), `${p2.stdout}`.slice(0, 220));
+  }
+
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

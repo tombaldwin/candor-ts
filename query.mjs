@@ -44,7 +44,8 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          fix as coreFix, fixGate as coreFixGate, unverified as coreUnverified,
          matches as coreMatches, gainsCoverage, parseClassFilter, ClassFilterError,
          loadReport, loadCallgraph, loadGateReport, reportVersion, reportPackage,
-         reportUnanalyzed, advisoryAnswer } from "./query-core.mjs";
+         advisoryAnswer,
+         reportCompleteness, mustHedge, completenessFields, absorbCompleteness } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
 // ⟨0.24⟩ SPEC §3.2 — THE OTHER CHANNEL. `advisoryAnswer` withdraws the claim from the JSON; this withdraws
 // it from the one a human reads, and the spec requires both because a test that reads one channel is
@@ -71,6 +72,14 @@ const advisoryUnevaluatedNote = (verb, unevaluated, tail) => {
   console.error(`  ${tail}`);
 };
 const UNEVAL_TAIL_STRICT = "(`ok` is OMITTED — neither value is a statement this input licenses; no remedy is offered for a boundary the gate could not adjudicate; `--strict` exits 2, the could-not-evaluate code)";
+// ⟨0.28⟩ SPEC §2's OTHER cause on the ADVISORY channel — `analyzed.count: 0`, which `advisoryIncompleteNote`
+// above could not say because it is written around an unread FILE and this report names none. Same two
+// channels, different sentence, and the tail is the OPPOSITE one: the gate exits 0 over these bytes
+// (⟨0.24⟩: a disclosure, not an exit code), so `--strict` does not move either and this note is all there is.
+const advisoryJudgedNothingNote = (verb) => {
+  console.error(`candor-ts: ${verb} could NOT fully evaluate — the report(s) under this locator say they JUDGED NOTHING (⟨0.24⟩ \`analyzed.count\` is 0, absent with no entries, or unreadable), so absence from \`functions\` licenses no purity claim about any unit and there is nothing here to certify`);
+  console.error("  (`ok` is OMITTED — neither value is a statement this input licenses. NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU: `gate --report` exits 0 over a judged-nothing report and `--strict` does not move either, so this note is the whole of the warning. Re-scan the sources you meant to check.)");
+};
 // The §6 effect vocabulary — used to reject a typo'd effect name in `where` (corpus-audit #3). Kept in step
 // with SPEC §6 / the umbrella's list; an unknown name PRESENT in a report (a spec extension) is still allowed.
 const KNOWN_EFFECTS = ["Net", "Fs", "Db", "Llm", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Unknown"];
@@ -95,14 +104,87 @@ const wantJsonOut = (a) =>
   a.includes("--json") || (!a.includes("--text") && !a.includes("--human") && !process.stdout.isTTY);
 // Emit the pinned JSON, or render prose via proseFn(data). Returns data so the caller can still exit on it.
 const put = (a, data, proseFn) => { if (!proseFn || wantJsonOut(a)) emit(data); else proseFn(data); return data; };
+
+// ---- ⟨0.28⟩ SPEC §2 — THE COMPLETENESS CAVEAT ON A *DESCRIPTIVE* VERB. `advisoryAnswer` +
+// `advisoryIncompleteNote` above are the two channels for a verb that renders a VERDICT; the clause they
+// implement was scoped to verdicts, and ⟨0.28⟩ widens it to "any verb whose output could be read as a
+// negative finding about the code — a verdict, an empty result set, or a zero count". These three helpers
+// are the SAME two channels for an ANSWER. One reader (`reportCompleteness`), one key set
+// (`completenessFields`), one trigger (`mustHedge`) — a second mechanism is how the family ended up with
+// two element rules for the manifest reader, and how one channel goes quiet while the other is asserted on.
+
+// What `gate --report` does over THESE SAME BYTES, as one sentence — a function and not a constant because
+// the two causes get OPPOSITE answers. §3.3 makes an incomplete analysis of the target's own code an exit-2
+// gate cause, so "the gate refuses too" is true of `unanalyzed`; ⟨0.24⟩ ruled count-0 the other way ("a
+// disclosure, not an exit code"), so the gate exits 0 there. A note that sends the reader to a CI job which
+// then passes teaches them the warning is noise — the disclosure discrediting itself. The count-0 sentence
+// is also the more urgent one and says so: nothing downstream fails closed on those bytes.
+const gateLine = (comp) => (comp.unanalyzed.length
+  ? "`gate --report` exits 2 over these bytes."
+  : "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU — `gate --report` exits 0 over a judged-nothing report (⟨0.24⟩: a disclosure, not an exit code), so this note is the whole of the warning.");
+
+// The HUMAN half. A no-op when there is nothing to disclose, so an ordinary run stays byte-identical, and
+// printed BEFORE the answer because it qualifies a NON-EMPTY result as much as an empty one: a function in
+// an unread file performs the effect or does not, and no list below can say which.
+const incompleteAnswerNote = (comp, soWhat, tail) => {
+  if (!mustHedge(comp)) return;
+  const head = comp.unanalyzed.length
+    ? `the report(s) under this locator declare ${comp.unanalyzed.length} unit(s) candor could not analyze`
+      + (comp.judgedNothing ? ", and judged NOTHING at all (`analyzed.count: 0`)" : "")
+    : "the report(s) under this locator say they JUDGED NOTHING (`analyzed.count: 0`)";
+  console.error(`candor-ts: ⚠ INCOMPLETE — ${head}, so ${soWhat}:`);
+  for (const u of comp.unanalyzed) console.error(`    ${u.path}${u.reason ? `  (${u.reason})` : ""}`);
+  if (comp.judgedNothing)
+    console.error("    (a report that judged nothing names no function at all — its silence is not a purity claim about any unit)");
+  console.error(`    ${tail} ${gateLine(comp)}`);
+};
+
+// The MACHINE half. Spread LAST so the verb's own pinned key order is untouched (JS objects keep insertion
+// order), and `{}` on a complete report — the whole document is then byte-identical to a pre-⟨0.28⟩ one.
+//
+// THE COLLISION IS DISCLOSED, NOT HIDDEN. `map`'s top level is a USER NAMESPACE, so a module literally named
+// `incomplete` can occupy the key this answer must carry. Nesting the disclosure is not an escape: a consumer
+// branching on `"incomplete" in doc` would never see it. So the hedge WINS and the displaced row is named
+// loudly — a lost module row the operator has been told about beats a false all-clear nobody has. Asked of
+// the fields ACTUALLY being written (each is omitted when it does not apply), never of a hardcoded name
+// list: warning that `unanalyzed` was displaced when nothing displaced it is a FALSE disclosure, the
+// `net-partner` failure this family already made once, pointed the other way.
+const withCompleteness = (data, comp) => {
+  const f = completenessFields(comp);
+  for (const k of Object.keys(f))
+    if (Object.hasOwn(data, k))
+      console.error(`candor-ts: this report has a row literally named \`${k}\`, which collides with the ⟨0.28⟩ incompleteness disclosure this answer MUST carry — the disclosure wins and that row is NOT in the JSON below. Drop --json for the text form, which shows it.`);
+  return { ...data, ...f };
+};
+
+// `put`, plus the caveat on BOTH channels from ONE trigger — a caller cannot get the JSON half and the prose
+// half to disagree, which is exactly the mutant (`ec1a441`) that survived a whole suite in candor-rust.
+// `proseFn` receives the hedge flag as its second argument so it can WITHDRAW its reassuring sentence; the
+// note alone is not enough, because "no Unknown sources ✓" IS the prose spelling of the empty JSON.
+const putAnswer = (a, data, proseFn, comp, soWhat, tail) => {
+  if (!proseFn || wantJsonOut(a)) { emit(withCompleteness(data, comp)); return data; }
+  incompleteAnswerNote(comp, soWhat, tail);
+  proseFn(data, mustHedge(comp));
+  return data;
+};
+// The one sentence every hedged prose arm ends with, so the six cannot drift into six wordings.
+const NOT_A = (claim) => `— but see the INCOMPLETE note above; this is NOT "${claim}"`;
 const csv = (xs) => (xs && xs.length ? xs.join(", ") : "none");
 const rows = (xs, pre = "    ") => { for (const x of xs) console.log(pre + x); };
 // Per-verb prose renderers. Read the SAME shapes query-core returns (so JSON and prose can't drift); kept
 // terse and scannable, in candor's voice (cf. the existing `tour`/`path` human forms).
 const P = {
-  where: (d) => {
+  // ⟨0.28⟩ `hedge` is `mustHedge(comp)` (see `putAnswer`): the report could not support a determined
+  // negative, so the reassuring sentence — which IS the prose spelling of the empty JSON — is withdrawn.
+  // Never a manufactured finding in its place: the answer stands, its STANDING is what changes.
+  where: (d, hedge) => {
     const n = d.directly.length + d.inherited.length;
-    if (n === 0) { console.log(`candor: 0 functions perform ${d.effect} in this report.`); return; }
+    if (n === 0) {
+      console.log(hedge
+        ? `candor: 0 functions candor COULD SEE perform ${d.effect} ${NOT_A(`nothing performs ${d.effect}`)}.`
+        : `candor: 0 functions perform ${d.effect} in this report.`);
+      return;
+    }
     console.log(`candor where ${d.effect} — ${n} function${n === 1 ? "" : "s"}:`);
     if (d.directly.length) { console.log(`  perform it directly (${d.directly.length}):`); rows(d.directly); }
     if (d.inherited.length) { console.log(`  reach it transitively (${d.inherited.length}):`); rows(d.inherited); }
@@ -129,30 +211,54 @@ const P = {
       if (e.tables?.length) console.log(`  tables:  ${e.tables.join(", ")}`);
     });
   },
-  map: (d) => {
+  map: (d, hedge) => {
     const mods = Object.entries(d);
-    if (!mods.length) { console.log("candor: no effectful modules in this report."); return; }
+    if (!mods.length) {
+      console.log(hedge
+        ? `candor: no effectful module candor COULD SEE ${NOT_A("the code performs no effects")}.`
+        : "candor: no effectful modules in this report.");
+      return;
+    }
     console.log("candor map — effects by module:");
     for (const [m, v] of mods) console.log(`  ${m} — ${csv(v.effects)}  (${v.functions} fn${v.functions === 1 ? "" : "s"})`);
   },
-  containment: (d) => {
+  containment: (d, hedge) => {
     if ("leaks" in d) { // ratchet (a baseline was given)
-      if (!d.leaks.length) console.log("candor containment — no boundary effect reached a new layer vs the baseline. ✓");
+      // The ✓ is withdrawn from BOTH directions here, not just the empty one: this answer is a DIFFERENCE,
+      // so a partial side is unsound two ways — a leak in an unread CURRENT file is missed, one in an unread
+      // BASELINE file reads as newly appeared (a fabricated leak, at exit 1).
+      if (!d.leaks.length)
+        console.log(hedge
+          ? `candor containment — no boundary effect candor COULD SEE reached a new layer vs the baseline ${NOT_A("nothing leaked")}.`
+          : "candor containment — no boundary effect reached a new layer vs the baseline. ✓");
       else { console.log(`candor containment — ${d.leaks.length} boundary effect(s) reached a NEW layer (leak):`); rows(d.leaks); }
       if (d.cleanups && d.cleanups.length) { console.log(`  no longer present (${d.cleanups.length}):`); rows(d.cleanups); }
       return;
     }
-    if (!d.contained.length && !Object.keys(d.ambient).length) { console.log("candor containment — no boundary effects in this report."); return; }
+    if (!d.contained.length && !Object.keys(d.ambient).length) {
+      console.log(hedge
+        ? `candor containment — no boundary effect candor COULD SEE ${NOT_A("there are no boundary effects")}.`
+        : "candor containment — no boundary effects in this report.");
+      return;
+    }
     console.log("candor containment — how well each boundary effect stays in one layer:");
     for (const c of d.contained)
       console.log(`  ${c.effect}: ${c.containmentPct}% in \`${c.owner}\` (spread across ${c.layers} layer${c.layers === 1 ? "" : "s"})`);
     const amb = Object.entries(d.ambient);
     if (amb.length) console.log(`  ambient (reported, not scored): ${amb.map(([e, n]) => `${e}×${n}`).join(", ")}`);
   },
-  reachable: (d) => {
+  reachable: (d, hedge) => {
     const effs = Object.entries(d.effects);
     console.log(`candor reachable — what the ${d.entryPoints} entry point${d.entryPoints === 1 ? "" : "s"} do at runtime:`);
-    if (!effs.length) { console.log("  no effect reaches an entry point."); return; }
+    // "the program performs no effect at runtime" is the strongest claim this tool can make, and it stays a
+    // DETERMINED negative on good data (a library has no entry points) — which is exactly why the caveat
+    // must be said, rather than left for a reader to infer from the emptiness.
+    if (!effs.length) {
+      console.log(hedge
+        ? `  no effect reaches an entry point candor COULD SEE ${NOT_A("the program performs no effect at runtime")}.`
+        : "  no effect reaches an entry point.");
+      return;
+    }
     for (const [e, v] of effs) console.log(`  ${e}: ${v.count} (via ${csv(v.via)})`);
   },
   impact: (d) => {
@@ -161,13 +267,23 @@ const P = {
     if (d.affected.length) rows(d.affected);
     if (d.entryPoints.length) { console.log(`  reachable from ${d.entryPoints.length} entry point(s):`); rows(d.entryPoints.map((ep) => `${ep.fn}  [${csv(ep.inferred)}]`)); }
   },
-  blindspots: (d) => {
-    if (!d.sources.length) { console.log(`candor blindspots — no Unknown sources${d.totalUnknown ? " (all Unknown here is inherited, not rooted in a call)" : ""}. ✓`); return; }
+  blindspots: (d, hedge) => {
+    if (!d.sources.length) {
+      console.log(hedge
+        ? `candor blindspots — no Unknown source candor COULD SEE ${NOT_A("there are no blind spots")}.`
+        : `candor blindspots — no Unknown sources${d.totalUnknown ? " (all Unknown here is inherited, not rooted in a call)" : ""}. ✓`);
+      return;
+    }
     console.log(`candor blindspots — ${d.sources.length} Unknown source${d.sources.length === 1 ? "" : "s"} (of ${d.totalUnknown} function(s) carrying Unknown), most-smearing first:`);
     for (const s of d.sources) console.log(`  \`${s.fn}\` — ${csv(s.why)}; reaches ${s.reaches} caller(s)`);
   },
-  blindspotsStats: (d) => {
-    if (!d.sources) { console.log("candor blindspots --stats — no Unknown sources (nothing to classify). ✓"); return; }
+  blindspotsStats: (d, hedge) => {
+    if (!d.sources) {
+      console.log(hedge
+        ? `candor blindspots --stats — no Unknown source candor COULD SEE (nothing to classify) ${NOT_A("there are no blind spots")}.`
+        : "candor blindspots --stats — no Unknown sources (nothing to classify). ✓");
+      return;
+    }
     console.log(`candor blindspots --stats — ${d.sources} Unknown source(s) by reason class (of ${d.totalUnknown} function(s) carrying Unknown) — size the blind-spot cost before \`deny E Unknown[…]\`:`);
     Object.entries(d.byClass).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1])
       .forEach(([k, v]) => console.log(`  ${k.padEnd(12)} ${String(v).padStart(4)}${k === "setup" ? "   ← fixable: the scan isn't configured, not a real blind spot" : ""}`));
@@ -909,7 +1025,11 @@ switch (cmd) {
     if (!KNOWN_EFFECTS.includes(eff) && !new Set(fnsW.flatMap((e) => e.inferred || [])).has(eff)) {
       console.error(`candor-ts-query where: unknown effect '${eff}' (known: ${KNOWN_EFFECTS.join(", ")})`); process.exit(2);
     }
-    put(args, coreWhere(fnsW, eff), P.where);
+    // ⟨0.28⟩ SPEC §2 — `{"directly":[],"inherited":[]}` is one of the four empty answers the clause names
+    // by measurement. The caveat rides the SAME document (see `putAnswer`); the exit code does not move.
+    putAnswer(args, coreWhere(fnsW, eff), P.where, reportCompleteness(prefix),
+      `the function(s) named below are only those candor could SEE perform ${eff}`,
+      `A function in an unread unit is ABSENT from the report, so it cannot appear in either list. Re-scan for a complete answer.`);
     break;
   }
   case "callers": {
@@ -969,7 +1089,12 @@ switch (cmd) {
   case "map": {
     // Shared query-core — the CLI and MCP `candor_map` are one implementation (see `where` above).
     const { prefix } = resolveReportVerb(args, 0);
-    put(args, coreMap(loadReportOrDie(prefix)), P.map);
+    // ⟨0.28⟩ `map` answers `{}`, which SPEC §2 calls the STRONGEST determined negative there is: every key
+    // a consumer reads defaults to empty, so `d["db"] ?? {}` cannot tell an empty map from an unexamined
+    // one. (Its top level is a user namespace — `withCompleteness` discloses a colliding module by name.)
+    putAnswer(args, coreMap(loadReportOrDie(prefix)), P.map, reportCompleteness(prefix),
+      "the module rows below cover only the source candor read",
+      "A module living wholly in an unread unit is MISSING from this overview, and one that IS listed may be missing functions. Re-scan for a complete map.");
     break;
   }
   case "containment": {
@@ -999,10 +1124,20 @@ switch (cmd) {
         process.exit(2);
       }
       const r = coreContainment(loadReportOrDie(prefix), baseFns);
-      put(args, r, P.containment);
+      // ⟨0.28⟩ BOTH SIDES' MANIFESTS. This answer is a DIFFERENCE, so it is unsound if either side is
+      // partial, and in OPPOSITE directions: a leak living in an unread file of the CURRENT tree is missed
+      // (a false all-clear at exit 0), while one living in an unread file of the BASELINE reads as newly
+      // appeared (a fabricated leak, at exit 1). A wholly-empty baseline already fails closed above; a
+      // baseline that loaded but declares `unanalyzed` is the case that reached here silently.
+      putAnswer(args, r, P.containment,
+        absorbCompleteness(reportCompleteness(prefix), reportCompleteness(basePrefix)),
+        "the leak set below is a difference over only the code candor read on BOTH sides",
+        "An unread unit of the current tree hides a leak; an unread unit of the baseline manufactures one. Re-scan both before moving the ratchet.");
       process.exit(r.leaks.length ? 1 : 0);
     }
-    put(args, coreContainment(loadReportOrDie(prefix)), P.containment);
+    putAnswer(args, coreContainment(loadReportOrDie(prefix)), P.containment, reportCompleteness(prefix),
+      "the containment scores below cover only the boundary effects candor could see",
+      "A boundary effect in an unread unit is in no layer's count, so a dispersed effect can score as contained. Re-scan for a complete picture.");
     break;
   }
   case "diff": {
@@ -1047,9 +1182,13 @@ switch (cmd) {
     const roots = fns.filter((e) => e.entryPoint);
     const byEff = {};
     for (const e of roots) for (const x of e.inferred) (byEff[x] ??= []).push(e.fn);
-    put(args, { entryPoints: roots.length,
+    // ⟨0.28⟩ `{"entryPoints":0,"effects":{}}` asserts *the program performs no effect at runtime* — the
+    // strongest claim in this binary — and over a report that judged nothing it rests on no evidence.
+    putAnswer(args, { entryPoints: roots.length,
            effects: Object.fromEntries(Object.entries(byEff).sort()
-             .map(([k, v]) => [k, { count: v.length, via: v.sort() }])) }, P.reachable);
+             .map(([k, v]) => [k, { count: v.length, via: v.sort() }])) }, P.reachable, reportCompleteness(prefix),
+      "the runtime effect set below is a union over only the entry points candor could see",
+      "An entry point in an unread unit contributes NOTHING to this union, and neither does any effect it reaches. Re-scan before treating this as the program's runtime surface.");
     break;
   }
   case "impact": {
@@ -1117,10 +1256,18 @@ switch (cmd) {
     const { prefix } = resolveReportVerb(args, 0);
     const ci = args.indexOf("--class");
     const classFilter = ci >= 0 ? args[ci + 1] : null;   // ⟨0.20⟩ drill-down by reason class
+    // ⟨0.28⟩ THE SHARPEST OF THE SIX: `{"sources":[],"totalUnknown":0}` reports *no blind spots* out of a
+    // report whose own manifest names a file candor could not read — the unread file is the blind spot, and
+    // it contributes no entry, so nothing in the computation below can see it. BOTH forms, because
+    // `--stats` is the same claim counted differently (the sibling-route habit: a rule applied where the
+    // work is and never to the arm one line down).
+    const bsComp = reportCompleteness(prefix);
+    const bsSoWhat = "the Unknown sources below are only those rooted in a call candor could see";
+    const bsTail = "An unread unit contributes no entry at all, so its own Unknowns are not counted here and cannot be. Re-scan before treating this as the blind-spot inventory.";
     if (args.includes("--stats")) {   // ⟨0.20⟩ the reason-class distribution, not the source list
-      put(args, coreBlindspotsStats(loadReportOrDie(prefix), classFilter), P.blindspotsStats);
+      putAnswer(args, coreBlindspotsStats(loadReportOrDie(prefix), classFilter), P.blindspotsStats, bsComp, bsSoWhat, bsTail);
     } else {
-      put(args, coreBlindspots(loadReportOrDie(prefix), loadCallgraph(prefix), classFilter), P.blindspots);
+      putAnswer(args, coreBlindspots(loadReportOrDie(prefix), loadCallgraph(prefix), classFilter), P.blindspots, bsComp, bsSoWhat, bsTail);
     }
     break;
   }
@@ -1176,6 +1323,9 @@ switch (cmd) {
     // The header names the report's §2 envelope `package` — meaningful and locator-independent, so every
     // engine and every --report form print the SAME crate. Falls back to the prefix basename.
     const crateName = reportPackage(prefix) ?? path.basename(prefix);
+    // ⟨0.28⟩ read ONCE, before either channel branches, so the JSON half and the prose half cannot end up
+    // triggered by two different readings of the same bytes (see `putAnswer`; tour renders its own output).
+    const tourComp = reportCompleteness(prefix);
     if (wantJson) {
       // Pure JSON to STDOUT: {"reaches":[{effect,fn,hops,loc,score,source}, …]} — ALPHABETICAL keys, the
       // same order Rust+Swift emit (loc is the SOURCE's file:line, "" when absent).
@@ -1189,9 +1339,17 @@ switch (cmd) {
       const teff = fns.filter((e) => (e.inferred ?? []).length > 0).length;
       const tunk = fns.filter((e) => (e.inferred ?? []).includes("Unknown")).length;
       if (teff > 0 && tunk * 3 >= teff) out.unknown = { count: tunk, total: teff };
-      console.log(JSON.stringify(out));
+      // ⟨0.28⟩ THE SAME ARGUMENT AS `unknown` ABOVE, ONE CAUSE OVER — and the ⅓ threshold cannot reach this
+      // one. That field exists because a bare `{"reaches":[]}` read as clean to the agent loop over a
+      // mostly-Unknown graph; a report that judged nothing, or that names a file it could not read, yields
+      // the IDENTICAL empty array from strictly less evidence, and an unread unit contributes no entry, so
+      // it moves neither `unknown` nor `total`. Spread last, `{}` on a complete report.
+      console.log(JSON.stringify({ ...out, ...completenessFields(tourComp) }));
       break;
     }
+    incompleteAnswerNote(tourComp,
+      "the reaches below are ranked over only the call graph candor could see",
+      "A surprising reach whose path runs through an unread unit is not ranked here at all, and cannot be. Re-scan for the full tour.");
     if (finds.length === 0) {
       // Effectful-but-nothing-surprising vs genuinely-pure both land here; the honest line is the useful
       // answer (never a manufactured surprise) — mirrors the scan-note fallback + the Rust engine. BUT never
@@ -1206,6 +1364,11 @@ switch (cmd) {
           + `(unresolved calls; their transitive effects are NOT analyzed). Run \`candor blindspots\` — `
           + `the report records a reason for each.`,
         );
+      } else if (mustHedge(tourComp)) {
+        // "nothing hidden" is the single most reassuring sentence this binary prints, and over these bytes
+        // it is the false all-clear in plain English. The ⅓-Unknown branch above cannot catch it, for the
+        // reason given on the JSON arm.
+        console.log(`candor: nothing hidden in what candor COULD SEE ${NOT_A("nothing is hidden")}.`);
       } else {
         console.log("candor: nothing hidden — every effect sits where its name says it should.");
       }
@@ -1357,10 +1520,15 @@ switch (cmd) {
     // consulted BEFORE an edit, where the alternative is the operator guessing. The exit is UNCHANGED:
     // this verb has no `--strict`, §3.2 rules no exit for it, and inventing one is the failure mode the
     // clause it lives beside exists to prevent.
-    const wunan = reportUnanalyzed(prefix);
+    const wcomp = reportCompleteness(prefix);
+    const wunan = wcomp.unanalyzed;
     if (wunan.length)
       console.error(`candor-ts: whatif is NOT a complete answer — the report declares ${wunan.length} unit(s) candor could not analyze (disclosed under \`unanalyzed\`); \`ok\` is omitted because neither value is a statement the input licenses`);
-    emit(advisoryAnswer(r, wunan));
+    // ⟨0.28⟩ …and the count-0 cause, which reaches here through a LIVE §2.2 sidecar: the target resolves
+    // over the call graph, so this verb answers `ok: true` where the report-only verbs exit 2 on the name.
+    // MEASURED exactly so — the pre-edit gate check, green, over a report that judged nothing.
+    if (wcomp.judgedNothing) advisoryJudgedNothingNote("whatif");
+    emit(advisoryAnswer(r, wunan, wcomp.judgedNothing));
     process.exit(r.violations.length ? 1 : 0);
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }
@@ -1406,13 +1574,18 @@ switch (cmd) {
     // ⟨0.24⟩ SPEC §3.2 — see `advisoryAnswer`. Over a report declaring `unanalyzed` this OMITS `ok`, adds
     // the manifest, and `--strict` (the CI form) exits 2 — could-not-fully-evaluate, the same code the gate
     // uses for the same situation — rather than the 1 that would claim a finding or the 0 that certified.
-    const fgUnan = reportUnanalyzed(prefix);
+    const fgComp = reportCompleteness(prefix);
+    const fgUnan = fgComp.unanalyzed;
     if (fgUnan.length) advisoryIncompleteNote("fix-gate", fgUnan);
+    // ⟨0.28⟩ …and the count-0 cause, which reaches the DOCUMENT and the PROSE but deliberately NOT the exit
+    // below (see `advisoryAnswer`). Leaving it out would have let this verb print a remedy list beside
+    // `ok: true` over a report that judged nothing — the same false all-clear, arriving by omission.
+    if (fgComp.judgedNothing) advisoryJudgedNothingNote("fix-gate");
     // ⟨0.24⟩ SPEC §3.2 `4fd140c` — and the same posture for a rule the GATE refused: no remedy is computed
     // from evidence the gate declined to read, the refusal is disclosed on both channels, and `--strict`
     // exits 2 (could-not-evaluate) rather than the 0 that would read as "no crossings left to fix".
     if (fgr.unevaluated?.length) advisoryUnevaluatedNote("fix-gate", fgr.unevaluated, UNEVAL_TAIL_STRICT);
-    emit(advisoryAnswer(fgr, fgUnan));
+    emit(advisoryAnswer(fgr, fgUnan, fgComp.judgedNothing));
     process.exit(fgUnan.length || fgr.unevaluated?.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
     break; // unreachable
   }
@@ -1445,12 +1618,16 @@ switch (cmd) {
     // entire job is "your green gate is not provably green" was certifying a set it knows it cannot see all
     // of. A function in an unparsed file is absent from `functions`, so it cannot be enumerated as an
     // unverified pass — and that absence is exactly what this verb would have to report.
-    const uUnan = reportUnanalyzed(prefix);
+    const uComp = reportCompleteness(prefix);
+    const uUnan = uComp.unanalyzed;
     if (uUnan.length) advisoryIncompleteNote("unverified", uUnan);
+    // ⟨0.28⟩ …and the count-0 cause. MEASURED before this line: `{ok: true, unverified: []}` over a report
+    // that judged nothing — this verb certifying a package it never examined. The exit is untouched.
+    if (uComp.judgedNothing) advisoryJudgedNothingNote("unverified");
     // ⟨0.24⟩ SPEC §3.2 `4fd140c` — the function the gate could not judge is NAMED in `unverified` above,
     // with the missing evidence as its reason; this is the human channel for the same fact.
     if (r.unevaluated?.length) advisoryUnevaluatedNote("unverified", r.unevaluated, UNEVAL_TAIL_STRICT);
-    emit(advisoryAnswer(r, uUnan));
+    emit(advisoryAnswer(r, uUnan, uComp.judgedNothing));
     process.exit(uUnan.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
     break; // unreachable
   }

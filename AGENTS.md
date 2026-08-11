@@ -97,6 +97,20 @@ answers `path: []`, all at exit 0 — those are determined negatives, and they a
 and *there is no such function* (stderr, and NO `unanswerable` key — a graph WAS read). If you generate
 query targets, read exit 2 + `no function matching` as **fix the name**, never as a finding.
 
+⟨0.28⟩ **And the REPORT-ONLY verbs — `where`, `map`, `blindspots`, `reachable`, `containment`, `tour` —
+carry the report's own ⟨0.21⟩ manifest instead**, because they have no call graph to be missing and their
+empty answer is the whole of the harm: `{"directly":[],"inherited":[]}`, `{}`,
+`{"sources":[],"totalUnknown":0}`, `{"entryPoints":0,"effects":{}}`, `{"contained":[],"ambient":{}}`,
+`{"reaches":[]}`. Over a report declaring a non-empty `unanalyzed` **or** `analyzed.count: 0` they add
+`"incomplete": true` (plus `unanalyzed` / `"judgedNothing": true`, naming which cause — the two want
+different repairs) to the SAME document, and the human arm withdraws its ✓. **The exit code does NOT
+move**: this rung is a caveat, not a refusal, so `if (!doc.incomplete)` is the guard and the exit is not.
+Same keys on the MCP tools (`candor_where`, `candor_map`, `candor_blindspots`, `candor_reachable`,
+`candor_containment`) and on the advisory verbs (`unverified`, `fix-gate`, `whatif`), which additionally
+OMIT `ok`. Over a COMPLETE report the answer is byte-identical to a pre-⟨0.28⟩ one — no key, no note —
+and `analyzed.count > 0` with `functions: []` is deliberately NOT hedged: that is a genuine all-pure
+claim (§2 rule 3) you should believe.
+
 A dist-CJS export unit (a `module.exports` surface scanned with `--allow-js`) carries
 `unitKind: "export"` (spec 0.8, informative); ordinary functions omit the field.
 

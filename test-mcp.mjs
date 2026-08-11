@@ -877,5 +877,60 @@ fs.rmSync(W, { recursive: true, force: true });
   fs.rmSync(B, { recursive: true, force: true });
 }
 
+// ---- ⟨0.28⟩ SPEC §2 — THE ⟨0.21⟩ MANIFEST REACHES THE AGENT CHANNEL TOO --------------------------
+// The CLI and this server are ONE implementation, so a caveat shipped on one of them is a caveat the
+// other silently drops. MEASURED here before the fix, over the standard post-failure artifact
+// (`analyzed.count: 0` + a non-empty `unanalyzed`): `candor_where` → `{"directly":[],"inherited":[]}`,
+// `candor_map` → `{}`, `candor_blindspots` → `{"sources":[],"totalUnknown":0}`, `candor_reachable` →
+// `{"entryPoints":0,"effects":{}}`, `candor_containment` → `{"contained":[],"ambient":{}}` — five flat
+// all-clears. The agent is the consumer that CANNOT ASK A FOLLOW-UP QUESTION: a loop reading
+// `sources.length === 0` records "no blind spots" and moves on. (`candor_show`/`candor_impact` already
+// fail closed here on the fn-existence guard, which is why they are not in this matrix.)
+{
+  const A = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-desc-"));
+  // Its own scan: the top-of-file fixture `W` is removed long before this block, and reusing a deleted
+  // prefix would make every row below pass on a tool error rather than on an answer.
+  fs.writeFileSync(`${A}/app.ts`, `import * as http from "node:http";
+export function leaf(): void { http.get("http://x"); }
+export function mid(): void { leaf(); }
+`);
+  execFileSync("node", [`${HERE}/scan.mjs`, `${A}/app.ts`, `${A}/base`], { stdio: "ignore" });
+  const P = `${A}/base`;
+  const src = JSON.parse(fs.readFileSync(`${P}.json`, "utf8"));
+  const mk = (name, mut) => { const doc = JSON.parse(JSON.stringify(src)); mut(doc);
+                              fs.writeFileSync(`${A}/${name}.json`, JSON.stringify(doc)); return `${A}/${name}`; };
+  const armedP = mk("armed", (o) => { o.functions = []; o.analyzed = { count: 0 };
+                                      o.unanalyzed = [{ path: "src/gone.ts", reason: "parse error" }]; });
+  const c0P = mk("count0", (o) => { o.functions = []; o.analyzed = { count: 0 }; delete o.unanalyzed; });
+  const pureP = mk("allpure", (o) => { o.functions = []; o.analyzed = { count: 9 }; delete o.unanalyzed; });
+  const TOOLS5 = [["candor_where", { effect: "Net" }], ["candor_map", {}], ["candor_blindspots", {}],
+                  ["candor_reachable", {}], ["candor_containment", {}]];
+  const callAll = async (pfx) => {
+    const rs = await mcpSession(TOOLS5.map(([name, a], i) =>
+      ({ jsonrpc: "2.0", id: i + 1, method: "tools/call", params: { name, arguments: { ...a, report: pfx } } })));
+    const by = Object.fromEntries(rs.map((r) => [r.id, r]));
+    return TOOLS5.map(([name], i) => [name, JSON.parse(by[i + 1].result.content[0].text)]);
+  };
+  // A + D: BOTH causes. `unanalyzed` says candor could not READ a file; `analyzed.count: 0` says it
+  // reached no conclusion and therefore names no file at all — a manifest-only reader sees that second
+  // one as a complete report, which is exactly how it stayed invisible.
+  for (const [cause, pfx, wantUnan] of [["an armed", armedP, true], ["a count-0, NO-`unanalyzed`,", c0P, false]])
+    for (const [name, doc] of await callAll(pfx))
+      ok(`⟨0.28⟩ ${name} over ${cause} report carries \`incomplete: true\` — an agent cannot otherwise tell "nobody performs this" from "nothing was examined"`,
+         doc.incomplete === true && doc.judgedNothing === true
+         && (wantUnan ? doc.unanalyzed?.length === 1 : !("unanalyzed" in doc)),
+         JSON.stringify(doc).slice(0, 240));
+  // B: an INTACT report is untouched — a hedge on every call is one an agent learns to ignore.
+  for (const [name, doc] of await callAll(P))
+    ok(`⟨0.28⟩ CONTROL: ${name} over an INTACT report is unhedged — its pinned shape is unchanged`,
+       !("incomplete" in doc) && !("judgedNothing" in doc), JSON.stringify(doc).slice(0, 200));
+  // …and the ⟨0.24⟩ mirror: `analyzed.count: 9` with `functions: []` is a purity CLAIM rule 3 requires a
+  // consumer to believe, not a silence. Hedging it would withdraw the claim this rung exists to protect.
+  for (const [name, doc] of await callAll(pureP))
+    ok(`⟨0.28⟩ CONTROL: ${name} over an ALL-PURE report (\`analyzed.count: 9\`, \`functions: []\`) does NOT hedge`,
+       !("incomplete" in doc), JSON.stringify(doc).slice(0, 200));
+  fs.rmSync(A, { recursive: true, force: true });
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
