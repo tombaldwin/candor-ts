@@ -108,6 +108,10 @@ const P = {
     if (d.inherited.length) { console.log(`  reach it transitively (${d.inherited.length}):`); rows(d.inherited); }
   },
   callers: (d) => {
+    // ⟨0.28⟩ UNREACHABLE FROM THE CLI since the callers verb split the empty-`of` case into its two real
+    // causes below (no graph at all -> `unanswerable`, exit 2; a name absent from a real graph -> "no
+    // function matching", exit 2). Kept as a renderer guard only; do NOT route a new caller through it —
+    // this sentence is a determined negative and is the wrong answer when there is no call graph.
     if (!d.of.length) { console.log("candor: no function in the call graph matches that name."); return; }
     console.log(`candor callers — who reaches \`${d.of.join("`, `")}\`:`);
     console.log(`  direct callers (${d.direct.length}): ${csv(d.direct)}`);
@@ -909,7 +913,42 @@ switch (cmd) {
     // A nonexistent function is a LOUD error (exit 2), like path/impact — never an empty {of:[],direct:[],
     // transitive:[]} at exit 0, which reads as an authoritative "nothing calls it" for a fn that doesn't exist
     // (corpus-audit #3). Gated on a NON-empty callgraph so a missing sidecar isn't misreported as "no such fn".
-    if (Object.keys(cg).length > 0 && cres.of.length === 0) {
+    if (cres.of.length === 0) {
+      // ⟨0.28⟩ UNANSWERABLE MUST REACH THE MACHINE CHANNEL (SPEC §3.3.1). This branch printed
+      // `{"of":[],"direct":[],"transitive":[]}` at exit 0 while the human arm said "no function in the
+      // call graph matches that name" — and BOTH readings are a determined negative, which is worse than
+      // the reference engines' split: rust/java's human arm at least said "no call graph in the report".
+      // A consumer reading `direct`, or defaulting it (the fail-open idiom ⟨0.24⟩ names on every key in
+      // this format), is told NOBODY CALLS this function: a blast radius of "safe to edit" over a pair
+      // whose honest answer is "this run judged nothing". The ⟨0.28⟩ sidecar rule (scan.mjs, which
+      // deletes the §2.2 sidecars with an armed report) did not dig this hole — an absent sidecar has
+      // always answered this way — it aimed traffic at it by making no-sidecar the STANDARD state after
+      // a failed run.
+      //
+      // BOTH CHANNELS FAIL CLOSED: the document names itself unanswerable AND the exit is non-zero.
+      // §3.3.1 permits either, but each ALONE leaves a naive reader exposed — the key alone still lets
+      // `d.direct ?? []` read as a determined negative, and the exit alone leaves a JSON consumer
+      // holding an empty document. Same shape as rust `358e117` / java `927252c`.
+      //
+      // ONLY THIS ARM, and the control separation is the load-bearing half. An EMPTY graph means there
+      // is no call graph AT ALL (no §2.2 sidecar, and ⟨0.24⟩ rules an empty/unparseable one identical to
+      // an absent one), which is the unanswerable case. A function with genuinely no callers over a REAL
+      // graph still answers `direct: []` at exit 0 below — a determined negative, and withdrawing it
+      // would be the mirror defect (the ⟨0.24⟩ count-0 lesson) — and a name absent from a real graph
+      // still exits 2 as "no function matching", because a graph WAS read there.
+      //
+      // ONE SITE, MEASURED NOT ASSUMED: the rust reference had this branch twice (callers_via_callgraph
+      // + the frontier variant) and warned to grep for both; candor-ts folds `--include-unknown` through
+      // this same block via `callersFrontier`, so `grep -n 'coreCallers\|callersFrontier' query.mjs`
+      // finds exactly one CALL site (plus the import). Verified through the flag as well: `--json
+      // --include-unknown` discloses too. The MCP surface was measured, not assumed, and already fails
+      // closed — `candor_callers` over an armed pair returns `isError: true` from mcp.mjs's fn-existence
+      // guard, which unions the callgraph keys with the report's fns, both empty here.
+      if (Object.keys(cg).length === 0) {
+        const why = "no call graph in the report — the §2.2 sidecar is absent, so who calls this function is UNANSWERABLE, not empty (SPEC §3.3.1 ⟨0.28⟩)";
+        put(args, { of: [q], unanswerable: why }, () => console.log(`candor: ${why}`));
+        process.exit(2);
+      }
       console.error(`candor-ts-query callers: no function matching '${q}' in the call graph`); process.exit(2);
     }
     put(args, cres, P.callers);

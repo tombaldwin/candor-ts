@@ -80,6 +80,12 @@ leaves that fail-closed shape (`functions: []`, `analyzed.count: 0`, a non-empty
 two together: **a sidecar whose report is one of these empties tells you nothing, whatever it says.**
 Re-scan; do not conclude from either half.
 
+⟨0.28⟩ **And `callers` SAYS so in the machine channel over such a pair** — `{"of": […], "unanswerable":
+"<why>"}` at **exit 2**, never an empty `direct` at exit 0. An empty `direct` means *nothing calls this*;
+with no call graph the engine does not know that, so do not read `d.direct ?? []` without checking
+`unanswerable` first. A function that genuinely has no callers over a REAL graph still answers
+`direct: []` at exit 0 — that one is a determined negative, and it is correct.
+
 A dist-CJS export unit (a `module.exports` surface scanned with `--allow-js`) carries
 `unitKind: "export"` (spec 0.8, informative); ordinary functions omit the field.
 

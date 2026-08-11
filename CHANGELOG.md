@@ -18,6 +18,22 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   NOT taken: a gate verdict is the verdict sink's own document. The sidecars follow only if the report
   write SUCCEEDED, and an orphan handed back by the ⟨0.28⟩ disarm brings its sidecars back with it.
   Conformance PART 37 (d) SKIP → PASS.
+- **⚠ ⟨0.28⟩ `callers` discloses UNANSWERABLE in the machine channel** (SPEC §3.3.1). Deleting the
+  sidecar with the armed report (above) removes the confidently WRONG answer; it does not by itself
+  produce an honest one. `callers <f> --json` over an armed pair answered
+  `{"of":[],"direct":[],"transitive":[]}` at exit 0 while the human arm said "no function in the call
+  graph matches that name" — both determined negatives. A consumer reading `direct`, or defaulting it
+  (the fail-open idiom ⟨0.24⟩ names on every key in this format), was told NOBODY CALLS this function:
+  "safe to edit" over a pair whose honest answer is "this run judged nothing". Now
+  `{"of": […], "unanswerable": "<why>"}` AND exit 2, in both channels and on the `--include-unknown`
+  frontier arm too — §3.3.1 permits either, but the key alone still lets `d.direct ?? []` read as a
+  determined negative and the exit alone leaves a JSON consumer holding an empty document (matching
+  candor-rust `358e117` / candor-java `927252c`). **Only "no graph at all" is unanswerable**: a function
+  with genuinely no callers over a complete graph still answers `direct: []` at exit 0, and a name absent
+  from a real graph is still `no function matching` at exit 2 — three control rows pin that, so the fix
+  cannot decay into `callers` refusing everything. The MCP `candor_callers` already failed closed here
+  (`isError: true` from its fn-existence guard), measured rather than assumed.
+  Conformance PART 37 (e) SKIP → PASS.
 - **⚠ ⟨0.28⟩ never reached the `gate --report` verb** (`query.mjs` has its own argv pre-pass, and the rung
   went into `scan.mjs` only). Measured: exit 1, red verdict at the last sink, a pre-seeded `{"ok": true}`
   untouched at the first. Conformance PART 36 (b21).

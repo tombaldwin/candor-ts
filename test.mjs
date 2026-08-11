@@ -9215,6 +9215,31 @@ export function all(db: DatabaseSync, o: any) {
   check("⟨0.28⟩ sidecar: an ORPHAN report armed under the same prefix loses ITS sidecar as well — the rule is per REPORT, not per `--out` value",
         !there(`${pfx}.orphanA.callgraph.json`), "the orphan's callgraph is still there");
 
+  // ── ⟨0.28⟩ …AND UNANSWERABLE REACHES THE MACHINE CHANNEL (SPEC §3.3.1). Deleting the sidecar removes
+  // the confidently WRONG answer above; it does not by itself produce an honest one. The absence arm was
+  // `{"of":[],"direct":[],"transitive":[]}` at exit 0 while the human arm said "no function in the call
+  // graph matches that name" — and BOTH of those are determined negatives. A consumer reading `direct`,
+  // or DEFAULTING it (the fail-open idiom ⟨0.24⟩ names on every key in this format), is told NOBODY CALLS
+  // `f`: "safe to edit" over a pair whose honest answer is "this run judged nothing". §3.3.1 permits an
+  // `unanswerable` key OR a non-zero exit; BOTH are asserted, because each alone leaves a naive reader
+  // exposed — the key alone still lets `d.direct ?? []` read as a determined negative, the exit alone
+  // leaves a JSON consumer holding an empty document. Conformance PART 37 row (e) pins the same thing.
+  const callersQ = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), "callers", ...a, "--report", pfx], { encoding: "utf8" });
+  for (const flags of [[], ["--include-unknown"]]) {
+    const lbl = flags.length ? " (--include-unknown — the frontier arm routes through the same block)" : "";
+    const aj = callersQ("src.app.f", ...flags, "--json");
+    let doc = null; try { doc = JSON.parse(aj.stdout); } catch { /* stays null → the row fails loudly */ }
+    check(`⟨0.28⟩ callers --json over an armed pair carries \`unanswerable\` and NO \`direct\`/\`transitive\`${lbl}`,
+          !!doc && typeof doc.unanswerable === "string" && doc.unanswerable.length > 0 && !("direct" in doc) && !("transitive" in doc),
+          `${aj.stdout}`.slice(0, 220));
+    check(`⟨0.28⟩ …and exits non-zero, so an exit-only consumer fails closed too${lbl}`,
+          aj.status !== 0, `status=${aj.status}`);
+    const ah = callersQ("src.app.f", ...flags, "--text");
+    check(`⟨0.28⟩ …and the human arm says there is NO CALL GRAPH (not "no such function"), same non-zero exit${lbl}`,
+          ah.status !== 0 && /no call graph in the report/.test(ah.stdout),
+          `status=${ah.status} ${ah.stdout}`.slice(0, 220));
+  }
+
   // RECOVERY. The absence arm is a state a completing run leaves, not a state it gets stuck in.
   // A SECOND orphan, seeded here so the run that arms it is the one that COMPLETES: only a completing
   // run reaches `disarmUnwrittenOutReports`, which is what hands an unowned report back.
@@ -9226,6 +9251,30 @@ export function all(db: DatabaseSync, o: any) {
   check("⟨0.28⟩ sidecar: a recovering run writes all three back, and the call graph now answers `h` — the caller the stale sidecar hid",
         rec.status === 0 && sidecars(pfx).every(there) && (cg["src.app.h"] ?? []).includes("src.app.f") && (cg["src.app.g"] ?? []).includes("src.app.f"),
         `status=${rec.status} ${JSON.stringify(cg).slice(0, 200)}`);
+
+  // THE CONTROLS ON THE RECOVERED PAIR, and they are the load-bearing half of the machine-channel rows
+  // above: ONLY "no graph at all" is unanswerable. A fn that really has no callers over a COMPLETE graph
+  // must still answer `direct: []` at exit 0 — a DETERMINED negative, and withdrawing it would be the
+  // mirror defect (the ⟨0.24⟩ count-0 lesson, where the plausible fix withdrew 104 real claims to catch
+  // 6). A name absent from a real graph must still be the "no function matching" error, because a graph
+  // WAS read. Without these three rows the fix is indistinguishable from `callers` refusing everything.
+  const okReal = callersQ("src.app.f", "--json");
+  let okDoc = null; try { okDoc = JSON.parse(okReal.stdout); } catch { /* stays null */ }
+  check("⟨0.28⟩ CONTROL: over the RECOVERED pair `callers` still answers the real blast radius at exit 0",
+        okReal.status === 0 && !!okDoc && !("unanswerable" in okDoc)
+          && okDoc.direct.includes("src.app.g") && okDoc.direct.includes("src.app.h"),
+        `status=${okReal.status} ${okReal.stdout}`.slice(0, 220));
+  const lonely = callersQ("src.app.main", "--json");
+  let lonelyDoc = null; try { lonelyDoc = JSON.parse(lonely.stdout); } catch { /* stays null */ }
+  check("⟨0.28⟩ CONTROL: a fn with GENUINELY no callers over a complete graph still answers `direct: []` at exit 0 — a determined negative, not a refusal",
+        lonely.status === 0 && !!lonelyDoc && !("unanswerable" in lonelyDoc)
+          && lonelyDoc.direct.length === 0 && lonelyDoc.transitive.length === 0 && lonelyDoc.of.includes("src.app.main"),
+        `status=${lonely.status} ${lonely.stdout}`.slice(0, 220));
+  const nofn = callersQ("zzzNoSuchFn", "--json");
+  check("⟨0.28⟩ CONTROL: a nonexistent fn over a REAL graph is still `no function matching` at exit 2 — not the unanswerable disclosure (a graph WAS read; the name is not in it)",
+        nofn.status === 2 && /no function matching/.test(nofn.stderr) && !/unanswerable/.test(nofn.stdout + nofn.stderr),
+        `status=${nofn.status} ${nofn.stdout}${nofn.stderr}`.slice(0, 220));
+
   // …and the orphan is handed back WHOLE. Restoring the report while leaving its sidecars deleted is a
   // third state neither the pre-run tree nor the armed tree ever had.
   check("⟨0.28⟩ sidecar: the ORPHAN this run turned out not to own comes back with its sidecar — report AND callgraph byte-identical",

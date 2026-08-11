@@ -366,10 +366,18 @@ const outArmedSidecars = [];
 //   callers f  ->  exit 0, direct: ["src.app.g"], transitive: ["src.app.g", "src.app.main"]
 //
 // Confident, exit 0, and WRONG: `h` calls `f` too, and an agent reads that as safe-to-edit. After this
-// change the same query takes its absence arm ("no function in the call graph matches that name") and a
-// recovering run answers `g` AND `h`. NOT the whole of ⟨0.28⟩: the CONSUMER half — the pairing rule,
-// which makes a verb reading a sidecar whose report is a Row-1 empty SAY so rather than answer emptily —
-// is a separate clause this engine has not implemented, and the `--json` channel is silent here.
+// change the same query has no graph to answer from, and a recovering run answers `g` AND `h`.
+//
+// THE CONSUMER HALF IS NOW IMPLEMENTED TOO, and this paragraph used to record that it was not — which is
+// exactly how a limitation written as a comment reads as handled and stops being measured. Deleting the
+// sidecar removes the confidently WRONG answer; it does not by itself produce an honest one. The absence
+// arm here was an EMPTY caller set at exit 0 — human-fine, machine-silent, the split that makes a defect
+// a cardinal sin. `callers` (query.mjs) now emits an `unanswerable` key AND exits 2 over a pair with no
+// §2.2 sidecar; conformance PART 37 row (e) pins it. STILL OPEN, named so it stays measured: the
+// report-only DESCRIPTIVE verbs (`map`/`show`/`blindspots`/`where`/`reachable`/`containment`/`tour`, and
+// on this engine also `impact`/`path`, which fail closed on candor-java) answer flat at exit 0 over an
+// armed report. That is a rung of its own — it wants the ⟨0.21⟩ manifest forwarded into descriptive-verb
+// JSON — not a patch to this one.
 //
 // DELETED RATHER THAN `{}`, and NOT by reading the report's own anti-deletion rule (§3.3.1) across. That
 // rule exists because a consumer treating a missing REPORT as "nothing to report" fails open. No sidecar
