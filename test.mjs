@@ -9630,8 +9630,9 @@ export function all(db: DatabaseSync, o: any) {
       // The OTHER channel, and it is asserted separately on purpose: "no Unknown sources ✓" IS the prose
       // spelling of the empty JSON, so a fix that leaves the sentence standing MOVES the false all-clear.
       const h = dq(argv, pfx, "--text");
-      check(`⟨0.28⟩ …and the HUMAN arm of ${label} withdraws its reassurance and prints the INCOMPLETE note`,
-            hedgeRe.test(h.stdout) && !calmRe.test(h.stdout) && /⚠ INCOMPLETE/.test(h.stderr),
+      check(`⟨0.28⟩ …and the HUMAN arm of ${label} withdraws its reassurance and prints the INCOMPLETE note ON STDOUT with the answer it qualifies — a caveat on the other stream is one \`2>/dev/null\` from gone (java's words; swift reverted exactly this stderr choice; ts was the last outlier)`,
+            hedgeRe.test(h.stdout) && !calmRe.test(h.stdout) && /⚠ INCOMPLETE/.test(h.stdout)
+              && !/INCOMPLETE/.test(h.stderr),
             `out=${h.stdout}`.slice(0, 200) + ` err=${h.stderr}`.slice(0, 200));
     }
 
@@ -9639,8 +9640,8 @@ export function all(db: DatabaseSync, o: any) {
     // makes `unanalyzed` an exit-2 gate cause; ⟨0.24⟩ makes count-0 an exit-0 one. A warning that sends the
     // reader to a job which then passes teaches them the warning is noise.
     check(`⟨0.28⟩ …and ${label}'s note says the gate REFUSES over \`unanalyzed\` and that NOTHING catches a count-0 report — the two causes get opposite sentences`,
-          /gate --report` exits 2 over these bytes/.test(dq(argv, armedP, "--text").stderr)
-            && /NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU/.test(dq(argv, count0P, "--text").stderr));
+          /gate --report` exits 2 over these bytes/.test(dq(argv, armedP, "--text").stdout)
+            && /NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU/.test(dq(argv, count0P, "--text").stdout));
 
     // B — THE CONTROL. Over an INTACT report the answer is byte-identical, on both channels, and no
     // stderr note appears. candor-rust's first draft of this rung silently RE-SORTED two of these
@@ -9790,10 +9791,11 @@ export function all(db: DatabaseSync, o: any) {
           `${r.stdout}`.slice(0, 300));
     check("⟨0.28⟩ …and gains still exits 0 over it — advisory by default, and this rung adds a caveat, never a verdict",
           r.status === 0, `status=${r.status}`);
-    check("⟨0.28⟩ …and gains says it on the HUMAN channel too, naming the BASELINE as the soft half — the mutant this family keeps building keeps exactly one of these two",
-          /⚠ INCOMPLETE/.test(gq(intactP, partialP, "--text").stderr)
-            && /BASELINE half of this comparison/.test(gq(intactP, partialP, "--text").stderr),
-          `${gq(intactP, partialP, "--text").stderr}`.slice(0, 240));
+    check("⟨0.28⟩ …and gains says it on the HUMAN channel too — on STDOUT, with the answer it qualifies — naming the BASELINE as the soft half",
+          /⚠ INCOMPLETE/.test(gq(intactP, partialP, "--text").stdout)
+            && /BASELINE half of this comparison/.test(gq(intactP, partialP, "--text").stdout)
+            && !/INCOMPLETE/.test(gq(intactP, partialP, "--text").stderr),
+          `${gq(intactP, partialP, "--text").stdout}`.slice(0, 240));
   }
   // The CURRENT half, under BOTH causes — the side that makes the gained set SHORT.
   for (const [cause, pfx, wantUnan] of [["an armed", armedP, true], ["a count-0, NO-`unanalyzed`,", count0P, false]]) {

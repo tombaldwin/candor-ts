@@ -126,17 +126,25 @@ const gateLine = (comp) => (comp.unanalyzed.length
 // The HUMAN half. A no-op when there is nothing to disclose, so an ordinary run stays byte-identical, and
 // printed BEFORE the answer because it qualifies a NON-EMPTY result as much as an empty one: a function in
 // an unread file performs the effect or does not, and no list below can say which.
+//
+// ON STDOUT, WITH THE ANSWER IT QUALIFIES — this engine had it on stderr, alone against three: java
+// documents stdout as deliberate ("a caveat on the other stream is one `2>/dev/null` from gone"), and
+// swift's log records catching and REVERTING exactly this stderr choice after diffing against rust. The
+// caveat and the answer must travel the same pipe, or a `2>/dev/null` consumer keeps the reassurance and
+// loses its withdrawal. Every caller is on the PROSE branch (`putAnswer`'s else-arm, `tour`'s human arm,
+// `gains`' else-arm), so stdout is never carrying a JSON document when this prints — JSON-mode runs take
+// the machine half (`completenessFields`) instead and this function is not called at all.
 const incompleteAnswerNote = (comp, soWhat, tail) => {
   if (!mustHedge(comp)) return;
   const head = comp.unanalyzed.length
     ? `the report(s) under this locator declare ${comp.unanalyzed.length} unit(s) candor could not analyze`
       + (comp.judgedNothing.length ? ", and judged NOTHING at all (`analyzed.count: 0`)" : "")
     : "the report(s) under this locator say they JUDGED NOTHING (`analyzed.count: 0`)";
-  console.error(`candor-ts: ⚠ INCOMPLETE — ${head}, so ${soWhat}:`);
-  for (const u of comp.unanalyzed) console.error(`    ${u.path}${u.reason ? `  (${u.reason})` : ""}`);
+  console.log(`candor-ts: ⚠ INCOMPLETE — ${head}, so ${soWhat}:`);
+  for (const u of comp.unanalyzed) console.log(`    ${u.path}${u.reason ? `  (${u.reason})` : ""}`);
   if (comp.judgedNothing.length)
-    console.error("    (a report that judged nothing names no function at all — its silence is not a purity claim about any unit)");
-  console.error(`    ${tail} ${gateLine(comp)}`);
+    console.log("    (a report that judged nothing names no function at all — its silence is not a purity claim about any unit)");
+  console.log(`    ${tail} ${gateLine(comp)}`);
 };
 
 // The MACHINE half. Spread LAST so the verb's own pinned key order is untouched (JS objects keep insertion
