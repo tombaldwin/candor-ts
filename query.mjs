@@ -130,11 +130,11 @@ const incompleteAnswerNote = (comp, soWhat, tail) => {
   if (!mustHedge(comp)) return;
   const head = comp.unanalyzed.length
     ? `the report(s) under this locator declare ${comp.unanalyzed.length} unit(s) candor could not analyze`
-      + (comp.judgedNothing ? ", and judged NOTHING at all (`analyzed.count: 0`)" : "")
+      + (comp.judgedNothing.length ? ", and judged NOTHING at all (`analyzed.count: 0`)" : "")
     : "the report(s) under this locator say they JUDGED NOTHING (`analyzed.count: 0`)";
   console.error(`candor-ts: ⚠ INCOMPLETE — ${head}, so ${soWhat}:`);
   for (const u of comp.unanalyzed) console.error(`    ${u.path}${u.reason ? `  (${u.reason})` : ""}`);
-  if (comp.judgedNothing)
+  if (comp.judgedNothing.length)
     console.error("    (a report that judged nothing names no function at all — its silence is not a purity claim about any unit)");
   console.error(`    ${tail} ${gateLine(comp)}`);
 };
@@ -1553,7 +1553,7 @@ switch (cmd) {
     // ⟨0.28⟩ …and the count-0 cause, which reaches here through a LIVE §2.2 sidecar: the target resolves
     // over the call graph, so this verb answers `ok: true` where the report-only verbs exit 2 on the name.
     // MEASURED exactly so — the pre-edit gate check, green, over a report that judged nothing.
-    if (wcomp.judgedNothing) advisoryJudgedNothingNote("whatif");
+    if (wcomp.judgedNothing.length) advisoryJudgedNothingNote("whatif");
     emit(advisoryAnswer(r, wunan, wcomp.judgedNothing));
     process.exit(r.violations.length ? 1 : 0);
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
@@ -1606,7 +1606,7 @@ switch (cmd) {
     // ⟨0.28⟩ …and the count-0 cause, which reaches the DOCUMENT and the PROSE but deliberately NOT the exit
     // below (see `advisoryAnswer`). Leaving it out would have let this verb print a remedy list beside
     // `ok: true` over a report that judged nothing — the same false all-clear, arriving by omission.
-    if (fgComp.judgedNothing) advisoryJudgedNothingNote("fix-gate");
+    if (fgComp.judgedNothing.length) advisoryJudgedNothingNote("fix-gate");
     // ⟨0.24⟩ SPEC §3.2 `4fd140c` — and the same posture for a rule the GATE refused: no remedy is computed
     // from evidence the gate declined to read, the refusal is disclosed on both channels, and `--strict`
     // exits 2 (could-not-evaluate) rather than the 0 that would read as "no crossings left to fix".
@@ -1649,7 +1649,7 @@ switch (cmd) {
     if (uUnan.length) advisoryIncompleteNote("unverified", uUnan);
     // ⟨0.28⟩ …and the count-0 cause. MEASURED before this line: `{ok: true, unverified: []}` over a report
     // that judged nothing — this verb certifying a package it never examined. The exit is untouched.
-    if (uComp.judgedNothing) advisoryJudgedNothingNote("unverified");
+    if (uComp.judgedNothing.length) advisoryJudgedNothingNote("unverified");
     // ⟨0.24⟩ SPEC §3.2 `4fd140c` — the function the gate could not judge is NAMED in `unverified` above,
     // with the missing evidence as its reason; this is the human channel for the same fact.
     if (r.unevaluated?.length) advisoryUnevaluatedNote("unverified", r.unevaluated, UNEVAL_TAIL_STRICT);

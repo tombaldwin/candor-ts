@@ -350,6 +350,13 @@ const TOOLS = {
       // caveat is ADDITIVE (the two existing keys keep their shape and meaning, and the field is absent
       // on every ordinary report) because the verdict itself must not move: the report asserts no effect,
       // so asserting one here would be the fabrication mirror of the silence being disclosed.
+      //
+      // `judgedNothing: true` — a BOOLEAN here, deliberately, where the answer/advisory documents carry
+      // the ARRAY of report paths (`completenessFields`; the rust/java/swift wire shape ⟨0.28⟩ moved this
+      // engine to). This tool's document is ONE gate verdict about ONE locator, no sibling engine serves
+      // this surface, and the `caveat` prose beside the flag carries the "why". The array spelling
+      // governs everywhere the four engines can be diffed; this flag predates it and its consumers key
+      // on `=== true`.
       const judged = g.judgedNothing ? { judgedNothing: true,
         caveat: "⟨0.24⟩ this report judged NOTHING (`analyzed.count` is 0, absent with no entries, or unreadable) — "
               + "a green verdict here certifies nothing: absence from `functions` licenses no purity claim about any "

@@ -345,14 +345,25 @@ export const claimsToHaveJudgedNothing = (parsed, fns) => {
 export function reportJudgedNothing(prefix) {
   const files = reportFilesAt(prefix);
   if (!files.length) return false;
-  return files.every((f) => {
-    let parsed;
-    try { parsed = JSON.parse(fs.readFileSync(f, "utf8")); } catch { return true; }   // unreadable → no claim
-    // The raw entries, read QUIETLY: this is an advisory, and its caller has already run the loud loader
-    // over the same bytes, so re-disclosing a malformed shape here would double every such line.
-    const raw = parsed && typeof parsed === "object" && parsed.functions !== undefined ? parsed.functions : parsed;
-    return claimsToHaveJudgedNothing(parsed, Array.isArray(raw) ? raw : []);
-  });
+  return files.every(fileClaimsJudgedNothing);
+}
+// The per-FILE question the two prefix-level readers above and below share — extracted so the boolean
+// (the gate's ANDed "did this locator judge anything at all") and the ⟨0.28⟩ disclosure (WHICH member
+// files judged nothing) cannot drift into two readings of the same integer.
+function fileClaimsJudgedNothing(f) {
+  let parsed;
+  try { parsed = JSON.parse(fs.readFileSync(f, "utf8")); } catch { return true; }   // unreadable → no claim
+  // The raw entries, read QUIETLY: this is an advisory, and its caller has already run the loud loader
+  // over the same bytes, so re-disclosing a malformed shape here would double every such line.
+  const raw = parsed && typeof parsed === "object" && parsed.functions !== undefined ? parsed.functions : parsed;
+  return claimsToHaveJudgedNothing(parsed, Array.isArray(raw) ? raw : []);
+}
+/** ⟨0.28⟩ The report FILES under a locator that say they judged nothing — one path per file, the shape
+ *  the disclosure carries (see `completenessFields`). PER FILE, not the ANDed prefix answer: a locator
+ *  naming several members must disclose EACH silent one by name (rust `report_completeness`, java
+ *  `ReportCompleteness` — "one label per report file declaring `analyzed.count: 0`"). */
+export function reportJudgedNothingFiles(prefix) {
+  return reportFilesAt(prefix).filter(fileClaimsJudgedNothing);
 }
 
 // Load ONE report file → { entries, hardFail }. A read/parse throw, or an empty result over a doc that
@@ -440,7 +451,10 @@ export function reportUnanalyzed(prefix) {
  * uncovered.
  */
 export function reportCompleteness(prefix) {
-  return { unanalyzed: reportUnanalyzed(prefix), judgedNothing: reportJudgedNothing(prefix) };
+  // `judgedNothing` is the PER-FILE list, not the ANDed boolean the gate asks: the disclosure names
+  // WHICH report judged nothing, so a locator with one silent member among several still hedges — the
+  // semantics rust and java pin, and a repair the reader can aim (that file, not "somewhere here").
+  return { unanalyzed: reportUnanalyzed(prefix), judgedNothing: reportJudgedNothingFiles(prefix) };
 }
 
 /**
@@ -455,7 +469,7 @@ export function reportCompleteness(prefix) {
  * predicate and stops at the exit code; see `advisoryAnswer`, whose exit-bearing callers still key their
  * `--strict` on the manifest alone.
  */
-export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing));
+export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing?.length));
 
 /**
  * ⟨0.28⟩ The disclosure KEYS, defined ONCE, for spreading into a verb's answer document — `{}` when there
@@ -469,13 +483,22 @@ export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing
  * both; `judgedNothing`/`unanalyzed` name WHICH, because the two want different repairs — one wants a scan
  * that can READ a file, the other a scan that reached a conclusion. Each is omitted when it does not
  * apply, so a document raised by `unanalyzed` alone stays byte-identical to the pre-⟨0.28⟩ advisory shape.
- * `judgedNothing: true` is the spelling the MCP gate tool already uses (⟨0.24⟩), not a second one.
+ *
+ * `judgedNothing` is the ARRAY OF REPORT PATHS, the shape rust, java and swift all emit — this engine
+ * first shipped `judgedNothing: true`, reusing the MCP gate tool's spelling, and a consumer doing
+ * `doc.judgedNothing.length` got a TypeError here while one doing `=== true` missed the other three.
+ * The array also answers a question the boolean cannot: WHICH report judged nothing, over a multi-report
+ * locator. The two spellings now deliberately differ because they are different surfaces: THIS key rides
+ * answer/advisory documents and is the cross-engine wire shape; the MCP gate tool's `judgedNothing: true`
+ * (mcp.mjs) is a flag on ONE gate verdict about ONE locator, where "which file" is carried by the
+ * adjacent ⟨0.24⟩ prose and no sibling engine serves that tool — the wire shape governs everywhere the
+ * engines can be diffed.
  */
 export function completenessFields(c) {
   if (!mustHedge(c)) return {};
   return { incomplete: true,
            ...(c.unanalyzed?.length ? { unanalyzed: c.unanalyzed } : {}),
-           ...(c.judgedNothing ? { judgedNothing: true } : {}) };
+           ...(c.judgedNothing?.length ? { judgedNothing: c.judgedNothing } : {}) };
 }
 
 /**
@@ -487,7 +510,7 @@ export function completenessFields(c) {
  */
 export const absorbCompleteness = (a, b) => ({
   unanalyzed: [...(a.unanalyzed ?? []), ...(b.unanalyzed ?? [])],
-  judgedNothing: !!(a.judgedNothing || b.judgedNothing),
+  judgedNothing: [...(a.judgedNothing ?? []), ...(b.judgedNothing ?? [])],
 });
 
 /**
@@ -535,14 +558,16 @@ export const absorbCompleteness = (a, b) => ({
  * over-claim the strict exit exists to prevent. (`mustHedge` is the same distinction, stated for a verb
  * that has no exit code for it to matter to.)
  */
-export function advisoryAnswer(body, unanalyzed, judgedNothing = false) {
+export function advisoryAnswer(body, unanalyzed, judgedNothing = []) {
   const unevaluated = body?.unevaluated;
-  if (!unanalyzed?.length && !unevaluated?.length && !judgedNothing) return body;  // COMPLETE: unchanged, byte for byte, `ok` and all.
+  if (!unanalyzed?.length && !unevaluated?.length && !judgedNothing?.length) return body;  // COMPLETE: unchanged, byte for byte, `ok` and all.
   const { ok, ...rest } = body;                          // eslint-disable-line no-unused-vars -- omitted BY DESIGN
-  const judged = judgedNothing ? { judgedNothing: true } : {};
+  // The array of report paths, same key and same shape as `completenessFields` — ONE wire spelling for
+  // this key across the answer and advisory documents (see the shape ruling there).
+  const judged = judgedNothing?.length ? { judgedNothing } : {};
   // Key order matches the gate's verdict document: the finding, then `unevaluated`, then the manifest.
   if (unanalyzed?.length) return { ...rest, incomplete: true, unanalyzed, ...judged };
-  return judgedNothing ? { ...rest, incomplete: true, ...judged } : rest;
+  return judgedNothing?.length ? { ...rest, incomplete: true, ...judged } : rest;
 }
 
 export function loadReport(prefix) {

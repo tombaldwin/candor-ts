@@ -9614,7 +9614,12 @@ export function all(db: DatabaseSync, o: any) {
       const j = dq(argv, pfx, "--json");
       let doc = null; try { doc = JSON.parse(j.stdout); } catch { /* stays null → the row fails loudly */ }
       check(`⟨0.28⟩ ${label} over ${cause} report carries \`incomplete: true\` on the JSON channel — an empty answer over a report that judged nothing is a determined negative it cannot support`,
-            !!doc && doc.incomplete === true && doc.judgedNothing === true
+            !!doc && doc.incomplete === true
+              // The ARRAY of report paths — the rust/java/swift wire shape, naming WHICH report judged
+              // nothing. This engine shipped `judgedNothing: true` first, and a consumer doing
+              // `doc.judgedNothing.length` got a TypeError here while `=== true` missed the other three.
+              && Array.isArray(doc.judgedNothing) && doc.judgedNothing.length === 1
+              && doc.judgedNothing[0] === `${pfx}.json`
               && (wantUnan ? Array.isArray(doc.unanalyzed) && doc.unanalyzed.length === 1 : !("unanalyzed" in doc)),
             `${j.stdout}`.slice(0, 260));
       // C — exit codes. This rung adds a caveat; it does not refuse. ⟨0.24⟩ ruled count-0 explicitly:
@@ -9696,6 +9701,32 @@ export function all(db: DatabaseSync, o: any) {
         !/row literally named `unanalyzed`/.test(col.stderr) && !/row literally named `judgedNothing`/.test(col.stderr),
         `${col.stderr}`.slice(0, 240));
 
+  // ── THE ARRAY EARNS ITS SHAPE ON A MULTI-REPORT LOCATOR: it names WHICH member judged nothing, which
+  // `true` never could. PER FILE, the rust/java semantics ("a locator naming several members must
+  // disclose EACH silent one by name") — the gate's ANDed boolean is a different question (`did this
+  // locator judge ANYTHING`) and keeps its own answer: one member with real judgments means the union
+  // judged something, so `gate --report` stays exit 0 while the disclosure still names the silent file.
+  {
+    const mdir = path.join(d, "multi"); fs.mkdirSync(mdir, { recursive: true });
+    const memberDoc = JSON.parse(JSON.stringify(intact));
+    fs.writeFileSync(path.join(mdir, "r.aa.scan.json"), JSON.stringify(memberDoc));
+    fs.writeFileSync(path.join(mdir, "r.bb.scan.json"),
+      JSON.stringify({ candor: memberDoc.candor, functions: [], analyzed: { count: 0 } }));
+    const mp = path.join(mdir, "r");
+    const mj = spawnSync("node", [path.join(HERE, "query.mjs"), "where", "Fs", "--report", mp, "--json"], { encoding: "utf8" });
+    let mdoc = null; try { mdoc = JSON.parse(mj.stdout); } catch { /* null → fails loudly */ }
+    check("⟨0.28⟩ a multi-report locator with ONE judged-nothing member hedges and NAMES that member — the per-file semantics the array shape exists for",
+          !!mdoc && mdoc.incomplete === true && Array.isArray(mdoc.judgedNothing)
+            && mdoc.judgedNothing.length === 1 && mdoc.judgedNothing[0] === path.join(mdir, "r.bb.scan.json")
+            && mdoc.directly.length > 0,
+          `${mj.stdout}`.slice(0, 280));
+    fs.writeFileSync(path.join(mdir, "m.pol"), "deny Net src.app\n");
+    const mg = spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", mp,
+                                  "--policy", path.join(mdir, "m.pol"), "--gate-json", "-"], { encoding: "utf8" });
+    check("⟨0.28⟩ CONTROL: `gate --report` over the same mixed locator still exits 0 with no judged-nothing caveat — the union judged something, and the gate's ANDed question is not this disclosure's per-file one",
+          mg.status === 0 && !/judgedNothing/.test(mg.stdout), `status=${mg.status} ${mg.stdout}`.slice(0, 200));
+  }
+
   // ── …AND THE ADVISORY VERBS TAKE THE SECOND CAUSE TOO, WITHOUT MOVING AN EXIT CODE. Their manifest arm
   // has existed since ⟨0.24⟩; the `analyzed.count: 0` arm did not, and a report that judged nothing carries
   // no `unanalyzed` to trip it. MEASURED: `unverified` answered `{ok: true, unverified: []}` over one —
@@ -9712,8 +9743,10 @@ export function all(db: DatabaseSync, o: any) {
   for (const [label, argv] of [["unverified", ["unverified"]], ["fix-gate", ["fix-gate"]], ["whatif", ["whatif", "src.app.mid", "Net"]]]) {
     const j = adv(argv, count0P, "--json");
     let doc = null; try { doc = JSON.parse(j.stdout); } catch { /* null → fails loudly */ }
-    check(`⟨0.28⟩ ${label} over a judged-nothing report WITHDRAWS \`ok\` and carries \`incomplete: true\` + \`judgedNothing\` — the ⟨0.24⟩ manifest arm cannot see this cause, because there is no unread file to name`,
-          !!doc && !("ok" in doc) && doc.incomplete === true && doc.judgedNothing === true && !("unanalyzed" in doc),
+    check(`⟨0.28⟩ ${label} over a judged-nothing report WITHDRAWS \`ok\` and carries \`incomplete: true\` + \`judgedNothing\` (the array of report paths — one wire spelling across the answer and advisory documents) — the ⟨0.24⟩ manifest arm cannot see this cause, because there is no unread file to name`,
+          !!doc && !("ok" in doc) && doc.incomplete === true
+            && Array.isArray(doc.judgedNothing) && doc.judgedNothing[0] === `${count0P}.json`
+            && !("unanalyzed" in doc),
           `${j.stdout}`.slice(0, 240));
     check(`⟨0.28⟩ …and ${label} says it on the HUMAN channel too — the mutant this family keeps building keeps exactly one of these two`,
           /JUDGED NOTHING/.test(adv(argv, count0P, "--text").stderr), `${adv(argv, count0P, "--text").stderr}`.slice(0, 200));
@@ -9766,7 +9799,8 @@ export function all(db: DatabaseSync, o: any) {
   for (const [cause, pfx, wantUnan] of [["an armed", armedP, true], ["a count-0, NO-`unanalyzed`,", count0P, false]]) {
     const { r, doc } = gjson(pfx, intactP);
     check(`⟨0.28⟩ gains over ${cause} CURRENT report carries \`incomplete: true\` — an empty gained set out of a report that judged nothing is a determined negative it cannot support`,
-          !!doc && doc.incomplete === true && doc.judgedNothing === true
+          !!doc && doc.incomplete === true
+            && Array.isArray(doc.judgedNothing) && doc.judgedNothing[0] === `${pfx}.json`
             && (wantUnan ? doc.unanalyzed?.length === 1 : !("unanalyzed" in doc))
             && !("baselineIncomplete" in doc),
           `${r.stdout}`.slice(0, 300));
@@ -9774,6 +9808,18 @@ export function all(db: DatabaseSync, o: any) {
           r.status === 0 && /NOT "this bump gained nothing"/.test(gq(pfx, intactP, "--text").stdout)
             && !/vs the baseline\. ✓/.test(gq(pfx, intactP, "--text").stdout),
           `status=${r.status} ${gq(pfx, intactP, "--text").stdout}`.slice(0, 240));
+  }
+  // …and the BASELINE-prefixed spelling of the count-0 cause is the SAME ARRAY SHAPE. `gains` splits by
+  // engine exactly the way the plain key did — `gainsCompletenessFields` prefixes whatever
+  // `completenessFields` returns, so `baselineJudgedNothing` was a boolean here and an array in java. A
+  // supply-chain script written against java's shape threw on this engine's output over identical trees.
+  {
+    const { r, doc } = gjson(intactP, count0P);
+    check("⟨0.28⟩ gains over a count-0 BASELINE carries `baselineJudgedNothing` as the ARRAY of report paths — the same wire shape as the plain key, through the same one reader",
+          !!doc && doc.baselineIncomplete === true
+            && Array.isArray(doc.baselineJudgedNothing) && doc.baselineJudgedNothing[0] === `${count0P}.json`
+            && !("incomplete" in doc) && !("judgedNothing" in doc),
+          `${r.stdout}`.slice(0, 300));
   }
   // BOTH sides at once — the two disclosures are SEPARATE keys, not one merged flag.
   {

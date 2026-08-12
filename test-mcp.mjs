@@ -917,7 +917,10 @@ export function mid(): void { leaf(); }
   for (const [cause, pfx, wantUnan] of [["an armed", armedP, true], ["a count-0, NO-`unanalyzed`,", c0P, false]])
     for (const [name, doc] of await callAll(pfx))
       ok(`⟨0.28⟩ ${name} over ${cause} report carries \`incomplete: true\` — an agent cannot otherwise tell "nobody performs this" from "nothing was examined"`,
-         doc.incomplete === true && doc.judgedNothing === true
+         doc.incomplete === true
+         // The ARRAY of report paths — the cross-engine wire shape (rust/java/swift); the boolean
+         // spelling is the MCP gate tool's own flag, a different surface (see mcp.mjs).
+         && Array.isArray(doc.judgedNothing) && doc.judgedNothing[0] === `${pfx}.json`
          && (wantUnan ? doc.unanalyzed?.length === 1 : !("unanalyzed" in doc)),
          JSON.stringify(doc).slice(0, 240));
   // B: an INTACT report is untouched — a hedge on every call is one an agent learns to ignore.
