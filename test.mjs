@@ -9419,6 +9419,54 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.28⟩ ARMING NEVER TOUCHES THE SCAN TARGET (SPEC §3.3.1 (3)) ───────────────────────────────────
+// The worst artifact the ⟨0.28⟩ review found, on this engine: `scan.mjs app.ts --gate-json app.ts`
+// ARMED the refusal verdict OVER the operator's source file, parsed the wreckage it had just written
+// ("1 source file(s) failed to parse — NOT analyzed"), and exited 0. Silent destruction of the one file
+// the run exists to describe, reported as success. §3.3.1 (3) lists "the target's own source tree"
+// among the inputs arming must not touch; `runInputs` registered policy / env / deps / config — not the
+// target. EVERY row here asserts the BYTES, because an exit-code assertion alone passes on an engine
+// that still destroys the file and then exits 2 about something else.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-target-"));
+  const src = path.join(d, "app.ts");
+  fs.writeFileSync(src, "export function hello(): number { return 1 }\n");
+  const before = fs.readFileSync(src, "utf8");
+  const run = (...a) => spawnSync("node", [path.join(HERE, "scan.mjs"), ...a], { encoding: "utf8", cwd: d });
+
+  const g = run("app.ts", "--gate-json", "app.ts");
+  check("⟨0.28⟩ target: `--gate-json <the scan target>` leaves the target BYTE-IDENTICAL — arming must never destroy the source it is about to scan",
+        fs.readFileSync(src, "utf8") === before, fs.readFileSync(src, "utf8").slice(0, 120));
+  check("⟨0.28⟩ target: …and the run REFUSES loudly — exit 2 naming the collision, never exit 0 claiming success over a tree it just broke",
+        g.status === 2 && /names the SAME FILE as the scan target/.test(g.stderr),
+        `status=${g.status} ${g.stderr}`.slice(0, 240));
+
+  // THE SECOND ROUTE TO THE SAME SINK: the report set's FINAL write, which the armer's exemption does
+  // not run in front of. A `tsconfig.json` target under `--out tsconfig` was left unarmed by the
+  // exemption and then destroyed by `writeAtomic(`${outPrefix}.json`)` at exit 0 — "wrote 0 effectful
+  // functions … to tsconfig.json", over the file that configured the scan.
+  fs.mkdirSync(path.join(d, "src"));
+  fs.writeFileSync(path.join(d, "src/lib.ts"), "export function f(): number { return 2 }\n");
+  const tsc = path.join(d, "tsconfig.json");
+  fs.writeFileSync(tsc, '{ "compilerOptions": { "target": "ES2020", "module": "ESNext" }, "include": ["src/**/*.ts"] }\n');
+  const tscBefore = fs.readFileSync(tsc, "utf8");
+  const o = run("tsconfig.json", "--out", "tsconfig");
+  check("⟨0.28⟩ target: `--out <prefix>` whose report set expands onto the target leaves the target BYTE-IDENTICAL — the final write is a second route to the report sink and carries the same input rule",
+        fs.readFileSync(tsc, "utf8") === tscBefore, fs.readFileSync(tsc, "utf8").slice(0, 120));
+  check("⟨0.28⟩ target: …refused at exit 2 naming the file, never a report silently withheld or an exit 0",
+        o.status === 2 && /SAME FILE as the scan target/.test(o.stderr),
+        `status=${o.status} ${o.stderr}`.slice(0, 240));
+
+  // THE CONTROL that keeps this exact-artifact, never containment: a verdict written INSIDE the scanned
+  // tree is ordinary usage (the recommended CI layout), and a directory-aware rule refused it once
+  // before — the comment beside the dep-directory expansion records it taking 33 tests with it.
+  const v = run(".", "--gate-json", path.join(d, "verdict.json"));
+  check("⟨0.28⟩ target CONTROL: a verdict sink INSIDE a directory target is still ordinary usage — exact-artifact comparison, never containment",
+        v.status === 0 && fs.existsSync(path.join(d, "verdict.json")),
+        `status=${v.status} ${v.stderr}`.slice(0, 200));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── ⟨0.28⟩ SPEC §2 — THE DESCRIPTIVE VERBS CARRY THE ⟨0.21⟩ MANIFEST TOO ────────────────────────────
 // The re-disclosure MUST was written over the instance it was found in ("a verb whose VERDICT could
 // change") and ⟨0.28⟩ widens it to the condition that makes it true: ANY verb whose output could be read

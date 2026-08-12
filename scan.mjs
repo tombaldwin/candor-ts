@@ -224,6 +224,18 @@ const sameArtifact = (a, b) => {
 
 const runInputs = (target, policyFlag) => {
   const out = [];
+  // ⟨0.28⟩ THE SCAN TARGET ITSELF — SPEC §3.3.1 (3) lists "the target's own source tree" among the
+  // inputs arming must not touch, and this list did not: `--gate-json app.ts` on the file being scanned
+  // armed the refusal verdict OVER the operator's source, the run then parsed the wreckage it had just
+  // made ("1 source file(s) failed to parse"), and exited 0. Silent destruction of the one file the run
+  // exists to describe, reported as success. Measured live, and the same gap was in all four engines.
+  //
+  // EXACT ARTIFACT, NEVER CONTAINMENT. Registering the target as one more `[path, label]` pair means
+  // `sameArtifact` refuses only a sink that IS the target — a report or verdict written into `.candor/`
+  // INSIDE a directory target is ordinary usage and still permitted. Making `sameArtifact`
+  // directory-aware was tried for the dep-directory case below and rejected (it refused the ordinary
+  // in-tree layout and took 33 tests with it); the same reasoning holds here.
+  if (target) out.push([target, "the scan target"]);
   if (policyFlag) out.push([policyFlag, "--policy"]);
   for (const [v, label] of [["CANDOR_POLICY", "CANDOR_POLICY"], ["CANDOR_BASELINE", "CANDOR_BASELINE"],
                             ["CANDOR_CONFIG", "CANDOR_CONFIG"]]) {
@@ -1129,6 +1141,29 @@ if (!compilerOptions.typeRoots) {
   compilerOptions.typeRoots = roots;
 }
 if (!outPrefix) outPrefix = path.join(rootDir, ".candor", "report");
+// ⟨0.28⟩ THE REPORT SET REACHES ITS SINK BY A SECOND ROUTE, AND THE INPUT RULE MUST COVER BOTH. The armer
+// asks the input exemption of every file it arms, so `--out tsconfig` over a `tsconfig.json` TARGET was
+// correctly left unarmed — and then the FINAL `writeAtomic(`${outPrefix}.json`)` destroyed it anyway, at
+// exit 0, on a run that had already scanned it: "wrote 0 effectful functions … to tsconfig.json" over the
+// operator's own tsconfig. Measured while verifying the target registration covered both sinks; it covered
+// the arm and not the write. Asked HERE, where every route to the report set converges (`--out`, the
+// legacy positional prefix, and the default), of the same `runInputs`/`sameArtifact` every other sink
+// guard uses, over the exact file set this engine writes. Refused, not skipped: silently withholding one
+// file of a four-file report set would be a pair no run has ever written.
+if (!wantJson) {
+  for (const suffix of ["", ".callgraph", ".locs", ".hierarchy"]) {
+    const w = `${outPrefix}${suffix}.json`;
+    for (const [other, label] of runInputs(target, policyPath)) {
+      if (sameArtifact(w, other)) {
+        console.error(`candor-ts: the report set at --out ${outPrefix} includes ${w}, which is the SAME `
+          + `FILE as ${label} ${other} — refusing (exit 2). Writing the report there would destroy an `
+          + `input of this run. Nothing was scanned; give the report set its own prefix.`);
+        refuseEarlyToStream(`the report set at ${outPrefix} would overwrite ${label} ${other}`);
+        process.exit(2);
+      }
+    }
+  }
+}
 // --json prints the report to stdout and writes NOTHING, so skip creating the (otherwise default) .candor/ dir.
 // The scanned package's name — the first half of the cross-package join key (SPEC §2 `hash`).
 let pkgName = path.basename(rootDir);
