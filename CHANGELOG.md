@@ -8,6 +8,20 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.28⟩ a corrupt sibling report is disclosed as UNREADABLE, not `judgedNothing`** (SPEC §2's
+  corruption-per-key-role ruling; the ⟨0.28⟩ caveat key set). Measured via candor-spec's key-shape
+  harvest over an intact report with an unparseable `.dep` sibling under the same locator: rust and
+  swift answered `incomplete: true` alone, while this engine listed the corrupt file under
+  `judgedNothing` — a fabricated `analyzed.count: 0` claim about bytes nobody could read — and
+  `reportUnanalyzed` skipped the same file with a bare `catch`. `reportCompleteness` now carries a
+  third arm, `unreadable`, which raises `incomplete: true` with NO wire key of its own (the family
+  shape) and names the file on the human channel with the true gate line (`gate --report` exits 2
+  over a corrupt member, unlike count-0); `unverified`/`fix-gate`/`whatif` withdraw `ok` over it and
+  keep their findings. The gate/MCP ANDed `reportJudgedNothing` keeps its fail-closed reading; the
+  corrupt-ONLY locator still refuses loudly (exit 2). Exit codes unchanged — byte-verified old-vs-new
+  over intact, armed and judged-nothing states across seven verbs and three `gains` pairings: zero
+  diffs.
+
 - **⟨0.28⟩ `gate --report`: the input guard covers what the locator EXPANDS to** (SPEC §3.3.1 (3),
   *"AND AN INPUT LOCATOR NAMES A SET — COMPARE THE EXPANSION, NEVER THE TOKEN"*). The guard compared
   `--gate-json` against the raw `--report` token while `loadGateReport` reads the token's expansion, so
