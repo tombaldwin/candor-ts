@@ -1696,7 +1696,11 @@ switch (cmd) {
     // exits 2 (could-not-evaluate) rather than the 0 that would read as "no crossings left to fix".
     if (fgr.unevaluated?.length) advisoryUnevaluatedNote("fix-gate", fgr.unevaluated, UNEVAL_TAIL_STRICT);
     emit(advisoryAnswer(fgr, fgUnan, fgComp.judgedNothing, fgComp.unreadable));
-    process.exit(fgUnan.length || fgr.unevaluated?.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
+    // ⟨0.28⟩ `unreadable` joins the `--strict` exit-2 trigger (SPEC §3.2's pessimism relation): `gate
+    // --report` REFUSES over a corrupt member — measured, exit 2 — so exiting 0/1 here claimed this verb
+    // got FURTHER than the gate on identical bytes. The unreadable note above already SAID the exit was
+    // bounded by the gate's while this line did not read the field — a documented limitation, unmeasured.
+    process.exit(fgUnan.length || fgComp.unreadable.length || fgr.unevaluated?.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
     break; // unreachable
   }
   case "unverified": {
@@ -1739,7 +1743,10 @@ switch (cmd) {
     // with the missing evidence as its reason; this is the human channel for the same fact.
     if (r.unevaluated?.length) advisoryUnevaluatedNote("unverified", r.unevaluated, UNEVAL_TAIL_STRICT);
     emit(advisoryAnswer(r, uUnan, uComp.judgedNothing, uComp.unreadable));
-    process.exit(uUnan.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
+    // ⟨0.28⟩ `unreadable` joins the `--strict` exit-2 trigger — see fix-gate above. Measured on this verb
+    // before the fix: over one good report plus one unparsable sibling, `gate --report` exited 2 and
+    // `unverified --strict` exited 0 — and `--strict` is how CI consumes it.
+    process.exit(uUnan.length || uComp.unreadable.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
     break; // unreachable
   }
   case "gate": {

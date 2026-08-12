@@ -527,12 +527,13 @@ export function reportCompleteness(prefix) {
  * is the trigger for a VERDICT** — and the difference is an exit code, not a mood.
  *
  * `unverified --strict` / `fix-gate --strict` answer 2 ("the gate refuses over these bytes, so do I") off
- * the `unanalyzed` arm. ⟨0.24⟩ ruled the count-0 arm explicitly the other way for exactly those bytes: it
- * is *a disclosure, not an exit code* — `gate --report` exits 0 over a judged-nothing report, and a verb
- * exiting 2 there would claim it got LESS far than the gate on identical input, the mirror of the
- * over-claim the strict exit exists to prevent. So count-0 reaches both DISCLOSURE channels through this
- * predicate and stops at the exit code; see `advisoryAnswer`, whose exit-bearing callers still key their
- * `--strict` on the manifest alone.
+ * the `unanalyzed` arm — and ⟨0.28⟩ off the `unreadable` arm too, because `gate --report` REFUSES over a
+ * corrupt member (measured, exit 2) and §3.2's relation binds the exit as much as the document. ⟨0.24⟩
+ * ruled the count-0 arm explicitly the other way for exactly those bytes: it is *a disclosure, not an
+ * exit code* — `gate --report` exits 0 over a judged-nothing report, and a verb exiting 2 there would
+ * claim it got LESS far than the gate on identical input, the mirror of the over-claim the strict exit
+ * exists to prevent. So count-0 reaches both DISCLOSURE channels through this predicate and stops at the
+ * exit code; see `advisoryAnswer`, whose exit-bearing callers key `--strict` on manifest + unreadable.
  */
 export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing?.length || c.unreadable?.length));
 

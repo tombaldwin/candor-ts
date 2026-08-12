@@ -9934,6 +9934,7 @@ export function all(db: DatabaseSync, o: any) {
           !/judgedNothing/.test(p2.stdout) && /"incomplete": true/.test(p2.stdout), `${p2.stdout}`.slice(0, 220));
   }
 
+
   // ── …AND `gains`, THE LAST CELL OF THE §2 RE-DISCLOSURE MUST. This verb has carried the CURRENT
   // report's `coverage` ledger since ⟨0.15⟩ — "a no-gains over an uncovered dep reads clean with false
   // confidence" — and MEASURED, the same call on the same report dropped `unanalyzed`, the STRONGER
@@ -10034,6 +10035,12 @@ export function all(db: DatabaseSync, o: any) {
     const sdir = path.join(d, "corruptsib"); fs.mkdirSync(sdir, { recursive: true });
     fs.writeFileSync(path.join(sdir, "r.aa.scan.json"), JSON.stringify(intact));
     fs.writeFileSync(path.join(sdir, "r.bb.scan.json"), "{ this is not json");
+    // The §2.2 sidecars ride along so `fix-gate` (which needs the call graph) answers over this locator
+    // for the #79 rows below rather than refusing for a missing sidecar.
+    for (const s of ["callgraph", "hierarchy", "locs"]) {
+      const from = path.join(d, `r.${s}.json`);
+      if (fs.existsSync(from)) fs.copyFileSync(from, path.join(sdir, `r.${s}.json`));
+    }
     const sp = path.join(sdir, "r");
     const sq = (verb, ...flags) => spawnSync("node", [path.join(HERE, "query.mjs"), ...verb, "--report", sp, ...flags], { encoding: "utf8" });
 
@@ -10055,12 +10062,27 @@ export function all(db: DatabaseSync, o: any) {
             && /exits 2 over these bytes/.test(uj.stderr),
           `${uj.stderr}`.slice(0, 300));
 
-    // THE EXIT IS UNCHANGED — measured before the fix: 0 plain, and `--strict` follows the holes/manifest
-    // arms exactly as over the intact pair (the corrupt sibling adds a caveat, never a verdict).
-    check("⟨0.28⟩ CONTROL: `unverified --strict` over the corrupt-sibling locator exits exactly as over the intact member alone — this rung adds a caveat, it does not move an exit",
-          sq(["unverified"], ...pol, "--strict", "--json").status
-            === spawnSync("node", [path.join(HERE, "query.mjs"), "unverified", "--report", path.join(sdir, "r.aa.scan.json"), ...pol, "--strict", "--json"], { encoding: "utf8" }).status,
-          `sibling=${sq(["unverified"], ...pol, "--strict", "--json").status}`);
+    // ⟨0.28⟩ #79 — THE `--strict` EXIT IS BOUNDED BY THE GATE OVER THESE BYTES (SPEC §3.2's pessimism
+    // relation). This block first shipped with a control pinning the exit UNCHANGED, while the stderr
+    // note two lines up told the reader "`gate --report` exits 2 over these bytes" — the engine asserting
+    // the bound on one channel and pinning its violation on another. MEASURED before the fix:
+    // `gate --report` exit 2, `unverified --strict` exit 0, `fix-gate --strict` exit 1 (its finding),
+    // each claiming it got FURTHER than the gate on identical bytes — and `--strict` is how CI consumes
+    // both. The plain (advisory) exit stays 0: only the CI form takes the gate's exit.
+    check("⟨0.28⟩ #79 PREMISE: `gate --report` over one good member + one unparsable sibling exits 2 — the bound the strict exits below are measured against",
+          spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", sp, ...pol, "--json"], { encoding: "utf8" }).status === 2);
+    for (const label of ["unverified", "fix-gate"]) {
+      const s = sq([label], ...pol, "--strict", "--json");
+      let sdoc = null; try { sdoc = JSON.parse(s.stdout); } catch { /* null → fails loudly */ }
+      check(`⟨0.28⟩ #79: \`${label} --strict\` over the corrupt-sibling locator exits 2 — an advisory verb may be LESS certain than the gate, never MORE, and the exit is part of the answer`,
+            s.status === 2, `status=${s.status}`);
+      check(`⟨0.28⟩ #79: …and the \`${label}\` document still hedges (\`ok\` withdrawn, \`incomplete: true\`) — the exit change rides the document that was already right`,
+            !!sdoc && !("ok" in sdoc) && sdoc.incomplete === true, `${s.stdout}`.slice(0, 200));
+      check(`⟨0.28⟩ #79 CONTROL: \`${label}\` WITHOUT --strict over the same bytes stays exit 0 — advisory by default`,
+            sq([label], ...pol, "--json").status === 0, `status=${sq([label], ...pol, "--json").status}`);
+      check(`⟨0.28⟩ #79 CONTROL: \`${label} --strict\` over the INTACT locator stays exit 0 — the corrupt sibling is the only thing that moved it`,
+            spawnSync("node", [path.join(HERE, "query.mjs"), label, "--report", intactP, ...pol, "--strict", "--json"], { encoding: "utf8" }).status === 0);
+    }
 
     // A locator whose ONLY member is corrupt REFUSES (exit 2, "refusing to report an empty (all-clear)
     // answer over a corrupt report") — measured, and stronger than a hedge: with zero readable members
