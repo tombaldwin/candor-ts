@@ -8,6 +8,24 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.28⟩ the verdict document carries `ignored` — the policy lines the parse dropped** (SPEC §6.2,
+  *"AND THE CONDITION IS A DROPPED LINE, NOT AN EMPTY POLICY"*). The zero-rule refusal fires only at ZERO
+  survivors, so the discontinuity ran the wrong way: 0 of 10 rules parsing refused at exit 2, while 1 of
+  10 wrote `{"ok": true, "violations": []}` at exit 0 and said nothing about the nine gates never asked —
+  a 90%-gateless green, at every fraction below 100%. Measured here 2026-08-12: all four lines warned on
+  stderr, both verdict documents silent. Refusal is the wrong remedy (it would break the
+  forward-compatibility leniency §6.2 defends), so disclosure is: `ignored: [{line, text, reason}]` on
+  the verdict, `line` 1-based over the normalized split, `text` the source line **verbatim** (before
+  comment-stripping and trimming, unlike `unevaluated`'s `rule`), `reason` the same sentence stderr
+  carries. **Both gate routes**, in the same position, pinned by a whole-document byte-equality row.
+  Distinct from `unevaluated`, and the distinction is load-bearing: that key carries rules that PARSED
+  and could not be answered, this carries text that never became a rule at all. Omitted when nothing was
+  dropped, so a clean policy's verdict stays byte-identical; `ok` and every exit code ignore it. A FATAL
+  policy error (a typo'd effect token) still refuses at exit 2 with `unevaluated` and no `ignored` — a
+  refused run has no verdict for a dropped line to have shrunk. Built inside `parsePolicy`'s error
+  recorder rather than as a second pass, and kept off `errors` itself so `parsepolicy`'s pinned witness
+  shape is untouched.
+
 - **⟨0.28⟩ a repeated `--out` is refused, with the fail-closed report at EVERY prefix named** (SPEC
   §3.3.1, *"AND A REPEATED `--out` IS THE SAME RULE — filed as an open question by the rung that wrote
   the sentence above, which is the tell"*). ⚠ Measured here 2026-08-12: `--out A --out B` took the LAST

@@ -10558,5 +10558,79 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.28⟩ THE VERDICT CARRIES `ignored` — THE POLICY LINES THE PARSE DROPPED (SPEC §6.2) ───────────
+// "AND THE CONDITION IS A DROPPED LINE, NOT AN EMPTY POLICY — the clause above is stated over its own
+// instance, which is the fifth time in this document." The zero-rule refusal fires only at ZERO
+// survivors, so the discontinuity was stark and the wrong way round:
+//
+//   0 of 10 rules parse  →  exit 2, the fail-closed refusal document
+//   1 of 10 rules parse  →  {"ok": true, "violations": []}, exit 0, and the document says NOTHING
+//                           about the nine gates that were never asked
+//
+// A 90%-gateless green, arriving at every fraction below 100%. Refusal is the wrong remedy — it would
+// break the forward-compatibility leniency §6.2 has just finished defending — so DISCLOSURE is.
+// MEASURED here 2026-08-12: all four warnings on stderr, the verdict document silent on both routes.
+//
+// `ignored` is DISTINCT from `unevaluated` and the distinction is load-bearing: `unevaluated` carries
+// rules that PARSED and could not be answered, `ignored` carries text that never became a rule at all.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ignored-"));
+  fs.mkdirSync(path.join(d, "src"));
+  fs.writeFileSync(path.join(d, "src/app.ts"),
+    'import * as nfs from "node:fs";\nexport function save(): void { nfs.writeFileSync("x", "1"); }\n');
+  // Three DROPPED lines and one survivor. Every dropped form is a `rule-kind` error — the non-fatal
+  // class. A typo'd EFFECT token (`deny Nett app`, `allow Clock foo`) is a policy ERROR at exit 2, not an
+  // ignored line, which is the case §6.2 explicitly sets aside; the fatal control below pins that.
+  fs.writeFileSync(path.join(d, "drop.policy"),
+    "deny Net\nthis line is not a rule\nallow\nforbid nonsense here\n# a comment: not a dropped line\n");
+  fs.writeFileSync(path.join(d, "clean.policy"), "deny Fs\n");
+  fs.writeFileSync(path.join(d, "fatal.policy"), "deny Fs\nallow Clock foo\n");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "src"), "--out", path.join(d, "r")], { encoding: "utf8" });
+  const scanGate = (pol, sink) => spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "src"),
+    "--policy", path.join(d, pol), "--gate-json", path.join(d, sink)], { encoding: "utf8", cwd: d });
+  const verbGate = (pol) => spawnSync("node", [path.join(HERE, "query.mjs"), "gate",
+    "--report", path.join(d, "r.json"), "--policy", path.join(d, pol), "--json"], { encoding: "utf8", cwd: d });
+
+  const sc = scanGate("drop.policy", "v.json");
+  const v = JSON.parse(fs.readFileSync(path.join(d, "v.json"), "utf8"));
+  check("⟨0.28⟩ ignored: a policy with 3 dropped lines and 1 survivor carries them on the VERDICT document — the machine channel, where before the fix only stderr said anything",
+        Array.isArray(v.ignored) && v.ignored.length === 3, `${JSON.stringify(v)}`.slice(0, 300));
+  check("⟨0.28⟩ ignored: …in the pinned `{line, text, reason}` shape — `line` 1-based, `text` the source line VERBATIM (the operator matches it against their file), `reason` the sentence stderr carries",
+        v.ignored?.[0]?.line === 2 && v.ignored[0].text === "this line is not a rule"
+          && /DROPPED/.test(v.ignored[0].reason)
+          && v.ignored[1].line === 3 && v.ignored[1].text === "allow"
+          && v.ignored[2].line === 4 && v.ignored[2].text === "forbid nonsense here",
+        `${JSON.stringify(v.ignored)}`.slice(0, 300));
+  check("⟨0.28⟩ ignored: …and it is NOT `unevaluated` — that key carries rules that PARSED and could not be answered; a dropped line never became a rule at all, and here the surviving `deny Net` was evaluated normally",
+        !("unevaluated" in v) && v.ok === true && sc.status === 0,
+        `status=${sc.status} ${JSON.stringify(v)}`.slice(0, 220));
+  check("⟨0.28⟩ ignored: …and `ok`/the exit do NOT consult it — the line-level leniency §6.2 defends is unchanged, only disclosed",
+        v.ok === true && sc.status === 0, `status=${sc.status} ok=${v.ok}`);
+
+  // §6.2 records this measured on `gate --report` too, and §3.1 makes byte-equality between the two
+  // verdict documents the acceptance test — so the key has to land in the same position, not merely be
+  // present on both. Asserted as a whole-document equality, which a per-key check cannot see.
+  const vb = verbGate("drop.policy");
+  check("⟨0.28⟩ ignored: the `gate --report` verdict is BYTE-EQUAL to the scan route's, `ignored` included — a route is not covered by its sibling, and §3.1 binds the two documents",
+        vb.status === 0 && vb.stdout === fs.readFileSync(path.join(d, "v.json"), "utf8"),
+        `status=${vb.status} ${vb.stdout}`.slice(0, 240));
+
+  // CONTROL 1 — a clean policy's verdict is byte-identical to a pre-⟨0.28⟩ one: the key is OMITTED, not
+  // emitted empty. `deny Fs` also FIRES here, so the control covers a non-green verdict as well.
+  scanGate("clean.policy", "c.json");
+  const c = fs.readFileSync(path.join(d, "c.json"), "utf8");
+  check("⟨0.28⟩ ignored CONTROL: a clean policy's verdict carries NO `ignored` key at all — omitted when nothing was dropped, so an ordinary verdict stays byte-identical",
+        !/ignored/.test(c) && /"ok": false/.test(c) && /AS-EFF-006/.test(c), `${c}`.slice(0, 200));
+  // CONTROL 2 — the case §6.2 sets aside: a typo'd EFFECT token is a policy ERROR at exit 2, not an
+  // ignored line. A refused run has no verdict for a dropped line to have shrunk, so `ignored` must not
+  // appear there — it would describe a gate that never ran.
+  const f = scanGate("fatal.policy", "f.json");
+  const fd = fs.readFileSync(path.join(d, "f.json"), "utf8");
+  check("⟨0.28⟩ ignored CONTROL: a FATAL policy error still REFUSES (exit 2) and its refusal document carries `unevaluated`, never `ignored` — a refused run has no verdict for a dropped line to have shrunk",
+        f.status === 2 && /"refused": true/.test(fd) && /"unevaluated"/.test(fd) && !/"ignored"/.test(fd),
+        `status=${f.status} ${fd}`.slice(0, 240));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

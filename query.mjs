@@ -2140,6 +2140,13 @@ switch (cmd) {
     // ⟨0.27⟩ SPEC §4 `zeroMatch` — the same list the stderr lines above carry, in the machine channel,
     // in the same position the scan route puts it (§3.1's byte-equality MUST binds the two documents).
     if (gviol.zeroMatch?.length) gverdictObj.zeroMatch = gviol.zeroMatch;
+    // ⟨0.28⟩ SPEC §6.2 `ignored: [{line, text, reason}]` — the policy lines the parse DROPPED, in the SAME
+    // position the scan route puts them, because §3.1 makes byte-equality between the two documents the
+    // acceptance test and §6.2 records this defect measured "on the `gate --report` verb too — a route is
+    // not covered by its sibling". Distinct from `unevaluated`: that carries rules that PARSED and could
+    // not be answered, this carries text that never became a rule at all. Omitted when empty; `ok` and
+    // the exit do not consult it (the line-level leniency is unchanged, only disclosed).
+    if (gpol.ignored?.length) gverdictObj.ignored = gpol.ignored;
     if (gincomplete) { gverdictObj.incomplete = true; gverdictObj.unanalyzed = g.unanalyzed; }
     if (g.coverage.length)
       gverdictObj.coverage = { uncovered: g.coverage.length, packages: g.coverage.map((c) => c.name) };

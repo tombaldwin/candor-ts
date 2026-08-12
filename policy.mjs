@@ -226,12 +226,37 @@ export function parsePolicy(text, aliases = null) {
   // This engine emitted `vocabulary` for `kind`, `where` for `rule`, prose for `accepted`, and no `message`
   // at all — three renamed/reshaped fields on the one output whose whole job is to be diffed.
   const errors = [], aliasesUsed = new Map();
-  const err = (kind, token, accepted, rule, message) => errors.push({ kind, token, accepted, rule, message });
+  // ⟨0.28⟩ SPEC §6.2 — **THE CONDITION IS A DROPPED LINE, NOT AN EMPTY POLICY.** The zero-rule refusal
+  // fires only at ZERO survivors, so the discontinuity was stark and the wrong way round: 0 of 10 rules
+  // parsing refused at exit 2, while 1 of 10 wrote `{"ok": true, "violations": []}` at exit 0 and said
+  // NOTHING about the nine gates that were never asked. A 90%-gateless green, arriving at every fraction
+  // below 100%. Refusal is the wrong remedy there — it would break the forward-compatibility leniency
+  // §6.2 has just finished defending — so DISCLOSURE is: the verdict document carries the lines the
+  // parse dropped, and a machine consumer can see that the gate it is reading is smaller than the gate
+  // that was written.
+  //
+  // `{line, text, reason}` exactly: `line` 1-based over the normalized split (a bare `\r` breaks a line
+  // here, as it does for the parse), `text` the source line VERBATIM — before comment-stripping and
+  // trimming, unlike `rule`, because the operator matches it against their file — and `reason` the SAME
+  // sentence the stderr channel carries.
+  //
+  // BUILT IN `err`, not as a second pass, so it cannot drift from the list it is derived from. FATAL
+  // errors are excluded: a fatal error (a typo'd effect token, `deny Nett app`) is a policy ERROR that
+  // refuses the whole run at exit 2, and a refused run has no verdict for a dropped line to have shrunk.
+  // A SEPARATE list rather than two new fields on `errors`, because that entry shape is PINNED (§3.1
+  // `195d45a`/`901f14d`) and `parsepolicy`'s witness output is diffed across engines byte for byte.
+  const ignored = [];
+  let lineNo = 0, rawLineText = "";
+  const err = (kind, token, accepted, rule, message) => {
+    errors.push({ kind, token, accepted, rule, message });
+    if (!FATAL_ERROR_KINDS.has(kind)) ignored.push({ line: lineNo, text: rawLineText, reason: message });
+  };
   // Split LINES on \n / \r\n / bare \r — the three forms Java's Files.readAllLines (the reference parser)
   // breaks on. Splitting on \n ONLY let a classic-Mac (bare-\r) file collapse to one line: \r is also an
   // in-line ASCII-ws token separator (below), so every rule after the first was glued into the first rule's
   // tokens and dropped — a gateless-green divergence (sweep [16]/[17]). \v/\f stay in-line separators.
   for (const rawLine of text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")) {
+    lineNo++; rawLineText = rawLine;   // ⟨0.28⟩ the source position `ignored` reports (see `err`)
     const line = rawLine.split("#")[0].replace(ASCII_WS_TRIM, "");
     if (!line) continue;
     const t = line.split(ASCII_WS);
@@ -364,7 +389,9 @@ export function parsePolicy(text, aliases = null) {
   //
   // Being outnumbered is not the argument against it, and this family has twice found the outlier to be
   // the correct one on `gate --report` questions. Recorded for the spec to adjudicate.
-  return { deny, allow, forbid, errors,
+  // ⟨0.28⟩ `ignored` rides the parse beside `errors` (SPEC §6.2) — see the note on `err`. The gate routes
+  // spread it onto the verdict document; `parsepolicy`'s pinned witness shape is untouched.
+  return { deny, allow, forbid, errors, ignored,
            aliasesUsed: Object.fromEntries([...aliasesUsed.entries()].sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))) };
 }
 

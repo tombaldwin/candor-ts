@@ -6150,6 +6150,9 @@ let gateViolations = [];
 // unable to see that a rule bound nothing — the typo'd-scope silent green, one channel over. Disclosure
 // only: `ok` and the exit code never consult it.
 let gateZeroMatch = [];
+// ⟨0.28⟩ SPEC §6.2 `ignored` — the policy lines the parse DROPPED, for the verdict document. Declared
+// beside `gateZeroMatch` and for the same reason: the verdict is assembled long after the policy block.
+let gateIgnored = [];
 // ⟨0.24⟩ the `.candor/config` that supplied POLICY VOCABULARY this verdict actually used — named on the
 // document (SPEC §3.1 `99eb4e9`), null when no alias was referenced so the verdict stays byte-identical.
 let policyVocabulary = null;
@@ -6367,6 +6370,11 @@ if (policyPath !== null) {
     const unknownAliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(policyPath, target)), parseErrs);
     const gatePolicy = parsePolicy(text, unknownAliases);
     parseErrs.push(...gatePolicy.errors);
+    // ⟨0.28⟩ SPEC §6.2 — the LINES THE PARSE DROPPED, for the verdict document below. Non-fatal by
+    // construction (`parsePolicy` excludes the fatal kinds: a policy ERROR refuses the whole run and a
+    // refused run has no verdict for a dropped line to have shrunk). Captured here because the verdict
+    // is assembled far below and `gatePolicy` is scoped to this block.
+    gateIgnored = gatePolicy.ignored ?? [];
     // ⟨0.24⟩ only the UNRECOGNISED VALUE TOKENS refuse. `errors` now also carries every LINE this parser
     // dropped whole (SPEC §3.1 `195d45a`), which is additive to the `parsepolicy` witness and deliberately
     // silent about the gate — refusing there would be a grammar change, not a token change.
@@ -6520,6 +6528,17 @@ if (gateJsonPath) {
   // ⟨0.27⟩ SPEC §4 `zeroMatch` — the same list the stderr lines carry, in the machine channel. Omitted
   // when empty so a fully-binding verdict is byte-identical; never consulted for `ok` or the exit code.
   if (gateZeroMatch.length) verdictObj.zeroMatch = gateZeroMatch;
+  // ⟨0.28⟩ SPEC §6.2 `ignored: [{line, text, reason}]` — the policy lines the parse DROPPED, so a machine
+  // consumer can see that the gate it is reading is SMALLER than the gate that was written. MEASURED
+  // four-way: all four engines warn per ignored line on stderr while the verdict document stays silent,
+  // and the zero-rule refusal fires only at ZERO survivors — so 1-of-10 rules parsing wrote
+  // `{"ok": true, "violations": []}` at exit 0 with nothing said about the nine gates never asked.
+  //
+  // DISTINCT FROM `unevaluated`, and the distinction is load-bearing: `unevaluated` carries rules that
+  // PARSED and could not be answered, `ignored` carries text that never became a rule at all. Omitted
+  // when nothing was dropped, so a clean policy's verdict stays byte-identical. Never consulted for `ok`
+  // or the exit code — the line-level leniency is UNCHANGED, only disclosed.
+  if (gateIgnored.length) verdictObj.ignored = gateIgnored;
   // ⟨0.21⟩ (Gap 2) the machine-legible incompleteness: the units candor couldn't analyze, so a CI/agent
   // reading the JSON learns WHY the gate can't certify (the stderr warning alone used to hide this from a
   // machine). `incomplete:true` + the list; the run exits 2 (could-not-fully-evaluate) below. ok:false +
