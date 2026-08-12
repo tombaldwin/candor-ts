@@ -962,6 +962,25 @@ export function mid(): void { leaf(); }
     ok("⟨0.28⟩ Rung A (MCP): `candor_map` emits the caveat document with NO module row beside it — the merged shape displaced a real module to make space for the hedge",
        hMap.incomplete === true && Object.keys(hMap).every((k) => ["incomplete", "unanalyzed", "judgedNothing"].includes(k)),
        JSON.stringify(hMap).slice(0, 240));
+    // ⟨0.28⟩ …AND WITH A NAME THE REPORT DOES NOT CONTAIN, which is where the rung was still open.
+    // The row above queries `app.leaf`, a fn that EXISTS, so `Q.show`'s fn-existence guard passes and
+    // the caveat is reached. With a name it does not contain the guard THREW FIRST — and it threw
+    // because `caveatInstead(p, Q.show(…))` took its document BY VALUE, so JavaScript evaluated the
+    // verb before the hedge could be decided. Over a judged-nothing report an agent asking about any
+    // name was told "no function matching …": a determined negative about the code, from a report that
+    // examined none of it, on the surface where answers are acted on rather than read. The CLI was
+    // already correct here — measured — so this was the MCP half of a rung the CLI had shipped.
+    {
+      const jnP = mk("part-jn", (o) => { o.functions = []; o.analyzed = { count: 0 }; });
+      const rs = await mcpSession([
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "candor_show", arguments: { fn: "no.such.fn", report: jnP } } },
+      ]);
+      const r = rs[0].result;
+      const doc = r?.isError ? null : JSON.parse(r.content[0].text);
+      ok("⟨0.28⟩ Rung A (MCP): `candor_show` over a JUDGED-NOTHING report answers the CAVEAT DOCUMENT for a name the report does not contain — the fn-existence guard must not pre-empt the hedge, or an agent is told a function is absent by a report that examined nothing",
+         doc !== null && doc.incomplete === true && Array.isArray(doc.judgedNothing) && doc.judgedNothing.length === 1,
+         r?.isError ? "tool error: " + String(r.content?.[0]?.text).slice(0, 140) : JSON.stringify(doc).slice(0, 200));
+    }
     // INTACT-INPUT CONTROL: both pinned shapes unchanged (byte-compared out of band against the
     // pre-rung server on the same fixture — identical on both tools).
     const [cShow, cMap] = await shot(P);

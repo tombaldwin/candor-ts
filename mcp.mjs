@@ -236,9 +236,31 @@ const withCompleteness = (p, doc) => ({ ...doc, ...Q.completenessFields(Q.report
 //                for the reason the ruling names candor-ts for: `@scope/name` is a key a module owns.
 //
 // A no-op on a complete report, so both pinned tool shapes are unchanged on an ordinary one.
+// ⟨0.28⟩ THE DOC ARRIVES AS A THUNK, and that is the whole fix rather than a style preference.
+// This took `doc` by value, so JavaScript evaluated `Q.show(loadReportLoud(p), a.fn)` BEFORE
+// `caveatInstead` was ever called — and `Q.show`'s fn-existence guard throws. Over a judged-nothing
+// report `candor_show <anything>` therefore answered "no function matching …" to an AGENT: a
+// determined negative about the code, produced by a report that examined none of it, on the surface
+// where a wrong answer is acted on rather than read. The CLI was already correct (measured: it emits
+// the caveat document), so this was the MCP half of a rung the CLI had shipped — the third time today
+// that half was the one nobody checked.
+//
+// Hedging is now decided BEFORE the answer is computed, so no guard inside the verb can pre-empt it.
+// AND CORRUPTION IS NOT A HEDGE — the deferral made that distinction load-bearing where it had been
+// free. `mustHedge` is true on the `unreadable` arm too, so simply deferring turned `candor_map` over a
+// CORRUPT report from a loud tool error into `{"incomplete": true}`: a disclosure where the contract
+// says refuse (§2 ⟨0.24⟩ — a signature key that cannot be read impeaches the document, it does not
+// qualify it). Caught by the existing row, which is the second time today that fixing a false negative
+// introduced a wrong downgrade in the same edit.
+//
+// So the loud causes fall THROUGH to the thunk, whose loader throws; only the qualifying causes
+// substitute a caveat. Corruption anywhere in the set wins over a hedge elsewhere in it.
 const caveatInstead = (p, doc) => {
   const comp = Q.reportCompleteness(p);
-  return Q.mustHedge(comp) ? Q.completenessFields(comp) : doc;
+  const call = () => (typeof doc === "function" ? doc() : doc);
+  if (comp?.unreadable?.length) return call();          // refuse loudly, via the loader
+  if (Q.mustHedge(comp)) return Q.completenessFields(comp);
+  return call();
 };
 // ⟨0.28⟩ The graph the three graph verbs answer over: the §2.2 sidecar when there is one, else the
 // report's own embedded `calls` edges (Q.reportCallsGraph) — the same fallback the CLI and rust/java
@@ -280,12 +302,12 @@ const TOOLS = {
   candor_show: {
     description: "A function's effects (inferred = transitive, direct = own body) plus its literal surfaces (hosts/cmds/paths/tables) when present.",
     schema: { type: "object", properties: { fn: { type: "string" }, ...reportArg }, required: ["fn"] },
-    run: (a, p) => caveatInstead(p, Q.show(loadReportLoud(p), a.fn)),
+    run: (a, p) => caveatInstead(p, () => Q.show(loadReportLoud(p), a.fn)),
   },
   candor_map: {
     description: "Per-module effect overview: each module's union of effects and function count. The architecture-at-a-glance.",
     schema: { type: "object", properties: { ...reportArg } },
-    run: (_a, p) => caveatInstead(p, Q.map(loadReportLoud(p))),
+    run: (_a, p) => caveatInstead(p, () => Q.map(loadReportLoud(p))),
   },
   candor_whatif: {
     description: "Hypothetically add `effect` to `fn` and report the blast radius; with `policy`, also the deny-rule violations it would cause. Pre-edit gate check.",
@@ -679,7 +701,22 @@ function handle(msg) {
       const prefix = t.noReport ? null : resolvePrefix(args);
       // A tool that targets a `fn` gets a clear "not found" rather than a silently-empty result —
       // an agent must distinguish "no such function" from "found, nothing calls it".
-      if (args.fn !== undefined) {
+      //
+      // ⟨0.28⟩ …BUT THE HEDGE OUTRANKS THE EXISTENCE GUARD, and this guard sits in the DISPATCHER, so it
+      // pre-empted the caveat for EVERY fn-taking tool rather than one. Over a judged-nothing report
+      // `candor_show`/`candor_impact`/`candor_callers`/`candor_path` answered "no function matching …"
+      // — a determined negative about the code, asserted by a report that examined none of it, to an
+      // agent that acts on it. "Found, nothing calls it" and "no such function" are indeed different
+      // answers and the guard is right to separate them; what it cannot do is choose between them from
+      // a report that judged nothing. Skipping it here hands the case to each tool's own completeness
+      // reader, which emits the caveat document (Rung A).
+      //
+      // CORRUPTION IS NOT A HEDGE and must stay loud: `unreadable` falls through to the guard, whose
+      // `loadReportLoud` throws — §2 ⟨0.24⟩ impeaches a document whose signature keys cannot be read
+      // rather than qualifying it.
+      const fnComp = t.noReport ? null : Q.reportCompleteness(prefix);
+      const fnHedges = !!fnComp && !fnComp.unreadable?.length && Q.mustHedge(fnComp);
+      if (args.fn !== undefined && !fnHedges) {
         const names = [...new Set([...Object.keys(Q.loadCallgraph(prefix)), ...loadReportLoud(prefix).map((e) => e.fn)])];
         if (Q.matches(names, args.fn).length === 0)
           return result(id, { content: [{ type: "text", text: `candor: no function matching \`${clip(args.fn)}\` in this report` }], isError: true });
