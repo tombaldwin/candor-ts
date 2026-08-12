@@ -19,7 +19,7 @@ import {
   fix, fixGate, unverified,
   containment, loadReport, loadCallgraph, loadHierarchy, callersFrontier, blindspots, blindspotsStats, isReport,
   reportCoverage, gainsCoverage, parseClassFilter, ClassFilterError,
-  claimsToHaveJudgedNothing, loadGateReport, reportJudgedNothing,
+  claimsToHaveJudgedNothing, loadGateReport, reportJudgedNothing, reportUnanalyzed,
 } from "./query-core.mjs";
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
@@ -1664,3 +1664,30 @@ test("scan.mjs: every fn-record site initialises the same ACCUMULATORS", () => {
   }
 });
 
+
+// ── ⟨0.28⟩ sibling enumeration is SORTED, never readdir order ──────────────────────────────────────
+// rust, java and swift all sort the multi-report siblings; this engine returned raw `readdirSync`
+// order — filesystem ENUMERATION order, stable on one machine and divergent across filesystems — and
+// everything downstream inherited it: the merged `functions` order, and the concatenation order of the
+// ⟨0.28⟩ `unanalyzed` disclosure. APFS happens to enumerate these names already sorted, so the REAL
+// filesystem cannot falsify the rule on this machine — the patched readdir is the only adversarial
+// enumeration available, and without it this test passes vacuously on the broken engine (measured).
+test("⟨0.28⟩ siblings are sorted: multi-report merge + unanalyzed order survive an adversarial readdir", () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-sibsort-"));
+  const doc = (fn, p) => JSON.stringify({ candor: { version: "candor-ts-x", spec: "0.27" },
+    functions: [{ fn, inferred: ["Fs"], direct: ["Fs"], calls: [] }],
+    analyzed: { count: 1 }, unanalyzed: [{ path: p, reason: "parse error" }] });
+  fs.writeFileSync(path.join(d, "r.bb.scan.json"), doc("m.bb", "bb.ts"));
+  fs.writeFileSync(path.join(d, "r.aa.scan.json"), doc("m.aa", "aa.ts"));
+  const real = fs.readdirSync;
+  fs.readdirSync = (...a) => real(...a).slice().reverse();
+  try {
+    assert.deepEqual(reportUnanalyzed(path.join(d, "r")).map((u) => u.path), ["aa.ts", "bb.ts"],
+      "the ⟨0.28⟩ unanalyzed disclosure must concatenate siblings in sorted order, not enumeration order");
+    assert.deepEqual(loadReport(path.join(d, "r")).map((e) => e.fn), ["m.aa", "m.bb"],
+      "the multi-report merge must read siblings in sorted order, not enumeration order");
+  } finally {
+    fs.readdirSync = real;
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+});

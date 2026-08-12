@@ -20,8 +20,15 @@ function siblings(prefix, predicate) {
   const dir = nodePath.dirname(prefix) || ".";
   const base = nodePath.basename(prefix);
   try {
+    // SORTED, because readdir order is filesystem ENUMERATION order — stable on one machine, divergent
+    // across filesystems and checkouts, and everything downstream of this list inherits it: the merge
+    // order of multi-report functions, the concatenation order of the ⟨0.28⟩ `unanalyzed` disclosure,
+    // which duplicate callgraph key wins Object.assign. rust (candor-report lib.rs), java (Query.java)
+    // and swift (FixCLI.swift) all sort here; this engine was the outlier, so two engines over an
+    // IDENTICAL tree could emit differently-ordered arrays and a byte-diffing consumer read a change
+    // where there was none.
     return fs.readdirSync(dir).filter((f) => f.startsWith(base + ".") && f.endsWith(".json") && predicate(f))
-      .map((f) => nodePath.join(dir, f));
+      .sort().map((f) => nodePath.join(dir, f));
   } catch { return []; }
 }
 // A sibling filename that is a real REPORT (not a callgraph sidecar, an encountered-crate ledger, a
