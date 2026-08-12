@@ -833,5 +833,76 @@ export function handler(): void { mid(); }
   for (const d of [RF, RM]) fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.28⟩ A CONFIGURED ZERO-RULE POLICY IN THE EDITOR (SPEC §2/§6.2) ───────────────────────────────
+// The editor has no exit code and no JSON document, so both of the rung's channels collapse onto the one
+// it does have — and this is the surface where §6.2's harm is LEAST visible, because the live gate's
+// entire vocabulary is the presence or absence of squiggles. Over `# no rules yet` the pre-rung server
+// published no diagnostics (indistinguishable from a gate that ran and found nothing), answered
+// `✓ no policy rule fires` to `candor.whatif` — which IS the prose spelling of `ok: true` — and told a
+// user who had ASKED for a fix that "Net isn't forbidden here; no boundary fix needed", vacuously true
+// from a policy that forbids nothing.
+{
+  // Its own scan: the top-of-file fixture `W` is removed long before this block, and a row that reads a
+  // deleted prefix passes on a tool error rather than on an answer.
+  const mkz = (policyText) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-zero-"));
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(path.join(dir, "src", "app.ts"), `import http from "node:http";
+export function leaf(): void { http.get("http://x"); }
+export function mid(): void { leaf(); }
+export function handler(): void { mid(); }
+`);
+    fs.mkdirSync(path.join(dir, ".candor"));
+    execFileSync("node", [path.join(HERE, "scan.mjs"), path.join(dir, "src"), "--out", path.join(dir, ".candor", "report")], { stdio: "ignore" });
+    fs.writeFileSync(path.join(dir, "arch.policy"), policyText);
+    fs.writeFileSync(path.join(dir, ".candor", "config"), "policy arch.policy\n");
+    return dir;
+  };
+  const Z = mkz("# no rules yet\n");
+  const ZDOC = pathToFileURL(path.join(Z, "src", "app.ts")).href;
+  const zArgs = (fn, effect) => [{ fn, effect, uri: ZDOC, line: 1 }];
+  const { inbound: zr } = await lspSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(Z).href } },
+    { jsonrpc: "2.0", method: "initialized", params: {} },
+    { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: ZDOC, languageId: "typescript", version: 1, text: "" } } },
+    { jsonrpc: "2.0", id: 10, method: "workspace/executeCommand", params: { command: "candor.whatif", arguments: zArgs("app.mid", "Db") } },
+    { jsonrpc: "2.0", id: 11, method: "workspace/executeCommand", params: { command: "candor.fix", arguments: zArgs("app.leaf", "Net") } },
+    { jsonrpc: "2.0", id: 12, method: "shutdown" },
+  ], 12);
+  const zMsgs = zr.filter((r) => r.method === "window/showMessage").map((r) => r.params?.message ?? "").join("\n");
+  const zLogs = zr.filter((r) => r.method === "window/logMessage").map((r) => r.params?.message ?? "").join("\n");
+  ok("⟨0.28⟩ zero-rule (LSP): the silent editor is DISCLOSED — a configured policy that parsed to no rules says so on the log channel, because in an editor 'no squiggles' is indistinguishable from a green gate",
+     /yielded NO RULES/.test(zLogs) && /not an all-clear/i.test(zLogs), zLogs.slice(0, 300));
+  ok("⟨0.28⟩ zero-rule (LSP): `candor.whatif` WITHDRAWS its pre-edit verdict — `✓ no policy rule fires` is the prose spelling of `ok: true`, and a policy that asks nothing cannot support it",
+     /has NO RULES/.test(zMsgs) && !/no policy rule fires/.test(zMsgs), zMsgs.slice(0, 300));
+  ok("⟨0.28⟩ zero-rule (LSP): …and the executeCommand RESULT carries the caveat instead of the verdict — a thick client renders that document, so the withdrawal has to reach it too",
+     Array.isArray(zr.find((r) => r.id === 10)?.result?.unevaluated)
+       && !("ok" in (zr.find((r) => r.id === 10)?.result ?? { ok: 1 })),
+     JSON.stringify(zr.find((r) => r.id === 10)?.result).slice(0, 260));
+  ok("⟨0.28⟩ zero-rule (LSP): `candor.fix` stops answering \"isn't forbidden here; no boundary fix needed\" — vacuously true from a policy that forbids nothing, on the surface that ASKED for a fix",
+     /no fix computed/.test(zMsgs) && /NO RULES/.test(zMsgs) && !/isn't forbidden here/.test(zMsgs),
+     zMsgs.slice(0, 300));
+  ok("⟨0.28⟩ zero-rule (LSP): …and its result carries NO `crossing` key — present exactly when the verb answered",
+     !("crossing" in (zr.find((r) => r.id === 11)?.result ?? {}))
+       && Array.isArray(zr.find((r) => r.id === 11)?.result?.unevaluated),
+     JSON.stringify(zr.find((r) => r.id === 11)?.result).slice(0, 260));
+  // CONTROL: the main fixture W has a REAL policy, and every LSP row above it in this file still passes —
+  // the caveat fires on the CONDITION (zero rules), not on the presence of a policy. Asserted here too so
+  // the control travels with the rows it controls.
+  const C = mkz("deny Net\ndeny Db app\n");
+  const CDOC = pathToFileURL(path.join(C, "src", "app.ts")).href;
+  const { inbound: cr } = await lspSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(C).href } },
+    { jsonrpc: "2.0", method: "initialized", params: {} },
+    { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: CDOC, languageId: "typescript", version: 1, text: "" } } },
+    { jsonrpc: "2.0", id: 10, method: "workspace/executeCommand", params: { command: "candor.whatif", arguments: [{ fn: "app.mid", effect: "Db", uri: CDOC, line: 1 }] } },
+  ], 4);
+  const cMsgs = cr.filter((r) => r.method === "window/showMessage").map((r) => r.params?.message ?? "").join("\n");
+  ok("⟨0.28⟩ zero-rule (LSP) CONTROL: with a REAL policy `candor.whatif` still delivers its verdict and no caveat — unchanged from before the rung",
+     /would fire/.test(cMsgs) && !/NO RULES/.test(cMsgs) && "ok" in (cr.find((r) => r.id === 10)?.result ?? {}),
+     cMsgs.slice(0, 240));
+  for (const dir of [Z, C]) fs.rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

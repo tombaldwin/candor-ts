@@ -409,7 +409,41 @@ function fileClaimsJudgedNothing(f) {
  *  corrupt". `fileClaimsJudgedNothing`'s own unreadable→true stays: `reportJudgedNothing` above is the
  *  gate's ANDed fail-closed question, where "no readable claim" must never read as "judged something". */
 export function reportJudgedNothingFiles(prefix) {
-  return reportFilesAt(prefix).filter((f) => fileParses(f) && fileClaimsJudgedNothing(f));
+  return reportFilesAt(prefix).filter((f) => fileParses(f) && fileClaimsJudgedNothing(f) && !fileHasNoManifest(f));
+}
+
+/** ⟨0.28⟩ SPEC §2 — **THE THIRD ROW IS NOT THE FIRST ROW.** §2's three-row table distinguishes
+ *  `analyzed.count: 0` (row 1 — *nothing was judged*, a claim the report MAKES) from `analyzed` ABSENT
+ *  (row 3 — a pre-⟨0.21⟩ producer with no manifest at all, which claims nothing). MEASURED here
+ *  2026-08-12 over `{"candor":{…},"functions":[]}` with no `analyzed` key: this engine listed the file
+ *  under `judgedNothing` and its note said the report *"say[s] they JUDGED NOTHING (`analyzed.count:
+ *  0`)"*. **The report declares nothing.** The HEDGE is the right direction — row 3's own instruction is
+ *  *no manifest, no claim* — but the disclosure is FALSE, and this family rates a false disclosure worse
+ *  than a missing one (§3.4's `net-partner` finding: an engine reported "ignoring unknown config key"
+ *  while honouring it).
+ *
+ *  It is also a hole in ⟨0.28⟩'s own pin, which defines `judgedNothing` as *reports declaring
+ *  `analyzed.count: 0`*: putting a row-3 report there makes the key mean two things and loses the
+ *  distinction the table exists to draw. The REPAIRS differ — row 1 wants a scan that reaches a
+ *  conclusion, row 3 wants a producer that emits a manifest at all.
+ *
+ *  A legacy BARE ARRAY report has no envelope and therefore no manifest either, so it is row 3 too when
+ *  it is empty; when it LISTS entries it is not hedging at all (`claimsToHaveJudgedNothing` is false) and
+ *  never reaches this filter. Asked of the same parsed bytes as its two siblings so the three cannot
+ *  drift into three readings of one file. */
+const fileHasNoManifest = (f) => {
+  let parsed;
+  try { parsed = JSON.parse(fs.readFileSync(f, "utf8")); } catch { return false; }  // unreadable → `unreadable`
+  if (Array.isArray(parsed)) return true;                       // legacy bare array: no envelope, no manifest
+  return !!parsed && typeof parsed === "object" && !("analyzed" in parsed);
+};
+
+/** ⟨0.28⟩ The consulted report FILES carrying no `analyzed` key at all — SPEC §2's row 3, pinned to its
+ *  own key (`noManifest`) in the rung that introduced it. Only the files that are also HEDGING: a row-3
+ *  report that LISTS functions demonstrably judged units and said so the only way it could, and keeps the
+ *  standing it has always had (`claimsToHaveJudgedNothing`'s manifest-absent row). */
+export function reportNoManifestFiles(prefix) {
+  return reportFilesAt(prefix).filter((f) => fileParses(f) && fileHasNoManifest(f) && fileClaimsJudgedNothing(f));
 }
 
 /** ⟨0.28⟩ Does the file's TEXT parse at all — the line between "this report says X" and "this report
@@ -518,8 +552,12 @@ export function reportCompleteness(prefix) {
   // semantics rust and java pin, and a repair the reader can aim (that file, not "somewhere here").
   // ⟨0.28⟩ `unreadable`: the third cause, split out of the judged-nothing mislabel — see
   // `reportUnreadableFiles`. It hedges the answer and names the file on the human channel only.
+  // ⟨0.28⟩ `noManifest`: SPEC §2's row 3, split out of the `judgedNothing` mislabel — see
+  // `reportNoManifestFiles`. It hedges like the others and carries its own wire key, because the two
+  // want different repairs and because `judgedNothing` is PINNED to "reports declaring `analyzed.count:
+  // 0`", which a row-3 report is not.
   return { unanalyzed: reportUnanalyzed(prefix), judgedNothing: reportJudgedNothingFiles(prefix),
-           unreadable: reportUnreadableFiles(prefix) };
+           noManifest: reportNoManifestFiles(prefix), unreadable: reportUnreadableFiles(prefix) };
 }
 
 /**
@@ -535,7 +573,8 @@ export function reportCompleteness(prefix) {
  * exists to prevent. So count-0 reaches both DISCLOSURE channels through this predicate and stops at the
  * exit code; see `advisoryAnswer`, whose exit-bearing callers key `--strict` on manifest + unreadable.
  */
-export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing?.length || c.unreadable?.length));
+export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing?.length
+                                         || c.noManifest?.length || c.unreadable?.length));
 
 /**
  * ⟨0.28⟩ The disclosure KEYS, defined ONCE, for spreading into a verb's answer document — `{}` when there
@@ -565,9 +604,15 @@ export function completenessFields(c) {
   // `unreadable` raises the flag and adds NO key of its own — measured, rust and swift answer
   // `incomplete: true` alone over a corrupt sibling, and a third spelling here would be the
   // judgedNothing three-way split again, minted by the engine that was fixing it.
+  // ⟨0.28⟩ `noManifest` is the third NAMED cause, `omitted when empty` like the other two, and it RAISES
+  // `incomplete` exactly as they do — the flag stays the one key a consumer may branch on alone and be
+  // safe under every cause. It is separate from `judgedNothing` because that key is pinned to "reports
+  // declaring `analyzed.count: 0`" and a row-3 report declares nothing: merging them would make one key
+  // mean two things and lose the distinction §2's three-row table exists to draw.
   return { incomplete: true,
            ...(c.unanalyzed?.length ? { unanalyzed: c.unanalyzed } : {}),
-           ...(c.judgedNothing?.length ? { judgedNothing: c.judgedNothing } : {}) };
+           ...(c.judgedNothing?.length ? { judgedNothing: c.judgedNothing } : {}),
+           ...(c.noManifest?.length ? { noManifest: c.noManifest } : {}) };
 }
 
 /**
@@ -580,6 +625,7 @@ export function completenessFields(c) {
 export const absorbCompleteness = (a, b) => ({
   unanalyzed: [...(a.unanalyzed ?? []), ...(b.unanalyzed ?? [])],
   judgedNothing: [...(a.judgedNothing ?? []), ...(b.judgedNothing ?? [])],
+  noManifest: [...(a.noManifest ?? []), ...(b.noManifest ?? [])],
   unreadable: [...(a.unreadable ?? []), ...(b.unreadable ?? [])],
 });
 
@@ -628,18 +674,24 @@ export const absorbCompleteness = (a, b) => ({
  * over-claim the strict exit exists to prevent. (`mustHedge` is the same distinction, stated for a verb
  * that has no exit code for it to matter to.)
  */
-export function advisoryAnswer(body, unanalyzed, judgedNothing = [], unreadable = []) {
+export function advisoryAnswer(body, unanalyzed, judgedNothing = [], unreadable = [], noManifest = []) {
   const unevaluated = body?.unevaluated;
-  if (!unanalyzed?.length && !unevaluated?.length && !judgedNothing?.length && !unreadable?.length)
+  if (!unanalyzed?.length && !unevaluated?.length && !judgedNothing?.length && !unreadable?.length
+      && !noManifest?.length)
     return body;  // COMPLETE: unchanged, byte for byte, `ok` and all.
   const { ok, ...rest } = body;                          // eslint-disable-line no-unused-vars -- omitted BY DESIGN
   // The array of report paths, same key and same shape as `completenessFields` — ONE wire spelling for
   // this key across the answer and advisory documents (see the shape ruling there). `unreadable` withdraws
   // `ok` and raises `incomplete` with NO key of its own, exactly as `completenessFields` rules it.
-  const judged = judgedNothing?.length ? { judgedNothing } : {};
+  // ⟨0.28⟩ `noManifest` DOES get a key of its own — SPEC §2 pins it — and it rides here for the same
+  // reason `judgedNothing` does: an advisory verb's `ok` is a claim about the CODE, and a report that
+  // never emitted a manifest cannot support it (row 3: *no manifest, no claim*).
+  const judged = { ...(judgedNothing?.length ? { judgedNothing } : {}),
+                   ...(noManifest?.length ? { noManifest } : {}) };
   // Key order matches the gate's verdict document: the finding, then `unevaluated`, then the manifest.
   if (unanalyzed?.length) return { ...rest, incomplete: true, unanalyzed, ...judged };
-  return (judgedNothing?.length || unreadable?.length) ? { ...rest, incomplete: true, ...judged } : rest;
+  return (judgedNothing?.length || noManifest?.length || unreadable?.length)
+    ? { ...rest, incomplete: true, ...judged } : rest;
 }
 
 export function loadReport(prefix) {

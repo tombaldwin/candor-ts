@@ -73,6 +73,53 @@ const advisoryUnevaluatedNote = (verb, unevaluated, tail) => {
   console.error(`  ${tail}`);
 };
 const UNEVAL_TAIL_STRICT = "(`ok` is OMITTED — neither value is a statement this input licenses; no remedy is offered for a boundary the gate could not adjudicate; `--strict` exits 2, the could-not-evaluate code)";
+
+// ---- ⟨0.28⟩ SPEC §2 — AN ADVISORY VERB OVER A CONFIGURED ZERO-RULE POLICY ANSWERS WITH THE CAVEAT
+// DOCUMENT, RESULT KEYS WITHHELD, EXIT UNCHANGED.
+//
+// §6.2 makes the same condition an exit-2 REFUSAL for the GATE, on the ground that `ok: true` is a claim
+// about the code no such run is entitled to make. These verbs share that loader and were not touched by
+// the rung. They are ADVISORY — they set no verdict, so the gate's refusal posture is the wrong import.
+// What they DO produce is an answer *relative to a policy*, and relative to no rules that answer is not a
+// finding, it is an absence of questions. MEASURED here 2026-08-12 over `# no rules yet`:
+//
+//     whatif      {"of":[…],"affected":[…],"violations":[],"ok":true}          exit 0
+//     fix         {"crossing":false,"reason":"not-forbidden"}                  exit 0
+//     fix-gate    {"ok":true,"remedies":[]}                                    exit 0 (also --strict)
+//     unverified  {"ok":true,"unverified":[]}                                  exit 0 (also --strict)
+//
+// `not-forbidden` by a policy that forbids nothing is vacuously true — an all-clear produced by deleting
+// the question. So the result keys are withheld: `unverified` does not emit an empty `unverified` list
+// over a policy that asked nothing, for the same reason ⟨0.27⟩'s refusal document must not carry
+// `violations`. And `fix` emits NO `crossing` KEY — ⟨0.28⟩ pins that key as present exactly when the verb
+// answered, and here it did not.
+//
+// `fix` IS IN THE LIST BECAUSE THE LIST IS A CONDITION, NOT AN ENUMERATION. §2 names `whatif`/`fix-gate`/
+// `unverified` because those were the three in front of the author, and records the divergence that
+// created: candor-rust extended the rule to `fix` and flagged it, candor-swift read the list as closed and
+// did not. Every verb that answers relative to a CONFIGURED policy takes this rule.
+//
+// NO NEW KEY. The document carries `unevaluated` with one entry naming the whole policy, in the EXACT
+// spelling this engine's own gate routes already use for their zero-rule refusal (`policyZeroRules`, one
+// builder, shared) — so the gate and the advisory verbs say the same thing about the same policy in the
+// same words, which is what makes a cross-engine consumer possible at all.
+//
+// A policy that is NOT CONFIGURED is untouched: that remains the honest way to say "I am not gating"
+// (§6.2), and it is exactly why a configured zero-rule policy is never a legitimate expression of it.
+const policyAskedNothing = (pol) => !!pol && !pol.deny.length && !pol.allow.length && !pol.forbid.length;
+const emitZeroRuleCaveat = (verb, policyFile, comp) => {
+  const { unevaluated } = policyZeroRules(policyFile);
+  console.error(`candor-ts: ${verb}: the policy at ${policyFile} yielded NO RULES — every line was ignored `
+    + `(see the \`ignoring policy rule\` warnings above), the file is empty, or it holds only comments. A `
+    + `policy with no rules ASKS NOTHING, so this verb has no answer to give relative to it: the result `
+    + `keys are WITHHELD and this caveat stands in their place (SPEC §2 ⟨0.28⟩). \`gate\` refuses outright `
+    + `over this policy (exit 2). If you did not mean to gate, remove the policy configuration rather than `
+    + `pointing it at a file with no rules in it.`);
+  // The report-completeness caveat rides the SAME document when it applies: the two disclosures are
+  // independent — one says the policy asked nothing, the other that the report could not see everything —
+  // and each says something the other does not.
+  emit({ unevaluated, ...completenessFields(comp) });
+};
 // ⟨0.28⟩ SPEC §2's OTHER cause on the ADVISORY channel — `analyzed.count: 0`, which `advisoryIncompleteNote`
 // above could not say because it is written around an unread FILE and this report names none. Same two
 // channels, different sentence, and the tail is the OPPOSITE one: the gate exits 0 over these bytes
@@ -85,6 +132,15 @@ const advisoryUnreadableNote = (verb, unreadable) => {
   console.error(`candor-ts: ${verb} could NOT fully evaluate — ${unreadable.length} report file(s) under this locator could not be parsed, and whatever they say is not in this answer:`);
   for (const f of unreadable) console.error(`    ${f}`);
   console.error("  (`ok` is OMITTED — neither value is a statement this input licenses; `gate --report` exits 2 over these bytes. Fix or regenerate the corrupt report.)");
+};
+// ⟨0.28⟩ SPEC §2's THIRD ROW on the ADVISORY channel. Its own sentence beside the judged-nothing one
+// below, for the reason `incompleteAnswerNote` gives: that note asserts `analyzed.count: 0`, which a
+// row-3 report never said, and the repair is a producer that emits a manifest rather than a scan that
+// reaches a conclusion.
+const advisoryNoManifestNote = (verb, files) => {
+  console.error(`candor-ts: ${verb} could NOT fully evaluate — ${files.length} report(s) under this locator carry NO \`analyzed\` manifest at all (SPEC §2 row 3, a pre-⟨0.21⟩ producer), so they make no claim about what was judged and their silence licenses none either:`);
+  for (const f of files) console.error(`    ${f}`);
+  console.error("  (`ok` is OMITTED — neither value is a statement this input licenses. `gate --report` exits 0 over these bytes, so this note is the whole of the warning. Re-scan with a current engine so the report carries its manifest.)");
 };
 const advisoryJudgedNothingNote = (verb) => {
   console.error(`candor-ts: ${verb} could NOT fully evaluate — the report(s) under this locator say they JUDGED NOTHING (⟨0.24⟩ \`analyzed.count\` is 0, absent with no entries, or unreadable), so absence from \`functions\` licenses no purity claim about any unit and there is nothing here to certify`);
@@ -154,12 +210,21 @@ const incompleteAnswerNote = (comp, soWhat, tail) => {
     causes.push(`declare ${comp.unanalyzed.length} unit(s) candor could not analyze`);
   if (comp.judgedNothing.length)
     causes.push("say they JUDGED NOTHING (`analyzed.count: 0`)");
+  // ⟨0.28⟩ SPEC §2's THIRD ROW, and it gets its OWN sentence because the one above was FALSE for it:
+  // this engine told the reader a row-3 report "says it judged nothing (`analyzed.count: 0`)" when the
+  // report declares nothing at all, and this family rates a false disclosure worse than a missing one.
+  // The repairs differ too — row 1 wants a scan that reaches a conclusion, row 3 wants a producer that
+  // emits a manifest — so a reader given the wrong one goes to the wrong place.
+  if (comp.noManifest?.length)
+    causes.push(`include ${comp.noManifest.length} report(s) carrying NO \`analyzed\` manifest at all`);
   if (comp.unreadable?.length)
     causes.push(`include ${comp.unreadable.length} file(s) that could not be parsed at all`);
   console.log(`candor-ts: ⚠ INCOMPLETE — the report(s) under this locator ${causes.join(", and ")}, so ${soWhat}:`);
   for (const u of comp.unanalyzed) console.log(`    ${u.path}${u.reason ? `  (${u.reason})` : ""}`);
   if (comp.judgedNothing.length)
     console.log("    (a report that judged nothing names no function at all — its silence is not a purity claim about any unit)");
+  for (const f of comp.noManifest ?? [])
+    console.log(`    ${f} — no \`analyzed\` manifest (a pre-⟨0.21⟩ producer): it makes no claim about what was judged, so its silence licenses none either. Re-scan with a current engine.`);
   for (const f of comp.unreadable ?? [])
     console.log(`    ${f} — could not be parsed (corrupt or mid-write), so whatever it says is not in this answer`);
   console.log(`    ${tail} ${gateLine(comp)}`);
@@ -1682,8 +1747,13 @@ switch (cmd) {
     // over the call graph, so this verb answers `ok: true` where the report-only verbs exit 2 on the name.
     // MEASURED exactly so — the pre-edit gate check, green, over a report that judged nothing.
     if (wcomp.judgedNothing.length) advisoryJudgedNothingNote("whatif");
+    if (wcomp.noManifest.length) advisoryNoManifestNote("whatif", wcomp.noManifest);
     if (wcomp.unreadable.length) advisoryUnreadableNote("whatif", wcomp.unreadable);
-    emit(advisoryAnswer(r, wunan, wcomp.judgedNothing, wcomp.unreadable));
+    // ⟨0.28⟩ SPEC §2 — a CONFIGURED policy that parsed to zero rules asked nothing, so the pre-edit
+    // verdict AND the blast radius it qualifies are withheld in favour of the caveat document. The exit
+    // is UNCHANGED (0: with no rules, `violations` was empty by construction on this path anyway).
+    if (policyFile && policyAskedNothing(pol)) { emitZeroRuleCaveat("whatif", policyFile, wcomp); process.exit(0); }
+    emit(advisoryAnswer(r, wunan, wcomp.judgedNothing, wcomp.unreadable, wcomp.noManifest));
     process.exit(r.violations.length ? 1 : 0);
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }
@@ -1703,8 +1773,17 @@ switch (cmd) {
     // The sidecar is the ONLY graph a candor-ts report carries (it embeds no inline `calls`). Fail LOUD when
     // it's absent — never compute a degenerate empty-graph remedy that reads as a false "no clean hoist".
     if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
-    const r = coreFix(cg, loadReportOrDie(prefix), target, eff, loadPolicyOrDie(policyFile, ptext), scopeMatches);
+    const fpol = loadPolicyOrDie(policyFile, ptext);
+    const r = coreFix(cg, loadReportOrDie(prefix), target, eff, fpol, scopeMatches);
     if (r === null) { console.error(`candor: no function matching \`${target}\` in the call graph`); process.exit(2); }
+    // ⟨0.28⟩ SPEC §2 — this verb shares the policy loader with the three the clause names, and its every
+    // answer is equally policy-relative: over a zero-rule policy it emitted `{"crossing": false,
+    // "reason": "not-forbidden"}` at exit 0, and *not-forbidden* by a policy that forbids nothing is
+    // vacuously true. Composed with the ⟨0.28⟩ `crossing` ruling, this emits NO `crossing` KEY — that key
+    // is present exactly when the verb answered, and here it did not. Exit UNCHANGED (0; the
+    // missing-function usage error above keeps its 2). Placed AFTER that error so a bad `fn` still
+    // reports the bad `fn`.
+    if (policyAskedNothing(fpol)) { emitZeroRuleCaveat("fix", policyFile, reportCompleteness(prefix)); process.exit(0); }
     // ⟨0.24⟩ SPEC §3.2 `4fd140c` — the printed channel for a REFUSED remedy (`refused: true`, no `crossing`
     // key). Without it the terminal shows a document with no plan in it and no reason for the absence.
     if (r.unevaluated?.length) advisoryUnevaluatedNote("fix", r.unevaluated,
@@ -1725,7 +1804,8 @@ switch (cmd) {
     catch { console.error(`candor: policy ${policyFile} could not be read — no fix computed`); process.exit(2); }
     const cg = loadCallgraph(prefix);
     if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix-gate needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
-    const fgr = coreFixGate(cg, loadReportOrDie(prefix), loadPolicyOrDie(policyFile, ptext), scopeMatches);
+    const fgpol = loadPolicyOrDie(policyFile, ptext);
+    const fgr = coreFixGate(cg, loadReportOrDie(prefix), fgpol, scopeMatches);
     // ⟨0.24⟩ SPEC §3.2 — see `advisoryAnswer`. Over a report declaring `unanalyzed` this OMITS `ok`, adds
     // the manifest, and `--strict` (the CI form) exits 2 — could-not-fully-evaluate, the same code the gate
     // uses for the same situation — rather than the 1 that would claim a finding or the 0 that certified.
@@ -1736,12 +1816,22 @@ switch (cmd) {
     // below (see `advisoryAnswer`). Leaving it out would have let this verb print a remedy list beside
     // `ok: true` over a report that judged nothing — the same false all-clear, arriving by omission.
     if (fgComp.judgedNothing.length) advisoryJudgedNothingNote("fix-gate");
+    if (fgComp.noManifest.length) advisoryNoManifestNote("fix-gate", fgComp.noManifest);
     if (fgComp.unreadable.length) advisoryUnreadableNote("fix-gate", fgComp.unreadable);
     // ⟨0.24⟩ SPEC §3.2 `4fd140c` — and the same posture for a rule the GATE refused: no remedy is computed
     // from evidence the gate declined to read, the refusal is disclosed on both channels, and `--strict`
     // exits 2 (could-not-evaluate) rather than the 0 that would read as "no crossings left to fix".
     if (fgr.unevaluated?.length) advisoryUnevaluatedNote("fix-gate", fgr.unevaluated, UNEVAL_TAIL_STRICT);
-    emit(advisoryAnswer(fgr, fgUnan, fgComp.judgedNothing, fgComp.unreadable));
+    // ⟨0.28⟩ SPEC §2 — an empty `remedies` beside `ok: true` here is a claim relative to a gate that never
+    // asked a question. The caveat document replaces the result; the EXIT is the SAME expression the
+    // result path computes, over the finding sets a zero-rule policy produces by construction (no
+    // remedies, no unanswerable rule) — so it moves only with the REPORT's own incompleteness, exactly as
+    // it does today.
+    if (policyAskedNothing(fgpol)) {
+      emitZeroRuleCaveat("fix-gate", policyFile, fgComp);
+      process.exit(fgUnan.length || fgComp.unreadable.length ? (strict ? 2 : 0) : 0);
+    }
+    emit(advisoryAnswer(fgr, fgUnan, fgComp.judgedNothing, fgComp.unreadable, fgComp.noManifest));
     // ⟨0.28⟩ `unreadable` joins the `--strict` exit-2 trigger (SPEC §3.2's pessimism relation): `gate
     // --report` REFUSES over a corrupt member — measured, exit 2 — so exiting 0/1 here claimed this verb
     // got FURTHER than the gate on identical bytes. The unreadable note above already SAID the exit was
@@ -1772,7 +1862,8 @@ switch (cmd) {
     const ucg = uci >= 0 ? loadCallgraph(prefix) : {};
     if (uci >= 0 && Object.keys(ucg).length === 0 && !ucg.partial && !ufns.some((e) => (e.calls ?? []).length))
       console.error(`candor-ts: no call-graph sidecar for '${prefix}' and no \`calls\` edges in the report — \`--class\` resolved each hole's reason class from its OWN \`unknownWhy\` only; a hole whose Unknown is INHERITED reads \`unresolved\` here (re-run: candor-ts <src> --out ${prefix})`);
-    const r = coreUnverified(ufns, loadPolicyOrDie(policyFile, ptext), scopeMatches,
+    const upol = loadPolicyOrDie(policyFile, ptext);
+    const r = coreUnverified(ufns, upol, scopeMatches,
                              uci >= 0 ? args[uci + 1] : null, ucg);
     // ⟨0.24⟩ SPEC §3.2 — see `advisoryAnswer`, and this is the SHARPEST case in the family: the verb whose
     // entire job is "your green gate is not provably green" was certifying a set it knows it cannot see all
@@ -1784,11 +1875,20 @@ switch (cmd) {
     // ⟨0.28⟩ …and the count-0 cause. MEASURED before this line: `{ok: true, unverified: []}` over a report
     // that judged nothing — this verb certifying a package it never examined. The exit is untouched.
     if (uComp.judgedNothing.length) advisoryJudgedNothingNote("unverified");
+    if (uComp.noManifest.length) advisoryNoManifestNote("unverified", uComp.noManifest);
     if (uComp.unreadable.length) advisoryUnreadableNote("unverified", uComp.unreadable);
     // ⟨0.24⟩ SPEC §3.2 `4fd140c` — the function the gate could not judge is NAMED in `unverified` above,
     // with the missing evidence as its reason; this is the human channel for the same fact.
     if (r.unevaluated?.length) advisoryUnevaluatedNote("unverified", r.unevaluated, UNEVAL_TAIL_STRICT);
-    emit(advisoryAnswer(r, uUnan, uComp.judgedNothing, uComp.unreadable));
+    // ⟨0.28⟩ SPEC §2 — the sharpest of the four: the verb whose whole job is "your green gate is not
+    // provably green" answered `{"ok": true, "unverified": []}` over a policy that asked nothing. The
+    // empty list is withheld for ⟨0.27⟩'s reason (a refusal document must not carry `violations`), and the
+    // exit follows the same expression the result path computes over empty finding sets.
+    if (policyAskedNothing(upol)) {
+      emitZeroRuleCaveat("unverified", policyFile, uComp);
+      process.exit(uUnan.length || uComp.unreadable.length ? (strict ? 2 : 0) : 0);
+    }
+    emit(advisoryAnswer(r, uUnan, uComp.judgedNothing, uComp.unreadable, uComp.noManifest));
     // ⟨0.28⟩ `unreadable` joins the `--strict` exit-2 trigger — see fix-gate above. Measured on this verb
     // before the fix: over one good report plus one unparsable sibling, `gate --report` exited 2 and
     // `unverified --strict` exited 0 — and `--strict` is how CI consumes it.

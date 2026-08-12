@@ -21,7 +21,7 @@ import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses,
          parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText,
-         unanswerableScoped, resolveReasonClasses, fatalPolicyErrors } from "./policy.mjs";
+         unanswerableScoped, resolveReasonClasses, fatalPolicyErrors, policyZeroRules } from "./policy.mjs";
 
 const VERSION = createRequire(import.meta.url)("./package.json").version; // single-sourced, like scan.mjs
 
@@ -136,6 +136,22 @@ function policyOrThrow(text, policyPath) {
   if (fatal.length) throw new Error(policyErrorText(policyPath ?? "(policy)", fatal));
   return pol;
 }
+// ⟨0.28⟩ SPEC §2 — AN ADVISORY TOOL OVER A CONFIGURED ZERO-RULE POLICY ANSWERS WITH THE CAVEAT DOCUMENT,
+// RESULT KEYS WITHHELD. The CLI half is `emitZeroRuleCaveat` in query.mjs and this is the SAME document
+// through the same builder (`policyZeroRules`), because the agent surface is a channel these verbs answer
+// on and a caveat that exists on one of them is a caveat the other silently drops. MEASURED on the CLI
+// twins before this: `{"ok": true, "unverified": []}` / `{"crossing": false, "reason": "not-forbidden"}`
+// over `# no rules yet` — an all-clear produced by deleting the question, handed to a consumer that
+// cannot ask a follow-up. `fix` emits NO `crossing` key: that key is present exactly when the verb
+// answered. §6.2's gate REFUSES over the same policy (exit 2); these are advisory, so they disclose.
+const policyAskedNothing = (pol) => !!pol && !pol.deny.length && !pol.allow.length && !pol.forbid.length;
+// `policyZeroRules` also returns a `why` — the HUMAN sentence the gate's refusal puts in `reason`. The
+// caveat document carries only `unevaluated`, so it is not spread here rather than minted as a wire key.
+const zeroRuleCaveat = (policyPath, prefix) => {
+  const { unevaluated } = policyZeroRules(policyPath ?? "(policy)");
+  return { unevaluated, ...Q.completenessFields(Q.reportCompleteness(prefix)) };
+};
+
 // The repo's .candor/config (spec §3.4), from the report's directory upward — shared impl in policy.mjs.
 function configPolicy(prefix) {
   return discoverConfigPolicy(nodePath.dirname(nodePath.resolve(prefix)) || ".");
@@ -282,6 +298,10 @@ const TOOLS = {
       const pol = a.policy ? policyOrThrow(confinedPolicyRead(a.policy, p), a.policy) : null;
       const r = Q.whatif(Q.loadCallgraph(p), a.fn, a.effect, pol, scopeMatches);
       if (r === null) throw new Error(`no function matching \`${clip(a.fn)}\` in the call graph`);
+      // ⟨0.28⟩ a CONFIGURED policy that parsed to zero rules asked nothing — the pre-edit verdict and the
+      // blast radius it qualifies are withheld for the caveat document (see `zeroRuleCaveat`). A policy
+      // that is NOT configured stays untouched: that is the honest way to say "I am not gating".
+      if (policyAskedNothing(pol)) return zeroRuleCaveat(a.policy, p);
       return r;
     },
   },
@@ -303,8 +323,13 @@ const TOOLS = {
       // The sidecar is the only graph a candor-ts report carries — fail loud (tool error) when it's absent,
       // never a degenerate empty-graph remedy. (/code-review.)
       if (!cg || Object.keys(cg).length === 0) throw new Error(`no call-graph sidecar for the report — fix needs it (re-scan with --out)`);
-      const r = Q.fix(cg, loadReportLoud(p), a.fn, a.effect, policyOrThrow(text, polPath), scopeMatches);
+      const fpol = policyOrThrow(text, polPath);
+      const r = Q.fix(cg, loadReportLoud(p), a.fn, a.effect, fpol, scopeMatches);
       if (r === null) throw new Error(`no function matching \`${clip(a.fn)}\` in the call graph`);
+      // ⟨0.28⟩ …and NO `crossing` key over a zero-rule policy: this tool's own description tells an agent
+      // to read `crossing` as the answer, and `crossing: false` from a policy that forbids nothing is
+      // vacuously true. Present exactly when the verb answered.
+      if (policyAskedNothing(fpol)) return zeroRuleCaveat(polPath, p);
       return r;
     },
   },
@@ -437,8 +462,15 @@ const TOOLS = {
       // `reportCompleteness` the CLI and the descriptive tools use — one reader, so the two channels
       // cannot disagree about which reports judged nothing.
       const ucomp = Q.reportCompleteness(p);
-      return Q.advisoryAnswer(Q.unverified(loadReportLoud(p), policyOrThrow(text, polPath), scopeMatches),
-                              ucomp.unanalyzed, ucomp.judgedNothing);
+      const upol = policyOrThrow(text, polPath);
+      // ⟨0.28⟩ the sharpest of the three: the verb whose job is "your green gate is not provably green"
+      // answered `{ok: true, unverified: []}` over a policy that asked nothing. The empty list is withheld
+      // for ⟨0.27⟩'s reason — a document that made no evaluation must not carry the finding key.
+      if (policyAskedNothing(upol)) return zeroRuleCaveat(polPath, p);
+      // ⟨0.28⟩ `noManifest` (SPEC §2 row 3) rides here too — a report with no `analyzed` key declares
+      // nothing, and listing it under `judgedNothing` would be the false disclosure the rung split out.
+      return Q.advisoryAnswer(Q.unverified(loadReportLoud(p), upol, scopeMatches),
+                              ucomp.unanalyzed, ucomp.judgedNothing, ucomp.unreadable, ucomp.noManifest);
     },
   },
   candor_containment: {

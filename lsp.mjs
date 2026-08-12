@@ -45,7 +45,7 @@ import { createRequire } from "node:module";
 import nodePath from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as Q from "./query-core.mjs";
-import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, resolveReasonClasses, fatalPolicyErrors } from "./policy.mjs";
+import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, resolveReasonClasses, fatalPolicyErrors, policyZeroRules } from "./policy.mjs";
 
 // Version: from the sibling package.json when running inside the npm package; a single-file BUNDLE of
 // this server (the IDE-plugin embedding) has no sibling package.json — fall back rather than crash.
@@ -324,6 +324,18 @@ function activePolicyParsed(text) {
   warnOnce(`candor-lsp: ${policyErrorText(activePolicyPath ?? "(policy)", fatal)}\n  No gate diagnostics are produced from it — their ABSENCE here is the refusal, not an all-clear.`);
   return null;
 }
+// ⟨0.28⟩ SPEC §2/§6.2 — DID THIS CONFIGURED POLICY ASK ANYTHING AT ALL? Every rule vector, never a
+// subset: keying on `deny` alone would call an ordinary allow-only or forbid-only gate empty.
+const policyAskedNothing = (pol) => !!pol && !pol.deny.length && !pol.allow.length && !pol.forbid.length;
+// The editor has no exit code and no JSON document, so both of this rung's channels collapse onto the
+// one it does have. Same `warnOnce` shape (and same reasoning) as the judged-nothing warning below: there
+// is no line to pin it to, and a per-keystroke popup is how an advisory gets turned off.
+const zeroRulePolicyWarn = (what) =>
+  warnOnce(`candor-lsp: ${policyZeroRules(activePolicyPath ?? "(policy)").why} — every line was ignored, the `
+    + `file is empty, or it holds only comments. ${what} A policy with no rules ASKS NOTHING, so the silence `
+    + `here is NOT an all-clear: \`gate\` REFUSES over this policy outright (exit 2, SPEC §6.2). If you did `
+    + `not mean to gate, remove the policy configuration rather than pointing it at a file with no rules.`);
+
 function diagnosticsFor(docPath) {
   const text = activePolicy();
   if (text === null || !hasReport(reportPrefix)) return [];
@@ -346,6 +358,11 @@ function diagnosticsFor(docPath) {
   // producer's project, in both the fabricating and the fail-open direction (see reportNetClasses).
   const dpol = activePolicyParsed(text);
   if (dpol === null) return [];
+  // ⟨0.28⟩ …and a CONFIGURED policy that parsed to ZERO RULES produces no squiggles either, which in an
+  // editor is indistinguishable from a gate that ran and found nothing — §6.2's harm on the surface where
+  // it is least visible, since the live gate's entire vocabulary IS the absence or presence of squiggles.
+  if (policyAskedNothing(dpol))
+    zeroRulePolicyWarn("No gate diagnostics can come from it.");
   // ⟨0.24⟩ THE ANSWERABILITY WITHHOLD, which this surface ran WITHOUT — `evaluatePolicy` was called with no
   // `withhold` predicate and the DEFAULT netClass mode, so both directions of the §3.1 harm were live in the
   // editor. Measured against the CLI on one report and one policy: `deny Unknown[reflect]` drew NO squiggle
@@ -487,11 +504,23 @@ function runWhatif(a) {
     return null;
   }
   const policyText = activePolicy();
-  const r = Q.whatif(Q.loadCallgraph(reportPrefix), a.fn, a.effect,
-                     policyText === null ? null : activePolicyParsed(policyText), scopeMatches);
+  const wpol = policyText === null ? null : activePolicyParsed(policyText);
+  const r = Q.whatif(Q.loadCallgraph(reportPrefix), a.fn, a.effect, wpol, scopeMatches);
   if (r === null) {
     showMessage(2, `candor: no function matching \`${a.fn}\` in the call graph — the report may be stale`);
     return null;
+  }
+  // ⟨0.28⟩ SPEC §2 — a CONFIGURED policy that yielded zero rules asked nothing, and `✓ no policy rule
+  // fires` IS the prose spelling of `ok: true`. The pre-edit verdict is withheld on both this channel and
+  // the executeCommand RESULT (a thick client renders that); the blast radius is not a policy claim, so it
+  // is still counted in the message the operator gets. A policy that is NOT configured keeps its own
+  // "no policy discovered" wording below — that is the honest way to say "I am not gating".
+  if (policyAskedNothing(wpol)) {
+    zeroRulePolicyWarn("No pre-edit verdict can come from it.");
+    const zcallers = r.affected.filter((f) => !r.of.includes(f));
+    showMessage(2, `candor: the configured policy has NO RULES — no pre-edit verdict (blast radius only: `
+      + `${zcallers.length} caller(s) would inherit ${a.effect})`);
+    return { unevaluated: policyZeroRules(activePolicyPath ?? "(policy)").unevaluated };
   }
   const callers = r.affected.filter((f) => !r.of.includes(f));   // affected minus the target(s) themselves
   const rules = [...new Set(r.violations.map((v) => v.rule))];
@@ -549,6 +578,15 @@ function runFix(a) {
   }
   const fpol = activePolicyParsed(policyText);
   if (fpol === null) return null;
+  // ⟨0.28⟩ SPEC §2 — the same caveat, before any `crossing` reading: `${a.effect} isn't forbidden here`
+  // from a policy that forbids nothing is vacuously true, and this surface is the one that ASKED for a
+  // fix. No `crossing` key on the result either — present exactly when the verb answered.
+  if (policyAskedNothing(fpol)) {
+    zeroRulePolicyWarn("No boundary fix can be computed from it.");
+    showMessage(2, `candor: \`${a.fn}\` — no fix computed: the configured policy has NO RULES, so there is `
+      + `no boundary to have crossed. The absence of a plan here is the caveat, not an all-clear.`);
+    return { unevaluated: policyZeroRules(activePolicyPath ?? "(policy)").unevaluated };
+  }
   const r = Q.fix(Q.loadCallgraph(reportPrefix), Q.loadReport(reportPrefix), a.fn, a.effect,
                   fpol, scopeMatches);
   if (r === null) {

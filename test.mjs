@@ -10232,5 +10232,254 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.28⟩ AN ADVISORY VERB OVER A CONFIGURED ZERO-RULE POLICY (SPEC §2) ────────────────────────────
+// §6.2 makes a configured policy that yields no rules an exit-2 REFUSAL for the GATE, on the ground that
+// `ok: true` is a claim about the code no such run is entitled to make. These four verbs share that
+// loader and the rung did not touch them. MEASURED here 2026-08-12 over `# no rules yet`:
+//
+//     whatif      {"of":[…],"affected":[…],"violations":[],"ok":true}          exit 0
+//     fix         {"crossing":false,"reason":"not-forbidden"}                  exit 0
+//     fix-gate    {"ok":true,"remedies":[]}                                    exit 0 (also --strict)
+//     unverified  {"ok":true,"unverified":[]}                                  exit 0 (also --strict)
+//
+// *not-forbidden* by a policy that forbids nothing is vacuously true — an all-clear produced by deleting
+// the question. They are ADVISORY, so the gate's refusal posture is the wrong import: the caveat document
+// replaces the result, the result keys are WITHHELD, and the EXIT DOES NOT MOVE.
+//
+// `fix` IS IN THE LIST BECAUSE THE LIST IS A CONDITION, NOT AN ENUMERATION — §2 names three verbs because
+// three were in front of the author, and records the divergence that created (rust extended it, swift read
+// the list as closed). Composed with the `crossing` ruling, `fix` emits NO `crossing` key here.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-zerorule-"));
+  fs.mkdirSync(path.join(d, "src"));
+  fs.writeFileSync(path.join(d, "src/app.ts"),
+    'import * as fs from "fs";\n'
+    + 'export function leaf(): number { return fs.readFileSync("/etc/hosts").length; }\n'
+    + 'export function mid(): number { return leaf(); }\n'
+    + 'export function main(): void { console.log(mid()); }\n');
+  spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out", path.join(d, "r")], { encoding: "utf8" });
+  const R = path.join(d, "r.json");
+  // The three spellings §6.2's refusal covers, so the caveat cannot hold for one and not the others.
+  const zero = { comments: "# no rules yet\n", empty: "", junk: "this is a README, not a policy\n" };
+  for (const [name, text] of Object.entries(zero)) fs.writeFileSync(path.join(d, `${name}.policy`), text);
+  fs.writeFileSync(path.join(d, "real.policy"), "deny Fs\n");
+  const q = (argv, pol, ...flags) => spawnSync("node", [path.join(HERE, "query.mjs"), ...argv,
+    "--report", R, "--policy", path.join(d, `${pol}.policy`), "--json", ...flags], { encoding: "utf8" });
+  // `resultKeys` are the keys each verb's own answer document carries — the ones that must be ABSENT.
+  const VERBS = [
+    ["whatif", ["whatif", "src.app.mid", "Net"], ["ok", "violations", "affected", "of"], []],
+    ["fix", ["fix", "src.app.leaf", "Fs"], ["crossing", "reason", "hoistTo", "policyAlternative"], []],
+    ["fix-gate", ["fix-gate"], ["ok", "remedies"], ["--strict"]],
+    ["unverified", ["unverified"], ["ok", "unverified"], ["--strict"]],
+  ];
+  for (const [label, argv, resultKeys, strictFlags] of VERBS) {
+    for (const pol of Object.keys(zero)) {
+      const r = q(argv, pol, ...strictFlags);
+      let doc = null; try { doc = JSON.parse(r.stdout); } catch { /* null → the row fails loudly */ }
+      check(`⟨0.28⟩ zero-rule: \`${label}\` over a CONFIGURED policy that parsed to no rules (${pol}) emits the CAVEAT DOCUMENT — \`unevaluated\` naming the WHOLE policy, in the spelling the gate's own refusal already uses`,
+            !!doc && Array.isArray(doc.unevaluated) && doc.unevaluated.length === 1
+              && /^\(entire policy .*— no rules parsed\)$/.test(doc.unevaluated[0].rule)
+              && /yielded NO RULES/.test(doc.unevaluated[0].why),
+            `${r.stdout}`.slice(0, 260));
+      check(`⟨0.28⟩ zero-rule: …and \`${label}\`'s RESULT KEYS are withheld (${resultKeys.join("/")}) — an empty finding list over a policy that asked nothing is ⟨0.27⟩'s \`violations\`-on-a-refusal, one condition over`,
+            !!doc && resultKeys.every((k) => !(k in doc)), `${r.stdout}`.slice(0, 260));
+      check(`⟨0.28⟩ zero-rule: …and \`${label}\`'s EXIT DOES NOT MOVE (0${strictFlags.length ? ", --strict included" : ""}) — a disclosure, not a verdict; the GATE is the one that refuses (⟨0.24⟩)`,
+            r.status === 0, `status=${r.status} err=${r.stderr}`.slice(0, 200));
+    }
+    // …and the human channel says it too: the mutant this family keeps building keeps exactly one of the
+    // two, and candor-rust's survived a whole suite.
+    check(`⟨0.28⟩ zero-rule: …and \`${label}\` says it on the HUMAN channel — a JSON-only fix moves the false all-clear rather than removing it`,
+          /yielded NO RULES/.test(q(argv, "comments", ...strictFlags).stderr),
+          `${q(argv, "comments", ...strictFlags).stderr}`.slice(0, 220));
+
+    // CONTROL: a policy with ONE real rule is byte-identical to a pre-rung run — the caveat fires on the
+    // CONDITION (zero rules), never on the presence of a policy.
+    const c = q(argv, "real", ...strictFlags);
+    check(`⟨0.28⟩ zero-rule CONTROL: \`${label}\` over a policy with a REAL rule carries its result keys and NO caveat — the rule fires on zero rules, not on gating`,
+          !/unevaluated/.test(c.stdout) && resultKeys.some((k) => c.stdout.includes(`"${k}"`)),
+          `${c.stdout}`.slice(0, 220));
+  }
+  // The gate ROUTE is the control that pins the spelling: §6.2 refuses there (exit 2) and the entry the
+  // refusal carries must be the SAME one the advisory caveat carries, or a cross-engine consumer is
+  // reading two names for one condition. Asserted as an EQUALITY, not two regexes.
+  const gz = spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", R,
+    "--policy", path.join(d, "comments.policy"), "--json"], { encoding: "utf8" });
+  const uz = q(["unverified"], "comments");
+  let gdoc = null, udoc = null;
+  try { gdoc = JSON.parse(gz.stdout); } catch { /* null → fails loudly */ }
+  try { udoc = JSON.parse(uz.stdout); } catch { /* null → fails loudly */ }
+  check("⟨0.28⟩ zero-rule: the gate REFUSES (exit 2) and its `unevaluated` entry is CHARACTER-IDENTICAL to the advisory caveat's — one condition, one spelling, so the gate and the advisory verbs describe the same policy in the same words",
+        gz.status === 2 && !!gdoc && !!udoc
+          && JSON.stringify(gdoc.unevaluated) === JSON.stringify(udoc.unevaluated),
+        `gate=${gz.stdout}`.slice(0, 200) + ` adv=${uz.stdout}`.slice(0, 200));
+  // A policy that is NOT CONFIGURED is the honest way to say "I am not gating" (§6.2) and is untouched:
+  // `whatif` with no policy still answers its blast radius. This is the control that keeps the caveat from
+  // swallowing the no-gate case, which is a legitimate expression of intent and the other three refuse.
+  const np = spawnSync("node", [path.join(HERE, "query.mjs"), "whatif", "src.app.mid", "Net",
+    "--report", R, "--json"], { encoding: "utf8", env: { ...process.env, CANDOR_POLICY: "" } });
+  let ndoc = null; try { ndoc = JSON.parse(np.stdout); } catch { /* null → fails loudly */ }
+  check("⟨0.28⟩ zero-rule CONTROL: NO policy configured at all is untouched — `whatif` still answers its blast radius, because not configuring a gate is the honest way to say you are not gating (§6.2)",
+        np.status === 0 && !!ndoc && Array.isArray(ndoc.affected) && !("unevaluated" in ndoc),
+        `${np.stdout}`.slice(0, 220));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── ⟨0.28⟩ THE THIRD ROW IS NOT THE FIRST ROW — `noManifest` (SPEC §2) ──────────────────────────────
+// §2's three-row table distinguishes `analyzed.count: 0` (row 1 — *nothing was judged*, a claim the
+// report MAKES) from `analyzed` ABSENT (row 3 — a pre-⟨0.21⟩ producer with no manifest at all, which
+// claims nothing). MEASURED here 2026-08-12 over `{"candor":{…},"functions":[]}` with no `analyzed` key:
+//
+//   where Fs --json  → {…,"incomplete":true,"judgedNothing":["<the row-3 report>"]}
+//   where Fs --text  → "say they JUDGED NOTHING (`analyzed.count: 0`)"
+//
+// The report declares nothing. The hedge is the right DIRECTION — row 3's own instruction is *no
+// manifest, no claim* — but the disclosure is FALSE, and this family rates a false disclosure worse than
+// a missing one. It also holed ⟨0.28⟩'s own pin, which defines `judgedNothing` as *reports declaring
+// `analyzed.count: 0`*. The repairs differ: row 1 wants a scan that reaches a conclusion, row 3 wants a
+// producer that emits a manifest at all.
+//
+// ROW 2 IS THE CONTROL THAT MAKES ROW 1 AND ROW 3 MEAN ANYTHING (conformance PART 26's CONTROL
+// SEPARATION): `count: 7` with `functions: []` is a legitimate all-pure CLAIM a consumer MUST believe,
+// and a fix that hedges all three has disabled the feature rather than implemented the rule.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-nomanifest-"));
+  fs.mkdirSync(path.join(d, "src"));
+  fs.writeFileSync(path.join(d, "src/app.ts"),
+    'import * as fs from "fs";\n'
+    + 'export function leaf(): number { return fs.readFileSync("/etc/hosts").length; }\n'
+    + 'export function mid(): number { return leaf(); }\n');
+  spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out", path.join(d, "r")], { encoding: "utf8" });
+  const intact = JSON.parse(fs.readFileSync(path.join(d, "r.json"), "utf8"));
+  const state = (name, mut) => {
+    const doc = JSON.parse(JSON.stringify(intact)); mut(doc);
+    fs.writeFileSync(path.join(d, `${name}.json`), JSON.stringify(doc));
+    return path.join(d, `${name}.json`);
+  };
+  const row1 = state("row1", (o) => { o.functions = []; o.analyzed = { count: 0 }; });
+  const row3 = state("row3", (o) => { o.functions = []; delete o.analyzed; });
+  const row2 = state("row2", (o) => { o.functions = []; o.analyzed = { count: 7 }; });
+  // A row-3 report that LISTS functions demonstrably judged units and said so the only way it could —
+  // `claimsToHaveJudgedNothing`'s manifest-absent row keeps its standing, so it must not hedge at all.
+  const row3full = state("row3full", (o) => { delete o.analyzed; });
+  fs.writeFileSync(path.join(d, "policy"), "deny Fs\n");
+  const q = (argv, file, ...flags) => spawnSync("node", [path.join(HERE, "query.mjs"), ...argv,
+    "--report", file, "--json", ...flags], { encoding: "utf8" });
+  const doc = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
+
+  const w3 = doc(q(["where", "Fs"], row3));
+  check("⟨0.28⟩ noManifest: a report carrying NO `analyzed` key is disclosed under `noManifest`, and is NOT listed under `judgedNothing` — it declares nothing, so saying it declared `analyzed.count: 0` is a FALSE disclosure",
+        !!w3 && w3.incomplete === true && Array.isArray(w3.noManifest)
+          && w3.noManifest.length === 1 && w3.noManifest[0] === row3 && !("judgedNothing" in w3),
+        `${JSON.stringify(w3)}`.slice(0, 260));
+  const h3 = q(["where", "Fs"], row3, "--text");
+  check("⟨0.28⟩ noManifest: …and the HUMAN note stops asserting `analyzed.count: 0` about it — the repair it points at is a producer that emits a manifest, not a scan that reaches a conclusion",
+        /NO `analyzed` manifest/.test(h3.stdout) && !/JUDGED NOTHING/.test(h3.stdout)
+          && /⚠ INCOMPLETE/.test(h3.stdout),
+        `${h3.stdout}`.slice(0, 300));
+  const s3 = doc(q(["show", "src.app.leaf"], row3));
+  check("⟨0.28⟩ noManifest: the key rides the Rung A CAVEAT DOCUMENT too — `show` over a row-3 report emits `{incomplete, noManifest}` and nothing else",
+        !!s3 && !Array.isArray(s3) && s3.incomplete === true && Array.isArray(s3.noManifest)
+          && Object.keys(s3).every((k) => ["incomplete", "noManifest"].includes(k)),
+        `${JSON.stringify(s3)}`.slice(0, 240));
+  const u3 = q(["unverified"], row3, "--policy", path.join(d, "policy"));
+  const u3d = doc(u3);
+  check("⟨0.28⟩ noManifest: the ADVISORY document carries it too, `ok` withdrawn — an advisory verb's `ok` is a claim about the CODE, and a report that never emitted a manifest cannot support it",
+        !!u3d && !("ok" in u3d) && u3d.incomplete === true && Array.isArray(u3d.noManifest)
+          && !("judgedNothing" in u3d),
+        `${JSON.stringify(u3d)}`.slice(0, 240));
+  check("⟨0.28⟩ noManifest: …and its own sentence on the HUMAN channel, not the judged-nothing one",
+        /carry NO `analyzed` manifest at all/.test(u3.stderr) && !/JUDGED NOTHING/.test(u3.stderr),
+        `${u3.stderr}`.slice(0, 260));
+  check("⟨0.28⟩ noManifest: …and the exit does NOT move (0) — a disclosure, not a verdict, exactly as ⟨0.24⟩ ruled the count-0 arm",
+        u3.status === 0, `status=${u3.status}`);
+
+  // ROW 1 keeps its own key: the split has to go BOTH ways or it is a rename, not a distinction.
+  const w1 = doc(q(["where", "Fs"], row1));
+  check("⟨0.28⟩ noManifest CONTROL: a row-1 report (`analyzed.count: 0`) is STILL `judgedNothing` and is NOT `noManifest` — the split goes both ways or it is a rename",
+        !!w1 && Array.isArray(w1.judgedNothing) && w1.judgedNothing[0] === row1 && !("noManifest" in w1),
+        `${JSON.stringify(w1)}`.slice(0, 240));
+  // ROW 2: the CONTROL SEPARATION arm. Hedging this would withdraw the very claim §2 rule 3 protects.
+  const w2 = doc(q(["where", "Fs"], row2));
+  check("⟨0.28⟩ noManifest CONTROL SEPARATION: a row-2 report (`count: 7`, `functions: []`) does NOT hedge at all — an all-pure claim a consumer MUST believe; hedging all three rows disables the feature rather than implementing the rule",
+        !!w2 && !("incomplete" in w2) && !("noManifest" in w2) && !("judgedNothing" in w2),
+        `${JSON.stringify(w2)}`.slice(0, 240));
+  // A manifest-less report that LISTS functions judged units the only way it could.
+  const w3f = doc(q(["where", "Fs"], row3full));
+  check("⟨0.28⟩ noManifest CONTROL: a manifest-less report that LISTS functions is NOT hedged — its entries are the claim it could make, and ⟨0.24⟩'s manifest-absent row keeps its standing",
+        !!w3f && !("incomplete" in w3f) && w3f.directly.length > 0, `${JSON.stringify(w3f)}`.slice(0, 240));
+  // A locator naming BOTH kinds discloses each under its own key — the whole point of two names.
+  {
+    const both = path.join(d, "both"); fs.mkdirSync(both, { recursive: true });
+    fs.copyFileSync(row1, path.join(both, "r.aa.scan.json"));
+    fs.copyFileSync(row3, path.join(both, "r.bb.scan.json"));
+    const wb = doc(q(["where", "Fs"], path.join(both, "r")));
+    check("⟨0.28⟩ noManifest: a locator naming ONE of each discloses them under SEPARATE keys — one key meaning two things is what loses the distinction the three-row table exists to draw",
+          !!wb && wb.judgedNothing?.length === 1 && wb.noManifest?.length === 1
+            && wb.judgedNothing[0].endsWith("r.aa.scan.json") && wb.noManifest[0].endsWith("r.bb.scan.json"),
+          `${JSON.stringify(wb)}`.slice(0, 300));
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── ⟨0.28⟩ WHAT EACH LOCATOR FORM RESOLVES TO (SPEC §3.1) ───────────────────────────────────────────
+// "AND HERE IS WHAT EACH LOCATOR FORM RESOLVES TO — because 'expand as the loader will' says how to
+// compare, and never says what the loader should expand to." Three engines were measured disagreeing,
+// and the disagreement was invisible because each was internally consistent. This engine was measured
+// CORRECT on all three forms; these rows PIN that, because candor-swift was found unioning where it must
+// not and candor-java answering a PREFIX from the lexicographically first file, and "correct today" with
+// no row is how a contract drifts back.
+//
+//   FILE      → that file, and its §2.2 sidecars. NOT the prefix siblings beside it: the operator named
+//               one artifact, and reading three would make `--report r.json` mean something different
+//               according to what else happens to sit in the directory.
+//   PREFIX    → the whole matching set, unioned — for EVERY verb, not just the gate.
+//   DIRECTORY → the reports discovered inside it (`<dir>/.candor/report`).
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-locator-"));
+  const pfx = path.join(d, "pfx"); fs.mkdirSync(pfx, { recursive: true });
+  const env = { candor: { version: "handwritten", toolchain: "n", spec: "0.27" } };
+  const mk = (fn, eff) => ({ ...env, package: "p", functions: [{ fn, loc: "s:1", inferred: [eff], direct: [eff] }], analyzed: { count: 1 } });
+  fs.writeFileSync(path.join(pfx, "r.aa.scan.json"), JSON.stringify(mk("aa.one", "Fs")));
+  fs.writeFileSync(path.join(pfx, "r.bb.scan.json"), JSON.stringify(mk("bb.two", "Net")));
+  fs.writeFileSync(path.join(pfx, "r.aa.scan.callgraph.json"), JSON.stringify({ "aa.one": [], "aa.pureCaller": ["aa.one"] }));
+  fs.writeFileSync(path.join(pfx, "r.bb.scan.callgraph.json"), JSON.stringify({ "bb.two": [], "bb.pureCaller": ["bb.two"] }));
+  const dir = path.join(d, "dircase"); fs.mkdirSync(path.join(dir, ".candor"), { recursive: true });
+  fs.copyFileSync(path.join(pfx, "r.aa.scan.json"), path.join(dir, ".candor", "report.aa.scan.json"));
+  fs.copyFileSync(path.join(pfx, "r.bb.scan.json"), path.join(dir, ".candor", "report.bb.scan.json"));
+  fs.writeFileSync(path.join(d, "deny-net.policy"), "deny Net\n");
+  const q = (argv, loc, ...flags) => spawnSync("node", [path.join(HERE, "query.mjs"), ...argv,
+    "--report", loc, "--json", ...flags], { encoding: "utf8" });
+  const doc = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
+  const P = path.join(pfx, "r"), FA = path.join(pfx, "r.aa.scan.json");
+
+  const mp = doc(q(["map"], P));
+  check("⟨0.28⟩ locator PREFIX: a DESCRIPTIVE verb answers over the WHOLE matching set, unioned — candor-java answered `map`/`where`/`show` from the lexicographically FIRST file, which is two contracts wearing one flag",
+        !!mp && "aa" in mp && "bb" in mp, `${JSON.stringify(mp)}`.slice(0, 220));
+  check("⟨0.28⟩ locator PREFIX: …and so does the GATE — the `Net` in the second sibling fires (exit 1), which is the arm a first-file reading silently drops",
+        (() => { const g = spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", P,
+          "--policy", path.join(d, "deny-net.policy"), "--json"], { encoding: "utf8" });
+          return g.status === 1 && /bb\.two/.test(g.stdout); })(), "");
+  const mf = doc(q(["map"], FA));
+  check("⟨0.28⟩ locator FILE: a locator naming ONE FILE resolves to THAT FILE — no sibling union, so `--report r.aa.scan.json` does not change meaning according to what else sits in the directory",
+        !!mf && "aa" in mf && !("bb" in mf), `${JSON.stringify(mf)}`.slice(0, 220));
+  check("⟨0.28⟩ locator FILE: …and the GATE over it does not see the sibling's violation either (exit 0) — the same expansion on both routes",
+        (() => { const g = spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", FA,
+          "--policy", path.join(d, "deny-net.policy"), "--json"], { encoding: "utf8" });
+          return g.status === 0; })(), "");
+  const cf = doc(q(["callers", "aa.one"], FA));
+  check("⟨0.28⟩ locator FILE: …but its §2.2 SIDECARS ARE in the expansion — `callers` answers a PURE caller only the call graph knows, so the pair travels with the file",
+        !!cf && cf.direct?.includes("aa.pureCaller"), `${JSON.stringify(cf)}`.slice(0, 220));
+  const cx = q(["callers", "bb.two"], FA);
+  check("⟨0.28⟩ locator FILE: …and NOT the sibling's sidecar — a name only the other pair's graph carries is absent (exit 2), never answered from a file the operator did not name",
+        cx.status === 2 && /no function matching/.test(cx.stderr), `status=${cx.status} ${cx.stderr}`.slice(0, 200));
+  const cp = doc(q(["callers", "bb.two"], P));
+  check("⟨0.28⟩ locator PREFIX: …while the prefix form unions the SIDECARS too, so the same query answers",
+        !!cp && cp.direct?.includes("bb.pureCaller"), `${JSON.stringify(cp)}`.slice(0, 220));
+  const md = doc(q(["map"], dir));
+  check("⟨0.28⟩ locator DIRECTORY: a directory resolves to the reports DISCOVERED inside it (`<dir>/.candor/report`), unioned",
+        !!md && "aa" in md && "bb" in md, `${JSON.stringify(md)}`.slice(0, 220));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

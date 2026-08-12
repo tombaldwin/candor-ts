@@ -993,6 +993,43 @@ export function mid(): void { leaf(); }
        by[2].result.isError !== true && imp.affectedCount === 1 && imp.affected?.includes("app.mid"),
        JSON.stringify(imp).slice(0, 200));
   }
+
+  // ── ⟨0.28⟩ A ZERO-RULE POLICY ON THE AGENT CHANNEL (SPEC §2). The three policy-relative tools share the
+  // CLI's loader and answered relative to a policy that asked nothing. MEASURED against the pre-rung
+  // server on this fixture: `candor_whatif` → `{…,"ok":true}`, `candor_fix` →
+  // `{"crossing":false,"reason":"not-forbidden"}`, `candor_unverified` → `{"ok":true,"unverified":[]}`.
+  // Each tool's own DESCRIPTION tells the agent to key on exactly the field that is lying there —
+  // "ALWAYS CHECK `ok`", "ALWAYS CHECK `refused` BEFORE `crossing`" — so this surface hands the false
+  // all-clear to a consumer that has been instructed to trust it and cannot ask a follow-up question.
+  {
+    fs.writeFileSync(`${A}/zero.policy`, "# no rules yet\n");
+    fs.writeFileSync(`${A}/real.policy`, "deny Net\n");
+    const three = async (pol) => {
+      const rs = await mcpSession([
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "candor_whatif", arguments: { fn: "app.mid", effect: "Fs", policy: `${A}/${pol}.policy`, report: P } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "candor_fix", arguments: { fn: "app.leaf", effect: "Net", policy: `${A}/${pol}.policy`, report: P } } },
+        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "candor_unverified", arguments: { policy: `${A}/${pol}.policy`, report: P } } },
+      ]);
+      const by = Object.fromEntries(rs.map((r) => [r.id, r]));
+      return [1, 2, 3].map((i) => JSON.parse(by[i].result.content[0].text));
+    };
+    const [zw, zf, zu] = await three("zero");
+    for (const [name, doc, keys] of [["candor_whatif", zw, ["ok", "violations", "affected"]],
+                                     ["candor_fix", zf, ["crossing", "reason", "hoistTo"]],
+                                     ["candor_unverified", zu, ["ok", "unverified"]]]) {
+      ok(`⟨0.28⟩ zero-rule (MCP): ${name} over a CONFIGURED policy that parsed to no rules returns the CAVEAT DOCUMENT — \`unevaluated\` naming the whole policy, the same spelling the gate's refusal uses`,
+         Array.isArray(doc.unevaluated) && doc.unevaluated.length === 1
+           && /— no rules parsed\)$/.test(doc.unevaluated[0].rule),
+         JSON.stringify(doc).slice(0, 240));
+      ok(`⟨0.28⟩ zero-rule (MCP): …and ${name}'s RESULT KEYS are withheld (${keys.join("/")}) — the fields its own description tells the agent to key on are the ones that were lying`,
+         keys.every((k) => !(k in doc)), JSON.stringify(doc).slice(0, 240));
+    }
+    // CONTROL: a policy with a real rule is unchanged — the caveat fires on the CONDITION, not on gating.
+    const [rw, rf, ru] = await three("real");
+    ok("⟨0.28⟩ zero-rule (MCP) CONTROL: a policy with a REAL rule leaves all three tools carrying their result keys and no caveat",
+       "ok" in rw && !("unevaluated" in rw) && "crossing" in rf && "ok" in ru && !("unevaluated" in ru),
+       `${JSON.stringify(rw).slice(0, 120)} ${JSON.stringify(rf).slice(0, 120)} ${JSON.stringify(ru).slice(0, 120)}`);
+  }
   fs.rmSync(A, { recursive: true, force: true });
 }
 

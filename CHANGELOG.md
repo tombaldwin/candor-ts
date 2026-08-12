@@ -8,6 +8,47 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.28⟩ an advisory verb over a configured ZERO-RULE policy answers with the caveat document**
+  (SPEC §2, *"AND AN ADVISORY VERB OVER A ZERO-RULE POLICY ANSWERS THE SAME WAY"* + *"THE LIST OF
+  ADVISORY VERBS IS ILLUSTRATIVE, NOT CLOSED — `fix` takes this too"*). §6.2 makes a configured policy
+  that yields no rules an exit-2 refusal for the GATE; these four verbs share that loader and the rung
+  did not touch them. Measured here 2026-08-12 over `# no rules yet`: `whatif` → `{…,"ok":true}`, `fix`
+  → `{"crossing":false,"reason":"not-forbidden"}`, `fix-gate` → `{"ok":true,"remedies":[]}`,
+  `unverified` → `{"ok":true,"unverified":[]}`, all exit 0 including `--strict`. *not-forbidden* by a
+  policy that forbids nothing is vacuously true. They now emit the caveat document — `unevaluated`
+  carrying one whole-policy entry, in the exact spelling this engine's own gate routes already use
+  (`policyZeroRules`, one builder) — with the **result keys withheld** and the **exit unchanged**. `fix`
+  emits **no `crossing` key**: present exactly when the verb answered. **All three surfaces**: the CLI,
+  the MCP `candor_whatif`/`candor_fix`/`candor_unverified` tools, and the LSP, where the editor has no
+  exit code and no JSON document so both channels collapse onto the log/message one — `✓ no policy rule
+  fires` and `Net isn't forbidden here; no boundary fix needed` are the prose spelling of `ok: true`, and
+  the live gate's silent squiggle-free editor is §6.2's harm where it is least visible. A policy that is
+  NOT configured is untouched — that remains the honest way to say "I am not gating".
+
+- **⟨0.28⟩ the third row is not the first row: `noManifest`** (SPEC §2, *"AND THE THIRD ROW IS NOT THE
+  FIRST ROW — measured, two engines report it as one"*). Over `{"candor":{…},"functions":[]}` with no
+  `analyzed` key at all, this engine listed the file under `judgedNothing` and its note said the report
+  *"say[s] they JUDGED NOTHING (`analyzed.count: 0`)"* — measured here 2026-08-12. The report declares
+  nothing. The hedge is the right direction (row 3's own instruction is *no manifest, no claim*) but the
+  disclosure was false, and it holed ⟨0.28⟩'s own pin, which defines `judgedNothing` as *reports
+  declaring `analyzed.count: 0`*. Row 3 now has its own pinned key `noManifest: ["<report path>", …]`,
+  raising `incomplete` like the others and omitted when empty, on the answer documents, the Rung A caveat
+  document, the advisory documents (`ok` withdrawn), the `baselineNoManifest` half of `gains`, and the
+  MCP `candor_unverified` tool; the human notes get their own sentence, pointing at the repair that
+  actually applies (a producer that emits a manifest, not a scan that reaches a conclusion). Row 1 keeps
+  `judgedNothing` and **row 2 (`count: n>0`, `functions: []`) still does not hedge at all** — the control
+  that makes the other two mean anything. The gate's own note already named all three conditions
+  honestly and is unchanged.
+
+- **⟨0.28⟩ the locator forms are pinned** (SPEC §3.1, *"AND HERE IS WHAT EACH LOCATOR FORM RESOLVES
+  TO"*). No behaviour change — this engine was measured correct on all three — but three engines were
+  found disagreeing invisibly, so the contract is now a row rather than an observation: a **FILE** locator
+  resolves to that file and its §2.2 sidecars and never unions the prefix siblings beside it; a
+  **PREFIX** resolves to the whole matching set, unioned, for the descriptive verbs as well as the gate;
+  a **DIRECTORY** resolves to the reports discovered inside it. Each arm is pinned on both the
+  descriptive and the gate route, and each was falsified against a mutant carrying the defect the other
+  engines shipped.
+
 - **⟨0.28⟩ Rung A: `show` and `map` emit the CAVEAT DOCUMENT instead of their result when hedging**
   (SPEC §2, *"A verb whose pinned shape cannot carry the caveat MUST emit the CAVEAT DOCUMENT INSTEAD
   of its result document"*). Not a result document with the caveat omitted, and not an empty result of
