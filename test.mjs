@@ -9467,6 +9467,52 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.28⟩ A SYMLINKED SIDECAR IS LEFT ALONE, AND SAID SO (the rust 8094169 ruling) ─────────────────
+// This engine resolved the link and deleted its TARGET — a file outside the prefix, the canonical copy
+// in a shared-artifact CI layout, unrecoverable because a failing run never restores. And even on
+// success, delete-then-restore-by-bytes converts the operator's LINK into a regular file. rust and
+// swift leave the link alone; java deleted the link itself (also wrong, fixed in parallel). The rows
+// assert the LINK is still a link AND the target's bytes survive — an exit-code assertion cannot see
+// either half.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-symside-"));
+  fs.mkdirSync(path.join(d, "shared"));
+  fs.mkdirSync(path.join(d, "work"));
+  const src = path.join(d, "work", "app.ts");
+  fs.writeFileSync(src, "export function f(): number { return 1 }\n");
+  const pfx = path.join(d, "work", "out");
+  const run = (...a) => spawnSync("node", [path.join(HERE, "scan.mjs"), src, ...a], { encoding: "utf8" });
+  run("--out", pfx);
+  // Replace the callgraph sidecar with a symlink into the shared directory — the layout the ruling
+  // exists for: many prefixes, one canonical graph.
+  const canonical = path.join(d, "shared", "callgraph.json");
+  fs.renameSync(`${pfx}.callgraph.json`, canonical);
+  const canonBytes = fs.readFileSync(canonical, "utf8");
+  // Relative, and PROVEN to resolve before anything is asserted over it: a dangling link makes the
+  // target-intact and link-intact rows below pass VACUOUSLY on a broken engine (measured — the first
+  // draft of this block pointed one directory too high and its falsification run passed 2 of 4 rows).
+  fs.symlinkSync(path.join("..", "shared", "callgraph.json"), `${pfx}.callgraph.json`);
+  check("⟨0.28⟩ symlinked sidecar PREMISE: the link resolves to the canonical file (a dangling link would make every row below vacuous)",
+        fs.existsSync(`${pfx}.callgraph.json`) && fs.readFileSync(`${pfx}.callgraph.json`, "utf8") === canonBytes,
+        `link resolves=${fs.existsSync(`${pfx}.callgraph.json`)}`);
+
+  const r = run("--out", pfx, "--zzz-not-a-flag");
+  check("⟨0.28⟩ symlinked sidecar: a failing run leaves the link's TARGET intact — deleting it destroyed a canonical file OUTSIDE the prefix, unrecoverably",
+        fs.existsSync(canonical) && fs.readFileSync(canonical, "utf8") === canonBytes,
+        `target exists=${fs.existsSync(canonical)}`);
+  check("⟨0.28⟩ symlinked sidecar: …and the LINK is still a symlink at its old path — a severed layout is not recoverable, and a restore-by-bytes would hand back a regular file",
+        fs.lstatSync(`${pfx}.callgraph.json`).isSymbolicLink(), "the link is gone or is now a regular file");
+  check("⟨0.28⟩ symlinked sidecar: …and it is DISCLOSED as left, with the pair named unanswerable — leaving it silently would let the armed-report/live-sidecar contradiction stand unexplained",
+        r.status === 2 && /is a SYMLINK\b/.test(r.stderr) && /unanswerable/.test(r.stderr),
+        `status=${r.status} ${r.stderr}`.slice(0, 300));
+  // THE CONTROL: a REGULAR sidecar still goes with its armed report — the ruling narrows the delete to
+  // what the run owns, it does not turn the ⟨0.28⟩ pairing rule off.
+  const locs = `${pfx}.locs.json`;
+  check("⟨0.28⟩ symlinked sidecar CONTROL: the sibling REGULAR sidecar of the same armed report is still deleted — the ruling is about links, not about arming",
+        !fs.existsSync(locs), "locs.json survived arming");
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── ⟨0.28⟩ SPEC §2 — THE DESCRIPTIVE VERBS CARRY THE ⟨0.21⟩ MANIFEST TOO ────────────────────────────
 // The re-disclosure MUST was written over the instance it was found in ("a verb whose VERDICT could
 // change") and ⟨0.28⟩ widens it to the condition that makes it true: ANY verb whose output could be read

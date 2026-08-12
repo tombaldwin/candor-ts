@@ -419,7 +419,11 @@ const removeArmedReportSidecars = (report, prefix, inputs) => {
   const stem = report.replace(/\.json$/i, "");
   for (const seg of REPORT_SIDECAR_SEGMENTS) {
     const side = `${stem}.${seg}.json`;
-    if (!fs.existsSync(side)) continue;
+    // lstat, not existsSync: existsSync FOLLOWS a symlink, so a DANGLING link read as "absent" and was
+    // skipped without the symlink disclosure below — but it is still the operator's link, and the
+    // symlink arm must see it. A path with nothing there at all falls out through the catch.
+    let lst;
+    try { lst = fs.lstatSync(side); } catch { continue; }
     // THE INPUT EXEMPTION COVERS THE SIDECARS, asked of the same `runInputs`/`sameArtifact` the report
     // and verdict sink guards use — "do not touch what this run READS" does not stop at the report half.
     // A `--policy`, a chained `CANDOR_DEPS` report or the discovered config can perfectly well be named
@@ -431,14 +435,28 @@ const removeArmedReportSidecars = (report, prefix, inputs) => {
         + `sidecar are now a MISMATCHED PAIR: read the sidecar as unanswerable until a run completes.`);
       continue;
     }
+    // A SYMLINKED SIDECAR IS LEFT ALONE, AND SAID SO — the ruling the rust reference pinned in 8094169,
+    // raised by candor-swift's arm of this rung. This engine used to resolve the link and delete its
+    // TARGET, arguing the stale bytes live there; measured, a failing run (`--out out --zzz`) deleted
+    // `../shared/callgraph.json` — a file OUTSIDE this prefix, the canonical copy in a shared-artifact
+    // CI layout — unrecoverably, because a failed run never restores and every other link to it now
+    // dangles. And even the SUCCESS path cannot make this honest: the disarm hands bytes back with
+    // `writeSinkAtomic`, so a delete-then-restore cycle converts the operator's LINK into a regular
+    // file — a third state neither the pre-run tree nor the armed tree ever had. The link is not ours
+    // to consume. Leaving it is the cheap side of the trade: the ⟨0.28⟩ pairing rule already makes a
+    // sidecar beside an armed report unanswerable consumer-side, whereas a severed link (or a destroyed
+    // shared target) is not recoverable at all.
+    if (lst.isSymbolicLink()) {
+      console.error(`candor-ts: ${side} is a §2.2 sidecar of the armed report ${report} but is a SYMLINK `
+        + `— leaving it, because removing it would sever the operator's layout (and a restore would hand `
+        + `back a regular file where a link was). Its report is armed, so treat the pair as unanswerable `
+        + `until a run completes (SPEC §3.3.1 ⟨0.28⟩).`);
+      continue;
+    }
     // Remember the bytes first, so a report the run turns out not to own can hand its sidecars back too.
     let prev;
     try { prev = fs.readFileSync(side); } catch { prev = null; }
-    // Through the SAME artifact resolution `writeSinkAtomic` publishes with. A sidecar that is a symlink
-    // into a shared directory holds its stale bytes at the TARGET — that is where this engine wrote them
-    // — so unlinking the link alone would leave the stale call graph readable under its other name while
-    // silently destroying the operator's layout for the next good run.
-    try { fs.rmSync(resolveSinkArtifact(side), { force: true }); if (prev !== null) outArmedSidecars.push([report, side, prev]); }
+    try { fs.rmSync(side, { force: true }); if (prev !== null) outArmedSidecars.push([report, side, prev]); }
     catch (e) {
       console.error(`candor-ts: could not remove ${side} beside the armed report ${report} (${e.message}) `
         + `— it is a STALE half-pair: any callers/whatif answer computed from it describes the last run `
