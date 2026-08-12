@@ -398,9 +398,34 @@ function fileClaimsJudgedNothing(f) {
 /** ⟨0.28⟩ The report FILES under a locator that say they judged nothing — one path per file, the shape
  *  the disclosure carries (see `completenessFields`). PER FILE, not the ANDed prefix answer: a locator
  *  naming several members must disclose EACH silent one by name (rust `report_completeness`, java
- *  `ReportCompleteness` — "one label per report file declaring `analyzed.count: 0`"). */
+ *  `ReportCompleteness` — "one label per report file declaring `analyzed.count: 0`").
+ *
+ *  A file that does not PARSE is excluded here and carried as `unreadable` instead — `judgedNothing` is
+ *  the report's OWN `analyzed.count: 0` assertion, and a file whose bytes cannot be read asserted
+ *  nothing. MEASURED (candor-spec conformance/gen_key_shapes.py corpus, 2026-08-12): over an intact
+ *  report with a corrupt `.dep` sibling, rust and swift answer `incomplete: true` alone while this
+ *  engine listed the corrupt file under `judgedNothing` — a fabricated claim about content nobody read,
+ *  and a consumer told "re-scan, that report reached no conclusion" when the repair is "that file is
+ *  corrupt". `fileClaimsJudgedNothing`'s own unreadable→true stays: `reportJudgedNothing` above is the
+ *  gate's ANDed fail-closed question, where "no readable claim" must never read as "judged something". */
 export function reportJudgedNothingFiles(prefix) {
-  return reportFilesAt(prefix).filter(fileClaimsJudgedNothing);
+  return reportFilesAt(prefix).filter((f) => fileParses(f) && fileClaimsJudgedNothing(f));
+}
+
+/** ⟨0.28⟩ Does the file's TEXT parse at all — the line between "this report says X" and "this report
+ *  says nothing readable". Parse-only on purpose: shape defects inside a parsed document are judged per
+ *  key role (SPEC §2 ⟨0.24⟩) by the loaders, not here. */
+const fileParses = (f) => {
+  try { JSON.parse(fs.readFileSync(f, "utf8")); return true; } catch { return false; }
+};
+
+/** ⟨0.28⟩ The report FILES under a locator that could not be read at all — the THIRD cause, and it is a
+ *  cause of `incomplete` with NO wire key of its own (rust and swift both answer `incomplete: true` and
+ *  name the file on the human channel only; matching them is the point — one wire shape per state).
+ *  Before this arm existed, `reportUnanalyzed` skipped an unparseable member with a bare `catch` and the
+ *  corrupt file surfaced only through the judged-nothing mislabel above. */
+export function reportUnreadableFiles(prefix) {
+  return reportFilesAt(prefix).filter((f) => !fileParses(f));
 }
 
 // Load ONE report file → { entries, hardFail }. A read/parse throw, or an empty result over a doc that
@@ -491,7 +516,10 @@ export function reportCompleteness(prefix) {
   // `judgedNothing` is the PER-FILE list, not the ANDed boolean the gate asks: the disclosure names
   // WHICH report judged nothing, so a locator with one silent member among several still hedges — the
   // semantics rust and java pin, and a repair the reader can aim (that file, not "somewhere here").
-  return { unanalyzed: reportUnanalyzed(prefix), judgedNothing: reportJudgedNothingFiles(prefix) };
+  // ⟨0.28⟩ `unreadable`: the third cause, split out of the judged-nothing mislabel — see
+  // `reportUnreadableFiles`. It hedges the answer and names the file on the human channel only.
+  return { unanalyzed: reportUnanalyzed(prefix), judgedNothing: reportJudgedNothingFiles(prefix),
+           unreadable: reportUnreadableFiles(prefix) };
 }
 
 /**
@@ -506,7 +534,7 @@ export function reportCompleteness(prefix) {
  * predicate and stops at the exit code; see `advisoryAnswer`, whose exit-bearing callers still key their
  * `--strict` on the manifest alone.
  */
-export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing?.length));
+export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing?.length || c.unreadable?.length));
 
 /**
  * ⟨0.28⟩ The disclosure KEYS, defined ONCE, for spreading into a verb's answer document — `{}` when there
@@ -533,6 +561,9 @@ export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing
  */
 export function completenessFields(c) {
   if (!mustHedge(c)) return {};
+  // `unreadable` raises the flag and adds NO key of its own — measured, rust and swift answer
+  // `incomplete: true` alone over a corrupt sibling, and a third spelling here would be the
+  // judgedNothing three-way split again, minted by the engine that was fixing it.
   return { incomplete: true,
            ...(c.unanalyzed?.length ? { unanalyzed: c.unanalyzed } : {}),
            ...(c.judgedNothing?.length ? { judgedNothing: c.judgedNothing } : {}) };
@@ -548,6 +579,7 @@ export function completenessFields(c) {
 export const absorbCompleteness = (a, b) => ({
   unanalyzed: [...(a.unanalyzed ?? []), ...(b.unanalyzed ?? [])],
   judgedNothing: [...(a.judgedNothing ?? []), ...(b.judgedNothing ?? [])],
+  unreadable: [...(a.unreadable ?? []), ...(b.unreadable ?? [])],
 });
 
 /**
@@ -595,16 +627,18 @@ export const absorbCompleteness = (a, b) => ({
  * over-claim the strict exit exists to prevent. (`mustHedge` is the same distinction, stated for a verb
  * that has no exit code for it to matter to.)
  */
-export function advisoryAnswer(body, unanalyzed, judgedNothing = []) {
+export function advisoryAnswer(body, unanalyzed, judgedNothing = [], unreadable = []) {
   const unevaluated = body?.unevaluated;
-  if (!unanalyzed?.length && !unevaluated?.length && !judgedNothing?.length) return body;  // COMPLETE: unchanged, byte for byte, `ok` and all.
+  if (!unanalyzed?.length && !unevaluated?.length && !judgedNothing?.length && !unreadable?.length)
+    return body;  // COMPLETE: unchanged, byte for byte, `ok` and all.
   const { ok, ...rest } = body;                          // eslint-disable-line no-unused-vars -- omitted BY DESIGN
   // The array of report paths, same key and same shape as `completenessFields` — ONE wire spelling for
-  // this key across the answer and advisory documents (see the shape ruling there).
+  // this key across the answer and advisory documents (see the shape ruling there). `unreadable` withdraws
+  // `ok` and raises `incomplete` with NO key of its own, exactly as `completenessFields` rules it.
   const judged = judgedNothing?.length ? { judgedNothing } : {};
   // Key order matches the gate's verdict document: the finding, then `unevaluated`, then the manifest.
   if (unanalyzed?.length) return { ...rest, incomplete: true, unanalyzed, ...judged };
-  return judgedNothing?.length ? { ...rest, incomplete: true, ...judged } : rest;
+  return (judgedNothing?.length || unreadable?.length) ? { ...rest, incomplete: true, ...judged } : rest;
 }
 
 export function loadReport(prefix) {

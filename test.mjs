@@ -10023,6 +10023,58 @@ export function all(db: DatabaseSync, o: any) {
         gq(count0P, intactP, "--json", "--strict").status === 0,
         `status=${gq(count0P, intactP, "--json", "--strict").status}`);
 
+  // ── THE CORRUPT SIBLING IS THE THIRD CAUSE, AND IT IS NOT `judgedNothing`. MEASURED (candor-spec
+  // conformance/gen_key_shapes.py corpus, 2026-08-12): over an intact member with an unparseable `.dep`
+  // sibling under the same locator, rust and swift answered `incomplete: true` ALONE, while this engine
+  // listed the corrupt file under `judgedNothing` — a fabricated `analyzed.count: 0` claim about bytes
+  // nobody could read, sending the reader to "re-scan" when the repair is "fix the corrupt file". And
+  // `reportUnanalyzed` skipped the same file with a bare `catch`, so the manifest arm was silent about
+  // it by construction. The wire form here is the family's: the flag, no third key.
+  {
+    const sdir = path.join(d, "corruptsib"); fs.mkdirSync(sdir, { recursive: true });
+    fs.writeFileSync(path.join(sdir, "r.aa.scan.json"), JSON.stringify(intact));
+    fs.writeFileSync(path.join(sdir, "r.bb.scan.json"), "{ this is not json");
+    const sp = path.join(sdir, "r");
+    const sq = (verb, ...flags) => spawnSync("node", [path.join(HERE, "query.mjs"), ...verb, "--report", sp, ...flags], { encoding: "utf8" });
+
+    const wj = sq(["where", "Fs"], "--json");
+    let wdoc = null; try { wdoc = JSON.parse(wj.stdout); } catch { /* null → fails loudly */ }
+    check("⟨0.28⟩ a corrupt sibling under the locator hedges the answer — `incomplete: true`, NO `judgedNothing` (a file whose bytes cannot be read asserted nothing) and NO invented `unanalyzed` row: the wire shape rust and swift already answer",
+          !!wdoc && wdoc.incomplete === true && !("judgedNothing" in wdoc) && !("unanalyzed" in wdoc)
+            && wdoc.directly.length > 0 && wj.status === 0,
+          `status=${wj.status} ${wj.stdout}`.slice(0, 260));
+
+    const uj = sq(["unverified"], ...pol, "--json");
+    let udoc = null; try { udoc = JSON.parse(uj.stdout); } catch { /* null → fails loudly */ }
+    check("⟨0.28⟩ unverified over the corrupt sibling WITHDRAWS `ok` and keeps its findings — a certification over a member nobody could read is the false all-clear, and a refusal would be less than the partial answer §3.2 asks for",
+          !!udoc && !("ok" in udoc) && udoc.incomplete === true && !("judgedNothing" in udoc)
+            && Array.isArray(udoc.unverified) && uj.status === 0,
+          `status=${uj.status} ${uj.stdout}`.slice(0, 260));
+    check("⟨0.28⟩ …and names the corrupt FILE on the human channel with the true gate line — `gate --report` REFUSES over these bytes (exit 2), unlike the count-0 cause",
+          /could not be parsed/.test(uj.stderr) && /r\.bb\.scan\.json/.test(uj.stderr)
+            && /exits 2 over these bytes/.test(uj.stderr),
+          `${uj.stderr}`.slice(0, 300));
+
+    // THE EXIT IS UNCHANGED — measured before the fix: 0 plain, and `--strict` follows the holes/manifest
+    // arms exactly as over the intact pair (the corrupt sibling adds a caveat, never a verdict).
+    check("⟨0.28⟩ CONTROL: `unverified --strict` over the corrupt-sibling locator exits exactly as over the intact member alone — this rung adds a caveat, it does not move an exit",
+          sq(["unverified"], ...pol, "--strict", "--json").status
+            === spawnSync("node", [path.join(HERE, "query.mjs"), "unverified", "--report", path.join(sdir, "r.aa.scan.json"), ...pol, "--strict", "--json"], { encoding: "utf8" }).status,
+          `sibling=${sq(["unverified"], ...pol, "--strict", "--json").status}`);
+
+    // A locator whose ONLY member is corrupt REFUSES (exit 2, "refusing to report an empty (all-clear)
+    // answer over a corrupt report") — measured, and stronger than a hedge: with zero readable members
+    // there is no partial answer to qualify, and an empty document with `incomplete: true` would still
+    // read as "nothing performs Fs" to a consumer that never checks the flag. The hedge is for the
+    // partial case above; the refusal is for the nothing case, and this pins the line between them.
+    const gonly = path.join(d, "corruptonly"); fs.mkdirSync(gonly, { recursive: true });
+    fs.writeFileSync(path.join(gonly, "r.aa.scan.json"), "{ nope");
+    const go = spawnSync("node", [path.join(HERE, "query.mjs"), "where", "Fs", "--report", path.join(gonly, "r"), "--json"], { encoding: "utf8" });
+    check("⟨0.28⟩ a locator whose ONLY member is corrupt still REFUSES loudly (exit 2) — zero readable members leaves no partial answer to hedge, and an empty hedged document would read as an all-clear to a flag-blind consumer",
+          go.status === 2 && /refusing to report an empty/.test(go.stderr),
+          `status=${go.status} err=${go.stderr}`.slice(0, 220));
+  }
+
   fs.rmSync(d, { recursive: true, force: true });
 }
 

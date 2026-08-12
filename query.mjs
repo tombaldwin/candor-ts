@@ -77,6 +77,15 @@ const UNEVAL_TAIL_STRICT = "(`ok` is OMITTED — neither value is a statement th
 // above could not say because it is written around an unread FILE and this report names none. Same two
 // channels, different sentence, and the tail is the OPPOSITE one: the gate exits 0 over these bytes
 // (⟨0.24⟩: a disclosure, not an exit code), so `--strict` does not move either and this note is all there is.
+// ⟨0.28⟩ The THIRD cause on the advisory channel — a report file under the locator whose bytes could not
+// be parsed. Its own sentence because the repair differs (fix or re-write that file, not "re-scan the
+// sources"), and the gate tail is the `unanalyzed` one: `gate --report` REFUSES over a corrupt member
+// (measured, exit 2), so `--strict`'s exit is bounded by the gate exactly as for an unread source file.
+const advisoryUnreadableNote = (verb, unreadable) => {
+  console.error(`candor-ts: ${verb} could NOT fully evaluate — ${unreadable.length} report file(s) under this locator could not be parsed, and whatever they say is not in this answer:`);
+  for (const f of unreadable) console.error(`    ${f}`);
+  console.error("  (`ok` is OMITTED — neither value is a statement this input licenses; `gate --report` exits 2 over these bytes. Fix or regenerate the corrupt report.)");
+};
 const advisoryJudgedNothingNote = (verb) => {
   console.error(`candor-ts: ${verb} could NOT fully evaluate — the report(s) under this locator say they JUDGED NOTHING (⟨0.24⟩ \`analyzed.count\` is 0, absent with no entries, or unreadable), so absence from \`functions\` licenses no purity claim about any unit and there is nothing here to certify`);
   console.error("  (`ok` is OMITTED — neither value is a statement this input licenses. NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU: `gate --report` exits 0 over a judged-nothing report and `--strict` does not move either, so this note is the whole of the warning. Re-scan the sources you meant to check.)");
@@ -120,7 +129,7 @@ const put = (a, data, proseFn) => { if (!proseFn || wantJsonOut(a)) emit(data); 
 // disclosure, not an exit code"), so the gate exits 0 there. A note that sends the reader to a CI job which
 // then passes teaches them the warning is noise — the disclosure discrediting itself. The count-0 sentence
 // is also the more urgent one and says so: nothing downstream fails closed on those bytes.
-const gateLine = (comp) => (comp.unanalyzed.length
+const gateLine = (comp) => (comp.unanalyzed.length || comp.unreadable?.length
   ? "`gate --report` exits 2 over these bytes."
   : "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU — `gate --report` exits 0 over a judged-nothing report (⟨0.24⟩: a disclosure, not an exit code), so this note is the whole of the warning.");
 
@@ -137,14 +146,22 @@ const gateLine = (comp) => (comp.unanalyzed.length
 // the machine half (`completenessFields`) instead and this function is not called at all.
 const incompleteAnswerNote = (comp, soWhat, tail) => {
   if (!mustHedge(comp)) return;
-  const head = comp.unanalyzed.length
-    ? `the report(s) under this locator declare ${comp.unanalyzed.length} unit(s) candor could not analyze`
-      + (comp.judgedNothing.length ? ", and judged NOTHING at all (`analyzed.count: 0`)" : "")
-    : "the report(s) under this locator say they JUDGED NOTHING (`analyzed.count: 0`)";
-  console.log(`candor-ts: ⚠ INCOMPLETE — ${head}, so ${soWhat}:`);
+  // Three causes, one sentence each, and only true ones: `unreadable` is a report file whose BYTES could
+  // not be parsed — not "declared unanalyzed units" and not "judged nothing", both of which would send
+  // the reader to the wrong repair (rust names it separately for the same reason).
+  const causes = [];
+  if (comp.unanalyzed.length)
+    causes.push(`declare ${comp.unanalyzed.length} unit(s) candor could not analyze`);
+  if (comp.judgedNothing.length)
+    causes.push("say they JUDGED NOTHING (`analyzed.count: 0`)");
+  if (comp.unreadable?.length)
+    causes.push(`include ${comp.unreadable.length} file(s) that could not be parsed at all`);
+  console.log(`candor-ts: ⚠ INCOMPLETE — the report(s) under this locator ${causes.join(", and ")}, so ${soWhat}:`);
   for (const u of comp.unanalyzed) console.log(`    ${u.path}${u.reason ? `  (${u.reason})` : ""}`);
   if (comp.judgedNothing.length)
     console.log("    (a report that judged nothing names no function at all — its silence is not a purity claim about any unit)");
+  for (const f of comp.unreadable ?? [])
+    console.log(`    ${f} — could not be parsed (corrupt or mid-write), so whatever it says is not in this answer`);
   console.log(`    ${tail} ${gateLine(comp)}`);
 };
 
@@ -1619,7 +1636,8 @@ switch (cmd) {
     // over the call graph, so this verb answers `ok: true` where the report-only verbs exit 2 on the name.
     // MEASURED exactly so — the pre-edit gate check, green, over a report that judged nothing.
     if (wcomp.judgedNothing.length) advisoryJudgedNothingNote("whatif");
-    emit(advisoryAnswer(r, wunan, wcomp.judgedNothing));
+    if (wcomp.unreadable.length) advisoryUnreadableNote("whatif", wcomp.unreadable);
+    emit(advisoryAnswer(r, wunan, wcomp.judgedNothing, wcomp.unreadable));
     process.exit(r.violations.length ? 1 : 0);
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }
@@ -1672,11 +1690,12 @@ switch (cmd) {
     // below (see `advisoryAnswer`). Leaving it out would have let this verb print a remedy list beside
     // `ok: true` over a report that judged nothing — the same false all-clear, arriving by omission.
     if (fgComp.judgedNothing.length) advisoryJudgedNothingNote("fix-gate");
+    if (fgComp.unreadable.length) advisoryUnreadableNote("fix-gate", fgComp.unreadable);
     // ⟨0.24⟩ SPEC §3.2 `4fd140c` — and the same posture for a rule the GATE refused: no remedy is computed
     // from evidence the gate declined to read, the refusal is disclosed on both channels, and `--strict`
     // exits 2 (could-not-evaluate) rather than the 0 that would read as "no crossings left to fix".
     if (fgr.unevaluated?.length) advisoryUnevaluatedNote("fix-gate", fgr.unevaluated, UNEVAL_TAIL_STRICT);
-    emit(advisoryAnswer(fgr, fgUnan, fgComp.judgedNothing));
+    emit(advisoryAnswer(fgr, fgUnan, fgComp.judgedNothing, fgComp.unreadable));
     process.exit(fgUnan.length || fgr.unevaluated?.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
     break; // unreachable
   }
@@ -1715,10 +1734,11 @@ switch (cmd) {
     // ⟨0.28⟩ …and the count-0 cause. MEASURED before this line: `{ok: true, unverified: []}` over a report
     // that judged nothing — this verb certifying a package it never examined. The exit is untouched.
     if (uComp.judgedNothing.length) advisoryJudgedNothingNote("unverified");
+    if (uComp.unreadable.length) advisoryUnreadableNote("unverified", uComp.unreadable);
     // ⟨0.24⟩ SPEC §3.2 `4fd140c` — the function the gate could not judge is NAMED in `unverified` above,
     // with the missing evidence as its reason; this is the human channel for the same fact.
     if (r.unevaluated?.length) advisoryUnevaluatedNote("unverified", r.unevaluated, UNEVAL_TAIL_STRICT);
-    emit(advisoryAnswer(r, uUnan, uComp.judgedNothing));
+    emit(advisoryAnswer(r, uUnan, uComp.judgedNothing, uComp.unreadable));
     process.exit(uUnan.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
     break; // unreachable
   }
