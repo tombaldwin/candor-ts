@@ -933,6 +933,45 @@ export function mid(): void { leaf(); }
     ok(`⟨0.28⟩ CONTROL: ${name} over an ALL-PURE report (\`analyzed.count: 9\`, \`functions: []\`) does NOT hedge`,
        !("incomplete" in doc), JSON.stringify(doc).slice(0, 200));
 
+  // ── ⟨0.28⟩ RUNG A ON THE AGENT CHANNEL: the two tools whose pinned shape cannot CARRY the caveat
+  // emit the CAVEAT DOCUMENT INSTEAD. `candor_show` returns the CLI's array and had no completeness
+  // reader at all; `candor_map` is keyed by the operator's own module names and used to MERGE the hedge
+  // into that namespace, displacing a real row. MEASURED here 2026-08-12 against the pre-rung server,
+  // over a report declaring one `unanalyzed` unit:
+  //
+  //   candor_show → [{"fn":"app.leaf",…}]                              (no caveat on any channel)
+  //   candor_map  → {"app":{…},"incomplete":true,"unanalyzed":[…]}     (the merged shape)
+  //
+  // This surface is the worse of the two: an agent reading `Object.keys(map).length === 0` records "this
+  // codebase performs no effects" and has no follow-up question available to it.
+  {
+    const partialP = mk("part-unan", (o) => { o.unanalyzed = [{ path: "src/gone.ts", reason: "parse error" }]; });
+    const shot = async (pfx) => {
+      const rs = await mcpSession([
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "candor_show", arguments: { fn: "app.leaf", report: pfx } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "candor_map", arguments: { report: pfx } } },
+      ]);
+      const by = Object.fromEntries(rs.map((r) => [r.id, r]));
+      return [JSON.parse(by[1].result.content[0].text), JSON.parse(by[2].result.content[0].text)];
+    };
+    const [hShow, hMap] = await shot(partialP);
+    ok("⟨0.28⟩ Rung A (MCP): `candor_show` over a report declaring `unanalyzed` returns the CAVEAT DOCUMENT instead of its ARRAY — before this it answered the rows with no caveat on any channel",
+       !Array.isArray(hShow) && hShow.incomplete === true && hShow.unanalyzed?.length === 1
+         && Object.keys(hShow).every((k) => ["incomplete", "unanalyzed", "judgedNothing"].includes(k)),
+       JSON.stringify(hShow).slice(0, 240));
+    ok("⟨0.28⟩ Rung A (MCP): `candor_map` emits the caveat document with NO module row beside it — the merged shape displaced a real module to make space for the hedge",
+       hMap.incomplete === true && Object.keys(hMap).every((k) => ["incomplete", "unanalyzed", "judgedNothing"].includes(k)),
+       JSON.stringify(hMap).slice(0, 240));
+    // INTACT-INPUT CONTROL: both pinned shapes unchanged (byte-compared out of band against the
+    // pre-rung server on the same fixture — identical on both tools).
+    const [cShow, cMap] = await shot(P);
+    ok("⟨0.28⟩ Rung A (MCP) CONTROL: `candor_show` over an INTACT report keeps its pinned ARRAY, unhedged",
+       Array.isArray(cShow) && cShow[0]?.fn === "app.leaf" && !("incomplete" in cShow),
+       JSON.stringify(cShow).slice(0, 200));
+    ok("⟨0.28⟩ Rung A (MCP) CONTROL: `candor_map` over an INTACT report keeps its module rows and gains no caveat key",
+       !("incomplete" in cMap) && Object.keys(cMap).length > 0, JSON.stringify(cMap).slice(0, 200));
+  }
+
   // ── ⟨0.28⟩ THE GRAPH TOOLS FALL BACK TO THE REPORT'S OWN `calls` EDGES on this surface too. The
   // fn-existence guard unions the report's names, so a sidecar-less VALID report passed the guard and
   // `candor_callers` then computed over an EMPTY graph: `{of:[],direct:[],transitive:[]}` — "nobody

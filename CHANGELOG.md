@@ -8,6 +8,24 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.28⟩ Rung A: `show` and `map` emit the CAVEAT DOCUMENT instead of their result when hedging**
+  (SPEC §2, *"A verb whose pinned shape cannot carry the caveat MUST emit the CAVEAT DOCUMENT INSTEAD
+  of its result document"*). Not a result document with the caveat omitted, and not an empty result of
+  the pinned shape. Measured here 2026-08-12 over a report declaring one `unanalyzed` unit: `show
+  --json` answered its bare ARRAY with no caveat on any channel — the only descriptive verb of the
+  seven with no completeness reader at all — and `map --json` MERGED the caveat keys into its module
+  namespace, disclosing the collision loudly while still dropping the displaced row. Both now answer
+  `{"incomplete": true, "unanalyzed"/"judgedNothing": …}` and nothing else on the hedge path. The
+  `@`-prefix escape §2.2 uses for sidecars is unavailable and the ruling names this engine for why: an
+  npm scoped package is `@scope/name`, so `@incomplete` is a key a real module could own. The type
+  change is deliberate — a consumer doing `for (const x of doc)` gets a TypeError rather than a silent
+  zero-iteration loop. `show` also gains the prose ⚠ INCOMPLETE note it never had, and its empty
+  sentence stops citing the ⟨0.21⟩ purity convention over a report that cannot back it. **Both routes**:
+  the CLI and the MCP `candor_show`/`candor_map` tools, the surface where an agent has no follow-up
+  question available to it. Exits unchanged (0); the `map` collision warning is deleted because the
+  condition it disclosed is no longer constructible. Healthy output byte-identical on both channels and
+  both surfaces, diffed against the pre-change files.
+
 - **⟨0.28⟩ the scan target expands to the files the run will PARSE** (SPEC §3.3.1, *"AND THE SCAN
   TARGET EXPANDS TO THE FILES THE RUN WILL PARSE"* — the residual the exact-artifact ruling
   deliberately left, and the clause names this engine's reproduction). ⚠ Measured live here

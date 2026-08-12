@@ -9922,23 +9922,83 @@ export function all(db: DatabaseSync, o: any) {
   check("⟨0.28⟩ CONTROL: containment vs an INTACT baseline is unhedged and still exits 0 — the ratchet's exit follows the LEAKS, never the caveat",
         ratchetOk.status === 0 && !/incomplete/.test(ratchetOk.stdout), `status=${ratchetOk.status} ${ratchetOk.stdout}`.slice(0, 200));
 
-  // `map`'s top level is a USER NAMESPACE — the one document whose own rows can collide with the keys this
-  // rung must add. The hedge WINS (a consumer branching on `"incomplete" in doc` must be able to see it)
-  // and the displaced row is named LOUDLY: a lost module row the operator has been told about beats a
-  // false all-clear nobody has. Disclosed off the fields ACTUALLY written, never a hardcoded name list —
-  // announcing a displacement that did not happen is the `net-partner` false disclosure pointed backwards.
+  // `map`'s top level is a USER NAMESPACE — the one document whose own rows could collide with the keys
+  // this rung must add. ⟨0.28⟩ RUNG A DISSOLVES THE COLLISION rather than disclosing it: the caveat
+  // REPLACES the module map, so a module named `incomplete` is not displaced by a hedge, it is simply
+  // absent along with every other row. The previous shape merged the keys and named the lost row loudly —
+  // the best answer available while the caveat had to ride the result, and still a dropped row. The
+  // stderr warning is GONE and this row asserts that: a disclosure about a displacement that can no
+  // longer happen is the `net-partner` false disclosure pointed backwards.
   const colP = state("collide", (o) => {
     o.functions = o.functions.map((e) => ({ ...e, fn: e.fn.replace(/^src\.app\./, "incomplete.") }));
     o.unanalyzed = [{ path: "src/gone.ts", reason: "parse error" }];
   });
   const col = spawnSync("node", [path.join(HERE, "query.mjs"), "map", "--report", `${colP}.json`, "--json"], { encoding: "utf8" });
   let cdoc = null; try { cdoc = JSON.parse(col.stdout); } catch { /* null → fails loudly */ }
-  check("⟨0.28⟩ map: a module literally named `incomplete` does NOT silently displace the disclosure — the hedge wins and the lost row is disclosed by name on stderr",
-        !!cdoc && cdoc.incomplete === true && /row literally named `incomplete`/.test(col.stderr),
-        `${col.stdout}`.slice(0, 200) + ` err=${col.stderr}`.slice(0, 200));
-  check("⟨0.28⟩ CONTROL: the collision warning names ONLY a key that was really written — `unanalyzed` is not announced as displaced when no module is called that",
-        !/row literally named `unanalyzed`/.test(col.stderr) && !/row literally named `judgedNothing`/.test(col.stderr),
-        `${col.stderr}`.slice(0, 240));
+  check("⟨0.28⟩ Rung A: over a report whose module is literally named `incomplete`, `map` emits the CAVEAT DOCUMENT and nothing else — the collision cannot arise because no module row rides beside the hedge",
+        !!cdoc && cdoc.incomplete === true && Array.isArray(cdoc.unanalyzed)
+          && Object.keys(cdoc).every((k) => ["incomplete", "unanalyzed", "judgedNothing"].includes(k)),
+        `${col.stdout}`.slice(0, 260));
+  check("⟨0.28⟩ Rung A: …and the old collision warning is GONE — a stderr disclosure about a displacement that can no longer happen is a false disclosure",
+        !/row literally named/.test(col.stderr), `${col.stderr}`.slice(0, 240));
+
+  // ── ⟨0.28⟩ RUNG A, THE OTHER HALF: `show` IS PINNED TO A TOP-LEVEL ARRAY, so it has nowhere to put a
+  // caveat KEY at all — and before this rung it carried none on EITHER channel, the only verb of the
+  // seven above with no completeness reader whatsoever. MEASURED here 2026-08-12:
+  //
+  //     show app.save --report <report declaring one unanalyzed unit> --json   →  [ {…} ]   exit 0
+  //     show app.save --report <report with analyzed.count: 0>         --json   →  []       exit 0
+  //
+  // `[]` over a manifest naming a file the scan could not read is *nothing performs this effect*, asserted
+  // about code nobody examined. The ruling: emit the CAVEAT DOCUMENT INSTEAD. The TYPE CHANGE is the
+  // point — a consumer doing `for (const x of doc)` gets a TypeError rather than a silent zero-iteration
+  // loop, which is the one case where breaking a consumer is the correct outcome.
+  //
+  // The `@`-prefix escape §2.2 uses for sidecars is unavailable, and the ruling names THIS engine for
+  // why: `map` is keyed by module names and an npm scoped package is `@scope/name`, so `@incomplete` is a
+  // key a real ts module could own.
+  {
+    const sq = (pfx, ...flags) => spawnSync("node", [path.join(HERE, "query.mjs"), "show", "app.leaf",
+      "--report", `${pfx}.json`, ...flags], { encoding: "utf8" });
+    for (const [cause, pfx, key] of [["an `unanalyzed`", partialP, "unanalyzed"],
+                                     ["a judged-nothing", count0P, "judgedNothing"]]) {
+      const j = sq(pfx, "--json");
+      let doc = null; try { doc = JSON.parse(j.stdout); } catch { /* null → the row fails loudly */ }
+      check(`⟨0.28⟩ Rung A: \`show\` over ${cause} report emits the CAVEAT DOCUMENT instead of its ARRAY — an array here is the pre-⟨0.28⟩ silent wrong answer, and an OBJECT is the loud stop the ruling asks for`,
+            !!doc && !Array.isArray(doc) && doc.incomplete === true && Array.isArray(doc[key])
+              && Object.keys(doc).every((k) => ["incomplete", "unanalyzed", "judgedNothing"].includes(k)),
+            `${j.stdout}`.slice(0, 260));
+      check(`⟨0.28⟩ Rung A: …and \`show\` still exits 0 over ${cause} report — the caveat is a disclosure, not a verdict (⟨0.24⟩)`,
+            j.status === 0, `status=${j.status}`);
+      const h = sq(pfx, "--text");
+      check(`⟨0.28⟩ Rung A: …and the HUMAN arm of \`show\` prints the ⚠ INCOMPLETE note ON STDOUT — it had NO caveat on either channel before this rung`,
+            /⚠ INCOMPLETE/.test(h.stdout) && !/INCOMPLETE/.test(h.stderr), `out=${h.stdout}`.slice(0, 220));
+    }
+    // …and the hedged EMPTY prose stops citing the ⟨0.21⟩ purity convention: over these bytes an absent
+    // function is not evidence of purity, and "pure functions are omitted from the report" says it is.
+    const eh = spawnSync("node", [path.join(HERE, "query.mjs"), "show", "zzz_no_such_fn",
+      "--report", `${count0P}.json`, "--text"], { encoding: "utf8" });
+    check("⟨0.28⟩ Rung A: `show`'s empty PROSE arm withdraws the ⟨0.21⟩ purity sentence when hedging — absence from a report that judged nothing licenses no purity claim",
+          /licenses no purity claim/.test(eh.stdout) && !/pure functions are omitted/.test(eh.stdout),
+          `${eh.stdout}`.slice(0, 240));
+
+    // INTACT-INPUT CONTROL, and it is the row that caught a real regression while this was written: the
+    // first draft routed the healthy JSON arm through the key-spreading helper, which turned the pinned
+    // top-level array into `{"0": {…}}`. Both shapes AND both channels.
+    const cj = sq(intactP, "--json"), ch = sq(intactP, "--text");
+    let cdoc2 = null; try { cdoc2 = JSON.parse(cj.stdout); } catch { /* null → fails loudly */ }
+    check("⟨0.28⟩ Rung A CONTROL: `show` over an INTACT report keeps its pinned TOP-LEVEL ARRAY, unhedged — the shape moves only on the hedge path",
+          Array.isArray(cdoc2) && cdoc2.length === 1 && cdoc2[0].fn === "src.app.leaf" && cj.status === 0,
+          `${cj.stdout}`.slice(0, 240));
+    check("⟨0.28⟩ Rung A CONTROL: …and its human arm is silent — no note, no stderr, byte-identical to a pre-⟨0.28⟩ run",
+          /app\.leaf/.test(ch.stdout) && !/INCOMPLETE/.test(ch.stdout) && ch.stderr === "",
+          `out=${ch.stdout}`.slice(0, 200) + ` err=${ch.stderr}`.slice(0, 160));
+    const mj2 = spawnSync("node", [path.join(HERE, "query.mjs"), "map", "--report", `${intactP}.json`, "--json"], { encoding: "utf8" });
+    let mdoc2 = null; try { mdoc2 = JSON.parse(mj2.stdout); } catch { /* null → fails loudly */ }
+    check("⟨0.28⟩ Rung A CONTROL: `map` over an INTACT report keeps its module rows and gains no caveat key",
+          !!mdoc2 && !("incomplete" in mdoc2) && Object.keys(mdoc2).length > 0,
+          `${mj2.stdout}`.slice(0, 240));
+  }
 
   // ── THE ARRAY EARNS ITS SHAPE ON A MULTI-REPORT LOCATOR: it names WHICH member judged nothing, which
   // `true` never could. PER FILE, the rust/java semantics ("a locator naming several members must

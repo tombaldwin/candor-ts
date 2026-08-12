@@ -168,20 +168,16 @@ const incompleteAnswerNote = (comp, soWhat, tail) => {
 // The MACHINE half. Spread LAST so the verb's own pinned key order is untouched (JS objects keep insertion
 // order), and `{}` on a complete report — the whole document is then byte-identical to a pre-⟨0.28⟩ one.
 //
-// THE COLLISION IS DISCLOSED, NOT HIDDEN. `map`'s top level is a USER NAMESPACE, so a module literally named
-// `incomplete` can occupy the key this answer must carry. Nesting the disclosure is not an escape: a consumer
-// branching on `"incomplete" in doc` would never see it. So the hedge WINS and the displaced row is named
-// loudly — a lost module row the operator has been told about beats a false all-clear nobody has. Asked of
-// the fields ACTUALLY being written (each is omitted when it does not apply), never of a hardcoded name
-// list: warning that `unanalyzed` was displaced when nothing displaced it is a FALSE disclosure, the
-// `net-partner` failure this family already made once, pointed the other way.
-const withCompleteness = (data, comp) => {
-  const f = completenessFields(comp);
-  for (const k of Object.keys(f))
-    if (Object.hasOwn(data, k))
-      console.error(`candor-ts: this report has a row literally named \`${k}\`, which collides with the ⟨0.28⟩ incompleteness disclosure this answer MUST carry — the disclosure wins and that row is NOT in the JSON below. Drop --json for the text form, which shows it.`);
-  return { ...data, ...f };
-};
+// THE COLLISION GUARD THIS USED TO CARRY IS GONE, because ⟨0.28⟩ Rung A removed the only shape that could
+// construct it. `map` was the one caller whose top level is a USER NAMESPACE, and it answered by MERGING
+// the hedge over a module literally named `incomplete` and disclosing the loss on stderr — a lost row the
+// operator was told about, which was the best available answer while the caveat had to ride the result.
+// It no longer does: `map` takes `putCaveatInstead` below, where the caveat REPLACES the document and
+// nothing is displaced. Every remaining caller has a FIXED key set of its own (`where`
+// {effect,directly,inherited}, `reachable` {entryPoints,effects}, `containment` {contained,ambient},
+// `blindspots` {sources,totalUnknown}), so a collision here is not constructible from any report.
+// Deleted rather than kept as a dormant guard: a check whose condition cannot arise reads as coverage.
+const withCompleteness = (data, comp) => ({ ...data, ...completenessFields(comp) });
 
 // `put`, plus the caveat on BOTH channels from ONE trigger — a caller cannot get the JSON half and the prose
 // half to disagree, which is exactly the mutant (`ec1a441`) that survived a whole suite in candor-rust.
@@ -189,6 +185,42 @@ const withCompleteness = (data, comp) => {
 // note alone is not enough, because "no Unknown sources ✓" IS the prose spelling of the empty JSON.
 const putAnswer = (a, data, proseFn, comp, soWhat, tail) => {
   if (!proseFn || wantJsonOut(a)) { emit(withCompleteness(data, comp)); return data; }
+  incompleteAnswerNote(comp, soWhat, tail);
+  proseFn(data, mustHedge(comp));
+  return data;
+};
+
+// ---- ⟨0.28⟩ RUNG A — SPEC §2: "A VERB WHOSE PINNED SHAPE CANNOT CARRY THE CAVEAT MUST EMIT THE CAVEAT
+// DOCUMENT INSTEAD OF ITS RESULT DOCUMENT." Not a result document with the caveat omitted, and not an
+// empty result of the pinned shape. `putAnswer` above SPREADS the caveat into the answer, which works for
+// every verb with a fixed key set; two verbs have no such place:
+//
+//   show   pinned to a TOP-LEVEL ARRAY — nowhere to put a key at all. MEASURED here 2026-08-12 over a
+//          report declaring one `unanalyzed` unit: `[]`, exit 0, no caveat on ANY channel. *Nothing
+//          performs this effect*, asserted about code nobody examined.
+//   map    keyed by the operator's own MODULE names. MEASURED: the caveat keys merged INTO the module
+//          namespace, and the merged shape disclosed the collision loudly while still dropping the row.
+//
+// AND THE RULING NAMES THIS ENGINE FOR WHY THE `@`-PREFIX ESCAPE IS NOT AVAILABLE: §2.2's convention is
+// airtight for a sidecar because a `@`-key cannot collide with a TYPE name — but an npm scoped package is
+// spelled `@scope/name`, so `@incomplete` is a key a real ts module could own. "A convention that is
+// airtight in one namespace and merely unlikely in another is not a convention; it is a deferred
+// collision."
+//
+// THE TYPE CHANGE IS THE POINT. A consumer doing `for (const x of doc)` over `show` gets a TypeError
+// rather than a silent zero-iteration loop — the one case where breaking a consumer is the CORRECT
+// outcome, because the consumer was being lied to. The exit does not move (⟨0.24⟩: a disclosure, not an
+// exit code), and HEALTHY OUTPUT IS BYTE-IDENTICAL: the shape changes only on the hedge path.
+//
+// The PROSE arm is `putAnswer`'s, verbatim — prose has no shape problem, and the clause is about the
+// machine document. Sharing the note + renderer call keeps the two channels from drifting.
+//
+// THE HEALTHY JSON ARM MUST NOT GO THROUGH `withCompleteness`, and the first draft of this helper did:
+// it delegated to `putAnswer`, whose `{ ...data, ...{} }` turned `show`'s ARRAY into `{"0": {…}}` — the
+// pinned top-level array destroyed on the very path this rung promises to leave byte-identical. Caught by
+// the intact-input control before it left the machine. So the healthy arm emits `data` itself.
+const putCaveatInstead = (a, data, proseFn, comp, soWhat, tail) => {
+  if (!proseFn || wantJsonOut(a)) { emit(mustHedge(comp) ? completenessFields(comp) : data); return data; }
   incompleteAnswerNote(comp, soWhat, tail);
   proseFn(data, mustHedge(comp));
   return data;
@@ -225,8 +257,15 @@ const P = {
     console.log(`  direct callers (${d.direct.length}): ${csv(d.direct)}`);
     console.log(`  transitive callers (${d.transitive.length}): ${csv(d.transitive)}`);
   },
-  show: (d) => {
-    if (!d.length) { console.log("candor: no effectful function matches that name (pure functions are omitted from the report)."); return; }
+  show: (d, hedge) => {
+    // ⟨0.28⟩ the empty sentence stops citing the ⟨0.21⟩ purity convention when the report cannot back it:
+    // over these bytes an absent function is not evidence of purity, it is evidence of nothing.
+    if (!d.length) {
+      console.log(hedge
+        ? `candor: no effectful function candor COULD SEE matches that name ${NOT_A("this function is pure")} — absence from this report licenses no purity claim here.`
+        : "candor: no effectful function matches that name (pure functions are omitted from the report).");
+      return;
+    }
     d.forEach((e, i) => {
       if (i) console.log("");
       console.log(`${e.fn}`);
@@ -1073,7 +1112,13 @@ switch (cmd) {
     // A missing/empty <query> is a LOUD usage error (exit 2, like candor-java) — never a silently-empty
     // `[]` at exit 0, which reads as an authoritative "no such function" over a question never asked.
     if (!q) { console.error("usage: candor-ts-query show <query> [--report <locator>] [--json]"); process.exit(2); }
-    put(args, coreShow(loadReportOrDie(prefix), q), P.show);
+    // ⟨0.28⟩ RUNG A — `show`'s pinned shape is a TOP-LEVEL ARRAY, so over a hedging report it emits the
+    // CAVEAT DOCUMENT INSTEAD (see `putCaveatInstead`). Before this it took plain `put` and had no
+    // completeness reader at all: measured, `[]` at exit 0 over a report whose own manifest names a file
+    // candor could not read — the only verb of the six with no caveat on EITHER channel.
+    putCaveatInstead(args, coreShow(loadReportOrDie(prefix), q), P.show, reportCompleteness(prefix),
+      `the function(s) shown below are only those candor could SEE match \`${q}\``,
+      "A function in an unread unit is ABSENT from the report, so it cannot be shown here at all. Re-scan for a complete answer.");
     break;
   }
   case "where": {
@@ -1175,8 +1220,9 @@ switch (cmd) {
     const { prefix } = resolveReportVerb(args, 0);
     // ⟨0.28⟩ `map` answers `{}`, which SPEC §2 calls the STRONGEST determined negative there is: every key
     // a consumer reads defaults to empty, so `d["db"] ?? {}` cannot tell an empty map from an unexamined
-    // one. (Its top level is a user namespace — `withCompleteness` discloses a colliding module by name.)
-    putAnswer(args, coreMap(loadReportOrDie(prefix)), P.map, reportCompleteness(prefix),
+    // one. RUNG A: its top level is a USER NAMESPACE, so the caveat REPLACES the module map rather than
+    // merging into it — the merged shape displaced a real module row to make space for the hedge.
+    putCaveatInstead(args, coreMap(loadReportOrDie(prefix)), P.map, reportCompleteness(prefix),
       "the module rows below cover only the source candor read",
       "A module living wholly in an unread unit is MISSING from this overview, and one that IS listed may be missing functions. Re-scan for a complete map.");
     break;

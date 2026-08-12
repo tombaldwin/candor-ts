@@ -202,16 +202,27 @@ function capCallers(r) {
 // oddly bare answer; a loop reading `blindspots.sources.length === 0` records "no blind spots" and moves on.
 // Additive and a no-op on a complete report (`completenessFields` returns `{}`), so every pinned tool shape
 // is unchanged on an ordinary one.
-const withCompleteness = (p, doc) => {
-  const f = Q.completenessFields(Q.reportCompleteness(p));
-  // `candor_map`'s top level is a USER NAMESPACE — a module named `incomplete` can occupy the key. Nesting
-  // is not an escape (a consumer branching on `"incomplete" in doc` would never see it), so the hedge wins
-  // and the displaced row is named on the log channel. Asked of the fields ACTUALLY written, never of a
-  // hardcoded list: reporting a displacement that did not happen is a false disclosure.
-  for (const k of Object.keys(f))
-    if (Object.hasOwn(doc, k))
-      console.error(`candor-mcp: this report has a row literally named \`${k}\`, which collides with the ⟨0.28⟩ incompleteness disclosure this answer MUST carry — the disclosure wins and that row is NOT in the result.`);
-  return { ...doc, ...f };
+// The collision loop this used to carry is gone with ⟨0.28⟩ Rung A: `candor_map` was its only possible
+// trigger and now takes `caveatInstead`, where nothing is displaced. Every remaining caller has a fixed
+// key set, so the condition is not constructible — and a guard whose condition cannot arise reads as
+// coverage.
+const withCompleteness = (p, doc) => ({ ...doc, ...Q.completenessFields(Q.reportCompleteness(p)) });
+// ⟨0.28⟩ RUNG A, ON THE AGENT CHANNEL — SPEC §2: a verb whose pinned shape cannot carry the caveat emits
+// the CAVEAT DOCUMENT INSTEAD of its result document. Two tools qualify and both are handled here,
+// because THE MCP HALF HAS BEEN THE MISSED ROUTE TWICE IN THIS REPO — and it is the worse one: an agent
+// reading `Object.keys(map).length === 0` records "this codebase performs no effects" and moves on, with
+// no follow-up question available to it.
+//
+//   candor_show  the CLI's `show` is pinned to an ARRAY; this tool returns `Q.show(...)`, the same array,
+//                and had no completeness reader at all.
+//   candor_map   keyed by the operator's own MODULE names. The merged shape it used to take displaced a
+//                real module row to make space for the hedge, and the `@`-prefix escape is unavailable
+//                for the reason the ruling names candor-ts for: `@scope/name` is a key a module owns.
+//
+// A no-op on a complete report, so both pinned tool shapes are unchanged on an ordinary one.
+const caveatInstead = (p, doc) => {
+  const comp = Q.reportCompleteness(p);
+  return Q.mustHedge(comp) ? Q.completenessFields(comp) : doc;
 };
 // ⟨0.28⟩ The graph the three graph verbs answer over: the §2.2 sidecar when there is one, else the
 // report's own embedded `calls` edges (Q.reportCallsGraph) — the same fallback the CLI and rust/java
@@ -253,12 +264,12 @@ const TOOLS = {
   candor_show: {
     description: "A function's effects (inferred = transitive, direct = own body) plus its literal surfaces (hosts/cmds/paths/tables) when present.",
     schema: { type: "object", properties: { fn: { type: "string" }, ...reportArg }, required: ["fn"] },
-    run: (a, p) => Q.show(loadReportLoud(p), a.fn),
+    run: (a, p) => caveatInstead(p, Q.show(loadReportLoud(p), a.fn)),
   },
   candor_map: {
     description: "Per-module effect overview: each module's union of effects and function count. The architecture-at-a-glance.",
     schema: { type: "object", properties: { ...reportArg } },
-    run: (_a, p) => withCompleteness(p, Q.map(loadReportLoud(p))),
+    run: (_a, p) => caveatInstead(p, Q.map(loadReportLoud(p))),
   },
   candor_whatif: {
     description: "Hypothetically add `effect` to `fn` and report the blast radius; with `policy`, also the deny-rule violations it would cause. Pre-edit gate check.",
