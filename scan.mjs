@@ -233,6 +233,39 @@ const sameArtifact = (a, b) => {
   return x !== null && x === resolve(b);
 };
 
+// ⟨0.28⟩ SPEC §3.3.1 — EVERY `--out` THIS ARGV NAMES, in order, duplicates kept. `preScan` keeps only the
+// LAST (what the parse loop honours); this is the same walk, and it exists because **a repeated `--out`
+// is the same rule as a repeated `--gate-json`** — the question the rung that settled the verdict sink
+// filed as "deferred" for the report sink, on no stated ground except which sink was in front of the
+// author.
+//
+// ONE WALK, not a second parser. The value rules are `preScan`'s exactly, including the `refused` latch:
+// a `--out` named after the first token the parse loop will refuse at was never accepted, so it is not a
+// sink. Two walks with two value rules is how the repeated form and the single form come to disagree
+// about which tokens are prefixes at all — and candor-swift's arm of this rung caught the reference
+// engine arming the FIRST prefix while the run wrote the LAST.
+const allOutPrefixes = (av) => {
+  const out = [];
+  let refused = false;
+  for (let i = 0; i < av.length; i++) {
+    const a = av[i], v = av[i + 1];
+    if (a !== "--gate-json" && a !== "--policy" && a !== "--out") continue;
+    if (v === undefined || (v !== "-" && v.startsWith("--"))) { refused = true; continue; }
+    if (a === "--out" && !refused) out.push(v);
+    i++;
+  }
+  return out;
+};
+// Two spellings of ONE prefix are ONE report set — the §3.3.1 artifact rule applied to the prefix. A
+// prefix is not itself a file, but `sameArtifact` resolves the PARENT of a path that does not exist, so
+// `p` and `./p` from p's own directory collapse. Order-preserving, first spelling kept; `--out` never
+// accepts `-`, so the stream arm of that helper is inert here.
+const distinctOutPrefixes = (all) => {
+  const out = [];
+  for (const p of all) if (!out.some((k) => k === p || sameArtifact(k, p))) out.push(p);
+  return out;
+};
+
 // ⟨0.28⟩ SPEC §3.3.1 — **A SINK THAT LIES UNDER THE SCAN TARGET AND BEARS AN EXTENSION THIS ENGINE
 // PARSES IS REFUSED.** This is the residual the exact-artifact ruling deliberately left: registering
 // the target in `runInputs` catches `--gate-json <the target>` and cannot catch `--gate-json
@@ -821,6 +854,39 @@ const disarmUnwrittenOutReports = () => {
   // `--json` publishes the report to STDOUT and writes no files at all, so there is no file sink to arm
   // in that form — it is the stream rule above, and arming under it would rewrite files this run is
   // never going to touch.
+  //
+  // ⟨0.28⟩ **AND A REPEATED `--out` IS THE SAME RULE — refused at exit 2, with the fail-closed report
+  // written to EVERY prefix named.** `--out A --out B` says where the reports go, twice; the two
+  // statements cannot both be honoured. MEASURED here 2026-08-12 before this: last-wins at exit 0, with
+  // `A.json` byte-identical to the previous good run — a stale green whose reader has no way to learn it
+  // lost, and a `gate --report A` over it answers from a scan that never ran.
+  //
+  // "The fail-closed report written to every prefix named" means, under THIS sink's own arming rules,
+  // ARMING each prefix: the set at risk is the one the PREVIOUS run left there, which is what
+  // `armOutPrefixFailClosed` rewrites to the ⟨0.21⟩ Row-1 no-claim shape (asking the input exemption
+  // first, per file, and taking the §2.2 sidecars with each report). The run exits before scanning, so
+  // `disarmUnwrittenOutReports` never runs and the placeholders STAND — which is the fail-closed reading
+  // a run that scanned nothing is entitled to.
+  //
+  // AFTER the gate-sink arming above, so a `--gate-json` file sink already holds its armed document and
+  // `refuseEarlyToStream` covers the `-` and `--json` streams. And skipped under `--json` for the same
+  // reason the single-prefix arm below is: that form writes no files at all, so arming would rewrite
+  // files this run was never going to touch — the refusal itself still fires.
+  const namedOuts = distinctOutPrefixes(allOutPrefixes(argv));
+  if (namedOuts.length > 1) {
+    const list = namedOuts.join(", ");
+    console.error(`candor-ts: --out given more than once (${list}) — refusing (exit 2). A run writes ONE `
+      + `report set to ONE prefix. Naming two says where the reports go twice, and the reader of the `
+      + `prefix that loses cannot tell it lost — it goes on holding a previous run's reports as if they `
+      + `were current${preWantJson ? "" : ", so every prefix named now holds the fail-closed empty in "
+      + "place of them"}. Name one, or run the scan twice.`);
+    if (!preWantJson) {
+      const inputs = runInputs(preTarget, policy);
+      for (const p of namedOuts) armOutPrefixFailClosed(p, inputs);
+    }
+    refuseEarlyToStream(`--out was given more than once (${list}) — a run writes one report set to one prefix`);
+    process.exit(2);
+  }
   if (preOut && !preWantJson) armOutPrefixFailClosed(preOut, runInputs(preTarget, policy));
 }
 let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, gateJsonPath = null, allowJs = false, wantAgents = false, wantJson = false, wantWorkspace = false, wantDepInits = false;

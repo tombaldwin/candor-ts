@@ -10481,5 +10481,82 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.28⟩ A REPEATED `--out` IS REFUSED, AND EVERY PREFIX NAMED GETS THE FAIL-CLOSED REPORT ─────────
+// SPEC §3.3.1 settles the question its own rung filed as "deferred" for the report sink while settling
+// it for the verdict sink, on no stated ground except which sink was in front of the author. `--out A
+// --out B` says where the reports go, twice; the two statements cannot both be honoured. MEASURED here
+// 2026-08-12: last-wins at exit 0, with `A.json` BYTE-IDENTICAL to the previous good run — a stale green
+// whose reader has no way to learn it lost, and a `gate --report A` over it answers from a scan that
+// never ran.
+//
+// "The fail-closed report at every prefix named" means, under this sink's own arming rules, ARMING each
+// prefix: the set at risk is the one the PREVIOUS run left there. The run exits before scanning, so the
+// hand-back never runs and the placeholders STAND — the fail-closed reading a run that scanned nothing
+// is entitled to. Rows assert the BYTES, not the exit code, because the pre-fix build exits 0 and the
+// whole defect is what is left on disk.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-dupout-"));
+  fs.mkdirSync(path.join(d, "src"));
+  fs.writeFileSync(path.join(d, "src/app.ts"),
+    'import * as nfs from "node:fs";\nexport function save(): void { nfs.writeFileSync("x", "1"); }\n');
+  fs.writeFileSync(path.join(d, "deny-fs.policy"), "deny Fs\n");
+  const scan = (...a) => spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "src"), ...a],
+    { encoding: "utf8", cwd: d });
+  const A = path.join(d, "A"), B = path.join(d, "B");
+  scan("--out", A); scan("--out", B);
+  const aBefore = fs.readFileSync(`${A}.json`, "utf8");
+  const armed = (f) => { const t = fs.readFileSync(f, "utf8");
+    return /"analyzed": \{ "count": 0 \}/.test(t) && /"reason": "armed:/.test(t); };
+  const hadSidecar = fs.existsSync(`${A}.callgraph.json`);
+
+  const dup = scan("--out", A, "--out", B);
+  check("⟨0.28⟩ repeated --out: the LOSING prefix stops publishing the previous run's report — it holds the ⟨0.21⟩ fail-closed empty, not the stale green it held before the fix",
+        armed(`${A}.json`) && fs.readFileSync(`${A}.json`, "utf8") !== aBefore,
+        fs.readFileSync(`${A}.json`, "utf8").slice(0, 160));
+  check("⟨0.28⟩ repeated --out: …and so does EVERY prefix named, the last one included — 'every path named gets the refusal', in the report sink's spelling",
+        armed(`${B}.json`), fs.readFileSync(`${B}.json`, "utf8").slice(0, 160));
+  check("⟨0.28⟩ repeated --out: …refused at exit 2 naming both prefixes, never the exit-0 last-wins scan",
+        dup.status === 2 && /--out given more than once/.test(dup.stderr)
+          && dup.stderr.includes(A) && dup.stderr.includes(B),
+        `status=${dup.status} ${dup.stderr}`.slice(0, 260));
+  check("⟨0.28⟩ repeated --out: …and the §2.2 sidecars go with the armed reports, so no live call graph is left pairing with a no-claim report",
+        hadSidecar && !fs.existsSync(`${A}.callgraph.json`) && !fs.existsSync(`${B}.callgraph.json`),
+        `hadSidecar=${hadSidecar}`);
+  check("⟨0.28⟩ repeated --out: …and the placeholders STAND — the run exited before scanning, so the hand-back must not restore a previous run's answer as current",
+        armed(`${A}.json`) && armed(`${B}.json`), "");
+
+  // The OTHER sinks named in the same argv get their documents too: the rule is about a RUN.
+  fs.writeFileSync(path.join(d, "pre.gate.json"), '{"ok":true}');
+  const g = scan("--out", A, "--out", B, "--policy", path.join(d, "deny-fs.policy"),
+                 "--gate-json", path.join(d, "pre.gate.json"));
+  check("⟨0.28⟩ repeated --out: a `--gate-json` file sink in the same argv stops publishing its stale `{\"ok\":true}` — it holds the armed refusal, `ok:false` + `refused:true`",
+        g.status === 2 && /"refused": true/.test(fs.readFileSync(path.join(d, "pre.gate.json"), "utf8"))
+          && /"ok": false/.test(fs.readFileSync(path.join(d, "pre.gate.json"), "utf8")),
+        fs.readFileSync(path.join(d, "pre.gate.json"), "utf8").slice(0, 200));
+  const js = scan("--out", A, "--out", B, "--json");
+  check("⟨0.28⟩ repeated --out: the `--json` REPORT STREAM carries the fail-closed document naming this cause — never 0 bytes on stdout at exit 2 (§3.3.1 (4))",
+        js.status === 2 && /"analyzed": \{ "count": 0 \}/.test(js.stdout)
+          && /--out was given more than once/.test(js.stdout),
+        `status=${js.status} ${js.stdout}`.slice(0, 220));
+  const gs = scan("--out", A, "--out", B, "--policy", path.join(d, "deny-fs.policy"), "--gate-json", "-");
+  check("⟨0.28⟩ repeated --out: …and the `--gate-json -` VERDICT STREAM carries the refusal verdict, as the stream's only content",
+        gs.status === 2 && /"refused": true/.test(gs.stdout) && /--out was given more than once/.test(gs.stdout),
+        `status=${gs.status} ${gs.stdout}`.slice(0, 220));
+
+  // CONTROL 1 — two spellings of ONE prefix are ONE sink (the §3.3.1 artifact rule applied to a prefix),
+  // so a legal command is not refused. This is the mirror of the stale green: refusing here would be the
+  // hardlink mistake the verdict sink already paid for.
+  const one = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "src"), "--out", "A", "--out", "./A"],
+    { encoding: "utf8", cwd: d });
+  check("⟨0.28⟩ repeated --out CONTROL: `--out A --out ./A` from A's own directory is ONE sink and is NOT refused — artifact identity, not string identity",
+        one.status === 0 && /wrote 1 effectful functions/.test(one.stderr),
+        `status=${one.status} ${one.stderr}`.slice(0, 220));
+  // CONTROL 2 — a SINGLE `--out` is completely unchanged.
+  const single = scan("--out", path.join(d, "C"));
+  check("⟨0.28⟩ repeated --out CONTROL: a single `--out` still writes its report and exits 0 — the refusal fires on the DUPLICATE, not on the flag",
+        single.status === 0 && fs.existsSync(path.join(d, "C.json")), `status=${single.status}`);
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

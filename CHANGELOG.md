@@ -8,6 +8,20 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.28⟩ a repeated `--out` is refused, with the fail-closed report at EVERY prefix named** (SPEC
+  §3.3.1, *"AND A REPEATED `--out` IS THE SAME RULE — filed as an open question by the rung that wrote
+  the sentence above, which is the tell"*). ⚠ Measured here 2026-08-12: `--out A --out B` took the LAST
+  at exit 0, leaving `A.json` **byte-identical to the previous good run** — a stale green whose reader
+  has no way to learn it lost, and a `gate --report A` over it answers from a scan that never ran. Now
+  every distinct prefix named is ARMED (its previous §2 reports rewritten to the ⟨0.21⟩ Row-1 no-claim
+  shape, §2.2 sidecars taken with them, the input exemption still asked per file) and the run exits 2;
+  the exit precedes the scan, so the hand-back never runs and the placeholders STAND. A `--gate-json`
+  file sink in the same argv holds its armed refusal, and the `--json` / `--gate-json -` streams carry
+  their documents naming this cause. Two spellings of one prefix are ONE sink (`--out A --out ./A` from
+  A's own directory) and are not refused; a single `--out` is unchanged. `allOutPrefixes` is one walk
+  with `preScan`'s value rules, `preScan` keeping its `.last` — two walks is how the repeated form and
+  the single form come to disagree about which tokens are prefixes at all.
+
 - **⟨0.28⟩ an advisory verb over a configured ZERO-RULE policy answers with the caveat document**
   (SPEC §2, *"AND AN ADVISORY VERB OVER A ZERO-RULE POLICY ANSWERS THE SAME WAY"* + *"THE LIST OF
   ADVISORY VERBS IS ILLUSTRATIVE, NOT CLOSED — `fix` takes this too"*). §6.2 makes a configured policy
