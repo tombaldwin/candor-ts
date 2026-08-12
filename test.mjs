@@ -9513,6 +9513,43 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.28⟩ THE PRE-PASS AGREES WITH THE PARSE LOOP ABOUT WHICH TOKENS CONSUME A VALUE ───────────────
+// `--policy --out X`: the loop refuses at `--policy` ("requires a value") and never parses another
+// token; the pre-pass skipped on, read `--out X` as a fresh flag, and ARMED X — on an argv the loop
+// never accepts, so SPEC §3.3.1 (1)'s precondition ("`--out` has been parsed and accepted") was false
+// and X's previous reports became permanent placeholders. The BYTES are the assertion: the run exits 2
+// either way, so only the report can tell the fixed engine from the broken one.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-prepass-"));
+  const src = path.join(d, "app.ts");
+  fs.writeFileSync(src, "export function f(): number { return 1 }\n");
+  const pfx = path.join(d, "X");
+  const run = (...a) => spawnSync("node", [path.join(HERE, "scan.mjs"), src, ...a], { encoding: "utf8" });
+  run("--out", pfx);
+  const good = fs.readFileSync(`${pfx}.json`, "utf8");
+
+  const r1 = run("--policy", "--out", pfx);
+  check("⟨0.28⟩ pre-pass: `--policy --out X` exits 2 with X's previous report BYTE-IDENTICAL — the loop refuses at `--policy`, so no `--out` was ever accepted and nothing may be armed",
+        r1.status === 2 && /--policy requires a value/.test(r1.stderr) && fs.readFileSync(`${pfx}.json`, "utf8") === good,
+        `status=${r1.status} armed=${/armed/.test(fs.readFileSync(`${pfx}.json`, "utf8"))}`);
+  // THE SIBLING ROUTE — the same disagreement through `--gate-json`'s missing value, because a rule
+  // stated over the instance and not the condition is how this family regresses.
+  const r2 = run("--gate-json", "--out", pfx);
+  check("⟨0.28⟩ pre-pass: `--gate-json --out X` (the sibling value-taking flag) leaves X untouched too — the rule is about value consumption, not about `--policy`",
+        r2.status === 2 && fs.readFileSync(`${pfx}.json`, "utf8") === good,
+        `status=${r2.status}`);
+  // THE CONTROLS: an `--out` the loop ACCEPTED before it died still arms (that is the ⟨0.28⟩ rung
+  // working), whether the death is an unknown flag after it or a value-starved flag after it.
+  const r3 = run("--out", pfx, "--zzz-not-a-flag");
+  check("⟨0.28⟩ pre-pass CONTROL: `--out X --zzz` still arms X — the loop accepted the pair before it died, which is exactly the staleness case the rung exists for",
+        r3.status === 2 && /armed/.test(fs.readFileSync(`${pfx}.json`, "utf8")), fs.readFileSync(`${pfx}.json`, "utf8").slice(0, 160));
+  run("--out", pfx);   // restore a good report
+  const r4 = run("--out", pfx, "--policy");
+  check("⟨0.28⟩ pre-pass CONTROL: `--out X --policy` (value-starved flag AFTER the accepted pair) arms X as well — acceptance is decided at the token the loop dies on, not by the run's overall fate",
+        r4.status === 2 && /armed/.test(fs.readFileSync(`${pfx}.json`, "utf8")), fs.readFileSync(`${pfx}.json`, "utf8").slice(0, 160));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── ⟨0.28⟩ SPEC §2 — THE DESCRIPTIVE VERBS CARRY THE ⟨0.21⟩ MANIFEST TOO ────────────────────────────
 // The re-disclosure MUST was written over the instance it was found in ("a verb whose VERDICT could
 // change") and ⟨0.28⟩ widens it to the condition that makes it true: ANY verb whose output could be read

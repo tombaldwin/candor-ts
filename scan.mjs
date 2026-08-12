@@ -152,18 +152,29 @@ const CONFIG_KEYS_IMPLEMENTED = new Set(["policy", "baseline", "deps", "unknown-
 //      as an unknown rule, and the gate ran over zero rules. A machine-readable all-clear produced by
 //      deleting the question.
 const preScan = (av) => {
-  let gate = null, policy = null, target = null, out = null;
+  let gate = null, policy = null, target = null, out = null, refused = false;
   for (let i = 0; i < av.length; i++) {
     const a = av[i], v = av[i + 1];
     if (a === "--gate-json" || a === "--policy" || a === "--out") {
-      if (v === undefined || (v !== "-" && v.startsWith("--"))) continue;
+      // ⟨0.28⟩ A MISSING/FLAG-SHAPED VALUE IS WHERE THE PARSE LOOP EXITS 2 — and this pre-pass used to
+      // disagree about what happens NEXT. The loop refuses `--policy --out X` at `--policy` and never
+      // parses another token; this pre-pass skipped on and read `--out X` as a fresh flag, so X was
+      // ARMED on an argv the loop never accepts — SPEC §3.3.1 (1)'s precondition ("`--out` has been
+      // parsed and accepted") was false, and X's previous reports became permanent placeholders.
+      // So report-set arming honours only an `--out` consumed BEFORE the first token the loop refuses
+      // at (`--out p --zzz` still arms p: the loop accepted that pair before it died). `gate`, `policy`
+      // and `target` keep collecting past the breakage, each for its own reason: the gate sink must be
+      // armed with the refusal whatever the argv order (⟨0.27⟩ (1)) and arming it writes a refusal, not
+      // a placeholder over a report set; policy/target only feed the input GUARDS, where over-collection
+      // can only protect a file more — and the run is exiting 2 regardless.
+      if (v === undefined || (v !== "-" && v.startsWith("--"))) { refused = true; continue; }
       // ⟨0.28⟩ THE LAST `--out` WINS, BECAUSE THAT IS WHAT THE PARSE LOOP HONOURS — every assignment here
       // overwrites, deliberately. candor-swift's arm of this rung caught the reference engine returning
       // the FIRST: measured on `--out p1 --out p2 --zzz-not-a-flag`, p1 was armed and p2 — the prefix the
       // run would actually have written — stayed STALE, so the rung did nothing for that argv while
       // neutralising a set nobody was going to replace. A pre-pass that disagrees with the loop it exists
       // to run ahead of arms the wrong thing.
-      if (a === "--gate-json") gate = v; else if (a === "--policy") policy = v; else out = v;
+      if (a === "--gate-json") gate = v; else if (a === "--policy") policy = v; else if (!refused) out = v;
       i++;
       continue;
     }
