@@ -9572,6 +9572,78 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.28⟩ THE SCAN TARGET EXPANDS TO THE FILES THE RUN WILL PARSE (SPEC §3.3.1) ────────────────────
+// The residual the exact-artifact ruling above deliberately left, and the ruling names THIS engine's
+// reproduction: `--gate-json src/main.ts` while scanning `tsconfig.json`. MEASURED here 2026-08-12
+// before the fix, and it is the worse of the two artifacts the spec prints:
+//
+//   candor-ts: 1 source file(s) failed to parse — NOT analyzed …
+//   candor-ts: wrote 0 effectful functions (1 analyzed, 1 files) to .candor/report.json      exit 0
+//   $ cat src/main.ts  →  { "spec": "0.27", "ok": false, … }
+//
+// The operator's source, unrecoverably replaced, reported as SUCCESS — the run destroyed the file and
+// then disclosed the parse failure it had itself caused. Arming precedes the file walk, so the check is
+// over what IS knowable then: the sink's EXTENSION against the engine's own parse set.
+//
+// EVERY ROW ASSERTS THE BYTES. An exit-code row alone passes on a build that destroys the file and then
+// exits 2 about the wreckage — which is exactly how candor-java's spelling of this defect presents.
+// The two CONTROLS are the point of the rule's shape: `.candor/verdict.json` is under the target and is
+// not source (a containment rule refuses it, and took 33 tests with it here once), and a `.ts` sink
+// OUTSIDE the target is not this rule at all.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-tgtexp-"));
+  fs.mkdirSync(path.join(d, "src"));
+  const src = path.join(d, "src", "main.ts");
+  fs.writeFileSync(src, "export function hello(): number { return 1 }\n");
+  fs.writeFileSync(path.join(d, "tsconfig.json"),
+    '{ "compilerOptions": { "target": "ES2020", "module": "ESNext" }, "include": ["src/**/*.ts"] }\n');
+  fs.writeFileSync(path.join(d, "candor.policy"), "deny Exec\n");
+  const before = fs.readFileSync(src, "utf8");
+  const run = (...a) => spawnSync("node", [path.join(HERE, "scan.mjs"), ...a], { encoding: "utf8", cwd: d });
+
+  const t = run("tsconfig.json", "--gate-json", "src/main.ts");
+  check("⟨0.28⟩ target expansion: a `.ts` sink under a TSCONFIG target leaves the source BYTE-IDENTICAL — the parsed set lives under the config's directory, not under the token",
+        fs.readFileSync(src, "utf8") === before, fs.readFileSync(src, "utf8").slice(0, 120));
+  check("⟨0.28⟩ target expansion: …refused at exit 2 saying the sink is source under the target, never exit 0 'wrote 0 effectful functions' over the file it just destroyed",
+        t.status === 2 && /lies UNDER the scan target/.test(t.stderr), `status=${t.status} ${t.stderr}`.slice(0, 260));
+
+  const dir = run(".", "--policy", "candor.policy", "--gate-json", "src/main.ts");
+  check("⟨0.28⟩ target expansion: the DIRECTORY-target spelling is the same rule — source byte-identical, exit 2 (a route is not covered by its sibling)",
+        dir.status === 2 && fs.readFileSync(src, "utf8") === before && /lies UNDER the scan target/.test(dir.stderr),
+        `status=${dir.status} ${dir.stderr}`.slice(0, 260));
+
+  // The DUPLICATE-sink route shares the predicate, so a second `--gate-json` cannot smuggle the
+  // duplicate-refusal document over source the single-sink route refuses to touch. The source path is
+  // exempt (nothing written); the innocent sibling sink still gets the refusal — the ⟨0.28⟩ scoping.
+  const innocent = path.join(d, "pre.json");
+  fs.writeFileSync(innocent, '{"ok":true}');
+  const dup = run(".", "--policy", "candor.policy", "--gate-json", "src/main.ts", "--gate-json", "pre.json");
+  check("⟨0.28⟩ target expansion: the DUPLICATE-sink route asks the same predicate — the source is exempt and byte-identical…",
+        dup.status === 2 && fs.readFileSync(src, "utf8") === before,
+        `status=${dup.status} ${fs.readFileSync(src, "utf8").slice(0, 120)}`);
+  check("⟨0.28⟩ target expansion: …and the INNOCENT sibling sink still gets the duplicate refusal, so it stops publishing its stale `ok: true`",
+        /"refused": true/.test(fs.readFileSync(innocent, "utf8")) && /given more than once/.test(fs.readFileSync(innocent, "utf8")),
+        fs.readFileSync(innocent, "utf8").slice(0, 200));
+
+  // CONTROL 1 — the recommended layout. `<target>/.candor/verdict.json` is under the target and is NOT
+  // source, so it must still gate for real. This is what separates the rule from the containment fix
+  // the ruling explicitly rejects.
+  fs.mkdirSync(path.join(d, ".candor"), { recursive: true });
+  const ok = run(".", "--policy", "candor.policy", "--gate-json", ".candor/verdict.json");
+  check("⟨0.28⟩ target expansion CONTROL: `<target>/.candor/verdict.json` is under the target and is not source — it still gates for real (exit 0, verdict written)",
+        ok.status === 0 && /"ok": true/.test(fs.readFileSync(path.join(d, ".candor", "verdict.json"), "utf8")),
+        `status=${ok.status} ${ok.stderr}`.slice(0, 240));
+
+  // CONTROL 2 — a parsed extension OUTSIDE the target is not this rule.
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "candor-tgtexp-out-"));
+  const away = path.join(outside, "v.ts");
+  const off = run("src", "--policy", "candor.policy", "--gate-json", away);
+  check("⟨0.28⟩ target expansion CONTROL: a `.ts` sink OUTSIDE the target is permitted — the predicate is containment AND extension, not extension alone",
+        off.status === 0 && /"ok": true/.test(fs.readFileSync(away, "utf8")), `status=${off.status} ${off.stderr}`.slice(0, 240));
+  fs.rmSync(outside, { recursive: true, force: true });
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── ⟨0.28⟩ THE GATE'S INPUT GUARD COVERS WHAT THE `--report` LOCATOR EXPANDS TO (SPEC §3.3.1 (3)) ───
 // "AND AN INPUT LOCATOR NAMES A SET — COMPARE THE EXPANSION, NEVER THE TOKEN." The guard compared the
 // sink against the raw locator while `loadGateReport` reads the locator's expansion. MEASURED on this

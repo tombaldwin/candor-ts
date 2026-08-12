@@ -233,6 +233,72 @@ const sameArtifact = (a, b) => {
   return x !== null && x === resolve(b);
 };
 
+// ⟨0.28⟩ SPEC §3.3.1 — **A SINK THAT LIES UNDER THE SCAN TARGET AND BEARS AN EXTENSION THIS ENGINE
+// PARSES IS REFUSED.** This is the residual the exact-artifact ruling deliberately left: registering
+// the target in `runInputs` catches `--gate-json <the target>` and cannot catch `--gate-json
+// src/main.ts` while scanning `tsconfig.json` or `.`, because the file set the run will parse is not
+// known at the moment arming happens (arming precedes the file walk, and deferring it would uncover
+// the argv-error exits the arming rule exists for).
+//
+// MEASURED HERE BEFORE THIS FIX, and this engine had the worst artifact of the four:
+//
+//   $ node scan.mjs tsconfig.json --gate-json src/main.ts
+//     candor-ts: 1 source file(s) failed to parse — NOT analyzed …
+//     candor-ts: wrote 0 effectful functions (1 analyzed, 1 files) to .candor/report.json   exit 0
+//   $ cat src/main.ts
+//     { "spec": "0.27", "ok": false, … }          ← the operator's SOURCE, unrecoverably replaced
+//
+// Unrecoverable loss of the operator's own code, reported as SUCCESS — the run destroyed the file,
+// then dutifully disclosed the parse failure it had itself caused.
+//
+// NOT CONTAINMENT IN GENERAL, and that control is the whole difference between this and the fix the
+// ruling explicitly rejects. `<dir>/.candor/report.json` is under the target and is not a source
+// file, so the recommended layout stays permitted; a general containment rule was tried in this repo
+// for the dep-directory case and "took 33 tests with it" (see `runInputs`). Extension is the whole of
+// the predicate, and an engine knows its own source extensions before it knows its file list — which
+// is exactly what makes this checkable at the instant arming happens.
+//
+// THE JS FAMILY IS IN THE SET UNCONDITIONALLY, not gated on `--allow-js`. `--allow-js` is only one of
+// the two ways a `.js` reaches the parse set: a tsconfig carrying `allowJs` puts them in
+// `parsed.fileNames`, and the tsconfig is not read at parse time either. Erring here costs a sink
+// spelled `verdict.mjs`; erring the other way costs the operator's source.
+// "UNDER THE TARGET" IS UNDER THE TARGET'S ROOT DIR, AND THAT IS NOT THE SAME STRING. The measured
+// reproduction is `--gate-json src/main.ts` while scanning **`tsconfig.json`** — a FILE target, whose
+// parsed set is everything the config names and therefore lives under its DIRECTORY, not under the
+// token. A first version of this predicate compared against the target path itself and the defect
+// reproduced unchanged (measured, same fixture, source still destroyed at exit 0). So the containment
+// root is computed by the SAME three-way test the run below roots itself with (search `usedTsconfig`):
+// a tsconfig-shaped file roots at its directory, any other single file is exactly itself (and is
+// already covered by the exact-artifact registration in `runInputs`), a directory is itself.
+//
+// Over-approximate on the tsconfig arm, deliberately: the config's `include` may not name every `.ts`
+// under that directory, so a sink spelled `<dir>/excluded/verdict.ts` is refused though the run would
+// not have parsed it. The cost is a verdict path that has to be renamed; the cost of the other
+// direction is the operator's source.
+const PARSED_SOURCE_EXT = /\.[mc]?[tj]sx?$/i;
+const targetContainmentRoot = (target) => {
+  let t;
+  try { t = fs.realpathSync(target); } catch { return null; }   // a missing target refuses on its own terms
+  try {
+    if (fs.statSync(t).isFile()) return /tsconfig.*\.json$/i.test(path.basename(t)) ? path.dirname(t) : t;
+  } catch { return null; }
+  return t;
+};
+const sinkIsParsedSourceUnderTarget = (sink, target) => {
+  if (!sink || sink === "-" || !target) return false;
+  if (!PARSED_SOURCE_EXT.test(path.basename(sink))) return false;
+  const t = targetContainmentRoot(target);
+  if (t === null) return false;
+  // The sink may not exist yet — resolve its parent and re-append the name, the shape `sameArtifact` uses.
+  let s;
+  try { s = fs.realpathSync(sink); }
+  catch {
+    try { s = path.join(fs.realpathSync(path.dirname(path.resolve(sink))), path.basename(sink)); }
+    catch { return false; }
+  }
+  return s === t || s.startsWith(t.endsWith(path.sep) ? t : t + path.sep);
+};
+
 const runInputs = (target, policyFlag) => {
   const out = [];
   // ⟨0.28⟩ THE SCAN TARGET ITSELF — SPEC §3.3.1 (3) lists "the target's own source tree" among the
@@ -627,6 +693,17 @@ const disarmUnwrittenOutReports = () => {
       process.exit(2);
     }
   }
+  // ⟨0.28⟩ …AND THE TARGET EXPANDS TO THE FILES THE RUN WILL PARSE (see `sinkIsParsedSourceUnderTarget`).
+  if (gate && singleSink && sinkIsParsedSourceUnderTarget(gate, preTarget)) {
+    console.error(`candor-ts: --gate-json ${gate} lies UNDER the scan target ${preTarget} and bears an `
+      + `extension this engine parses — refusing (exit 2). Nothing was written there. The verdict is `
+      + `armed at parse time, BEFORE the file walk, so this would replace a source file this run is `
+      + `about to read and then scan the wreckage. A non-source sink under the target `
+      + `(${path.join(targetContainmentRoot(preTarget) ?? ".", ".candor", "verdict.json")}, say) is the `
+      + `recommended layout and stays permitted.`);
+    refuseEarlyToStream(`--gate-json ${gate} is a source file under the scan target ${preTarget}`);
+    process.exit(2);
+  }
   // `.candor/config` is never a verdict sink, wherever it is. The per-input checks above can only name
   // inputs the run was TOLD about; the config is DISCOVERED by walking up from the target, so by the
   // time its path is known the arming has already destroyed it. A check on the SHAPE needs no
@@ -684,6 +761,15 @@ const disarmUnwrittenOutReports = () => {
       }
       if (sameArtifact(g, process.env.CANDOR_CONFIG)) {
         console.error(`candor-ts: --gate-json ${g} names the SAME FILE as CANDOR_CONFIG — refusing (exit 2).`);
+        bad = true;
+      }
+      // ⟨0.28⟩ THE SAME PREDICATE ON THE DUPLICATE ROUTE. Asked here as well as above so a SECOND
+      // `--gate-json` cannot smuggle the duplicate-refusal document over source the single-sink route
+      // refuses to touch — this rung has paid six times for one rule with two spellings. The path is
+      // exempt (nothing written there); every innocent sibling sink still gets the refusal.
+      if (sinkIsParsedSourceUnderTarget(g, preTarget)) {
+        console.error(`candor-ts: --gate-json ${g} lies UNDER the scan target ${preTarget} and bears an `
+          + `extension this engine parses — refusing (exit 2). Nothing was written there.`);
         bad = true;
       }
       if (bad) offending.add(g);

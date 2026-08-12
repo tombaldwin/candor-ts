@@ -8,6 +8,24 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.28⟩ the scan target expands to the files the run will PARSE** (SPEC §3.3.1, *"AND THE SCAN
+  TARGET EXPANDS TO THE FILES THE RUN WILL PARSE"* — the residual the exact-artifact ruling
+  deliberately left, and the clause names this engine's reproduction). ⚠ Measured live here
+  2026-08-12: `candor-ts tsconfig.json --gate-json src/main.ts` armed the refusal verdict OVER the
+  operator's source file, then reported the parse failure it had itself caused, and **exited 0** —
+  unrecoverable loss of the operator's own code, published as success. Arming happens at parse time,
+  before the file walk, so the set of files the run will read is not yet knowable; the check is the
+  narrow one stated over what IS: **a sink that lies under the target and bears an extension this
+  engine parses (`.ts/.tsx/.mts/.cts` and the `.js` family, which a tsconfig `allowJs` puts in the
+  parse set) is refused at exit 2, having written nothing.** Never containment —
+  `<target>/.candor/verdict.json` is under the target and is not source, so the recommended layout
+  keeps gating for real, which is the control that separates this from the fix the ruling rejects
+  (a containment rule was tried here once and "took 33 tests with it"). "Under the target" is under
+  the target's ROOT DIR, computed by the same three-way test the run roots itself with — a tsconfig
+  FILE target roots at its directory, which is exactly the measured spelling. Asked on the
+  duplicate-`--gate-json` route as well, so a second sink cannot smuggle the refusal document over
+  source the single-sink route refuses to touch.
+
 - **⟨0.28⟩ a corrupt sibling report is disclosed as UNREADABLE, not `judgedNothing`** (SPEC §2's
   corruption-per-key-role ruling; the ⟨0.28⟩ caveat key set). Measured via candor-spec's key-shape
   harvest over an intact report with an unparseable `.dep` sibling under the same locator: rust and
