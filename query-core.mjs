@@ -57,6 +57,43 @@ export function hasReport(p) {
 // narrower one would answer about a report the gate never gated.
 const reportFilesAt = (prefix) => (fs.existsSync(`${prefix}.json`) ? [`${prefix}.json`] : siblings(prefix, isReport));
 
+// ⟨0.28⟩ SPEC §3.3.1 (3) — the FILES a gate `--report` locator names, for the verdict-sink guard:
+// `reportFilesAt`'s expansion (the SAME enumeration `loadGateReport` below reads — kept adjacent so the
+// guard and the loader cannot drift), plus each report's §2.2 sidecars. Exists because the guard
+// compared the sink against the raw locator TOKEN while the loader reads the token's EXPANSION.
+// MEASURED on this engine 2026-08-12:
+//
+//   gate --report r --policy P --gate-json r.json
+//       → armQueryGateJson wrote the refusal placeholder OVER the operator's report, the load then
+//         failed on the wreckage ("has no functions array"), and the exit-2 refusal document was
+//         written over it AGAIN. The no-`--report` discovery spelling (sink = the discovered
+//         `.candor/report.json`) destroyed the discovered report identically.
+//
+// THE SIDECARS RIDE ALONG (same clause: a report locator names the PAIR). The gate opens no sidecar —
+// that MUST NOT is `loadGateReport`'s — but a sink on the pair's other half is WORSE: the report loads
+// fine, the gate runs, and a REAL verdict lands on the callgraph at a success exit; `callers`/`tour`
+// then read a verdict document where the graph belongs. The segment list is the `isReport` denylist's
+// pair-carrying members: `gate` is excluded because `<stem>.gate.json` is the verdict sink's own
+// beside-the-report layout — the exact spelling `--gate-json` exists for, pinned by the control test —
+// and `encountered-*` because it is engine-local scan bookkeeping no query reads. Existing files only:
+// the guard protects data, and a sidecar not on disk has none to lose.
+const PAIRED_SIDECAR_SEGMENTS = ["calibrated", "callgraph", "hierarchy", "layerreach", "locs"];
+export function gateReportInputFiles(prefix) {
+  if (!prefix) return [];
+  const out = [];
+  for (const r of reportFilesAt(prefix)) {
+    if (r.endsWith(".json")) {
+      const stem = r.slice(0, -".json".length);
+      for (const seg of PAIRED_SIDECAR_SEGMENTS) {
+        const side = `${stem}.${seg}.json`;
+        if (fs.existsSync(side)) out.push(side);
+      }
+    }
+    out.push(r);
+  }
+  return out;
+}
+
 // Defend the queries against a partial/old-engine/hand-edited report: the §2 required fields are
 // defaulted, and a WRONG-TYPE field is coerced — a non-array `inferred` (e.g. the string "Net") must
 // NOT survive, or `new Set("Net")` iterates characters into {N,e,t} (a fabricated effect set). Array

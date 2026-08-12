@@ -8,6 +8,18 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.28⟩ `gate --report`: the input guard covers what the locator EXPANDS to** (SPEC §3.3.1 (3),
+  *"AND AN INPUT LOCATOR NAMES A SET — COMPARE THE EXPANSION, NEVER THE TOKEN"*). The guard compared
+  `--gate-json` against the raw `--report` token while `loadGateReport` reads the token's expansion, so
+  `gate --report r --policy P --gate-json r.json` destroyed the operator's report at exit 2 — measured,
+  with the diagnostic blaming the report ("has no functions array") for the corruption the run
+  inflicted — and the no-`--report` discovery spelling destroyed the discovered `.candor/report.json`
+  identically. The §2.2 sidecars are covered too: `--gate-json <the callgraph>` wrote a REAL verdict
+  over the pair's other half at exit 1, a success. `gateReportInputFiles` (query-core.mjs) enumerates
+  the exact files by the loader's own `reportFilesAt` rule, kept adjacent so guard and loader cannot
+  drift; `<stem>.gate.json` stays a permitted sink (the beside-the-report verdict layout), pinned by
+  the control test.
+
 - **⟨0.28⟩ the DESCRIPTIVE verbs carry the ⟨0.21⟩ completeness manifest too** (SPEC §2). The
   re-disclosure MUST was written over the instance it was found in — "a report-consuming verb whose
   VERDICT could change" — and ⟨0.28⟩ corrects it to the condition that makes it true: the obligation

@@ -9572,6 +9572,67 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.28⟩ THE GATE'S INPUT GUARD COVERS WHAT THE `--report` LOCATOR EXPANDS TO (SPEC §3.3.1 (3)) ───
+// "AND AN INPUT LOCATOR NAMES A SET — COMPARE THE EXPANSION, NEVER THE TOKEN." The guard compared the
+// sink against the raw locator while `loadGateReport` reads the locator's expansion. MEASURED on this
+// engine 2026-08-12, each at the BYTES because each also "failed" with a plausible exit code:
+//   gate --report r --policy P --gate-json r.json      → exit 2, the operator's report replaced by the
+//       armed refusal — and the diagnostic blamed the report ("has no functions array") for the
+//       corruption this run inflicted;
+//   the discovery spelling (no --report, sink = the discovered .candor/report.json) — identical;
+//   gate … --gate-json r.callgraph.json                → the §2.2 sidecar half, destroyed at a SUCCESS
+//       exit: the report loads fine, the gate runs, and a REAL verdict lands where the graph belongs.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-gatelocator-"));
+  fs.writeFileSync(path.join(d, "app.ts"),
+    'import * as nfs from "node:fs";\nexport function save(): void { nfs.writeFileSync("x", "1"); }\n');
+  fs.writeFileSync(path.join(d, "deny-fs.policy"), "deny Fs\n");
+  const pfx = path.join(d, "r");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "app.ts"), "--out", pfx], { encoding: "utf8" });
+  const gate = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), "gate",
+    "--policy", path.join(d, "deny-fs.policy"), ...a], { encoding: "utf8", cwd: d });
+
+  const repBefore = fs.readFileSync(`${pfx}.json`, "utf8");
+  const g1 = gate("--report", pfx, "--gate-json", `${pfx}.json`);
+  check("⟨0.28⟩ gate locator: `--gate-json <one of the locator's expanded reports>` leaves the report BYTE-IDENTICAL — the guard compares the expansion, never the token",
+        fs.readFileSync(`${pfx}.json`, "utf8") === repBefore, fs.readFileSync(`${pfx}.json`, "utf8").slice(0, 120));
+  check("⟨0.28⟩ gate locator: …refused at exit 2 naming the collision, never a downstream 'failed to load' over the wreckage",
+        g1.status === 2 && /a file this gate reads/.test(g1.stderr), `status=${g1.status} ${g1.stderr}`.slice(0, 240));
+
+  // The DISCOVERY spelling: no `--report` anywhere in argv — the reports this gate is about to read
+  // from the discovered `.candor/` are inputs just the same.
+  spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "app.ts")], { encoding: "utf8", cwd: d });
+  const disc = path.join(d, ".candor", "report.json");
+  const discBefore = fs.readFileSync(disc, "utf8");
+  const g2 = gate("--gate-json", path.join(".candor", "report.json"));
+  check("⟨0.28⟩ gate locator: the DISCOVERED report is an input too — byte-identical after `gate --gate-json .candor/report.json` with no --report at all",
+        fs.readFileSync(disc, "utf8") === discBefore, fs.readFileSync(disc, "utf8").slice(0, 120));
+  check("⟨0.28⟩ gate locator: …and the discovery spelling is refused at exit 2",
+        g2.status === 2, `status=${g2.status} ${g2.stderr}`.slice(0, 240));
+
+  // The SIDECAR half of the pair — the worse artifact: before the fix this run SUCCEEDED (exit 1, a
+  // real verdict) while replacing the callgraph, so every later `callers`/`tour` read a verdict
+  // document where the graph belongs.
+  const cgBefore = fs.readFileSync(`${pfx}.callgraph.json`, "utf8");
+  const g3 = gate("--report", pfx, "--gate-json", `${pfx}.callgraph.json`);
+  check("⟨0.28⟩ gate locator: the report's §2.2 callgraph sidecar is part of what the locator names — byte-identical, refused at exit 2 (before the fix: a REAL verdict here at exit 1)",
+        g3.status === 2 && fs.readFileSync(`${pfx}.callgraph.json`, "utf8") === cgBefore,
+        `status=${g3.status} ${fs.readFileSync(`${pfx}.callgraph.json`, "utf8").slice(0, 120)}`);
+
+  // THE CONTROL, load-bearing: `<stem>.gate.json` is a sibling matching `<stem>.*.json` — the exact
+  // file a fix that guarded "everything sharing the stem" would refuse — and it is the recommended
+  // beside-the-report verdict layout (`isReport` excludes it for the same reason). It must still gate,
+  // with a REAL verdict, and leave the reports it read untouched.
+  const g4 = gate("--report", pfx, "--gate-json", `${pfx}.gate.json`);
+  let g4doc = null; try { g4doc = JSON.parse(fs.readFileSync(`${pfx}.gate.json`, "utf8")); } catch { /* null fails below */ }
+  check("⟨0.28⟩ gate locator CONTROL: `--gate-json <stem>.gate.json` beside the reports still gates — a violation VERDICT at exit 1, never a refusal (over-refusal here breaks the recommended layout)",
+        g4.status === 1 && !!g4doc && g4doc.refused === undefined && Array.isArray(g4doc.violations) && g4doc.violations.length > 0,
+        `status=${g4.status} ${JSON.stringify(g4doc)?.slice(0, 160)}`);
+  check("⟨0.28⟩ gate locator CONTROL: …and the reports the control run read are byte-identical after it",
+        fs.readFileSync(`${pfx}.json`, "utf8") === repBefore, "the control run changed the report");
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── ⟨0.28⟩ A SYMLINKED SIDECAR IS LEFT ALONE, AND SAID SO (the rust 8094169 ruling) ─────────────────
 // This engine resolved the link and deleted its TARGET — a file outside the prefix, the canonical copy
 // in a shared-artifact CI layout, unrecoverable because a failing run never restores. And even on

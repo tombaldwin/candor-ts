@@ -43,7 +43,8 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          where as coreWhere, map as coreMap, whatif as coreWhatif,
          fix as coreFix, fixGate as coreFixGate, unverified as coreUnverified,
          matches as coreMatches, gainsCoverage, gainsCompletenessFields, parseClassFilter, ClassFilterError,
-         loadReport, loadCallgraph, reportCallsGraph, loadGateReport, reportVersion, reportPackage,
+         loadReport, loadCallgraph, reportCallsGraph, loadGateReport, gateReportInputFiles,
+         reportVersion, reportPackage,
          advisoryAnswer,
          reportCompleteness, mustHedge, completenessFields, absorbCompleteness } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
@@ -731,6 +732,13 @@ function resolveGateReportVerb(rawArgs) {
       // destroys the very report the gate was asked to judge, and the diagnostic then blames the report
       // rather than the collision.
       refuseGateJsonOverInput(gate, report, "--report");
+      // ⟨0.28⟩ …AND THE FILES THE LOCATOR EXPANDS TO, because the raw flag value above is not what the
+      // gate READS: a locator is a prefix/dir (or a discovery, when absent), and `loadGateReport` reads
+      // its expansion — so a sink naming one of the expanded reports, or one of their §2.2 sidecars,
+      // named an input the token comparison could not see. Enumerated by the loader-adjacent
+      // `gateReportInputFiles` (query-core.mjs); the measurement lives there.
+      const expandedInputs = gateReportInputFiles(report ? locatorToPrefix(report) : discoverReportPrefix());
+      for (const f of expandedInputs) refuseGateJsonOverInput(gate, f, "a file this gate reads —");
       refuseGateJsonOverInput(gate, process.env.CANDOR_POLICY, "CANDOR_POLICY");
       // THE CONFIG-DECLARED POLICY. This verb's policy ladder falls back to the \`policy\` key of the
       // config discovered from the CWD, and the guard checked only the flags — so the checked-in form,
@@ -753,6 +761,9 @@ function resolveGateReportVerb(rawArgs) {
       for (const g of namedSinks) {
         refuseGateJsonOverInput(g, policy, "--policy");
         refuseGateJsonOverInput(g, report, "--report");
+        // ⟨0.28⟩ the expanded report set (and its sidecars), exactly as the single-sink path asks it
+        // above — a duplicate must not smuggle an expanded input past the guard.
+        for (const f of expandedInputs) refuseGateJsonOverInput(g, f, "a file this gate reads —");
         refuseGateJsonOverInput(g, process.env.CANDOR_POLICY, "CANDOR_POLICY");
         refuseGateJsonOverInput(g, process.env.CANDOR_CONFIG, "CANDOR_CONFIG");
         for (const [p2, label] of configDeclaredInputs()) refuseGateJsonOverInput(g, p2, label);
