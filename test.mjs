@@ -10364,6 +10364,12 @@ export function all(db: DatabaseSync, o: any) {
   fs.writeFileSync(path.join(d, "policy"), "deny Fs\n");
   const q = (argv, file, ...flags) => spawnSync("node", [path.join(HERE, "query.mjs"), ...argv,
     "--report", file, "--json", ...flags], { encoding: "utf8" });
+  // THE HUMAN CHANNEL NEEDS ITS OWN HELPER, and the first version of these rows did not have one: `q`
+  // always appends `--json`, and `wantJsonOut` keys on the flag being PRESENT, so a trailing `--text`
+  // was inert and the "human note" row was asserting about the JSON document. It passed the assertion it
+  // was given and measured the wrong channel — caught by the suite, not by the hand-run that preceded it.
+  const qt = (argv, file, ...flags) => spawnSync("node", [path.join(HERE, "query.mjs"), ...argv,
+    "--report", file, "--text", ...flags], { encoding: "utf8" });
   const doc = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
 
   const w3 = doc(q(["where", "Fs"], row3));
@@ -10371,7 +10377,7 @@ export function all(db: DatabaseSync, o: any) {
         !!w3 && w3.incomplete === true && Array.isArray(w3.noManifest)
           && w3.noManifest.length === 1 && w3.noManifest[0] === row3 && !("judgedNothing" in w3),
         `${JSON.stringify(w3)}`.slice(0, 260));
-  const h3 = q(["where", "Fs"], row3, "--text");
+  const h3 = qt(["where", "Fs"], row3);
   check("⟨0.28⟩ noManifest: …and the HUMAN note stops asserting `analyzed.count: 0` about it — the repair it points at is a producer that emits a manifest, not a scan that reaches a conclusion",
         /NO `analyzed` manifest/.test(h3.stdout) && !/JUDGED NOTHING/.test(h3.stdout)
           && /⚠ INCOMPLETE/.test(h3.stdout),

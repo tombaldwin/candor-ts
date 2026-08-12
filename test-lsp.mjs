@@ -889,6 +889,26 @@ export function handler(): void { mid(); }
   // CONTROL: the main fixture W has a REAL policy, and every LSP row above it in this file still passes —
   // the caveat fires on the CONDITION (zero rules), not on the presence of a policy. Asserted here too so
   // the control travels with the rows it controls.
+  // ⟨0.28⟩ SPEC §6.2's OTHER fraction on this surface: the zero-rule warning above fires only at ZERO
+  // survivors, so a policy where three of four lines were dropped produced the surviving rule's squiggles
+  // and nothing else — and in an editor that reads as the whole gate, because squiggles ARE this
+  // surface's entire vocabulary. The CLI routes carry `ignored` on the verdict document; here there is no
+  // document, so the log channel carries it, with the line numbers the operator has to go to.
+  const P3 = mkz("deny Net\nthis line is not a rule\nallow\nforbid nonsense here\n");
+  const P3DOC = pathToFileURL(path.join(P3, "src", "app.ts")).href;
+  const { inbound: pr } = await lspSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(P3).href } },
+    { jsonrpc: "2.0", method: "initialized", params: {} },
+    { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: P3DOC, languageId: "typescript", version: 1, text: "" } } },
+  ], 3);
+  const pLogs = pr.filter((r) => r.method === "window/logMessage").map((r) => r.params?.message ?? "").join("\n");
+  const pDiag = pr.find((r) => r.method === "textDocument/publishDiagnostics");
+  ok("⟨0.28⟩ ignored (LSP): a policy whose parse DROPPED 3 of its 4 lines is disclosed on the log channel, with the line numbers — the gate you are seeing is smaller than the gate that was written",
+     /3 line\(s\) of the configured policy were DROPPED/.test(pLogs) && /line 2: this line is not a rule/.test(pLogs)
+       && /line 4: forbid nonsense here/.test(pLogs), pLogs.slice(0, 300));
+  ok("⟨0.28⟩ ignored (LSP) CONTROL: …and the SURVIVING rule still gates — the leniency is disclosed, not withdrawn (a squiggle for the `deny Net` the file really violates)",
+     pDiag?.params?.diagnostics?.some((x) => x.code === "AS-EFF-006"), JSON.stringify(pDiag?.params).slice(0, 220));
+
   const C = mkz("deny Net\ndeny Db app\n");
   const CDOC = pathToFileURL(path.join(C, "src", "app.ts")).href;
   const { inbound: cr } = await lspSession([
@@ -901,7 +921,7 @@ export function handler(): void { mid(); }
   ok("⟨0.28⟩ zero-rule (LSP) CONTROL: with a REAL policy `candor.whatif` still delivers its verdict and no caveat — unchanged from before the rung",
      /would fire/.test(cMsgs) && !/NO RULES/.test(cMsgs) && "ok" in (cr.find((r) => r.id === 10)?.result ?? {}),
      cMsgs.slice(0, 240));
-  for (const dir of [Z, C]) fs.rmSync(dir, { recursive: true, force: true });
+  for (const dir of [Z, P3, C]) fs.rmSync(dir, { recursive: true, force: true });
 }
 
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);

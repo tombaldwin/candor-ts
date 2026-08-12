@@ -404,6 +404,13 @@ const TOOLS = {
       // this surface, and the `caveat` prose beside the flag carries the "why". The array spelling
       // governs everywhere the four engines can be diffed; this flag predates it and its consumers key
       // on `=== true`.
+      // ⟨0.28⟩ SPEC §6.2 `ignored` — THE LINES THE PARSE DROPPED, on the surface where their absence is
+      // worst. MEASURED here 2026-08-12 over a policy whose 3 of 4 lines were dropped: this tool returned
+      // `{"ok":true,"violations":[]}` while the per-line warnings went to the SERVER's stderr, a channel
+      // the calling agent never reads — so the one consumer that cannot ask a follow-up question was
+      // handed a green verdict from a gate three-quarters of which was never asked. Same shape and same
+      // builder as both CLI routes; omitted when nothing was dropped, and `ok` does not consult it.
+      const ignored = pol.ignored?.length ? { ignored: pol.ignored } : {};
       const judged = g.judgedNothing ? { judgedNothing: true,
         caveat: "⟨0.24⟩ this report judged NOTHING (`analyzed.count` is 0, absent with no entries, or unreadable) — "
               + "a green verdict here certifies nothing: absence from `functions` licenses no purity claim about any "
@@ -417,12 +424,12 @@ const TOOLS = {
       // `unevaluated` — WHICH rules went unenforced and why — which is exactly what an agent needs to fix it.
       // The document is still fail-closed to the naivest possible reader (`ok` is false), and it is the same
       // shape the agent would get from `--gate-json`, so one consumer parses both routes.
-      if (v.length) return { ok: false, violations: v, ...(unevaluated.length ? { unevaluated } : {}), ...inc, ...judged };
+      if (v.length) return { ok: false, violations: v, ...(unevaluated.length ? { unevaluated } : {}), ...ignored, ...inc, ...judged };
       if (unevaluated.length)
         return { ok: false, refused: true,
                  reason: `${unevaluated.length} policy rule(s) could not be evaluated against this report`,
                  unevaluated, ...inc, ...judged };
-      return { ok: !incomplete, violations: v, ...inc, ...judged };
+      return { ok: !incomplete, violations: v, ...ignored, ...inc, ...judged };
     },
   },
   candor_unverified: {

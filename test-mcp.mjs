@@ -1033,5 +1033,41 @@ export function mid(): void { leaf(); }
   fs.rmSync(A, { recursive: true, force: true });
 }
 
+// ── ⟨0.28⟩ SPEC §6.2 `ignored` ON THE AGENT-FACING GATE — the route the CLI fixes never reached ─────
+// The CLI's two gate routes carry the dropped lines on the verdict document; this tool's verdict did
+// not. MEASURED here 2026-08-12 over a policy with 3 dropped lines and 1 survivor:
+//
+//   candor_gate → {"ok":true,"violations":[]}
+//
+// …with the per-line warnings on the SERVER's stderr, a channel the calling agent never reads. So the
+// one consumer that cannot ask a follow-up question was handed a green verdict from a gate
+// three-quarters of which was never asked — §6.2's "90%-gateless green", on the surface where it is
+// least recoverable. Same shape and same builder as both CLI routes.
+{
+  const G = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-ignored-"));
+  fs.writeFileSync(`${G}/app.ts`, `import * as nfs from "node:fs";
+export function save(): void { nfs.writeFileSync("x", "1"); }
+`);
+  execFileSync("node", [`${HERE}/scan.mjs`, `${G}/app.ts`, `${G}/r`], { stdio: "ignore" });
+  fs.writeFileSync(`${G}/drop.policy`, "deny Net\nthis line is not a rule\nallow\nforbid nonsense here\n");
+  fs.writeFileSync(`${G}/clean.policy`, "deny Fs\n");
+  const gate = async (pol) => {
+    const rs = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "candor_gate", arguments: { policy: `${G}/${pol}.policy`, report: `${G}/r` } } }]);
+    return JSON.parse(rs[0].result.content[0].text);
+  };
+  const gd = await gate("drop");
+  ok("⟨0.28⟩ ignored (MCP): `candor_gate`'s verdict carries the lines the parse DROPPED — before this the agent got `{ok:true,violations:[]}` and the warnings went to the server's stderr, which it never reads",
+     Array.isArray(gd.ignored) && gd.ignored.length === 3 && gd.ignored[0].line === 2
+       && gd.ignored[0].text === "this line is not a rule" && /DROPPED/.test(gd.ignored[0].reason),
+     JSON.stringify(gd).slice(0, 300));
+  ok("⟨0.28⟩ ignored (MCP): …and `ok` does not consult it — the line-level leniency is unchanged, only disclosed",
+     gd.ok === true, JSON.stringify(gd).slice(0, 200));
+  const gc = await gate("clean");
+  ok("⟨0.28⟩ ignored (MCP) CONTROL: a clean policy's verdict carries NO `ignored` key — omitted when nothing was dropped, so the pinned tool shape is unchanged",
+     !("ignored" in gc) && gc.ok === false && gc.violations.length === 1, JSON.stringify(gc).slice(0, 240));
+  fs.rmSync(G, { recursive: true, force: true });
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -363,6 +363,16 @@ function diagnosticsFor(docPath) {
   // it is least visible, since the live gate's entire vocabulary IS the absence or presence of squiggles.
   if (policyAskedNothing(dpol))
     zeroRulePolicyWarn("No gate diagnostics can come from it.");
+  // ⟨0.28⟩ SPEC §6.2 — …AND THE LINES THE PARSE DROPPED, which is the same clause one fraction down: the
+  // zero-rule warning above fires only at ZERO survivors, so a policy where three of four lines were
+  // dropped produced the surviving rule's squiggles and nothing else. In an editor that reads as the
+  // whole gate, because squiggles ARE this surface's entire vocabulary. The CLI routes carry `ignored`
+  // on the verdict document; here there is no document, so the log channel carries it — once, with the
+  // line numbers, so the operator can go to them.
+  else if (dpol.ignored?.length)
+    warnOnce(`candor-lsp: ${dpol.ignored.length} line(s) of the configured policy were DROPPED by the `
+      + `parse, so the gate you are seeing is SMALLER than the gate that was written (SPEC §6.2 ⟨0.28⟩):\n`
+      + dpol.ignored.map((g) => `    line ${g.line}: ${g.text}`).join("\n"));
   // ⟨0.24⟩ THE ANSWERABILITY WITHHOLD, which this surface ran WITHOUT — `evaluatePolicy` was called with no
   // `withhold` predicate and the DEFAULT netClass mode, so both directions of the §3.1 harm were live in the
   // editor. Measured against the CLI on one report and one policy: `deny Unknown[reflect]` drew NO squiggle

@@ -24,7 +24,11 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   policy error (a typo'd effect token) still refuses at exit 2 with `unevaluated` and no `ignored` — a
   refused run has no verdict for a dropped line to have shrunk. Built inside `parsePolicy`'s error
   recorder rather than as a second pass, and kept off `errors` itself so `parsepolicy`'s pinned witness
-  shape is untouched.
+  shape is untouched. **Four routes**: both CLI gates, the MCP `candor_gate` tool — measured returning
+  `{"ok":true,"violations":[]}` to an agent over a policy 3 of whose 4 lines were dropped, with the
+  warnings on the *server's* stderr, a channel the agent never reads — and the LSP's live gate, where
+  there is no document so the log channel carries the dropped lines with their line numbers (squiggles
+  are that surface's entire vocabulary, so their absence reads as the whole gate).
 
 - **⟨0.28⟩ a repeated `--out` is refused, with the fail-closed report at EVERY prefix named** (SPEC
   §3.3.1, *"AND A REPEATED `--out` IS THE SAME RULE — filed as an open question by the rung that wrote
