@@ -462,15 +462,26 @@ function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknow
   const positionals = [];
   let reportLocator = null, policyFile = null, wantStrict = false, wantIncludeUnknown = false;
   let sawClass = false;   // ⟨0.24⟩ `--class` takes ONE list and is NOT repeatable (SPEC §6.2)
+  // SPEC §3.2 ⟨0.28⟩ (every value-taking flag below): "given no value" MEANS the next token is
+  // flag-shaped, or the clause is unimplementable — consuming the token as the value made this very
+  // diagnostic unreachable and silently reinterpreted a flag. Measured on this file: `where Fs
+  // --report --json` diagnosed the wrong cause ("no report files at prefix '--json'"), and on a
+  // NON-policy verb `--policy --json` consumed-and-DISCARDED the next flag at exit 0 — a silently
+  // different command than the one on screen, the §6.2 unknown-flag reinterpretation one position
+  // over. A bare `-` stays a value and fails loud downstream (an unreadable file / unknown class);
+  // `./--weird` spells a file genuinely named like a flag.
+  const flagShaped = (v) => v !== undefined && v !== "-" && v.startsWith("-") && v.length > 1;
   for (let i = 0; i < rawArgs.length; i++) {
     const a = rawArgs[i];
     if (a === "--report") {
       // A `--report` with no following value is a LOUD usage error (exit 2), never a silent fall-back to
       // discovery and never an uncaught `locatorToPrefix(undefined)` TypeError (`where Fs --report`).
+      if (flagShaped(rawArgs[i + 1])) { console.error(`candor-ts: --report was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a locator (a path really named that is spelled ./${rawArgs[i + 1]})`); process.exit(2); }
       if (i + 1 >= rawArgs.length) { console.error("candor-ts: --report requires a <locator> value (a directory, a .json report path, or a prefix)"); process.exit(2); }
       reportLocator = rawArgs[++i]; continue;
     }
     if (a === "--policy") { // consumed for EVERY verb (a valid candor flag); used only by policy verbs
+      if (flagShaped(rawArgs[i + 1])) { console.error(`candor-ts: --policy was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a path (a file really named that is spelled ./${rawArgs[i + 1]})`); process.exit(2); }
       if (i + 1 >= rawArgs.length) { console.error("candor-ts: --policy requires a <file> value"); process.exit(2); }
       const v = rawArgs[++i]; if (policy) policyFile = v; continue;
     }
@@ -480,6 +491,7 @@ function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknow
     if (a === "--include-unknown") { if (includeUnknown) wantIncludeUnknown = true; continue; } // used only by the verb that reads it
     if (a === "--stats") { continue; }   // ⟨0.20⟩ tolerated everywhere; read by the `blindspots` case via args.includes
     if (a === "--class") { // ⟨0.20⟩ value flag; the value is read by the `blindspots` and `unverified` cases
+      if (flagShaped(rawArgs[i + 1])) { console.error(`candor-ts: --class was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a <class,…> list`); process.exit(2); }
       if (i + 1 >= rawArgs.length) { console.error("candor-ts: --class requires a <class,…> value (reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*)"); process.exit(2); }
       // ⟨0.24⟩ SPEC §6.2's VALUE GRAMMAR, validated HERE — the one place every verb's args pass through, so
       // no verb can accept a value the filter will not honour. Two rules, one reason (see parseClassFilter):
@@ -775,13 +787,23 @@ function resolveGateReportVerb(rawArgs) {
       // that catches it is now there.
     }
   }
+  // SPEC §3.2 ⟨0.28⟩: "given no value" MEANS the next token is flag-shaped — consuming it as a filename
+  // made this diagnostic unreachable and reinterpreted the command line: `--policy --gate-json -` read
+  // *policy = the file named `--gate-json`* and diagnosed the displaced `-` as an "unexpected argument".
+  // The sink the operator named is STILL a sink: the pre-pass above leaves a flag-shaped token live, so
+  // `--gate-json -` after the broken flag installed the stream hook (and a file sink was armed
+  // fail-closed) BEFORE this refusal fires — the exits below inherit that, like every other exit-2 in
+  // this loop. A bare `-` stays a value; `./--weird` spells a file genuinely named like a flag.
+  const flagShapedValue = (v) => v !== undefined && v !== "-" && v.startsWith("-") && v.length > 1;
   for (let i = 0; i < rawArgs.length; i++) {
     const a = rawArgs[i];
     if (a === "--report") {
+      if (flagShapedValue(rawArgs[i + 1])) { console.error(`candor-ts: --report was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a locator (a path really named that is spelled ./${rawArgs[i + 1]})\n  ${usageLine}`); process.exit(2); }
       if (i + 1 >= rawArgs.length) { console.error(`candor-ts: --report requires a <locator> value (a directory, a .json report path, or a prefix)\n  ${usageLine}`); process.exit(2); }
       reportLocator = rawArgs[++i]; continue;
     }
     if (a === "--policy") {
+      if (flagShapedValue(rawArgs[i + 1])) { console.error(`candor-ts: --policy was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a path (a file really named that is spelled ./${rawArgs[i + 1]})\n  ${usageLine}`); process.exit(2); }
       if (i + 1 >= rawArgs.length) { console.error(`candor-ts: --policy requires a <file> value\n  ${usageLine}`); process.exit(2); }
       policyFile = rawArgs[++i]; continue;
     }

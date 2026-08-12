@@ -7752,6 +7752,59 @@ export function all(db: DatabaseSync, o: any) {
         /^\s+gate\s+--report/m.test(spawnSync("node", [path.join(HERE, "query.mjs")], { encoding: "utf8" }).stderr));
 }
 
+// ── (e2) SPEC §3.2 ⟨0.28⟩ "GIVEN NO VALUE" MEANS THE NEXT TOKEN IS FLAG-SHAPED ──────────────────────
+// The query/gate sibling of the scan CLI's conformance §3.1 (b13) row — the route the row never drives.
+// Measured before the fix: `gate --report R --policy --gate-json -` consumed `--gate-json` as the policy
+// FILENAME and diagnosed the displaced `-` as an "unexpected argument" (the "given no value" cause
+// unreachable — no argv could produce it); `where Fs --report --json` blamed a report named `--json`; and
+// on a NON-policy verb `--policy --json` was consumed and DISCARDED at exit 0 — a silently different
+// command than the one on screen. BOTH halves are asserted on the gate rows — exit 2 alone passes
+// against the broken behaviour, which also exited 2.
+{
+  const d = handReport({
+    "r.json": { candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 1, digest: "0" },
+      functions: [{ fn: "app.f", inferred: ["Net"], direct: ["Net"], hosts: ["x.example"], netClass: ["unknown-host"] }] },
+    "ok.pol": "deny Fs\n",
+  });
+  const R = path.join(d, "r.json"), P = path.join(d, "ok.pol");
+  // The conformance rows run env-scrubbed; a CANDOR_POLICY in the harness environment must not turn
+  // these into different runs (the policy ladder would resolve it and gate for real).
+  const env = { ...process.env };
+  delete env.CANDOR_POLICY; delete env.CANDOR_CONFIG; delete env.CANDOR_REPORT;
+  const cli = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), ...a], { encoding: "utf8", env });
+  // The STREAM spelling: the refusal document belongs on stdout, with the RIGHT cause on stderr.
+  const s = cli("gate", "--report", R, "--policy", "--gate-json", "-");
+  check("⟨0.28⟩ gate: `--policy --gate-json -` is '--policy was given no value', exit 2 — not a swallowed sink + displaced positional",
+        s.status === 2 && /--policy was given no value/.test(s.stderr) && s.stderr.includes("--gate-json"), s.stderr.slice(0, 200));
+  check("⟨0.28⟩ gate: …and the `--gate-json -` sink named AFTER the broken flag still carries the fail-closed refusal document on stdout",
+        isRefusal(s.stdout), s.stdout.slice(0, 200));
+  // The FILE spelling: a previous run's green must not survive as current.
+  const G = path.join(d, "stale.json");
+  fs.writeFileSync(G, '{"ok": true}\n');
+  const f2 = cli("gate", "--report", R, "--policy", "--gate-json", G);
+  let gv = null; try { gv = JSON.parse(fs.readFileSync(G, "utf8")); } catch { /* below */ }
+  check("⟨0.28⟩ gate: the FILE spelling of the sink is fail-closed too — the stale green is replaced, exit 2",
+        f2.status === 2 && gv !== null && gv.ok === false && gv.refused === true, `exit=${f2.status} ${JSON.stringify(gv)?.slice(0, 160)}`);
+  // The same rule on the query grammar, one row per value-taking flag.
+  const w = cli("where", "Fs", "--report", "--json");
+  check("⟨0.28⟩ query: `--report --json` is '--report was given no value' (exit 2), never a report named `--json`",
+        w.status === 2 && /--report was given no value/.test(w.stderr), w.stderr.slice(0, 200));
+  const p2 = cli("where", "Fs", "--report", R, "--policy", "--json");
+  check("⟨0.28⟩ query: `--policy --json` on a NON-policy verb is exit 2 — it was consumed-and-DISCARDED at exit 0, a silently different command",
+        p2.status === 2 && /--policy was given no value/.test(p2.stderr), `exit=${p2.status} ${p2.stderr.slice(0, 200)}`);
+  const c = cli("blindspots", "--report", R, "--class", "--json");
+  check("⟨0.28⟩ query: `--class --json` is '--class was given no value' (exit 2), never an unknown-class diagnosis of a flag",
+        c.status === 2 && /--class was given no value/.test(c.stderr), c.stderr.slice(0, 200));
+  // The boundaries: the same argvs with the mistake repaired. A bare `-` stays a value (`--gate-json -`
+  // is the stream form, pinned byte-equal to `--json` in (e) above), and a normal `--policy <file>` gates.
+  const okGate = cli("gate", "--report", R, "--policy", P, "--gate-json", "-");
+  let okv = null; try { okv = JSON.parse(okGate.stdout); } catch { /* below */ }
+  check("⟨0.28⟩ boundary: the repaired argv gates for real — `--policy <file> --gate-json -` streams a verdict, not a refusal (exit 0)",
+        okGate.status === 0 && okv?.ok === true && Array.isArray(okv?.violations), okGate.stdout.slice(0, 200));
+  check("⟨0.28⟩ boundary: a value-shaped `--report <file> --json` still answers (exit 0)",
+        cli("where", "Fs", "--report", R, "--json").status === 0);
+}
+
 // ── (f) THE ⟨0.15⟩ COVERAGE ADVISORY rides the verdict, off the ENVELOPE ───────────────────────────
 // SPEC §3.1 names the coverage advisory in the byte-equality obligation, but the κ ledger is empty on
 // every corpus the equivalence matrix above can reach, so the arm would be VACUOUS there. Asserted
