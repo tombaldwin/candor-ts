@@ -932,6 +932,28 @@ export function mid(): void { leaf(); }
   for (const [name, doc] of await callAll(pureP))
     ok(`⟨0.28⟩ CONTROL: ${name} over an ALL-PURE report (\`analyzed.count: 9\`, \`functions: []\`) does NOT hedge`,
        !("incomplete" in doc), JSON.stringify(doc).slice(0, 200));
+
+  // ── ⟨0.28⟩ THE GRAPH TOOLS FALL BACK TO THE REPORT'S OWN `calls` EDGES on this surface too. The
+  // fn-existence guard unions the report's names, so a sidecar-less VALID report passed the guard and
+  // `candor_callers` then computed over an EMPTY graph: `{of:[],direct:[],transitive:[]}` — "nobody
+  // calls this, safe to edit" — to an agent, over a graph present one key over. (`mk` copies carry no
+  // sidecars, which is exactly the hand-copied-report state a §3.3.1 locator supports.)
+  {
+    const soloP = mk("soloedges", () => { /* the intact report verbatim, sidecar-less */ });
+    const rs = await mcpSession([
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "candor_callers", arguments: { fn: "app.leaf", report: soloP } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "candor_impact", arguments: { fn: "app.leaf", report: soloP } } },
+    ]);
+    const by = Object.fromEntries(rs.map((r) => [r.id, r]));
+    const cal = JSON.parse(by[1].result.content[0].text);
+    const imp = JSON.parse(by[2].result.content[0].text);
+    ok("⟨0.28⟩ candor_callers over a sidecar-less report answers the REAL callers from the report's `calls` edges — never an authoritative-empty blast radius to an agent",
+       by[1].result.isError !== true && cal.direct?.includes("app.mid"),
+       JSON.stringify(cal).slice(0, 200));
+    ok("⟨0.28⟩ candor_impact over the same report answers the real affected set too",
+       by[2].result.isError !== true && imp.affectedCount === 1 && imp.affected?.includes("app.mid"),
+       JSON.stringify(imp).slice(0, 200));
+  }
   fs.rmSync(A, { recursive: true, force: true });
 }
 

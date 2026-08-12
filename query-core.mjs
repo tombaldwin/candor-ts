@@ -720,6 +720,31 @@ export function loadCallgraph(prefix) {
   return tagPartial(norm(cg), partial);
 }
 
+/**
+ * ⟨0.28⟩ The call graph EMBEDDED IN THE REPORT — each entry's §2 `calls` edges, keyed by fn. The
+ * fallback the graph verbs (`callers`/`impact`/`path`, CLI and MCP) run over when the §2.2 sidecar is
+ * absent, exactly as rust (callers.rs: "Fallback (no call-graph sidecar): build a graph from the
+ * report's effect-relevant `calls` edges and run the SAME query") and java do. Without it, a VALID
+ * report queried without its sidecar — a single hand-copied `report.json`, a locator §3.3.1 supports —
+ * answered `unanswerable` at exit 2 here while rust and java answered real callers at exit 0.
+ * `unanswerable` is for a graph that is genuinely ABSENT, not for one present by another route.
+ *
+ * EVERY entry is a key, even one with no calls — a leaf that performs its effect directly must still
+ * resolve as a target (rust's fallback map collects every entry). Same-named entries across merged
+ * workspace siblings UNION their edges (the effectsByFn lesson: last-wins silently drops a member's
+ * rows). Effect-relevant edges ONLY, so this graph under-approximates the sidecar: a pure fn appears at
+ * most as a CALLEE, never a key — which is why a no-match over the fallback is INCONCLUSIVE, not proof
+ * of absence (the callers verb keeps that distinction; rust corpus-audit #5).
+ */
+export function reportCallsGraph(fns) {
+  const g = {};
+  for (const e of fns) {
+    const prev = g[e.fn];
+    g[e.fn] = prev ? [...new Set([...prev, ...(e.calls ?? [])])] : [...(e.calls ?? [])];
+  }
+  return g;
+}
+
 // ---- the §3.1 match ladder: exact > segment-suffix > substring ------------------------------------
 function matchTier(name, q) {
   if (name === q) return 3;

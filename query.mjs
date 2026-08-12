@@ -43,7 +43,7 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          where as coreWhere, map as coreMap, whatif as coreWhatif,
          fix as coreFix, fixGate as coreFixGate, unverified as coreUnverified,
          matches as coreMatches, gainsCoverage, gainsCompletenessFields, parseClassFilter, ClassFilterError,
-         loadReport, loadCallgraph, loadGateReport, reportVersion, reportPackage,
+         loadReport, loadCallgraph, reportCallsGraph, loadGateReport, reportVersion, reportPackage,
          advisoryAnswer,
          reportCompleteness, mustHedge, completenessFields, absorbCompleteness } from "./query-core.mjs";
 const emit = (v) => console.log(JSON.stringify(v, null, 1));
@@ -1057,8 +1057,17 @@ switch (cmd) {
     // A missing/empty <query> is a LOUD usage error (exit 2, like candor-java) — never an empty
     // {of:[],direct:[],transitive:[]} at exit 0 (reads as "nothing reaches it" for a fn never named).
     if (!q) { console.error("usage: candor-ts-query callers <query> [--include-unknown] [--report <locator>] [--json]"); process.exit(2); }
+    // ⟨0.28⟩ PREFER THE §2.2 SIDECAR, FALL BACK TO THE REPORT'S OWN `calls` EDGES — rust's exact split
+    // (callers.rs). The sidecar records EVERY function including pure ones, so it is the COMPLETE graph;
+    // the report's embedded edges are effect-relevant only, but a report is a §3.3.1 locator in its own
+    // right (a single hand-copied report.json) and rust/java answer real callers over it at exit 0 while
+    // this engine refused `unanswerable` exit 2 — a one-engine divergence that broke a cross-engine
+    // script. The fail-closed arm below now fires only when the graph is GENUINELY absent (no sidecar
+    // AND no embedded edges — the armed pair), which narrows when it fires without removing it.
     const cg = loadCallgraph(prefix);
-    const cres = includeUnknown ? callersFrontier(cg, loadReportOrDie(prefix), loadHierarchy(prefix), q) : coreCallers(cg, q);
+    const completeGraph = Object.keys(cg).length > 0;
+    const graph = completeGraph ? cg : reportCallsGraph(loadReportOrDie(prefix));
+    const cres = includeUnknown ? callersFrontier(graph, loadReportOrDie(prefix), loadHierarchy(prefix), q) : coreCallers(graph, q);
     // A nonexistent function is a LOUD error (exit 2), like path/impact — never an empty {of:[],direct:[],
     // transitive:[]} at exit 0, which reads as an authoritative "nothing calls it" for a fn that doesn't exist
     // (corpus-audit #3). Gated on a NON-empty callgraph so a missing sidecar isn't misreported as "no such fn".
@@ -1093,10 +1102,18 @@ switch (cmd) {
       // --include-unknown` discloses too. The MCP surface was measured, not assumed, and already fails
       // closed — `candor_callers` over an armed pair returns `isError: true` from mcp.mjs's fn-existence
       // guard, which unions the callgraph keys with the report's fns, both empty here.
-      if (Object.keys(cg).length === 0) {
+      if (Object.keys(graph).length === 0) {
         const why = "no call graph in the report — the §2.2 sidecar is absent, so who calls this function is UNANSWERABLE, not empty (SPEC §3.3.1 ⟨0.28⟩)";
         put(args, { of: [q], unanswerable: why }, () => console.log(`candor: ${why}`));
         process.exit(2);
+      }
+      // ⟨0.28⟩ Only the COMPLETE graph (the sidecar) can prove a name absent. Over the effect-only
+      // fallback a miss is INCONCLUSIVE — a pure leaf called only by pure fns is simply invisible there —
+      // so the answer is empty at exit 0, never a fabricated "no such function" (rust corpus-audit #5,
+      // byte-matching its two arms: `{}` on the machine channel, the re-scan pointer on the human one).
+      if (!completeGraph) {
+        put(args, {}, () => console.log(`candor: no caller of \`${q}\` in the effect-relevant graph (the full call-graph sidecar is absent; re-scan with --out to see pure-only callers).`));
+        break;
       }
       console.error(`candor-ts-query callers: no function matching '${q}' in the call graph`); process.exit(2);
     }
@@ -1216,7 +1233,11 @@ switch (cmd) {
     // affectedCount:0 blast radius at exit 0 for a function that was never named.
     if (!q) { console.error("usage: candor-ts-query impact <query> [--report <locator>] [--json]"); process.exit(2); }
     const impFns = loadReportOrDie(prefix);
-    const impCg = loadCallgraph(prefix);
+    // ⟨0.28⟩ Sidecar first, then the report's embedded `calls` edges — rust's `impact` runs on the
+    // report's edges ALONE (callers.rs cmd_impact), so a sidecar-less report must answer here too; see
+    // the callers verb. The unanswerable arm below keeps the genuinely-absent case (the armed pair).
+    let impCg = loadCallgraph(prefix);
+    if (Object.keys(impCg).length === 0) impCg = reportCallsGraph(impFns);
     // ⟨0.28⟩ UNANSWERABLE MUST REACH THE MACHINE CHANNEL (SPEC §3.3.1), the `callers` fix (5091905) on
     // the verb its own commit message named as still open. Over an armed pair — report armed to the
     // ⟨0.21⟩ Row-1 empty, §2.2 sidecars deleted, the STANDARD post-failure state since the ⟨0.28⟩
@@ -1466,7 +1487,10 @@ switch (cmd) {
     // "does not perform undefined" at exit 0 — a false all-clear over a question that was never posed.
     if (!fn || !eff) { console.error("usage: candor-ts-query path <fn> <Effect> [--report <locator>] [--json]"); process.exit(2); }
     const fns = loadReportOrDie(prefix);
-    const cg = loadCallgraph(prefix);
+    // ⟨0.28⟩ Sidecar first, then the report's embedded `calls` edges (rust's `path` runs on the report's
+    // edges alone — see the callers verb). The unanswerable arm below keeps the genuinely-absent case.
+    let cg = loadCallgraph(prefix);
+    if (Object.keys(cg).length === 0) cg = reportCallsGraph(fns);
     // ⟨0.28⟩ UNANSWERABLE MUST REACH THE MACHINE CHANNEL (SPEC §3.3.1) — the `impact` argument above,
     // on the verb that answers the OTHER direction. Over an armed pair this emitted
     // `{"effect":…,"fn":…,"path":[]}` at exit 0: "there is no route by which this function reaches that

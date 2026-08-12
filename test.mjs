@@ -9419,6 +9419,58 @@ export function all(db: DatabaseSync, o: any) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── ⟨0.28⟩ THE GRAPH VERBS FALL BACK TO THE REPORT'S OWN `calls` EDGES ──────────────────────────────
+// A valid report queried WITHOUT its sidecar — a single hand-copied `report.json`, a locator §3.3.1
+// supports — is a graph present by another route, not an absent one. rust and java build the fallback
+// graph from the report's embedded edges and answer real callers at exit 0; this engine's ⟨0.28⟩
+// unanswerable arm fired on it, flipping a cross-engine script's exit 0→2 on one arm of four.
+// `unanswerable` now fires only when the graph is GENUINELY absent (no sidecar AND no embedded edges —
+// the armed pair), which the block above still pins.
+{
+  const d = project({
+    "src/app.ts": 'import * as fs from "fs";\n'
+      + 'export function leaf(): number { return fs.readFileSync("/etc/hosts").length; }\n'
+      + 'export function mid(): number { return leaf(); }\n'
+      + 'export function top(): number { return mid(); }\n',
+  });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out", path.join(d, "full")], { encoding: "utf8" });
+  // The hand-copied form: the report alone, no §2.2 sidecars anywhere near it.
+  const solo = path.join(d, "solo"); fs.mkdirSync(solo);
+  fs.copyFileSync(path.join(d, "full.json"), path.join(solo, "r.json"));
+  const q = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), ...a, "--report", path.join(solo, "r.json"), "--json"], { encoding: "utf8" });
+
+  const c = q("callers", "src.app.leaf");
+  let cdoc = null; try { cdoc = JSON.parse(c.stdout); } catch { /* null → fails loudly */ }
+  check("⟨0.28⟩ fallback: `callers` over a sidecar-less report answers the REAL callers from the report's `calls` edges at exit 0 — rust/java's answer, not `unanswerable`",
+        c.status === 0 && !!cdoc && !("unanswerable" in cdoc)
+          && cdoc.direct.includes("src.app.mid") && cdoc.transitive.includes("src.app.top"),
+        `status=${c.status} ${c.stdout}`.slice(0, 220));
+  const i = q("impact", "src.app.leaf");
+  let idoc = null; try { idoc = JSON.parse(i.stdout); } catch { /* null → fails loudly */ }
+  check("⟨0.28⟩ fallback: `impact` too — the blast radius is in the report's own edges",
+        i.status === 0 && !!idoc && !("unanswerable" in idoc)
+          && idoc.affectedCount === 2 && idoc.affected.includes("src.app.top"),
+        `status=${i.status} ${i.stdout}`.slice(0, 220));
+  const p = q("path", "src.app.top", "Fs");
+  let pdoc = null; try { pdoc = JSON.parse(p.stdout); } catch { /* null → fails loudly */ }
+  check("⟨0.28⟩ fallback: `path` too — the chain to the source, ending on `leaf` marked as it",
+        p.status === 0 && !!pdoc && !("unanswerable" in pdoc)
+          && pdoc.path.length === 3 && pdoc.path.at(-1).fn === "src.app.leaf" && pdoc.path.at(-1).source === true,
+        `status=${p.status} ${p.stdout}`.slice(0, 220));
+  // Only the COMPLETE graph proves a name absent: the fallback is effect-relevant edges only, so a pure
+  // leaf called only by pure fns is invisible there — a no-match is INCONCLUSIVE, answered `{}` at exit 0
+  // (rust corpus-audit #5), never a fabricated "no such function" and never the unanswerable disclosure.
+  const nm = q("callers", "zzz_not_anywhere");
+  check("⟨0.28⟩ fallback: a no-match over the effect-only graph is `{}` at exit 0 — inconclusive, not `no function matching` (which only the complete sidecar can prove) and not `unanswerable` (a graph WAS read)",
+        nm.status === 0 && nm.stdout.trim() === "{}" && !/no function matching|unanswerable/.test(nm.stdout + nm.stderr),
+        `status=${nm.status} ${nm.stdout}${nm.stderr}`.slice(0, 220));
+  const nmh = spawnSync("node", [path.join(HERE, "query.mjs"), "callers", "zzz_not_anywhere", "--report", path.join(solo, "r.json"), "--text"], { encoding: "utf8" });
+  check("⟨0.28⟩ fallback: …and the human arm points at the ABSENT SIDECAR and the re-scan, byte-matching rust's sentence",
+        nmh.status === 0 && /no caller of `zzz_not_anywhere` in the effect-relevant graph \(the full call-graph sidecar is absent; re-scan with --out to see pure-only callers\)\./.test(nmh.stdout),
+        `status=${nmh.status} ${nmh.stdout}${nmh.stderr}`.slice(0, 220));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── ⟨0.28⟩ ARMING NEVER TOUCHES THE SCAN TARGET (SPEC §3.3.1 (3)) ───────────────────────────────────
 // The worst artifact the ⟨0.28⟩ review found, on this engine: `scan.mjs app.ts --gate-json app.ts`
 // ARMED the refusal verdict OVER the operator's source file, parsed the wreckage it had just written

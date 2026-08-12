@@ -213,11 +213,22 @@ const withCompleteness = (p, doc) => {
       console.error(`candor-mcp: this report has a row literally named \`${k}\`, which collides with the ⟨0.28⟩ incompleteness disclosure this answer MUST carry — the disclosure wins and that row is NOT in the result.`);
   return { ...doc, ...f };
 };
+// ⟨0.28⟩ The graph the three graph verbs answer over: the §2.2 sidecar when there is one, else the
+// report's own embedded `calls` edges (Q.reportCallsGraph) — the same fallback the CLI and rust/java
+// run, so this surface cannot refuse a report the CLI answers. The fn-existence guard below already
+// unions the report's names, so a sidecar-less locator passed the guard and then computed over an
+// EMPTY graph: `candor_callers` returned `{of:[],direct:[],transitive:[]}` — "nobody calls this,
+// safe to edit" — to an agent, over a pair whose graph was present one key over. An ARMED pair (no
+// sidecar, report judged nothing) still fails closed: both sets are empty and the guard refuses.
+const graphOrReportEdges = (p, fns) => {
+  const cg = Q.loadCallgraph(p);
+  return Object.keys(cg).length ? cg : Q.reportCallsGraph(fns);
+};
 const TOOLS = {
   candor_impact: {
     description: "Backward blast radius: every effectful function that transitively calls `fn`, and which runtime entry points are downstream. Answers 'if I change this, what surfaces at runtime?' — the cheapest possible alternative to tracing callers by hand.",
     schema: { type: "object", properties: { fn: { type: "string", description: "the function/unit to assess" }, ...reportArg }, required: ["fn"] },
-    run: (a, p) => capImpact(Q.impact(loadReportLoud(p), Q.loadCallgraph(p), a.fn)),
+    run: (a, p) => { const fns = loadReportLoud(p); return capImpact(Q.impact(fns, graphOrReportEdges(p, fns), a.fn)); },
   },
   candor_where: {
     description: "Which functions perform a given effect (e.g. Net, Db, Exec, Fs) — `directly` vs `inherited` via a callee. The effect-surface map.",
@@ -232,12 +243,12 @@ const TOOLS = {
   candor_path: {
     description: "Forward provenance: the shortest call chain from `fn` to the nearest function that performs `effect` DIRECTLY — 'this reaches Net through WHAT?'.",
     schema: { type: "object", properties: { fn: { type: "string" }, effect: { type: "string" }, ...reportArg }, required: ["fn", "effect"] },
-    run: (a, p) => Q.path(loadReportLoud(p), Q.loadCallgraph(p), a.fn, a.effect),
+    run: (a, p) => { const fns = loadReportLoud(p); return Q.path(fns, graphOrReportEdges(p, fns), a.fn, a.effect); },
   },
   candor_callers: {
     description: "Who calls `fn` — direct (one hop) and transitive callers over the effect-relevant call graph.",
     schema: { type: "object", properties: { fn: { type: "string" }, ...reportArg }, required: ["fn"] },
-    run: (a, p) => capCallers(Q.callers(Q.loadCallgraph(p), a.fn)),
+    run: (a, p) => capCallers(Q.callers(graphOrReportEdges(p, loadReportLoud(p)), a.fn)),
   },
   candor_show: {
     description: "A function's effects (inferred = transitive, direct = own body) plus its literal surfaces (hosts/cmds/paths/tables) when present.",
