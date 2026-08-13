@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { show, loadReport, callersFrontier, blindspots, blindspotsStats } from "./query-core.mjs";
+import { scratch, keepOnFailure } from "./scratch.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let pass = 0, fail = 0;
@@ -21,7 +22,10 @@ function check(name, cond, detail = "") {
 }
 
 function project(files) {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-test-"));
+  // `scratch`, not a bare mkdtempSync: this is called ~1,300 times a run and used to leave every tree
+  // behind — the single biggest contributor to the 46,919 `candor-*` dirs measured in $TMPDIR. Trees
+  // still survive a FAILING run, which is when their paths are printed and someone wants to look.
+  const d = scratch("candor-ts-test-");
   for (const [rel, content] of Object.entries(files)) {
     const p = path.join(d, rel);
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -10737,4 +10741,5 @@ export function all(db: DatabaseSync, o: any) {
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
+if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
