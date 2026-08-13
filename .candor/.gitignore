@@ -1,0 +1,10 @@
+# candor-ts dogfoods itself: CI's Self-gate step (ci/self-gate.sh) enforces the boundary declared in
+# `policy` here, so that ONE file has to be tracked. Everything else under .candor/ is a live report
+# regenerated on every run and stays untracked.
+#
+# The repo root's .gitignore ignores `.candor/` wholesale, which would have left the self-gate reading a
+# policy that exists on the author's machine and nowhere else — green locally, missing in CI. This is
+# candor-rust's arrangement, for the same reason.
+*
+!.gitignore
+!policy

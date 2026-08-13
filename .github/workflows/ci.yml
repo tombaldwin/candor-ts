@@ -31,6 +31,14 @@ jobs:
       # that candor claims complete-pure and no oracle in this arm could contradict.
       - name: Transitive-recall battery (how far up a chain the oracle can falsify)
         run: npm run test:transitive-recall
+      # SELF-GATE (SPEC §7.12): candor-ts analyzes ITSELF and holds its own declared boundary. An
+      # effect-gate vendor whose own gate is red has no business gating anyone else — candor-rust and
+      # candor-java have had this step for a while and this arm was the one without it. Two halves,
+      # because a policy file cannot say "deny Exec everywhere except these three": the whole engine
+      # under .candor/policy (`deny Net Db Ipc`), plus an assertion that the Exec-performing units are
+      # EXACTLY the declared self-invocation list. See ci/self-gate.sh.
+      - name: Self-gate (candor-ts on candor-ts)
+        run: bash ci/self-gate.sh
       - name: Effect-set oracle (the 20 shared cases)
         run: |
           git clone --depth 1 https://github.com/tombaldwin/candor-spec /tmp/spec

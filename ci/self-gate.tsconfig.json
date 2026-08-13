@@ -1,0 +1,8 @@
+{
+  "//": "candor-ts self-gate target (SPEC §7.12). EXCLUDES the test/harness files rather than LISTING the engine ones, deliberately: a new engine module is then gated by default, where an include-list would silently skip it — the same allowlist-vs-denylist rule the classifier follows. Every excluded name spawns the engine under test, which is what a harness does.",
+  "compilerOptions": { "allowJs": true, "module": "node16", "moduleResolution": "node16", "target": "es2022", "noEmit": true },
+  "include": ["../*.mjs", "../*.ts"],
+  "exclude": ["../test.mjs", "../test-unit.mjs", "../test-mcp.mjs", "../test-lsp.mjs", "../test-watch.mjs",
+              "../fuzz.mjs", "../sensitivity.mjs", "../fabrication_probe.mjs", "../transitive-recall.mjs",
+              "../Cases.ts", "../eslint.config.mjs", "../node_modules"]
+}

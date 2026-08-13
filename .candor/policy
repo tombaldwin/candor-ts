@@ -1,0 +1,16 @@
+# candor-ts self-gate (SPEC §7.12): the engine reads source and writes reports — Fs/Env/Clock are its
+# job. It must never reach the network, a database, or local IPC — anywhere, ever.
+#
+# It spawns a subprocess in exactly THREE places, and all three are "run candor, or your program,
+# again": `watch.mjs` re-invokes the scanner on change, `scan.mjs` re-invokes itself to scan a
+# dependency's initializers, and `verify.mjs` runs YOUR program under the dynamic honesty oracle to
+# check candor's static claim against reality. That Exec is the feature, not a hidden effect.
+#
+# A policy file cannot say "deny Exec everywhere except these three", so `ci/self-gate.sh` proves the
+# two halves separately (this is candor-java's arrangement, for the same reason):
+#   (1) the whole engine under THIS policy — no Net, no Db, no Ipc, anywhere;
+#   (2) the set of Exec-performing units is EXACTLY the declared self-invocation list — so a new
+#       subprocess anywhere in the engine fails the gate, while the three known ones stay green.
+# Together: candor-ts reaches the network / a database / IPC nowhere, and spawns a process only where
+# it says it does.
+deny Net Db Ipc
