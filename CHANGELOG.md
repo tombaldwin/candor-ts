@@ -8,6 +8,59 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL SIN — a caller of a BODY-LESS LOCAL DECLARATION read PURE, and `deny Unknown` was green
+  on it.** `localName` mints a unit for any declaration it can name and never asks whether that
+  declaration has a BODY. An ambient `declare function`, any member of a local `.d.ts`, an `abstract`
+  member no subclass overrides — each got a unit, the call site edged the caller to it, and the unit was
+  EMPTY, so the caller unioned nothing and was certified pure. That is a purity claim over code the
+  engine never saw. `deny Unknown` — the gate whose entire purpose is *fail if candor cannot see what
+  this reaches* — exited **0** where candor-rust, candor-java and candor-swift all exit 1 on the same
+  input. Now the declaration carries `Unknown` and the existing least-fixpoint carries it caller-ward.
+  Pinned four-way by **conformance PART 46**, which reddens on ts alone with this fix reverted.
+
+  FOUND ON REAL CODE by `candor/bin/corpus.sh`, and not reachable from any fixture anyone had thought to
+  write: candor-ts's **entire report for `axios` is 54 `index.d.ts` declarations** while its 61 `.js`
+  implementation files are never analyzed — `analyzed.count: 54` with `functions: []` and no
+  `unanalyzed`, which is ⟨0.24⟩ **row 2**, the row that tells a consumer to believe the report and not
+  hedge. THE SIBLING ROUTE: this same shape in a *dependency* has been pinned since the scan-boundary
+  work (conformance PART 21, and this repo's own `boundary:` suite). Nobody asked it of the project's
+  own source.
+
+  REASON CLASSES follow §4's dividing line and the family's existing spellings — `native:<name>` for an
+  ambient/`.d.ts` declaration (a boundary to code we cannot analyse, §4's definition verbatim; java
+  spells the same shape `native:<method>`, rust `native:extern fn`), `dispatch:<owner>.<member>` for an
+  `abstract` member, which is an unresolved dispatch with both halves nameable and swift's spelling for
+  it. §4 makes the class per-language and best-effort, so this is the licensed use, not a new rung — no
+  spec version moves.
+
+  **THE OVER-CHARGE HALF, measured, because closing an under-report is exactly where fabrications get
+  introduced.** A body-less declaration is charged only when NO LOCAL BODY ANSWERS IT: a base member with
+  a local bodied override is already resolved by the class-CHA at the dispatch site, and charging the
+  empty base too would manufacture uncertainty over code the engine can see. On the corpus that
+  distinction is the whole difference — with it, **zod +0** (its one abstract, `ZodType._parse`, is
+  overridden locally) and **hono +18 → +9**; without it, hono's `EventProcessor` (six abstracts, three
+  local subclasses) and zod's would both have been charged. The nine that remain on hono are all true
+  positives: `Deno.mkdir`/`writeFile` are Fs and `Deno.upgradeWebSocket`/`FetcherLike.fetch` are Net,
+  all declared in local `.d.ts` shims with no body. Separately, the OVERLOAD SET is why the marker
+  mirrors `fns.set`'s last-write-wins exactly — N body-less signatures precede the implementation under
+  the same unit name, so a naive marker would call every overloaded function in every project
+  unanalysable. Both controls are fixtures in `test.mjs`.
+
+  RESIDUAL, stated because the axios headline invites over-reading it: this closes the *"candor cannot
+  see"* channel, not the blindness itself. `deny Unknown` on axios now exits 1, but **`deny Net` still
+  exits 0** — recovering that would mean analyzing the `.js` implementation, a different question.
+
+- **`--agents` truncated the contract when stdout was a PIPE.** `printAgents` used `console.log` /
+  `process.stdout.write` and scan.mjs called `process.exit(0)` on the next line, discarding Node's
+  asynchronous stdout buffer: **8170 of 23121 characters**, cut mid-sentence, exit 0, nothing on stderr.
+  An agent piping `candor-ts --agents` into its context silently read a third of its own instructions.
+  Now a synchronous `fs.writeSync(1, …)` loop. The header on that function claimed one shared
+  implementation "can never diverge within an install" and it was still wrong — query.mjs `break`s and
+  drains on the way out, scan.mjs exits — so sharing the PRINTER did not share the EXIT. **The sibling
+  route again**, in the caller the shared function existed to protect. Fixed in the printer, so the next
+  caller inherits it. Only a pipe was affected, which is why a shell redirect to a file looked fine and
+  only the suite's `execFileSync` ever saw it.
+
 - **⟨0.28⟩ the MCP gate's ANDed boolean went silent on the PARTIAL case — `judgedNothing` is the ARRAY
   here too, and `noManifest` rides with it.** `candor_gate` emitted `judgedNothing: true|undefined` where
   SPEC §2 pins an array. The comment defending the boolean rested on one premise — *"this tool's document

@@ -2428,6 +2428,9 @@ function ollamaFromUrlArg(urlLit) {
 }
 // qualifies by the file's basename (`Cases.union_a`).
 const fns = new Map();           // qualified name -> { direct, edges, hosts, tables, cmds, paths, loc }
+// Units minted for a declaration with NO BODY (ambient `declare`, `.d.ts` member, `abstract` member).
+// Drained by the §3 body-less-declaration disclosure pass, after the class-CHA index is built.
+const bodylessDecls = new Map(); // qual -> {node, mod, abstract, owner, member}
 const unlistedSeen = new Map();  // the κ-coverage ledger: unlisted npm package -> call-site count
 const nodeName = new WeakMap();  // declaration node -> qualified name
 // ORM table declarations: `@Entity("user")` on a class maps that class to its table — the JVM's
@@ -2825,6 +2828,25 @@ for (const sf of sources) {
                       loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}`,
                       endLine: sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1 });
       nodeName.set(node, qual);
+      // Record a unit minted for a declaration with NO BODY, for the §3 disclosure pass below (see it
+      // for the argument). MIRROR `fns.set`'s last-write-wins EXACTLY — `.delete` on the bodied write is
+      // load-bearing, not tidiness: an overload set is N body-less signatures followed by the
+      // implementation under the SAME qual, so a plain `.add` would mark every real overloaded function
+      // in the project unanalysable and charge its callers Unknown. That is the over-charge half of the
+      // fix, and it is pinned by a fixture (`over`/`callsOver`, still `Fs` after this pass).
+      {
+        const hasBodySlot = ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)
+          || ts.isConstructorDeclaration(node) || ts.isGetAccessorDeclaration(node)
+          || ts.isSetAccessorDeclaration(node);
+        if (hasBodySlot && !node.body)
+          bodylessDecls.set(qual, {
+            node, mod,
+            abstract: !!(ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Abstract),
+            owner: node.parent?.name?.getText?.(),
+            member: node.name?.getText?.(),
+          });
+        else bodylessDecls.delete(qual);
+      }
       if ((ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)) && node.initializer)
         nodeName.set(node.initializer, qual);
       // Index a `Object.defineProperty` descriptor accessor by its target SYMBOL + key, so a forcing
@@ -5385,6 +5407,53 @@ function resolveDepEntryKey(pkg, subpath) {
       if (rec && !rec.edges.has(to)) { rec.edges.add(to); changed = true; }
     }
   }
+}
+
+// ---- THE BODY-LESS LOCAL DECLARATION (SPEC §3 honesty invariant; §4 `native:`/`dispatch:`) ---------
+// A declaration the scan can SEE but whose BODY is not in the analyzed set — an ambient `declare
+// function`, any member of a `.d.ts`, an `abstract` member no local subclass overrides. `localName`
+// mints a unit for each (it keys on the declaration, not on the presence of a body), the call site
+// edges the caller to it, and the unit is EMPTY — so the caller unioned nothing and read PURE. That is
+// the cardinal sin: a purity claim over code the engine never saw.
+//
+// FOUND ON REAL CODE, and the corpus is why: candor-ts's whole report for `axios` is 54 `index.d.ts`
+// declarations while its 61 `.js` implementation files are never analyzed, so `deny Unknown` — the gate
+// whose entire purpose is "fail if candor cannot see what this reaches" — exited **0** where rust, java
+// and swift all exit 1 on the same shape. candor-ts was the four-way outlier:
+//
+//   rust   `extern "C" { fn ambient(…) }`      caller -> Unknown[native:extern fn]
+//   java   `public static native int ambient`  DECL   -> Unknown[native:ambient], caller inherits
+//   swift  protocol req., no local conformer   caller -> Unknown[dispatch:Ambient.ping]
+//   ts     `declare function ambient(…)`       caller -> PURE                        <-- this
+//
+// We take java's shape (charge the DECLARATION, let the existing fixpoint carry it caller-ward) rather
+// than rust/swift's (charge at the edge), for one reason: ts already mints the unit and already forms
+// the edge, so mint-side is ONE place. Charging at the edge would mean touching every call and desugar
+// site — and that is the exact drift this file has been bitten by twice (`discloseUnanswerableKey` is
+// one function today because it was two, and the ⟨0.19⟩ reason class was added to neither).
+//
+// PRECISION HALF, and it is not optional — a fix that over-charges is how a fabrication gets introduced
+// while closing an under-report. A base member with a local bodied override is ALREADY resolved: the
+// class-CHA at the dispatch site edges the caller to the overrides and runs its own `allResolved` gate.
+// Charging the empty base too would manufacture uncertainty over code the engine can in fact see.
+// MEASURED on the corpus: hono's `EventProcessor` has six abstracts with three local subclasses and
+// zod's `ZodType._parse` one — excluding them takes zod's delta to +0 and hono's from +18 to +9, and
+// every one of the nine that remain is a true positive (`Deno.mkdir`/`writeFile` are Fs, `Deno.
+// upgradeWebSocket` and `FetcherLike.fetch` are Net, all declared in local `.d.ts` shims with no body).
+const answeredByLocalBody = (node) => (classOverrides.get(node) ?? []).some((om) => !!om.body);
+for (const [qual, meta] of bodylessDecls) {
+  const rec = fns.get(qual);
+  if (!rec || answeredByLocalBody(meta.node)) continue;
+  rec.direct.add("Unknown");
+  // §4's dividing line, same as everywhere else in this file. An `abstract` member IS an unresolved
+  // DISPATCH — owner type and member are both nameable, which is what `dispatch:` reserves itself for,
+  // and it is the spelling swift gives the same shape. Everything else (ambient/`declare`/`.d.ts`) is a
+  // boundary to code we cannot analyse, which is §4's definition of `native:` verbatim; java spells it
+  // `native:<method>` and rust `native:extern fn`. §4 makes the CLASS per-language and best-effort, so
+  // ts emitting `native:` where its language model produces one is exactly the licensed use.
+  rec.why.add(meta.abstract
+    ? dispatchWhy(meta.owner ? `${meta.mod}.${meta.owner}` : null, meta.member)
+    : `native:${rec.local}`);
 }
 
 // ---- pass 3: the least fixpoint (SEMANTICS §5a), effects + the literal surfaces -------------------

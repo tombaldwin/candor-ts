@@ -1281,6 +1281,104 @@ export function useFetcher(): string { return build().fetch(); }` });
         JSON.stringify(entry(ctl, "src.m.useFetcher")));
 }
 
+// ── 1c. the BODY-LESS LOCAL declaration — the block above's untaken sibling route ──────────────────
+// Everything above is about a declaration in a DEPENDENCY. The identical shape in the project's OWN
+// source went the other way: `localName` mints a unit for any declaration it can name, WITHOUT asking
+// whether it has a body, the call site edges the caller to that empty unit, and the caller unioned
+// nothing and read PURE. Found on real code — candor-ts's whole report for `axios` is 54 `index.d.ts`
+// declarations while its 61 `.js` implementation files are never analyzed, so `deny Unknown` exited 0
+// where rust, java and swift all exit 1 on the same input. The fix charges the DECLARATION (java's
+// shape) and lets the existing fixpoint carry it caller-ward.
+{
+  const src = `import * as fsm from "node:fs";
+declare function ambient(u: string): string;
+export function callsAmbient(): string { return ambient("u"); }
+export function over(a: string): void;
+export function over(a: number): void;
+export function over(a: any): void { fsm.writeFileSync("/tmp/x", String(a)); }
+export function callsOver(): void { over("x"); }
+export abstract class Base { abstract hook(): void; run(): void { this.hook(); } }
+export class Impl extends Base { hook(): void { fsm.readFileSync("/tmp/y"); } }
+export abstract class Lone { abstract solo(): void; call(): void { this.solo(); } }`;
+  const dir = project({ "package.json": `{"name":"bl","version":"1.0.0"}`, "src/a.ts": src });
+  const { report: rep } = scan(dir);
+  const eff = (fn) => entry(rep, fn)?.inferred ?? [];
+  const why = (fn) => entry(rep, fn)?.unknownWhy ?? [];
+  // THE UNDER-REPORT, closed. An ambient declaration has no body in the analyzed set, so it cannot be
+  // certified pure — and the caller inherits that, which is the half a consumer's gate reads.
+  check("body-less: a local ambient `declare function` is Unknown, not pure",
+        eff("src.a.ambient").includes("Unknown"), JSON.stringify(entry(rep, "src.a.ambient")));
+  check("body-less: ...with §4's `native:` class — the same class java gives `native int ambient`",
+        why("src.a.ambient").includes("native:ambient"), JSON.stringify(why("src.a.ambient")));
+  check("body-less: ...and the CALLER inherits it (the transitive half a gate actually reads)",
+        eff("src.a.callsAmbient").includes("Unknown"), JSON.stringify(entry(rep, "src.a.callsAmbient")));
+  // An `abstract` member NO local subclass overrides is an unresolved DISPATCH — owner and member are
+  // both nameable, which is exactly what §4 reserves `dispatch:` for, and it is swift's spelling too.
+  check("body-less: an `abstract` member with NO local override is Unknown[dispatch:]",
+        eff("src.a.Lone.solo").includes("Unknown") && why("src.a.Lone.solo").some((w) => w.startsWith("dispatch:")),
+        JSON.stringify(entry(rep, "src.a.Lone.solo")));
+  check("body-less: ...and its caller inherits that too",
+        eff("src.a.Lone.call").includes("Unknown"), JSON.stringify(entry(rep, "src.a.Lone.call")));
+  // OVER-CHARGE CONTROL 1 — THE OVERLOAD SET. `over` is two body-less signatures followed by a bodied
+  // implementation under the SAME unit name. Marking body-less units without mirroring `fns.set`'s
+  // last-write-wins would call every overloaded function in every real project unanalysable and charge
+  // its callers Unknown — a fabrication introduced BY the fix for an under-report, which is the failure
+  // mode this project measures most often. `over` keeps its exact effect and stays free of Unknown.
+  check("no over-charge: an OVERLOAD SET keeps its implementation's effect, no Unknown",
+        eff("src.a.over").includes("Fs") && !eff("src.a.over").includes("Unknown"),
+        JSON.stringify(entry(rep, "src.a.over")));
+  check("no over-charge: ...and its caller is precisely Fs, not Unknown",
+        eff("src.a.callsOver").includes("Fs") && !eff("src.a.callsOver").includes("Unknown"),
+        JSON.stringify(entry(rep, "src.a.callsOver")));
+  // OVER-CHARGE CONTROL 2 — CHA ALREADY ANSWERED. `Base.hook` is abstract, but a local subclass bodies
+  // it, and the class-CHA at the dispatch site already edges the caller to that override. Charging the
+  // empty base as well would manufacture uncertainty over code the engine can see. MEASURED on the
+  // corpus: this control is what takes zod's delta to +0 and hono's from +18 to +9.
+  check("no over-charge: an abstract member a LOCAL subclass bodies stays resolved (CHA answered it)",
+        !eff("src.a.Base.hook").includes("Unknown"), JSON.stringify(entry(rep, "src.a.Base.hook")));
+  check("no over-charge: ...so its caller is precisely Fs, with no Unknown",
+        eff("src.a.Base.run").includes("Fs") && !eff("src.a.Base.run").includes("Unknown"),
+        JSON.stringify(entry(rep, "src.a.Base.run")));
+  // THE GATE FLIP, on a project holding ONLY the unanswerable call — the verdict turns on this arm and
+  // nothing else. `deny Unknown` is the gate whose whole purpose is "fail if candor cannot see what this
+  // reaches"; on this input it was exit 0, and the other three engines exit 1.
+  const g = project({ "package.json": `{"name":"g","version":"1.0.0"}`,
+    "src/a.ts": `declare function ambient(u: string): string;
+export function callsAmbient(): string { return ambient("u"); }`,
+    "deny.policy": "deny Unknown\n" });
+  const gated = spawnSync("node", [path.join(HERE, "scan.mjs"), g, "--policy", path.join(g, "deny.policy")],
+                          { encoding: "utf8" });
+  check("body-less: `deny Unknown` is exit 1 over a caller of a body-less declaration (was 0)",
+        gated.status === 1, `status=${gated.status} ${gated.stdout}`);
+  // GATE CONTROL — the same gate over a project whose declarations are all bodied stays green, so the
+  // flip above is the unanswerable declaration and not `deny Unknown` becoming unusable on real TS.
+  const gc = project({ "package.json": `{"name":"gc","version":"1.0.0"}`,
+    "src/a.ts": `export abstract class B { abstract h(): void; run(): void { this.h(); } }
+export class I extends B { h(): void {} }`,
+    "deny.policy": "deny Unknown\n" });
+  const gctl = spawnSync("node", [path.join(HERE, "scan.mjs"), gc, "--policy", path.join(gc, "deny.policy")],
+                         { encoding: "utf8" });
+  check("body-less GATE CONTROL: `deny Unknown` stays exit 0 when every declaration has a local body",
+        gctl.status === 0, `status=${gctl.status} ${gctl.stdout}`);
+}
+
+// ── 1d. `--agents` must not truncate on a PIPE ────────────────────────────────────────────────────
+// scan.mjs printed the contract and immediately `process.exit(0)`, which discards Node's asynchronous
+// stdout buffer on a pipe: 8170 of 23121 characters, cut mid-sentence, exit 0, nothing on stderr. An
+// agent piping `candor-ts --agents` into its context silently read a third of its own instructions. The
+// existing contract test caught it only because execFileSync uses a pipe; a shell redirect to a FILE
+// writes synchronously and looked fine. Assert the byte count through a pipe explicitly, so a future
+// regression names the cause rather than failing an equality over 23k characters.
+{
+  const doc = fs.readFileSync(path.join(HERE, "AGENTS.md"), "utf8");
+  for (const bin of ["scan.mjs", "query.mjs"]) {
+    const out = spawnSync("node", [path.join(HERE, bin), "--agents"], { encoding: "utf8", maxBuffer: 1 << 26 });
+    check(`--agents (${bin}) writes the WHOLE contract through a pipe (no exit-truncation)`,
+          out.stdout.length > doc.length && out.stdout.endsWith(doc),
+          `got ${out.stdout.length} chars, contract is ${doc.length}`);
+  }
+}
+
 // ── 2b. `show` SURFACES the literal Fs paths + Exec cmds (the regression that shipped) ─────────────
 // scan writes the surface under report keys `paths`/`cmds`; `show` once read a nonexistent `e.fs`, so
 // it silently dropped every file path even though the MCP `candor_show` doc promises "paths". The CLI
