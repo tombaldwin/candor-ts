@@ -3,7 +3,16 @@
 You are working in a TypeScript project. **candor-ts** tells you, for every function, which side
 effects it can reach — network, filesystem, database, subprocess, env, clock — *including effects
 inherited transitively through any chain of calls across files*. Use it instead of tracing call
-chains by hand.
+chains by hand. The language-agnostic consumption contract is
+[candor-spec/AGENTS.md](https://github.com/tombaldwin/candor-spec/blob/main/AGENTS.md); this file is
+the TypeScript-specific production + query surface.
+
+> **If the repository is not TypeScript-only, start at the umbrella:**
+> [candor/AGENTS.md](https://github.com/tombaldwin/candor/blob/main/AGENTS.md). `candor` is one
+> command in front of every engine (TypeScript, JVM, Rust, Swift, agent fleets) — it picks the right
+> one per target, `candor update` installs and upgrades them, and `candor doctor` checks that every
+> installed engine agrees on a spec version. A polyglot repo scanned with this engine alone gets an
+> answer about its TypeScript and nothing that says so.
 
 > **This document ships inside the package.** `npx -y candor-ts --agents` prints the contract for
 > the *installed* version — always prefer that over a vendored or fetched copy, which can describe
