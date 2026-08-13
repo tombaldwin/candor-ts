@@ -8,6 +8,24 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.28⟩ the MCP gate's ANDed boolean went silent on the PARTIAL case — `judgedNothing` is the ARRAY
+  here too, and `noManifest` rides with it.** `candor_gate` emitted `judgedNothing: true|undefined` where
+  SPEC §2 pins an array. The comment defending the boolean rested on one premise — *"this tool's document
+  is ONE gate verdict about ONE locator"* — which the same file contradicts: `report` is a PREFIX
+  (`DEFAULT_PREFIX`; `loadReportLoud`'s own message reads *"every report found at prefix … failed to
+  load"*). One VERDICT is not one REPORT, which is precisely §2's reason for the array: *"a verb reading
+  a prefix answers over many sibling reports, and WHICH of them judged nothing is the whole of the
+  actionable content"*. It did not merely lose *which*: `loadGateReport` computes the flag as an AND over
+  siblings, so the PARTIAL case — the common one — emitted `false` and therefore **no caveat at all**.
+  MEASURED 2026-08-13 on a two-report prefix, one judged-nothing and one carrying a real function: the
+  tool returned `{"ok":true,"violations":[]}`, silent, over a surface half of which was never judged — on
+  the one channel whose consumer cannot ask a follow-up question. `noManifest` (SPEC §2 row 3) now rides
+  with it for the reason that row exists; the `unverified` route in this same file already emitted both,
+  and the gate route is its sibling that was never brought along. `ok` still consults neither key
+  (⟨0.24⟩'s gate carve-out). The existing test asserted `judgedNothing === true` and now asserts the array
+  NAMES the report — strictly stronger, since `=== true` passed for an engine that knew something was
+  unjudged but not which.
+
 - **⟨0.28⟩ the verdict document carries `ignored` — the policy lines the parse dropped** (SPEC §6.2,
   *"AND THE CONDITION IS A DROPPED LINE, NOT AN EMPTY POLICY"*). The zero-rule refusal fires only at ZERO
   survivors, so the discontinuity ran the wrong way: 0 of 10 rules parsing refused at exit 2, while 1 of
