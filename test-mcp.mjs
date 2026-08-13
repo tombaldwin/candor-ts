@@ -633,12 +633,42 @@ fs.rmSync(W, { recursive: true, force: true });
   const ur = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
                                ucall(2, "zero"), ucall(3, "allpure")], [], { CANDOR_REPORT: `${F}/zero` });
   const ut = (id) => JSON.parse(ur.find((r) => r.id === id).result.content[0].text);
-  ok("candor_gate: ⟨0.24⟩ a count-0 report is flagged `judgedNothing` with a caveat — a green verdict over it certifies nothing",
-     ut(2).ok === true && ut(2).judgedNothing === true && /judged NOTHING/.test(ut(2).caveat ?? ""),
+  // ⟨0.28⟩ the ARRAY, not the boolean this asserted until 2026-08-13, and the change is a STRENGTHENING:
+  // `=== true` passed for an engine that knew something was unjudged but not WHICH — and SPEC §2 says
+  // which "is the whole of the actionable content" because `report` is a PREFIX over sibling reports.
+  // The boolean was also an AND across siblings, so the PARTIAL case emitted `false` and no caveat at
+  // all; naming the file is the assertion that cannot be satisfied that way.
+  ok("candor_gate: ⟨0.24⟩ a count-0 report is NAMED in `judgedNothing` with a caveat — a green verdict over it certifies nothing",
+     ut(2).ok === true && Array.isArray(ut(2).judgedNothing)
+       && ut(2).judgedNothing.some((x) => /zero\.json$/.test(x)) && /judged NOTHING/.test(ut(2).caveat ?? ""),
      JSON.stringify(ut(2)).slice(0, 240));
   ok("candor_gate: ⟨0.24⟩ CONTROL — count n>0 with the SAME empty `functions` carries no caveat (§2 rule 3's all-pure claim, believed)",
      ut(3).ok === true && ut(3).judgedNothing === undefined && ut(3).caveat === undefined,
      JSON.stringify(ut(3)).slice(0, 240));
+
+  // ⟨0.28⟩ THE PARTIAL PREFIX — the case the boolean got WRONG, and the reason this row exists.
+  // `report` is a prefix, so one verdict covers many sibling reports. `loadGateReport` ANDed
+  // `judgedNothing` across them, so a prefix where SOME sibling judged nothing emitted `false` and
+  // therefore no caveat at all: a green gate, silent, over a surface half of which was never judged.
+  // Both rows above pass on that engine — the all-nothing case still flips the AND, and the control has
+  // nothing to disclose — which is exactly why neither caught it.
+  fs.mkdirSync(`${F}/mix`, { recursive: true });
+  // the policy lives WITH the reports: a caller-supplied policy is confined to the report's own repo root
+  fs.writeFileSync(`${F}/mix/p.pol`, "deny Net\n");
+  fs.writeFileSync(`${F}/mix/r.empty.json`, JSON.stringify(
+    { candor: { version: "t", toolchain: "x", spec: "0.27" }, package: "empty", functions: [], analyzed: { count: 0 } }));
+  fs.writeFileSync(`${F}/mix/r.real.json`, JSON.stringify(
+    { candor: { version: "t", toolchain: "x", spec: "0.27" }, package: "real",
+      functions: [{ fn: "a.f", inferred: ["Fs"], calls: [] }], analyzed: { count: 1 } }));
+  const mr = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/call",
+      params: { name: "candor_gate", arguments: { report: `${F}/mix/r`, policy: `${F}/mix/p.pol` } } }],
+    [], { CANDOR_REPORT: `${F}/mix/r` });
+  const mdoc = JSON.parse(mr.find((r) => r.id === 2).result.content[0].text);
+  ok("candor_gate: ⟨0.28⟩ a PARTIAL prefix (one sibling judged nothing, one did not) still names the gap",
+     Array.isArray(mdoc.judgedNothing) && mdoc.judgedNothing.some((x) => /r\.empty\.json$/.test(x))
+       && !mdoc.judgedNothing.some((x) => /r\.real\.json$/.test(x)) && /judged NOTHING/.test(mdoc.caveat ?? ""),
+     JSON.stringify(mdoc).slice(0, 240));
   fs.rmSync(F, { recursive: true, force: true });
 }
 

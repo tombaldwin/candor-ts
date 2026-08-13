@@ -420,12 +420,30 @@ const TOOLS = {
       // on every ordinary report) because the verdict itself must not move: the report asserts no effect,
       // so asserting one here would be the fabrication mirror of the silence being disclosed.
       //
-      // `judgedNothing: true` — a BOOLEAN here, deliberately, where the answer/advisory documents carry
-      // the ARRAY of report paths (`completenessFields`; the rust/java/swift wire shape ⟨0.28⟩ moved this
-      // engine to). This tool's document is ONE gate verdict about ONE locator, no sibling engine serves
-      // this surface, and the `caveat` prose beside the flag carries the "why". The array spelling
-      // governs everywhere the four engines can be diffed; this flag predates it and its consumers key
-      // on `=== true`.
+      // `judgedNothing` IS THE ARRAY HERE TOO, and it used to be a boolean. The old comment defended the
+      // boolean on one premise — "this tool's document is ONE gate verdict about ONE locator" — and that
+      // premise is contradicted in this very file: `report` is a PREFIX (DEFAULT_PREFIX, and
+      // `loadReportLoud`, whose own message reads "every report found at prefix … failed to load" and
+      // whose header says "over a multi-report prefix"). ONE VERDICT IS NOT ONE REPORT. SPEC §2 gives
+      // precisely that reason for the array: "a verb reading a prefix answers over many sibling reports,
+      // and WHICH of them judged nothing is the whole of the actionable content".
+      //
+      // The boolean did not merely lose "which". `loadGateReport` computes it as an AND over the siblings
+      // (`let judgedNothing = true`, cleared by the first report with content), so the PARTIAL case — the
+      // common one — emitted `false` and therefore NO CAVEAT AT ALL. MEASURED 2026-08-13 on a two-report
+      // prefix, one judged-nothing and one carrying a real function: the boolean said `false` while
+      // `reportCompleteness` named `r.empty.json`. A green gate with NO disclosure over a surface half of
+      // which was never judged — on the one channel whose consumer cannot ask a follow-up question, which
+      // is the argument this file already makes immediately below about `ignored`.
+      //
+      // ⟨0.28⟩ `noManifest` (SPEC §2 row 3) rides with it, for the reason that row exists: a report with
+      // no `analyzed` key declares nothing, and listing it under `judgedNothing` would be the false
+      // disclosure the rung split out. The `unverified` route in this same file already emitted both;
+      // this route is its sibling and was never brought along.
+      //
+      // ADDITIVE STILL: `ok` does not consult either key. ⟨0.24⟩'s carve-out keeps the gate verdict's
+      // `ok`, and the report asserts no effect — asserting one here would be the fabrication mirror of
+      // the silence being disclosed.
       // ⟨0.28⟩ SPEC §6.2 `ignored` — THE LINES THE PARSE DROPPED, on the surface where their absence is
       // worst. MEASURED here 2026-08-12 over a policy whose 3 of 4 lines were dropped: this tool returned
       // `{"ok":true,"violations":[]}` while the per-line warnings went to the SERVER's stderr, a channel
@@ -433,10 +451,15 @@ const TOOLS = {
       // handed a green verdict from a gate three-quarters of which was never asked. Same shape and same
       // builder as both CLI routes; omitted when nothing was dropped, and `ok` does not consult it.
       const ignored = pol.ignored?.length ? { ignored: pol.ignored } : {};
-      const judged = g.judgedNothing ? { judgedNothing: true,
-        caveat: "⟨0.24⟩ this report judged NOTHING (`analyzed.count` is 0, absent with no entries, or unreadable) — "
-              + "a green verdict here certifies nothing: absence from `functions` licenses no purity claim about any "
-              + "unit. Re-scan the sources you meant to gate, or point `report` at the package that has them." } : {};
+      const gcomp = Q.reportCompleteness(p);
+      const judged = (gcomp.judgedNothing?.length || gcomp.noManifest?.length)
+        ? { ...(gcomp.judgedNothing?.length ? { judgedNothing: gcomp.judgedNothing } : {}),
+            ...(gcomp.noManifest?.length ? { noManifest: gcomp.noManifest } : {}),
+        caveat: "⟨0.24⟩ report(s) under this locator judged NOTHING (`analyzed.count` is 0, or absent with no "
+              + "entries) — a green verdict does not certify them: absence from `functions` licenses no purity "
+              + "claim about any unit they contain. The named report(s) are the gap; the verdict above covers "
+              + "only the siblings that DID judge. Re-scan those sources, or point `report` at the package that "
+              + "has them." } : {};
       const inc = incomplete ? { incomplete: true, unanalyzed: g.unanalyzed } : {};
       // ⟨0.24⟩ PRECEDENCE (SPEC §3.1 `7271c69`/`4c79958`): violation (1) > refusal (2) > incomplete (2), and
       // the REFUSAL SHAPE is the one the CLI writes — `ok:false`, `refused:true`, and NO `violations` KEY AT
