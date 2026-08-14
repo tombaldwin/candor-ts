@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [0.28.0] — 2026-08-14
 
+- **A `scan.mjs` comment illustrating a refusal document** named the previous floor.
+
 - **Self-gate (SPEC §7.12), and the first attempt would have proved nothing.** candor-ts was the one engine
   not gated by its own product. The first run analysed ONE file — `Cases.ts`, the test fixture — because
   the engine's own implementation is `.mjs` and that needs `--allow-js`: 38 functions, none of them the
