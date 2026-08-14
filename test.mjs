@@ -1745,7 +1745,7 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
 
 // ── 3f. diff/gains disclose a producing-build mismatch (§2.1 — baseline-invalidation) ──────────────
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-basever-"));
+  const d = scratch("candor-basever-");
   fs.writeFileSync(path.join(d, "cur.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.23" },
     functions: [{ fn: "a.leaf", inferred: ["Net", "Log"], direct: ["Net", "Log"] }] }));
   fs.writeFileSync(path.join(d, "base.json"), JSON.stringify({ candor: { version: "aaaaaaa", spec: "0.23" },
@@ -2804,7 +2804,7 @@ export class MemStore implements Store { save(p: string): void { netm.connect(44
   // The mutant engine lives in its OWN dir (siblings copied, node_modules symlinked) and never inside the
   // scanned project — a scratch copy of the engine left in a scanned tree shows up as extra units, which
   // has cost this vein a false A/B datapoint before.
-  const eng = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-mutant-"));
+  const eng = scratch("candor-ts-mutant-");
   for (const m of ["policy.mjs", "query-core.mjs", "contract.mjs", "scan-core.mjs", "surface.mjs", "package.json"])
     fs.copyFileSync(path.join(HERE, m), path.join(eng, m));
   try { fs.symlinkSync(path.join(HERE, "node_modules"), path.join(eng, "node_modules"), "dir"); } catch { /* exists */ }
@@ -4065,7 +4065,7 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
 // omitted loudly — silently skipping it would make its effectful functions read as "no effect".
 {
   const Q = await import("./query-core.mjs");
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-corrupt-"));
+  const d = scratch("candor-ts-corrupt-");
   // two siblings under one prefix: one valid (effectful), one truncated mid-object
   fs.writeFileSync(path.join(d, "rep.good.scan.json"), JSON.stringify({ candor: { version: "x" }, functions: [{ fn: "g.net", inferred: ["Net"], direct: ["Net"] }] }));
   fs.writeFileSync(path.join(d, "rep.bad.scan.json"), `{ "candor": { "version": "x" }, "functions": [ { "fn": "b.`);
@@ -4162,7 +4162,7 @@ export function effClientRequest(): void { const x = new http.ClientRequest("htt
 // must never reach Object.entries.
 {
   const Q = await import("./query-core.mjs");
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-cgcorrupt-"));
+  const d = scratch("candor-ts-cgcorrupt-");
   // corrupt (truncated) primary callgraph
   fs.writeFileSync(path.join(d, "rep.callgraph.json"), `{ "a.f": [ "a.g`);
   let errs = [], cg, threw = false;
@@ -4648,7 +4648,7 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
 // query-core directly; this is the same three claims through the CLI a consumer actually runs, on a report
 // candor-ts did not produce — a foreign engine's, which is the only way `ambiguous:` reaches it). ──
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-kind024-"));
+  const d = scratch("candor-ts-kind024-");
   const rep = {
     candor: { version: "candor-rust-0.24.0", spec: "0.24" },
     functions: [
@@ -5236,7 +5236,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 // four engines now die loud here (candor-rust load_entries_loud; java throws; swift → no-report). The
 // original no-crash guarantee is kept: the exit is a clean console.error, NOT a leaked JSON.parse stack.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-qcorrupt-"));
+  const d = scratch("candor-ts-qcorrupt-");
   fs.writeFileSync(path.join(d, "rep.json"), `{ "candor": {}, "functions": [ { "fn": "x.`); // truncated mid-object
   const prefix = path.join(d, "rep");
   const r = runQuery("show", prefix, "x");
@@ -5258,7 +5258,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 // repo's CI until the spec repo happens to run (§3) — so each arm gets a CLI-level spawn here with its
 // EXACT exit code (1 vs 2 is load-bearing: violation vs could-not-evaluate).
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-cliarms-"));
+  const d = scratch("candor-cliarms-");
   const eqJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const rep = (fns) => JSON.stringify({ candor: { version: "ttttttt", spec: "0.23" }, functions: fns });
   fs.writeFileSync(path.join(d, "r.json"), rep([
@@ -5735,7 +5735,7 @@ export { Settings };`,
 // already had the guard (pinned here so it can't regress); reachable/map take no verb-arg and are
 // exercised argless in CLI-10.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-missarg-"));
+  const d = scratch("candor-missarg-");
   fs.writeFileSync(path.join(d, "r.json"), JSON.stringify({ candor: { version: "ttttttt", spec: "0.23" },
     functions: [{ fn: "app.db.save", inferred: ["Db"], direct: ["Db"], loc: "db.ts:1" }] }));
   fs.writeFileSync(path.join(d, "r.callgraph.json"), JSON.stringify({ "app.db.save": [] }));
@@ -6327,7 +6327,7 @@ main();
       hj?.metrics.soundCompleteOk >= 1, JSON.stringify(hj?.metrics));
     // (b) SEEDED MISS — a report that (wrongly) declares `reads` complete-pure. verify must catch the
     // escaped Fs the run exhibits and exit 1: the cardinal-sin falsifier working.
-    const seedDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-verify-seed-"));
+    const seedDir = scratch("candor-verify-seed-");
     const seeded = structuredClone(report);
     for (const e of seeded.functions) if (e.fn === "app.reads") e.inferred = [];
     fs.writeFileSync(path.join(seedDir, "s.seed.scan.json"), JSON.stringify(seeded));
@@ -6365,7 +6365,7 @@ main();
       th.status === 0 && thj?.metrics.honestyInvariantHolds === true && thj?.metrics.executedFunctionsChecked >= 3,
       `exit=${th.status} m=${JSON.stringify(thj?.metrics)}`);
     // seed the miss at the CALLER `middle` (leave the leaf correct) → must VIOLATE on t.middle, not only t.leaf.
-    const tSeedDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-verify-tseed-"));
+    const tSeedDir = scratch("candor-verify-tseed-");
     const tseeded = structuredClone(trep);
     for (const e of tseeded.functions) if (e.fn === "t.middle") e.inferred = [];
     fs.writeFileSync(path.join(tSeedDir, "t.seed.scan.json"), JSON.stringify(tseeded));
@@ -6375,7 +6375,7 @@ main();
       ts.status === 1 && (tsj?.violations || []).some((v) => v.fn === "t.middle" && v.escaped?.includes("Fs")),
       `exit=${ts.status} out=${(ts.stdout || "").slice(0, 300)}`);
     // (c) DISCLOSURE FLIPS IT — the same run under an `Unknown` disclosure HOLDS (disclosed-partial).
-    const discDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-verify-disc-"));
+    const discDir = scratch("candor-verify-disc-");
     const disc = structuredClone(report);
     for (const e of disc.functions) if (e.fn === "app.reads") e.inferred = ["Unknown"];
     // Write a CANONICAL report + copy the real span sidecar so attribution is COMPLETE (mirrors a real scan):
@@ -6395,7 +6395,7 @@ main();
       "package.json": '{"name":"nvapp","version":"0.0.0","type":"module"}',
     });
     const { report: nrep } = scan(nd);
-    const nSeedDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-verify-nseed-"));
+    const nSeedDir = scratch("candor-verify-nseed-");
     const nseeded = structuredClone(nrep);
     for (const e of nseeded.functions) if (e.fn === "napp.reads") e.inferred = [];
     fs.writeFileSync(path.join(nSeedDir, "n.seed.scan.json"), JSON.stringify(nseeded));
@@ -6440,7 +6440,7 @@ run();
       `exit=${pv.status} out=${(pv.stdout || "").slice(0, 220)}`);
     // (f) FAIL-CLOSED: an EMPTY span sidecar drops every captured site — verify must exit 2 (attribution
     // INCOMPLETE), never a green exit 0 over a run whose real effects could not be placed (review #4/#7).
-    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-verify-empty-"));
+    const emptyDir = scratch("candor-verify-empty-");
     fs.writeFileSync(path.join(emptyDir, "rep.json"), JSON.stringify(report)); // a SOUND envelope (reads=Fs)…
     fs.writeFileSync(path.join(emptyDir, "rep.locs.json"), "{}");              // …but an EMPTY span index
     const ec = verify(path.join(emptyDir, "rep"));
@@ -7514,7 +7514,7 @@ export function go(): void { helper(); }`,
 const gateCli = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), "gate", ...a], { encoding: "utf8" });
 // A hand-written report at `<dir>/r.json` (+ optional sidecar) — the shape conformance PART 27 writes.
 function handReport(files) {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-gate-"));
+  const d = scratch("candor-ts-gate-");
   for (const [rel, content] of Object.entries(files)) {
     const p = path.join(d, rel);
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -8804,7 +8804,7 @@ export function all(db: DatabaseSync, o: any) {
 // is LOST DISCLOSURE: each excluded-class row is paired with a row whose policy classes DO match, asserted
 // still named — and with the BARE (unfiltered) rule, which must be untouched.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-classfilter-"));
+  const d = scratch("candor-classfilter-");
   const rep = (fns) => JSON.stringify({ candor: { version: "ttttttt", spec: "0.23" }, functions: fns });
   const W = (n, o) => fs.writeFileSync(path.join(d, n), typeof o === "string" ? o : JSON.stringify(o));
   const pol = (n, text) => { W(n, text); return path.join(d, n); };
@@ -8973,7 +8973,7 @@ export function all(db: DatabaseSync, o: any) {
 // assertions below check ABSENCE (`"ok" in j`), never falsiness: `ok:false` would satisfy a `!j.ok` test
 // while being the invention the rule exists to forbid.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-advisory-inc-"));
+  const d = scratch("candor-advisory-inc-");
   const W = (n, o) => fs.writeFileSync(path.join(d, n), typeof o === "string" ? o : JSON.stringify(o));
   const J = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
   const env = (extra) => ({ candor: { version: "ttttttt", spec: "0.23" }, ...extra,
@@ -9077,7 +9077,7 @@ export function all(db: DatabaseSync, o: any) {
 // same evidence-less report (no narrowing ⇒ nothing to refuse), and the `Unknown[…]` hole that must still
 // be found.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-advisory-bound-"));
+  const d = scratch("candor-advisory-bound-");
   const W = (n, o) => fs.writeFileSync(path.join(d, n), typeof o === "string" ? o : JSON.stringify(o));
   const J = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
   // The conformance R11 report, verbatim in shape: (a) a decoy Unknown hole the policy's class filter
@@ -9197,7 +9197,7 @@ export function all(db: DatabaseSync, o: any) {
   //   fix-gate (fixed)   remedies: [], unevaluated: [1]
   //
   // Which is the audit doing its job: the fixture that proved one axis closed could not see the other.
-  const dU = fs.mkdtempSync(path.join(os.tmpdir(), "candor-advisory-bound-unk-"));
+  const dU = scratch("candor-advisory-bound-unk-");
   fs.writeFileSync(path.join(dU, "r.json"), JSON.stringify({
     candor: { version: "ttttttt", spec: "0.23" }, package: "app", analyzed: { count: 1, digest: "0" },
     functions: [{ fn: "app.blind", inferred: ["Unknown"], direct: [], unresolved: true }] }));
@@ -9250,7 +9250,7 @@ export function all(db: DatabaseSync, o: any) {
 // unconditional "would violate", now attributed to the narrowed line, reading as a filter candor evaluated
 // and did not. So the raw line and the condition land in one change.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-whatif-cond-"));
+  const d = scratch("candor-whatif-cond-");
   fs.writeFileSync(path.join(d, "r.json"), JSON.stringify({
     candor: { version: "ttttttt", spec: "0.24" }, package: "app", analyzed: { count: 1, digest: "0" },
     functions: [{ fn: "app.nat", inferred: ["Unknown"], direct: ["Unknown"], unknownWhy: ["native:extern fn"], calls: [], loc: "a.ts:1" }],
@@ -9635,7 +9635,7 @@ export function all(db: DatabaseSync, o: any) {
 // target. EVERY row here asserts the BYTES, because an exit-code assertion alone passes on an engine
 // that still destroys the file and then exits 2 about something else.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-target-"));
+  const d = scratch("candor-target-");
   const src = path.join(d, "app.ts");
   fs.writeFileSync(src, "export function hello(): number { return 1 }\n");
   const before = fs.readFileSync(src, "utf8");
@@ -9693,7 +9693,7 @@ export function all(db: DatabaseSync, o: any) {
 // not source (a containment rule refuses it, and took 33 tests with it here once), and a `.ts` sink
 // OUTSIDE the target is not this rule at all.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-tgtexp-"));
+  const d = scratch("candor-tgtexp-");
   fs.mkdirSync(path.join(d, "src"));
   const src = path.join(d, "src", "main.ts");
   fs.writeFileSync(src, "export function hello(): number { return 1 }\n");
@@ -9737,7 +9737,7 @@ export function all(db: DatabaseSync, o: any) {
         `status=${ok.status} ${ok.stderr}`.slice(0, 240));
 
   // CONTROL 2 — a parsed extension OUTSIDE the target is not this rule.
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "candor-tgtexp-out-"));
+  const outside = scratch("candor-tgtexp-out-");
   const away = path.join(outside, "v.ts");
   const off = run("src", "--policy", "candor.policy", "--gate-json", away);
   check("⟨0.28⟩ target expansion CONTROL: a `.ts` sink OUTSIDE the target is permitted — the predicate is containment AND extension, not extension alone",
@@ -9757,7 +9757,7 @@ export function all(db: DatabaseSync, o: any) {
 //   gate … --gate-json r.callgraph.json                → the §2.2 sidecar half, destroyed at a SUCCESS
 //       exit: the report loads fine, the gate runs, and a REAL verdict lands where the graph belongs.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-gatelocator-"));
+  const d = scratch("candor-gatelocator-");
   fs.writeFileSync(path.join(d, "app.ts"),
     'import * as nfs from "node:fs";\nexport function save(): void { nfs.writeFileSync("x", "1"); }\n');
   fs.writeFileSync(path.join(d, "deny-fs.policy"), "deny Fs\n");
@@ -9815,7 +9815,7 @@ export function all(db: DatabaseSync, o: any) {
 // assert the LINK is still a link AND the target's bytes survive — an exit-code assertion cannot see
 // either half.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-symside-"));
+  const d = scratch("candor-symside-");
   fs.mkdirSync(path.join(d, "shared"));
   fs.mkdirSync(path.join(d, "work"));
   const src = path.join(d, "work", "app.ts");
@@ -9860,7 +9860,7 @@ export function all(db: DatabaseSync, o: any) {
 // and X's previous reports became permanent placeholders. The BYTES are the assertion: the run exits 2
 // either way, so only the report can tell the fixed engine from the broken one.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-prepass-"));
+  const d = scratch("candor-prepass-");
   const src = path.join(d, "app.ts");
   fs.writeFileSync(src, "export function f(): number { return 1 }\n");
   const pfx = path.join(d, "X");
@@ -9905,7 +9905,7 @@ export function all(db: DatabaseSync, o: any) {
 // channels and the EXIT, which is the shape the mutants in this family survive through — candor-rust built
 // one that kept the whole JSON fix and deleted only the printed line, and it passed that engine's suite.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-desc-"));
+  const d = scratch("candor-desc-");
   fs.mkdirSync(path.join(d, "src"));
   fs.writeFileSync(path.join(d, "src/app.ts"),
     'import * as fs from "fs";\n'
@@ -10352,7 +10352,7 @@ export function all(db: DatabaseSync, o: any) {
 // three were in front of the author, and records the divergence that created (rust extended it, swift read
 // the list as closed). Composed with the `crossing` ruling, `fix` emits NO `crossing` key here.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-zerorule-"));
+  const d = scratch("candor-zerorule-");
   fs.mkdirSync(path.join(d, "src"));
   fs.writeFileSync(path.join(d, "src/app.ts"),
     'import * as fs from "fs";\n'
@@ -10444,7 +10444,7 @@ export function all(db: DatabaseSync, o: any) {
 // SEPARATION): `count: 7` with `functions: []` is a legitimate all-pure CLAIM a consumer MUST believe,
 // and a fix that hedges all three has disabled the feature rather than implemented the rule.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-nomanifest-"));
+  const d = scratch("candor-nomanifest-");
   fs.mkdirSync(path.join(d, "src"));
   fs.writeFileSync(path.join(d, "src/app.ts"),
     'import * as fs from "fs";\n'
@@ -10543,7 +10543,7 @@ export function all(db: DatabaseSync, o: any) {
 //   PREFIX    → the whole matching set, unioned — for EVERY verb, not just the gate.
 //   DIRECTORY → the reports discovered inside it (`<dir>/.candor/report`).
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-locator-"));
+  const d = scratch("candor-locator-");
   const pfx = path.join(d, "pfx"); fs.mkdirSync(pfx, { recursive: true });
   const env = { candor: { version: "handwritten", toolchain: "n", spec: "0.27" } };
   const mk = (fn, eff) => ({ ...env, package: "p", functions: [{ fn, loc: "s:1", inferred: [eff], direct: [eff] }], analyzed: { count: 1 } });
@@ -10603,7 +10603,7 @@ export function all(db: DatabaseSync, o: any) {
 // is entitled to. Rows assert the BYTES, not the exit code, because the pre-fix build exits 0 and the
 // whole defect is what is left on disk.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-dupout-"));
+  const d = scratch("candor-dupout-");
   fs.mkdirSync(path.join(d, "src"));
   fs.writeFileSync(path.join(d, "src/app.ts"),
     'import * as nfs from "node:fs";\nexport function save(): void { nfs.writeFileSync("x", "1"); }\n');
@@ -10682,7 +10682,7 @@ export function all(db: DatabaseSync, o: any) {
 // `ignored` is DISTINCT from `unevaluated` and the distinction is load-bearing: `unevaluated` carries
 // rules that PARSED and could not be answered, `ignored` carries text that never became a rule at all.
 {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ignored-"));
+  const d = scratch("candor-ignored-");
   fs.mkdirSync(path.join(d, "src"));
   fs.writeFileSync(path.join(d, "src/app.ts"),
     'import * as nfs from "node:fs";\nexport function save(): void { nfs.writeFileSync("x", "1"); }\n');
