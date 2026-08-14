@@ -279,7 +279,7 @@ const distinctOutPrefixes = (all) => {
 //     candor-ts: 1 source file(s) failed to parse — NOT analyzed …
 //     candor-ts: wrote 0 effectful functions (1 analyzed, 1 files) to .candor/report.json   exit 0
 //   $ cat src/main.ts
-//     { "spec": "0.27", "ok": false, … }          ← the operator's SOURCE, unrecoverably replaced
+//     { "spec": "0.28", "ok": false, … }          ← the operator's SOURCE, unrecoverably replaced
 //
 // Unrecoverable loss of the operator's own code, reported as SUCCESS — the run destroyed the file,
 // then dutifully disclosed the parse failure it had itself caused.
