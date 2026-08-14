@@ -8,6 +8,22 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.28.0] — 2026-08-14
+
+- **Self-gate (SPEC §7.12), and the first attempt would have proved nothing.** candor-ts was the one engine
+  not gated by its own product. The first run analysed ONE file — `Cases.ts`, the test fixture — because
+  the engine's own implementation is `.mjs` and that needs `--allow-js`: 38 functions, none of them the
+  engine, and a verdict that reads like an answer. With the flag, 488 across 18 files. Two halves: the
+  whole engine under `deny Net Db Ipc`, plus an assertion that the Exec units are exactly the three
+  self-invocation sites. Falsified in all three directions.
+- **The test harness sweeps its own fixture trees.** `project()` minted a temp tree per fixture and removed
+  none — 45,280 `candor-ts-test-*` directories in `$TMPDIR`, ~1,300 per run, and a listing of `$TMPDIR` is
+  what once made a `privacy-manifest --verify` take 72 seconds. `scratch.mjs` registers and sweeps on exit,
+  including on SIGINT/SIGTERM, but KEEPS the trees when a run FAILED — a failing assertion prints a path
+  into one of them. A passing run now leaks 0.
+- **AGENTS.md points at the umbrella**, and the two verdict-spec assertions now derive the floor from
+  `scan.mjs --version` rather than a literal.
+
 - **⚠ CARDINAL SIN — a caller of a BODY-LESS LOCAL DECLARATION read PURE, and `deny Unknown` was green
   on it.** `localName` mints a unit for any declaration it can name and never asks whether that
   declaration has a BODY. An ambient `declare function`, any member of a local `.d.ts`, an `abstract`
