@@ -15,6 +15,13 @@ import { show, loadReport, callersFrontier, blindspots, blindspotsStats } from "
 import { scratch, keepOnFailure } from "./scratch.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+// The spec floor this build declares, DERIVED from the binary under test rather than written as a
+// literal. A verdict's `spec` must equal what the engine says it speaks; asserting it against a
+// hardcoded "0.27" tests a literal against a literal and makes every floor bump edit this file. That
+// class was closed as "a one-off" once and then cost an edit in every repo on the next rung.
+const SPEC = (execFileSync(process.execPath, [path.join(HERE, "scan.mjs"), "--version"], { encoding: "utf8" })
+  .match(/\(spec ([0-9.]+)\)/) ?? [])[1];
+if (!SPEC) throw new Error("could not derive the spec floor from `scan.mjs --version`");
 let pass = 0, fail = 0;
 function check(name, cond, detail = "") {
   if (cond) { pass++; console.log(`  ok   ${name}`); }
@@ -1544,7 +1551,7 @@ export function place(db: DatabaseSync): void { save(db); }`,
   check("--gate-json + violation still exits 1", r.status === 1, `status=${r.status}`);
   let v = null;
   try { v = JSON.parse(fs.readFileSync(gp, "utf8")); } catch { /* null → checks fail with raw */ }
-  check("--gate-json verdict declares spec 0.27", v?.spec === "0.27", JSON.stringify(v)?.slice(0, 120));
+  check(`--gate-json verdict declares spec ${SPEC}`, v?.spec === SPEC, JSON.stringify(v)?.slice(0, 120));
   check("--gate-json verdict ok:false on a failing gate", v?.ok === false, `ok=${v?.ok}`);
   const viol = v?.violations?.find((x) => x.fn === "src.domain.place");
   check("--gate-json names the violating fn with its rule", viol?.rule === "AS-EFF-006", JSON.stringify(v?.violations)?.slice(0, 160));
@@ -7838,7 +7845,7 @@ export function all(db: DatabaseSync, o: any) {
   const j = gateCli("--report", R, "--policy", P, "--json");
   let jv = null; try { jv = JSON.parse(j.stdout); } catch { /* below */ }
   check("gate --report: `--json` puts the VERDICT on stdout as pure JSON (prose routed to stderr)",
-        jv !== null && jv.spec === "0.27" && jv.ok === true && Array.isArray(jv.violations), j.stdout.slice(0, 300));
+        jv !== null && jv.spec === SPEC && jv.ok === true && Array.isArray(jv.violations), j.stdout.slice(0, 300));
   const gj = gateCli("--report", R, "--policy", P, "--gate-json", "-");
   check("gate --report: `--gate-json -` writes the SAME document to stdout — the two spellings are one flag",
         gj.stdout === j.stdout, `${gj.stdout.slice(0, 200)} vs ${j.stdout.slice(0, 200)}`);
