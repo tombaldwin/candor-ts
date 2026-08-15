@@ -14,6 +14,31 @@ _A cardinal-sin fix. 0.28.1's body-less-declaration pass reopened, in two shapes
 written to close — both found by a max-effort review of that patch, both live on npm and crates.io
 until this release. The spec floor is unchanged at 0.28._
 
+- **The `--parallel` driver could lose its own summary.** It relayed each shard's buffered stdout with
+  `process.stdout.write` and then `process.exit()` — asynchronous on a PIPE, so the tail was discarded:
+  measured at exactly 65536 bytes delivered with the `test: N passed` line GONE, and CI captures step
+  stdout on a pipe. That is the identical defect `contract.mjs` was rewritten for one release earlier,
+  in its sibling. Now `fs.writeSync`. Two more in the same driver: `spawn` has no `encoding` option (it
+  is spawnSync/execFile's), so chunks arrived as Buffers and were decoded independently — 29 U+FFFD per
+  264 KB, because the assertion names are dense with 3-byte characters; and a child's exit STATUS and
+  SIGNAL were ignored, so a shard that printed valid counts and then died contributed them and let the
+  parent exit 0.
+
+- **`ci/shard-check.sh`'s red branches were dead code.** It read the summary with `tail -1`, but
+  `scratch.mjs`'s exit sweep prints its kept-trees line AFTER the summary on any FAILING run — so a
+  genuine failure came back as "could not parse the baseline summary", the could-not-evaluate collapse
+  this same release fixed in the self-gates. Anchored on `^test: N passed` instead, and falsified.
+  Its header also claimed an index-union check that does not exist; the comment now states what the
+  sum CANNOT catch, including that it passed a "parallel" driver which was sequential by construction.
+
+- **`--agents` truncation is stated rather than swallowed.** Catching EPIPE stopped `| head` being a
+  failure, but restored a truncated contract with exit 0 and an empty stderr — verbatim the defect that
+  rewrite removed. It now writes one stderr line naming the byte count, and still exits 0.
+
+- **The self-gate's exit-2 branch is gated on the Exec verdict.** It fired before half (2) was reported,
+  so an ESTABLISHED AS-EFF-006 violation was announced as "not a violation, the boundary was never
+  judged" and the FAILED line was unreachable — the collapse it fixed, inverted.
+
 - **⚠ `declare function f(); declare namespace f {}` read PURE — the axios cardinal sin, reopened.**
   The UMD/ambient typings shape of jQuery, lodash, moment and chalk. `overloadImplOf` tested `!!d.body`,
   and a `ts.ModuleDeclaration` HAS a body (its ModuleBlock), so the namespace was taken for the overload

@@ -69,7 +69,11 @@ fi
 # boundary is red" sends the reader hunting for a subprocess that does not exist, and collapsing it to
 # exit 1 tells CI a violation was ESTABLISHED. Preserved as 2. (Found by review in the java arm first;
 # all three self-gates were written with the same collapse.)
-if [ "$gate_rc" -eq 2 ]; then
+# …and ONLY when half (2) is clean. This branch used to fire regardless, so an ESTABLISHED
+# AS-EFF-006 violation was announced as "not a violation, the boundary was never judged" and
+# the FAILED line below became unreachable — the could-not-evaluate collapse INVERTED, by the
+# change that fixed it in the other direction.
+if [ "$gate_rc" -eq 2 ] && [ "$exec_rc" -eq 0 ]; then
   echo "self-gate: COULD NOT EVALUATE — candor-ts exited 2 over its own sources (the boundary was never"
   echo "  judged, so this is not a clean result and not a violation). Fix the input, then re-run."
   exit 2

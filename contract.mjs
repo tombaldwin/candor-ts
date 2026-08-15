@@ -41,5 +41,14 @@ export function printAgents() {
       try { off += fs.writeSync(1, buf, off, buf.length - off); }   // a short write is legal
       catch (e) { if (e.code !== "EAGAIN") throw e; Atomics.wait(idle, 0, 0, 1); }
     }
-  } catch (e) { if (e.code !== "EPIPE") throw e; }
+  } catch (e) {
+    if (e.code !== "EPIPE") throw e;
+    // SWALLOWED, BUT NOT SILENT. Exiting non-zero would make `--agents | head` a failure, which it is
+    // not. But a truncated contract with exit 0 and an empty stderr is verbatim the defect this function
+    // was rewritten to remove ("an agent piping candor-ts --agents into its context silently read a
+    // third of its own instructions") — so the reader-left case has to be STATED. stderr may be closed
+    // too; that write is best-effort by construction.
+    try { fs.writeSync(2, `candor-ts: --agents output was cut short at ${off} of ${buf.length} bytes `
+                        + `— the reader closed the pipe. This contract is INCOMPLETE.\n`); } catch { /* nothing left to tell */ }
+  }
 }

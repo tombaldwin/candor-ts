@@ -70,24 +70,48 @@ if (SHARD === null) {
     // for the plain run. shard-check could not see it: the totals are identical whether the children
     // run together or in a queue. Only the clock catches a parallel driver that is not parallel.
     const kids = await Promise.all(Array.from({ length: N }, (_, i) => new Promise((res) => {
-      const c = spawn(process.execPath, [fileURLToPath(import.meta.url), `--shard=${i}/${N}`], { encoding: 'utf8' });
+      const c = spawn(process.execPath, [fileURLToPath(import.meta.url), `--shard=${i}/${N}`]);
       let out = '', err = '';
+      // `spawn` has NO `encoding` option (that is spawnSync/execFile), so chunks arrive as Buffers and
+      // `out += d` decoded each independently — measured 29 U+FFFD in 264 KB, because every assertion
+      // name here is dense with 3-byte characters (─ ⟨⟩ → — κ).
+      c.stdout.setEncoding('utf8'); c.stderr.setEncoding('utf8');
       c.stdout.on('data', (d) => { out += d; });
       c.stderr.on('data', (d) => { err += d; });
-      c.on('close', (status) => res({ stdout: out, stderr: err, status }));
+      // A child that dies by SIGNAL, or exits non-zero after printing a valid summary (OOM between the
+      // last write and exit, with 8 TypeScript programs resident), would otherwise contribute its counts
+      // and let the parent exit 0. Status and signal are part of the verdict, not just diagnostics.
+      c.on('error', (e) => res({ stdout: out, stderr: `${err}\nspawn failed: ${e.message}\n`, status: null, signal: null }));
+      c.on('close', (status, signal) => res({ stdout: out, stderr: err, status, signal }));
     })));
+    // fs.writeSync, NOT process.stdout.write — the same defect contract.mjs was rewritten for in this
+    // same release. On a PIPE those writes are asynchronous and `process.exit()` below discards whatever
+    // is still buffered: measured at exactly 65536 bytes delivered with the `test: N passed` summary GONE,
+    // both at N=2 (2 × 72 KB, the 2-core-runner shape) and at N=8 with a late reader. CI captures step
+    // stdout on a pipe, so `npm test` could exit 0 having printed no summary at all — and a lost summary
+    // is indistinguishable from the crashed-shard case `broke` exists to catch.
+    const wr = (fd, text) => {
+      if (!text) return;
+      const buf = Buffer.from(text, 'utf8');
+      let off = 0;
+      try { while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off); }
+      catch (e) { if (e.code !== 'EPIPE') throw e; }
+    };
     let p = 0, f = 0, broke = 0;
     kids.forEach((k, i) => {
-      process.stdout.write(k.stdout ?? '');
-      if (k.stderr) process.stderr.write(k.stderr);
+      wr(1, k.stdout ?? '');
+      wr(2, k.stderr ?? '');
       const m = /^test: (\d+) passed, (\d+) failed$/m.exec(k.stdout ?? '');
       // A shard with no summary line did not finish. Counting it 0/0 would let a crashed child pass as
       // an empty shard — the vacuous green this suite exists to reject.
-      if (!m) { broke++; console.log(`  FAIL shard ${i}/${N} produced no summary line (status ${k.status})`); return; }
+      if (!m) { broke++; wr(1, `  FAIL shard ${i}/${N} produced no summary line (status ${k.status}, signal ${k.signal})\n`); return; }
+      if (k.status !== 0 || k.signal) {
+        broke++; wr(1, `  FAIL shard ${i}/${N} reported ${m[1]} passed but exited status ${k.status} signal ${k.signal}\n`); return;
+      }
       p += Number(m[1]); f += Number(m[2]);
     });
-    console.log(`\ntest: ${p} passed, ${f} failed  (${N} shards)`);
-    if (broke) console.log(`test: ${broke} shard(s) did not report — treating the run as FAILED`);
+    wr(1, `\ntest: ${p} passed, ${f} failed  (${N} shards)\n`);
+    if (broke) wr(1, `test: ${broke} shard(s) did not report cleanly — treating the run as FAILED\n`);
     process.exit(f || broke ? 1 : 0);
   }
 }
