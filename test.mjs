@@ -13,6 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { show, loadReport, callersFrontier, blindspots, blindspotsStats } from "./query-core.mjs";
 import { scratch, keepOnFailure } from "./scratch.mjs";
+import { printAgents } from "./contract.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // The spec floor this build declares, DERIVED from the binary under test rather than written as a
@@ -58,19 +59,97 @@ const blk = () => { const i = _blkIdx++; return !SHARD || i % SHARD.n === SHARD.
 if (SHARD === null) {
   const pa = process.argv.find((x) => x === '--parallel' || x.startsWith('--parallel='));
   if (pa) {
-    const want = pa.includes('=') ? Number(pa.split('=')[1]) : 0;
+    // BOTH the flag and the env override are VALIDATED, in the same shape as --shard above (usage error,
+    // exit 2, naming what was given). Neither was, and the parent generates the children's --shard from
+    // this number, so a bad value here came back as the CHILDREN's error. Measured before this fix:
+    //   --parallel=3.7  spawned `--shard=0/3.7`, which the child's own regex rejects — all shards exited
+    //                   2 with no summary, and the parent blamed the shards for a flag IT wrote.
+    //   --parallel=abc, --parallel=, =0, =-4, CANDOR_TEST_SHARDS=abc
+    //                   all failed `want > 0` and fell back to the core count with nothing on stderr —
+    //                   so an operator setting the override precisely to STOP an oversubscribed run got
+    //                   the oversubscribed run, silently, which is the failure the override exists for.
+    //   --parallel=1e9  passed `want > 0` and reached Array.from({ length: 1e9 }).
+    // The upper bound is a sanity rail, not a capability claim: the suite is 175 blocks, so shards past
+    // this point are empty children paying process + TypeScript startup for nothing.
+    const MAX_SHARDS = 64;
+    const shardCount = (raw, what) => {
+      // `\d+` on purpose: it is the only spelling that is unambiguously a shard count. Number() accepts
+      // '3.7', '1e9', '0x10', ' 4 ' and '-4', and every one of those reaches the child as a --shard value.
+      if (!/^\d+$/.test(raw)) {
+        console.error(`test.mjs: ${what} wants a whole number of shards, got '${raw}'`); process.exit(2);
+      }
+      const n = Number(raw);
+      if (!(n >= 1 && n <= MAX_SHARDS)) {
+        console.error(`test.mjs: ${what}=${raw} out of range (want 1..${MAX_SHARDS})`); process.exit(2);
+      }
+      return n;
+    };
+    const want = pa.includes('=') ? shardCount(pa.slice(pa.indexOf('=') + 1), '--parallel') : 0;
     // All cores, not cores-1. The parent only awaits children, so reserving one for it buys nothing —
     // and CI runners are small, where that one core is a third of the machine. Measured: the local 12-core
     // box went 286s → 74s, while CI's first run at cores-1 managed only 884s → 612s. CANDOR_TEST_SHARDS
-    // overrides for a runner that reports more cores than it can actually schedule.
-    const env = Number(process.env.CANDOR_TEST_SHARDS ?? 0);
+    // overrides for a runner that reports more cores than it can actually schedule. An EMPTY env var reads
+    // as unset (that is what `CANDOR_TEST_SHARDS= npm test` means); an empty `--parallel=` does not, because
+    // someone typed the `=`.
+    const envRaw = process.env.CANDOR_TEST_SHARDS;
+    const env = envRaw === undefined || envRaw === '' ? 0 : shardCount(envRaw, 'CANDOR_TEST_SHARDS');
     const N = want > 0 ? want : env > 0 ? env : Math.max(2, Math.min(8, os.cpus()?.length ?? 4));
     // `spawn`, awaited together — NOT `spawnSync` in a map. The first version did exactly that and was
     // sequential by construction (spawnSync blocks until the child exits), measuring 289s against 286s
     // for the plain run. shard-check could not see it: the totals are identical whether the children
     // run together or in a queue. Only the clock catches a parallel driver that is not parallel.
+    // THE PARENT OWNS THE CHILDREN'S LIFETIME. Measured before this: SIGTERM the parent and all N
+    // `node test.mjs --shard=i/N` children survived with ppid 1, still scanning and still minting fixture
+    // trees that nothing would sweep — the 46,919-directory leak scratch.mjs exists to stop, refilled by
+    // the one process shape scratch.mjs cannot see. Ctrl-C in a terminal hid it: the tty signals the whole
+    // process GROUP, so the children were already dying for a reason that has nothing to do with us. A CI
+    // step timeout or a plain `kill <pid>` signals the parent only.
+    //
+    // SIGTERM ALONE DOES NOT KILL A SHARD, and that is the whole reason this needs two stages. MEASURED:
+    // `node test.mjs --shard=0/8`, SIGTERMed mid-run, was still alive 25 seconds later and only SIGKILL
+    // ended it. The cause is scratch.mjs, unhappily: installing a JS listener REPLACES the default "die"
+    // disposition, and the callback can only be dispatched from the event loop — but a shard's whole body
+    // is synchronous top-level code, 175 blocks of blocking spawnSync scans, and never yields until it is
+    // finished. So the sweep handler that exists to stop the fixture-tree leak is exactly what makes the
+    // leaking process unkillable. (Same shape as the unkillable-Ctrl-C bug scratch.mjs's own comment
+    // records, from the other direction — and it is not confined to --parallel: a plain `node test.mjs`
+    // ignores SIGTERM for the same reason.) TERM first anyway, so a child that IS at a yield point exits
+    // cleanly and sweeps; then a bounded grace; then KILL what is left, because a parent that politely
+    // asks and then dies has not solved anything.
+    const live = new Set();
+    const GRACE_MS = 500;
+    for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+      // prependListener, NOT `on` — and this is the trick that makes it compose. scratch.mjs installs its
+      // sweep handler at IMPORT time, i.e. before this line runs, and that handler ends with
+      // `removeAllListeners(sig)` + a re-raise so the process still dies with the right status. A listener
+      // merely appended after it would be REMOVED BEFORE IT WAS EVER CALLED. Running first also gives the
+      // order we want: children are signalled, then the parent sweeps and re-raises.
+      process.prependListener(sig, () => {
+        for (const c of live) { try { c.kill(sig); } catch { /* already gone; nothing to kill */ } }
+        // A synchronous grace: this runs from a signal handler with the parent about to re-raise, so there
+        // is no later turn of the event loop to escalate from. Atomics.wait is the only blocking sleep.
+        if (live.size) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, GRACE_MS);
+        for (const c of live) {
+          // `kill(pid, 0)` asks the OS, because the parent has been blocking and has processed no `close`
+          // events during the grace. An already-exited child is an unreaped zombie here: signalling it is a
+          // no-op, which is why this does not need to tell the two apart.
+          try { process.kill(c.pid, 0); c.kill('SIGKILL'); } catch { /* reaped or gone */ }
+        }
+        live.clear();
+      });
+    }
+    // ONE PARENT-OWNED TMPDIR FOR THE WHOLE RUN, because the kill above buys the orphan fix with a leak:
+    // a SIGKILLed child cannot run its own scratch.mjs sweep, and the killed run measured 136 fixture
+    // trees left in $TMPDIR. Pointing the children's `os.tmpdir()` at a directory the PARENT minted with
+    // `scratch()` moves the ownership up one level — the parent's sweep removes the lot, on the signal
+    // path too (this handler runs first, scratch.mjs's sweep second). It also fixes the case nobody was
+    // watching: before, an orphan that ran to completion swept its own trees, so the leak was invisible
+    // unless you killed it, and now neither ending leaks.
+    const kidTmp = scratch('candor-ts-parallel-');
     const kids = await Promise.all(Array.from({ length: N }, (_, i) => new Promise((res) => {
-      const c = spawn(process.execPath, [fileURLToPath(import.meta.url), `--shard=${i}/${N}`]);
+      const c = spawn(process.execPath, [fileURLToPath(import.meta.url), `--shard=${i}/${N}`],
+                      { env: { ...process.env, TMPDIR: kidTmp } });
+      live.add(c);
       let out = '', err = '';
       // `spawn` has NO `encoding` option (that is spawnSync/execFile), so chunks arrive as Buffers and
       // `out += d` decoded each independently — measured 29 U+FFFD in 264 KB, because every assertion
@@ -81,8 +160,8 @@ if (SHARD === null) {
       // A child that dies by SIGNAL, or exits non-zero after printing a valid summary (OOM between the
       // last write and exit, with 8 TypeScript programs resident), would otherwise contribute its counts
       // and let the parent exit 0. Status and signal are part of the verdict, not just diagnostics.
-      c.on('error', (e) => res({ stdout: out, stderr: `${err}\nspawn failed: ${e.message}\n`, status: null, signal: null }));
-      c.on('close', (status, signal) => res({ stdout: out, stderr: err, status, signal }));
+      c.on('error', (e) => { live.delete(c); res({ stdout: out, stderr: `${err}\nspawn failed: ${e.message}\n`, status: null, signal: null }); });
+      c.on('close', (status, signal) => { live.delete(c); res({ stdout: out, stderr: err, status, signal }); });
     })));
     // fs.writeSync, NOT process.stdout.write — the same defect contract.mjs was rewritten for in this
     // same release. On a PIPE those writes are asynchronous and `process.exit()` below discards whatever
@@ -90,12 +169,55 @@ if (SHARD === null) {
     // both at N=2 (2 × 72 KB, the 2-core-runner shape) and at N=8 with a late reader. CI captures step
     // stdout on a pipe, so `npm test` could exit 0 having printed no summary at all — and a lost summary
     // is indistinguishable from the crashed-shard case `broke` exists to catch.
+    //
+    // EAGAIN. Once a pipe fd is in NON-BLOCKING mode, writeSync throws EAGAIN instead of short-writing as
+    // soon as the reader is behind, and this driver dumps every shard's whole stdout — ~72 KB each against
+    // a 64 KiB pipe buffer. The code before this had no EAGAIN arm at all, so the throw escaped `wr` and
+    // killed the parent mid-dump: the lost summary the writeSync was adopted to prevent, arriving by the
+    // other door.
+    //   WHAT IS ACTUALLY MEASURED, and it is not what I expected: `node test.mjs --parallel=16` piped into
+    //   a reader that never drains does NOT reach this arm. fd 1 stays BLOCKING, because libuv only flips
+    //   a pipe non-blocking when the process.stdout STREAM is created, and this parent path never touches
+    //   it (`console.error` in the usage errors above exits immediately). The parent blocked in writeSync
+    //   and finished when the reader finally drained. So the guard below is LATENT here — one `console.log`
+    //   added anywhere before the dump arms it — and the residual it does NOT cover is the blocking write,
+    //   which cannot be bounded from user code without going async. The arm was verified against a
+    //   deliberately non-blocking fd: 5000 ms, then the diagnostic, then 234,464 of 300,000 bytes dropped.
+    // BOUNDED, because a reader that stalls without ever closing (a CI log collector wedged on a full disk)
+    // would spin here forever, and a hung run reports nothing, burns the whole step timeout, and cannot be
+    // told from a slow one. After the budget we say so on fd 2 and drop the rest of THAT write. Not a
+    // throw: losing output is bad, hanging CI is worse — but it is not free either, so `dropped` turns the
+    // run red rather than letting a truncated dump exit 0.
+    const EAGAIN_BUDGET_MS = 5000;
+    const idle = new Int32Array(new SharedArrayBuffer(4));
+    let dropped = 0;
     const wr = (fd, text) => {
       if (!text) return;
       const buf = Buffer.from(text, 'utf8');
-      let off = 0;
-      try { while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off); }
-      catch (e) { if (e.code !== 'EPIPE') throw e; }
+      let off = 0, deadline = 0;
+      try {
+        while (off < buf.length) {
+          try { off += fs.writeSync(fd, buf, off, buf.length - off); deadline = 0; }
+          catch (e) {
+            if (e.code !== 'EAGAIN') throw e;
+            // Wall-clock deadline, not a retry count: Atomics.wait's 1 ms is a floor, so counting turns
+            // would cap at "5000 sleeps" and not at any particular amount of time.
+            if (deadline === 0) deadline = Date.now() + EAGAIN_BUDGET_MS;
+            else if (Date.now() >= deadline) {
+              dropped++;
+              // fd 2 may be wedged or closed for the same reason fd 1 is, so this is best-effort BY
+              // CONSTRUCTION — and it must not go through `wr`, or the report of a stalled write would
+              // be another stalled write.
+              try {
+                fs.writeSync(2, `test.mjs: gave up writing to fd ${fd} after ${EAGAIN_BUDGET_MS}ms of EAGAIN `
+                              + `— ${buf.length - off} of ${buf.length} bytes DROPPED (the reader is not draining).\n`);
+              } catch { /* nothing left to tell */ }
+              return;
+            }
+            Atomics.wait(idle, 0, 0, 1);   // the only synchronous sleep available here
+          }
+        }
+      } catch (e) { if (e.code !== 'EPIPE') throw e; }
     };
     let p = 0, f = 0, broke = 0;
     kids.forEach((k, i) => {
@@ -112,7 +234,14 @@ if (SHARD === null) {
     });
     wr(1, `\ntest: ${p} passed, ${f} failed  (${N} shards)\n`);
     if (broke) wr(1, `test: ${broke} shard(s) did not report cleanly — treating the run as FAILED\n`);
-    process.exit(f || broke ? 1 : 0);
+    // A dump this driver could not finish writing is a run whose report is INCOMPLETE, and an incomplete
+    // report that exits 0 is indistinguishable from a clean one — the same reason `broke` exists.
+    if (dropped) wr(1, `test: ${dropped} write(s) dropped on a stalled fd — the output above is INCOMPLETE\n`);
+    // The children's trees now live under a directory this process owns, so the parent has to honour the
+    // same keep-the-evidence rule the shards do: a failing shard printed paths into them (`  FAIL … /var/
+    // folders/…`), and sweeping on the way out would delete what those lines point at.
+    if (f || broke) keepOnFailure();
+    process.exit(f || broke || dropped ? 1 : 0);
   }
 }
 
@@ -1527,6 +1656,55 @@ if (blk()) {
           out.stdout.length > doc.length && out.stdout.endsWith(doc),
           `got ${out.stdout.length} chars, contract is ${doc.length}`);
   }
+}
+
+// ── 1d2. …and must not HANG when the reader stalls without closing ────────────────────────────────
+// The EPIPE arm covers the reader that LEFT. This is the reader that STAYED and stopped — an agent
+// harness holding the pipe open while it blocks, a log collector wedged on a full disk. The retry loop
+// was `while (off < buf.length)` with an unconditional 1ms sleep and no exit: it spun forever, and a
+// hung `--agents` cannot be told from a slow one. It reports nothing and burns the surrounding timeout.
+//
+// DRIVES THE REAL LOOP, not a copy of it — a FIFO opened O_NONBLOCK on the write end with a reader that
+// never reads, which is the only way to make writeSync actually raise EAGAIN. (`printAgents` takes its
+// fd and budget as parameters for exactly this; production passes neither.) Both halves are asserted:
+// the call RETURNS inside the budget, and it says on stderr that the contract is incomplete — a silent
+// give-up would be the same truncation-with-exit-0 this whole section exists to prevent.
+//
+// THE SECOND ASSERTION IS THE CALIBRATION. That diagnostic is reachable only from the branch this fix
+// added, past its deadline — the previous loop had no such message and no way out of the `while`. So the
+// row cannot pass against the old code by any route; it hangs instead. Worth saying, because the timing
+// assertion ALONE would go green on a machine where the write happened to land.
+if (blk()) {
+  const dir = scratch("candor-ts-eagain-");
+  const fifo = path.join(dir, "p");
+  spawnSync("mkfifo", [fifo]);
+  // A reader that opens and then sleeps: the FIFO needs an open read end or the non-blocking open of the
+  // write end fails with ENXIO, and it must never drain, or the write simply succeeds.
+  const reader = spawn("sh", ["-c", `exec 3<"${fifo}"; sleep 30`], { stdio: "ignore" });
+  let wfd = -1;
+  for (let i = 0; i < 200 && wfd < 0; i++) {
+    try { wfd = fs.openSync(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK); }
+    catch { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); }
+  }
+  if (wfd < 0) {
+    check("--agents stalled-reader guard: could not open the FIFO write end", false, "ENXIO — no reader attached");
+  } else {
+    const t0 = Date.now();
+    const errFd = fs.openSync(path.join(dir, "err"), "w");
+    const saved = fs.writeSync;
+    // Redirect only the guard's own fd-2 diagnostic into a file, so the assertion can read it.
+    fs.writeSync = (fd, ...rest) => saved.call(fs, fd === 2 ? errFd : fd, ...rest);
+    try { printAgents(wfd, 600); } finally { fs.writeSync = saved; fs.closeSync(errFd); }
+    const ms = Date.now() - t0;
+    const diag = fs.readFileSync(path.join(dir, "err"), "utf8");
+    check("--agents RETURNS when the reader stalls without closing (bounded EAGAIN retry)",
+          ms < 5000, `took ${ms}ms — the retry loop is unbounded again`);
+    check("…and says on stderr that the contract is INCOMPLETE",
+          /stalled at \d+ of \d+ bytes/.test(diag) && diag.includes("INCOMPLETE"),
+          `stderr was ${JSON.stringify(diag.slice(0, 120))}`);
+    fs.closeSync(wfd);
+  }
+  reader.kill("SIGKILL");
 }
 
 // ── 2b. `show` SURFACES the literal Fs paths + Exec cmds (the regression that shipped) ─────────────

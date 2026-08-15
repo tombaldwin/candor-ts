@@ -5,7 +5,10 @@ import { fileURLToPath } from "node:url";
 // The agent contract for THE INSTALLED VERSION — AGENTS.md ships in the npm tarball, so the doc and
 // engine cannot drift (the spec §2.1 version-trust rule applied to documentation). ONE implementation
 // used by both scan.mjs and query.mjs, so `--agents` output can never diverge within an install.
-export function printAgents() {
+// `fd` and `budgetMs` are parameters ONLY so the suite can drive this exact loop against a real
+// non-blocking fd. A guard that has never taken its own EAGAIN branch is a guard nobody has seen work,
+// and this file's whole history is failure modes that only appear on a pipe. Production passes neither.
+export function printAgents(fd = 1, budgetMs = 5000) {
   const dir = path.dirname(fileURLToPath(import.meta.url)); // the package root (where AGENTS.md ships)
   const semver = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")).version;
   const out = `<!-- candor-ts ${semver} · the agent contract for this installed version -->\n`
@@ -32,14 +35,41 @@ export function printAgents() {
   //            THROWS rather than short-writing as soon as the payload exceeds the 64 KiB pipe buffer.
   //            The contract is 24 KiB today, so this is latent, not live — and it would come back as
   //            exactly the truncation-plus-noise this function was written to remove. Retry with a
-  //            small backoff (Atomics.wait is the only synchronous sleep available here).
-  let off = 0;
+  //            small backoff (Atomics.wait is the only synchronous sleep available here) — BOUNDED, see
+  //            below.
+  //
+  // THE RETRY IS BOUNDED, and it was not. `while (off < buf.length)` with an unconditional 1 ms sleep
+  // spins FOREVER against a reader that stalls without ever closing — an agent harness that stops
+  // reading while holding the pipe open, a log collector wedged on a full disk. EPIPE is the case where
+  // the reader LEFT, and it is handled; this is the case where it stayed and stopped, and the two look
+  // nothing alike from here. A hung `--agents` cannot be told from a slow one: it reports nothing, and
+  // burns whatever timeout is around it. Both endings are bad, so pick the one that is legible — say so
+  // on fd 2, in the same words as the EPIPE arm, and stop.
+  //
+  // WHY THE SAME BUDGET AS test.mjs's DRIVER: this is the identical hazard on the identical primitive,
+  // and the fix went into the driver first while this one — the one an AGENT actually reads through a
+  // pipe — was left spinning. The sibling route, again, and this side is the user-facing half.
+  const EAGAIN_BUDGET_MS = budgetMs;
+  let off = 0, deadline = 0;
   const buf = Buffer.from(out, "utf8");
   const idle = new Int32Array(new SharedArrayBuffer(4));
   try {
     while (off < buf.length) {
-      try { off += fs.writeSync(1, buf, off, buf.length - off); }   // a short write is legal
-      catch (e) { if (e.code !== "EAGAIN") throw e; Atomics.wait(idle, 0, 0, 1); }
+      try { off += fs.writeSync(fd, buf, off, buf.length - off); deadline = 0; }   // a short write is legal
+      catch (e) {
+        if (e.code !== "EAGAIN") throw e;
+        // A wall-clock deadline, not a retry count: Atomics.wait's 1 ms is a FLOOR, so N turns is not N
+        // milliseconds of anything. Reset on every byte that lands, so a slow reader is never punished
+        // for being slow — only a stopped one runs the budget down.
+        if (deadline === 0) deadline = Date.now() + EAGAIN_BUDGET_MS;
+        else if (Date.now() >= deadline) {
+          try { fs.writeSync(2, `candor-ts: --agents output stalled at ${off} of ${buf.length} bytes `
+                              + `— the reader has not drained for ${EAGAIN_BUDGET_MS}ms. This contract is INCOMPLETE.\n`); }
+          catch { /* nothing left to tell */ }
+          return;
+        }
+        Atomics.wait(idle, 0, 0, 1);
+      }
     }
   } catch (e) {
     if (e.code !== "EPIPE") throw e;

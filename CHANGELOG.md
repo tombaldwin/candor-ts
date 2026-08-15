@@ -8,6 +8,35 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **`--agents` could HANG instead of truncating.** `contract.mjs`'s EAGAIN retry was
+  `while (off < buf.length)` with an unconditional 1 ms sleep and no way out, so a reader that stalls
+  *without closing* — an agent harness blocked while holding the pipe, a log collector wedged on a full
+  disk — spun forever. The EPIPE arm covers the reader that LEFT; this is the one that stayed and
+  stopped, and from inside the loop the two look nothing alike. A hung `--agents` reports nothing and
+  cannot be told from a slow one. Now bounded at 5 s, reset on every byte that lands (a slow reader is
+  never punished for being slow), and it says on stderr that the contract is INCOMPLETE rather than
+  giving up quietly — which would be the truncation-with-exit-0 that function was written to remove.
+  Covered by a test that drives the real loop against a FIFO opened `O_NONBLOCK` with a reader that
+  never reads; `printAgents(fd, budgetMs)` takes those two parameters only so the suite can reach it.
+- **The test driver's children outlived the parent.** SIGTERM to `node test.mjs --parallel` left every
+  shard alive with ppid 1, still scanning and still minting fixture trees nothing would sweep —
+  measured at 4 orphans and 69 leaked directories. Ctrl-C hid it, because a tty signals the whole
+  process group; a CI step timeout or a plain `kill` does not. Also measured on the way: **SIGTERM alone
+  does not kill a shard.** Installing a JS signal listener replaces the default die-disposition, and the
+  callback can only dispatch from the event loop — which a shard's 175 blocks of synchronous
+  `spawnSync` scans never reach. So the sweep handler that exists to stop the fixture-tree leak is what
+  makes the leaking process unkillable, and that is true of a plain `node test.mjs` too. TERM, a 500 ms
+  grace, then KILL what is left; the children's `TMPDIR` is now one parent-owned directory, so the
+  parent's sweep takes trees a SIGKILLed child could never sweep itself. 0 orphans, 0 trees.
+- **`--parallel=N` and `CANDOR_TEST_SHARDS` are validated.** `3.7` reached the children as
+  `--shard=0/3.7` and every shard exited 2, so the parent blamed the shards for a flag it wrote itself;
+  `abc`, `-4` and `0` fell back to the core count with nothing on stderr — an operator setting the
+  override precisely to stop an oversubscribed run got one, silently; `1e9` reached
+  `Array.from({length: 1e9})`. Whole numbers 1..64, usage error and exit 2 otherwise, in `--shard`'s
+  shape. An empty env var still reads as unset; an empty `--parallel=` does not.
+- The driver's own relay now bounds its EAGAIN retry the same way and turns the run RED if a write was
+  dropped — a dump it could not finish is an incomplete report, which is why `broke` exists.
+
 ## [0.28.2] — 2026-08-15
 
 _A cardinal-sin fix. 0.28.1's body-less-declaration pass reopened, in two shapes, the hole it was
