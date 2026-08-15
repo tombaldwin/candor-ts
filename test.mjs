@@ -6,7 +6,7 @@
  *
  * Run: node test.mjs
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +23,70 @@ const SPEC = (execFileSync(process.execPath, [path.join(HERE, "scan.mjs"), "--ve
   .match(/\(spec ([0-9.]+)\)/) ?? [])[1];
 if (!SPEC) throw new Error("could not derive the spec floor from `scan.mjs --version`");
 let pass = 0, fail = 0;
+// ── SHARDING ────────────────────────────────────────────────────────────────────────────────────────
+// `node test.mjs --shard=I/N` runs only the top-level blocks whose index ≡ I (mod N); `--parallel[=N]`
+// runs those shards as children and sums them. This file is 281s of the 346s `npm test` takes locally
+// and ~700 of CI's 884 — ~1,300 fixture scans at ~1.5s each, each paying for a fresh TypeScript program.
+// The blocks are already independent (`{}`-scoped, each minting its own temp tree), so the parallelism
+// was there to take. Nothing about what is asserted changes.
+//
+// THE BLOCK LIST IS PARSED, NOT PATTERN-MATCHED. The first attempt found top-level blocks with a regex
+// for a bare `{` at column 0, tracking backtick parity to skip fixture source. The parity desynced —
+// backticks appear in comments and ordinary strings too — and it reported 96 real blocks and 79 inside
+// template literals when the truth is 175 real ones. A third of the suite then ran in EVERY shard.
+// ci/shard-check.sh caught it; the regex could not have. The generator uses ts.createSourceFile.
+//
+// ROUND-ROBIN, not contiguous ranges: the expensive blocks cluster at the end (the ⟨0.28⟩ sink work
+// spawns far more scans than the early classifier rows), so splitting by position leaves one shard
+// carrying most of the cost.
+const SHARD = (() => {
+  const a = process.argv.find((x) => x.startsWith('--shard='));
+  if (!a) return null;
+  const m = /^(\d+)\/(\d+)$/.exec(a.slice('--shard='.length));
+  if (!m) { console.error(`test.mjs: --shard wants I/N, got '${a}'`); process.exit(2); }
+  const [i, n] = [Number(m[1]), Number(m[2])];
+  if (!(n > 0 && i >= 0 && i < n)) { console.error(`test.mjs: --shard=${i}/${n} out of range`); process.exit(2); }
+  return { i, n };
+})();
+let _blkIdx = 0;
+const blk = () => { const i = _blkIdx++; return !SHARD || i % SHARD.n === SHARD.i; };
+
+// The parent runs NO blocks: it dispatches and exits before the suite body is reached. Sharding lives
+// here rather than in a CI matrix because ci.yml runs `npm test` on purpose — enumerating stages in the
+// workflow is how the probe and mcp/watch suites once went silently missing from CI — and because a
+// developer gets the same speedup.
+if (SHARD === null) {
+  const pa = process.argv.find((x) => x === '--parallel' || x.startsWith('--parallel='));
+  if (pa) {
+    const want = pa.includes('=') ? Number(pa.split('=')[1]) : 0;
+    const N = want > 0 ? want : Math.max(2, Math.min(8, (os.cpus()?.length ?? 4) - 1));
+    // `spawn`, awaited together — NOT `spawnSync` in a map. The first version did exactly that and was
+    // sequential by construction (spawnSync blocks until the child exits), measuring 289s against 286s
+    // for the plain run. shard-check could not see it: the totals are identical whether the children
+    // run together or in a queue. Only the clock catches a parallel driver that is not parallel.
+    const kids = await Promise.all(Array.from({ length: N }, (_, i) => new Promise((res) => {
+      const c = spawn(process.execPath, [fileURLToPath(import.meta.url), `--shard=${i}/${N}`], { encoding: 'utf8' });
+      let out = '', err = '';
+      c.stdout.on('data', (d) => { out += d; });
+      c.stderr.on('data', (d) => { err += d; });
+      c.on('close', (status) => res({ stdout: out, stderr: err, status }));
+    })));
+    let p = 0, f = 0, broke = 0;
+    kids.forEach((k, i) => {
+      process.stdout.write(k.stdout ?? '');
+      if (k.stderr) process.stderr.write(k.stderr);
+      const m = /^test: (\d+) passed, (\d+) failed$/m.exec(k.stdout ?? '');
+      // A shard with no summary line did not finish. Counting it 0/0 would let a crashed child pass as
+      // an empty shard — the vacuous green this suite exists to reject.
+      if (!m) { broke++; console.log(`  FAIL shard ${i}/${N} produced no summary line (status ${k.status})`); return; }
+      p += Number(m[1]); f += Number(m[2]);
+    });
+    console.log(`\ntest: ${p} passed, ${f} failed  (${N} shards)`);
+    if (broke) console.log(`test: ${broke} shard(s) did not report — treating the run as FAILED`);
+    process.exit(f || broke ? 1 : 0);
+  }
+}
+
 function check(name, cond, detail = "") {
   if (cond) { pass++; console.log(`  ok   ${name}`); }
   else { fail++; console.log(`  FAIL ${name}  ${detail}`); }
@@ -50,7 +114,7 @@ function scan(dir, ...extra) {
 const entry = (rep, fn) => rep.functions.find((e) => e.fn === fn);
 
 // ── 1. multi-file: cross-file edges resolve and effects propagate ─────────────────────────────────
-{
+if (blk()) {
   const d = project({
     "src/db.ts": `import { DatabaseSync } from "node:sqlite";
 export function save(db: DatabaseSync): void { db.exec("INSERT INTO orders (id) VALUES (1)"); }`,
@@ -65,7 +129,7 @@ export function handle(db: DatabaseSync): void { save(db); }`,
 }
 
 // ── 2. arrow-const functions are analyzed (the rimraf gap) ────────────────────────────────────────
-{
+if (blk()) {
   const d = project({
     "src/a.ts": `import * as fsm from "node:fs";
 export const readIt = (p: string) => fsm.readFileSync("/etc/app/x");
@@ -79,7 +143,7 @@ export const wrap = () => readIt("y");`,
 }
 
 // ── 2b. SETUP split (⟨0.19⟩, SPEC §6.2 §3): a declared-but-uninstalled dep tags no-node_modules (setup) ──
-{
+if (blk()) {
   const d = project({
     "package.json": `{ "name": "demo", "dependencies": { "left-pad": "^1.0.0" } }`,
     "src/app.ts": `import leftPad from "left-pad";
@@ -105,7 +169,7 @@ export function pad2(s: string) { return lp.default(s, 10); }`,
 // minted the SAME `mod.persist` key; the second `fns.set` clobbered the first, and the checker-resolved
 // LOCAL edge then read the module unit's Fs off the shared entry — FABRICATED onto a pure caller. Found
 // by the cross-engine review of candor-rust's qself/macro phantom-edge class (same class, different repo).
-{
+if (blk()) {
   const d = project({
     "src/a.ts": `import * as fsm from "node:fs";
 export const persist = (msg: string): void => { fsm.writeFileSync("/tmp/x", msg); };
@@ -126,7 +190,7 @@ export function handler(): void {
 // edge dropped silent-pure (the cardinal sin). FIX = follow the alias to the real fn unit (recovers the
 // edge, like the direct `effectful.call(…)` form); an unresolvable holder discloses Unknown; a PURE local
 // var stays pure (no fabrication). Controls below pin all three boundaries.
-{
+if (blk()) {
   const d = project({
     "src/a.ts": `import { writeFileSync } from "fs";
 function effectful(p: string) { writeFileSync(p, "x"); }
@@ -169,7 +233,7 @@ export function viaParam(fn: Function, p: string) { const m = fn; m.call(null, p
 // `.bind` is the missing third member of the `.call`/`.apply` reflective-invoke family. FIX = unwrap the
 // `.bind` chain to the root receiver and resolve it to its fn unit (recovers the precise effect); an
 // unresolvable receiver discloses Unknown; a `.bind` on a PURE fn stays pure (no fabrication).
-{
+if (blk()) {
   const d = project({
     "src/a.ts": `import { writeFileSync } from "fs";
 import { execSync } from "child_process";
@@ -224,7 +288,7 @@ export function bindUnresolvable(){ setTimeout(getCb().bind(null), 0); }`,
 // sin). FIX = resolve the operand's type's coercion member via the checker, edge to it when LOCAL.
 // NO FABRICATION: a PURE coercion member edges a pure unit; string+string / number+number / String(42) /
 // JSON.stringify of a plain object (no toJSON) resolve to no LOCAL member → stay pure.
-{
+if (blk()) {
   const d = project({
     "src/a.ts": `import * as fsm from "node:fs";
 class Eff {
@@ -298,7 +362,7 @@ export function plainJson(): string { return JSON.stringify({ a: 1 }); }`,
 // interfaceImpls / classDescendants indexes ordinary dispatch already uses), and model the named
 // stringifying sinks. NO FABRICATION: a string/number/plain-object/library-typed operand, or a type
 // with no LOCAL coercion member, resolves to nothing and contributes nothing.
-{
+if (blk()) {
   const d = project({
     "src/a.ts": `import * as fsm from "node:fs";
 interface Entry { state(): number; }
@@ -377,7 +441,7 @@ export function pureJoinStrings(xs: string[]): string { return xs.join("/"); }`,
 // A logging level-method on an EXTERNAL receiver (pino/winston/bunyan) formats its arguments, running
 // the argument's toString/toJSON inside the library — the exact shape the vein was found on. A LOCAL
 // logger is NOT treated as a sink: its body is walked, so its stringification is already ordinary code.
-{
+if (blk()) {
   const d = project({
     "src/a.ts": `import * as fsm from "node:fs";
 import { logger } from "extlogger";
@@ -413,7 +477,7 @@ export declare const logger: Logger;`,
 // It was GATE-level, not report-level: `deny Fs` went exit 1 (correct) → exit 0 (a false all-clear) on
 // identical source. Both halves are pinned here: the chained join recovers the effect, and the
 // UNCHAINED scan discloses the package instead of claiming purity.
-{
+if (blk()) {
   const depSrc = `import * as fsm from "node:fs";
 export class Entry {
   toString(): string { fsm.appendFileSync("/tmp/x", "s"); return "e"; }
@@ -493,7 +557,7 @@ export declare class Plain { label(): string; }`,
 // `decl.name`, and a ConstructorDeclaration has no name, so the tail was null and the lookup skipped;
 // the implicit-ctor arm (no resolved declaration at all) never consulted the chain either. An effectful
 // dependency constructor was absorbed silently at every `new` across the boundary.
-{
+if (blk()) {
   const depSrc = `import * as fsm from "node:fs";
 export class Boot { constructor() { fsm.appendFileSync("/tmp/x", "b"); } }
 export class Lazy { x: string = fsm.readFileSync("/tmp/y", "utf8"); }
@@ -541,7 +605,7 @@ export declare class Idle { label(): string; }`,
 // grounds that "dep calls flow through the κ/invisible channel" — and that channel is the CallExpression
 // handler, which a by-reference pass never enters. The result was silent-pure on BOTH sides of the
 // boundary: no effect chained, no disclosure unchained.
-{
+if (blk()) {
   const depSrc = `import * as fsm from "node:fs";
 export function writeIt(x: string): void { fsm.appendFileSync("/tmp/x", x); }
 export function pureIt(x: string): string { return x.trim(); }
@@ -769,7 +833,7 @@ export function viaIterableParam0(s: Set<string>): boolean { return every(s, wri
 // The failure lever is the ordinary published shape, not a contrivance: the file walk excludes `*.d.ts`
 // and `*.min.js`, so a package shipping typings plus a minified bundle exits 2 on "no TypeScript
 // sources" while still RESOLVING for its consumer. Measured on five real packages in the A/B corpus.
-{
+if (blk()) {
   const appFiles = {
     "package.json": `{"name":"t2app","version":"1.0.0","dependencies":{"stalekit":"1.0.0"}}`,
     "src/m.ts": `import { hot } from "stalekit";
@@ -835,7 +899,7 @@ export function useHot(): void { hot("x"); }`,
 // `.candor/deps/` is the dir `--workspace` writes AND the dir users point `CANDOR_DEPS` at, so both
 // directions have to hold here at once: a failed path dep's stale report must go, and a hand-placed
 // report for a non-path dependency must survive AND still chain.
-{
+if (blk()) {
   const app = project({
     "package.json": `{"name":"wapp","version":"1.0.0"}`,
     "src/m.ts": `import { pull } from "handdep";
@@ -906,7 +970,7 @@ export function run(): void { fsm.appendFileSync("/tmp/sib", "x"); }`,
 // THE CONTROL IS THE COLD ARM, and it is what makes this a cache defect rather than a limitation: the
 // same source with no cache at all must give the same answer as the same source with one. A cache that
 // changes the verdict is the whole bug, in either direction.
-{
+if (blk()) {
   const mkWorkspace = (ifaceForm) => {
     // The path dep at the far end. Two shapes, because they fail in OPPOSITE directions.
     const liba = project(ifaceForm ? {
@@ -1043,7 +1107,7 @@ export function callB(): void { useB(); }`,
 // string, and they were two spellings of one derivation: the writer took `report.package` on trust,
 // `failedDepName` required a non-empty STRING. A manifest whose `name` is not a string makes them
 // disagree — and the sweep is the unrecoverable direction.
-{
+if (blk()) {
   const mkOwn = (manifestName) => {
     const dep = project({
       "package.json": `{"name":${manifestName},"version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
@@ -1137,7 +1201,7 @@ export function useW(): void { w(); }`,
 // java and rust (candor-rust `dbab8be`) both fail closed here; ts and swift did not. Coverage is the
 // claim that an ABSENT entry is the dep's own purity claim (SPEC §2 rule 3), so an unreadable
 // completeness claim must buy nothing — the posture this file already takes on a malformed `inferred`.
-{
+if (blk()) {
   const depDir = project({ "package.json": `{"name":"mkit","version":"1.0.0"}`,
     "src/index.ts": `import * as fsm from "node:fs";
 export function loud(): void { fsm.appendFileSync("/tmp/m", "x"); }
@@ -1187,7 +1251,7 @@ export declare function quiet(): string;`,
 // while the dependency's own report read `ifacekit#Client.fetch -> ['Fs']`.
 // Third conjunct: only when the dependency is CHAINED. Unchained, the κ ledger already discloses
 // `invisible: [pkg]` and a second voice would be pure false uncertainty.
-{
+if (blk()) {
   const depSrc = `import * as fsm from "node:fs";
 export interface Fetcher { fetch(): string; }
 export class Client implements Fetcher { fetch(): string { return fsm.readFileSync("/etc/x", "utf8"); } }
@@ -1300,7 +1364,7 @@ export function useFetcher(): string { return build().fetch(); }` });
 // declarations while its 61 `.js` implementation files are never analyzed, so `deny Unknown` exited 0
 // where rust, java and swift all exit 1 on the same input. The fix charges the DECLARATION (java's
 // shape) and lets the existing fixpoint carry it caller-ward.
-{
+if (blk()) {
   const src = `import * as fsm from "node:fs";
 declare function ambient(u: string): string;
 export function callsAmbient(): string { return ambient("u"); }
@@ -1407,7 +1471,7 @@ export class I extends B { h(): void {} }`,
 // existing contract test caught it only because execFileSync uses a pipe; a shell redirect to a FILE
 // writes synchronously and looked fine. Assert the byte count through a pipe explicitly, so a future
 // regression names the cause rather than failing an equality over 23k characters.
-{
+if (blk()) {
   const doc = fs.readFileSync(path.join(HERE, "AGENTS.md"), "utf8");
   for (const bin of ["scan.mjs", "query.mjs"]) {
     const out = spawnSync("node", [path.join(HERE, bin), "--agents"], { encoding: "utf8", maxBuffer: 1 << 26 });
@@ -1421,7 +1485,7 @@ export class I extends B { h(): void {} }`,
 // scan writes the surface under report keys `paths`/`cmds`; `show` once read a nonexistent `e.fs`, so
 // it silently dropped every file path even though the MCP `candor_show` doc promises "paths". The CLI
 // had its own drifted copy that ALSO dropped `cmds`. One shared show now feeds both; assert it surfaces.
-{
+if (blk()) {
   const d = project({
     "src/io.ts": `import * as fsm from "node:fs";
 import { execSync } from "node:child_process";
@@ -1438,7 +1502,7 @@ export function runIt() { return execSync("ls -la"); }`,
 }
 
 // ── 3. the standing gate: deny + allow + forbid, exit codes ───────────────────────────────────────
-{
+if (blk()) {
   const d = project({
     "src/db.ts": `import { DatabaseSync } from "node:sqlite";
 export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v = 1"); }`,
@@ -1463,7 +1527,7 @@ export function place(db: DatabaseSync): void { save(db); }`,
 // `deny Fs app` against namespace layers was silently inert while the same policy bit on directory
 // layers. The fix is in the NAMING (report-affecting: `fn` gains the namespace segments); the §2
 // hash keeps the bare local name so cross-package report chaining is unaffected.
-{
+if (blk()) {
   const d = project({
     "src/a.ts": `import * as fsm from "node:fs";
 export namespace repo {
@@ -1515,7 +1579,7 @@ export namespace outer {
 // scopes that must exclude uncertainty (AS-EFF-003's concern). candor-ts wrongly counted an
 // Unknown-only fn as a `pure` violation until 2026-07-09 — a cross-engine verdict split on the same
 // policy. Effectful fns still trip `pure`; deny Unknown still fires.
-{
+if (blk()) {
   const d = project({
     "src/u.ts": `export function entry(f: () => void): void { f(); }`,
     "src/e.ts": `import * as fsm from "node:fs";\nexport function writer(): void { fsm.writeFileSync("/x", "1"); }`,
@@ -1535,7 +1599,7 @@ export namespace outer {
 }
 
 // ── 3a. --json: stdout is the §2 envelope and stays PURE JSON — even with a firing policy gate ──────
-{
+if (blk()) {
   const d = project({
     "src/db.ts": `import { DatabaseSync } from "node:sqlite";
 export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v = 1"); }`,
@@ -1564,7 +1628,7 @@ export function place(db: DatabaseSync): void { save(db); }`,
 }
 
 // ── 3c. --gate-json ⟨0.8⟩: the structured gate verdict, faithful to the exit code ───────────────────
-{
+if (blk()) {
   const d = project({
     "src/db.ts": `import { DatabaseSync } from "node:sqlite";
 export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v = 1"); }`,
@@ -1601,7 +1665,7 @@ export function place(db: DatabaseSync): void { save(db); }`,
 // COVERAGE-DESIGN.md §3: when the κ ledger is non-empty the verdict gains `coverage: {uncovered: N,
 // packages: [...]}` — VERDICT-PRESERVING (the ⟨0.9⟩ provable-purity auto-disclosure precedent): ok /
 // violations / exit are identical with or without it, on both a failing and a passing gate.
-{
+if (blk()) {
   const stub = {
     "node_modules/blinddep/package.json": `{"name":"blinddep","version":"0.0.0","main":"index.js","types":"index.d.ts"}`,
     "node_modules/blinddep/index.d.ts": `export declare function poke(): string;`,
@@ -1645,7 +1709,7 @@ export function save(db: DatabaseSync): void { poke(); db.exec("UPDATE customers
 // (b) a syntactically-broken .ts is disclosed in the report's `unanalyzed` (was stderr-only); (c) a
 // CONFIGURED gate over it fails closed — verdict {ok:false, incomplete:true, unanalyzed:[…]} + exit 2 (a
 // real violation still dominates at exit 1); (d) the digest is stable across a same-input re-scan.
-{
+if (blk()) {
   const d = project({
     "src/good.ts": `export function pureAdd(x: number, y: number): number { return x + y; }
 export async function fetchIt(u: string): Promise<Response> { return fetch(u); }`,
@@ -1696,7 +1760,7 @@ export async function fetchIt(u: string): Promise<Response> { return fetch(u); }
 }
 
 // ── 3d. --gate-json robustness: unwritable path never crashes; `-` keeps stdout pure ────────────────
-{
+if (blk()) {
   const d = project({
     "src/db.ts": `import { DatabaseSync } from "node:sqlite";
 export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v = 1"); }`,
@@ -1717,7 +1781,7 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
 }
 
 // ── 3e. .candor/config (§config): target-anchored, env-overridden, fail-closed ─────────────────────
-{
+if (blk()) {
   const d = project({
     "src/db.ts": `import { DatabaseSync } from "node:sqlite";
 export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v = 1"); }`,
@@ -1778,7 +1842,7 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
 }
 
 // ── 3f. diff/gains disclose a producing-build mismatch (§2.1 — baseline-invalidation) ──────────────
-{
+if (blk()) {
   const d = scratch("candor-basever-");
   fs.writeFileSync(path.join(d, "cur.json"), JSON.stringify({ candor: { version: "bbbbbbb", spec: "0.23" },
     functions: [{ fn: "a.leaf", inferred: ["Net", "Log"], direct: ["Net", "Log"] }] }));
@@ -1800,7 +1864,7 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
 }
 
 // ── 3b. single-dash unknown flag is rejected (NOT read as a positional target) ──────────────────────
-{
+if (blk()) {
   const bad = spawnSync("node", [path.join(HERE, "scan.mjs"), "-policy", "/nonexistent-xyz"], { encoding: "utf8" });
   check("a single-dash unknown flag (`-policy`) exits 2 as an unknown flag, not a scan target",
         bad.status === 2 && bad.stderr.includes("unknown flag -policy"), bad.stderr.slice(0, 120));
@@ -1808,7 +1872,7 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
 
 // ── masking evasion (the cross-engine HIGH): a benign captured host must NOT certify an invisible
 // runtime-host reach; a use-call (write) after a captured connect host must NOT false-positive ──────
-{
+if (blk()) {
   const d = project({
     "src/m.ts": `import https from "https";
 import { connect } from "net";
@@ -1825,7 +1889,7 @@ export function cleanFn(): void { const s = connect(443, "benign.com"); s.write(
 
 // ── sweep 2026-06-17: masking generalized to all 4 effects; establishing-set; fabrication; setters;
 // disclosure; bare-CR. Each guards a confirmed, reproduced finding. ───────────────────────────────
-{
+if (blk()) {
   // [11] masking is NOT Net-only: an Fs runtime-path / Exec runtime-command masked by a benign literal
   // must fail closed; [12] dgram.send (UDP) is host-establishing.
   const d = project({
@@ -1846,7 +1910,7 @@ export function maskUdp(h: string): void { const s = dgram.createSocket("udp4");
   check("masking [12]: dgram.send UDP runtime host fails closed",
         scan(d, "--policy", path.join(d, "pol.net")).r.stdout.includes("src.m.maskUdp"));
 }
-{
+if (blk()) {
   // [9] net-cluster fabrication: pure config/metadata members are NOT Net.
   const d = project({
     "src/f.ts": `import * as tls from "node:tls";
@@ -1858,7 +1922,7 @@ export function validate(n: string) { return http.validateHeaderName(n); }`,
   check("[9] tls.getCiphers is pure (not fabricated Net)", !entry(report, "src.f.ciphers"));
   check("[9] http.validateHeaderName is pure (not fabricated Net)", !entry(report, "src.f.validate"));
 }
-{
+if (blk()) {
   // [10] compound/logical assignment invokes the setter; [32] destructuring-assignment target.
   const d = project({
     "src/s.ts": `import * as fs from "node:fs";
@@ -1873,14 +1937,14 @@ export function read(c: C) { return c.count; }`,
   check("[10] logical-assign (??=) invokes the effectful setter", entry(report, "src.s.coalesce")?.inferred.includes("Fs"));
   check("[32] destructuring-assign target invokes the setter", entry(report, "src.s.destr")?.inferred.includes("Fs"));
 }
-{
+if (blk()) {
   // [31] a local `process` shadow must NOT fabricate Ipc/Clock by callee text.
   const d = project({
     "src/p.ts": `export function f() { const process = { send: (x: number) => x + 1 }; return process.send(41); }`,
   });
   check("[31] local process shadow does not fabricate Ipc", !entry(scan(d).report, "src.p.f"));
 }
-{
+if (blk()) {
   // [13] implicit-ctor blind class: `new Pool()` from an unmodeled pkg discloses `invisible`, not plain pure.
   const d = project({
     "node_modules/unmodeled-pkg/package.json": `{ "name": "unmodeled-pkg", "version": "1.0.0", "types": "index.d.ts", "main": "index.js" }`,
@@ -1893,7 +1957,7 @@ export function read(c: C) { return c.count; }`,
   check("[13] blind-class construction discloses invisible (not silent-pure)",
         f && (f.invisible ?? []).includes("unmodeled-pkg"), JSON.stringify(f));
 }
-{
+if (blk()) {
   // [17] bare-CR policy: a multi-rule classic-Mac policy must not collapse to rule 1.
   const d = project({
     "src/h.ts": `import * as cp from "node:child_process";\nexport function hop() { cp.execSync("ls"); }`,
@@ -1905,7 +1969,7 @@ export function read(c: C) { return c.count; }`,
 }
 
 // ── 4. honest Unknown: a callback parameter never reads pure ──────────────────────────────────────
-{
+if (blk()) {
   const d = project({
     "src/cb.ts": `export function run(f: () => void): void { f(); }`,
   });
@@ -1915,7 +1979,7 @@ export function read(c: C) { return c.count; }`,
 }
 
 // ── 5. tsconfig project discovery + test exclusion ────────────────────────────────────────────────
-{
+if (blk()) {
   const d = project({
     "tsconfig.json": `{"compilerOptions": {"strict": true}, "include": ["src", "test"]}`,
     "src/x.ts": `import * as fsm from "node:fs";
@@ -1930,7 +1994,7 @@ export function harness(): void { fsm.rmSync("/danger"); }`,
 }
 
 // ── 6. class arrow-properties + constructors are units (the got dogfood holes) ───────────────────
-{
+if (blk()) {
   const d = project({
     "src/h.ts": `import * as fsm from "node:fs";
 export class Handler {
@@ -1952,7 +2016,7 @@ export function boot(): Handler { return new Handler(); }`,
 }
 
 // ── 7. callback_named: all-named call sites resolve; an opaque one keeps Unknown ─────────────────
-{
+if (blk()) {
   const d = project({
     "src/cb.ts": `import * as fsm from "node:fs";
 export function effectful(): void { fsm.readFileSync("/x"); }
@@ -1974,7 +2038,7 @@ export function c(f: () => void): void { invokeOpaque(f); }`,
 }
 
 // ── 8. field initializers attribute to the constructor (the silent-pure hole) ────────────────────
-{
+if (blk()) {
   const d = project({
     "src/f.ts": `import * as fsm from "node:fs";
 export class Config {
@@ -2000,7 +2064,7 @@ export function make(): Implicit { return new Implicit(); }`,
 // scanned as functions:[] → a false "pure" verdict that a `deny Llm`/`deny Fs` gate PASSED). The
 // module body is the file's own initializer — the field-init `Class.constructor` synthesis one level
 // up. Minted LAZILY, unitKind "initializer" (spec §2, java's `<clinit>` twin). ──────────────────
-{
+if (blk()) {
   const d = project({
     "src/tla.ts": `const r = await fetch("https://api.openai.com/x"); export { r };`,
     "src/fsmod.ts": `import { readFileSync } from "node:fs";\nconst c = readFileSync("/etc/x"); export { c };`,
@@ -2043,7 +2107,7 @@ export function make(): Implicit { return new Implicit(); }`,
 // away — a false all-clear found on real code (candor-spec SOUNDNESS-VEIN-initializer-edge.md); the JVM
 // engine has had the equivalent GETSTATIC→<clinit> edge all along. Only specifiers resolving INSIDE the
 // scanned set get an edge, so both ends are analyzed and no `Unknown` is invented. ──────────────────
-{
+if (blk()) {
   const d = project({
     "src/dep.ts": `export const dbg = process.env.NODE_DEBUG || "";`,
     "src/app.ts": `import { dbg } from "./dep";\nexport const n = 1;`,
@@ -2118,7 +2182,7 @@ export function make(): Implicit { return new Implicit(); }`,
 // advisory — while the PUBLISHED-package form of the SAME code disclosed correctly. In a monorepo that
 // made every cross-package reach read confidently pure. Both shapes are asserted side by side so they
 // can never drift apart again.
-{
+if (blk()) {
   const wsdepSrc = { "package.json": JSON.stringify({ name: "wsdep", version: "0.0.0", main: "dist/index.js", types: "dist/index.d.ts" }),
                      "dist/index.d.ts": `export declare class Entry { toString(): string; }\nexport declare function writeIt(x: string): void;\n`,
                      "dist/index.js": `"use strict";\nconst fs = require("fs");\nexports.writeIt = (x) => fs.writeFileSync("/tmp/w", x);\n` };
@@ -2157,7 +2221,7 @@ export function make(): Implicit { return new Implicit(); }`,
 }
 
 // ── 9. ambient builtins + crypto tier + the missing-deps warning (CTA dogfood) ───────────────────
-{
+if (blk()) {
   const d = project({
     "src/a.ts": `export function slugish(): number { return Math.random(); }
 export function stamp(): Date { return new Date(); }
@@ -2169,7 +2233,7 @@ export function parsed(): Date { return new Date("2020-01-01"); }`,
   check("new Date(string) is parsing, not Clock", entry(report, "src.a.parsed") == null,
         JSON.stringify(entry(report, "src.a.parsed")));
 }
-{
+if (blk()) {
   // covered-module precision: crypto's generateKeyPair*/generateKey*/generatePrime* draw from the CSPRNG
   // just like random* — they read silent-pure before being modeled (the κ-coverage floor can't tell an
   // unmodeled entropy draw from a pure unmodeled member; the fix is to MODEL the member).
@@ -2182,7 +2246,7 @@ export function prime() { return crypto.generatePrimeSync(256); }`,
   check("crypto.generateKeyPairSync -> Rand", entry(report, "src.k.keypair")?.inferred.includes("Rand"));
   check("crypto.generatePrimeSync -> Rand", entry(report, "src.k.prime")?.inferred.includes("Rand"));
 }
-{
+if (blk()) {
   const d = project({
     "package.json": `{"dependencies": {"left-pad": "1.0.0"}}`,
     "src/x.ts": `export function f(): number { return 1; }`,
@@ -2190,7 +2254,7 @@ export function prime() { return crypto.generatePrimeSync(256); }`,
   const { r } = scan(d);
   check("missing node_modules warns LOUDLY", r.stderr.includes("WARNING") && r.stderr.includes("npm install"));
 }
-{
+if (blk()) {
   // Regression for the 0.9 dogfood trap (scanning `zx/src`): a SUBDIR scan of a project whose manifest is
   // one level up, whose deps are devDependencies (npm install fetches those too), and with no node_modules —
   // must STILL warn. Before: the check only looked at <scanRoot>/package.json's `dependencies`, so this read
@@ -2202,7 +2266,7 @@ export function prime() { return crypto.generatePrimeSync(256); }`,
   const { r } = scan(path.join(d, "src"));
   check("subdir scan (devDeps, no node_modules) still warns", r.stderr.includes("WARNING") && r.stderr.includes("npm install"));
 }
-{
+if (blk()) {
   // κ-batch from the 0.9 dogfood on zx (source-verified): which -> Fs (PATH stat via isexe), @webpod/ps ->
   // Exec (spawns the OS ps/kill), envapi member-precise (load/config READ the .env file -> Fs; parse/
   // stringify are pure string transforms). The `parse` PURE assert is the fabrication guard — the argon2
@@ -2238,7 +2302,7 @@ export function parseEnv(s: string) { return parse(s); }`,
 
 // ── coverage calibration: effectful npm packages the differential found disclosed-but-unmodeled ───
 // Each: the effect-bearing API → its effect, AND a PURE API of the SAME package → pure (no fabrication).
-{
+if (blk()) {
   const pkg = (name, types) => ({
     [`node_modules/${name}/package.json`]: `{"name":"${name}","types":"index.d.ts","main":"index.js"}`,
     [`node_modules/${name}/index.d.ts`]: types,
@@ -2462,7 +2526,7 @@ export function ctx(l: WinstonLogger) { l.setContext("svc"); }`,
 }
 
 // ── 10. @Entity decorator names feed the tables surface (the TypeORM declarative move) ──────────
-{
+if (blk()) {
   const d = project({
     "node_modules/typeorm/index.d.ts": `export declare function Entity(name?: string): ClassDecorator;
 export declare class Repository<T> { find(): Promise<T[]>; save(e: T): Promise<T>; }`,
@@ -2484,7 +2548,7 @@ export class Svc {
 }
 
 // ── ⟨0.13⟩ Llm: model-host refinement + model-SDK surface + the deny/allow gate (SPEC §1) ───────────
-{
+if (blk()) {
   // (a) HOST-LITERAL refinement: a known model host → Net + Llm; an unknown host stays bare Net.
   const d = project({
     "src/m.ts": `export async function ask() { return fetch("https://api.anthropic.com/v1/messages", { method: "POST" }); }
@@ -2725,7 +2789,7 @@ export async function complete() { return client.invoke("hello"); }`,
 }
 
 // ── ⟨0.13⟩ Llm: a MASKED host on a model-reaching fn fails the allow-Llm surface closed (parity #3) ─
-{
+if (blk()) {
   // The fn reaches a KNOWN model host (Llm is inferred) AND a runtime host (masks the Net surface). A
   // benign visible model literal must NOT certify `allow Llm` — the incomplete Net surface fails it
   // closed, exactly as java's incompleteAsLlm re-keys a Net-incomplete surface onto Llm (parity #3).
@@ -2743,7 +2807,7 @@ export async function complete() { return client.invoke("hello"); }`,
 }
 
 // ── 11. cross-package inheritance (CANDOR_DEPS, spec §2 hash) ─────────────────────────────────────
-{
+if (blk()) {
   // the DEPENDENCY, scanned from source — its report carries hashes (pkg#LocalName)
   const dep = project({
     "package.json": `{"name": "billing-lib"}`,
@@ -2808,7 +2872,7 @@ export function buy(): void { charge(100); }`,
 // `e66f29e` shipped a union entry carrying `inferred:['Unknown']` with `unresolved` absent — a TIER-1
 // marker reading FALSE on an entry that was not resolved, live on all seven of rxjs's unions. Two
 // independent producers derive that marker. This asserts the property rather than re-checking the two.
-{
+if (blk()) {
   const d = project({
     "package.json": `{"name":"markers"}`,
     "src/a.ts": `import * as netm from "node:net";
@@ -2855,7 +2919,7 @@ export class MemStore implements Store { save(p: string): void { netm.connect(44
 // ⟨0.6⟩ makes `unknownWhy` DIRECT-ONLY, so a dependency's exported function publishes `Unknown` with no
 // reason whenever the unresolvable call is one hop further in. The consumer then falls back to
 // `unresolved`, and `deny Unknown[reflect]` reads green one package boundary along.
-{
+if (blk()) {
   const pol = (dir, body) => { const p = path.join(dir, "p.policy"); fs.writeFileSync(p, body); return p; };
   // pkgc: the Unknown ORIGIN is a LOCAL callee; the EXPORT a consumer joins only inherits it.
   const c = project({
@@ -3059,7 +3123,7 @@ export function wrap(): void { (opaque as any)(); }`,
 // §2 rule 3 turns a report's silence into a purity claim. A report carrying `unanalyzed` has just said it
 // never read some of its own source, so its silence about that source answers nothing — the same split
 // `651c9f9` made for a report that fails the §2.1 version check, through a different door.
-{
+if (blk()) {
   const pol = (dir, body) => { const p = path.join(dir, "p.policy"); fs.writeFileSync(p, body); return p; };
   const mkApp = (name) => project({
     "package.json": `{"name":"${name}","dependencies":{"holedep":"1.0.0"}}`,
@@ -3218,7 +3282,7 @@ export function wrap(): void { (opaque as any)(); }`,
 // that happened to hedge differently. The count-n arm beside it is a CONTROL, not decoration — both prior
 // engines report that keying the rule on the emptiness of `functions` fails the control while the count-0
 // row stays GREEN, so the FLOOR arm alone cannot catch the destructive fix.
-{
+if (blk()) {
   const pol = (dir, body) => { const p = path.join(dir, "p.policy"); fs.writeFileSync(p, body); return p; };
   const dep = project({
     "package.json": `{"name":"ratesdep"}`,
@@ -3406,7 +3470,7 @@ export function calc(a: number): number { return a + 1; }`,
 // A trust marker failing OPEN at the scan boundary: `hosts` is a LOWER bound and `netClass`'s
 // `unknown-host` is the producer's published judgment that it is one. The join copied the literals and
 // not the judgment, so the consumer re-derived `netClass` from a partial surface and certified it.
-{
+if (blk()) {
   const pol = (dir, body) => { const p = path.join(dir, "p.policy"); fs.writeFileSync(p, body); return p; };
   // THE SECOND FIXTURE, WRITTEN FIRST (standing bar item 0): a dep whose Net surface is COMPLETE must NOT
   // pick up `unknown-host` at the consumer. Without this control the fix is indistinguishable from
@@ -3503,7 +3567,7 @@ export function both(w: string): void { netm.connect(443, "sentry.io"); send(w);
 }
 
 // ── 12. entry points + reachable + unknownWhy + allow-js + import-alias edges ────────────────────
-{
+if (blk()) {
   const d = project({
     "tsconfig.json": `{"compilerOptions":{"strict":true,"experimentalDecorators":true},"include":["src","app"]}`,
     "src/deco.d.ts": `declare global { function __noop(): void; }
@@ -3549,7 +3613,7 @@ export function GET(): void { netm.connect(443, "api.x.com"); }`,
         ppBad.status === 2 && /could not be read/.test(ppBad.stderr) && !/Error:|at /.test(ppBad.stderr),
         `status=${ppBad.status} ${ppBad.stderr.slice(0, 160)}`);
 }
-{
+if (blk()) {
   const d = project({
     "src/u.ts": `export function launder(x: unknown): void { (x as any)(); }
 export function recv(cb: () => void, other: string): void { cb(); }`,
@@ -3562,7 +3626,7 @@ export function recv(cb: () => void, other: string): void { cb(); }`,
         entry(report, "src.u.recv")?.unknownWhy?.includes("callback:param#0"),
         JSON.stringify(entry(report, "src.u.recv")));
 }
-{
+if (blk()) {
   const d = project({
     "src/x.js": `import * as fsm from "node:fs";
 export function jsRead() { return fsm.readFileSync("/x"); }`,
@@ -3571,7 +3635,7 @@ export function jsRead() { return fsm.readFileSync("/x"); }`,
   check("--allow-js analyzes JS sources", entry(report, "src.x.jsRead")?.inferred.includes("Fs"),
         JSON.stringify(report?.functions));
 }
-{
+if (blk()) {
   const d = project({
     "src/e.ts": `import * as fsm from "node:fs";
 export class Loader { cfg = fsm.readFileSync("/cfg"); }`,
@@ -3586,7 +3650,7 @@ export function boot(): Loader { return new Loader(); }`,
 }
 
 // ── κ-coverage ledger: an unlisted npm package the code calls is NAMED in the receipt ─────────────
-{
+if (blk()) {
   const stub = (name, member) => ({
     [`node_modules/${name}/package.json`]: `{"name":"${name}","version":"0.0.0","main":"index.js","types":"index.d.ts"}`,
     [`node_modules/${name}/index.d.ts`]: `export declare function ${member}(s: string): string;`,
@@ -3630,7 +3694,7 @@ export function go(): string { fsm.readFileSync("/x"); chunk("ab"); return pad("
 // The counts are EQUAL (one call each) on purpose: the primary key is count-descending, so equal counts
 // are what hand the decision to the name comparator. With unequal counts this fixture would pass under
 // `localeCompare` and pin nothing.
-{
+if (blk()) {
   const stub = (name) => ({
     [`node_modules/${name}/package.json`]: `{"name":"${name}","version":"0.0.0","main":"index.js","types":"index.d.ts"}`,
     [`node_modules/${name}/index.d.ts`]: `export declare function go(s: string): string;`,
@@ -3675,7 +3739,7 @@ export function run(): string { return gz("a") + gt("b"); }`,
 // ⟨0.15 staged⟩ the coverage envelope is OMITTED when nothing is uncovered — a fully-covered report is
 // byte-identical to a ⟨0.14⟩ one (the wire-compatibility half of the rung), and an UNRESOLVABLE import
 // keeps the stronger `Unknown` posture without joining the ledger (no node_modules path to count).
-{
+if (blk()) {
   const d = project({
     "src/c.ts": `import * as fsm from "node:fs";
 export function covered(): Buffer { return fsm.readFileSync("/x"); }`,
@@ -3703,7 +3767,7 @@ export function f(): string { return x(); }`,
 // in the report from "there is nothing there". The trigger is call VOLUME, not package count (candor-java's
 // own build output: 519 calls into 4 packages), so the threshold is pinned at its literal boundary here: a
 // drift of the constant must break this test, not slip through. Advisory ONLY — stderr, never the verdict.
-{
+if (blk()) {
   const stub = (name, member) => ({
     [`node_modules/${name}/package.json`]: `{"name":"${name}","version":"0.0.0","main":"index.js","types":"index.d.ts"}`,
     [`node_modules/${name}/index.d.ts`]: `export declare function ${member}(s: string): string;`,
@@ -3741,7 +3805,7 @@ ${Array.from({ length: n }, (_, i) => `  touch("x${i}");`).join("\n")}
 }
 
 // ── interface-CHA: a LOCAL interface dispatch resolves to its implementors (the Rust move) ────────
-{
+if (blk()) {
   const d = project({
     "src/store.ts": `import * as fsm from "node:fs";
 export interface Store { save(q: string): void; }
@@ -3775,7 +3839,7 @@ export function orphan(k: Sink): void { k.flush(); }`,
 // (`callback:unresolved call`), java (`callback:…Function.apply`) and swift (`callback:fn`) all say
 // `indirect` for the same input. BOTH DIRECTIONS are asserted here, because the change NARROWS
 // `deny Unknown[dispatch]` and a fixture that only shows the narrowing is the item-0 trap.
-{
+if (blk()) {
   const d = project({
     "package.json": `{"name":"vocab","version":"1.0.0"}`,
     "src/a.ts": `export interface Store { save(x: string): void; }
@@ -3820,7 +3884,7 @@ export function useHolder(): void { holder.run(); }`,
 }
 
 // ── super-interface CHA (R47): a SUPER-method on a sub-interface value resolves precisely ──────────
-{
+if (blk()) {
   const d = project({
     "src/store.ts": `import * as fsm from "node:fs";
 export interface Sup { base(): void; }
@@ -3844,7 +3908,7 @@ export function callsOwn(s: Sub): void { s.extra(); }`,
 }
 
 // ── 11b. the CJS dist chain: a require()-style dep scanned with --allow-js chains the same way ────
-{
+if (blk()) {
   // the DEPENDENCY ships CJS: exports via assignment, not declarations (the jsonwebtoken shape).
   const dep = project({
     "package.json": `{"name": "old-school"}`,
@@ -3878,7 +3942,7 @@ export function stamp(): string { return sign("x"); }`,
 }
 
 // ── /code-review fixes: ledger coverage, @types, CHA soundness, CJS join shapes ──────────────────
-{
+if (blk()) {
   // (a) chained coverage: a package with a loaded sibling report leaves the ledger even when the
   // called fn is PURE (omitted from the report) — and an all-pure EMPTY report counts via `package`.
   const dep = project({
@@ -3900,7 +3964,7 @@ export function go(): string { fsm.readFileSync("/x"); return pad("hi"); }`,
   check("an all-pure dep's EMPTY report covers its package (no ledger entry)",
         !/pure-utils/.test(r.stderr), r.stderr);
 }
-{
+if (blk()) {
   // (b) @types: a KAPPA_PURE package typed via DefinitelyTyped is NOT disclosed
   const d = project({
     "node_modules/lodash/package.json": `{"name":"lodash","main":"index.js"}`,
@@ -3915,7 +3979,7 @@ export function go(): string { fsm.readFileSync("/x"); return chunk("ab"); }`,
   check("a reviewed-pure package typed via @types stays out of the ledger",
         !/lodash/.test(r.stderr), r.stderr);
 }
-{
+if (blk()) {
   // (c) CHA soundness: an implementor whose member is INHERITED keeps the Unknown (no silent drop)
   const d = project({
     "src/s.ts": `import * as fsm from "node:fs";
@@ -3931,7 +3995,7 @@ export function handle(store: Store): void { store.save("x"); }`,
   check("a partially-resolved interface dispatch keeps honest Unknown",
         h?.inferred.includes("Unknown"), JSON.stringify(h));
 }
-{
+if (blk()) {
   // (d) merged interface declarations: the impl registers under BOTH blocks
   const d = project({
     "src/s.ts": `import * as fsm from "node:fs";
@@ -3951,7 +4015,7 @@ export function fin(store: Store): void { store.flush(); }`,
         && !entry(report, "src.a.fin")?.inferred.includes("Unknown"),
         JSON.stringify({ cg: cg["src.a.fin"], e: entry(report, "src.a.fin") }));
 }
-{
+if (blk()) {
   // (e) CJS join shapes: interface-shaped typings (Owner.member) + quoted export keys both join
   const dep = project({
     "package.json": `{"name": "legacy-sign"}`,
@@ -3980,7 +4044,7 @@ export function stamp(): string { return s.sign("x"); }`,
 }
 
 // ── solution-style tsconfig (files: [] + references) — the hono shape ─────────────────────────────
-{
+if (blk()) {
   const d = project({
     "tsconfig.json": `{"files": [], "references": [{"path": "./tsconfig.build.json"}]}`,
     "tsconfig.build.json": `{"compilerOptions": {"target": "es2022", "moduleResolution": "bundler", "module": "esnext", "types": []}, "include": ["src/**/*.ts"]}`,
@@ -3993,7 +4057,7 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
 }
 
 // ── --agents: the self-describing engine (the contract ships in the tarball) ──────────────────────
-{
+if (blk()) {
   const doc = fs.readFileSync(path.join(HERE, "AGENTS.md"), "utf8");
   const pkg = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"));
   for (const bin of ["scan.mjs", "query.mjs"]) {
@@ -4018,7 +4082,7 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
 }
 
 // unitKind 'export' is PER-UNIT: a same-named ordinary TS function in another file is not mislabeled
-{
+if (blk()) {
   const d = project({
     "package.json": `{"name": "mix"}`,
     "dist/util.js": `const fs = require("node:fs");\nmodule.exports.sign = function () { return fs.readFileSync("/k"); };`,
@@ -4032,7 +4096,7 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
 }
 
 // ── effect manifest (SPEC §5.1): a package's package.json candorEffects is the declared tier ──────
-{
+if (blk()) {
   const pkg = (effects) => ({
     "app.ts": `import { send } from "mylib";\nexport function f(): void { send(); }`,
     "node_modules/mylib/package.json": JSON.stringify({ name: "mylib", version: "1.0.0", types: "index.d.ts", main: "index.js", candorEffects: effects }),
@@ -4061,7 +4125,7 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
 }
 
 // ── Exec-cliff refinement (SPEC §4 ⟨0.5⟩): the head is argv[0]; a literal ARGUMENT must not refine ─
-{
+if (blk()) {
   const d = project({ "cmd.ts":
       `import { spawn, execSync } from "child_process";\n` +
       `export function litProg(): void { execSync("curl http://x"); }\n` +       // legit: curl IS argv[0]
@@ -4083,7 +4147,7 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
 // query (reads the report). An in-place write would let a reader observe a half-written file and
 // throw on JSON.parse; an atomic temp+rename guarantees old-or-new-whole. We assert the rename
 // discipline by its observable side effect: the scan leaves NO `.tmp` turds and writes valid JSON.
-{
+if (blk()) {
   const d = project({ "app.ts": `import * as fsm from "node:fs";\nexport function f(): void { fsm.readFileSync("/x"); }` });
   const { prefix } = scan(d);
   const leftovers = fs.readdirSync(path.dirname(prefix)).filter((n) => n.includes(".tmp"));
@@ -4097,7 +4161,7 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
 // ── a corrupt SIBLING report is DISCLOSED, not silently dropped (never-silently-pure) ─────────────
 // loadReport merges sibling reports (the Rust/workspace form). A malformed sibling must WARN and be
 // omitted loudly — silently skipping it would make its effectful functions read as "no effect".
-{
+if (blk()) {
   const Q = await import("./query-core.mjs");
   const d = scratch("candor-ts-corrupt-");
   // two siblings under one prefix: one valid (effectful), one truncated mid-object
@@ -4120,7 +4184,7 @@ export function r(): Buffer { return fsm.readFileSync("/x"); }`,
 // silent under-report). The rule is now member-aware: construction (token "new")
 // is pure; every function/verb member keeps Net (so an unlisted effectful call never under-reports).
 // Both directions pinned here (the standalone fabrication_probe.mjs is the broader generative guard).
-{
+if (blk()) {
   const d = project({
     "src/n.ts": `import * as http from "node:http";
 import * as net from "node:net";
@@ -4194,7 +4258,7 @@ export function effClientRequest(): void { const x = new http.ClientRequest("htt
 // null to object" — the CLI died with a raw stack trace. The loader must disclose a corrupt graph on
 // stderr (κ-ledger ethos) and return an empty graph rather than crash; a `null`/non-object parse
 // must never reach Object.entries.
-{
+if (blk()) {
   const Q = await import("./query-core.mjs");
   const d = scratch("candor-ts-cgcorrupt-");
   // corrupt (truncated) primary callgraph
@@ -4219,7 +4283,7 @@ export function effClientRequest(): void { const x = new http.ClientRequest("htt
 }
 
 // ── decorator-factory effects must NOT be FABRICATED onto the decorated unit (fabrication) ───────
-{
+if (blk()) {
   const d = project({
     "src/d.ts": `import cp from "node:child_process";
 function logged(_a: string) { cp.execSync("ls"); return function (_t:any,_k:string,_d:PropertyDescriptor){}; }
@@ -4245,7 +4309,7 @@ export function callsFactory(): void { logged("z"); }`,
 }
 
 // a fn-reference passed to a STORE/compare/log sink (not an invoking HOF) must NOT fabricate its effect
-{
+if (blk()) {
   const d = project({
     "src/h.ts": `import { readFileSync } from "node:fs";
 function eff(): string { return readFileSync("/h", "utf8"); }
@@ -4271,7 +4335,7 @@ export function invokesMap(xs: number[]) { return xs.map(eff); }`,
 // arm of a four-way sync-callback-invoker parity fix (candor-java shipped it as c755acd / SYNC_CALLBACK_
 // INVOKERS). CRUCIAL GUARD: only OPAQUE callbacks disclose — an INLINE arrow keeps its analyzed effect and
 // a resolvable NAMED fn keeps its resolved effect (no flood of the overwhelming-majority inline shape).
-{
+if (blk()) {
   const d = project({
     "src/cb.ts": `import * as fs from "fs";
 export function knownPure(x: number): number { return x + 1; }
@@ -4326,7 +4390,7 @@ export function sortNoCallback(): number[] { return [3, 1, 2].sort(); }`,
 // callback (`.filter(Boolean)` / `.map(String)` — coercion globals are pure, decl in lib.es5.d.ts, not
 // opaque), and a NON-callback positional whose type is `any` (`path.reduce(fn, obj)` — the `obj` SEED is
 // arg 1, never the invoked fn). Both must stay PURE; a genuine opaque callback in the SAME file still fires.
-{
+if (blk()) {
   const d = project({
     "src/g.ts": `import * as fs from "fs";
 // pure global builtins as callbacks — must stay pure (not Unknown).
@@ -4354,7 +4418,7 @@ export function stillFires(cb: (x: number) => void): void { [1, 2].forEach(cb); 
 // types target.key as a DATA prop), so a forcing site `target.key` read silent-pure — the cardinal sin.
 // FIX = mint the descriptor body as a unit + edge the forcing site to it (precise when target+key pin),
 // else disclose Unknown (computed key). Controls pin no-fabrication (pure getter / value descriptor).
-{
+if (blk()) {
   const d = project({
     "src/a.ts": `import { execSync } from "node:child_process";
 import fs from "node:fs";
@@ -4414,7 +4478,7 @@ export function readData(): number { return dataOnly.k; }`,
 // ── opaque-iterable force: a param/any/type-param iterable runs caller-supplied iterator code ──────
 // (epistemically identical to invoking an opaque callback → Unknown, never silent-pure). PRESERVE
 // concrete built-in iteration (array/string/Map → pure) and LOCAL generators (real effect propagates).
-{
+if (blk()) {
   const d = project({
     "src/it.ts": `import * as fs from "fs";
 // BUG fixed: forcing an OPAQUE iterable/iterator parameter must disclose Unknown (was silent-pure).
@@ -4462,7 +4526,7 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
 // ── callers --include-unknown ⟨0.7⟩: the unresolved-dispatch frontier. Confirmed callers never include a
 // fn reaching the target only via a `dispatch:OWNER.member` the engine declined to resolve; the frontier
 // discloses those iff a confirmed reacher is an override of OWNER.member (subtype-per-hierarchy = precise).
-{
+if (blk()) {
   const cg = { "m.Impl.run": ["m.Sink.touch"], "m.Sink.touch": [], "m.Frontier.go": [] };
   const fns = [{ fn: "m.Frontier.go", unknownWhy: ["dispatch:m.Base.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
   const hier = { "m.Impl": ["m.Base"], "m.Base": [] }; // Impl <: Base; ⟨0.26⟩ the root carries its own key
@@ -4485,7 +4549,7 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
 // no member, so condition (3) is UNANSWERABLE and MUST NOT be scored as a failed one. MEASURED before the
 // fix on exactly this shape: the frontier held ONLY the dotted entry in BOTH arms and no diagnostic named
 // the dropped one. The CONTROLS below are what separate this fix from a blanket "disclose everything". ──
-{
+if (blk()) {
   const cg = { "m.Impl.handle": ["m.Sink.touch"], "m.Sink.touch": [], "m.Dotted.go": [], "m.Untyped.go": [], "m.Unrelated.go": [], "m.NoReason.go": [] };
   const hier = { "m.Impl": ["m.Base"], "m.Base": [] }; // Impl <: Base; ⟨0.26⟩ the root carries its own key
   const fns = [
@@ -4552,7 +4616,7 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
 // members and the raw dot-free details. The two literals below are candor-java's, produced from its real
 // CLI, and are the shared cross-engine fixture — assert the exact STRING, because the conformance
 // differential only substring-checks this field and cannot see an ordering divergence. ──
-{
+if (blk()) {
   const cg = { "app.Impl.run": ["app.Sink.touch"], "app.Zed.write": ["app.Sink.touch"], "app.Sink.touch": [], "app.Mixed.go": [] };
   const hier = { "app.Impl": ["app.Base", "app.Other"], "app.Zed": ["app.Base"] };
   // Reasons fed in an order that is NOT the sorted order, and the sorted answer INTERLEAVES the two kinds
@@ -4637,7 +4701,7 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
 // and the disagreement is the correct answer, not a bug in either. Asserting only the frontier's exclusion
 // would also pass if the entry were simply missing from the report — the `blindspots --class dispatch`
 // half is what proves the entry is present, is class `dispatch`, and is nonetheless kept out.
-{
+if (blk()) {
   const cg = { "m.Impl.run": ["m.Sink.touch"], "m.Sink.touch": [], "m.Dotted.go": [], "m.Ambig.go": [], "m.Banana.go": [] };
   const hier = { "m.Impl": ["m.Base"], "m.Base": [] }; // Impl <: Base; ⟨0.26⟩ the root carries its own key
   const fns = [
@@ -4681,7 +4745,7 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
 // ── §4 ⟨0.24⟩ the fifth kind, END TO END through the shipped verbs (the model-level block above is over
 // query-core directly; this is the same three claims through the CLI a consumer actually runs, on a report
 // candor-ts did not produce — a foreign engine's, which is the only way `ambiguous:` reaches it). ──
-{
+if (blk()) {
   const d = scratch("candor-ts-kind024-");
   const rep = {
     candor: { version: "candor-rust-0.24.0", spec: "0.24" },
@@ -4734,7 +4798,7 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
 // dependency join copies a chained report's `unknownWhy` VERBATIM into the consumer's own report keyed by
 // the CALLING function, so the kind lands in candor-ts output regardless. Pinned here so the relay cannot
 // silently start filtering by a kind allowlist — which would be this engine's version of the §4 defect. ──
-{
+if (blk()) {
   // The dep's unit must be EFFECTFUL to appear in its report at all (§2 rule 3: silence is purity), so it
   // reads the clock — the effect is scaffolding, the `unknownWhy` rewrite below is the subject.
   const depDir = project({ "index.ts": `export function reach(): number { return Date.now(); }` });
@@ -4768,7 +4832,7 @@ export function pureConsume(): number[] { const o: number[] = []; for (const v o
 // ── node:vm executes a runtime code STRING → Unknown (the eval-class disclosure). Was silent-pure —
 // found by real-world corpus testing (vm is κ-covered @types/node with no rule, so it read pure, not
 // invisible). Mirrors eval/Function/import() which already disclose Unknown. ──
-{
+if (blk()) {
   const d = project({
     "src/a.ts": `import vm from "node:vm";
 export function runIt(c: string) { return vm.runInThisContext(c); }
@@ -4793,7 +4857,7 @@ export function createCtx() { return vm.createContext({}); }`,
 
 // ── dynamic require(<non-literal>) → Unknown (the CJS twin of import(m)); literal / require.resolve /
 // a project-local `require` shadow all stay pure (no fabrication). Corpus-testing find, sibling of vm. ──
-{
+if (blk()) {
   const d = project({
     "src/a.ts": `export function dyn(m: string) { return require(m); }
 export function lit() { return require("node:fs"); }
@@ -4819,7 +4883,7 @@ export function shadowed(y: string) { return require(y); }`,
 // these read SILENT-PURE before (dogfound on chalk/supports-color, which reads env via `const {env} =
 // process; 'FORCE_COLOR' in env; env.TERM`). SOUNDNESS: the same idiom on a NON-process.env object stays
 // pure (no fabrication), and a reassigned alias local is cleared. ──────────────────────────────────────
-{
+if (blk()) {
   const d = project({
     "src/pos.ts": `const envA = process.env;
 const { env: envB } = process;
@@ -4871,7 +4935,7 @@ export function afterReassign() { return env.FOO; }`,
 // reassignable union — dotenv's `let pe = process.env; if (opts.pe) pe = opts.pe`) → Unknown (possible, so
 // disclose, never fabricate Env). FABRICATION GUARD: a non-env arg, or a param only READ not written, stays
 // pure — the census shows this fires on ~1 leaf per corpus, not the benign argument-mutating majority. ──
-{
+if (blk()) {
   const d = project({
     "src/must.ts": `function writeEnv(target: Record<string,string>) { target.FOO = "x"; }
 const env = process.env;
@@ -4905,7 +4969,7 @@ export function callRead() { return readParam(process.env); }`,
 // writes an env-fed variable — its own parameter OR a captured one — through ANY assignment operator. So a
 // forwarding hop, a local alias, a closure that captures the parameter, and a compound assignment are all caught;
 // a benign argument-mutation with NO process.env inflow stays pure (still gated on a real env source). ─────────
-{
+if (blk()) {
   const d = project({
     "src/hop.ts": `function inner(t: Record<string,string>) { t.FOO = 'x'; }
 function outer(p: Record<string,string>) { inner(p); }
@@ -4950,7 +5014,7 @@ export function go() { fillInline(env); }`,                               // ANO
 // `Object.defineProperty(env, …)` / `Reflect.set(env, …)` WRITE the environment; `{...env}` / `Object.keys(env)` /
 // `Object.assign(_, env)` / `JSON.stringify(env)` READ every key. All are Env; a builtin on a NON-env object, and a
 // project-local `Object`/`Reflect` SHADOW, stay pure (no fabrication). Direct and through an env-fed parameter. ──
-{
+if (blk()) {
   const d = project({
     "src/w.ts": `export function wAssign(o: Record<string,string>) { Object.assign(process.env, o); }
 export function wDefine(k: string) { Object.defineProperty(process.env, k, { value: 'x' }); }
@@ -4984,7 +5048,7 @@ export function shadowed() { const Object = Shadow; return Object.assign(process
 }
 
 // ── the same whole-env class via for-in and the `structuredClone` bare global (a further corpus-probe pass). ──
-{
+if (blk()) {
   const d = project({
     "src/fi.ts": `export function forInEnv() { let n = 0; for (const k in process.env) n++; return n; }
 export function cloneEnv() { return structuredClone(process.env); }`,
@@ -5008,7 +5072,7 @@ export function cloneObj(o: unknown) { return structuredClone(o); }`,
 // function's effect (a corpus-probe find: these read silent-pure while `.bind`/alias/computed-member were caught).
 // The invoked ref is classified through the SAME κ table a direct call uses, so an EFFECTFUL builtin gets its
 // effect and a PURE builtin (`[].slice.call(args)`, `hasOwnProperty.call`) stays pure — no over-disclosure. ──
-{
+if (blk()) {
   const d = project({
     "src/eff.js": `const fs = require('fs');
 module.exports.viaCall = (p) => fs.writeFileSync.call(null, p, 'x');
@@ -5035,7 +5099,7 @@ module.exports.viaProjCall = (p) => doWrite.call(null, p);`,   // a PROJECT fn v
 // so an external tag got neither its κ effect nor the κ-ledger `invisible` disclosure a regular external call gets
 // (silent-pure). Now it classifies the external tag exactly like a regular call; a builtin tag (String.raw) is
 // pure (no fabrication). ─────────────────────────────────────────────────────────────────────────────────────
-{
+if (blk()) {
   const d = project({
     "node_modules/postgres/package.json": JSON.stringify({ name: "postgres", version: "3.4.0", main: "index.js", types: "index.d.ts" }),
     "node_modules/postgres/index.d.ts": `declare function postgres(url?: string): postgres.Sql;
@@ -5064,7 +5128,7 @@ export function rawTag(x: number) { return String.raw\`hi \${x}\`; }`,
 // ── `globalThis.process.env` / `global.process.env` — the SAME env object reached off the global (isomorphic
 // code, often `(globalThis as any).process.env`). Read AND write are Env; a project-local `globalThis` shadow or
 // an unrelated `obj.process.env` stays pure (no fabrication). ─────────────────────────────────────────────────
-{
+if (blk()) {
   const d = project({
     "src/g.ts": `export function readGT() { return globalThis.process.env.HOME; }
 export function writeGT(k: string) { globalThis.process.env[k] = 'x'; }
@@ -5085,7 +5149,7 @@ export function unrelated(o: { process: { env: Record<string,string> } }) { retu
 
 // ── the SAME globalThis.process gap for the process.* global CALLS: `globalThis.process.hrtime()` → Clock,
 // `global.process.send()` → Ipc (a project `const process` shadow stays pure). ───────────────────────────────
-{
+if (blk()) {
   const d = project({
     "src/g.ts": `export function hr() { return globalThis.process.hrtime(); }
 export function hrBig() { return globalThis.process.hrtime.bigint(); }
@@ -5108,7 +5172,7 @@ export function shadowSend(m: unknown) { return process.send(m); }`,
 // fires — a curated package typed via @types must NOT read silent-pure. Corpus find: `pool.query()` reported
 // pure because the decl resolved to `@types/pg` (not `pg`), so the pg→Db rule never matched. A real TS
 // Postgres app MUST have @types/pg installed (pg ships no types), so this was a live silent under-report.
-{
+if (blk()) {
   const d = project({
     "node_modules/pg/package.json": JSON.stringify({ name: "pg", version: "8.0.0", main: "index.js" }),
     "node_modules/pg/index.js": "module.exports = {};",
@@ -5133,7 +5197,7 @@ const runQuery = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), ...a
 const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"));
 
 // ── CLI-1. bare scan → reports files written, exit 0 (the default, file-writing mode) ─────────────
-{
+if (blk()) {
   const d = project({ "src/a.ts": `import * as fsm from "node:fs";\nexport function f(): void { fsm.readFileSync("/x"); }` });
   const r = runScan(d);
   check("bare scan exits 0 and WRITES the report files to .candor/", r.status === 0
@@ -5148,7 +5212,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 // §3a already covers --json (envelope shape, no files) and --json + a VIOLATING policy (exit 1,
 // stderr-only violations). The missing leg is the clean-pass: a satisfied gate must stay exit 0 with
 // stdout still pure JSON — never a spurious exit 1, never a violation line on a green run.
-{
+if (blk()) {
   const d = project({
     "src/db.ts": `import { DatabaseSync } from "node:sqlite";\nexport function save(db: DatabaseSync): void { db.exec("UPDATE ledger SET v = 1"); }`,
     "policy": "allow Db in db ledger\n",  // the only table touched (ledger) IS sanctioned → clean
@@ -5161,7 +5225,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 }
 
 // ── CLI-3. --policy <clean> (non-JSON) → exit 0; the gate is silent on a satisfied policy ─────────
-{
+if (blk()) {
   const d = project({
     "src/db.ts": `import { DatabaseSync } from "node:sqlite";\nexport function save(db: DatabaseSync): void { db.exec("UPDATE ledger SET v = 1"); }`,
     "policy": "allow Db in db ledger\n",  // the only table touched (ledger) IS sanctioned → clean
@@ -5173,7 +5237,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 }
 
 // ── CLI-4. --version / -V → `candor-ts <ver> (spec <X>)`, exit 0 (both spellings; offline) ─────────
-{
+if (blk()) {
   for (const flag of ["--version", "-V"]) {
     const r = runScan(flag);
     const line1 = r.stdout.split("\n")[0];
@@ -5185,7 +5249,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 
 // ── CLI-5. --help / -h → usage (the real flag list), exit 0 (both spellings; `-h`'s single dash
 // must reach the print-and-exit mode, not be eaten by the unknown-flag arm) ─────────────────────
-{
+if (blk()) {
   for (const flag of ["--help", "-h"]) {
     const r = runScan(flag);
     check(`scan ${flag} → usage with the real flags, exit 0`,
@@ -5198,7 +5262,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 // §3b pins `-policy` (a single-dash near-miss of a real flag). These pin the general arms: any
 // unrecognized flag — long OR short — is a hard exit-2 unknown-flag error, never a silent scan
 // target. The single-dash case is the SHIPPED FIX (a `-x` once fell through to "scan path -x").
-{
+if (blk()) {
   const bogus = runScan("--bogus");
   check("scan --bogus (unknown long flag) exits 2 with an unknown-flag error",
         bogus.status === 2 && /unknown flag --bogus/.test(bogus.stderr), `status=${bogus.status} ${bogus.stderr.slice(0, 120)}`);
@@ -5208,7 +5272,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 }
 
 // ── CLI-7. ADVERSARIAL scan inputs: no crash, an honest (loud) disclosure on each pathology ───────
-{
+if (blk()) {
   // (a) a syntactically-broken .ts must not throw an uncaught TS-compiler stack — degrade to a report.
   const broken = project({ "src/b.ts": `export function broken(: void { return\n` }); // unbalanced/garbage
   const rb = runScan(broken);
@@ -5239,7 +5303,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 }
 
 // ── CLI-8. query.mjs print-and-exit modes + unknown command (the FULL, non-stale usage) ───────────
-{
+if (blk()) {
   for (const flag of ["--version", "-V"]) {
     const r = runQuery(flag);
     check(`query ${flag} → version banner, exit 0`,
@@ -5269,7 +5333,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 // exit 0 over a corrupt report is the §4 cardinal-sin false all-clear (a gate on `map` would PASS). All
 // four engines now die loud here (candor-rust load_entries_loud; java throws; swift → no-report). The
 // original no-crash guarantee is kept: the exit is a clean console.error, NOT a leaked JSON.parse stack.
-{
+if (blk()) {
   const d = scratch("candor-ts-qcorrupt-");
   fs.writeFileSync(path.join(d, "rep.json"), `{ "candor": {}, "functions": [ { "fn": "x.`); // truncated mid-object
   const prefix = path.join(d, "rep");
@@ -5291,7 +5355,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 // Conformance exercises some of these cross-engine, but an engine-local regression stays green in this
 // repo's CI until the spec repo happens to run (§3) — so each arm gets a CLI-level spawn here with its
 // EXACT exit code (1 vs 2 is load-bearing: violation vs could-not-evaluate).
-{
+if (blk()) {
   const d = scratch("candor-cliarms-");
   const eqJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const rep = (fns) => JSON.stringify({ candor: { version: "ttttttt", spec: "0.23" }, functions: fns });
@@ -5675,7 +5739,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"))
 // "nothing hidden" at exit 0 — a silent under-report; the fix falls back to each entry's inline `calls`
 // (mirrors tour.rs). (b) `tour 0`/an out-of-range N printed the same false all-clear instead of a usage
 // error; the fix rejects it (exit 2). Also pins the alphabetical --json keys + the package-named header.
-{
+if (blk()) {
   const d = project({
     "cases.ts": `import * as fsm from "node:fs";
 class Settings { static load(): boolean { return refresh(); } }
@@ -5768,7 +5832,7 @@ export { Settings };`,
 // report-backed single-arg verb now does the same. `path` requires BOTH positionals (arity 2). `fix`
 // already had the guard (pinned here so it can't regress); reachable/map take no verb-arg and are
 // exercised argless in CLI-10.
-{
+if (blk()) {
   const d = scratch("candor-missarg-");
   fs.writeFileSync(path.join(d, "r.json"), JSON.stringify({ candor: { version: "ttttttt", spec: "0.23" },
     functions: [{ fn: "app.db.save", inferred: ["Db"], direct: ["Db"], loc: "db.ts:1" }] }));
@@ -5820,7 +5884,7 @@ export { Settings };`,
 // own remedy verb. The pointer is APPEND-ONLY on the failure path, on the summary's stream (stderr):
 // exit code, violation lines and the summary text are conformance-pinned and unchanged; a zero-violation
 // run must not mention it anywhere.
-{
+if (blk()) {
   const d = project({
     "src/web.ts": `export function handler(): void { fetch("https://api.example.com/x"); }`,
     "policy": "deny Net\n",
@@ -5843,7 +5907,7 @@ export { Settings };`,
 // form — descriptor getters on the CREATED object, joined through the binding the result is assigned
 // to — had no execution. The unbound-result form can't join a forcing site, but the descriptor body is
 // still a minted unit whose effect is IN the report (never silent-pure at the report level).
-{
+if (blk()) {
   const d = project({
     "src/c.ts": `import { execSync } from "node:child_process";
 const proto = {};
@@ -5870,7 +5934,7 @@ export function makeUnbound(): object { return Object.create(proto, { z: { get: 
 // A namespace import from a bare specifier that didn't RESOLVE (package not installed in this tree)
 // still classifies through κ by the syntactic path — winston.info is Log, not Unknown noise; an
 // UNMODELED uninstalled package stays the honest Unknown disclosure (the anti-fabrication twin).
-{
+if (blk()) {
   const d = project({
     "src/l.ts": `import * as winstonm from "winston";
 import * as mystery from "some-unlisted-pkg-zz";
@@ -5892,7 +5956,7 @@ export function callMystery(): void { mystery.go(); }`,
 // dispatch site must disclose Unknown with the canonical dispatch:OWNER.member why. Both sides of the
 // boundary pinned: 12 overrides → the real effect propagates (no Unknown); 13 → Unknown (and the
 // un-edged override effect is NOT silently claimed either way).
-{
+if (blk()) {
   const mkSubs = (n) => Array.from({ length: n }, (_, i) =>
     i === 0
       ? `export class S0 extends Base { m(): void { fsm.writeFileSync("/tmp/s0", "x"); } }`
@@ -5916,7 +5980,7 @@ export function dispatch(b: Base): void { b.m(); }`;
 // A Writable's public `.write()`/`.end()` drive the user's `_write` INSIDE node core (invisible), so a
 // custom effectful stream reached only via the public API read silent-pure. The fix edges the driver to
 // the local override. resolve-or-skip: an inert override / a non-stream class / a std stream adds nothing.
-{
+if (blk()) {
   const d = project({
     "src/s.ts": `import { Writable, Readable } from "stream";
 import * as fs from "fs";
@@ -5944,7 +6008,7 @@ export function viaLogger(l: Logger) { l.write("x"); }`,
 // object-spread twin). Both recordAccessorHit branches pinned: a CLASS-typed source's getter is a
 // minted unit → the copier inherits the precise effect; an object-LITERAL getter (no minted unit)
 // falls to the disclosed-Unknown branch — never silent-pure either way. Plain data stays pure.
-{
+if (blk()) {
   const d = project({
     "src/g.ts": `import { execSync } from "node:child_process";
 export class Vault { get tok(): string { return execSync("vault read tok").toString(); } }
@@ -5970,7 +6034,7 @@ export function copyPlain(): object { return Object.assign({}, plain); }`,
 // The CANDOR_CONFIG-set-but-missing and configured-but-empty arms are pinned above; the discovery-path
 // read failure (config EXISTS but readFileSync throws — here a directory at the config path) was the
 // remaining untested fail-closed arm. A gate source must never vanish silently.
-{
+if (blk()) {
   const d = project({ "src/p.ts": `export function f(): void { /* pure */ }` });
   fs.mkdirSync(path.join(d, ".candor", "config"), { recursive: true }); // a DIRECTORY named `config`
   const r = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "src")], { encoding: "utf8" });
@@ -5983,7 +6047,7 @@ export function copyPlain(): object { return Object.assign({}, plain); }`,
 // Exit-code contract per gate surface (TESTING.md §2.5): gain → 1, clean → 0, absent file → note + 0,
 // unparseable / missing-or-mismatched producing version → 2 WITHOUT evaluating, new fns exempt.
 // Semantics mirror the reference engine (candor-java Policy.checkBaseline).
-{
+if (blk()) {
   const baseSrc = `import { DatabaseSync } from "node:sqlite";
 export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v = 1"); }`;
   const gainedSrc = `import { DatabaseSync } from "node:sqlite";
@@ -6069,7 +6133,7 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
 // keys existence on the baseline CALLGRAPH sidecar (<baseline>.callgraph.json, which lists pure leaves),
 // reusing the `gains` origin node-set test. Three sidecar states: PRESENT catches pure→effectful (exit 1),
 // ABSENT degrades to report-only + a stderr note (exit 0 here), PRESENT-but-corrupt fails closed (exit 2).
-{
+if (blk()) {
   // The acceptance probe: a pure `fmt` (util.ts) + an already-effectful `fetch_` (api.ts).
   const utilPure = `export function fmt(s: string): string { return s.toUpperCase(); }`;
   const utilGain = `import { readFileSync } from "node:fs";
@@ -6193,7 +6257,7 @@ export function fmt(s: string, cb: Function): string { cb(); readFileSync("/etc/
 // Default OFF must leave the ⟨0.16⟩ advisory posture BYTE-IDENTICAL (exit 0, a stderr note). Mirrors the
 // reference engine (candor-java Policy.checkBaseline under ctx().unknownRatchet). require(<var>) is the
 // deterministic Unknown-ONLY source (an opaque module load, no real effect).
-{
+if (blk()) {
   // baseline: X (already Unknown via require(var)) + Y (pure) + Z (already effectful, Fs) — a real anchor
   const baseSrc = `export function x(m: string) { return require(m); }
 export function y(s: string): string { return s.toUpperCase(); }
@@ -6282,7 +6346,7 @@ export function z(): void { readFileSync("/etc/z"); }`;
 //
 // And that value is READ FROM scan.mjs, not written here. A literal in a drift gate pins the drift it
 // exists to catch — exactly how candor-java's docs gate stayed green through this same bump.
-{
+if (blk()) {
   const SPEC = (fs.readFileSync(path.join(HERE, "scan.mjs"), "utf8")
     .match(/const SPEC_VERSION = "([0-9]+\.[0-9]+)"/) ?? [])[1];
   check("the doc gate reads the spec floor off scan.mjs (not a literal)", !!SPEC, String(SPEC));
@@ -6332,7 +6396,7 @@ export function z(): void { readFileSync("/etc/z"); }`;
 }
 
 // ── candor verify: the dynamic honesty oracle, end to end (scan → run → check) ────────────────────
-{
+if (blk()) {
   const d = project({
     "app.ts": `import fs from "node:fs";
 function reads(): number { return fs.statSync(process.execPath).size; }
@@ -6490,7 +6554,7 @@ run();
 // typings — so the interface-union emitter, which walks the CLASS's heritage clauses, found nothing and a
 // chained consumer dispatching on the interface could never resolve. The relation is recovered from the
 // package's OWN typings module's exports, paired to the scanned dist class by exported name.
-{
+if (blk()) {
   const CHAIN = { ...process.env, CANDOR_WORKSPACE_CHAIN: "1" };
   const distDep = () => project({
     "package.json": `{"name":"depkit","main":"dist/index.js","types":"dist/index.d.ts"}`,
@@ -7247,7 +7311,7 @@ export declare class Definition implements IDefinition { load: string; }`,
 // All of a package's module units used to hash `<pkg>#<module>`, and duplicate hashes union on load, so
 // `import "pkg"` charged the union of EVERY published file's top level — `proper-lockfile` picked up `Net`
 // from `retry`'s `example/dns.js`. Per-file keys let the consumer ask for the module the specifier names.
-{
+if (blk()) {
   const depSrc = {
     "package.json": `{"name":"depkit3","main":"index.js"}`,
     "index.js": `"use strict";
@@ -7368,7 +7432,7 @@ net.connect(53, "8.8.8.8");`,
 // to bite exactly that hole, stopped biting one package boundary away. The ts sibling of candor-java
 // `6ab26e4`, whose root cause was the same DUPLICATION: two copies of the apply path, drifted, and the
 // reason class added to neither.
-{
+if (blk()) {
   const dep = project({
     "package.json": `{"name":"reflkit","main":"index.js","types":"index.d.ts"}`,
     "src/index.ts": `export function run(name: string): void { (0, eval)(name); }`,
@@ -7435,7 +7499,7 @@ export function go(): void { run("x"); }`,
 // importer was ABSENT from `functions` (a ⟨0.21⟩ purity claim) with `deny Fs` at exit 0, where the
 // single-tree control is exit 1 in both arms. So an untrusted report grants NO coverage, and an import
 // backed only by one discloses `Unknown`.
-{
+if (blk()) {
   const dep = project({
     "package.json": `{"name":"stalekit","main":"index.js","types":"index.d.ts"}`,
     "index.js": `"use strict";
@@ -7527,7 +7591,7 @@ export function go(): void { helper(); }`,
 // continuation, computed-key dispatch, deserialization hook, property getter) and measures BOTH sides: candor
 // disclosed (Fs/Unknown), and — with candor's disclosure stripped — the oracle still caught it. No mechanism
 // may ESCAPE (run yet be caught by neither), and every mechanism that runs must be oracle-caught (full recall).
-{
+if (blk()) {
   const r = spawnSync("node", [path.join(HERE, "sensitivity.mjs"), "--json"], { encoding: "utf8" });
   let s = null; try { s = JSON.parse(r.stdout).summary; } catch { /* below */ }
   check("sensitivity: no dynamic mechanism ESCAPES the honesty invariant (exit 0)",
@@ -7576,7 +7640,7 @@ const isRefusal = (text) => {
 // advisory included — and the SAME exit code. Anything less lets the two routes drift into two gates.
 // (This matrix is the standing gate; the landing measurement ran 73 rows over three corpora, including
 // a 1717-function slice of eslint's rules, all byte-equal.)
-{
+if (blk()) {
   const d = project({
     ".candor/config": "net-partner api.partner.example\n",
     "package.json": `{ "name": "gatefix", "dependencies": { "left-pad": "^1.0.0" } }`,
@@ -7739,7 +7803,7 @@ export function all(db: DatabaseSync, o: any) {
 // MUTATION-VERIFIED 2026-07-28: with the reader patched to adopt a sidecar-named entry from the dep
 // report, the ABSENT arm goes 0 -> 1. The NEGATIVE CONTROL below is what makes that meaningful — without
 // it, an engine that ignored the policy entirely would pass this row.
-{
+if (blk()) {
   const dep = { candor: { version: "handwritten", spec: "0.24" }, package: "dep", analyzed: { count: 2, digest: "0" },
                 functions: [{ fn: "app.Facade.load", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] },
                             { fn: "dep.readCfg", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] }] };
@@ -7773,7 +7837,7 @@ export function all(db: DatabaseSync, o: any) {
 // Net[unknown-host]` over a Net-bearing entry with no `netClass` matched an empty set and returned exit
 // 0 where the bare `deny Net` returns 1 — an absent optional field silently un-scoping a fail-closed
 // security gate. The BARE rule rides along as the control that proves the fixture can fire at all.
-{
+if (blk()) {
   const d = handReport({
     "r.json": { candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 4, digest: "0" },
       functions: [
@@ -7822,7 +7886,7 @@ export function all(db: DatabaseSync, o: any) {
 // directions: a `known-partner` host re-read as `unknown-host` (a FABRICATED `deny Net[unknown-host]`
 // hit) and, symmetrically, a `deny Net[known-partner]` that stops firing. Both arms are asserted, and
 // the second run adds a consumer-side config naming a DIFFERENT partner to prove the CWD cannot move it.
-{
+if (blk()) {
   const d = handReport({
     "r.json": { candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 1, digest: "0" },
       functions: [{ fn: "app.call", inferred: ["Net"], direct: ["Net"], hosts: ["partner.example"], netClass: ["known-partner"] }] },
@@ -7842,7 +7906,7 @@ export function all(db: DatabaseSync, o: any) {
 }
 
 // ── (e) THE GRAMMAR (§3.3.1, inherited unchanged) and the `--json` ≡ `--gate-json -` ruling ─────────
-{
+if (blk()) {
   const d = handReport({
     "r.json": { candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 1, digest: "0" },
       functions: [{ fn: "app.f", inferred: ["Net"], direct: ["Net"], hosts: ["x.example"], netClass: ["unknown-host"] }] },
@@ -7896,7 +7960,7 @@ export function all(db: DatabaseSync, o: any) {
 // on a NON-policy verb `--policy --json` was consumed and DISCARDED at exit 0 — a silently different
 // command than the one on screen. BOTH halves are asserted on the gate rows — exit 2 alone passes
 // against the broken behaviour, which also exited 2.
-{
+if (blk()) {
   const d = handReport({
     "r.json": { candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 1, digest: "0" },
       functions: [{ fn: "app.f", inferred: ["Net"], direct: ["Net"], hosts: ["x.example"], netClass: ["unknown-host"] }] },
@@ -7948,7 +8012,7 @@ export function all(db: DatabaseSync, o: any) {
 // order (calls descending, then name by code point) — the same shape `scan --policy --gate-json` writes,
 // read off the report envelope rather than recomputed. The two rows also differ (2 uncovered, `tpad`
 // before `zpad` despite the alphabetical order) so a shape that ignored the ledger cannot pass.
-{
+if (blk()) {
   const d = handReport({
     "r.json": { candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 2, digest: "0" },
       coverage: { uncovered: [{ name: "zpad", calls: 1 }, { name: "tpad", calls: 9 }] },
@@ -7963,7 +8027,7 @@ export function all(db: DatabaseSync, o: any) {
 }
 
 // ── (g) THE VERB REFUSES A CORRUPT REPORT rather than gating an empty (all-clear) signature ─────────
-{
+if (blk()) {
   const d = handReport({ "r.json": "{ not json", "p.pol": "deny Net\n" });
   const r = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"));
   check("gate --report: a corrupt report is exit 2 — never an empty signature gated green (the §4 cardinal sin)",
@@ -7981,7 +8045,7 @@ export function all(db: DatabaseSync, o: any) {
 // stdout, nothing written to `--gate-json <file>`), keeps the stderr disclosure as a requirement, and
 // carries TWO negative controls so it cannot pass by refusing every multi-report prefix. rust and swift
 // already exit 2 on this exact fixture.
-{
+if (blk()) {
   const V = { candor: { version: "handwritten", toolchain: "none", spec: "0.24" } };
   const clean = { ...V, package: "cleanpkg", analyzed: { count: 3, digest: "aa" },
                   functions: [{ fn: "a.pureish", inferred: [], direct: [] }] };
@@ -8030,7 +8094,7 @@ export function all(db: DatabaseSync, o: any) {
 // makes byte-equality with `scan --policy`'s the acceptance test (a scan that analyzed nothing writes
 // `{ok: true, analyzed: {count: 0}}` and exits 0) and because a verdict is an assertion the report gives
 // no evidence for. The CONTROL rows are the same three the chained half carries, for the same reason.
-{
+if (blk()) {
   const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app" };
   const F = [{ fn: "app.f", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] }];
   const d = handReport({
@@ -8085,7 +8149,7 @@ export function all(db: DatabaseSync, o: any) {
 // that fails every pre-⟨0.21⟩ and every legitimately-sparse report. The last two rows pin the SCOPE — a
 // wrong-typed key no verdict reads is not a refusal, and a read-only query over the same bytes still
 // answers (it returns what it found rather than certifying, so the coercion is right there).
-{
+if (blk()) {
   const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app" };
   const A = { count: 2, digest: "0" };
   const clean = { fn: "app.ok", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/hosts"] };
@@ -8166,7 +8230,7 @@ export function all(db: DatabaseSync, o: any) {
 // code alone — the harm this whole rung is about is evidence going missing from the machine-consumer
 // channel, and an exit-code-only assertion is blind to exactly that.
 // ══════════════════════════════════════════════════════════════════════════════════════════════════
-{
+if (blk()) {
   const V = { candor: { version: "handwritten", spec: "0.24" } };
   const readDoc = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } };
   // A GREEN document already sitting at the --gate-json path: the shape a CI cache or yesterday's clean
@@ -8488,7 +8552,7 @@ export function all(db: DatabaseSync, o: any) {
 // it records into the same verdict; the precedence repair had been scoped to the policy gate's own list.
 // THE ASSERTION IS ON THE DOCUMENT, deliberately: an exit code alone cannot tell a lost finding from a
 // found one, and the document is the channel that lost it.
-{
+if (blk()) {
   const pureSrc = "export function worker(): number { return 41 + 1; }\nexport function caller(): number { return worker(); }\n";
   const gainSrc = 'import fs from "node:fs";\nexport function worker(): number { fs.readFileSync("/tmp/x"); return 41 + 1; }\nexport function caller(): number { return worker(); }\n';
   const d = project({ "src/app.ts": pureSrc });
@@ -8557,7 +8621,7 @@ export function all(db: DatabaseSync, o: any) {
 // api.stripe.com` is an ordinary allowlist gate, not an absent one. A zero-rule check that inspects a
 // SUBSET of the rule kinds is the same false-answer shape this rung exists to close, pointed the other
 // way, so the allow-only / forbid-only / pure-only rows below are not padding.
-{
+if (blk()) {
   const d = project({ "src/app.ts": 'import fs from "node:fs";\nexport function saveIt(): void { fs.writeFileSync("/tmp/x", "d"); }\n' });
   const W = (n, t) => { const p = path.join(d, n); fs.writeFileSync(p, t); return p; };
   const readme = W("readme.md", "# Project README\n\nThis is documentation, not a policy file.\nSomeone pointed --policy at it by mistake.\n");
@@ -8648,7 +8712,7 @@ export function all(db: DatabaseSync, o: any) {
 // takes no operand, two malformed `forbid`s, two `allow`s naming no values, an unknown rule kind), each
 // warned on stderr and invisible to the machine output. A dropped rule is the LIMIT CASE of "silently
 // rewritten into a different policy": the rewritten policy is the one WITHOUT that line.
-{
+if (blk()) {
   const d = project({ "src/a.ts": "export function f(): void {}\n" });
   const battery = [
     "deny Net Db domain",              // honoured — the vacuity guard for the parse itself
@@ -8734,7 +8798,7 @@ export function all(db: DatabaseSync, o: any) {
 // THE ROW THAT MAKES THE OTHERS MEAN SOMETHING is the ambiguous middle: `deny Net Exex app` has a valid
 // effect and a trailing token that MIGHT be a scope, so it stays permissive by design. Without it this
 // block would pass on an engine that had simply started refusing any unfamiliar token.
-{
+if (blk()) {
   const d = project({ "src/a.ts": "export function f(): void {}\n" });
   const rep = path.join(d, ".candor", "report.json");
   spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8" });
@@ -8786,7 +8850,7 @@ export function all(db: DatabaseSync, o: any) {
 // The pre-existing row pins the SCAN route. This one pins `gate --report`, because §3.1 makes byte-equality
 // between the two documents the acceptance test and a shape held on one route only is the divergence this
 // field already produced once.
-{
+if (blk()) {
   const d = project({ "src/app.ts": "export function dyn(o: any, k: string) { return o[k](); }\n" });
   spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8" });
   const home = path.join(d, "polhome");
@@ -8837,7 +8901,7 @@ export function all(db: DatabaseSync, o: any) {
 // EVERY ARM CARRIES ITS MIRROR. A filter can only NARROW what a verb reports, so the regression to guard
 // is LOST DISCLOSURE: each excluded-class row is paired with a row whose policy classes DO match, asserted
 // still named — and with the BARE (unfiltered) rule, which must be untouched.
-{
+if (blk()) {
   const d = scratch("candor-classfilter-");
   const rep = (fns) => JSON.stringify({ candor: { version: "ttttttt", spec: "0.23" }, functions: fns });
   const W = (n, o) => fs.writeFileSync(path.join(d, n), typeof o === "string" ? o : JSON.stringify(o));
@@ -9006,7 +9070,7 @@ export function all(db: DatabaseSync, o: any) {
 // `false` would assert "a hole exists, here it is" beside an EMPTY array — the fabrication mirror. The
 // assertions below check ABSENCE (`"ok" in j`), never falsiness: `ok:false` would satisfy a `!j.ok` test
 // while being the invention the rule exists to forbid.
-{
+if (blk()) {
   const d = scratch("candor-advisory-inc-");
   const W = (n, o) => fs.writeFileSync(path.join(d, n), typeof o === "string" ? o : JSON.stringify(o));
   const J = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
@@ -9110,7 +9174,7 @@ export function all(db: DatabaseSync, o: any) {
 // rows below — netClass carried and firing, netClass carried and excluded, the BARE `deny Net` over the
 // same evidence-less report (no narrowing ⇒ nothing to refuse), and the `Unknown[…]` hole that must still
 // be found.
-{
+if (blk()) {
   const d = scratch("candor-advisory-bound-");
   const W = (n, o) => fs.writeFileSync(path.join(d, n), typeof o === "string" ? o : JSON.stringify(o));
   const J = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
@@ -9283,7 +9347,7 @@ export function all(db: DatabaseSync, o: any) {
 // editing. But printing `raw` while the verdict stayed filter-blind would be WORSE than that bug — the same
 // unconditional "would violate", now attributed to the narrowed line, reading as a filter candor evaluated
 // and did not. So the raw line and the condition land in one change.
-{
+if (blk()) {
   const d = scratch("candor-whatif-cond-");
   fs.writeFileSync(path.join(d, "r.json"), JSON.stringify({
     candor: { version: "ttttttt", spec: "0.24" }, package: "app", analyzed: { count: 1, digest: "0" },
@@ -9355,7 +9419,7 @@ export function all(db: DatabaseSync, o: any) {
 //
 // THE PREMISE ROW IS FIRST AND IS LOAD-BEARING: "no sidecars afterwards" and "this engine never wrote
 // one" are the same directory listing, so a block that only counts what is left can pass vacuously.
-{
+if (blk()) {
   const d = project({
     "tsconfig.json": '{ "compilerOptions": { "target": "ES2020", "module": "ESNext", "strict": true }, "include": ["src/**/*.ts"] }\n',
     "src/app.ts": 'export function f(): number { return 1; }\n'
@@ -9615,7 +9679,7 @@ export function all(db: DatabaseSync, o: any) {
 // unanswerable arm fired on it, flipping a cross-engine script's exit 0→2 on one arm of four.
 // `unanswerable` now fires only when the graph is GENUINELY absent (no sidecar AND no embedded edges —
 // the armed pair), which the block above still pins.
-{
+if (blk()) {
   const d = project({
     "src/app.ts": 'import * as fs from "fs";\n'
       + 'export function leaf(): number { return fs.readFileSync("/etc/hosts").length; }\n'
@@ -9668,7 +9732,7 @@ export function all(db: DatabaseSync, o: any) {
 // among the inputs arming must not touch; `runInputs` registered policy / env / deps / config — not the
 // target. EVERY row here asserts the BYTES, because an exit-code assertion alone passes on an engine
 // that still destroys the file and then exits 2 about something else.
-{
+if (blk()) {
   const d = scratch("candor-target-");
   const src = path.join(d, "app.ts");
   fs.writeFileSync(src, "export function hello(): number { return 1 }\n");
@@ -9726,7 +9790,7 @@ export function all(db: DatabaseSync, o: any) {
 // The two CONTROLS are the point of the rule's shape: `.candor/verdict.json` is under the target and is
 // not source (a containment rule refuses it, and took 33 tests with it here once), and a `.ts` sink
 // OUTSIDE the target is not this rule at all.
-{
+if (blk()) {
   const d = scratch("candor-tgtexp-");
   fs.mkdirSync(path.join(d, "src"));
   const src = path.join(d, "src", "main.ts");
@@ -9790,7 +9854,7 @@ export function all(db: DatabaseSync, o: any) {
 //   the discovery spelling (no --report, sink = the discovered .candor/report.json) — identical;
 //   gate … --gate-json r.callgraph.json                → the §2.2 sidecar half, destroyed at a SUCCESS
 //       exit: the report loads fine, the gate runs, and a REAL verdict lands where the graph belongs.
-{
+if (blk()) {
   const d = scratch("candor-gatelocator-");
   fs.writeFileSync(path.join(d, "app.ts"),
     'import * as nfs from "node:fs";\nexport function save(): void { nfs.writeFileSync("x", "1"); }\n');
@@ -9848,7 +9912,7 @@ export function all(db: DatabaseSync, o: any) {
 // swift leave the link alone; java deleted the link itself (also wrong, fixed in parallel). The rows
 // assert the LINK is still a link AND the target's bytes survive — an exit-code assertion cannot see
 // either half.
-{
+if (blk()) {
   const d = scratch("candor-symside-");
   fs.mkdirSync(path.join(d, "shared"));
   fs.mkdirSync(path.join(d, "work"));
@@ -9893,7 +9957,7 @@ export function all(db: DatabaseSync, o: any) {
 // never accepts, so SPEC §3.3.1 (1)'s precondition ("`--out` has been parsed and accepted") was false
 // and X's previous reports became permanent placeholders. The BYTES are the assertion: the run exits 2
 // either way, so only the report can tell the fixed engine from the broken one.
-{
+if (blk()) {
   const d = scratch("candor-prepass-");
   const src = path.join(d, "app.ts");
   fs.writeFileSync(src, "export function f(): number { return 1 }\n");
@@ -9938,7 +10002,7 @@ export function all(db: DatabaseSync, o: any) {
 // written by someone who had thought about incompleteness for the verb next to it. Each cell asserts BOTH
 // channels and the EXIT, which is the shape the mutants in this family survive through — candor-rust built
 // one that kept the whole JSON fix and deleted only the printed line, and it passed that engine's suite.
-{
+if (blk()) {
   const d = scratch("candor-desc-");
   fs.mkdirSync(path.join(d, "src"));
   fs.writeFileSync(path.join(d, "src/app.ts"),
@@ -10385,7 +10449,7 @@ export function all(db: DatabaseSync, o: any) {
 // `fix` IS IN THE LIST BECAUSE THE LIST IS A CONDITION, NOT AN ENUMERATION — §2 names three verbs because
 // three were in front of the author, and records the divergence that created (rust extended it, swift read
 // the list as closed). Composed with the `crossing` ruling, `fix` emits NO `crossing` key here.
-{
+if (blk()) {
   const d = scratch("candor-zerorule-");
   fs.mkdirSync(path.join(d, "src"));
   fs.writeFileSync(path.join(d, "src/app.ts"),
@@ -10477,7 +10541,7 @@ export function all(db: DatabaseSync, o: any) {
 // ROW 2 IS THE CONTROL THAT MAKES ROW 1 AND ROW 3 MEAN ANYTHING (conformance PART 26's CONTROL
 // SEPARATION): `count: 7` with `functions: []` is a legitimate all-pure CLAIM a consumer MUST believe,
 // and a fix that hedges all three has disabled the feature rather than implemented the rule.
-{
+if (blk()) {
   const d = scratch("candor-nomanifest-");
   fs.mkdirSync(path.join(d, "src"));
   fs.writeFileSync(path.join(d, "src/app.ts"),
@@ -10576,7 +10640,7 @@ export function all(db: DatabaseSync, o: any) {
 //               according to what else happens to sit in the directory.
 //   PREFIX    → the whole matching set, unioned — for EVERY verb, not just the gate.
 //   DIRECTORY → the reports discovered inside it (`<dir>/.candor/report`).
-{
+if (blk()) {
   const d = scratch("candor-locator-");
   const pfx = path.join(d, "pfx"); fs.mkdirSync(pfx, { recursive: true });
   const env = { candor: { version: "handwritten", toolchain: "n", spec: "0.27" } };
@@ -10636,7 +10700,7 @@ export function all(db: DatabaseSync, o: any) {
 // hand-back never runs and the placeholders STAND — the fail-closed reading a run that scanned nothing
 // is entitled to. Rows assert the BYTES, not the exit code, because the pre-fix build exits 0 and the
 // whole defect is what is left on disk.
-{
+if (blk()) {
   const d = scratch("candor-dupout-");
   fs.mkdirSync(path.join(d, "src"));
   fs.writeFileSync(path.join(d, "src/app.ts"),
@@ -10715,7 +10779,7 @@ export function all(db: DatabaseSync, o: any) {
 //
 // `ignored` is DISTINCT from `unevaluated` and the distinction is load-bearing: `unevaluated` carries
 // rules that PARSED and could not be answered, `ignored` carries text that never became a rule at all.
-{
+if (blk()) {
   const d = scratch("candor-ignored-");
   fs.mkdirSync(path.join(d, "src"));
   fs.writeFileSync(path.join(d, "src/app.ts"),

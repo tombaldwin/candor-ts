@@ -14,6 +14,27 @@ _Post-release review fixes. 0.28.0 shipped, then a high-effort review of that wo
 defects in it — three of them a defect of the same class as the fix that introduced them. The
 spec floor is UNCHANGED at 0.28: no contract moved, so this is a build-version patch._
 
+- **`npm test` runs the behavioural suite in parallel: 346s → 139s locally** (`test.mjs` itself
+  286s → 74s, 3.9× on 12 cores). `--shard=I/N` filters top-level blocks; `--parallel[=N]` runs those
+  shards as children and sums them. The blocks were already independent — `{}`-scoped, each minting its
+  own temp tree — so this changes how the suite runs, never what it asserts.
+
+  Sharding lives in the script rather than a CI matrix on purpose: `ci.yml` runs `npm test` precisely
+  so that a gate added locally cannot be silently missing from CI (the probe and mcp/watch suites once
+  were), and this way the speedup reaches developers too.
+
+  **`ci/shard-check.sh` is the correctness gate, and it earned itself twice.** It asserts the shards'
+  pass totals SUM to the unsharded total, because a shard filter fails by silence: a block claimed by no
+  shard does not error, it just never runs, and CI shows N green shards. (a) The first block-finder used
+  a regex for a bare `{` at column 0 with backtick-parity tracking to skip fixture source. The parity
+  desynced — backticks appear in comments and plain strings — and it found 96 real blocks and 79 in
+  template literals where the truth is **175 real and none**. 79 blocks then ran in EVERY shard: 2,782
+  assertions against 1,348. Now the block list is parsed with `ts.createSourceFile`. (b) A planted
+  lost-block probe drops the total to 1,332 and reddens the gate.
+
+  **And the thing shard-check could NOT see:** the first driver used `spawnSync` in a `map`, which
+  blocks until each child exits — parallel by name, sequential by construction, measured at 289s against
+  286s. The totals are identical either way, so only the clock catches it. Now `spawn` + `Promise.all`.
 - **⚠ The F1 fix OVER-CHARGED function-scoped overloads — the exact failure it claimed to guard.** The
   last-write-wins delete mirrors `fns.set` only at MODULE level: a function-scoped unit carries a
   `#line:col` suffix, so each signature held a distinct key, the implementation's delete never reached
