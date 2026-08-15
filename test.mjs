@@ -40,6 +40,20 @@ let pass = 0, fail = 0;
 // ROUND-ROBIN, not contiguous ranges: the expensive blocks cluster at the end (the ⟨0.28⟩ sink work
 // spawns far more scans than the early classifier rows), so splitting by position leaves one shard
 // carrying most of the cost.
+// THE SPACE-SEPARATED FORM IS AN ERROR, NOT A NO-OP. `--parallel 4` and `--shard 0/8` are what a person
+// types, and nothing matched them: the bare flag fell through and the `4` was matched by no parser, so
+// `--parallel 4` silently ran the default shard count and `--shard 0/8` silently ran the ENTIRE suite as
+// though unsharded. That is the same silent fallback the validation below was added to close, reached by
+// the spelling the validation does not look at — the operator asking for a specific count gets a
+// different one and no stderr. Both flags take `=`, and saying so is cheaper than guessing.
+for (const flag of ['--shard', '--parallel']) {
+  const at = process.argv.indexOf(flag);
+  if (at >= 0 && process.argv[at + 1] !== undefined && !process.argv[at + 1].startsWith('-')) {
+    console.error(`test.mjs: ${flag} takes its value with an '=' — write ${flag}=${process.argv[at + 1]}, not `
+                + `'${flag} ${process.argv[at + 1]}' (which would silently run the default)`);
+    process.exit(2);
+  }
+}
 const SHARD = (() => {
   const a = process.argv.find((x) => x.startsWith('--shard='));
   if (!a) return null;
@@ -119,21 +133,28 @@ if (SHARD === null) {
     const live = new Set();
     const GRACE_MS = 500;
     for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-      // prependListener, NOT `on` — and this is the trick that makes it compose. scratch.mjs installs its
-      // sweep handler at IMPORT time, i.e. before this line runs, and that handler ends with
-      // `removeAllListeners(sig)` + a re-raise so the process still dies with the right status. A listener
-      // merely appended after it would be REMOVED BEFORE IT WAS EVER CALLED. Running first also gives the
-      // order we want: children are signalled, then the parent sweeps and re-raises.
+      // prependListener, NOT `on`. scratch.mjs installs its sweep handler at IMPORT time — before this
+      // line runs — and that handler ends with `removeAllListeners(sig)` and a re-raise.
+      //   THE MECHANISM, corrected: `removeAllListeners` is NOT what would skip an appended listener.
+      //   EventEmitter.emit iterates a CLONE of the listener array, so a listener appended after
+      //   scratch.mjs's still runs (measured: both fire). What actually skips it is the RE-RAISE on the
+      //   next line — with the default disposition restored, `process.kill(process.pid, sig)` terminates
+      //   inside the call and never returns (measured: exit 143, the appended listener never ran).
+      //   Stated because a maintainer who tests only the first claim will find it false and revert this.
+      // Running first also gives the order we want: children are signalled, then the parent sweeps.
       process.prependListener(sig, () => {
         for (const c of live) { try { c.kill(sig); } catch { /* already gone; nothing to kill */ } }
         // A synchronous grace: this runs from a signal handler with the parent about to re-raise, so there
         // is no later turn of the event loop to escalate from. Atomics.wait is the only blocking sleep.
         if (live.size) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, GRACE_MS);
         for (const c of live) {
-          // `kill(pid, 0)` asks the OS, because the parent has been blocking and has processed no `close`
-          // events during the grace. An already-exited child is an unreaped zombie here: signalling it is a
-          // no-op, which is why this does not need to tell the two apart.
-          try { process.kill(c.pid, 0); c.kill('SIGKILL'); } catch { /* reaped or gone */ }
+          // `c.kill()`, NEVER `process.kill(c.pid, …)`. The ChildProcess method is a no-op once Node has
+          // reaped the child (`_handle === null`, returns false), so it needs no liveness probe. The pid
+          // form does: a child that exited BEFORE the signal and is sitting between 'exit' and 'close'
+          // with its stdio still draining has already been reaped, so its pid is free for reuse and
+          // signalling it by number can hit an unrelated process. The first version probed with
+          // `process.kill(c.pid, 0)` first, which is the same hazard one step removed.
+          try { c.kill('SIGKILL'); } catch { /* reaped or gone */ }
         }
         live.clear();
       });
@@ -240,7 +261,9 @@ if (SHARD === null) {
     // The children's trees now live under a directory this process owns, so the parent has to honour the
     // same keep-the-evidence rule the shards do: a failing shard printed paths into them (`  FAIL … /var/
     // folders/…`), and sweeping on the way out would delete what those lines point at.
-    if (f || broke) keepOnFailure();
+    // `dropped` counts too: the run exits 1 for it, and a run that exits 1 must not sweep the evidence
+    // its own output pointed at. Keeping on two of the three red conditions was an oversight, not a rule.
+    if (f || broke || dropped) keepOnFailure();
     process.exit(f || broke || dropped ? 1 : 0);
   }
 }
@@ -1678,17 +1701,34 @@ if (blk()) {
   const dir = scratch("candor-ts-eagain-");
   const fifo = path.join(dir, "p");
   spawnSync("mkfifo", [fifo]);
-  // A reader that opens and then sleeps: the FIFO needs an open read end or the non-blocking open of the
-  // write end fails with ENXIO, and it must never drain, or the write simply succeeds.
-  const reader = spawn("sh", ["-c", `exec 3<"${fifo}"; sleep 30`], { stdio: "ignore" });
-  let wfd = -1;
-  for (let i = 0; i < 200 && wfd < 0; i++) {
-    try { wfd = fs.openSync(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK); }
-    catch { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); }
-  }
+  // THE READ END IS HELD IN-PROCESS, no reader process at all. The first version spawned
+  // `sh -c 'exec 3<fifo; sleep 30'` — and /bin/sh forks for a compound command, so `reader.kill()` killed
+  // the SHELL and left `sleep 30` alive with ppid 1, holding the read end open into a directory the sweep
+  // had already removed. In a change titled "own the children", the new test was the one thing that did
+  // not. An O_NONBLOCK O_RDONLY open succeeds on a FIFO with no writer, and satisfies the write end's
+  // need for a reader without any process to lose track of.
+  let rfd = -1, wfd = -1;
+  try {
+    rfd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    wfd = fs.openSync(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
+  } catch { /* reported by the guard below */ }
   if (wfd < 0) {
-    check("--agents stalled-reader guard: could not open the FIFO write end", false, "ENXIO — no reader attached");
+    check("--agents stalled-reader guard: could not open the FIFO", false, "the fixture could not be built");
   } else {
+    // FILL THE PIPE FIRST, and this is what makes the row portable. The contract is 24110 bytes and a
+    // Linux FIFO holds 65536, so `printAgents` wrote the WHOLE thing on its first call, never raised
+    // EAGAIN, and never entered the branch under test — CI went red on the calibration assertion while
+    // the timing assertion passed in 1ms having tested nothing. macOS was green only because its pipe
+    // holds 8192. That is this project's own hazard reproduced inside the fix's own test, and the reason
+    // it surfaced as a loud failure instead of a vacuous green is the second assertion. Filling to
+    // capacity first makes the buffer's size irrelevant.
+    const fill = Buffer.alloc(4096, 0x61);
+    let filled = 0;
+    for (;;) {
+      try { filled += fs.writeSync(wfd, fill, 0, fill.length); }
+      catch (e) { if (e.code === "EAGAIN") break; throw e; }
+      if (filled > (1 << 22)) break;   // a rail, in case some platform's FIFO never says EAGAIN
+    }
     const t0 = Date.now();
     const errFd = fs.openSync(path.join(dir, "err"), "w");
     const saved = fs.writeSync;
@@ -1697,6 +1737,8 @@ if (blk()) {
     try { printAgents(wfd, 600); } finally { fs.writeSync = saved; fs.closeSync(errFd); }
     const ms = Date.now() - t0;
     const diag = fs.readFileSync(path.join(dir, "err"), "utf8");
+    check("--agents fixture really is at EAGAIN before the call (the row is not vacuous)",
+          filled > 0, `the FIFO accepted ${filled} bytes and never blocked`);
     check("--agents RETURNS when the reader stalls without closing (bounded EAGAIN retry)",
           ms < 5000, `took ${ms}ms — the retry loop is unbounded again`);
     check("…and says on stderr that the contract is INCOMPLETE",
@@ -1704,7 +1746,7 @@ if (blk()) {
           `stderr was ${JSON.stringify(diag.slice(0, 120))}`);
     fs.closeSync(wfd);
   }
-  reader.kill("SIGKILL");
+  if (rfd >= 0) fs.closeSync(rfd);
 }
 
 // ── 2b. `show` SURFACES the literal Fs paths + Exec cmds (the regression that shipped) ─────────────

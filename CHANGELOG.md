@@ -8,7 +8,15 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
-- **`--agents` could HANG instead of truncating.** `contract.mjs`'s EAGAIN retry was
+- **`--agents`'s EAGAIN retry could spin forever — LATENT on the production path, and that caveat is
+  part of the fix, not a footnote.** Measured after the change: `node scan.mjs --agents` into a FIFO whose
+  reader holds it open and never drains is **still blocked at 20 s with empty stderr**. The guard is not
+  reached, because nothing on that path creates a `process.stdout` stream, so libuv never flips fd 1 to
+  non-blocking and `writeSync` blocks in the kernel instead of raising EAGAIN. One `console.log` added
+  anywhere before the dump arms it. The sibling driver in `test.mjs` carried this caveat and this file did
+  not — the caveat is the thing that failed to travel. The residual, stated plainly: a *blocking* write
+  cannot be bounded from user code without going async, and that is not fixed here. What IS fixed:
+  `contract.mjs`'s EAGAIN retry was
   `while (off < buf.length)` with an unconditional 1 ms sleep and no way out, so a reader that stalls
   *without closing* — an agent harness blocked while holding the pipe, a log collector wedged on a full
   disk — spun forever. The EPIPE arm covers the reader that LEFT; this is the one that stayed and
@@ -16,8 +24,13 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   cannot be told from a slow one. Now bounded at 5 s, reset on every byte that lands (a slow reader is
   never punished for being slow), and it says on stderr that the contract is INCOMPLETE rather than
   giving up quietly — which would be the truncation-with-exit-0 that function was written to remove.
-  Covered by a test that drives the real loop against a FIFO opened `O_NONBLOCK` with a reader that
-  never reads; `printAgents(fd, budgetMs)` takes those two parameters only so the suite can reach it.
+  Covered by a test that drives the real loop against a FIFO opened `O_NONBLOCK` and **filled to
+  capacity first**; `printAgents(fd, budgetMs)` takes those two parameters only so the suite can reach it.
+  The fill is not incidental: without it the 24 KiB contract fits a 65536-byte Linux FIFO in one write,
+  EAGAIN never fires, and the row passes in 1 ms having tested nothing — which is what happened, and CI
+  caught it only because the second assertion reads the guard's own diagnostic rather than the clock.
+  And "bounded at 5 s" means five seconds of ZERO PROGRESS, not of wall-clock: the deadline resets on
+  every byte that lands, so a slow reader is never cut off for being slow.
 - **The test driver's children outlived the parent.** SIGTERM to `node test.mjs --parallel` left every
   shard alive with ppid 1, still scanning and still minting fixture trees nothing would sweep —
   measured at 4 orphans and 69 leaked directories. Ctrl-C hid it, because a tty signals the whole

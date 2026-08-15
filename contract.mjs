@@ -38,6 +38,14 @@ export function printAgents(fd = 1, budgetMs = 5000) {
   //            small backoff (Atomics.wait is the only synchronous sleep available here) — BOUNDED, see
   //            below.
   //
+  // WHAT THE BUDGET ACTUALLY BOUNDS: `budgetMs` of ZERO PROGRESS, not total wall-clock. The deadline
+  // resets on every successful write, including a partial one, so a reader draining a chunk at a time
+  // stretches the total to budget × the number of stalls. That is the RIGHT property — a slow reader must
+  // not be cut off for being slow, and the failure this guards is a reader that has STOPPED — but
+  // "bounded at 5s" was the wrong description of it, and the payload here is a fixed 24 KiB so the worst
+  // case is a small multiple rather than unbounded. Measured with a 500ms budget against a reader taking
+  // 4096 bytes every 400ms: 2409ms total, whole contract delivered, no give-up.
+  //
   // THE RETRY IS BOUNDED, and it was not. `while (off < buf.length)` with an unconditional 1 ms sleep
   // spins FOREVER against a reader that stalls without ever closing — an agent harness that stops
   // reading while holding the pipe open, a log collector wedged on a full disk. EPIPE is the case where
