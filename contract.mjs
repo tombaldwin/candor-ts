@@ -21,7 +21,25 @@ export function printAgents() {
   // and drains on the way out, scan.mjs exits. THE SIBLING ROUTE AGAIN — sharing the PRINTER does not
   // share the EXIT, and the divergence lived in the caller the shared function was meant to protect.
   // Fixing it here rather than in scan.mjs is deliberate: the next caller inherits the fix.
+  //
+  // Two failure modes the first version of this did not handle, both specific to a PIPE, which is the
+  // case it exists for:
+  //   EPIPE  — the reader stopped early (`| head -n5`, `| grep -m1`, a consumer that closed). The old
+  //            console.log path exited 0 silently; a bare writeSync raises, and a print-and-exit mode
+  //            answering a contract request with a Node stack trace and exit 1 is a worse regression
+  //            than the truncation this replaced. Swallowed — the reader left, that is not our error.
+  //   EAGAIN — once stdout has been initialised, libuv puts the pipe in non-blocking mode and writeSync
+  //            THROWS rather than short-writing as soon as the payload exceeds the 64 KiB pipe buffer.
+  //            The contract is 24 KiB today, so this is latent, not live — and it would come back as
+  //            exactly the truncation-plus-noise this function was written to remove. Retry with a
+  //            small backoff (Atomics.wait is the only synchronous sleep available here).
   let off = 0;
   const buf = Buffer.from(out, "utf8");
-  while (off < buf.length) off += fs.writeSync(1, buf, off, buf.length - off); // a short write is legal
+  const idle = new Int32Array(new SharedArrayBuffer(4));
+  try {
+    while (off < buf.length) {
+      try { off += fs.writeSync(1, buf, off, buf.length - off); }   // a short write is legal
+      catch (e) { if (e.code !== "EAGAIN") throw e; Atomics.wait(idle, 0, 0, 1); }
+    }
+  } catch (e) { if (e.code !== "EPIPE") throw e; }
 }

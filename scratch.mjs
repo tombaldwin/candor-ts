@@ -40,8 +40,19 @@ function sweep() {
 }
 
 process.on("exit", sweep);
+// An uncaught throw still runs `exit` handlers — with `keep` false, so a harness that dies mid-assertion
+// would sweep away the very trees whose paths the crash just printed. Treat any abnormal end as failure.
+for (const ev of ["uncaughtException", "unhandledRejection"]) {
+  process.on(ev, (e) => { keepOnFailure(); console.error(e); process.exit(1); });
+}
 // A signal does NOT run `exit` handlers on its own, which is the killed-mid-run leak. Re-raise after
 // sweeping so the exit status still reflects the signal rather than becoming a clean 0.
+//
+// `removeAllListeners` FIRST, and it is the whole trick: installing a listener REPLACES Node's default
+// disposition for that signal, so `process.kill(process.pid, sig)` re-enters this same handler. The
+// first version of this shipped without it and made the harness unkillable — Ctrl-C swept, re-signalled,
+// swept, forever, and a second Ctrl-C did not help either. Removing the listener restores the default,
+// so the re-raise terminates with the right status.
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-  process.on(sig, () => { sweep(); process.kill(process.pid, sig); });
+  process.on(sig, () => { sweep(); process.removeAllListeners(sig); process.kill(process.pid, sig); });
 }

@@ -1310,7 +1310,16 @@ export function over(a: any): void { fsm.writeFileSync("/tmp/x", String(a)); }
 export function callsOver(): void { over("x"); }
 export abstract class Base { abstract hook(): void; run(): void { this.hook(); } }
 export class Impl extends Base { hook(): void { fsm.readFileSync("/tmp/y"); } }
-export abstract class Lone { abstract solo(): void; call(): void { this.solo(); } }`;
+export abstract class Lone { abstract solo(): void; call(): void { this.solo(); } }
+export function outer(): void {
+  function inner(a: string): void;
+  function inner(a: number): void;
+  function inner(a: any): void { fsm.writeFileSync("/tmp/z", String(a)); }
+  inner("x");
+}
+export abstract class Mid extends Base { }
+export class Deep extends Mid { hook(): void { fsm.readFileSync("/tmp/d"); } }
+export function viaDeepBase(m: Mid): void { m.hook(); }`;
   const dir = project({ "package.json": `{"name":"bl","version":"1.0.0"}`, "src/a.ts": src });
   const { report: rep } = scan(dir);
   const eff = (fn) => entry(rep, fn)?.inferred ?? [];
@@ -1371,6 +1380,24 @@ export class I extends B { h(): void {} }`,
                          { encoding: "utf8" });
   check("body-less GATE CONTROL: `deny Unknown` stays exit 0 when every declaration has a local body",
         gctl.status === 0, `status=${gctl.status} ${gctl.stdout}`);
+  // OVER-CHARGE CONTROL 3 — A FUNCTION-SCOPED OVERLOAD SET. Control 1 above only exercises the
+  // MODULE-LEVEL form, and that gap shipped a real fabrication: a function-scoped unit carries a
+  // `#line:col` suffix in its qual, so each signature holds a distinct key, the implementation's
+  // last-write-wins delete never reaches them, and every signature was charged `Unknown[native:]` over
+  // code sitting in the same file. The guard is the SYMBOL — shared by every overload at any scope.
+  check("no over-charge: a FUNCTION-SCOPED overload set is not charged (the qual suffix defeats the delete)",
+        !Object.keys(rep.functions.reduce((a, f) => (a[f.fn] = 1, a), {}))
+          .some((fn) => fn.startsWith("src.a.inner#") && eff(fn).includes("Unknown")),
+        JSON.stringify(rep.functions.filter((f) => f.fn.startsWith("src.a.inner"))));
+  check("no over-charge: ...and its enclosing function keeps the implementation's exact effect",
+        eff("src.a.outer").includes("Fs") && !eff("src.a.outer").includes("Unknown"),
+        JSON.stringify(entry(rep, "src.a.outer")));
+  // OVER-CHARGE CONTROL 4 — AN INTERMEDIATE ABSTRACT CLASS. `classOverrides` records DIRECT subclass
+  // overrides only, so `Base -> Mid (abstract) -> Deep (bodied)` resolved one level to a body-less
+  // member and charged the base, though the sole concrete implementation is right there and analyzed.
+  check("no over-charge: a THREE-level hierarchy still resolves (CHA climbs transitively)",
+        eff("src.a.viaDeepBase").includes("Fs") && !eff("src.a.viaDeepBase").includes("Unknown"),
+        JSON.stringify(entry(rep, "src.a.viaDeepBase")));
 }
 
 // ── 1d. `--agents` must not truncate on a PIPE ────────────────────────────────────────────────────

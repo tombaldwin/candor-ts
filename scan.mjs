@@ -2829,11 +2829,13 @@ for (const sf of sources) {
                       endLine: sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1 });
       nodeName.set(node, qual);
       // Record a unit minted for a declaration with NO BODY, for the §3 disclosure pass below (see it
-      // for the argument). MIRROR `fns.set`'s last-write-wins EXACTLY — `.delete` on the bodied write is
-      // load-bearing, not tidiness: an overload set is N body-less signatures followed by the
-      // implementation under the SAME qual, so a plain `.add` would mark every real overloaded function
-      // in the project unanalysable and charge its callers Unknown. That is the over-charge half of the
-      // fix, and it is pinned by a fixture (`over`/`callsOver`, still `Fs` after this pass).
+      // for the argument). The `.delete` mirrors `fns.set`'s last-write-wins for the MODULE-LEVEL
+      // overload set (N body-less signatures then the implementation, all under one qual) — but it is
+      // NOT sufficient on its own, and assuming it was is how this fix shipped an over-charge: a
+      // FUNCTION-SCOPED unit gets `#line:col` appended to its qual, so each signature holds a distinct
+      // key, the implementation's delete never reaches them, and every signature was charged
+      // `Unknown[native:…]` over code that is fully visible. The disclosure pass below therefore asks
+      // the SYMBOL — which every overload in a set shares, at any scope — and that is the real guard.
       {
         const hasBodySlot = ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)
           || ts.isConstructorDeclaration(node) || ts.isGetAccessorDeclaration(node)
@@ -5440,10 +5442,39 @@ function resolveDepEntryKey(pkg, subpath) {
 // zod's `ZodType._parse` one — excluding them takes zod's delta to +0 and hono's from +18 to +9, and
 // every one of the nine that remain is a true positive (`Deno.mkdir`/`writeFile` are Fs, `Deno.
 // upgradeWebSocket` and `FetcherLike.fetch` are Net, all declared in local `.d.ts` shims with no body).
-const answeredByLocalBody = (node) => (classOverrides.get(node) ?? []).some((om) => !!om.body);
+// Does a LOCAL body answer this declaration? Climbs `classOverrides` TRANSITIVELY: that index records
+// DIRECT-subclass overrides only, so `Base (abstract) → Mid (abstract) → Impl (bodied)` resolved to
+// `Mid.hook` — no body — and charged `Base.hook` Unknown even though `Impl.hook` is the sole concrete
+// implementation and fully analyzed. The two-level fixture could not see it, which is also why the
+// measured corpus deltas characterise one-level hierarchies only.
+const answeredByLocalBody = (node, seen = new Set()) => {
+  if (seen.has(node)) return false;          // cycle guard: heritage clauses can be circular in bad input
+  seen.add(node);
+  return (classOverrides.get(node) ?? []).some((om) => !!om.body || answeredByLocalBody(om, seen));
+};
+// The IMPLEMENTATION of the overload set this body-less signature belongs to, if we analyzed it.
+// Keyed on the SYMBOL, not the unit name: every overload shares one symbol at any scope, where the
+// qual does not (a function-scoped unit carries a `#line:col` suffix to keep sibling scopes apart).
+const overloadImplOf = (node) => {
+  const sym = node.name ? checker.getSymbolAtLocation(node.name) : undefined;
+  return (sym?.declarations ?? []).find((d) => d !== node && !!d.body);
+};
 for (const [qual, meta] of bodylessDecls) {
   const rec = fns.get(qual);
   if (!rec || answeredByLocalBody(meta.node)) continue;
+  // An overload SIGNATURE with a local implementation is not unanswerable — but neither is it empty,
+  // and skipping it silently was this fix's first mistake in the other direction. At MODULE level every
+  // overload shares one qual, so a call resolving to the signature lands on the implementation's unit
+  // by construction. FUNCTION-SCOPED, the quals differ, the checker resolves the call to the SIGNATURE,
+  // and the caller reached an empty unit and read PURE — a silent under-report that predates this pass
+  // (`outer` calling a nested overloaded `inner` that writes a file was pure before any of this). Edge
+  // the signature to the implementation and the existing fixpoint carries the real effect through.
+  const implDecl = overloadImplOf(meta.node);
+  if (implDecl) {
+    const target = nodeName.get(implDecl);
+    if (target && target !== qual) rec.edges.add(target);
+    continue;
+  }
   rec.direct.add("Unknown");
   // §4's dividing line, same as everywhere else in this file. An `abstract` member IS an unresolved
   // DISPATCH — owner type and member are both nameable, which is what `dispatch:` reserves itself for,
