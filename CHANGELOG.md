@@ -8,6 +8,38 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.28.1] — 2026-08-15
+
+_Post-release review fixes. 0.28.0 shipped, then a high-effort review of that work found
+defects in it — three of them a defect of the same class as the fix that introduced them. The
+spec floor is UNCHANGED at 0.28: no contract moved, so this is a build-version patch._
+
+- **⚠ The F1 fix OVER-CHARGED function-scoped overloads — the exact failure it claimed to guard.** The
+  last-write-wins delete mirrors `fns.set` only at MODULE level: a function-scoped unit carries a
+  `#line:col` suffix, so each signature held a distinct key, the implementation's delete never reached
+  them, and every signature was charged `Unknown[native:]` over code in the same file. `deny Unknown`
+  flipped 0 → 1. The guard is now the SYMBOL, which every overload shares at any scope.
+
+- **…and fixing that revealed a silent under-report older than this work.** The checker resolves a call
+  to the SIGNATURE; function-scoped, that is a distinct empty unit, so a function calling a nested
+  overloaded function that writes a file read PURE. The signature now EDGES to the implementation.
+
+- **`answeredByLocalBody` saw only DIRECT overrides**, so one intermediate abstract class defeated the
+  CHA exclusion — `Base → Mid → Impl` charged the base though the sole concrete implementation was
+  analyzed. Now climbs transitively. Corpus deltas re-measured and unchanged.
+
+- **`scratch.mjs` made the test harness UNKILLABLE.** Installing a signal listener replaces Node's
+  default disposition, so `process.kill(process.pid, sig)` re-entered the handler forever — Ctrl-C swept,
+  re-signalled, swept. `removeAllListeners` first. An uncaught throw also swept away the trees whose
+  paths the crash had just printed.
+
+- **`--agents` piped to an early-closing reader CRASHED.** The truncation fix introduced EPIPE: exit 1
+  and a raw Node stack trace where the old path exited 0 silently. Swallowed, and EAGAIN (>64 KiB on a
+  non-blocking pipe) now retries rather than throwing.
+
+- **exit 2 is "could not evaluate", not a violation** — the self-gate reported the ⟨0.21⟩ fail-closed
+  verdict as a red boundary. Found by review in the java arm; all three self-gates shared the collapse.
+
 ## [0.28.0] — 2026-08-14
 
 - **A `scan.mjs` comment illustrating a refusal document** named the previous floor.
