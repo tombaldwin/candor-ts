@@ -64,6 +64,16 @@ if [ "$gate_rc" -eq 0 ] && [ "$exec_rc" -eq 0 ]; then
   echo "self-gate: OK — candor-ts reaches no Net/Db/Ipc, and spawns a process only where it declares it does"
   exit 0
 fi
+# Exit 2 is NOT a violation — it is the ⟨0.21⟩ fail-closed "could not evaluate" verdict (unanalyzed source),
+# and this project treats that distinction as load-bearing everywhere else. Reporting it as "the
+# boundary is red" sends the reader hunting for a subprocess that does not exist, and collapsing it to
+# exit 1 tells CI a violation was ESTABLISHED. Preserved as 2. (Found by review in the java arm first;
+# all three self-gates were written with the same collapse.)
+if [ "$gate_rc" -eq 2 ]; then
+  echo "self-gate: COULD NOT EVALUATE — candor-ts exited 2 over its own sources (the boundary was never"
+  echo "  judged, so this is not a clean result and not a violation). Fix the input, then re-run."
+  exit 2
+fi
 [ "$gate_rc" -ne 0 ] && echo "self-gate: FAILED — the declared boundary in .candor/policy is red (exit $gate_rc)"
 [ "$exec_rc" -ne 0 ] && echo "self-gate: FAILED — the Exec set does not match the declared self-invocation list"
 exit 1
