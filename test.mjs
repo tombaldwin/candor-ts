@@ -59,7 +59,12 @@ if (SHARD === null) {
   const pa = process.argv.find((x) => x === '--parallel' || x.startsWith('--parallel='));
   if (pa) {
     const want = pa.includes('=') ? Number(pa.split('=')[1]) : 0;
-    const N = want > 0 ? want : Math.max(2, Math.min(8, (os.cpus()?.length ?? 4) - 1));
+    // All cores, not cores-1. The parent only awaits children, so reserving one for it buys nothing —
+    // and CI runners are small, where that one core is a third of the machine. Measured: the local 12-core
+    // box went 286s → 74s, while CI's first run at cores-1 managed only 884s → 612s. CANDOR_TEST_SHARDS
+    // overrides for a runner that reports more cores than it can actually schedule.
+    const env = Number(process.env.CANDOR_TEST_SHARDS ?? 0);
+    const N = want > 0 ? want : env > 0 ? env : Math.max(2, Math.min(8, os.cpus()?.length ?? 4));
     // `spawn`, awaited together — NOT `spawnSync` in a map. The first version did exactly that and was
     // sequential by construction (spawnSync blocks until the child exits), measuring 289s against 286s
     // for the plain run. shard-check could not see it: the totals are identical whether the children
