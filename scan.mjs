@@ -5447,17 +5447,30 @@ function resolveDepEntryKey(pkg, subpath) {
 // `Mid.hook` — no body — and charged `Base.hook` Unknown even though `Impl.hook` is the sole concrete
 // implementation and fully analyzed. The two-level fixture could not see it, which is also why the
 // measured corpus deltas characterise one-level hierarchies only.
-const answeredByLocalBody = (node, seen = new Set()) => {
-  if (seen.has(node)) return false;          // cycle guard: heritage clauses can be circular in bad input
-  seen.add(node);
-  return (classOverrides.get(node) ?? []).some((om) => !!om.body || answeredByLocalBody(om, seen));
-};
+// DIRECT overrides only — the transitive climb was REVERTED, and the reason is worth keeping. Climbing
+// removed the base member's Unknown for `Base → Mid (re-declares abstract) → Impl`, but the dispatch-site
+// fan-out (see `classOverrides` at the call site) is still ONE level, so nothing then carried Impl's
+// effect caller-ward: the caller vanished from the report entirely, which under SPEC §2 rule 3 is a
+// positive purity claim. `deny Unknown` AND `deny Fs` both passed over a real Fs. The Unknown was
+// COMPENSATING for the non-transitive fan-out, and the climb deleted the compensation without supplying
+// the thing it compensated for. Over-charging that shape is the survivable direction; under-reporting it
+// is not. The real fix is to build `classOverrides` transitively once, as `classDescendants` already is —
+// filed, not attempted here under a shipped-regression clock.
+const answeredByLocalBody = (node) => (classOverrides.get(node) ?? []).some((om) => !!om.body);
 // The IMPLEMENTATION of the overload set this body-less signature belongs to, if we analyzed it.
 // Keyed on the SYMBOL, not the unit name: every overload shares one symbol at any scope, where the
 // qual does not (a function-scoped unit carries a `#line:col` suffix to keep sibling scopes apart).
+// `!!d.body` ALONE IS NOT "is an implementation" — a ts.ModuleDeclaration has a `.body` too (its
+// ModuleBlock), so `declare function f(); declare namespace f {}` — the UMD/ambient shape of jQuery,
+// lodash, moment, chalk — matched the namespace as f's implementation, dropped the Unknown, and
+// reported the caller PURE. That is the axios cardinal sin reopened BY the pass that closed it, and it
+// shipped in 0.28.1. The kind guard is the fix: only a declaration form that can carry a FUNCTION body
+// can be an overload implementation.
+const canCarryABody = (d) => ts.isFunctionDeclaration(d) || ts.isMethodDeclaration(d)
+  || ts.isConstructorDeclaration(d) || ts.isGetAccessorDeclaration(d) || ts.isSetAccessorDeclaration(d);
 const overloadImplOf = (node) => {
   const sym = node.name ? checker.getSymbolAtLocation(node.name) : undefined;
-  return (sym?.declarations ?? []).find((d) => d !== node && !!d.body);
+  return (sym?.declarations ?? []).find((d) => d !== node && canCarryABody(d) && !!d.body);
 };
 for (const [qual, meta] of bodylessDecls) {
   const rec = fns.get(qual);
@@ -5469,10 +5482,15 @@ for (const [qual, meta] of bodylessDecls) {
   // and the caller reached an empty unit and read PURE — a silent under-report that predates this pass
   // (`outer` calling a nested overloaded `inner` that writes a file was pure before any of this). Edge
   // the signature to the implementation and the existing fixpoint carries the real effect through.
+  // The `continue` must depend on an EDGE BEING FORMED, not merely on finding a declaration. `nodeName`
+  // is minted only for units in `projectFiles`, while the symbol's declarations span the whole program —
+  // a `/// <reference>` pull-in, a file outside the tsconfig `include`, a `declare module` augmentation.
+  // Skipping on a target we could not resolve drops the charge AND forms no edge: the disclosure pass
+  // failing OPEN. Fall through to the Unknown instead, which is what "we could not follow this" means.
   const implDecl = overloadImplOf(meta.node);
-  if (implDecl) {
-    const target = nodeName.get(implDecl);
-    if (target && target !== qual) rec.edges.add(target);
+  const target = implDecl ? nodeName.get(implDecl) : undefined;
+  if (target) {
+    if (target !== qual) rec.edges.add(target);
     continue;
   }
   rec.direct.add("Unknown");

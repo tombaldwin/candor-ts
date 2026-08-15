@@ -1386,9 +1386,13 @@ export function outer(): void {
   function inner(a: any): void { fsm.writeFileSync("/tmp/z", String(a)); }
   inner("x");
 }
-export abstract class Mid extends Base { }
-export class Deep extends Mid { hook(): void { fsm.readFileSync("/tmp/d"); } }
-export function viaDeepBase(m: Mid): void { m.hook(); }`;
+export abstract class Top { abstract tick(): void; }
+export abstract class Mid extends Top { abstract tick(): void; }
+export class Deep extends Mid { tick(): void { fsm.readFileSync("/tmp/d"); } }
+export function viaTop(t: Top): void { t.tick(); }
+export declare function widget(u: string): string;
+export declare namespace widget { const version: string; }
+export function callsWidget(): string { return widget("u"); }`;
   const dir = project({ "package.json": `{"name":"bl","version":"1.0.0"}`, "src/a.ts": src });
   const { report: rep } = scan(dir);
   const eff = (fn) => entry(rep, fn)?.inferred ?? [];
@@ -1464,9 +1468,24 @@ export class I extends B { h(): void {} }`,
   // OVER-CHARGE CONTROL 4 — AN INTERMEDIATE ABSTRACT CLASS. `classOverrides` records DIRECT subclass
   // overrides only, so `Base -> Mid (abstract) -> Deep (bodied)` resolved one level to a body-less
   // member and charged the base, though the sole concrete implementation is right there and analyzed.
-  check("no over-charge: a THREE-level hierarchy still resolves (CHA climbs transitively)",
-        eff("src.a.viaDeepBase").includes("Fs") && !eff("src.a.viaDeepBase").includes("Unknown"),
-        JSON.stringify(entry(rep, "src.a.viaDeepBase")));
+  // NOT an over-charge control — the previous version of this row asserted `Fs` on a hierarchy whose
+  // middle class re-declared nothing, so `classOverrides` already linked the concrete override straight
+  // to the base and the row passed identically on an engine WITHOUT the change it claimed to guard. It
+  // was vacuous, and a silent under-report shipped behind it. With `Mid` re-declaring the member the
+  // shape is real, and the assertion is the one that matters: the caller must not VANISH. Absence from
+  // `functions` is a positive purity claim under SPEC §2 rule 3, so a disappearing caller is the cardinal
+  // sin wearing an empty report. Over-charging it with Unknown is the survivable direction.
+  check("no silent loss: a caller through a RE-DECLARING intermediate abstract is still reported",
+        entry(rep, "src.a.viaTop") != null && eff("src.a.viaTop").includes("Unknown"),
+        JSON.stringify(entry(rep, "src.a.viaTop")));
+  // THE UMD/AMBIENT TYPINGS SHAPE — `declare function f(); declare namespace f {}`, which is jQuery,
+  // lodash, moment and chalk. A ts.ModuleDeclaration carries a `.body` (its ModuleBlock), so a bare
+  // `!!d.body` test read the NAMESPACE as f's overload implementation, dropped the charge, and reported
+  // the caller pure. That is the axios cardinal sin reopened by the pass that closed it; it shipped.
+  check("body-less: a `declare function` MERGED with a namespace is still Unknown, not pure",
+        eff("src.a.widget").includes("Unknown"), JSON.stringify(entry(rep, "src.a.widget")));
+  check("body-less: ...and its caller too — a ModuleBlock is not a function body",
+        eff("src.a.callsWidget").includes("Unknown"), JSON.stringify(entry(rep, "src.a.callsWidget")));
 }
 
 // ── 1d. `--agents` must not truncate on a PIPE ────────────────────────────────────────────────────
