@@ -8,6 +8,37 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.28.2] — 2026-08-15
+
+_A cardinal-sin fix. 0.28.1's body-less-declaration pass reopened, in two shapes, the hole it was
+written to close — both found by a max-effort review of that patch, both live on npm and crates.io
+until this release. The spec floor is unchanged at 0.28._
+
+- **⚠ `declare function f(); declare namespace f {}` read PURE — the axios cardinal sin, reopened.**
+  The UMD/ambient typings shape of jQuery, lodash, moment and chalk. `overloadImplOf` tested `!!d.body`,
+  and a `ts.ModuleDeclaration` HAS a body (its ModuleBlock), so the namespace was taken for the overload
+  implementation, the `Unknown` was dropped, and the caller was certified pure: `wrote 0 effectful
+  functions`, `deny Unknown` exit **0**. Fixed with a node-kind guard — only a form that can carry a
+  FUNCTION body can be an implementation.
+
+- **⚠ A caller through a RE-DECLARING intermediate abstract class VANISHED from the report.** Absence
+  from `functions` is a positive purity claim (SPEC §2 rule 3), and both `deny Unknown` and `deny Fs`
+  passed over a real `Fs`. Making `answeredByLocalBody` climb transitively removed the base member's
+  `Unknown`, but the dispatch-site fan-out is still ONE level — the `Unknown` had been COMPENSATING for
+  that, and the climb deleted the compensation without supplying what it compensated for. Reverted to
+  direct-only: over-charging that shape is survivable, under-reporting it is not. Transitive fan-out
+  (building `classOverrides` transitively, as `classDescendants` already is) is the real fix, filed.
+
+- **The overload skip now depends on an EDGE BEING FORMED, not on finding a declaration.** `nodeName` is
+  minted only for `projectFiles` while the symbol spans the whole program, so an unresolved target
+  dropped the charge AND formed no edge — a disclosure pass failing OPEN.
+
+- **And the control that let the second one ship was VACUOUS.** The "three-level hierarchy" row asserted
+  `Fs` on a hierarchy whose middle class re-declared nothing, so `classOverrides` already linked the
+  concrete override straight to the base: it passed identically on an engine WITHOUT the change it
+  claimed to guard. Replaced with a re-declaring hierarchy and a base-typed receiver, asserting the
+  caller is not LOST — and both new rows were verified to FAIL on the shipped 0.28.1 engine.
+
 ## [0.28.1] — 2026-08-15
 
 _Post-release review fixes. 0.28.0 shipped, then a high-effort review of that work found
