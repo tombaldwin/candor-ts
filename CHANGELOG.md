@@ -8,6 +8,14 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ Every unevaluated-rule row NAMES ITS OWN RULE, on every channel.** The `why` was one shared
+  sentence per KIND, phrased as a count — so with two `forbid` lines both rows read *"this policy has 2
+  `forbid` rule(s)"*, a fact about the file attached to a row about one line of it, whose obvious reading
+  (that the row covers all of them) is false. Two callers prefixed the rule and **three printed `why`
+  alone** — the advisory disclosure, the LSP fix path, and the MCP error, i.e. the agent channel — so the
+  rule name was missing exactly where a reader has least context. `why` is self-contained now and the two
+  prefixing callers drop their prefix; a channel added later cannot lose it. `allow` moves with `forbid`,
+  the sibling no conformance row anywhere writes into a `.pol` file.
 - **⟨0.29⟩ `peeked` on every `excluded` entry.** An empty `outOfScope` says "I read the excluded files
   and none held an effect this policy denies", and it may make that claim only about the classes it
   actually read. This engine answers `true` throughout — the peek is handed exactly `excludedFiles` and

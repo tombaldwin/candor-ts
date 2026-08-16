@@ -2035,7 +2035,7 @@ switch (cmd) {
     // for the whole policy, so an operator with three `forbid` rules learned that three rules were
     // unenforced and not which. The `unevaluated` array in the JSON document already carried `rule`; the
     // human channel simply did not show it.
-    for (const u of gunevaluated) console.error(`candor-ts: gate: \`${u.rule}\` — ${u.why}`);
+    for (const u of gunevaluated) console.error(`candor-ts: gate: ${u.why}`);
     const g = loadGateReport(prefix);
     // ANY report under the locator that did not load cleanly REFUSES THE WHOLE GATE — not just the case
     // where they ALL failed. The old guard was `functions.length === 0 && hardFail`, i.e. it fired only

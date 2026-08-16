@@ -400,7 +400,7 @@ function diagnosticsFor(docPath) {
   // guess which line of their policy went unenforced. In an editor that is the whole cost of the refusal:
   // the squiggle is absent either way, and the message is the only thing standing in for it.
   for (const u of dunevaluated)
-    warnOnce(`candor-lsp: \`${u.rule}\` — ${u.why}\n  NO diagnostics are drawn for that rule — their ABSENCE here is the refusal, not an all-clear.`);
+    warnOnce(`candor-lsp: ${u.why}\n  NO diagnostics are drawn for that rule — their ABSENCE here is the refusal, not an all-clear.`);
   const violations = evaluatePolicy(dwp.answerable, fns, Q.loadCallgraph(reportPrefix),
                                     new Map(), new Set(), dnet, dwithhold);
   const locByFn = new Map(fns.filter((e) => e.loc).map((e) => [e.fn, locParts(e.loc)]));

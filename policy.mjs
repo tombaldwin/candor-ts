@@ -654,19 +654,26 @@ export function reportNetClasses(functions, { authoritative = false } = {}) {
 //                       can still fire, they decide and these ride along disclosed)
 export function wholePolicyUnanswerable(pol, verb = "this route") {
   const unevaluated = [];
-  if (pol.forbid?.length) {
-    const why = `this policy has ${pol.forbid.length} \`forbid\` rule(s), which ${verb} cannot evaluate — `
-      + "a report's `calls` graph is not the evidence a NAME-matching dependency rule needs, and a report "
-      + "MUST NOT be back-filled from its sidecar. Gate at scan time (candor-ts <src> --policy <file>).";
-    for (const r of pol.forbid) unevaluated.push({ rule: r.raw, why });
-  }
-  if (pol.allow?.length) {
-    const effs = [...new Set(pol.allow.map((r) => r.effect))].sort();
-    const why = `this policy has \`allow ${effs.join("`/`")}\` rule(s), which ${verb} cannot evaluate — `
-      + "the AS-EFF-008 surface-completeness marker is not guaranteed to ride the wire, and an engine that "
-      + "answered where its siblings refuse would have SPLIT THE VERB. Gate at scan time.";
-    for (const r of pol.allow) unevaluated.push({ rule: r.raw, why });
-  }
+  // ⟨0.29⟩ NO COUNT OF THE FILE'S RULES IN A ROW ABOUT ONE OF THEM. The `why` was phrased "this policy
+  // has N `forbid` rule(s)", so with two `forbid` lines BOTH rows said "2" — a fact about the file,
+  // attached to a row that is about one line of it, and the reader's obvious inference (that this row
+  // covers all N) is false. It is a kind-level PREDICATE now, and the SUBJECT is the rule the caller
+  // prints in front of it: `` `forbid a -> b` is a `forbid` rule, which … ``.
+  //
+  // `why` IS SELF-CONTAINED, and that is a decision about the CALLERS rather than about wording. Six
+  // sites print one of these, and THREE of them print `why` alone — `query.mjs`'s advisory disclosure,
+  // the LSP's fix path, and the MCP error, i.e. the agent channel. A predicate-style `why` ("is a
+  // `forbid` rule, which …") reads correctly only where the caller happens to prefix the rule, so those
+  // three would have lost the rule name entirely and read as fragments. Naming the rule HERE cannot be
+  // got wrong by a caller added later; the two sites that used to prefix it drop their prefix.
+  const forbidWhy = (raw) => `\`${raw.trim()}\` is a \`forbid\` rule, which ${verb} cannot evaluate — `
+    + "a report's `calls` graph is not the evidence a NAME-matching dependency rule needs, and a report "
+    + "MUST NOT be back-filled from its sidecar. Gate at scan time (candor-ts <src> --policy <file>).";
+  const allowWhy = (raw) => `\`${raw.trim()}\` is an \`allow\` rule, which ${verb} cannot evaluate — `
+    + "the AS-EFF-008 surface-completeness marker is not guaranteed to ride the wire, and an engine that "
+    + "answered where its siblings refuse would have SPLIT THE VERB. Gate at scan time.";
+  for (const r of pol.forbid ?? []) unevaluated.push({ rule: r.raw, why: forbidWhy(r.raw) });
+  for (const r of pol.allow ?? []) unevaluated.push({ rule: r.raw, why: allowWhy(r.raw) });
   return {
     unevaluated,
     answerable: { ...pol, allow: [], forbid: [] },
