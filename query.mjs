@@ -1809,6 +1809,15 @@ switch (cmd) {
     // ⟨0.24⟩ SPEC §3.2 — see `advisoryAnswer`. Over a report declaring `unanalyzed` this OMITS `ok`, adds
     // the manifest, and `--strict` (the CI form) exits 2 — could-not-fully-evaluate, the same code the gate
     // uses for the same situation — rather than the 1 that would claim a finding or the 0 that certified.
+    // ⟨0.29⟩ …AND THE TWO WHOLE-POLICY UNANSWERABLE KINDS, which this verb never received. `fix-gate`'s
+    // `unevaluated` machinery — the note, the OMITTED `ok`, the `--strict` exit 2 — has been here since
+    // ⟨0.24⟩ and works; its INPUT was incomplete. `coreUnverified`/`coreFixGate` report scoped-`deny`
+    // refusals only, so a policy whose rules were ALL `forbid` produced an empty refusal set and this verb
+    // answered `{ok: true}` over a policy nothing had evaluated. MEASURED four-way: java disclosed and
+    // withheld `ok`; rust printed a green ✓ at exit 0; ts and swift emitted `ok: true`. The reference
+    // engine was the only one right, which is the signal to fix the other three rather than argue.
+    { const wp = wholePolicyUnanswerable(fgpol, "a report route");
+      if (wp.unevaluated.length) fgr.unevaluated = [...(fgr.unevaluated ?? []), ...wp.unevaluated]; }
     const fgComp = reportCompleteness(prefix);
     const fgUnan = fgComp.unanalyzed;
     if (fgUnan.length) advisoryIncompleteNote("fix-gate", fgUnan);
@@ -1869,6 +1878,15 @@ switch (cmd) {
     // entire job is "your green gate is not provably green" was certifying a set it knows it cannot see all
     // of. A function in an unparsed file is absent from `functions`, so it cannot be enumerated as an
     // unverified pass — and that absence is exactly what this verb would have to report.
+    // ⟨0.29⟩ …AND THE TWO WHOLE-POLICY UNANSWERABLE KINDS, which this verb never received. `unverified`'s
+    // `unevaluated` machinery — the note, the OMITTED `ok`, the `--strict` exit 2 — has been here since
+    // ⟨0.24⟩ and works; its INPUT was incomplete. `coreUnverified`/`coreFixGate` report scoped-`deny`
+    // refusals only, so a policy whose rules were ALL `forbid` produced an empty refusal set and this verb
+    // answered `{ok: true}` over a policy nothing had evaluated. MEASURED four-way: java disclosed and
+    // withheld `ok`; rust printed a green ✓ at exit 0; ts and swift emitted `ok: true`. The reference
+    // engine was the only one right, which is the signal to fix the other three rather than argue.
+    { const wp = wholePolicyUnanswerable(upol, "a report route");
+      if (wp.unevaluated.length) r.unevaluated = [...(r.unevaluated ?? []), ...wp.unevaluated]; }
     const uComp = reportCompleteness(prefix);
     const uUnan = uComp.unanalyzed;
     if (uUnan.length) advisoryIncompleteNote("unverified", uUnan);

@@ -8,6 +8,12 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ `unverified` and `fix-gate` certified over a policy the gate had refused.** Their
+  `unevaluated` machinery — the note, the omitted `ok`, the `--strict` exit 2 — has been correct since
+  ⟨0.24⟩; its INPUT was incomplete. `coreUnverified`/`coreFixGate` report scoped-`deny` refusals only, so
+  a `forbid`-only policy left the set empty and both verbs answered `{ok: true}`. Now fed from the shared
+  `wholePolicyUnanswerable()`. Four-way at exit 2 under `--strict`, pinned by conformance PART 47.
+
 - **⟨0.29⟩ CARDINAL-SIN CLASS, on the agent channel: `forbid` was answered from a report by the MCP tool
   and the LSP.** SPEC §3.1's ⟨0.24⟩ answerability MUST binds every route that reads a §2 report, and only
   the CLI implemented it. `mcp.mjs` and `lsp.mjs` passed the WHOLE policy to `evaluatePolicy`. **Measured
