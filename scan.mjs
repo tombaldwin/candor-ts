@@ -6132,8 +6132,15 @@ envelope.analyzed = { count: fns.size, digest: fnv1aHex(analyzedQuals) };
 {
   const byClass = new Map();
   for (const e of excludedFiles) byClass.set(e.cls, (byClass.get(e.cls) ?? 0) + 1);
+  // ⟨0.29⟩ `peeked` — does the peek READ this class? True for every class here, because the peek is
+  // handed exactly `excludedFiles` and analyses that set and nothing else. The field exists because it is
+  // NOT a constant across the family: candor-java cannot read a `.java` that was never compiled (it reads
+  // bytecode) and candor-swift does not read `.build/`. An empty `outOfScope` says "I read the excluded
+  // files and none held a denied effect", and it may claim that only about the classes it actually read —
+  // without the flag it would be certifying files nobody opened, the ⟨0.26⟩ partial-manifest failure.
   envelope.excluded = [...byClass.entries()].sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([cls, count]) => ({ class: cls, count, reason: EXCLUDED_REASON[cls] ?? `excluded (${cls})` }));
+    .map(([cls, count]) => ({ class: cls, count, peeked: true,
+                              reason: EXCLUDED_REASON[cls] ?? `excluded (${cls})` }));
 }
 if (unanalyzedUnits.length) envelope.unanalyzed = unanalyzedUnits.map((u) => ({ path: u.path, reason: u.reason }));
 const cg = {};

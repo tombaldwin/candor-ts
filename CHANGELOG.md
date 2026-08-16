@@ -8,6 +8,13 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ `peeked` on every `excluded` entry.** An empty `outOfScope` says "I read the excluded files
+  and none held an effect this policy denies", and it may make that claim only about the classes it
+  actually read. This engine answers `true` throughout — the peek is handed exactly `excludedFiles` and
+  analyses that set and nothing else — but the flag is not a constant across the family: **candor-java
+  cannot read a `.java` that was never compiled** (it reads bytecode), and **candor-swift does not read
+  `.build/`**. Without it their `[]` would certify files nobody opened, the ⟨0.26⟩ partial-manifest
+  failure. Added while porting this rung to those two arms.
 - **⟨0.29⟩ …and the PEEK.** candor-ts now READS the files it excluded and warns when they hold an effect
   the policy DENIES:
 
