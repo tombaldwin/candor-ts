@@ -8,6 +8,35 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ ⚠ an `Fs` path literal came from ANYWHERE in the call, not the path POSITION.** MEASURED:
+  ``fs.writeFileSync(userPath, "/tmp/lit")`` published `paths: ["/tmp/lit"]` — the BYTES BEING WRITTEN — so `allow Fs /tmp/lit`
+  answered `policy ✓` at exit 0 over a write to a runtime-controlled destination, where candor-java and
+  candor-swift fail closed on identical code. The operator's own allow-rule is the mechanism of the false
+  all-clear, which is worse than having no rule: the report names a path nothing was written to. The
+  discipline already existed in this family twice — this file states it at the `Exec` head ("the head MUST be argv[0], NOT any literal arg") and the block below says it was "generalized from Exec to Net" — and stopped there. Reading
+  the locator POSITION now, and a multi-path operation (`copy`, `rename`, `link`) is a complete surface
+  only when EVERY position is a literal; one literal beside one runtime path marks `incomplete: ["Fs"]`.
+  SPEC §2, conformance PART 51, whose `okLit` control asserts a fully-literal write still certifies —
+  giving up the surface would pass every other assertion and answer nothing. Found by the pre-release panel.
+- **⟨0.29⟩ ⚠ `excluded[].peeked` claimed a read the peek had not finished.** The rung already made
+  the flag an OUTCOME rather than a lookup on the exclusion class, and stopped one level short. The peek
+  reuses this engine's own entry point, so it produces its own ⟨0.21⟩ `unanalyzed` manifest — and
+  the parent read only `functions` and discarded it. An excluded file that FAILED TO PARSE inside the peek therefore published
+  `peeked: true` beside `outOfScope: []`, byte-identical to a clean peek, on ALL FOUR engines. The
+  ⟨0.26⟩ partial-manifest rule failing inside the rung built to enforce it, in the same field, twice.
+  The claim is withdrawn PER CLASS — a parse failure is a fact about one file — and an unread file that
+  cannot be attributed to a class withdraws the claim for all of them. SPEC §2, conformance PART 52,
+  calibrated in both directions: reverting the fix fails shape A, and publishing the SAFE value
+  unconditionally fails the control that notices the feature has been deleted.
+- **⟨0.29⟩ ⚠ `outOfScope` was published over a policy this engine REFUSES.** SPEC §2 already said
+  the key must be ABSENT there — "the peek is a producer reading the policy, and it may not certify
+  relative to a gate that evaluated nothing" — and the clause shipped WITH the rung while only
+  candor-java implemented it. The harm is the key, not the finding: `outOfScope: []` beside an exit 2
+  reads *a policy was configured, I looked at what it denies, and there is nothing*, when the look was
+  taken against rules no route would honour and the denied set searched was the parser's SALVAGE of an
+  unhonourable file — the silent rewriting the refusal exists to prevent, one layer down. Conformance
+  PART 53, whose two controls stop an engine passing by never emitting the key (which deletes the peek)
+  and by collapsing present-and-empty into absent (⟨0.27⟩ asked-and-clear vs ⟨0.26⟩ cannot-answer).
 - **⟨0.29⟩ ⚠ `only` violations carry their OWN code, `AS-EFF-011`** — not `forbid`'s `AS-EFF-009`. A rule
   code is the handle a CI suppression, a dashboard link and an alert filter key on, and the two forms are
   opposite constructs: must-not-reach versus must-be-on-the-list, with opposite remedies. **The decisive
