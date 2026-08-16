@@ -71,7 +71,18 @@ fs.rmSync(D, { recursive: true, force: true });
 {
   const L = fs.mkdtempSync("/tmp/candor-watchlive-");
   fs.writeFileSync(`${L}/app.ts`, `export function f(): void { /* pure */ }\n`);
+  // THE PARENT OWNS THIS CHILD. `watch.mjs` is an infinite `setInterval` that is deliberately NOT
+  // unref'd, and `stdio[0]: "ignore"` means it has no stdin to hit EOF on — the rescue that saves
+  // test-mcp.mjs and test-lsp.mjs, whose servers inherit a pipe and exit when it closes. So the only
+  // thing that stops it is the explicit `proc.kill` on the happy path below, and a SIGTERM to this
+  // harness during any of its three 30-second deadlines leaves a process re-scanning a deleted fixture
+  // tree forever. `unref()` is not enough: it stops the child holding the event loop open, not the child.
   const proc = spawn("node", [path.join(HERE, "watch.mjs"), L, "--interval", "150"], { stdio: ["ignore", "ignore", "pipe"] });
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.on(sig, () => { try { proc.kill("SIGKILL"); } catch { /* already gone */ }
+                            try { fs.rmSync(L, { recursive: true, force: true }); } catch { /* best effort */ }
+                            process.exit(128 + (sig === "SIGINT" ? 2 : sig === "SIGTERM" ? 15 : 1)); });
+  }
   let err = "";
   proc.stderr.on("data", (d) => { err += d; });
   const waitFor = (re, ms) => new Promise((resolve) => {

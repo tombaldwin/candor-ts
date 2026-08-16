@@ -8,6 +8,14 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **`test-watch.mjs` orphaned its watcher.** `watch.mjs` is an infinite `setInterval` that is
+  deliberately not unref'd, and the harness spawns it with `stdio[0]: "ignore"` — so it has no stdin to
+  hit EOF on, which is the rescue that saves `test-mcp.mjs` and `test-lsp.mjs` (their servers inherit a
+  pipe and exit when it closes). The only thing stopping it was the explicit `proc.kill` on the happy
+  path, so a SIGTERM during any of the three 30-second deadlines left a process re-scanning a deleted
+  fixture tree forever. **Measured: 1 orphan without a handler, 0 with one.** Same shape, and the same
+  pass, as candor-rust's `integration.sh`, which had no trap in the entire file.
+
 - **⚠ ⟨0.29⟩ `--json` LOST 30 KB THROUGH A PIPE, and the document that arrived was invalid.** MEASURED on
   a 400-file scan under a violating policy: **95281 bytes to a FILE, valid JSON; 65536 bytes through a
   PIPE, a JSONDecodeError** — exactly the pipe buffer, exit 1 on both, nothing on stderr. `console.log` is
