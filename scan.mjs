@@ -6246,7 +6246,14 @@ if (policyPath && excludedFiles.length) {
   let denied = new Set();
   try {
     const pol = parsePolicy(fs.readFileSync(policyPath, "utf8"), {});
-    denied = new Set((pol.deny ?? []).flatMap((r) => r.effects ?? []));
+    // ⟨0.29⟩ A REFUSED POLICY LEAVES THE KEY ABSENT (SPEC §2). The peek is a producer reading the policy,
+    // so §3.1 binds it exactly as it binds the gate: over a policy no route will honour, `outOfScope: []`
+    // claims a look taken against rules that never stood, and the `denied` set it would look for is the
+    // parser's SALVAGE of an unhonourable file — the rewriting `fatalPolicyErrors` exists to refuse.
+    // candor-java already withheld here; this engine, candor-rust and candor-swift did not.
+    if (!fatalPolicyErrors(pol.errors).length) {
+      denied = new Set((pol.deny ?? []).flatMap((r) => r.effects ?? []));
+    }
   } catch { /* an unreadable policy is the gate's business to refuse, not the peek's */ }
   if (denied.size) {
     outOfScopeFindings = [];
