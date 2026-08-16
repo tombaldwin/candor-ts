@@ -631,6 +631,49 @@ export function reportNetClasses(functions, { authoritative = false } = {}) {
  * to keep the unevidenced pairs from FIRING (see the note on that parameter — flooring an empty class set
  * at `unresolved` is right for a matcher and wrong for a firing).
  */
+// ── WHOLE-POLICY UNANSWERABLE KINDS ON A REPORT ROUTE (SPEC §3.1 ⟨0.24⟩ ANSWERABILITY) ────────────
+// `forbid` and `allow` cannot be answered from a §2 report, so a route reading one must DISCLOSE them and
+// evaluate what is left — never pass them to the matcher, and never drop them silently.
+//
+// WHY THIS IS A FUNCTION AND NOT A THIRD COPY. It lived inline in `query.mjs`'s `gate --report`, and the
+// two OTHER report-reading routes in this package — the MCP `candor_gate` tool and the LSP diagnostics
+// path — passed the WHOLE policy to `evaluatePolicy`. MEASURED on the real functions with
+// `forbid model -> model`: with no callgraph sidecar (what `loadCallgraph` returns for a hand-copied
+// `report.json`) the answer was `violations: 0, unevaluated: 0` — a SILENT GREEN, the false all-clear the
+// rule exists to prevent; with a sidecar it EVALUATED the rule and returned an AS-EFF-009 violation. Both
+// outcomes the MUST forbids, on the channel an agent reads, for any engine's report (`candor mcp` routes
+// every engine's reports through here). The CLI had the rule and its two siblings did not — so the fix is
+// one implementation with three callers, not three implementations that agree today.
+//
+// Returns { unevaluated, answerable, onlyUnanswerable }:
+//   unevaluated       — [{rule, why}] to disclose on whatever channel the caller has
+//   answerable        — the policy with these kinds REMOVED, safe to hand to evaluatePolicy
+//   onlyUnanswerable  — true when nothing else remains, i.e. there is no verdict to stand beside the
+//                       refusal and the route must refuse outright (⟨0.24⟩ §3.1 `1503368`: whole-policy
+//                       granularity is not a licence to SUPPRESS a certain violation, so when other rules
+//                       can still fire, they decide and these ride along disclosed)
+export function wholePolicyUnanswerable(pol, verb = "this route") {
+  const unevaluated = [];
+  if (pol.forbid?.length) {
+    const why = `this policy has ${pol.forbid.length} \`forbid\` rule(s), which ${verb} cannot evaluate — `
+      + "a report's `calls` graph is not the evidence a NAME-matching dependency rule needs, and a report "
+      + "MUST NOT be back-filled from its sidecar. Gate at scan time (candor-ts <src> --policy <file>).";
+    for (const r of pol.forbid) unevaluated.push({ rule: r.raw, why });
+  }
+  if (pol.allow?.length) {
+    const effs = [...new Set(pol.allow.map((r) => r.effect))].sort();
+    const why = `this policy has \`allow ${effs.join("`/`")}\` rule(s), which ${verb} cannot evaluate — `
+      + "the AS-EFF-008 surface-completeness marker is not guaranteed to ride the wire, and an engine that "
+      + "answered where its siblings refuse would have SPLIT THE VERB. Gate at scan time.";
+    for (const r of pol.allow) unevaluated.push({ rule: r.raw, why });
+  }
+  return {
+    unevaluated,
+    answerable: { ...pol, allow: [], forbid: [] },
+    onlyUnanswerable: unevaluated.length > 0 && !pol.deny?.length,
+  };
+}
+
 export function unanswerableScoped(pol, functions, reasonAcc, netMap) {
   const held = new Set(), byRule = new Map();
   const key = (raw, fn, eff) => `${raw}\u0000${fn}\u0000${eff}`;

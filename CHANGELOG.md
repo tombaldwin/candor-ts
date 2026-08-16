@@ -8,6 +8,26 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ CARDINAL-SIN CLASS, on the agent channel: `forbid` was answered from a report by the MCP tool
+  and the LSP.** SPEC §3.1's ⟨0.24⟩ answerability MUST binds every route that reads a §2 report, and only
+  the CLI implemented it. `mcp.mjs` and `lsp.mjs` passed the WHOLE policy to `evaluatePolicy`. **Measured
+  both ways, and both are outcomes the MUST forbids**: with no callgraph sidecar (what `loadCallgraph`
+  returns for a hand-copied `report.json`) the answer was `violations: []` with nothing disclosed — a
+  silent green over a rule that was never enforced; with a sidecar it EVALUATED the rule and returned an
+  AS-EFF-009 violation from evidence the spec says cannot support one. This is the channel an agent reads,
+  and `candor mcp` routes **every engine's** reports through it.
+  The fix is one implementation with three callers — `wholePolicyUnanswerable()` in `policy.mjs` — not a
+  third copy that agrees today. The CLI now uses it too. A `forbid`/`allow`-only policy REFUSES; beside a
+  `deny` that can fire, the `deny` decides and the unanswerable rule rides along disclosed, per §3.1's
+  precedence ruling that whole-policy granularity is not a licence to suppress a certain violation.
+  Eight new rows across the MCP and LSP suites, including controls that a policy with no `forbid` gains no
+  hedge. Teeth-verified: reverting the MCP fix alone turns two of them red.
+- **Both disclosures now NAME THE RULE.** They carried the kind — "this policy has 1 `forbid` rule(s)" —
+  so an operator with three of them learned that three rules went unenforced and not which. The
+  `unevaluated` array in the JSON document had `rule` all along; the human channels did not show it. In an
+  editor this is the entire cost of the refusal: the squiggle is absent either way, and the message is the
+  only thing standing in for it.
+
 - **`--agents`'s EAGAIN retry could spin forever — LATENT on the production path, and that caveat is
   part of the fix, not a footnote.** Measured after the change: `node scan.mjs --agents` into a FIFO whose
   reader holds it open and never drains is **still blocked at 20 s with empty stderr**. The guard is not

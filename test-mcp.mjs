@@ -240,6 +240,45 @@ const fixR = toolText(7);
 ok("mcp: candor_fix resolves the checked-in policy (no args) and returns the boundary remedy",
    fixR.crossing === true && fixR.site.includes("app.leaf") && fixR.policyAlternative === "allow Net",
    JSON.stringify(fixR));
+// ── ⟨0.29⟩ `forbid` IS NOT ANSWERED FROM A REPORT, on the AGENT channel ─────────────────────────────
+// SPEC §3.1's answerability MUST binds every route that reads a §2 report, and this tool is one — it
+// gates whatever `report` points at, which is how a FOREIGN report arrives here, and `bin/candor` routes
+// `candor mcp` to candor-ts for EVERY engine's reports. It passed the whole policy to the matcher, so
+// MEASURED before this: with no callgraph sidecar `violations: []` and nothing disclosed (a silent green
+// over a rule never enforced), and with one, an AS-EFF-009 violation derived from evidence §3.1 says
+// cannot support it. Both outcomes the MUST forbids. The CLI sibling had stripped and disclosed since
+// ⟨0.24⟩ — the rule went where the work was and not to its siblings.
+//
+// TWO ROWS, because the two harms are opposite: a policy that is NOTHING BUT `forbid` must REFUSE (there
+// is no verdict for the refusal to stand beside), and a `deny` beside a `forbid` must still decide, with
+// the `forbid` disclosed — suppressing a certain violation behind a refusal is the ⟨0.24⟩ Lemma-2 error.
+fs.writeFileSync(path.join(W, "layer.policy"), "forbid app -> app\n");
+fs.writeFileSync(path.join(W, "mixed.policy"), "deny Net\nforbid app -> app\n");
+const fb = await mcpSession([
+  { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+  { jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "candor_gate", arguments: { policy: path.join(W, "layer.policy") } } },
+  { jsonrpc: "2.0", id: 3, method: "tools/call",
+    params: { name: "candor_gate", arguments: { policy: path.join(W, "mixed.policy") } } },
+]);
+const fbRes = (id) => fb.find((r) => r.id === id)?.result;
+const onlyForbid = fbRes(2);
+ok("mcp: a `forbid`-only policy on the report route REFUSES — it is not answered and not silently green",
+   !!onlyForbid?.isError && /forbid/.test(JSON.stringify(onlyForbid)),
+   JSON.stringify(onlyForbid).slice(0, 220));
+const mixedGate = fb.find((r) => r.id === 3)?.result;
+const mixedDoc = mixedGate?.isError ? null : JSON.parse(mixedGate.content[0].text);
+ok("mcp: …and `deny Net` beside it still DECIDES, rather than being suppressed behind the refusal",
+   mixedDoc?.ok === false && (mixedDoc.violations ?? []).some((v) => v.effects?.includes("Net")),
+   JSON.stringify(mixedDoc ?? mixedGate).slice(0, 220));
+ok("mcp: …and the `forbid` rides the SAME document as `unevaluated`, so the agent sees what went unenforced",
+   (mixedDoc?.unevaluated ?? []).some((u) => /forbid app -> app/.test(u.rule ?? "")),
+   JSON.stringify(mixedDoc?.unevaluated ?? mixedGate).slice(0, 220));
+// THE CONTROL: no `forbid` in the policy, and the document must carry NO `unevaluated` — otherwise these
+// rows would pass against a tool that hedges on every gate, which is a different defect wearing this fix.
+ok("mcp: CONTROL — a plain `deny Net` policy still answers with NO unevaluated hedge",
+   gate.ok === false && !(gate.unevaluated ?? []).length, JSON.stringify(gate.unevaluated ?? null));
+
 const cont = toolText(3);
 ok("mcp: candor_containment returns the per-effect dispersion shape",
    cont && (Array.isArray(cont.contained) || typeof cont === "object"), JSON.stringify(cont).slice(0, 120));

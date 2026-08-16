@@ -921,7 +921,44 @@ export function handler(): void { mid(); }
   ok("⟨0.28⟩ zero-rule (LSP) CONTROL: with a REAL policy `candor.whatif` still delivers its verdict and no caveat — unchanged from before the rung",
      /would fire/.test(cMsgs) && !/NO RULES/.test(cMsgs) && "ok" in (cr.find((r) => r.id === 10)?.result ?? {}),
      cMsgs.slice(0, 240));
-  for (const dir of [Z, P3, C]) fs.rmSync(dir, { recursive: true, force: true });
+  // ── ⟨0.29⟩ `forbid` IS NOT ANSWERED FROM A REPORT, in the EDITOR ──────────────────────────────────
+  // Same defect as the MCP tool, same shared helper. This path handed the whole policy to the matcher, so
+  // the editor either drew AS-EFF-009 squiggles from evidence SPEC §3.1 rules cannot support them, or —
+  // with no sidecar — drew nothing and said nothing, which a developer reads as "no layering problem in
+  // this file". `dunevaluated` was deny-only, so neither case produced even a log line.
+  //
+  // THE SURFACE HAS NO EXIT CODE, so the refusal is the same one this file already uses for its other
+  // unanswerables: a window/showMessage naming the rule. The ABSENCE of a squiggle is only honest if it
+  // is explained, and that message is the explanation.
+  const F = mkz("deny Net\nforbid app -> app\n");
+  const FDOC = pathToFileURL(path.join(F, "src", "app.ts")).href;
+  const { inbound: fr } = await lspSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(F).href } },
+    { jsonrpc: "2.0", method: "initialized", params: {} },
+    { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: FDOC, languageId: "typescript", version: 1, text: fs.readFileSync(path.join(F, "src", "app.ts"), "utf8") } } },
+  ], 4);
+  // `window/logMessage`, not showMessage — that is the channel warnOnce uses for every other unanswerable
+  // in this file, and asserting the wrong one is how a passing implementation reads as a broken one.
+  const fMsgs = fr.filter((r) => /window\/(log|show)Message/.test(r.method ?? ""))
+                  .map((r) => r.params?.message ?? "").join("\n");
+  const fDiag = fr.find((r) => r.method === "textDocument/publishDiagnostics")?.params;
+  ok("⟨0.29⟩ LSP: a `forbid` rule is DISCLOSED as unevaluated, not answered from the report",
+     /forbid app -> app/.test(fMsgs) && /cannot evaluate/.test(fMsgs), fMsgs.slice(0, 240));
+  ok("⟨0.29⟩ LSP: …and NO AS-EFF-009 diagnostic is drawn from a report that cannot support one",
+     !(fDiag?.diagnostics ?? []).some((x) => x.code === "AS-EFF-009"),
+     JSON.stringify(fDiag?.diagnostics ?? []).slice(0, 240));
+  ok("⟨0.29⟩ LSP: …while `deny Net` beside it still draws its own diagnostic (the refusal suppresses nothing)",
+     (fDiag?.diagnostics ?? []).some((x) => x.code === "AS-EFF-006"),
+     JSON.stringify(fDiag?.diagnostics ?? []).slice(0, 240));
+  // CONTROL: without a `forbid`, no such message — otherwise these rows would pass against an editor that
+  // warns on every open, which is a different defect wearing this fix.
+  // CONTROL on the SAME channel the rows above read, or it is not a control for them.
+  const cAll = cr.filter((r) => /window\/(log|show)Message/.test(r.method ?? ""))
+                 .map((r) => r.params?.message ?? "").join("\n");
+  ok("⟨0.29⟩ LSP CONTROL: a policy with no `forbid` produces no unevaluated message",
+     !/cannot evaluate/.test(cAll), cAll.slice(0, 200));
+
+  for (const dir of [Z, P3, C, F]) fs.rmSync(dir, { recursive: true, force: true });
 }
 
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);

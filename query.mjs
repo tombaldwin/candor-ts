@@ -27,7 +27,7 @@ import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, d
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
          policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules,
          fatalPolicyErrors, refusalVerdict,
-         unanswerableScoped } from "./policy.mjs";
+         unanswerableScoped, wholePolicyUnanswerable } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
 import { printAgents } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
@@ -2000,18 +2000,18 @@ switch (cmd) {
     // does not care which KIND of refusal stands beside the firing rule. They are now UNEVALUATED rules
     // disclosed beside whatever the rest of the policy decided; a policy that is nothing BUT these still
     // refuses below, because then there is no verdict to dominate them.
-    const gunevaluated = [];
-    if (gpol.forbid.length) {
-      const why = `this policy has ${gpol.forbid.length} \`forbid\` rule(s), which \`gate --report\` cannot evaluate — a report's \`calls\` graph is EFFECT-RELEVANT (only callees with a non-empty effect set are kept), so a crossing into a wholly PURE unit is invisible in it while \`forbid\` matches on NAME. The rule would read green where a scan fails. Gate layering at scan time: candor-ts <src> --policy ${policyFile}`;
-      console.error(`candor-ts: gate: ${why}`);
-      for (const r of gpol.forbid) gunevaluated.push({ rule: r.raw, why });
-    }
-    if (gpol.allow.length) {
-      const effs = [...new Set(gpol.allow.map((r) => r.effect))].sort();
-      const why = `this policy has \`allow ${effs.join("`/`")}\` rule(s), which \`gate --report\` cannot evaluate — the AS-EFF-008 surface-completeness marker does not ride the report wire in any form, so a benign visible literal beside a runtime-computed endpoint would be CERTIFIED here and flagged by a scan. (\`netClass: unknown-host\` is NOT that marker — it also names a merely UNRECOGNISED host, so reading it as "masked" flags functions whose surface is fully visible.) Gate allowlists at scan time: candor-ts <src> --policy ${policyFile}`;
-      console.error(`candor-ts: gate: ${why}`);
-      for (const r of gpol.allow) gunevaluated.push({ rule: r.raw, why });
-    }
+    // ⟨0.29⟩ ONE IMPLEMENTATION, THREE CALLERS. This block used to live here and only here, and the two
+    // other report-reading routes in this package (the MCP `candor_gate` tool, the LSP diagnostics path)
+    // passed the whole policy to the matcher — so `forbid` was answered from a report on the agent
+    // channel while the CLI refused it. Moved into `wholePolicyUnanswerable` so the next route inherits
+    // the rule instead of being audited into it.
+    const gwp = wholePolicyUnanswerable(gpol, "`gate --report`");
+    const gunevaluated = gwp.unevaluated;
+    // One line per rule, each NAMING the rule. The previous shape printed a single kind-level sentence
+    // for the whole policy, so an operator with three `forbid` rules learned that three rules were
+    // unenforced and not which. The `unevaluated` array in the JSON document already carried `rule`; the
+    // human channel simply did not show it.
+    for (const u of gunevaluated) console.error(`candor-ts: gate: \`${u.rule}\` — ${u.why}`);
     const g = loadGateReport(prefix);
     // ANY report under the locator that did not load cleanly REFUSES THE WHOLE GATE — not just the case
     // where they ALL failed. The old guard was `functions.length === 0 && hardFail`, i.e. it fired only
@@ -2101,7 +2101,7 @@ switch (cmd) {
     // kinds, now disclosed as `unevaluated` instead of short-circuiting (`1503368`), and handing them to the
     // matcher would be the very evaluation-on-partial-evidence they are unanswerable FOR — `allow` would
     // fire AS-EFF-008 "no visible literal" on every report entry whose surface the wire does not carry.
-    const gviol = evaluatePolicy({ deny: gpol.deny, allow: [], forbid: [] },
+    const gviol = evaluatePolicy(gwp.answerable,
                                  g.functions, {}, new Map(), new Set(), gnet, gwithhold);
     // Route the human output exactly as a scan does: to stderr whenever stdout carries the verdict
     // document, so `candor-ts-query gate … --json | jq` sees pure JSON.

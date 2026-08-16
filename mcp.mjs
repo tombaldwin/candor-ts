@@ -21,7 +21,8 @@ import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses,
          parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText,
-         unanswerableScoped, resolveReasonClasses, fatalPolicyErrors, policyZeroRules } from "./policy.mjs";
+         unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors,
+         policyZeroRules } from "./policy.mjs";
 
 const VERSION = createRequire(import.meta.url)("./package.json").version; // single-sourced, like scan.mjs
 
@@ -405,7 +406,21 @@ const TOOLS = {
       const cg = Q.loadCallgraph(p);
       const gnet = reportNetClasses(gfns, { authoritative: true });
       const { unevaluated, withhold } = unanswerableScoped(pol, gfns, resolveReasonClasses(gfns, cg), gnet);
-      const v = evaluatePolicy(pol, gfns, cg, new Map(), new Set(), gnet, withhold);
+      // ⟨0.29⟩ …AND THE TWO WHOLE-POLICY UNANSWERABLE KINDS. This tool passed the WHOLE policy to
+      // `evaluatePolicy`, so `forbid` was answered from a report — MEASURED: with no callgraph sidecar,
+      // `violations: 0` and nothing disclosed (a silent green over a rule that was never enforced); with a
+      // sidecar, an AS-EFF-009 violation from evidence SPEC §3.1 says cannot support one. Both outcomes the
+      // MUST forbids, on the channel an agent reads. The CLI sibling had stripped and disclosed these since
+      // ⟨0.24⟩; the shared helper is so the third route cannot drift from the first two again.
+      const wp = wholePolicyUnanswerable(pol, "`candor_gate` (a report route)");
+      unevaluated.push(...wp.unevaluated);
+      // …and a policy that is NOTHING BUT unanswerable kinds has no verdict to stand beside the refusal,
+      // so it refuses outright — the same split `gate --report` makes. Where other rules CAN fire, they
+      // decide and these ride along disclosed (§3.1 `1503368`: whole-policy granularity is not a licence
+      // to suppress a certain violation).
+      if (wp.onlyUnanswerable)
+        throw new Error(`this policy asks only questions a report cannot answer — ${wp.unevaluated[0].why}`);
+      const v = evaluatePolicy(wp.answerable, gfns, cg, new Map(), new Set(), gnet, withhold);
       // ⟨0.21⟩ COMPLETENESS MANIFEST — this tool implemented no incompleteness rule at all: it answered
       // `{ok:true, violations:[]}` over a report DECLARING `unanalyzed`, where the CLI exits 2. A gate
       // cannot be green over code candor never analyzed, and the manifest travels ON the report, so the

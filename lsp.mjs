@@ -45,7 +45,7 @@ import { createRequire } from "node:module";
 import nodePath from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as Q from "./query-core.mjs";
-import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, resolveReasonClasses, fatalPolicyErrors, policyZeroRules } from "./policy.mjs";
+import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, policyZeroRules } from "./policy.mjs";
 
 // Version: from the sibling package.json when running inside the npm package; a single-file BUNDLE of
 // this server (the IDE-plugin embedding) has no sibling package.json — fall back rather than crash.
@@ -384,13 +384,24 @@ function diagnosticsFor(docPath) {
   const dnet = reportNetClasses(fns, { authoritative: true });
   const { unevaluated: dunevaluated, withhold: dwithhold } =
     unanswerableScoped(dpol, fns, resolveReasonClasses(fns, Q.loadCallgraph(reportPrefix)), dnet);
+  // ⟨0.29⟩ `forbid`/`allow` are STRIPPED and DISCLOSED here too. This path handed the whole policy to
+  // `evaluatePolicy`, so an editor drew AS-EFF-009 squiggles from a report — evidence SPEC §3.1 rules
+  // cannot support them — or, with no sidecar, drew nothing and said nothing, which reads as "no layering
+  // problem here". `dunevaluated` was deny-only, so neither case produced even a log line. Same defect as
+  // the MCP tool, same shared helper, because these two are each other's siblings as much as the CLI's.
+  const dwp = wholePolicyUnanswerable(dpol, "the editor's report route");
+  dunevaluated.push(...dwp.unevaluated);
   // The surface has no exit code, so the refusal is carried the way this file already carries its other two
   // (the unhonourable policy, the judged-nothing report): ONE log line naming the rules, so the missing
   // squiggle is EXPLAINED rather than read as a clean bill of health. Per rule, not per keystroke — warnOnce
   // keys on the message, and the message is a function of the policy and the report, not of the edit.
+  // NAME THE RULE, not just its kind. The message used to carry `why` alone — "this policy has 1
+  // `forbid` rule(s), which … cannot evaluate" — which tells a developer a category and leaves them to
+  // guess which line of their policy went unenforced. In an editor that is the whole cost of the refusal:
+  // the squiggle is absent either way, and the message is the only thing standing in for it.
   for (const u of dunevaluated)
-    warnOnce(`candor-lsp: ${u.why}\n  NO diagnostics are drawn for that rule — their ABSENCE here is the refusal, not an all-clear.`);
-  const violations = evaluatePolicy(dpol, fns, Q.loadCallgraph(reportPrefix),
+    warnOnce(`candor-lsp: \`${u.rule}\` — ${u.why}\n  NO diagnostics are drawn for that rule — their ABSENCE here is the refusal, not an all-clear.`);
+  const violations = evaluatePolicy(dwp.answerable, fns, Q.loadCallgraph(reportPrefix),
                                     new Map(), new Set(), dnet, dwithhold);
   const locByFn = new Map(fns.filter((e) => e.loc).map((e) => [e.fn, locParts(e.loc)]));
   const out = [];
