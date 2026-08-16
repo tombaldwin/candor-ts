@@ -2333,6 +2333,28 @@ function programHeadLiteral(node) {
 // options in the other overloads) — so those two members read arg0-or-arg1. Only STRING-LITERAL positions
 // are considered; returns null when the URL slot is not a static string literal — the safe direction.
 const NET_URL_ARG1_MEMBERS = new Set(["connect", "createConnection"]);
+// ⟨0.29⟩ THE Fs PATH LITERAL, read from the PATH ARGUMENT POSITION — the third application of the
+// `programHeadLiteral` discipline, and the one that never got it. The comment above says that rule was
+// "generalized from Exec to Net"; it stopped there, and `Fs` went on reading the first literal ANYWHERE
+// in the call. MEASURED: `fs.writeFileSync(userPath, "/tmp/lit")` published `paths: ["/tmp/lit"]` — the
+// BYTES BEING WRITTEN — so `allow Fs /tmp/lit` certified a write to a runtime-controlled destination at
+// exit 0, while candor-java and candor-swift failed closed on identical code.
+//
+// Returns { lit, complete }: `lit` is the path literal at position 0 when there is one, and `complete` is
+// false when ANY path position is not a literal. Two-path operations are why that is not one boolean:
+// `fs.copyFile("/safe", userPath)` has a literal at position 0 and still writes somewhere nobody can see.
+const FS_TWO_PATH_MEMBERS = new Set([
+  "copyFile", "copyFileSync", "cp", "cpSync", "rename", "renameSync",
+  "link", "linkSync", "symlink", "symlinkSync",
+]);
+function fsPathLiteral(node, member) {
+  const args = node.arguments ?? [];
+  const at = (i) => (args[i] && ts.isStringLiteralLike(args[i]) ? args[i].text : null);
+  const a0 = at(0);
+  const needsTwo = FS_TWO_PATH_MEMBERS.has(member);
+  const complete = a0 !== null && (!needsTwo || at(1) !== null);
+  return { lit: a0, complete };
+}
 // CONST-STRING PROPAGATION (java constant-inlining parity): resolve a bare identifier that references a
 // `const NAME = "literal"` string to its literal value, and ONLY then. Returns the string, or null. The
 // soundness rule is strict: resolve ONLY when EVERY value-declaration of the symbol is an immutable
@@ -4649,12 +4671,15 @@ function visitCalls(node) {
             else if (!EXEC_USE_VERBS.has(member)) rec.incomplete.add("Exec");
           }
           if (eff === "Fs") {
-            const lit = firstStringLiteral(node);
+            // ⟨0.29⟩ the PATH POSITION, never the first literal anywhere — see fsPathLiteral.
+            const { lit, complete } = fsPathLiteral(node, member);
             const pathCaptured = lit && /[/\\]|^[.~]/.test(lit); // path-shaped literals only
             if (pathCaptured) rec.paths.add(lit);
             // masking (sweep [11]): a path-taking fs.* call whose path is NOT a captured literal (runtime
             // path) leaves it invisible. fd/FileHandle USE-verbs (fd came from a prior open()) are excluded.
-            else if (!FS_USE_VERBS.has(member)) rec.incomplete.add("Fs");
+            // ⟨0.29⟩ `complete` also covers a two-path op whose SECOND path is runtime, which a captured
+            // position-0 literal would otherwise certify.
+            if (!(pathCaptured && complete) && !FS_USE_VERBS.has(member)) rec.incomplete.add("Fs");
           }
           // CANDOR_DEPS: an unclassified call into a package with a loaded sibling report inherits
           // that function's recorded transitive effects (+ literal surfaces) by `hash`.
