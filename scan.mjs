@@ -6235,6 +6235,13 @@ let outOfScopeFindings = null;
 // `outOfScope: []` — byte-identical to a clean peek, and the ⟨0.26⟩ partial-manifest failure inside the
 // rung built to prevent it. It is an outcome now.
 let peekRead = false;
+// ⟨0.29⟩ …AND DID IT READ THEM ALL? A child report the parent could PARSE is a different fact from every
+// excluded file having been opened. The child publishes its own ⟨0.21⟩ `unanalyzed` manifest and this
+// code read only `functions`, so an excluded file that failed to parse INSIDE the peek produced
+// `peeked: true` beside `outOfScope: []` — the same overclaim one comment up, one level down. `peeked` is
+// per CLASS, so the answer is too: a class is peeked only when no file of that class went unread.
+const peekUnread = new Set();
+let peekUnattributed = false;
 if (policyPath && excludedFiles.length) {
   let denied = new Set();
   try {
@@ -6263,6 +6270,15 @@ if (policyPath && excludedFiles.length) {
           stdio: ["ignore", "pipe", "ignore"] });
       const doc = JSON.parse(out);
       peekRead = true;   // the child returned a report this run could read — see `peekRead`
+      for (const u of Array.isArray(doc.unanalyzed) ? doc.unanalyzed : []) {
+        const where = String(u?.path ?? "");
+        const hit = excludedFiles.find((e) => where.endsWith(e.path)
+                                           || where.endsWith(path.basename(e.path)));
+        // The peek walks ONLY excluded files, so an unread path matching no exclusion is one this code
+        // cannot attribute — fail closed across every class rather than let one unattributable file leave
+        // all of them claiming completeness.
+        if (hit) peekUnread.add(hit.cls); else peekUnattributed = true;
+      }
       for (const f of doc.functions ?? []) {
         const hits = (f.inferred ?? []).filter((e) => denied.has(e));
         if (!hits.length) continue;
@@ -6317,7 +6333,10 @@ if (outOfScopeFindings) {
   const byClass = new Map();
   for (const e of excludedFiles) byClass.set(e.cls, (byClass.get(e.cls) ?? 0) + 1);
   envelope.excluded = [...byClass.entries()].sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([cls, count]) => ({ class: cls, count, peeked: peekRead,
+    .map(([cls, count]) => ({ class: cls, count,
+                              // `peekUnread` subtracts the classes the peek RAN over and could not read:
+                              // parse failures are per file, so the claim is per class.
+                              peeked: peekRead && !peekUnattributed && !peekUnread.has(cls),
                               reason: EXCLUDED_REASON[cls] ?? `excluded (${cls})` }));
 }
 
