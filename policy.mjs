@@ -498,6 +498,29 @@ export function refusalVerdict(spec, reason, unevaluated = null) {
 /** §6.2 scope match: by NAME SEGMENT, last segment a prefix.
  * Segments split on BOTH "." and "::" — Rust/Java qualify with "::" while TS uses ".", and a shared
  * policy must match across engines (a `Foo::bar` scope authored against Rust was inert in TS before). */
+// ⟨0.29⟩ SCOPE MATCHING FOR A PERMISSION, where the prefix rule below is FAIL-OPEN.
+//
+// `scopeMatches`'s last segment is a PREFIX of its name-segment, so `util` matches `utilities`. For
+// deny/pure/forbid that widening is FAIL-CLOSED — a scope matching more forbids more — and it is why the
+// rule exists. For the `to` list of an `only` rule it is the exact inverse: a permitted scope matching
+// more PERMITS more, so the matcher that keeps every other rule kind safe silently widens the one form
+// whose entire purpose is to fail safe. MEASURED on the shipped ⟨0.29⟩ implementation: `only model ->
+// util` let `model.go` reach `utilities_untrusted.exfil` at `policy ✓`, while `forbid model -> util`
+// charged AS-EFF-009 on the identical reach.
+//
+// The `from` side KEEPS the prefix rule: it selects which functions the rule BINDS, so matching more
+// constrains more. Each side takes the matcher whose over-approximation errs toward the gate firing.
+export function scopeMatchesPermitted(name, scope) {
+  const segs = name.split(/[.:]+/).filter(Boolean);
+  const parts = scope.split(/[.:]+/).filter(Boolean);
+  if (parts.length === 0 || parts.length > segs.length) return false;
+  outer: for (let i = 0; i + parts.length <= segs.length; i++) {
+    for (let k = 0; k < parts.length; k++) if (segs[i + k] !== parts[k]) continue outer;
+    return true;
+  }
+  return false;
+}
+
 export function scopeMatches(name, scope) {
   const segs = name.split(/[.:]+/).filter(Boolean);
   const parts = scope.split(/[.:]+/).filter(Boolean);
@@ -931,7 +954,8 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
         for (const c of callgraph[queue.pop()] ?? []) {
           if (seen.has(c)) continue;
           seen.add(c);
-          if (r.to.some((t) => scopeMatches(c, t))) continue;   // permitted; its callees are not ours
+          // ⟨0.29⟩ EXACT segment match — the shared prefix matcher is fail-OPEN for a permission.
+          if (r.to.some((t) => scopeMatchesPermitted(c, t))) continue;   // permitted; callees not ours
           if (!scopeMatches(c, r.from)) { hit = c; break; }
           queue.push(c);
         }

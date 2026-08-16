@@ -8,6 +8,23 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ ⟨0.29⟩ THE PEEK REFUSED THE VERY FILES IT WAS HANDED, and said it had read them.** The parent
+  writes a tsconfig naming the excluded files and spawns a child over it — and the child then applied its
+  OWN selection rules to that list, so `isTestPath` dropped every `test-file` exclusion before analysis.
+  MEASURED: a `*.test.ts` running `execSync("ls")` under `deny Exec` produced
+  `excluded: [{class:"test-file", peeked:true}]` with `outOfScope: []` — the peek reporting that it read
+  the file and found nothing, about a file it had refused to open. A peek is handed an explicit list and
+  must analyse exactly that; both selection filters now honour the internal `--peek-excluded` marker.
+- **⚠ ⟨0.29⟩ `excluded[].peeked` was hardcoded `true`.** So a peek that never ran, could not spawn, or
+  returned unparseable output still published the flag beside `outOfScope: []` — the ⟨0.26⟩
+  partial-manifest failure inside the rung built to prevent it. It is an outcome now, and the scope block
+  is assembled AFTER the peek: it was built before, reading a flag nothing had yet set, which is a field
+  whose whole job is to say whether a read happened computed before the read.
+- **⟨0.29⟩ `only`'s permitted scopes match by exact segment run.** The shared prefix matcher is
+  fail-CLOSED for deny/forbid and fail-OPEN for a permission — `only model -> util` permitted
+  `utilities_untrusted`. Found by review, four-way.
+- **⟨0.29⟩ A deadline on the peek child** (`timeout` beside `maxBuffer`): it re-parses exactly the files
+  this engine has never parsed, so one pathological input hung the scan and its CI job.
 - **⟨0.29⟩ `resolves` now declares `incomplete`** (SPEC §2.1). An absent `incomplete` is overloaded
   between "this producer does not compute undetermined locators" and "it computed them and found none" —
   exactly the ambiguity `resolves` was built for, one field over from the `fs` case that motivated it. A

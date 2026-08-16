@@ -131,6 +131,15 @@ See https://github.com/tombaldwin/candor`);
 // value-consuming skip handles, nor produce a "lying unknown flag" error for a real flag given first.
 const usage = "usage: candor-ts <dir | file.ts | tsconfig.json> [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--allow-js] [--workspace] [--agents] [--version] [--help]";
 const argv = process.argv.slice(2);
+// ⟨0.29⟩ THE PEEK, CHILD SIDE. Set only by this file on itself (see the peek block near the report
+// write). A peek is handed an EXPLICIT file list by its parent — the very files the parent excluded —
+// so it must analyse exactly those and apply NONE of the selection rules that excluded them.
+//
+// MEASURED before this existed: the parent handed the child a `*.test.ts` that runs `execSync("ls")`,
+// the child's own `isTestPath` filter dropped it from `fileNames`, and the scan published
+// `excluded: [{class:"test-file", peeked:true}]` with `outOfScope: []` under `deny Exec` — the peek
+// reporting that it read the file and found nothing, about a file it refused to open.
+const IS_PEEK = argv.includes("--peek-excluded");
 // Declared HERE, above the sink guard, because the guard calls `loadCandorConfig` and that reads
 // these: left below, they were in the temporal dead zone, the call threw, and the `catch` around it
 // swallowed the throw — so the config channel the guard exists to enumerate was silently empty and a
@@ -901,6 +910,11 @@ for (let i = 0; i < argv.length; i++) {
   // sibling's effects instead of reading pure (the candor-ts analog of rust `--deps`, SPEC §2).
   else if (a === "--workspace" || a === "--deps") wantWorkspace = true;
   else if (a === "--dep-inits") wantDepInits = true;
+  // ⟨0.29⟩ INTERNAL — set only by this file's own peek spawn (see IS_PEEK). Accepted here so the child
+  // does not take the unknown-flag path, which prints a refusal and, on the `--json` route, still emits a
+  // report: the parent parsed THAT as a successful peek of an empty file set. Deliberately absent from
+  // the usage string — it is not a way to scan a file list, it is the marker that this run IS a peek.
+  else if (a === "--peek-excluded") { /* consumed; behaviour lives in IS_PEEK */ }
   else if (a === "--out" || a === "--policy" || a === "--gate-json") {
     const v = argv[i + 1];
     if (v === undefined || v.startsWith("--")) {
@@ -1261,7 +1275,8 @@ function fromTsconfig(cfgPath, baseDir) {
     }
     names = [...new Set(names)];
   }
-  return names.filter((f) => !isTestPath(path.relative(baseDir, f)));
+  // ⟨0.29⟩ a peek analyses the list it was handed — see IS_PEEK.
+  return IS_PEEK ? names : names.filter((f) => !isTestPath(path.relative(baseDir, f)));
 }
 const stat = fs.existsSync(target) ? fs.statSync(target) : null;
 if (!stat) {
@@ -1293,7 +1308,7 @@ if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
     (function walk(d) {
       for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
         const p = path.join(d, ent.name);
-        if (isTestPath(path.relative(rootDir, p))) continue;
+        if (!IS_PEEK && isTestPath(path.relative(rootDir, p))) continue;   // ⟨0.29⟩ see IS_PEEK
         if (ent.isDirectory()) walk(p);
         else if (/\.[mc]?tsx?$/.test(ent.name) && !ent.name.endsWith(".d.ts")) fileNames.push(p);
         else if (allowJs && /\.[mc]?jsx?$/.test(ent.name) && !/\.min\.js$/.test(ent.name)) fileNames.push(p);
@@ -6159,21 +6174,6 @@ envelope.analyzed = { count: fns.size, digest: fnv1aHex(analyzedQuals) };
 // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the target's own source candor could NOT analyze (unparsed .ts).
 // OMITTED when empty — a complete scan stays byte-identical to a pre-rung report — so a MACHINE reading
 // --json sees the incompleteness the stderr warning alone used to hide.
-// ⟨0.29⟩ THE SCOPE. Emitted even when EMPTY — ⟨0.27⟩ makes zero-match a positive statement, and ⟨0.26⟩
-// makes an ABSENT key mean "this producer cannot answer", a different claim from "nothing was excluded".
-{
-  const byClass = new Map();
-  for (const e of excludedFiles) byClass.set(e.cls, (byClass.get(e.cls) ?? 0) + 1);
-  // ⟨0.29⟩ `peeked` — does the peek READ this class? True for every class here, because the peek is
-  // handed exactly `excludedFiles` and analyses that set and nothing else. The field exists because it is
-  // NOT a constant across the family: candor-java cannot read a `.java` that was never compiled (it reads
-  // bytecode) and candor-swift does not read `.build/`. An empty `outOfScope` says "I read the excluded
-  // files and none held a denied effect", and it may claim that only about the classes it actually read —
-  // without the flag it would be certifying files nobody opened, the ⟨0.26⟩ partial-manifest failure.
-  envelope.excluded = [...byClass.entries()].sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([cls, count]) => ({ class: cls, count, peeked: true,
-                              reason: EXCLUDED_REASON[cls] ?? `excluded (${cls})` }));
-}
 if (unanalyzedUnits.length) envelope.unanalyzed = unanalyzedUnits.map((u) => ({ path: u.path, reason: u.reason }));
 const cg = {};
 for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
@@ -6205,6 +6205,11 @@ const writeAtomic = (file, text) => writeSinkAtomic(file, text);
 // ABSENT, because nothing was asked and `[]` would be a claim. With a policy, only effects that policy
 // DENIES are reported — otherwise the noise floor is "everything you excluded".
 let outOfScopeFindings = null;
+// ⟨0.29⟩ DID THE PEEK ACTUALLY READ ANYTHING? `peeked` was a constant of the exclusion CLASS, so a peek
+// that never ran, could not spawn, or produced unparseable output still published `peeked: true` beside
+// `outOfScope: []` — byte-identical to a clean peek, and the ⟨0.26⟩ partial-manifest failure inside the
+// rung built to prevent it. It is an outcome now.
+let peekRead = false;
 if (policyPath && excludedFiles.length) {
   let denied = new Set();
   try {
@@ -6220,9 +6225,19 @@ if (policyPath && excludedFiles.length) {
         files: excludedFiles.map((e) => path.resolve(rootDir, e.path)),
       }));
       const out = execFileSync(process.execPath,
-        [fileURLToPath(import.meta.url), path.join(peekDir, "tsconfig.json"), "--json"],
-        { encoding: "utf8", maxBuffer: 1 << 28, stdio: ["ignore", "pipe", "ignore"] });
+        [fileURLToPath(import.meta.url), path.join(peekDir, "tsconfig.json"), "--json",
+         "--peek-excluded"],
+        // ⟨0.29⟩ `timeout` beside `maxBuffer`: the peek re-parses exactly the files this engine has never
+        // parsed — vendored trees, generated code, declaration bundles — i.e. the inputs least likely to
+        // have been exercised. Without a deadline one pathological file turns into a hung scan and a hung
+        // CI job, which contradicts this feature's own rule that a peek which cannot run must not fail
+        // the gate: hanging is the one failure that stops the gate completing at all. On timeout
+        // `execFileSync` throws, the catch below leaves the findings as far as they got, and `peekRead`
+        // stays false so no class claims to have been read.
+        { encoding: "utf8", maxBuffer: 1 << 28, timeout: 120_000,
+          stdio: ["ignore", "pipe", "ignore"] });
       const doc = JSON.parse(out);
+      peekRead = true;   // the child returned a report this run could read — see `peekRead`
       for (const f of doc.functions ?? []) {
         const hits = (f.inferred ?? []).filter((e) => denied.has(e));
         if (!hits.length) continue;
@@ -6266,6 +6281,19 @@ if (outOfScopeFindings) {
     console.error("             The verdict does not account for "
       + (outOfScopeFindings.length === 1 ? "it." : `these ${outOfScopeFindings.length}.`));
   }
+}
+
+// ⟨0.29⟩ THE SCOPE, BUILT AFTER THE PEEK — `peeked` is an OUTCOME, so this block cannot be assembled
+// until the peek has run. It sat above the peek and read `peekRead` before anything could set it, which
+// is the ordering bug the flag's own purpose makes fatal: a field that exists to say whether a read
+// happened, computed before the read. Emitted even when EMPTY — ⟨0.27⟩ makes zero-match a positive
+// statement, and ⟨0.26⟩ makes an ABSENT key mean "this producer cannot answer".
+{
+  const byClass = new Map();
+  for (const e of excludedFiles) byClass.set(e.cls, (byClass.get(e.cls) ?? 0) + 1);
+  envelope.excluded = [...byClass.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([cls, count]) => ({ class: cls, count, peeked: peekRead,
+                              reason: EXCLUDED_REASON[cls] ?? `excluded (${cls})` }));
 }
 
 // --json: print the §2 envelope to STDOUT instead of writing the report files (matches candor-scan/Rust).
