@@ -27,6 +27,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
+import os from "node:os";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText,
          reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules, fatalPolicyErrors, refusalVerdict,
          netClassResolver, resolveReasonClasses } from "./policy.mjs";
@@ -6144,6 +6145,90 @@ for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
 // ⟨0.28⟩ …and through `writeSinkAtomic`, so a symlinked or multiply-linked destination is written where
 // the operator points rather than replaced. Reports have the same layout exposure as verdicts.
 const writeAtomic = (file, text) => writeSinkAtomic(file, text);
+// ── ⟨0.29⟩ THE PEEK ───────────────────────────────────────────────────────────────────────────────
+// Read the files this run deliberately did NOT judge, and say so when they hold an effect the policy
+// DENIES. The verdict does not move: `outOfScope` is its own kind and never a violation, because a file
+// the gate declined to judge must not decide an exit code.
+//
+// A CHILD `scan.mjs`, not a second analysis path. candor-rust buys this by recursing into `scan_one`;
+// this engine is a script rather than a callable function, so the same guarantee comes from the same
+// BINARY over a different file set. That identity is the design constraint, not a convenience: a bespoke
+// second pass would be a SECOND OPINION, and a drifted second opinion reported as a warning is worse
+// than no warning — the reader cannot tell a real finding from two code paths disagreeing. The child is
+// given no policy, so it cannot gate and cannot recurse.
+//
+// PLACED HERE, ABOVE THE WRITE, on purpose. The gate block runs AFTER the envelope is serialised, so
+// computing this there would have put the finding on stderr and left it out of the artifact — the split
+// ⟨0.26⟩ calls worse than saying nothing. It reads the policy itself rather than borrowing the gate's
+// parse: one extra read of the same bytes through the same `parsePolicy`, not a second interpretation.
+//
+// POLICY-SCOPED AND POLICY-BOUNDED, which is the whole reason it stays quiet. No policy ⇒ the key is
+// ABSENT, because nothing was asked and `[]` would be a claim. With a policy, only effects that policy
+// DENIES are reported — otherwise the noise floor is "everything you excluded".
+let outOfScopeFindings = null;
+if (policyPath && excludedFiles.length) {
+  let denied = new Set();
+  try {
+    const pol = parsePolicy(fs.readFileSync(policyPath, "utf8"), {});
+    denied = new Set((pol.deny ?? []).flatMap((r) => r.effects ?? []));
+  } catch { /* an unreadable policy is the gate's business to refuse, not the peek's */ }
+  if (denied.size) {
+    outOfScopeFindings = [];
+    const peekDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-peek-"));
+    try {
+      fs.writeFileSync(path.join(peekDir, "tsconfig.json"), JSON.stringify({
+        compilerOptions: { target: "es2022", module: "esnext", allowJs: true, noEmit: true },
+        files: excludedFiles.map((e) => path.resolve(rootDir, e.path)),
+      }));
+      const out = execFileSync(process.execPath,
+        [fileURLToPath(import.meta.url), path.join(peekDir, "tsconfig.json"), "--json"],
+        { encoding: "utf8", maxBuffer: 1 << 28, stdio: ["ignore", "pipe", "ignore"] });
+      const doc = JSON.parse(out);
+      for (const f of doc.functions ?? []) {
+        const hits = (f.inferred ?? []).filter((e) => denied.has(e));
+        if (!hits.length) continue;
+        // NAME IT FROM THE PROJECT, NOT FROM THE CHILD'S TEMP ROOT. The child's tsconfig lives in a
+        // temp directory, so it derives module qualifiers from THAT root and the fn came out as a
+        // dotted absolute path — accurate, unreadable, and pointing at a directory that no longer
+        // exists by the time anyone reads it. The project-relative path is already known here (it is
+        // what was excluded), so match on basename and report the path we already trust.
+        const childLoc = (f.loc ?? "").split(":")[0] ?? "";
+        const hit = excludedFiles.find((e) => childLoc.endsWith(e.path)
+                                           || childLoc.endsWith(path.basename(e.path)));
+        const where = hit?.path ?? childLoc;
+        const cls = hit?.cls ?? "excluded";
+        outOfScopeFindings.push({
+          fn: f.fn.split(".").pop() ?? f.fn, path: where, effects: hits, class: cls,
+          reason: `OUTSIDE this scan's scope (${cls}) — the gate did NOT judge it. `
+                + "The effect is real; the verdict does not account for it.",
+        });
+      }
+      outOfScopeFindings.sort((a, b) => (a.path + a.fn).localeCompare(b.path + b.fn));
+    } catch {
+      // A PEEK THAT CANNOT RUN MUST NOT FAIL THE GATE — it is advisory by construction, and turning a
+      // child-process failure into a red gate would make the safest thing an operator can do (add a
+      // policy) the thing that breaks their build. It stays `[]`: a policy WAS configured, so the key is
+      // a real answer, and "we looked and found nothing" is what an empty list says.
+    } finally {
+      fs.rmSync(peekDir, { recursive: true, force: true });
+    }
+  }
+}
+if (outOfScopeFindings) {
+  envelope.outOfScope = outOfScopeFindings;
+  // SAY IT ON STDERR TOO. The report block is for machines; an operator reading `policy ✓` needs to know
+  // in the same breath that a file this scan did not judge holds the effect they denied.
+  for (const f of outOfScopeFindings) {
+    console.error(`candor-ts: ⚠ ${f.fn} performs ${f.effects.join("+")} — OUTSIDE this scan's scope `
+                + `(${f.class}), so the gate did NOT judge it.`);
+    if (f.path) console.error(`             ${f.path}`);
+  }
+  if (outOfScopeFindings.length) {
+    console.error("             The verdict does not account for "
+      + (outOfScopeFindings.length === 1 ? "it." : `these ${outOfScopeFindings.length}.`));
+  }
+}
+
 // --json: print the §2 envelope to STDOUT instead of writing the report files (matches candor-scan/Rust).
 if (wantJson) {
   // writeStdoutSync, NOT console.log. MEASURED over a 400-file fixture with a violating policy: 95281

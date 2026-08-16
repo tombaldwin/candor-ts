@@ -8,6 +8,36 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ …and the PEEK.** candor-ts now READS the files it excluded and warns when they hold an effect
+  the policy DENIES:
+
+  ```
+  candor-ts: ⚠ deploy performs Exec — OUTSIDE this scan's scope
+               (outside-the-tsconfig-program), so the gate did NOT judge it.
+             excluded/deploy.ts
+             The verdict does not account for it.
+  candor-ts: policy ✓        exit 0
+  ```
+
+  **The verdict does not move** — the finding rides the report as `outOfScope`, its own kind, never a
+  violation: a file the gate declined to judge must not decide an exit code.
+
+  A CHILD `scan.mjs` over a generated tsconfig, not a second analysis path. candor-rust buys this by
+  recursing into `scan_one`; this engine is a script rather than a callable function, so the same
+  guarantee comes from the same BINARY over a different file set. A bespoke second pass would be a second
+  opinion, and a drifted second opinion reported as a warning is worse than no warning.
+  Placed ABOVE the report write on purpose: the gate block runs after the envelope is serialised, so
+  computing it there would have put the finding on stderr and left it out of the artifact.
+  A peek that cannot run leaves `[]` and never fails the gate — turning a child-process failure red would
+  make adding a policy, the safest thing an operator can do, the thing that breaks their build.
+
+  Three bounds: `deny Exec` finds it, `deny Net` over the same tree says nothing, no policy says nothing
+  and OMITS the key (nothing was asked, so `[]` would be a claim).
+
+  Findings are named from the PROJECT, not the child's temp root — the child derives qualifiers from its
+  own tsconfig's directory, so the first version reported a dotted absolute path into a directory that no
+  longer existed by the time anyone read it.
+
 - **`scratch.mjs` now covers what its own header claims.** It says "every harness here made fixture trees
   with a bare `fs.mkdtempSync` and removed none of them" — and it had exactly ONE importer, `test.mjs`.
   Eight harnesses and 59 sites now use it: `test-unit`, `test-mcp`, `test-lsp`, `test-watch`, `fuzz`,
