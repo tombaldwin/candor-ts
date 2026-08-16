@@ -8,6 +8,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ `only <A> -> <B> [<C> …]` — the PERMISSION form (SPEC §6.2, AS-EFF-009).** `A` may reach `A`
+  itself and the listed scopes, nothing else. **`forbid` FAILS OPEN — the dependency you forgot to
+  prohibit is silently permitted — so a leaf package could only be protected by an enumeration that does
+  not cover a package added tomorrow.** `only` fails SAFE. The walk STOPS at a permitted scope (its own
+  dependencies answer to the rules about IT), `A -> A` is implicit, zero-match is measured on `from`, and
+  a report route REFUSES it (exit 2) for a stricter reason than `forbid`'s: `only` asks whether
+  EVERYTHING reached is on a list, so a report that omits a crossing turns a green into a claim of
+  COMPLETENESS. **Five sites decide "this policy asks nothing"** — `scan.mjs`, `query.mjs` ×2, `lsp.mjs`,
+  `mcp.mjs` — and every one had to count the new kind, or an `only`-only policy would be refused as a
+  zero-rule file: the ⟨0.28⟩ fail-closed guard turned into a false refusal by the rung that added the kind.
 - **⟨0.29⟩ Every unevaluated-rule row NAMES ITS OWN RULE, on every channel.** The `why` was one shared
   sentence per KIND, phrased as a count — so with two `forbid` lines both rows read *"this policy has 2
   `forbid` rule(s)"*, a fact about the file attached to a row about one line of it, whose obvious reading

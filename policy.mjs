@@ -211,12 +211,12 @@ export const fatalPolicyErrors = (errors) => (errors ?? []).filter((e) => FATAL_
 // The accepted sets, as ARRAYS (SPEC §3.1 `901f14d`: `accepted` is an array of tokens, not prose — a prose
 // string is unparseable by the consumer the field exists for).
 const REASON_VOCAB = [...REASON_CLASSES, "dynamic", "*"];
-const RULE_KIND_VOCAB = ["deny", "pure", "forbid", "allow"];
+const RULE_KIND_VOCAB = ["deny", "pure", "forbid", "only", "allow"];
 const DROPPED = (why) => `policy line NOT HONOURED — DROPPED (${why}); it is absent from the parse, so the `
                        + `policy that ran is the one without it`;
 
 export function parsePolicy(text, aliases = null) {
-  const deny = [], allow = [], forbid = [];
+  const deny = [], allow = [], forbid = [], only = [];
   // ⟨0.24⟩ every line this parser could not honour AS WRITTEN, and every alias a rule RESOLVED THROUGH.
   // `aliasesUsed` is recorded at the point of USE, never from the alias map: a config defining ten aliases
   // the policy never mentions moved nothing, and naming it would train the reader to skip the field.
@@ -359,6 +359,19 @@ export function parsePolicy(text, aliases = null) {
         continue;
       }
       forbid.push({ from: a, to: b, raw: line });
+    } else if (t[0] === "only") {
+      // ⟨0.29⟩ THE PERMISSION FORM. Token-wise like its `forbid` sibling above — the arrow must be its own
+      // token — but everything AFTER the arrow is a permitted scope, so this takes a LIST where `forbid`
+      // takes one destination and ignores the tail. An EMPTY tail is dropped rather than read as "A may
+      // reach nothing at all": that is a different rule, and one far likelier typed by accident than meant.
+      const from = t[1] ?? "", arrow = t[2] ?? "", to = t.slice(3).filter(Boolean);
+      if (!from || arrow !== "->" || !to.length) {
+        warn("malformed only (want `only <scope> -> <scope> [<scope> …]`)");
+        err("rule-kind", t.slice(1).join(" "), ["only <scope> -> <scope> [<scope> …]"], line,
+            DROPPED("want `only <scope> -> <scope> [<scope> …]`"));
+        continue;
+      }
+      only.push({ from, to, raw: line });
     } else {
       warn("unknown rule kind");
       err("rule-kind", t[0], RULE_KIND_VOCAB, line, DROPPED(`unknown rule kind \`${t[0]}\``));
@@ -391,7 +404,7 @@ export function parsePolicy(text, aliases = null) {
   // the correct one on `gate --report` questions. Recorded for the spec to adjudicate.
   // ⟨0.28⟩ `ignored` rides the parse beside `errors` (SPEC §6.2) — see the note on `err`. The gate routes
   // spread it onto the verdict document; `parsepolicy`'s pinned witness shape is untouched.
-  return { deny, allow, forbid, errors, ignored,
+  return { deny, allow, forbid, only, errors, ignored,
            aliasesUsed: Object.fromEntries([...aliasesUsed.entries()].sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))) };
 }
 
@@ -672,11 +685,24 @@ export function wholePolicyUnanswerable(pol, verb = "this route") {
   const allowWhy = (raw) => `\`${raw.trim()}\` is an \`allow\` rule, which ${verb} cannot evaluate — `
     + "the AS-EFF-008 surface-completeness marker is not guaranteed to ride the wire, and an engine that "
     + "answered where its siblings refuse would have SPLIT THE VERB. Gate at scan time.";
+  // ⟨0.29⟩ `only` IS AS UNANSWERABLE AS `forbid`, and for a STRICTER reason. Both match on NAME, which a
+  // report's effect-relevant wire cannot settle — but `forbid` asks whether ONE named crossing is present,
+  // while `only` asks whether EVERYTHING reached is on a list. A report that omits a crossing makes
+  // `forbid` read green; it makes `only` read green as a claim of COMPLETENESS.
+  const onlyWhy = (raw) => `\`${raw.trim()}\` is an \`only\` rule, which ${verb} cannot evaluate — it `
+    + "asks whether EVERYTHING a scope reaches is on a list, and a report carries an effect-relevant call "
+    + "surface rather than the complete dependency graph a NAME-matching rule needs. Answering it here "
+    + "would certify completeness from evidence that is not complete. Gate at scan time.";
   for (const r of pol.forbid ?? []) unevaluated.push({ rule: r.raw, why: forbidWhy(r.raw) });
+  for (const r of pol.only ?? []) unevaluated.push({ rule: r.raw, why: onlyWhy(r.raw) });
   for (const r of pol.allow ?? []) unevaluated.push({ rule: r.raw, why: allowWhy(r.raw) });
   return {
     unevaluated,
-    answerable: { ...pol, allow: [], forbid: [] },
+    // REMOVED from the answerable policy, not merely disclosed beside it: a kind left in the object is a
+    // kind `evaluatePolicy` walks, and the disclosure would then stand next to the very evaluation it says
+    // did not happen. (Measured in the java arm of this same port, where the two sites were one line
+    // apart and only the one I was working in got updated.)
+    answerable: { ...pol, allow: [], forbid: [], only: [] },
     onlyUnanswerable: unevaluated.length > 0 && !pol.deny?.length,
   };
 }
@@ -887,6 +913,32 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       if (hit) push("AS-EFF-009", fn, [], `\`${fn}\` reaches into a forbidden layer (via \`${hit}\`), violating policy: \`${r.raw}\``);
     }
   }
+  // ⟨0.29⟩ AS-EFF-009 — `only A -> B …`: a fn in A may reach A and the listed scopes, NOTHING else. The
+  // same walk as `forbid` above with the test INVERTED, and the inversion is the point: `forbid` fails
+  // OPEN, so a leaf can only be protected by enumerating what it must not reach — a list that does not
+  // cover a package added tomorrow. `only` fails SAFE.
+  //
+  // THE WALK STOPS AT A PERMITTED SCOPE. A permitted callee's own dependencies are governed by the rules
+  // about IT; descending past it would make `only` demand the transitive closure of everything you permit,
+  // which is the same enumeration-that-rots one level down. `from` IS descended through — a fn in A
+  // calling another fn in A that reaches infra is still A reaching infra.
+  for (const r of pol.only ?? []) {
+    for (const fn of Object.keys(callgraph)) {
+      if (!scopeMatches(fn, r.from)) continue;
+      const seen = new Set([fn]), queue = [fn];
+      let hit = null;
+      while (queue.length && !hit) {
+        for (const c of callgraph[queue.pop()] ?? []) {
+          if (seen.has(c)) continue;
+          seen.add(c);
+          if (r.to.some((t) => scopeMatches(c, t))) continue;   // permitted; its callees are not ours
+          if (!scopeMatches(c, r.from)) { hit = c; break; }
+          queue.push(c);
+        }
+      }
+      if (hit) push("AS-EFF-009", fn, [], `\`${fn}\` reaches \`${hit}\`, which this permission rule does not permit: \`${r.raw}\``);
+    }
+  }
   // ⟨0.27⟩ SPEC §4 — A RULE WHOSE SCOPE BOUND NO FUNCTION IS UNANSWERABLE, AND IS DISCLOSED RATHER THAN
   // SCORED AS SATISFIED. Measured on this engine before the fix: `deny Fs orders` exits 1 on a real
   // violation while `deny Fs ordrs` exits 0 in silence — a one-character typo in a layer name is a
@@ -902,6 +954,11 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
   const zeroCount = new Map();
   for (const r of pol.deny) if (r.scope) zeroCount.set(r.raw, 0);
   for (const r of pol.forbid) zeroCount.set(r.raw, 0);
+  // ⟨0.29⟩ …and `only`, counted on `from` ALONE — deliberately not either endpoint the way a `forbid`
+  // counts. A forbid's subject is the pair; an `only`'s subject is the scope it makes a PROMISE about, so
+  // a rule whose destinations all resolve while its `from` names nothing has bound nothing, and that is
+  // exactly the typo that leaves an operator believing a leaf is protected.
+  for (const r of pol.only ?? []) zeroCount.set(r.raw, 0);
   if (zeroCount.size) {
     const names = new Set(functions.map((f) => f.fn));
     for (const k of Object.keys(callgraph ?? {})) names.add(k);
@@ -909,6 +966,9 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       for (const r of pol.deny) if (r.scope && scopeMatches(n, r.scope)) zeroCount.set(r.raw, zeroCount.get(r.raw) + 1);
       for (const r of pol.forbid) {
         if (scopeMatches(n, r.from) || scopeMatches(n, r.to)) zeroCount.set(r.raw, zeroCount.get(r.raw) + 1);
+      }
+      for (const r of pol.only ?? []) {
+        if (scopeMatches(n, r.from)) zeroCount.set(r.raw, zeroCount.get(r.raw) + 1);
       }
     }
   }

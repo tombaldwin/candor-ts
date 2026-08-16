@@ -111,7 +111,8 @@ const UNEVAL_TAIL_STRICT = "(`ok` is OMITTED — neither value is a statement th
 //
 // A policy that is NOT CONFIGURED is untouched: that remains the honest way to say "I am not gating"
 // (§6.2), and it is exactly why a configured zero-rule policy is never a legitimate expression of it.
-const policyAskedNothing = (pol) => !!pol && !pol.deny.length && !pol.allow.length && !pol.forbid.length;
+const policyAskedNothing = (pol) => !!pol && !pol.deny.length && !pol.allow.length && !pol.forbid.length
+  && !(pol.only ?? []).length;   // ⟨0.29⟩ an `only`-only policy is ARMED
 const emitZeroRuleCaveat = (verb, policyFile, comp) => {
   const { unevaluated } = policyZeroRules(policyFile);
   console.error(`candor-ts: ${verb}: the policy at ${policyFile} yielded NO RULES — every line was ignored `
@@ -2000,7 +2001,7 @@ switch (cmd) {
     // §3.1's byte-equality MUST, which a one-route rung would break on the `# nothing` policy. Every rule
     // vector, never a subset: `deny` (deny + pure), `allow`, `forbid` — keying on one would refuse an
     // ordinary allow-only or forbid-only gate as if it had no rules.
-    if (!gpol.deny.length && !gpol.allow.length && !gpol.forbid.length) {
+    if (!gpol.deny.length && !gpol.allow.length && !gpol.forbid.length && !(gpol.only ?? []).length) {
       const { why, unevaluated } = policyZeroRules(policyFile);
       console.error(`candor-ts: gate: ${why} — refusing (exit 2, gate NOT enforced). Every line was ignored `
         + `(see the \`ignoring policy rule\` warnings above), the file is empty, or it holds only comments. A `

@@ -6658,7 +6658,10 @@ if (policyPath !== null) {
       // `deny Fs`, absent from the exit-1 document's list, as evaluated-and-passed. The SHARED builder,
       // so this document and `gate --report`'s stay byte-equal (§3.1's acceptance test for the routes).
       policyRefusal = { why, unevaluated: policyRefusalUnevaluated(text, policyErrs) };
-    } else if (!gatePolicy.deny.length && !gatePolicy.allow.length && !gatePolicy.forbid.length) {
+    // ⟨0.29⟩ …counting `only` too: an `only`-only policy is a LIVE gate, and refusing it here would
+    // be the ⟨0.28⟩ fail-closed guard turned into a false refusal by the rung that added the kind.
+    } else if (!gatePolicy.deny.length && !gatePolicy.allow.length && !gatePolicy.forbid.length
+               && !(gatePolicy.only ?? []).length) {
       // ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDED ZERO RULES IS A BROKEN GATE CONFIG (SPEC §6.2) — the same
       // refusal posture as the two branches above, and for the reason §6.2 already gives for an unreadable
       // FILE: "a typo'd policy path that runs green is a gate that silently passes everything". MEASURED

@@ -1856,6 +1856,59 @@ export namespace outer {
   check("deny against a cousin scope stays green (exit 0)", rdc.status === 0, `status=${rdc.status} ${rdc.stdout}`);
 }
 
+// ── 3n2. ⟨0.29⟩ `only <A> -> <B> …` — THE PERMISSION FORM: forbid fails OPEN, only fails SAFE ───────
+// `forbid` can state a prohibition but not a permission, so "this package is a leaf" is spelled by
+// enumerating what it must NOT reach — an allowlist in the unsafe direction, because a package added
+// tomorrow is not on the list and nothing says so. Found by pointing candor's own architecture gate at
+// candor, where `forbid <pkg>.model -> <pkg>` self-fires because a scope matches a contiguous run of
+// segments and `model` sits under the prefix it is protecting itself from.
+if (blk()) {
+  const d = project({
+    "src/a.ts": `export namespace model {
+  export function shape(): number { return util.helper(); }
+  export function leaks(): number { return infra.dbRead(); }
+}
+export namespace util { export function helper(): number { return deep.inner(); } }
+export namespace infra { export function dbRead(): number { return 9; } }
+export namespace deep { export function inner(): number { return 1; } }`,
+    "short.policy": "only model -> util\n",
+    "full.policy": "only model -> util infra\n",
+    "zero.policy": "only nosuch -> util\n",
+  });
+  const gate = (pol) => spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out",
+                                           path.join(d, ".candor", "o"), "--policy", path.join(d, pol)], { encoding: "utf8" });
+  const short = gate("short.policy"), full = gate("full.policy"), zero = gate("zero.policy");
+  check("only: what the permission list OMITS is a violation (009, exit 1)",
+        short.status === 1 && short.stdout.includes("[AS-EFF-009]") && short.stdout.includes("infra.dbRead"),
+        `status=${short.status} ${short.stdout}`);
+  check("only: the rule names itself in the message",
+        short.stdout.includes("only model -> util"), short.stdout);
+  // THE TAIL IS A LIST, and the STOP RULE rides the same row: `util` is permitted and itself reaches
+  // `deep`, which nothing permits. If the walk descended past a permitted scope this would fire, and
+  // `only` would demand the transitive closure of everything you allow — the same enumeration-that-rots
+  // one level down, which would make the form useless for the leaf case it exists for.
+  check("only: the tail is a LIST, and a permitted scope's OWN deps are not this rule's business",
+        full.status === 0 && !full.stdout.includes("deep"), `status=${full.status} ${full.stdout}`);
+  // ZERO-MATCH ON `from`, not either endpoint the way a `forbid` counts: `util` resolves here, so
+  // counting the destinations would have hidden the typo that matters.
+  check("only: a rule whose `from` binds nothing is DISCLOSED though its destination resolves",
+        zero.status === 0 && zero.stderr.includes("matched NO function") && zero.stderr.includes("only nosuch -> util"),
+        `status=${zero.status} ${zero.stderr}`);
+  check("only: an only-only policy is ARMED, not a zero-rule file",
+        !full.stderr.includes("NO RULES"), full.stderr);
+  // …AND A REPORT ROUTE REFUSES IT (exit 2), for a STRICTER reason than `forbid`'s: `forbid` asks whether
+  // one named crossing is present, `only` asks whether EVERYTHING reached is on a list, so a report that
+  // omits a crossing turns a green into a claim of COMPLETENESS.
+  const rep = path.join(d, ".candor", "o.json");
+  const g = spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", rep,
+                               "--policy", path.join(d, "short.policy")], { encoding: "utf8" });
+  check("only: a report route REFUSES it (exit 2) rather than evaluating it",
+        g.status === 2 && (g.stderr + g.stdout).includes("only model -> util"),
+        `status=${g.status} ${g.stderr}`);
+  check("only: …and no AS-EFF-009 was drawn from the report",
+        !(g.stderr + g.stdout).includes("[AS-EFF-009]"), g.stdout + g.stderr);
+}
+
 // ── 3o. `pure` forbids every EFFECT — not `Unknown` (the family ruling) ─────────────────────────────
 // Unknown is the §4 trust marker, not an effect: the reference engine (candor-java) and the rust deep
 // engine exclude it from a `pure` rule's hits, and `deny Unknown <scope>` is the explicit knob for

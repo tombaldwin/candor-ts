@@ -145,7 +145,8 @@ function policyOrThrow(text, policyPath) {
 // over `# no rules yet` — an all-clear produced by deleting the question, handed to a consumer that
 // cannot ask a follow-up. `fix` emits NO `crossing` key: that key is present exactly when the verb
 // answered. §6.2's gate REFUSES over the same policy (exit 2); these are advisory, so they disclose.
-const policyAskedNothing = (pol) => !!pol && !pol.deny.length && !pol.allow.length && !pol.forbid.length;
+const policyAskedNothing = (pol) => !!pol && !pol.deny.length && !pol.allow.length && !pol.forbid.length
+  && !(pol.only ?? []).length;   // ⟨0.29⟩ an `only`-only policy is ARMED
 // `policyZeroRules` also returns a `why` — the HUMAN sentence the gate's refusal puts in `reason`. The
 // caveat document carries only `unevaluated`, so it is not spread here rather than minted as a wire key.
 const zeroRuleCaveat = (policyPath, prefix) => {

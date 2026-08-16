@@ -326,7 +326,8 @@ function activePolicyParsed(text) {
 }
 // ⟨0.28⟩ SPEC §2/§6.2 — DID THIS CONFIGURED POLICY ASK ANYTHING AT ALL? Every rule vector, never a
 // subset: keying on `deny` alone would call an ordinary allow-only or forbid-only gate empty.
-const policyAskedNothing = (pol) => !!pol && !pol.deny.length && !pol.allow.length && !pol.forbid.length;
+const policyAskedNothing = (pol) => !!pol && !pol.deny.length && !pol.allow.length && !pol.forbid.length
+  && !(pol.only ?? []).length;   // ⟨0.29⟩ an `only`-only policy is ARMED
 // The editor has no exit code and no JSON document, so both of this rung's channels collapse onto the
 // one it does have. Same `warnOnce` shape (and same reasoning) as the judged-nothing warning below: there
 // is no line to pin it to, and a per-keystroke popup is how an advisory gets turned off.
