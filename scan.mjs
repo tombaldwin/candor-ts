@@ -6124,7 +6124,10 @@ function fnv1aHex(sortedQuals) {
 // so it says so. A producer MUST NOT list a surface it does not compute — that turns "unimplemented" into a
 // false "undetermined", which is the inversion the field exists to prevent.
 const envelope = { candor: { version: ENGINE_VERSION, toolchain: `node-${process.versions.node}`, spec: SPEC_VERSION },
-                   resolves: ["fs"], package: pkgName, functions };
+                   // ⟨0.29⟩ `incomplete` joins `resolves`: an optional per-function refinement surface
+                   // whose absence is overloaded the way `fs`'s was — "does not compute undetermined
+                   // locators" vs "computed them and found none". This engine computes it, so it says so.
+                   resolves: ["fs", "incomplete"], package: pkgName, functions };
 // ⟨0.15 staged⟩ the κ-coverage ledger as DATA (COVERAGE-DESIGN.md §1): ONE sorted form (count desc,
 // name asc — exactly the stderr line's order) feeds the envelope field, the stderr receipt below, and
 // the --gate-json advisory, so the three can never tell different stories.
