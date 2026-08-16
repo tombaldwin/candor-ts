@@ -1300,6 +1300,49 @@ if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
     })(rootDir);
   }
 }
+// ── ⟨0.29⟩ THE SCOPE: what this run chose not to open ──────────────────────────────────────────────
+// `analyzed.count` is a numerator; the selection above produced it and appeared nowhere, so a consumer
+// could not tell whether the answer was to the question they asked. Every exclusion here is deliberate —
+// `isTestPath`, `.d.ts`, the tsconfig's own `include` — and being deliberate is precisely why none was
+// measured: a limitation written as a comment reads as considered.
+//
+// Walked ONCE from the same root, skipping the directories nobody means. CLASSES WITH COUNTS, never file
+// lists: an excluded set that can contain node_modules is unbounded, and a gate that prints thousands of
+// paths is one people scroll past.
+const excludedFiles = [];
+{
+  const inSet = new Set(fileNames.map((f) => path.resolve(f)));
+  const SKIP_DIR = new Set(["node_modules", ".git", "dist", "build", "out", "coverage", ".next"]);
+  let rootIsDir = false;
+  try { rootIsDir = fs.statSync(rootDir).isDirectory(); } catch { /* not walkable */ }
+  if (rootIsDir) {
+    (function walkAll(d) {
+      let ents; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+      for (const ent of ents) {
+        const q = path.join(d, ent.name);
+        if (ent.isDirectory()) { if (!SKIP_DIR.has(ent.name) && !ent.name.startsWith(".")) walkAll(q); continue; }
+        if (!PARSED_SOURCE_EXT.test(ent.name)) continue;   // another language is not this engine's claim
+        if (inSet.has(path.resolve(q))) continue;          // analyzed, therefore not excluded
+        const rel = path.relative(rootDir, q);
+        excludedFiles.push({
+          path: rel,
+          cls: ent.name.endsWith(".d.ts") ? "declaration-only"
+             : isTestPath(rel)            ? "test-file"
+             : usedTsconfig               ? "outside-the-tsconfig-program"
+             :                              "not-a-parsed-source",
+        });
+      }
+    })(rootDir);
+  }
+}
+const EXCLUDED_REASON = {
+  "declaration-only": "a `.d.ts` declares types and carries no body, so there is nothing to judge in it",
+  "test-file": "a test file describes what the HARNESS does, not what the project does",
+  "outside-the-tsconfig-program":
+    "the tsconfig's `include`/`exclude` did not name it, so it is not part of the program this scan "
+    + "analyzed — a file your build excludes may still run in CI or at install time",
+  "not-a-parsed-source": "not in this run's parse set",
+};
 if (fileNames.length === 0) {
   console.error(`candor-ts: no TypeScript sources under ${target}`);
   // An empty scan is an exit-2 cause like any other: a consumer reading the stream after it must not
@@ -6083,6 +6126,14 @@ envelope.analyzed = { count: fns.size, digest: fnv1aHex(analyzedQuals) };
 // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the target's own source candor could NOT analyze (unparsed .ts).
 // OMITTED when empty — a complete scan stays byte-identical to a pre-rung report — so a MACHINE reading
 // --json sees the incompleteness the stderr warning alone used to hide.
+// ⟨0.29⟩ THE SCOPE. Emitted even when EMPTY — ⟨0.27⟩ makes zero-match a positive statement, and ⟨0.26⟩
+// makes an ABSENT key mean "this producer cannot answer", a different claim from "nothing was excluded".
+{
+  const byClass = new Map();
+  for (const e of excludedFiles) byClass.set(e.cls, (byClass.get(e.cls) ?? 0) + 1);
+  envelope.excluded = [...byClass.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([cls, count]) => ({ class: cls, count, reason: EXCLUDED_REASON[cls] ?? `excluded (${cls})` }));
+}
 if (unanalyzedUnits.length) envelope.unanalyzed = unanalyzedUnits.map((u) => ({ path: u.path, reason: u.reason }));
 const cg = {};
 for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();

@@ -4031,9 +4031,16 @@ export function covered(): Buffer { return fsm.readFileSync("/x"); }`,
   // ⟨0.22⟩ the completeness manifest ALWAYS appends `analyzed:{count,digest}`; a fully-covered/complete
   // scan still omits `coverage` and `unanalyzed` (both empty), so the wire stays byte-compatible bar the
   // additive `analyzed` sibling.
+  //
+  // ⟨0.29⟩ …and `excluded`, which is ALWAYS present and deliberately NOT omitted when empty. That is a
+  // real wire change and this row is where it shows up, which is the row doing its job. The reasoning is
+  // the opposite of `coverage`'s: for a ledger, "empty" and "absent" can mean the same thing, but for a
+  // SCOPE they cannot — ⟨0.26⟩ requires an absent key to mean "this producer cannot answer", and an
+  // engine that omits its scope when nothing was excluded is indistinguishable from one that has no
+  // concept of scope at all. Emitting `[]` is the positive statement ⟨0.27⟩ asks for.
   check("⟨0.15⟩ a fully-covered scan OMITS the coverage envelope key entirely",
         report !== null && !("coverage" in report) && !("unanalyzed" in report)
-          && JSON.stringify(Object.keys(report)) === JSON.stringify(["candor", "resolves", "package", "functions", "analyzed"]),
+          && JSON.stringify(Object.keys(report)) === JSON.stringify(["candor", "resolves", "package", "functions", "analyzed", "excluded"]),
         JSON.stringify(Object.keys(report ?? {})));
   const d2 = project({
     "src/u.ts": `import { x } from "not-installed-dep";
