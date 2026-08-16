@@ -1878,8 +1878,8 @@ export namespace deep { export function inner(): number { return 1; } }`,
   const gate = (pol) => spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out",
                                            path.join(d, ".candor", "o"), "--policy", path.join(d, pol)], { encoding: "utf8" });
   const short = gate("short.policy"), full = gate("full.policy"), zero = gate("zero.policy");
-  check("only: what the permission list OMITS is a violation (009, exit 1)",
-        short.status === 1 && short.stdout.includes("[AS-EFF-009]") && short.stdout.includes("infra.dbRead"),
+  check("only: what the permission list OMITS is a violation (011, exit 1)",
+        short.status === 1 && short.stdout.includes("[AS-EFF-011]") && short.stdout.includes("infra.dbRead"),
         `status=${short.status} ${short.stdout}`);
   check("only: the rule names itself in the message",
         short.stdout.includes("only model -> util"), short.stdout);
@@ -1905,8 +1905,11 @@ export namespace deep { export function inner(): number { return 1; } }`,
   check("only: a report route REFUSES it (exit 2) rather than evaluating it",
         g.status === 2 && (g.stderr + g.stdout).includes("only model -> util"),
         `status=${g.status} ${g.stderr}`);
-  check("only: …and no AS-EFF-009 was drawn from the report",
-        !(g.stderr + g.stdout).includes("[AS-EFF-009]"), g.stdout + g.stderr);
+  check("only: …and no AS-EFF-011 was drawn from the report",
+        !(g.stderr + g.stdout).includes("[AS-EFF-011]"), g.stdout + g.stderr);
+  // ⟨0.29⟩ ITS OWN CODE — a suppression written for a `forbid` crossing must not mute this.
+  check("only: the violation carries AS-EFF-011, never `forbid`'s 009",
+        !short.stdout.includes("[AS-EFF-009]"), short.stdout);
 }
 
 // ── 3o. `pure` forbids every EFFECT — not `Unknown` (the family ruling) ─────────────────────────────

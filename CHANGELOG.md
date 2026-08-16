@@ -8,6 +8,15 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ ⚠ `only` violations carry their OWN code, `AS-EFF-011`** — not `forbid`'s `AS-EFF-009`. A rule
+  code is the handle a CI suppression, a dashboard link and an alert filter key on, and the two forms are
+  opposite constructs: must-not-reach versus must-be-on-the-list, with opposite remedies. **The decisive
+  argument is timing.** Before this rung an `AS-EFF-009` suppression meant exactly *"I have accepted a
+  `forbid` crossing"*; shipping `only` under it would make every existing suppression silently begin
+  muting a class of violation its author never accepted — a fail-open change to an operator's config, made
+  by us and invisible to them, which is the argument `only` itself is built on turned on the tool. Free to
+  fix before release, breaking after it. Pinned by PART 49, which asserts both halves: 011 present AND 009
+  absent, since a row checking only the first would pass on an engine emitting both.
 - **⚠ ⟨0.29⟩ THE PEEK REFUSED THE VERY FILES IT WAS HANDED, and said it had read them.** The parent
   writes a tsconfig naming the excluded files and spawns a child over it — and the child then applied its
   OWN selection rules to that list, so `isTestPath` dropped every `test-file` exclusion before analysis.

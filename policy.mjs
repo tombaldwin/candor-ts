@@ -936,7 +936,7 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       if (hit) push("AS-EFF-009", fn, [], `\`${fn}\` reaches into a forbidden layer (via \`${hit}\`), violating policy: \`${r.raw}\``);
     }
   }
-  // ⟨0.29⟩ AS-EFF-009 — `only A -> B …`: a fn in A may reach A and the listed scopes, NOTHING else. The
+  // ⟨0.29⟩ AS-EFF-011 — `only A -> B …`: a fn in A may reach A and the listed scopes, NOTHING else. The
   // same walk as `forbid` above with the test INVERTED, and the inversion is the point: `forbid` fails
   // OPEN, so a leaf can only be protected by enumerating what it must not reach — a list that does not
   // cover a package added tomorrow. `only` fails SAFE.
@@ -960,7 +960,10 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
           queue.push(c);
         }
       }
-      if (hit) push("AS-EFF-009", fn, [], `\`${fn}\` reaches \`${hit}\`, which this permission rule does not permit: \`${r.raw}\``);
+      // ⟨0.29⟩ ITS OWN CODE, not `forbid`'s — a rule code is what a CI suppression keys on, and these two
+      // are opposite constructs. Sharing 009 would make an existing `forbid` suppression silently mute
+      // `only` violations its author never accepted.
+      if (hit) push("AS-EFF-011", fn, [], `\`${fn}\` reaches \`${hit}\`, which this permission rule does not permit: \`${r.raw}\``);
     }
   }
   // ⟨0.27⟩ SPEC §4 — A RULE WHOSE SCOPE BOUND NO FUNCTION IS UNANSWERABLE, AND IS DISCLOSED RATHER THAN
