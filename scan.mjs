@@ -1670,7 +1670,7 @@ if (wantDepInits) {
 // banner's) that drifted from this would make the engine distrust its OWN reports at the §2.1
 // staleness check (`d.candor?.version !== ENGINE_VERSION`), silently downgrading every chained dep.
 const ENGINE_VERSION = `candor-ts-${PKG_VERSION}`;
-const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:[], tables:[]}
+const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:[], tables:[], incomplete:Set}
 // Packages a loaded sibling report COVERS — exempt from the κ ledger even when a call joins no
 // entry (reports omit pure functions: the silence is the purity claim, SPEC §2 rule 3 — the
 // serde_json rule the Rust/JVM engines already carry; /code-review found TS missing it). Fed from
@@ -1978,7 +1978,7 @@ const corruptDepPkgs = new Set();
         if (!stale && entryCorruptKeys(e).length) continue;
         const hashPkg = e.hash.split("#")[0];
         if (hashPkg) covers.add(hashPkg);
-        const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [], netIncomplete: false };
+        const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [], incomplete: new Set(), netIncomplete: false };
         for (const x of stale ? ["Unknown"] : strs(e.inferred)) cell.inferred.add(x);
         // ⟨0.19⟩ THE REASON CLASS TRAVELS WITH THE UNKNOWN. Without this the join copied `inferred` and
         // `invisible` only, so a dependency's `Unknown[reflect:eval]` arrived at the consumer as a bare
@@ -2020,6 +2020,11 @@ const corruptDepPkgs = new Set();
         if (!stale) for (const b of strs(e.invisible)) cell.invisible.add(b);
         if (!stale) for (const m of ["hosts", "cmds", "paths", "tables"])
           for (const v of strs(e[m])) if (!cell[m].includes(v)) cell[m].push(v);
+        // ⟨0.29⟩ …AND THE INCOMPLETENESS, which §2's chained-join clause names in the same breath as the
+        // four surfaces above: "a join that carries the effect and drops `incomplete` lets a benign
+        // literal in the consumer certify what the dependency declared uncertifiable". That is not a
+        // hypothetical — it is the measured defect this field was added to close.
+        if (!stale) for (const v of strs(e.incomplete)) cell.incomplete.add(v);
         // ⟨0.20⟩ THE NET SURFACE'S INCOMPLETENESS TRAVELS WITH ITS HOSTS. `hosts` is a LOWER bound — the
         // producer marks a masked/hostless Net internally (`rec.incomplete`) and publishes that judgment as
         // `unknown-host` in `netClass`. The join copied the host LITERALS and not the judgment, so the
@@ -2030,8 +2035,15 @@ const corruptDepPkgs = new Set();
         // lines up, one field over: a fail-CLOSED marker failing OPEN at the boundary. No format rung: the
         // dependency already published the answer under the hash the consumer joins.
         //
-        // Read off `netClass` rather than an incompleteness field because `rec.incomplete` is deliberately
-        // INTERNAL family-wide (java/rust keep it out of the report too) — `unknown-host` IS its wire form.
+        // Read off `netClass` rather than the incompleteness field because `unknown-host` IS Net's wire
+        // form of it, and re-deriving one from the other would give the consumer two sources for one fact.
+        //
+        // ⟨0.29⟩ THE PARENTHETICAL THIS COMMENT USED TO CARRY WAS FALSE, and it cost a false all-clear.
+        // It said `rec.incomplete` is "deliberately INTERNAL family-wide (java/rust keep it out of the
+        // report too)". candor-rust has emitted a per-entry `incomplete` all along — SPEC §2 says so
+        // explicitly, in the clause beside the one this engine was following — so the premise for keeping
+        // it internal here was a statement about the family that was never true. The field is emitted and
+        // joined now; see the `entry.incomplete` site and the join two lines below.
         // Carries ONLY the incompleteness, never the classes: `known-telemetry`/`known-partner` are facts
         // about the hosts already copied above, and re-deriving them from those literals is what keeps the
         // consumer's `netClass` a function of the surface it can see (the property `netClassesOf` exists to
@@ -3359,6 +3371,7 @@ function applyDepHit(rec, hit) {
   // layer down. Additive: it can only ADD `unknown-host`, never remove a class, so it never turns a firing
   // gate green.
   if (hit.netIncomplete) rec.incomplete.add("Net");
+  for (const eff of hit.incomplete ?? []) rec.incomplete.add(eff);   // ⟨0.29⟩ see the sibling join site
 }
 function unanswerableKey(decl) {
   if (!decl) return null;
@@ -5329,7 +5342,7 @@ function depInitCell(pkg, subpath) {
   let cell = null;
   for (const [h, c] of crossDeps) {
     if (!h.startsWith(`${pkg}#`) || !h.endsWith(".<module>")) continue;
-    cell ??= { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [], netIncomplete: false };
+    cell ??= { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [], incomplete: new Set(), netIncomplete: false };
     for (const e of c.inferred) cell.inferred.add(e);
     for (const b of c.invisible) cell.invisible.add(b);
     for (const w of c.why ?? []) cell.why.add(w);
@@ -5442,6 +5455,9 @@ function resolveDepEntryKey(pkg, subpath) {
     // arm copies no `hosts` (a module unit's literals are not this caller's), so today it can only turn a
     // hostless Net that a sibling literal in THIS body would have certified back into `unknown-host`.
     if (cell.netIncomplete) rec.incomplete.add("Net");
+    // ⟨0.29⟩ every OTHER effect the dependency could not locate, carried the same way. Without this the
+    // join copies the dep's Fs and drops its "I could not see where", which is the fail-open above.
+    for (const eff of cell.incomplete ?? []) rec.incomplete.add(eff);
   }
   for (let changed = true; changed; ) {
     changed = false;
@@ -5636,6 +5652,19 @@ for (const [name, rec] of fns) {
   if (inf.includes("Db") && rec.tables.size) entry.tables = [...rec.tables].sort();
   if (inf.includes("Exec") && rec.cmds.size) entry.cmds = [...rec.cmds].sort();
   if (inf.includes("Fs") && rec.paths.size) entry.paths = [...rec.paths].sort();
+  // ⟨0.29⟩ SPEC §2 `incomplete` — the effects whose LOCATOR this fn could not determine. Omitted when
+  // empty, so a scan that determined everything is byte-identical to a pre-rung report.
+  //
+  // THIS ENGINE USED TO KEEP IT INTERNAL, on a premise about the family that was FALSE. The comment at the
+  // dep-join said `rec.incomplete` is "deliberately INTERNAL family-wide (java/rust keep it out of the
+  // report too)" — candor-rust has emitted it all along, and SPEC §2 says so in the clause right beside
+  // the one this engine was following. MEASURED, and the cost is a false all-clear on a configured gate:
+  // a dependency whose `Fs` path is a runtime value published NOTHING to say so, so a consumer that also
+  // writes ONE allowed literal joined `paths: ['/tmp/lit']` with no incompleteness marker and
+  // `allow Fs /tmp/lit` answered `policy ✓`. candor-rust, over the identical shape, charges AS-EFF-008.
+  // An absent `paths` is overloaded between "reaches no path" and "reaches a path I could not see", and
+  // this field is the only thing that separates them.
+  if (rec.incomplete.size) entry.incomplete = [...rec.incomplete].sort();
   // SPEC §2 `fs` — the read/write kinds this fn's OWN Fs calls revealed. Gated on `inferred` carrying Fs
   // (the spec: "applies only when `inferred` contains `Fs`") and omitted when empty.
   //

@@ -8,6 +8,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ ⟨0.29⟩ A CHAINED DEPENDENCY'S UNDETERMINED LOCATOR WAS INVISIBLE, and it certified a gate that
+  should have failed.** This engine computed `rec.incomplete` — the effects whose LOCATOR a unit could not
+  determine — and never published it, on a comment asserting the field is "deliberately INTERNAL
+  family-wide (java/rust keep it out of the report too)". **candor-rust has emitted it all along**, and
+  SPEC §2 says so in the clause beside the one this engine was following, so the premise was a statement
+  about the family that was never true. MEASURED: a dependency whose `Fs` path is a runtime value
+  published nothing to say so, and a consumer that ALSO wrote ONE allowed literal joined
+  `paths: ["/tmp/lit"]` with no marker — `allow Fs /tmp/lit` answered **`policy ✓`** where candor-rust
+  charges AS-EFF-008 on identical code. The field is emitted and joined now (§2's chained-join clause
+  names it among the surfaces a join must carry), and pinned four-way by conformance PART 50.
 - **⟨0.29⟩ `only <A> -> <B> [<C> …]` — the PERMISSION form (SPEC §6.2, AS-EFF-009).** `A` may reach `A`
   itself and the listed scopes, nothing else. **`forbid` FAILS OPEN — the dependency you forgot to
   prohibit is silently permitted — so a leaf package could only be protected by an enumeration that does
