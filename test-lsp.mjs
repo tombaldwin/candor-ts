@@ -16,9 +16,9 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { scratch, keepOnFailure } from "./scratch.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let pass = 0, fail = 0;
@@ -28,7 +28,7 @@ function ok(name, cond, detail = "") {
 }
 
 // ---- fixture: a project whose leaf() performs Net, scanned for real ---------------------------------
-const W = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-"));
+const W = scratch("candor-lsp-");
 fs.mkdirSync(path.join(W, "src"));
 fs.writeFileSync(path.join(W, "src", "app.ts"), `import http from "node:http";
 export function leaf(): void { http.get("http://x"); }
@@ -314,7 +314,7 @@ ok("an unknown workspace command: logged, result null",
 ok("the whatif session still shuts down cleanly (exit 0 on stdin end)", waById(17)?.result === null && waExit === 0, `exitCode=${waExit}`);
 
 // ── a no-policy repo: the whatif still answers — blast radius only, and SAYS so ────────────────────
-const W2 = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-nopol-"));
+const W2 = scratch("candor-lsp-nopol-");
 fs.mkdirSync(path.join(W2, "src"));
 fs.copyFileSync(path.join(W, "src", "app.ts"), path.join(W2, "src", "app.ts"));
 fs.mkdirSync(path.join(W2, ".candor"));
@@ -340,7 +340,7 @@ fs.rmSync(W2, { recursive: true, force: true });
 // opened doc holds the 100 fns with the DEEPEST caller radii (worst-case BFS per lens). The pin is a
 // loose 1000ms — vs ~200ms budget and single-digit-ms measured (see below) — so it catches a complexity
 // regression (an O(n²) inversion-per-lens relapse) without flaking on a slow CI box.
-const PERF = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-perf-"));
+const PERF = scratch("candor-lsp-perf-");
 fs.mkdirSync(path.join(PERF, ".candor"));
 {
   const functions = [], cg = {};
@@ -378,7 +378,7 @@ fs.rmSync(PERF, { recursive: true, force: true });
 fs.rmSync(W, { recursive: true, force: true });
 // ── the activity push (AGENT-SURFACE-DESIGN.md P2): a new BLOCKED record surfaces in-editor ─────────
 {
-  const AW = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-act-"));
+  const AW = scratch("candor-lsp-act-");
   fs.mkdirSync(path.join(AW, ".candor"), { recursive: true });
   fs.writeFileSync(path.join(AW, "edited.ts"), "export const x = 1;\n");
   const LOG = path.join(AW, ".candor", "activity.jsonl");
@@ -424,7 +424,7 @@ fs.rmSync(W, { recursive: true, force: true });
 
 {
   // off-switch: CANDOR_LSP_ACTIVITY=off → no push even when a blocked record lands
-  const AW = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-actoff-"));
+  const AW = scratch("candor-lsp-actoff-");
   fs.mkdirSync(path.join(AW, ".candor"), { recursive: true });
   const LOG = path.join(AW, ".candor", "activity.jsonl"); fs.writeFileSync(LOG, "");
   const got = await new Promise((resolve) => {
@@ -503,7 +503,7 @@ function lspDrive(extraEnv = {}) {
 // a shrink is routine — the old offset-to-0 reset replayed the whole trimmed tail (~5000 records, each
 // blocked one a showMessage) on every poll. The fix skips the tail to the file's END.
 {
-  const AW = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-trim-"));
+  const AW = scratch("candor-lsp-trim-");
   fs.mkdirSync(path.join(AW, ".candor"), { recursive: true });
   const LOG = path.join(AW, ".candor", "activity.jsonl");
   const oldLine = (i) => `{"ts":"2026-07-14T0${i % 10}:00:00Z","verdict":"blocked","edited":null,"gained":["Db"],"blastRadius":${i}}\n`;
@@ -535,7 +535,7 @@ function lspDrive(extraEnv = {}) {
 {
   // realpath'd fixture so the client uri and the tailer's canonical key coincide (the DIVERGENT case
   // is pinned separately below); no policy → every published diagnostic is an overlay.
-  const WA = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-ovl-")));
+  const WA = fs.realpathSync(scratch("candor-lsp-ovl-"));
   fs.mkdirSync(path.join(WA, "src"));
   fs.writeFileSync(path.join(WA, "src", "app.ts"), `import http from "node:http";
 export function leaf(): void { http.get("http://x"); }
@@ -586,7 +586,7 @@ export function handler(): void { mid(); }
 // letter in the client's uri ("%65dited.ts" = "edited.ts" — every platform), and, on macOS, the
 // tmpdir symlink (/var → /private/var: the fixture path is NOT realpath'd, the tailer's key is).
 {
-  const AC = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-enc-"));
+  const AC = scratch("candor-lsp-enc-");
   fs.mkdirSync(path.join(AC, ".candor"), { recursive: true });
   fs.writeFileSync(path.join(AC, "edited.ts"), "export const x = 1;\n");
   const LOG = path.join(AC, ".candor", "activity.jsonl");
@@ -626,7 +626,7 @@ export function handler(): void { mid(); }
 // must arrive with no advisory at all.
 {
   const mk = (analyzed) => {
-    const U = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-unjudged-"));
+    const U = scratch("candor-lsp-unjudged-");
     fs.mkdirSync(path.join(U, ".candor"));
     fs.writeFileSync(path.join(U, ".candor", "report.json"),
                      JSON.stringify({ candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed, functions: [] }));
@@ -666,7 +666,7 @@ export function handler(): void { mid(); }
 // that does not appear is invisible, which is what makes this the worst surface to rewrite a policy on.
 {
   const mkp = (policy, config) => {
-    const U = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-vocab-"));
+    const U = scratch("candor-lsp-vocab-");
     fs.mkdirSync(path.join(U, "src"), { recursive: true });
     fs.writeFileSync(path.join(U, "src", "app.ts"),
       "export function dyn(o: any, k: string) { return o[k](); }\n");
@@ -722,7 +722,7 @@ export function handler(): void { mid(); }
 // `deny Unknown`, which must still squiggle — otherwise a server that had stopped gating would pass.
 {
   const mkr = (policy) => {
-    const U = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-withhold-"));
+    const U = scratch("candor-lsp-withhold-");
     fs.mkdirSync(path.join(U, "src"), { recursive: true });
     fs.mkdirSync(path.join(U, ".candor"), { recursive: true });
     fs.writeFileSync(path.join(U, "src", "app.ts"),
@@ -781,7 +781,7 @@ export function handler(): void { mid(); }
 // refusal was bought by breaking the verb.
 {
   const mkf = (netClass) => {
-    const U = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-fixrefuse-"));
+    const U = scratch("candor-lsp-fixrefuse-");
     fs.mkdirSync(path.join(U, "src"), { recursive: true });
     fs.mkdirSync(path.join(U, ".candor"), { recursive: true });
     fs.writeFileSync(path.join(U, "src", "app.ts"), "export function fetcher() { return 2; }\n");
@@ -845,7 +845,7 @@ export function handler(): void { mid(); }
   // Its own scan: the top-of-file fixture `W` is removed long before this block, and a row that reads a
   // deleted prefix passes on a tool error rather than on an answer.
   const mkz = (policyText) => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-lsp-zero-"));
+    const dir = scratch("candor-lsp-zero-");
     fs.mkdirSync(path.join(dir, "src"));
     fs.writeFileSync(path.join(dir, "src", "app.ts"), `import http from "node:http";
 export function leaf(): void { http.get("http://x"); }
@@ -962,4 +962,8 @@ export function handler(): void { mid(); }
 }
 
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);
+// KEEP THE EVIDENCE ON FAILURE. A failing row prints the path to its fixture tree, and the sweep
+// would delete it on the way out — at exactly the moment someone needs to look. scratch.mjs has
+// carried this switch since it was written; only test.mjs was throwing it.
+if (fail) keepOnFailure();
 process.exit(fail ? 1 : 0);

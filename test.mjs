@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { show, loadReport, callersFrontier, blindspots, blindspotsStats } from "./query-core.mjs";
 import { scratch, keepOnFailure } from "./scratch.mjs";
-import { printAgents } from "./contract.mjs";
+import { printAgents, writeStdoutSync } from "./contract.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // The spec floor this build declares, DERIVED from the binary under test rather than written as a
@@ -191,55 +191,23 @@ if (SHARD === null) {
     // stdout on a pipe, so `npm test` could exit 0 having printed no summary at all — and a lost summary
     // is indistinguishable from the crashed-shard case `broke` exists to catch.
     //
-    // EAGAIN. Once a pipe fd is in NON-BLOCKING mode, writeSync throws EAGAIN instead of short-writing as
-    // soon as the reader is behind, and this driver dumps every shard's whole stdout — ~72 KB each against
-    // a 64 KiB pipe buffer. The code before this had no EAGAIN arm at all, so the throw escaped `wr` and
-    // killed the parent mid-dump: the lost summary the writeSync was adopted to prevent, arriving by the
-    // other door.
-    //   WHAT IS ACTUALLY MEASURED, and it is not what I expected: `node test.mjs --parallel=16` piped into
-    //   a reader that never drains does NOT reach this arm. fd 1 stays BLOCKING, because libuv only flips
-    //   a pipe non-blocking when the process.stdout STREAM is created, and this parent path never touches
-    //   it (`console.error` in the usage errors above exits immediately). The parent blocked in writeSync
-    //   and finished when the reader finally drained. So the guard below is LATENT here — one `console.log`
-    //   added anywhere before the dump arms it — and the residual it does NOT cover is the blocking write,
-    //   which cannot be bounded from user code without going async. The arm was verified against a
-    //   deliberately non-blocking fd: 5000 ms, then the diagnostic, then 234,464 of 300,000 bytes dropped.
-    // BOUNDED, because a reader that stalls without ever closing (a CI log collector wedged on a full disk)
-    // would spin here forever, and a hung run reports nothing, burns the whole step timeout, and cannot be
-    // told from a slow one. After the budget we say so on fd 2 and drop the rest of THAT write. Not a
-    // throw: losing output is bad, hanging CI is worse — but it is not free either, so `dropped` turns the
-    // run red rather than letting a truncated dump exit 0.
-    const EAGAIN_BUDGET_MS = 5000;
-    const idle = new Int32Array(new SharedArrayBuffer(4));
+    // ⟨0.29⟩ THE DRIVER USES THE SHARED WRITER — it had its own private copy of this loop, and that copy
+    // was a closure inside this branch, so NO route the suite drives could reach it: the arm was untested
+    // by construction. That is the sibling asymmetry inverted. `contract.mjs`'s half got a row (driving
+    // the real loop against a FIFO filled to capacity, which is what caught it being vacuous on Linux)
+    // and the driver's half got none, because the driver was fixed FIRST and its test came second.
+    //
+    // Deleting the copy is better than writing a second row for it: one implementation, already
+    // exercised. `writeStdoutSync` returns false when it gave up (EAGAIN budget) or the reader left
+    // (EPIPE), which is the `dropped` signal this driver needs — an unfinished dump is an incomplete
+    // report, indistinguishable from a clean one, the same argument `broke` rests on.
+    //
+    // The residual, stated because it has not changed: on this path fd 1 stays BLOCKING (nothing here
+    // creates a `process.stdout` stream), so the EAGAIN arm is LATENT and the write blocks in the kernel
+    // instead. One `console.log` before the dump arms it. A blocking write cannot be bounded from user
+    // code without going async, and that is not fixed here.
     let dropped = 0;
-    const wr = (fd, text) => {
-      if (!text) return;
-      const buf = Buffer.from(text, 'utf8');
-      let off = 0, deadline = 0;
-      try {
-        while (off < buf.length) {
-          try { off += fs.writeSync(fd, buf, off, buf.length - off); deadline = 0; }
-          catch (e) {
-            if (e.code !== 'EAGAIN') throw e;
-            // Wall-clock deadline, not a retry count: Atomics.wait's 1 ms is a floor, so counting turns
-            // would cap at "5000 sleeps" and not at any particular amount of time.
-            if (deadline === 0) deadline = Date.now() + EAGAIN_BUDGET_MS;
-            else if (Date.now() >= deadline) {
-              dropped++;
-              // fd 2 may be wedged or closed for the same reason fd 1 is, so this is best-effort BY
-              // CONSTRUCTION — and it must not go through `wr`, or the report of a stalled write would
-              // be another stalled write.
-              try {
-                fs.writeSync(2, `test.mjs: gave up writing to fd ${fd} after ${EAGAIN_BUDGET_MS}ms of EAGAIN `
-                              + `— ${buf.length - off} of ${buf.length} bytes DROPPED (the reader is not draining).\n`);
-              } catch { /* nothing left to tell */ }
-              return;
-            }
-            Atomics.wait(idle, 0, 0, 1);   // the only synchronous sleep available here
-          }
-        }
-      } catch (e) { if (e.code !== 'EPIPE') throw e; }
-    };
+    const wr = (fd, text) => { if (text && !writeStdoutSync(text, "the shard dump", fd)) dropped++; };
     let p = 0, f = 0, broke = 0;
     kids.forEach((k, i) => {
       wr(1, k.stdout ?? '');

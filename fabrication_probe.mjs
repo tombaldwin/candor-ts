@@ -37,9 +37,9 @@
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { scratch } from "./scratch.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -273,7 +273,7 @@ function runCase(c, work) {
 }
 
 function main() {
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-fab-"));
+  const work = scratch("candor-ts-fab-");
   const allFailures = [];
   let total = 0;
   try {

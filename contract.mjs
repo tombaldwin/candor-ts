@@ -29,6 +29,10 @@ export function printAgents(fd = 1, budgetMs = 5000) {
 // somebody measured and false of the report envelope nobody did.
 //
 // `what` names the caller, so the stderr diagnostic points at the surface that lost bytes.
+// RETURNS true when every byte landed, false when it gave up (EAGAIN budget) or the reader left (EPIPE).
+// The test driver needs that answer — an unfinished dump is an incomplete report and must turn the run
+// red — and returning it is what let the driver delete its own private copy of this loop, which was
+// unreachable from any route the suite drives and therefore untested by construction.
 export function writeStdoutSync(out, what = "output", fd = 1, budgetMs = 5000) {
   // fs.writeSync, NOT console.log/process.stdout.write. On a PIPE those are asynchronous, and scan.mjs
   // calls `process.exit(0)` on the next line — which discards whatever is still buffered. The contract
@@ -91,7 +95,7 @@ export function writeStdoutSync(out, what = "output", fd = 1, budgetMs = 5000) {
           try { fs.writeSync(2, `candor-ts: ${what} output stalled at ${off} of ${buf.length} bytes `
                               + `— the reader has not drained for ${EAGAIN_BUDGET_MS}ms. This output is INCOMPLETE.\n`); }
           catch { /* nothing left to tell */ }
-          return;
+          return false;
         }
         Atomics.wait(idle, 0, 0, 1);
       }
@@ -105,5 +109,7 @@ export function writeStdoutSync(out, what = "output", fd = 1, budgetMs = 5000) {
     // too; that write is best-effort by construction.
     try { fs.writeSync(2, `candor-ts: ${what} output was cut short at ${off} of ${buf.length} bytes `
                         + `— the reader closed the pipe. This output is INCOMPLETE.\n`); } catch { /* nothing left to tell */ }
+    return false;
   }
+  return true;
 }

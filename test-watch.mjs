@@ -8,13 +8,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as W from "./watch.mjs";
 import * as Q from "./query-core.mjs";
+import { scratch, keepOnFailure } from "./scratch.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 let pass = 0, fail = 0;
 const ok = (n, c, d = "") => c ? (pass++, console.log(`  ok   ${n}`)) : (fail++, console.log(`  FAIL ${n}  ${d}`));
 
-const D = fs.mkdtempSync("/tmp/candor-watch-");
+const D = scratch("candor-watch-");
 fs.writeFileSync(`${D}/app.ts`, `export function f(): void { /* pure */ }\n`);
 fs.writeFileSync(`${D}/note.md`, `not a source\n`);
 const OUT = `${D}/.candor/report`;
@@ -69,7 +70,7 @@ fs.rmSync(D, { recursive: true, force: true });
 // child flushes its coverage (TESTING.md §6) and a supervisor sees a clean stop, not a crash.
 // Non-flaky by construction: every wait is a deadline-polled condition, never a fixed sleep (§9).
 {
-  const L = fs.mkdtempSync("/tmp/candor-watchlive-");
+  const L = scratch("candor-watchlive-");
   fs.writeFileSync(`${L}/app.ts`, `export function f(): void { /* pure */ }\n`);
   // THE PARENT OWNS THIS CHILD. `watch.mjs` is an infinite `setInterval` that is deliberately NOT
   // unref'd, and `stdio[0]: "ignore"` means it has no stdin to hit EOF on — the rescue that saves
@@ -119,4 +120,8 @@ fs.rmSync(D, { recursive: true, force: true });
 }
 
 console.log(`\ntest-watch: ${pass} passed, ${fail} failed`);
+// KEEP THE EVIDENCE ON FAILURE. A failing row prints the path to its fixture tree, and the sweep
+// would delete it on the way out — at exactly the moment someone needs to look. scratch.mjs has
+// carried this switch since it was written; only test.mjs was throwing it.
+if (fail) keepOnFailure();
 process.exit(fail ? 1 : 0);

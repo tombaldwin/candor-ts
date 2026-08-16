@@ -8,6 +8,25 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **`scratch.mjs` now covers what its own header claims.** It says "every harness here made fixture trees
+  with a bare `fs.mkdtempSync` and removed none of them" — and it had exactly ONE importer, `test.mjs`.
+  Eight harnesses and 59 sites now use it: `test-unit`, `test-mcp`, `test-lsp`, `test-watch`, `fuzz`,
+  `fabrication_probe`, `sensitivity`, `transitive-recall`. Three of them also throw `keepOnFailure()`, so
+  a failing row's fixture tree survives the sweep — the switch has been in `scratch.mjs` since it was
+  written and only `test.mjs` was using it.
+  **Stated honestly: the measured leak here is ONE directory, not thousands.** These harnesses pair
+  `mkdtemp` with `rmSync` on the happy path; the exposure is the failure and signal paths, and SIGKILL
+  is uncatchable so nothing helps there. The 46,919 figure in that header came from `test.mjs`'s
+  `project()` at ~1,300 calls a run, which was already fixed. What changes is that the file's stated
+  scope is now true rather than aspirational, and that a killed run cleans up after itself.
+- The `--parallel` driver's private copy of the bounded write loop is **deleted**, not tested twice. It
+  was a closure inside the driver branch, so no route the suite drives could reach it — the arm was
+  untested by construction, which is the sibling asymmetry inverted: `contract.mjs`'s half got the row
+  that caught it being vacuous on Linux, and the driver's half, fixed first, got none. Both now use
+  `writeStdoutSync`, which returns whether every byte landed so the driver can still turn a dropped write
+  red. The residual is unchanged and restated in place: on that path fd 1 stays BLOCKING, so the EAGAIN
+  arm is latent and a blocking write cannot be bounded from user code.
+
 - **`test-watch.mjs` orphaned its watcher.** `watch.mjs` is an infinite `setInterval` that is
   deliberately not unref'd, and the harness spawns it with `stdio[0]: "ignore"` — so it has no stdin to
   hit EOF on, which is the rescue that saves `test-mcp.mjs` and `test-lsp.mjs` (their servers inherit a

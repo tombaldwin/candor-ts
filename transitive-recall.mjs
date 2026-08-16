@@ -31,10 +31,10 @@
 //   node transitive-recall.mjs [--json] [--keep]
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { scratch } from "./scratch.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const wantJson = process.argv.includes("--json");
@@ -221,7 +221,7 @@ function depthProbe(root) {
   return { depth: DEPTH, reached: reached.length, ran, deepest: reached.length ? Math.max(...reached) : -1 };
 }
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "candor-transitive-recall-"));
+const root = scratch("candor-transitive-recall-");
 const results = [];
 for (const shape of SHAPES) {
   const dir = path.join(root, shape.id);

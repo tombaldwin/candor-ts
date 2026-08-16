@@ -11,7 +11,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import {
@@ -34,6 +33,7 @@ import { bestFind, bestFinds, tokenize } from "./surface.mjs";
 import { verify, verifySites } from "./verify-core.mjs";
 import { netEffects, destOf } from "./verify-emit.mjs";
 import { parseTrace, programCheck } from "./verify-syscall.mjs";
+import { scratch } from "./scratch.mjs";
 
 // ── query-core: the §3.1 match ladder (exact > segment-suffix > substring) ────────────────────────
 test("matches: exact beats substring cousins", () => {
@@ -479,7 +479,7 @@ test("gains: a stable surface raises no alarm", () => {
 // COVERAGE-DESIGN.md §1/§3: the κ ledger travels with the report; gains discloses the CURRENT ledger
 // and a name-level delta vs the baseline; a coverage-free comparison stays byte-identical to ⟨0.14⟩.
 test("reportCoverage: reads the envelope ledger, sorted count-desc/name-asc; null when absent", () => {
-  const D = fs.mkdtempSync(path.join(os.tmpdir(), "candor-cov-"));
+  const D = scratch("candor-cov-");
   fs.writeFileSync(path.join(D, "r.json"), JSON.stringify({
     functions: [], coverage: { uncovered: [{ name: "a", calls: 1 }, { name: "z", calls: 9 }, { name: "b", calls: 1 }] },
   }));
@@ -490,7 +490,7 @@ test("reportCoverage: reads the envelope ledger, sorted count-desc/name-asc; nul
   fs.rmSync(D, { recursive: true, force: true });
 });
 test("reportCoverage: multi-report siblings merge (counts summed); malformed entries tolerated", () => {
-  const D = fs.mkdtempSync(path.join(os.tmpdir(), "candor-cov-"));
+  const D = scratch("candor-cov-");
   fs.writeFileSync(path.join(D, "r.a.scan.json"), JSON.stringify({
     functions: [], coverage: { uncovered: [{ name: "dep", calls: 2 }, { calls: 5 }, "junk"] },
   }));
@@ -502,7 +502,7 @@ test("reportCoverage: multi-report siblings merge (counts summed); malformed ent
   fs.rmSync(D, { recursive: true, force: true });
 });
 test("gainsCoverage: current ledger rides along; name-level delta vs the baseline; empty case spreads to {}", () => {
-  const D = fs.mkdtempSync(path.join(os.tmpdir(), "candor-cov-"));
+  const D = scratch("candor-cov-");
   const w = (f, doc) => fs.writeFileSync(path.join(D, f), JSON.stringify(doc));
   w("cur.json", { functions: [], coverage: { uncovered: [{ name: "newdep", calls: 2 }, { name: "kept", calls: 1 }] } });
   w("base.json", { functions: [], coverage: { uncovered: [{ name: "kept", calls: 4 }, { name: "gone", calls: 1 }] } });
@@ -813,7 +813,7 @@ test("fix-gate: no crossing → ok:true, empty remedies", () => {
 
 // ── query-core: loader robustness (never crash, never fabricate, disclose) ────────────────────────
 test("loadReport/loadCallgraph tolerate corrupt + malformed input", () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-unit-"));
+  const d = scratch("candor-unit-");
   // corrupt primary report → [] (disclosed on stderr, not a thrown stack)
   fs.writeFileSync(path.join(d, "corrupt.json"), "{ this is not json");
   assert.deepEqual(loadReport(path.join(d, "corrupt")), []);
@@ -838,7 +838,7 @@ test("isReport: a callgraph/ledger/calibrated sibling is not a report", () => {
 
 // ── query-core: loadHierarchy (the ⟨0.7⟩ sidecar loader — was never executed by any suite) ─────────
 test("loadHierarchy: exact sidecar, uninterpretable keys DROPPED, corrupt → {}, absent → {}", () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
+  const d = scratch("candor-hier-");
   // The exact `<prefix>.hierarchy.json` form. A non-array value is DROPPED, not coerced to `[]` and
   // kept: a kept key is a PHANTOM TYPE no code declares, and `callersFrontier` counts keys.
   fs.writeFileSync(path.join(d, "r.hierarchy.json"),
@@ -868,7 +868,7 @@ test("loadHierarchy: exact sidecar, uninterpretable keys DROPPED, corrupt → {}
   fs.rmSync(d, { recursive: true, force: true });
 });
 test("loadHierarchy: multi-report SIBLINGS merge (the workspace form), corrupt sibling tolerated", () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
+  const d = scratch("candor-hier-");
   fs.writeFileSync(path.join(d, "r.a.scan.hierarchy.json"), JSON.stringify({ "a.Impl": ["a.Base"] }));
   fs.writeFileSync(path.join(d, "r.b.scan.hierarchy.json"), JSON.stringify({ "b.Impl": ["b.Base"] }));
   fs.writeFileSync(path.join(d, "r.c.scan.hierarchy.json"), "{ corrupt");
@@ -878,7 +878,7 @@ test("loadHierarchy: multi-report SIBLINGS merge (the workspace form), corrupt s
 test("loadHierarchy → callersFrontier: a loaded sidecar actually drives the subtype filter", () => {
   // The wiring pin: hierarchy from DISK (not a hand object) rules the unrelated dispatch out and the
   // genuine override in — the loader and the frontier agree on shape.
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
+  const d = scratch("candor-hier-");
   // ⟨0.26⟩ `m.Base` carries its OWN key with an empty array. §2.2 makes the key set the manifest, so the
   // root is not optional bookkeeping: without it the walk reaches an unindexed type and must answer
   // UNANSWERABLE. See the pre-rung test below for what that costs.
@@ -899,7 +899,7 @@ test("loadHierarchy → callersFrontier: a DOT-FREE dispatch detail is disclosed
   // entry in BOTH arms, with no diagnostic. Same shape as the CLI (`callers --include-unknown`), which is
   // where the drop was seen. The controls (no-reason fn, unrelated-owner fn) are what prove the widening
   // is not a blanket.
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
+  const d = scratch("candor-hier-");
   fs.writeFileSync(path.join(d, "r.hierarchy.json"), JSON.stringify({ "m.Impl": ["m.Base"], "m.Base": [] }));  // ⟨0.26⟩ root key
   const hier = loadHierarchy(path.join(d, "r"));
   const cg = { "m.Impl.handle": ["m.Sink.touch"], "m.Sink.touch": [], "m.Dotted.go": [], "m.Untyped.go": [], "m.Unrelated.go": [], "m.NoReason.go": [] };
@@ -939,7 +939,7 @@ test("loadHierarchy → callersFrontier: ABSENT ≡ EMPTY sidecar, and neither c
   // supertype" would score condition (3) as FAILED for every dotted source at once and collapse the
   // frontier to `[]` — measured in candor-java, where it took the WORKING dotted entries with it. Pinned
   // as the three-arm triple the frontier engines share: absent ≡ `{}` (over-list) vs populated (precise).
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
+  const d = scratch("candor-hier-");
   fs.writeFileSync(path.join(d, "empty.hierarchy.json"), "{}");
   const absent = loadHierarchy(path.join(d, "nosuch")), empty = loadHierarchy(path.join(d, "empty"));
   fs.writeFileSync(path.join(d, "full.hierarchy.json"), JSON.stringify({ "m.Impl": ["m.Base"], "m.Base": [] }));  // ⟨0.26⟩ root key
@@ -964,7 +964,7 @@ test("loadHierarchy → callersFrontier: a METADATA key cannot narrow the fronti
   // interpret is not inert: it takes the frontier off the documented over-listing fallback and onto the
   // precise subtype test over a hierarchy that answers nothing. Both directions, because the fix is a
   // WIDENING and the row that must not move is the one with a real type in it.
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-hier-"));
+  const d = scratch("candor-hier-");
   const cg = { "m.Impl.run": ["m.Sink.touch"], "m.Sink.touch": [], "m.Go.go": [] };
   const unrelated = [{ fn: "m.Go.go", unknownWhy: ["dispatch:m.Elsewhere.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
   const genuine = [{ fn: "m.Go.go", unknownWhy: ["dispatch:m.Base.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
@@ -1098,12 +1098,12 @@ test("blindspots: equal blast radii tie-break by name (stable worklist order)", 
 test("discoverConfigPolicy: a dir with no .candor/config up to / returns null (clean no-config)", () => {
   // The walk-to-root termination arm never ran under any suite. A fresh temp dir's ancestors are
   // system dirs; if this ever finds a config, the TEST ENVIRONMENT is polluted — that should be loud.
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-noconf-"));
+  const d = scratch("candor-noconf-");
   assert.equal(discoverConfigPolicy(d), null);
   fs.rmSync(d, { recursive: true, force: true });
 });
 test("discoverConfigPolicy: a config WITHOUT a `policy` key is null, not a crash", () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-nopol-"));
+  const d = scratch("candor-nopol-");
   fs.mkdirSync(path.join(d, ".candor"));
   fs.writeFileSync(path.join(d, ".candor", "config"), "strict 1\n# just a comment\n");
   assert.equal(discoverConfigPolicy(d), null);
@@ -1530,7 +1530,7 @@ test("⟨0.24⟩ claimsToHaveJudgedNothing: the three-row table plus the fail-cl
 });
 
 test("⟨0.24⟩ the prefix readers agree: loadGateReport and reportJudgedNothing read one rule", () => {
-  const D = fs.mkdtempSync(path.join(os.tmpdir(), "candor-unjudged-"));
+  const D = scratch("candor-unjudged-");
   const w = (n, doc) => { fs.writeFileSync(path.join(D, `${n}.json`), JSON.stringify(doc)); return path.join(D, n); };
   const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app" };
   const zero = w("zero", { ...V, analyzed: { count: 0 }, functions: [] });
@@ -1543,7 +1543,7 @@ test("⟨0.24⟩ the prefix readers agree: loadGateReport and reportJudgedNothin
   // own loud not-found path. Answering true here would put a caveat on a missing file.
   assert.equal(reportJudgedNothing(path.join(D, "absent")), false);
   // MULTI-REPORT siblings (the Rust/workspace form): the union has judged something as soon as ONE has.
-  const M = fs.mkdtempSync(path.join(os.tmpdir(), "candor-unjudged-multi-"));
+  const M = scratch("candor-unjudged-multi-");
   fs.writeFileSync(path.join(M, "r.a.scan.json"), JSON.stringify({ ...V, analyzed: { count: 0 }, functions: [] }));
   fs.writeFileSync(path.join(M, "r.b.scan.json"), JSON.stringify({ ...V, analyzed: { count: 4 }, functions: [] }));
   assert.equal(reportJudgedNothing(path.join(M, "r")), false);
@@ -1673,7 +1673,7 @@ test("scan.mjs: every fn-record site initialises the same ACCUMULATORS", () => {
 // filesystem cannot falsify the rule on this machine — the patched readdir is the only adversarial
 // enumeration available, and without it this test passes vacuously on the broken engine (measured).
 test("⟨0.28⟩ siblings are sorted: multi-report merge + unanalyzed order survive an adversarial readdir", () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-sibsort-"));
+  const d = scratch("candor-sibsort-");
   const doc = (fn, p) => JSON.stringify({ candor: { version: "candor-ts-x", spec: "0.27" },
     functions: [{ fn, inferred: ["Fs"], direct: ["Fs"], calls: [] }],
     analyzed: { count: 1 }, unanalyzed: [{ path: p, reason: "parse error" }] });

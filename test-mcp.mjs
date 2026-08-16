@@ -7,10 +7,10 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as Q from "./query-core.mjs";
+import { scratch, keepOnFailure } from "./scratch.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let pass = 0, fail = 0;
@@ -18,7 +18,7 @@ const ok = (n, c, d = "") => c ? (pass++, console.log(`  ok   ${n}`)) : (fail++,
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 // ---- a tiny fixture report: handler -> mid -> leaf(Net) -------------------------------------------
-const W = fs.mkdtempSync("/tmp/candor-mcp-");
+const W = scratch("candor-mcp-");
 fs.writeFileSync(`${W}/app.ts`, `import * as http from "node:http";
 export function leaf(): void { http.get("http://x"); }
 export function mid(): void { leaf(); }
@@ -47,7 +47,7 @@ ok("where: leaf is a direct Net source; mid/handler inherit it",
    eq(w.directly, ["app.leaf"]) && eq(w.inherited, ["app.handler", "app.mid"]), JSON.stringify(w));
 
 // defensive: a partial/malformed report (entries missing §2 required fields) must TOLERATE, not throw
-const B = fs.mkdtempSync("/tmp/candor-bad-");
+const B = scratch("candor-bad-");
 fs.writeFileSync(`${B}/r.json`, JSON.stringify({ functions: [{ fn: "a" }, { fn: "b", inferred: ["Net"] }] }));
 fs.writeFileSync(`${B}/r.callgraph.json`, JSON.stringify({ a: null, b: ["a"] }));
 const bf = Q.loadReport(`${B}/r`), bcg = Q.loadCallgraph(`${B}/r`);
@@ -58,7 +58,7 @@ fs.rmSync(B, { recursive: true, force: true });
 
 // cross-engine loader: a multi-report prefix (<prefix>.<crate>.scan.json, the candor-scan/Rust form)
 // merges every sibling — so the MCP server serves a report from ANY engine, not just candor-ts's.
-const M = fs.mkdtempSync("/tmp/candor-multi-");
+const M = scratch("candor-multi-");
 fs.writeFileSync(`${M}/r.a.scan.json`, JSON.stringify({ functions: [{ fn: "a::f", inferred: ["Net"], direct: ["Net"], calls: [] }] }));
 fs.writeFileSync(`${M}/r.b.scan.json`, JSON.stringify({ functions: [{ fn: "b::g", inferred: ["Fs"], direct: ["Fs"], calls: [] }] }));
 fs.writeFileSync(`${M}/r.a.scan.callgraph.json`, JSON.stringify({ "a::f": [] }));
@@ -79,7 +79,7 @@ fs.rmSync(M, { recursive: true, force: true });
 // ladder must not read a dropped file's fns as "new" (the supply-chain attack signal downgraded):
 // report hit → existing; graph node → existing; graph empty OR partial → unknown; else new.
 {
-  const PG = fs.mkdtempSync("/tmp/candor-partialcg-");
+  const PG = scratch("candor-partialcg-");
   fs.writeFileSync(`${PG}/r.a.scan.callgraph.json`, JSON.stringify({ "a::f": [] }));
   fs.writeFileSync(`${PG}/r.b.scan.callgraph.json`, "{ truncated");   // matched, unparseable → edges dropped
   const pcg = Q.loadCallgraph(`${PG}/r`);
@@ -127,7 +127,7 @@ ok("query-core diff-vs-self == query.mjs diff-vs-self (both {changes: []})",
 // collapse last-wins — the collapse masked a gained effect from the CLI's gained→exit-1 contract while
 // MCP candor_diff (query-core) reported it: the package's no-two-truths rule broken between surfaces.
 {
-  const DD = fs.mkdtempSync("/tmp/candor-dupdiff-");
+  const DD = scratch("candor-dupdiff-");
   // cur: two workspace members both defining `init`; only member a's gained Net. Baseline: neither.
   fs.writeFileSync(`${DD}/cur.a.scan.json`, JSON.stringify({ functions: [{ fn: "init", inferred: ["Net"], direct: ["Net"] }] }));
   fs.writeFileSync(`${DD}/cur.b.scan.json`, JSON.stringify({ functions: [{ fn: "init", inferred: [], direct: [] }] }));
@@ -296,7 +296,7 @@ ok("mcp: resources/read serves the report envelope",
 // ── candor_whatif over MCP: the pre-edit gate must FAIL CLOSED on a bad policy path ────────────────
 // (review headline find: a typo'd/missing `policy` silently evaluated with NO policy → ok:true — a
 // false green on the agent-facing surface, the exact gateless-green shape the CLI whatif exits 2 on.)
-const OUTSIDE = fs.mkdtempSync("/tmp/candor-outside-");
+const OUTSIDE = scratch("candor-outside-");
 fs.writeFileSync(path.join(OUTSIDE, "other.policy"), "deny Net\n");
 const wi = (id, args) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "candor_whatif", arguments: args } });
 const wiReplies = await mcpSession([
@@ -355,7 +355,7 @@ fs.rmSync(OUTSIDE, { recursive: true, force: true });
 // verb does (one code path, the parity rule) — the current envelope's ledger + the name-level delta
 // ride along; a coverage-free comparison carries neither key (the pre-0.15 result, byte-identical).
 {
-  const CV = fs.mkdtempSync("/tmp/candor-covgains-");
+  const CV = scratch("candor-covgains-");
   const doc = (extra) => JSON.stringify({ candor: { version: "eeeeeee", spec: "0.23" },
     functions: [{ fn: "m.f", inferred: ["Net"], direct: ["Net"] }], ...extra });
   fs.writeFileSync(`${CV}/cur.json`, doc({ coverage: { uncovered: [{ name: "blinddep", calls: 2 }] } }));
@@ -383,7 +383,7 @@ fs.rmSync(OUTSIDE, { recursive: true, force: true });
 // flagged — silently-shortened lists would misreport the blast radius. Synthetic report: 60 entry-point
 // callers of one Net+Unknown leaf (>cap on every listed surface).
 {
-  const CAP = fs.mkdtempSync("/tmp/candor-cap-");
+  const CAP = scratch("candor-cap-");
   const capFns = [{ fn: "cap.leaf", inferred: ["Net", "Unknown"], direct: ["Net"], unknownWhy: ["reflect:eval"] }];
   const capCg = { "cap.leaf": [] };
   for (let i = 0; i < 60; i++) {
@@ -442,7 +442,7 @@ fs.rmSync(OUTSIDE, { recursive: true, force: true });
 // ── resources/read: the policy resource, the URI-encoded prefix, refusals, and protocol errors ─────
 {
   // a second repo whose checked-in config points OUTSIDE its own tree — the confined read must refuse
-  const CONF = fs.mkdtempSync("/tmp/candor-conf-");
+  const CONF = scratch("candor-conf-");
   fs.mkdirSync(path.join(CONF, ".candor"));
   fs.writeFileSync(path.join(CONF, ".candor", "report.json"), JSON.stringify({ functions: [{ fn: "c.f", inferred: ["Net"], direct: ["Net"] }] }));
   fs.writeFileSync(path.join(CONF, ".candor", "config"), "policy ../escape.policy\n");
@@ -483,7 +483,7 @@ fs.rmSync(OUTSIDE, { recursive: true, force: true });
 // the resolvePrefix existence check (only the main report had it), so a typo'd baseline diffed as
 // an authoritative empty. Both now surface as the isError tool result.
 {
-  const C = fs.mkdtempSync("/tmp/candor-mcpcorrupt-");
+  const C = scratch("candor-mcpcorrupt-");
   fs.writeFileSync(`${C}/r.json`, `{ "functions": [ { "fn": "x.`); // truncated mid-write
   const call = (id, name, args) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
   const cr = await mcpSession([
@@ -518,7 +518,7 @@ fs.rmSync(OUTSIDE, { recursive: true, force: true });
 // RED (so the fixture can fire), and candor_map over the partial prefix still ANSWERS (the read-only
 // tools keep the looser bar deliberately — a partial answer is a smaller claim than a green gate).
 {
-  const M = fs.mkdtempSync("/tmp/candor-mcppartial-");
+  const M = scratch("candor-mcppartial-");
   const V = { candor: { version: "handwritten", toolchain: "none", spec: "0.24" } };
   const clean = { ...V, package: "cleanpkg", analyzed: { count: 3, digest: "aa" }, functions: [{ fn: "a.pureish", inferred: [], direct: [] }] };
   const dirty = { ...V, package: "dirty", analyzed: { count: 1, digest: "bb" },
@@ -551,7 +551,7 @@ fs.rmSync(OUTSIDE, { recursive: true, force: true });
 fs.rmSync(W, { recursive: true, force: true });
 // ── candor_activity: the edit-time gate's self-inspection tool (FEEDBACK-SPEC "richer MCP push") ──
 {
-  const A = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-act-"));
+  const A = scratch("candor-mcp-act-");
   fs.mkdirSync(path.join(A, ".candor"), { recursive: true });
   fs.writeFileSync(path.join(A, ".candor", "activity.jsonl"), [
     '{"ts":"2026-07-14T10:00:00Z","sessionId":"s1","engine":"candor-scan","edited":null,"gained":["Fs"],"blastRadius":3,"maxHops":2,"verdict":"blocked","violations":["AS-EFF-006"],"unknowns":0,"effects":["Fs"],"reviewMs":100}',
@@ -634,7 +634,7 @@ fs.rmSync(W, { recursive: true, force: true });
 // `deny Net[unknown-host]` hit in one direction and a `deny Net[known-partner]` that silently stops
 // firing in the other. Both arms asserted, over a report this machine did not produce.
 {
-  const F = fs.mkdtempSync("/tmp/candor-mcp-foreign-");
+  const F = scratch("candor-mcp-foreign-");
   fs.writeFileSync(`${F}/r.json`, JSON.stringify({
     candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 1, digest: "0" },
     functions: [{ fn: "app.call", inferred: ["Net"], direct: ["Net"], hosts: ["partner.example"], netClass: ["known-partner"] }],
@@ -662,7 +662,7 @@ fs.rmSync(W, { recursive: true, force: true });
 // (the report asserts no effect, so asserting one here would be fabrication) and the field is absent on
 // every ordinary report, which is what the CONTROL row pins.
 {
-  const F = fs.mkdtempSync("/tmp/candor-mcp-unjudged-");
+  const F = scratch("candor-mcp-unjudged-");
   const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app" };
   fs.writeFileSync(`${F}/zero.json`, JSON.stringify({ ...V, analyzed: { count: 0, digest: "0" }, functions: [] }));
   fs.writeFileSync(`${F}/allpure.json`, JSON.stringify({ ...V, analyzed: { count: 2, digest: "0" }, functions: [] }));
@@ -720,7 +720,7 @@ fs.rmSync(W, { recursive: true, force: true });
 // looks armed. Both rows drive the real MCP session; the CONTROL is what keeps the row from passing on a
 // tool that has simply started erroring on every policy.
 {
-  const G = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-pol-"));
+  const G = scratch("candor-mcp-pol-");
   fs.mkdirSync(path.join(G, ".candor"), { recursive: true });
   fs.writeFileSync(path.join(G, "app.ts"),
     'export function dyn(o: any, k: string) { return o[k](); }\n');
@@ -779,7 +779,7 @@ fs.rmSync(W, { recursive: true, force: true });
 // the first two rows. The last row is the precedence half (SPEC §3.1 `7271c69`): a certain `deny Fs`
 // beside the unanswerable rule must produce the violation AND the disclosure, never one or the other.
 {
-  const A = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-withhold-"));
+  const A = scratch("candor-mcp-withhold-");
   fs.writeFileSync(`${A}/r.json`, JSON.stringify({
     candor: { version: "handwritten", spec: "0.24" }, package: "app", analyzed: { count: 3, digest: "0" },
     functions: [
@@ -830,7 +830,7 @@ fs.rmSync(W, { recursive: true, force: true });
 // bytes. The CONTROL is the identical report with the manifest removed, so the row cannot pass on a tool
 // that has started flagging everything.
 {
-  const I = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-incomplete-"));
+  const I = scratch("candor-mcp-incomplete-");
   const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app",
               analyzed: { count: 1, digest: "0" },
               functions: [{ fn: "app.fetcher", inferred: ["Net"], direct: ["Net"], hosts: ["x"], netClass: ["unknown-host"] }] };
@@ -860,7 +860,7 @@ fs.rmSync(W, { recursive: true, force: true });
 // ABSENCE is asserted, never falsiness: `ok:false` would satisfy a `!ok` test while being the fabrication
 // the rule forbids (a hole claimed beside an empty array).
 {
-  const I = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-uvinc-"));
+  const I = scratch("candor-mcp-uvinc-");
   const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app",
               analyzed: { count: 1, digest: "0" },
               functions: [{ fn: "app.port", inferred: ["Unknown"], direct: ["Unknown"],
@@ -896,7 +896,7 @@ fs.rmSync(W, { recursive: true, force: true });
 // only asks "did the verb return anything?" passes while `app.noClass` is silently cleared — which is
 // exactly how the weaker form of the conformance row passed on all four engines while the defect stood.
 {
-  const B = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-bound-"));
+  const B = scratch("candor-mcp-bound-");
   const V = { candor: { version: "handwritten", spec: "0.24" }, package: "app",
               analyzed: { count: 2, digest: "0" },
               functions: [{ fn: "app.nativeHole", inferred: ["Unknown"], direct: ["Unknown"],
@@ -956,7 +956,7 @@ fs.rmSync(W, { recursive: true, force: true });
 // `sources.length === 0` records "no blind spots" and moves on. (`candor_show`/`candor_impact` already
 // fail closed here on the fn-existence guard, which is why they are not in this matrix.)
 {
-  const A = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-desc-"));
+  const A = scratch("candor-mcp-desc-");
   // Its own scan: the top-of-file fixture `W` is removed long before this block, and reusing a deleted
   // prefix would make every row below pass on a tool error rather than on an answer.
   fs.writeFileSync(`${A}/app.ts`, `import * as http from "node:http";
@@ -1132,7 +1132,7 @@ export function mid(): void { leaf(); }
 // three-quarters of which was never asked — §6.2's "90%-gateless green", on the surface where it is
 // least recoverable. Same shape and same builder as both CLI routes.
 {
-  const G = fs.mkdtempSync(path.join(os.tmpdir(), "candor-mcp-ignored-"));
+  const G = scratch("candor-mcp-ignored-");
   fs.writeFileSync(`${G}/app.ts`, `import * as nfs from "node:fs";
 export function save(): void { nfs.writeFileSync("x", "1"); }
 `);
@@ -1158,4 +1158,8 @@ export function save(): void { nfs.writeFileSync("x", "1"); }
 }
 
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
+// KEEP THE EVIDENCE ON FAILURE. A failing row prints the path to its fixture tree, and the sweep
+// would delete it on the way out — at exactly the moment someone needs to look. scratch.mjs has
+// carried this switch since it was written; only test.mjs was throwing it.
+if (fail) keepOnFailure();
 process.exit(fail ? 1 : 0);

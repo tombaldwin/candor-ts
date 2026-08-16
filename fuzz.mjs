@@ -18,9 +18,9 @@
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { scratch } from "./scratch.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -237,7 +237,7 @@ function genProject(seed) {
 
 function runSeed(seed) {
   const { files, n, sink, forms, expectUnknown, multiFile } = genProject(seed);
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-fuzz-"));
+  const d = scratch("candor-ts-fuzz-");
   for (const [rel, content] of Object.entries(files)) {
     const p = path.join(d, rel);
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -288,7 +288,7 @@ class Cat extends Animal {}
 export function viaBase(a: Animal): void { a.speak(); }
 export function noOverride(c: Cat): void { c.speak(); }
 `;
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-fuzz-sib-"));
+  const d = scratch("candor-ts-fuzz-sib-");
   fs.mkdirSync(path.join(d, "src"), { recursive: true });
   fs.writeFileSync(path.join(d, "src", "sib.ts"), src);
   const res = spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8" });
@@ -327,7 +327,7 @@ function runRobustnessLane() {
   const crashed = (res) => res.status === null /* killed by signal */ || /\n\s+at \S+ \(.*\.mjs/.test(res.stderr || "");
 
   for (const [name, src] of HOSTILE_SRC) {
-    const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-fuzz-rob-"));
+    const d = scratch("candor-ts-fuzz-rob-");
     fs.mkdirSync(path.join(d, "src"), { recursive: true });
     fs.writeFileSync(path.join(d, "src", "x.ts"), src);
     const res = spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8" });
@@ -349,7 +349,7 @@ function runRobustnessLane() {
     ["bom_json", `\uFEFF{ "functions": [] }`],                          // leading BOM ahead of valid JSON
   ];
   for (const [name, body] of CORRUPT_REPORTS) {
-    const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-fuzz-rep-"));
+    const d = scratch("candor-ts-fuzz-rep-");
     fs.writeFileSync(path.join(d, "rep.json"), body);
     const prefix = path.join(d, "rep");
     for (const argv of [["show", prefix, "x"], ["map", prefix], ["where", prefix, "Net"], ["reachable", prefix]]) {
@@ -364,7 +364,7 @@ function runRobustnessLane() {
   // exit 0 with a valid (empty) answer, matching the Rust engine. This pins that the loud rule above fires
   // on corruption ONLY, never on a genuinely effect-free report (else it would raise false alarms).
   {
-    const d = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-fuzz-empty-"));
+    const d = scratch("candor-ts-fuzz-empty-");
     fs.writeFileSync(path.join(d, "rep.json"), `{ "candor": { "version": "fuzz" }, "functions": [] }`);
     const prefix = path.join(d, "rep");
     const res = spawnSync("node", [path.join(HERE, "query.mjs"), "map", prefix], { encoding: "utf8" });

@@ -20,10 +20,10 @@
 // INDEPENDENT witness that the effect executed (needed to distinguish a true ESCAPE from a path not taken).
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { scratch } from "./scratch.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const wantJson = process.argv.includes("--json");
@@ -106,7 +106,7 @@ function runVerify(dir, prefix, appPath, outPath) {
   return { j, ran, raw: r };
 }
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "candor-sensitivity-"));
+const root = scratch("candor-sensitivity-");
 const results = [];
 for (const mech of MECHANISMS) {
   const dir = path.join(root, mech.id);
