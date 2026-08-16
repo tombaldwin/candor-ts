@@ -8,6 +8,23 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ ⟨0.29⟩ `--json` LOST 30 KB THROUGH A PIPE, and the document that arrived was invalid.** MEASURED on
+  a 400-file scan under a violating policy: **95281 bytes to a FILE, valid JSON; 65536 bytes through a
+  PIPE, a JSONDecodeError** — exactly the pipe buffer, exit 1 on both, nothing on stderr. `console.log` is
+  asynchronous on a pipe and every bulk-output path ends in `process.exit(…)`, which discards what is
+  still buffered. This is the machine-consumer path — `candor-ts src --json --policy p | jq` — so the loss
+  is silent AND the document is unparseable, which is strictly worse than the `--agents` truncation that
+  got this class fixed one release earlier. `--agents` was never the only print-then-exit site; it was the
+  only one that got FIXED, and the umbrella backlog asserted the remaining sites "fit the buffer and
+  survive by SIZE" — true of the usage strings somebody measured, false of the report envelope nobody did.
+  The bounded synchronous writer is now `writeStdoutSync()`, shared: `scan.mjs --json`, `printAgents`, and
+  all twelve `emit` sites in `query.mjs` (every query verdict document an agent pipes into `jq`) go
+  through it. Three rows compare a PIPE against a real FILE, with a control that the fixture still exceeds
+  the buffer; teeth-verified by reverting the scan fix.
+  **Clean siblings, stated because a clean sibling is a result**: candor-rust (106781 bytes) and
+  candor-swift (116222) deliver byte-identical output to a file and a pipe — this is Node's async stdout,
+  not a family-wide defect.
+
 - **⟨0.29⟩ `unverified` and `fix-gate` certified over a policy the gate had refused.** Their
   `unevaluated` machinery — the note, the omitted `ok`, the `--strict` exit 2 — has been correct since
   ⟨0.24⟩; its INPUT was incomplete. `coreUnverified`/`coreFixGate` report scoped-`deny` refusals only, so

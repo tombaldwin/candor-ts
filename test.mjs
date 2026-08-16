@@ -1681,6 +1681,53 @@ if (blk()) {
   }
 }
 
+// ── 1d3. A BULK DOCUMENT MUST SURVIVE A PIPE, not just `--agents` ─────────────────────────────────
+// The `--agents` truncation got fixed and its SIBLINGS did not, which is the habit this project keeps
+// measuring in itself. `console.log` is asynchronous on a pipe and every bulk-output path here ends in
+// `process.exit(…)`, which discards what is still buffered.
+//
+// MEASURED before the fix, on `scan.mjs --json --policy <p>` over this fixture: 95281 bytes to a FILE and
+// valid JSON, **65536 bytes through a PIPE and a JSONDecodeError** — exactly the pipe buffer, exit 1 on
+// both, nothing on stderr. That is the machine-consumer path (`candor-ts src --json --policy p | jq`), so
+// the loss is silent AND the document is invalid: strictly worse than the `--agents` case that got the
+// class fixed. The umbrella backlog asserted these sites "fit the buffer and survive by SIZE", which was
+// true of the usage strings somebody measured and false of the report envelope nobody did.
+//
+// THE ROW COMPARES A PIPE AGAINST A FILE rather than asserting a byte count: the count moves with the
+// fixture and the classifier, and a row that needs updating every rung gets updated without being read.
+// The fixture must EXCEED the buffer or the row is vacuous, so that is asserted too.
+if (blk()) {
+  const dir = scratch("candor-ts-bigpipe-");
+  const src = path.join(dir, "src");
+  fs.mkdirSync(src, { recursive: true });
+  for (let i = 0; i < 400; i++) {
+    fs.writeFileSync(path.join(src, `m${i}.ts`),
+      `import http from "node:http";\nexport function f${i}(): void { http.get("http://x${i}"); }\n`);
+  }
+  const pol = path.join(dir, "p.pol");
+  fs.writeFileSync(pol, "deny Net\n");
+  const argv = [path.join(HERE, "scan.mjs"), src, "--json", "--policy", pol];
+  // A REAL FILE for the baseline, via a shell redirect. spawnSync's own `stdout` capture is a PIPE too,
+  // so using it as "the file size" measured the truncation on BOTH sides: against the unfixed engine the
+  // baseline came back as 8192 bytes and the not-vacuous row failed for the wrong reason. A redirect to
+  // a file is the only sink here that is synchronous by construction, which is the whole distinction.
+  const q = (x) => `'${x.replace(/'/g, "'\\''")}'`;
+  const cmd = `${q(process.execPath)} ${argv.map(q).join(" ")}`;
+  const filePath = path.join(dir, "out.json");
+  spawnSync("sh", ["-c", `${cmd} > ${q(filePath)} 2>/dev/null`]);
+  const fileBytes = fs.statSync(filePath).size;
+  const toPipe = spawnSync("sh", ["-c", `${cmd} 2>/dev/null | cat`], { encoding: "utf8", maxBuffer: 1 << 28 });
+  check("--json over a large scan EXCEEDS the pipe buffer (the row is not vacuous)",
+        fileBytes > 65536, `only ${fileBytes} bytes to a file — the fixture no longer tests anything`);
+  check("--json delivers the WHOLE envelope through a pipe, not the first 64KiB",
+        toPipe.stdout.length === fileBytes,
+        `pipe got ${toPipe.stdout.length} of the file's ${fileBytes} bytes`);
+  let parsed = false;
+  try { JSON.parse(toPipe.stdout); parsed = true; } catch { /* reported below */ }
+  check("…and what arrives through the pipe is VALID JSON (a truncated document is not a document)",
+        parsed, `${toPipe.stdout.length} bytes, tail: ${JSON.stringify(toPipe.stdout.slice(-40))}`);
+}
+
 // ── 1d2. …and must not HANG when the reader stalls without closing ────────────────────────────────
 // The EPIPE arm covers the reader that LEFT. This is the reader that STAYED and stopped — an agent
 // harness holding the pipe open while it blocks, a log collector wedged on a full disk. The retry loop

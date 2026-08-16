@@ -29,7 +29,7 @@ import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, d
          fatalPolicyErrors, refusalVerdict,
          unanswerableScoped, wholePolicyUnanswerable } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
-import { printAgents } from "./contract.mjs";
+import { printAgents, writeStdoutSync } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
 import { isTestPath } from "./scan-core.mjs";
 // ONE source of truth for loading + name-matching — query.mjs kept DRIFTED local copies that didn't
@@ -47,7 +47,12 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          reportVersion, reportPackage,
          advisoryAnswer,
          reportCompleteness, mustHedge, completenessFields, absorbCompleteness } from "./query-core.mjs";
-const emit = (v) => console.log(JSON.stringify(v, null, 1));
+// writeStdoutSync, NOT console.log — and this ONE line covers all twelve `emit` sites, which is the
+// point. console.log is asynchronous on a pipe and every verb here ends in `process.exit(...)`, which
+// discards whatever is still buffered. MEASURED on the sibling path (`scan.mjs --json`): 95281 bytes to a
+// FILE and valid JSON, 65536 bytes through a PIPE and a JSONDecodeError. These are the query documents an
+// agent pipes into `jq`; `map`/`where`/`blindspots` over a real report clear the buffer easily.
+const emit = (v) => writeStdoutSync(JSON.stringify(v, null, 1) + "\n", "the verdict document");
 // ⟨0.24⟩ SPEC §3.2 — THE OTHER CHANNEL. `advisoryAnswer` withdraws the claim from the JSON; this withdraws
 // it from the one a human reads, and the spec requires both because a test that reads one channel is
 // evidence about one channel. candor-rust built a mutant that kept the whole JSON fix and deleted only the
@@ -843,8 +848,9 @@ function resolveGateReportVerb(rawArgs) {
       if (gate === "-") {
         process.on("exit", (code) => {
           if (code === 2 && !globalThis.__candorGateVerdictWritten) {
-            console.log(JSON.stringify(refusalVerdict(SPEC_VERSION,
-              "the gate did not complete — this run exited before a verdict could be produced", null), null, 1));
+            writeStdoutSync(JSON.stringify(refusalVerdict(SPEC_VERSION,
+              "the gate did not complete — this run exited before a verdict could be produced", null), null, 1)
+              + "\n", "the refusal verdict");
           }
         });
       }
@@ -1543,7 +1549,7 @@ switch (cmd) {
       // mostly-Unknown graph; a report that judged nothing, or that names a file it could not read, yields
       // the IDENTICAL empty array from strictly less evidence, and an unread unit contributes no entry, so
       // it moves neither `unknown` nor `total`. Spread last, `{}` on a complete report.
-      console.log(JSON.stringify({ ...out, ...completenessFields(tourComp) }));
+      writeStdoutSync(JSON.stringify({ ...out, ...completenessFields(tourComp) }) + "\n", "tour");
       break;
     }
     incompleteAnswerNote(tourComp,

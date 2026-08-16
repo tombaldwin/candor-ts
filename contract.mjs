@@ -8,11 +8,28 @@ import { fileURLToPath } from "node:url";
 // `fd` and `budgetMs` are parameters ONLY so the suite can drive this exact loop against a real
 // non-blocking fd. A guard that has never taken its own EAGAIN branch is a guard nobody has seen work,
 // and this file's whole history is failure modes that only appear on a pipe. Production passes neither.
+// `--agents` was never the only print-then-exit site — it was the only one that got FIXED, which is how
+// the defect survived. `printAgents` now delegates to `writeStdoutSync` below so the next bulk-output
+// site inherits the fix instead of being audited into it.
 export function printAgents(fd = 1, budgetMs = 5000) {
   const dir = path.dirname(fileURLToPath(import.meta.url)); // the package root (where AGENTS.md ships)
   const semver = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")).version;
   const out = `<!-- candor-ts ${semver} · the agent contract for this installed version -->\n`
     + fs.readFileSync(path.join(dir, "AGENTS.md"), "utf8");
+  writeStdoutSync(out, "--agents", fd, budgetMs);
+}
+
+// ── THE SYNCHRONOUS BULK WRITER ───────────────────────────────────────────────────────────────────
+// MEASURED on `scan.mjs --json --policy <p>` over a 400-file fixture with a violation: **95281 bytes to
+// a FILE, valid JSON; 65536 bytes through a PIPE, a JSONDecodeError** — exactly the pipe buffer, exit 1
+// either way, nothing on stderr. `console.log` is asynchronous on a pipe and `process.exit()` discards
+// what is still buffered, which is the identical defect the `--agents` path was rewritten for, in the
+// path a MACHINE consumer reads. The umbrella backlog asserted the opposite — that the remaining
+// print-then-exit sites "fit the buffer and survive by SIZE" — which was true of the usage strings
+// somebody measured and false of the report envelope nobody did.
+//
+// `what` names the caller, so the stderr diagnostic points at the surface that lost bytes.
+export function writeStdoutSync(out, what = "output", fd = 1, budgetMs = 5000) {
   // fs.writeSync, NOT console.log/process.stdout.write. On a PIPE those are asynchronous, and scan.mjs
   // calls `process.exit(0)` on the next line — which discards whatever is still buffered. The contract
   // came out TRUNCATED AT 8170 OF 23121 CHARACTERS, cut mid-sentence, with exit 0 and nothing on stderr:
@@ -71,8 +88,8 @@ export function printAgents(fd = 1, budgetMs = 5000) {
         // for being slow — only a stopped one runs the budget down.
         if (deadline === 0) deadline = Date.now() + EAGAIN_BUDGET_MS;
         else if (Date.now() >= deadline) {
-          try { fs.writeSync(2, `candor-ts: --agents output stalled at ${off} of ${buf.length} bytes `
-                              + `— the reader has not drained for ${EAGAIN_BUDGET_MS}ms. This contract is INCOMPLETE.\n`); }
+          try { fs.writeSync(2, `candor-ts: ${what} output stalled at ${off} of ${buf.length} bytes `
+                              + `— the reader has not drained for ${EAGAIN_BUDGET_MS}ms. This output is INCOMPLETE.\n`); }
           catch { /* nothing left to tell */ }
           return;
         }
@@ -86,7 +103,7 @@ export function printAgents(fd = 1, budgetMs = 5000) {
     // was rewritten to remove ("an agent piping candor-ts --agents into its context silently read a
     // third of its own instructions") — so the reader-left case has to be STATED. stderr may be closed
     // too; that write is best-effort by construction.
-    try { fs.writeSync(2, `candor-ts: --agents output was cut short at ${off} of ${buf.length} bytes `
-                        + `— the reader closed the pipe. This contract is INCOMPLETE.\n`); } catch { /* nothing left to tell */ }
+    try { fs.writeSync(2, `candor-ts: ${what} output was cut short at ${off} of ${buf.length} bytes `
+                        + `— the reader closed the pipe. This output is INCOMPLETE.\n`); } catch { /* nothing left to tell */ }
   }
 }

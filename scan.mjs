@@ -31,7 +31,7 @@ import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNe
          reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules, fatalPolicyErrors, refusalVerdict,
          netClassResolver, resolveReasonClasses } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
-import { printAgents } from "./contract.mjs";
+import { printAgents, writeStdoutSync } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, fsKind, commandHeadEffects, hostLiteral, tablesInSql,
          modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
@@ -6095,7 +6095,13 @@ for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
 const writeAtomic = (file, text) => writeSinkAtomic(file, text);
 // --json: print the §2 envelope to STDOUT instead of writing the report files (matches candor-scan/Rust).
 if (wantJson) {
-  console.log(JSON.stringify(envelope, null, 1));
+  // writeStdoutSync, NOT console.log. MEASURED over a 400-file fixture with a violating policy: 95281
+  // bytes to a FILE and valid JSON, **65536 bytes through a PIPE and a JSONDecodeError** — exactly the
+  // pipe buffer, exit 1 either way, nothing on stderr. console.log is asynchronous on a pipe and the
+  // process.exit() sites below discard what is still buffered. This is the machine-consumer path
+  // (`candor-ts src --json --policy p | jq`), so the loss is silent and the document is invalid, which
+  // is worse than the `--agents` truncation that got this class fixed in the first place.
+  writeStdoutSync(JSON.stringify(envelope, null, 1) + "\n", "--json");
   // ⟨0.28⟩ REPORT STREAM LATCH — a successful envelope went to stdout, so a later exit-2 site (baseline
   // corrupt, policy refusal, gate NOT certified over unanalyzed) MUST NOT also write a fail-closed
   // placeholder there. Two documents on one stream parses as neither — the same shape the two-stream
