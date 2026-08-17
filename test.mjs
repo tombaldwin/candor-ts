@@ -2288,6 +2288,39 @@ export function litShortForm(): void { s.send("payload", 53, "telemetry.example"
         !g.includes("src.u.litLongForm") && !g.includes("src.u.litShortForm"), g);
 }
 if (blk()) {
+  // ⟨0.29⟩ THE FOURTH AND LAST LOCATOR SURFACE. `Db` read the first string literal ANYWHERE in the call
+  // and parsed it as SQL, so a literal in the PARAMS position became the table — and because a table HAD
+  // been captured, the masking guard below it never fired. MEASURED:
+  // `db.query(userSql, "SELECT * FROM audit_log")` → `tables: ["audit_log"]`, no `incomplete`, and the
+  // function was ABSENT from the violation list under `allow Db audit_log`: a green gate over a query
+  // whose SQL is a runtime value. Every string-SQL client puts the statement at argument 0
+  // (`query(text, values)`, `execute(sql, params)`, `raw(sql, bindings)`, `prepare(sql)`), so a later
+  // literal is a parameter, a fallback query or a health-check string — data, not the statement run.
+  //
+  // candor-rust reads argument 0 already; candor-java captures the same fabricated table but ALSO marks
+  // `incomplete`, so its verdict fails closed on an imprecise report rather than certifying.
+  const d = project({
+    "node_modules/pg/package.json": `{"name":"pg","version":"8.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/pg/index.d.ts": `export declare class Client { query(text: string, values?: any): Promise<any>; }`,
+    "node_modules/pg/index.js": `exports.Client = class Client { query(){} };`,
+    "src/q.ts": `import { Client } from "pg";
+const db = new Client();
+export function paramsLit(userSql: string): void { db.query(userSql, "SELECT * FROM audit_log"); }
+export function okLit(p: string): void { db.query("SELECT * FROM ok_table WHERE x=$1", [p]); }`,
+    "pol.db": "allow Db audit_log\n",
+  });
+  const rep = scan(d).report;
+  const g = scan(d, "--policy", path.join(d, "pol.db")).r.stdout;
+  const tables = (fn) => (entry(rep, fn)?.tables ?? []).join(",");
+  check("⟨0.29⟩ Db: a SQL-shaped literal in the PARAMS position is not published as a table",
+        tables("src.q.paramsLit") === "", tables("src.q.paramsLit"));
+  check("⟨0.29⟩ Db: …and the runtime SQL is disclosed rather than certified by that literal",
+        g.includes("[AS-EFF-008]") && g.includes("src.q.paramsLit"), g);
+  // THE OVER-CHARGE CONTROL: reading argument 0 only must not cost the real surface.
+  check("⟨0.29⟩ Db CONTROL: a literal SQL at argument 0 still yields its table",
+        tables("src.q.okLit") === "ok_table", tables("src.q.okLit"));
+}
+if (blk()) {
   // [9] net-cluster fabrication: pure config/metadata members are NOT Net.
   const d = project({
     "src/f.ts": `import * as tls from "node:tls";

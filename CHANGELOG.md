@@ -8,6 +8,21 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ ⚠ `Db` read the first string literal ANYWHERE in the call and parsed it as SQL — the fourth
+  and last locator surface.** `db.query(userSql, "SELECT * FROM audit_log")` published
+  `tables: ["audit_log"]` and, because a table HAD been captured, the masking guard below it never fired,
+  so the function was ABSENT from the violation list under `allow Db audit_log`: a green gate over a query
+  whose SQL is a runtime value. Every string-SQL client puts the statement at argument 0
+  (`query(text, values)`, `execute(sql, params)`, `raw(sql, bindings)`, `prepare(sql)`), so a later
+  literal is a parameter, a fallback query or a health-check string. Now reads argument 0, matching
+  candor-rust; candor-java captures the same fabricated table but also marks `incomplete`, so its verdict
+  fails closed on an imprecise report rather than certifying.
+- **⟨0.29⟩ the `cmds` surface reads argv[0] too.** It was documented as "the cosmetic cmds surface (any
+  literal)" — but `cmds` is exactly what `allow Exec <cmd>` gates on under AS-EFF-008, which is not
+  cosmetic. No node API places a bare string after the head (args are an array, options an object), so
+  this changes no measured behaviour today; it removes the hazard for the next exec-like wrapper whose
+  second argument is a string, which is how this identical defect reached `Fs`, `Net` and `Db`.
+  **`firstStringLiteral` now has no callers on any locator surface.**
 - **⟨0.29⟩ ⚠ dgram's destination is at argument 2 or 4; argument 0 is the MESSAGE, and it was being
   published as the host.** `urlArgLiteral` fell through to `litAt(0)` for `send`, so
   `sock.send("telemetry.example", 0, 17, 53, dst)` reported `hosts: ["telemetry.example"]` with no

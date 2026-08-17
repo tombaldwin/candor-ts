@@ -4684,7 +4684,16 @@ function visitCalls(node) {
           // parity #1) — any call into these single-purpose clients is a model dispatch. Additive.
           if (isModelSdkPackage(mod)) rec.direct.add("Llm");
           if (eff === "Db") {
-            const lit = firstStringLiteral(node);
+            // ⟨0.29⟩ THE SQL SLOT, never the first literal anywhere. Every string-SQL client puts the
+            // query at argument 0 (`query(text, values)`, `execute(sql, params)`, `raw(sql, bindings)`,
+            // `prepare(sql)`), so a literal in a LATER position is a parameter, a fallback query, a
+            // health-check string — data, not the statement being run. MEASURED:
+            // `db.query(userSql, "SELECT * FROM audit_log")` published `tables: ["audit_log"]` and, because
+            // a table HAD been captured, the masking guard below never fired — so `allow Db audit_log`
+            // certified a query whose SQL is a runtime value. The `Fs` and `Net` defects of this rung, in
+            // the fourth and last locator surface.
+            const a0 = (node.arguments ?? [])[0];
+            const lit = a0 && ts.isStringLiteralLike(a0) ? a0.text : null;
             const before = rec.tables.size;
             for (const t of lit ? tablesInSql(lit) : []) rec.tables.add(t);
             // ORM route: `this.userRepository.find(…)` — the receiver's `Repository<UserEntity>`
@@ -4704,12 +4713,18 @@ function visitCalls(node) {
             if (rec.tables.size === before && member !== "new") rec.incomplete.add("Db");
           }
           if (eff === "Exec") {
-            const lit = firstStringLiteral(node);
-            if (lit) rec.cmds.add(lit.trim().split(/\s+/)[0]); // cosmetic cmds surface (any literal)
+            // ⟨0.29⟩ `cmds` reads argv[0] too. It was documented as "the cosmetic cmds surface (any
+            // literal)", but `cmds` is precisely what `allow Exec <cmd>` gates on (AS-EFF-008) — nothing
+            // cosmetic about it. No node API places a bare string after the head (args are an array,
+            // options an object), so this changes no measured behaviour today; it removes the hazard for
+            // the next exec-like wrapper whose second argument is a string, which is how the identical
+            // defect reached `Fs`, `Net` and `Db` in this same rung.
+            const lit = programHeadLiteral(node);
+            if (lit) rec.cmds.add(lit.trim().split(/\s+/)[0]);
             // a known literal head refines the cliff (curl→Net, candor→Fs/Env); Exec stays. The head
             // MUST be argv[0] (programHeadLiteral), NOT any literal arg: `spawn(toolVar, "curl")`
             // names no static program, so its trailing literal must not fabricate Net (spec §4).
-            const head = programHeadLiteral(node);
+            const head = lit;
             if (head) for (const e of commandHeadEffects(head)) rec.direct.add(e);
             // masking (sweep [11]): an Exec call whose program head is NOT a static literal (runtime
             // command) leaves the command invisible. Establishing = the spawn fns; ChildProcess use-verbs
