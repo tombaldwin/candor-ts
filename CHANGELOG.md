@@ -10,6 +10,10 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [0.29.0] — 2026-08-17
 
+- **The `--gate-json` sink-arming transcript in `scan.mjs` is marked `informative`.** Its `spec 0.28`
+  is a measured capture of the run that overwrote an operator's source file, not a shape template, so
+  it does not move with the floor.
+
 - **⚠ A tree too deep to walk exits 2 (could not evaluate), not 1 (a violation was found).** The AST
   passes recurse, so deep nesting exhausts the JS stack and node died with an uncaught `RangeError` — a
   raw stack trace on stderr and **exit 1**, this family's code for *a violation was found*. A CI wrapper
