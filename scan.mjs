@@ -4723,7 +4723,16 @@ function visitCalls(node) {
             // options an object), so this changes no measured behaviour today; it removes the hazard for
             // the next exec-like wrapper whose second argument is a string, which is how the identical
             // defect reached `Fs`, `Net` and `Db` in this same rung.
-            const lit = programHeadLiteral(node);
+            // ⟨0.29⟩ A USE-VERB NAMES NO PROGRAM, and its argument 0 is not a head. `EXEC_USE_VERBS`
+            // already says so — it is consulted for the `incomplete` branch below and was NOT consulted
+            // here, so `child.send(msg)` (IPC to an ALREADY-spawned child) read its MESSAGE as argv[0].
+            // MEASURED: `ch.send("ls")` published `cmds: ["ls"]` and certified under `allow Exec ls`
+            // though the function executes nothing, and `ch.send("curl")` FABRICATED `Net` — a function
+            // that makes no network call reported as performing one, which `deny Net` then fires on.
+            // That is exactly what the doc comment above forbids ("`spawn(toolVar, "curl")` must NOT
+            // fabricate Net — the literal is an argument, not the program"); the rule was written for the
+            // argument POSITION and never covered the same hazard reached through the RECEIVER.
+            const lit = EXEC_USE_VERBS.has(member) ? null : programHeadLiteral(node);
             if (lit) rec.cmds.add(lit.trim().split(/\s+/)[0]);
             // a known literal head refines the cliff (curl→Net, candor→Fs/Env); Exec stays. The head
             // MUST be argv[0] (programHeadLiteral), NOT any literal arg: `spawn(toolVar, "curl")`

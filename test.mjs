@@ -2321,6 +2321,41 @@ export function okLit(p: string): void { db.query("SELECT * FROM ok_table WHERE 
         tables("src.q.okLit") === "ok_table", tables("src.q.okLit"));
 }
 if (blk()) {
+  // ⟨0.29⟩ A USE-VERB NAMES NO PROGRAM. `child.send(msg)` is IPC to an ALREADY-spawned child: its
+  // argument 0 is a MESSAGE, not argv[0]. `EXEC_USE_VERBS` says exactly that and was consulted for the
+  // `incomplete` branch but NOT for the head/`cmds` branch, so the message was read as the program.
+  //
+  // TWO FABRICATIONS, and the second is the one §4 explicitly forbids:
+  //   ch.send("ls")   → cmds: ["ls"], CERTIFIED by `allow Exec ls` though nothing is executed
+  //   ch.send("curl") → the head table refined the message to Net, so a function that makes NO network
+  //                     call reported { Exec, Net } and `deny Net` fired on it
+  // `programHeadLiteral`'s own doc comment says `spawn(toolVar, "curl")` must not fabricate Net because
+  // the literal is an argument and not the program. The rule was written for the argument POSITION and
+  // never covered the identical hazard reached through the RECEIVER.
+  const d = project({
+    "src/i.ts": `import * as cp from "node:child_process";
+export function onlySendsIpc(ch: cp.ChildProcess): void { ch.send("ls"); }
+export function sendsCurl(ch: cp.ChildProcess): void { ch.send("curl"); }
+export function realSpawn(): void { cp.spawnSync("ls", []); }`,
+    "pol.net": "deny Net\n", "pol.exec": "allow Exec ls\n",
+  });
+  const rep = scan(d).report;
+  const cmds = (fn) => (entry(rep, fn)?.cmds ?? []).join(",");
+  const eff = (fn) => (entry(rep, fn)?.inferred ?? []).join(",");
+  check("⟨0.29⟩ use-verb: an IPC message is not published as a command",
+        cmds("src.i.onlySendsIpc") === "", cmds("src.i.onlySendsIpc"));
+  check("⟨0.29⟩ use-verb: an IPC message that happens to read `curl` does NOT fabricate Net",
+        !eff("src.i.sendsCurl").includes("Net"), eff("src.i.sendsCurl"));
+  check("⟨0.29⟩ use-verb: …so `deny Net` does not fire on a function that makes no network call",
+        !scan(d, "--policy", path.join(d, "pol.net")).r.stdout.includes("src.i.sendsCurl"));
+  // THE OVER-CHARGE CONTROL: a REAL spawn head must still be read, or the fix has been made by giving up
+  // the `cmds` surface — which passes every assertion above and leaves `allow Exec` unable to certify.
+  check("⟨0.29⟩ use-verb CONTROL: a real spawn still publishes its head",
+        cmds("src.i.realSpawn") === "ls", cmds("src.i.realSpawn"));
+  check("⟨0.29⟩ use-verb CONTROL: …and still certifies under `allow Exec ls`",
+        !scan(d, "--policy", path.join(d, "pol.exec")).r.stdout.includes("src.i.realSpawn"));
+}
+if (blk()) {
   // [9] net-cluster fabrication: pure config/metadata members are NOT Net.
   const d = project({
     "src/f.ts": `import * as tls from "node:tls";

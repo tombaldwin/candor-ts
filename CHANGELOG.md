@@ -8,6 +8,17 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ ⚠ a USE-VERB's argument was read as argv[0], fabricating a command and an EFFECT.**
+  `child.send(msg)` is IPC to an ALREADY-spawned child — its argument 0 is a message, not a program.
+  `EXEC_USE_VERBS` says exactly that and was consulted for the `incomplete` branch but not for the
+  head/`cmds` branch. MEASURED: `ch.send("ls")` published `cmds: ["ls"]` and CERTIFIED under
+  `allow Exec ls` though the function executes nothing; worse, `ch.send("curl")` refined the message
+  through the command-head table and reported `{ Exec, Net }`, so `deny Net` fired on a function that
+  makes no network call. `programHeadLiteral`'s own doc comment forbids exactly this
+  (*"`spawn(toolVar, "curl")` must NOT fabricate Net — the literal is an argument, not the program"*) —
+  the rule was written for the argument POSITION and never covered the same hazard reached through the
+  RECEIVER. Found by asking what the boundary effects (`Ipc`/`Clipboard`), which have NO literal surface,
+  do with a literal.
 - **⟨0.29⟩ ⚠ `Db` read the first string literal ANYWHERE in the call and parsed it as SQL — the fourth
   and last locator surface.** `db.query(userSql, "SELECT * FROM audit_log")` published
   `tables: ["audit_log"]` and, because a table HAD been captured, the masking guard below it never fired,
