@@ -1183,7 +1183,7 @@ export function parseUnknownAliases(configText, errors = null) {
 // partner hosts — the per-project `known-partner` set for the Net destination-class classifier. Multi-value
 // (repeatable key); the value's `:port` is stripped + lowercased like MODEL_HOSTS. Case-insensitive key,
 // mirroring parseUnknownAliases + the java/rust config loaders. A partner is per-project — never universal.
-export function parseNetPartners(configText) {
+export function parseNetPartners(configText, errs = null) {
   const out = new Set();
   if (!configText) return out;
   for (const raw of configText.split(/\r?\n/)) {
@@ -1192,7 +1192,21 @@ export function parseNetPartners(configText) {
     const m = line.match(/^(\S+)\s+(.*)$/);
     if (!m || m[1].toLowerCase() !== "net-partner") continue;
     const val = m[2].trim();
-    if (val) out.add(hostPart(val).toLowerCase());
+    // ⟨0.29⟩ A MALFORMED VALUE IS DISCLOSED, NOT SILENTLY KEPT AS JUNK. The grammar is
+    // `net-partner <host>`; the `=` spelling an operator reaches for by habit
+    // (`net-partner = partner.example`) parsed as the HOST "= partner.example", which entered the set and
+    // matched nothing for the rest of the run. The direction is safe — the gate stays armed, so nothing
+    // is certified that should not be — which is exactly why it can sit unnoticed: the operator believes
+    // a partner is declared, the verdict says otherwise, and no line connects the two. ⟨0.28⟩ gave POLICY
+    // files an `ignored` block for this; config files had no equivalent.
+    if (!val) continue;
+    if (/\s/.test(val) || val.startsWith("=")) {
+      errs?.push({ kind: "config-value", raw: raw.trim(),
+                   why: `net-partner takes a bare host — \`net-partner <host>\`, one per line; `
+                      + `'${val}' is not one and was IGNORED (an '=' or extra words is the usual cause)` });
+      continue;
+    }
+    out.add(hostPart(val).toLowerCase());
   }
   return out;
 }

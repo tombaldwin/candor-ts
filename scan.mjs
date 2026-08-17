@@ -5766,7 +5766,11 @@ for (const m of ["hosts", "tables", "cmds", "paths", "blind", "incomplete", "fsK
 // ---- emit: the §2 envelope (effect-free items omitted) + the §2.2 sidecar (EVERY fn a key) --------
 // ⟨0.20⟩ Net destination-class partners from `.candor/config` — read ONCE here, used by the report's per-fn
 // `netClass` field (below) and the gate (deny Net[unknown-host]); the SAME set both surfaces resolve.
-const netPartners = parseNetPartners(discoverConfigText(target));
+// ⟨0.29⟩ …and a malformed `net-partner` line is DISCLOSED rather than kept as a junk host that matches
+// nothing for the rest of the run. Printed once, here, beside the other config diagnostics.
+const netPartnerErrs = [];
+const netPartners = parseNetPartners(discoverConfigText(target), netPartnerErrs);
+for (const e of netPartnerErrs) console.error(`candor-ts: ${e.why} — ${e.raw}`);
 const functions = [];
 for (const [name, rec] of fns) {
   const inf = [...inferred.get(name)].sort();
