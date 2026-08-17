@@ -8,6 +8,20 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.29.0] — 2026-08-17
+
+- **⚠ A tree too deep to walk exits 2 (could not evaluate), not 1 (a violation was found).** The AST
+  passes recurse, so deep nesting exhausts the JS stack and node died with an uncaught `RangeError` — a
+  raw stack trace on stderr and **exit 1**, this family's code for *a violation was found*. A CI wrapper
+  reading the exit code was told the gate had run and failed the tree, when nothing was analyzed and no
+  report was written. MEASURED, nested parens: depth 400 walked before ⟨0.29⟩ and overflows after (the
+  rung grew `visitCalls`'s frame), depth 800 overflowed **both** — so the crash predates the rung, which
+  only dropped the ceiling past `fuzz.mjs`'s fixed 400-deep bait and made it visible. Shrinking the frame
+  back would have returned the fuzzer to green and left the wrong exit code live one nesting level lower.
+  The new row pins the STATUS because the fuzzer cannot: it asserts `status ∈ {0,1,2}`, so **exit 0
+  satisfies it**, and a future change that caught the error and returned an empty report would read green
+  while certifying an unwalked tree as clean. Its control: an ordinarily-nested file still exits 0.
+
 - **⟨0.29⟩ `forbid`/`only` stop at the SCAN BOUNDARY, and now say so.** Both are matched over the call
   graph; a chained dependency contributes EFFECTS, not EDGES, so a function calling into a dep has an
   empty adjacency and the crossing is invisible to them. MEASURED with a dep chained:
