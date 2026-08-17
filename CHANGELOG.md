@@ -8,6 +8,20 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ ⚠ dgram's destination is at argument 2 or 4; argument 0 is the MESSAGE, and it was being
+  published as the host.** `urlArgLiteral` fell through to `litAt(0)` for `send`, so
+  `sock.send("telemetry.example", 0, 17, 53, dst)` reported `hosts: ["telemetry.example"]` with no
+  `incomplete` — `allow Net telemetry.example` then answered `policy ✓` at exit 0 over a UDP send to a
+  runtime-controlled address. A fabricated destination masking a real one: the `Fs` content-literal defect
+  of this same rung, one effect over, in the one node API whose locator is neither first nor second. The
+  position is now recovered from the numeric PORT that must precede the address in each of node's two
+  documented overloads, and anything matching neither returns null and fails closed. candor-java and
+  candor-swift fail closed on their equivalents.
+
+  **The existing masking row could not see it**: its fixture sends `Buffer.from("x")`, which is not a
+  string literal, so `litAt(0)` returned null there and the assertion passed for a reason unrelated to the
+  position rule. A fixture chosen for one property had silently decided another. Five rows added,
+  including both overloads as over-charge controls, calibrated by reverting.
 - **⟨0.29⟩ ⚠ a two-path `Fs` op with a literal in BOTH positions published only the first.**
   `fs.copyFileSync("/tmp/lit", "/tmp/dst")` under `allow Fs /tmp/lit` answered `policy ✓` at exit 0 while
   writing `/tmp/dst` — the completeness verdict was computed over both path positions while the surface

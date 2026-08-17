@@ -2333,6 +2333,26 @@ function programHeadLiteral(node) {
 // options in the other overloads) — so those two members read arg0-or-arg1. Only STRING-LITERAL positions
 // are considered; returns null when the URL slot is not a static string literal — the safe direction.
 const NET_URL_ARG1_MEMBERS = new Set(["connect", "createConnection"]);
+// ⟨0.29⟩ dgram's `send` puts the DESTINATION ADDRESS at position 2 or 4, and position 0 is the MESSAGE.
+// Falling through to `litAt(0)` read the payload as the endpoint: MEASURED,
+// `sock.send("telemetry.example", 0, 17, 53, dst)` published `hosts: ["telemetry.example"]` with NO
+// `incomplete`, so `allow Net telemetry.example` answered `policy ✓` at exit 0 over a UDP send to a
+// runtime-controlled address. A fabricated destination masking a real one — the `Fs` content-literal
+// defect of this same rung, one effect over, in the one API whose locator is neither first nor second.
+//
+// Node documents exactly two overloads:
+//   send(msg, port, address[, cb])                    → address at 2, a numeric port at 1
+//   send(msg, offset, length, port, address[, cb])    → address at 4, a numeric port at 3
+// so the position is recovered from the NUMERIC PORT that must precede it rather than guessed from the
+// argument count (a `cb` or an options object shifts nothing, and anything that does not match both
+// shapes returns null — the destination is then not statically visible and the caller fails closed).
+const isNumericLit = (a) => a && (ts.isNumericLiteral(a)
+  || (ts.isPrefixUnaryExpression(a) && ts.isNumericLiteral(a.operand)));
+function dgramSendAddressIndex(args) {
+  if (isNumericLit(args[3])) return 4;
+  if (isNumericLit(args[1])) return 2;
+  return -1;
+}
 // ⟨0.29⟩ THE Fs PATH LITERAL, read from the PATH ARGUMENT POSITION — the third application of the
 // `programHeadLiteral` discipline, and the one that never got it. The comment above says that rule was
 // "generalized from Exec to Net"; it stopped there, and `Fs` went on reading the first literal ANYWHERE
@@ -2467,7 +2487,7 @@ function literalHeadHostUrl(expr) {
   }
   return null;
 }
-function urlArgLiteral(node, member) {
+function urlArgLiteral(node, member, mod) {
   const args = node.arguments ?? [];
   const litAt = (i) => {
     const a = args[i];
@@ -2478,6 +2498,12 @@ function urlArgLiteral(node, member) {
     return resolveConstUrlString(a) ?? literalHeadHostUrl(a);
   };
   if (member && NET_URL_ARG1_MEMBERS.has(member)) return litAt(0) ?? litAt(1); // (port, host) or (path)
+  // ⟨0.29⟩ dgram `send` — keyed on the MODULE, because a bare `send` elsewhere legitimately takes its
+  // URL first and reading position 2/4 there would invent a host out of an unrelated argument.
+  if (member === "send" && /^(node:)?dgram$/.test(mod ?? "")) {
+    const i = dgramSendAddressIndex(args);
+    return i < 0 ? null : litAt(i);
+  }
   return litAt(0);
 }
 // Is arg0 a RUNTIME STRING expression whose host can't be known statically — a template, a string
@@ -4630,7 +4656,7 @@ function visitCalls(node) {
             // fetch/axios/the HTTP verbs), NEVER the first literal anywhere in the args: a trailing literal
             // in headers/body/options must not be read as the host (FINDING 6). Ollama's model decision runs
             // through the parsed host too, never a raw string that merely contains ":11434" (FINDING 1/9).
-            const urlLit = urlArgLiteral(node, member);
+            const urlLit = urlArgLiteral(node, member, mod);
             const ollama = ollamaFromUrlArg(urlLit);
             if (ollama === "capture-model" || ollama === "capture-plain") {
               const h = hostLiteral(urlLit);

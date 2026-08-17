@@ -2250,6 +2250,44 @@ export function maskUdp(h: string): void { const s = dgram.createSocket("udp4");
         scan(d, "--policy", path.join(d, "pol.net")).r.stdout.includes("src.m.maskUdp"));
 }
 if (blk()) {
+  // ⟨0.29⟩ dgram's DESTINATION is at argument 2 or 4, and argument 0 is the MESSAGE. `urlArgLiteral`
+  // fell through to `litAt(0)` for `send`, so the payload was published as the endpoint.
+  //
+  // WHY THE ROW ABOVE COULD NOT SEE IT, which is the durable half: its fixture sends
+  // `Buffer.from("x")`. A Buffer is not a string literal, so `litAt(0)` returned null there and the
+  // masking assertion passed for a reason that had nothing to do with the position rule. The moment the
+  // message is a plain string — the ordinary way to send text over UDP — arg0 becomes a literal and is
+  // read as the host. A fixture chosen for one property silently decided another.
+  //
+  // MEASURED: `s.send("telemetry.example", 0, 17, 53, dst)` published
+  // `hosts: ["telemetry.example"]` with NO `incomplete`, so `allow Net telemetry.example` answered
+  // `policy ✓` at exit 0 over a send to a runtime-controlled address — a fabricated destination masking
+  // a real one. candor-java and candor-swift fail closed on their equivalents.
+  const d = project({
+    "src/u.ts": `import * as dgram from "node:dgram";
+const s = dgram.createSocket("udp4");
+export function payloadIsNotTheHost(dst: string): void { s.send("telemetry.example", 0, 17, 53, dst); }
+export function litLongForm(): void { s.send("payload", 0, 7, 53, "telemetry.example"); }
+export function litShortForm(): void { s.send("payload", 53, "telemetry.example"); }`,
+    "pol.net": "allow Net telemetry.example\n",
+  });
+  const g = scan(d, "--policy", path.join(d, "pol.net")).r.stdout;
+  const rep = scan(d).report;
+  const hosts = (fn) => (entry(rep, fn)?.hosts ?? []).join(",");
+  check("⟨0.29⟩ dgram: the MESSAGE at arg0 is not published as the host — it is the payload, not the endpoint",
+        hosts("src.u.payloadIsNotTheHost") === "", hosts("src.u.payloadIsNotTheHost"));
+  check("⟨0.29⟩ dgram: …and the runtime destination is disclosed rather than certified by that payload",
+        g.includes("[AS-EFF-008]") && g.includes("src.u.payloadIsNotTheHost"), g);
+  // THE OVER-CHARGE CONTROLS — both documented overloads. Without these the fix is satisfied by never
+  // reading a dgram address at all, which fails the row above for free and answers nothing for a user.
+  check("⟨0.29⟩ dgram CONTROL: send(msg, offset, length, port, address) captures the address at arg4",
+        hosts("src.u.litLongForm") === "telemetry.example", hosts("src.u.litLongForm"));
+  check("⟨0.29⟩ dgram CONTROL: send(msg, port, address) captures the address at arg2",
+        hosts("src.u.litShortForm") === "telemetry.example", hosts("src.u.litShortForm"));
+  check("⟨0.29⟩ dgram CONTROL: …and both literal-address forms CERTIFY under the allowlist",
+        !g.includes("src.u.litLongForm") && !g.includes("src.u.litShortForm"), g);
+}
+if (blk()) {
   // [9] net-cluster fabrication: pure config/metadata members are NOT Net.
   const d = project({
     "src/f.ts": `import * as tls from "node:tls";
