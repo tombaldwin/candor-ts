@@ -65,6 +65,12 @@ const SPEC_VERSION = "0.29";
 // Narrow ON PURPOSE: only the stack-exhaustion RangeError is translated. Every other uncaught error
 // keeps the behaviour it had (stack on stderr, exit 1), because widening the net here would convert
 // unknown crashes into a tidy "could not evaluate" and hide the next real bug behind a clean message.
+//
+// RESIDUAL, stated because it is real and NOT measured: runaway recursion in THIS code exhausts the
+// stack exactly as a deep tree does, so such a bug would now be reported as "nests deeper than the
+// engine can walk", and nothing here can tell the two apart. It stays LOUD either way — exit 2, no
+// report, never a green — so the cost is a misleading message, not a wrong verdict. If this message
+// ever appears on a SHALLOW tree, the message is the bug and the recursion is where to look.
 process.on("uncaughtException", (e) => {
   if (e instanceof RangeError && /Maximum call stack/i.test(e?.message ?? "")) {
     console.error("candor-ts: this tree nests deeper than the engine can walk — the AST passes recurse, "
