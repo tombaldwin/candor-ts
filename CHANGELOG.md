@@ -24,7 +24,11 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   back would have returned the fuzzer to green and left the wrong exit code live one nesting level lower.
   The new row pins the STATUS because the fuzzer cannot: it asserts `status ∈ {0,1,2}`, so **exit 0
   satisfies it**, and a future change that caught the error and returned an empty report would read green
-  while certifying an unwalked tree as clean. Its control: an ordinarily-nested file still exits 0.
+  while certifying an unwalked tree as clean. Its control: an ordinarily-nested file still exits 0. The guard's residual is stated in
+  the source, not merely known: runaway recursion in candor-ts itself exhausts the stack identically and
+  would be reported as a deep tree. It stays loud either way (exit 2, no report, never a green), so the
+  cost is a misleading message and not a wrong verdict — and this message on a SHALLOW tree means the
+  message is the bug.
 
 - **⟨0.29⟩ `forbid`/`only` stop at the SCAN BOUNDARY, and now say so.** Both are matched over the call
   graph; a chained dependency contributes EFFECTS, not EDGES, so a function calling into a dep has an
