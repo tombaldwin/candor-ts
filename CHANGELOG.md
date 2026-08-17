@@ -8,6 +8,17 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ `forbid`/`only` stop at the SCAN BOUNDARY, and now say so.** Both are matched over the call
+  graph; a chained dependency contributes EFFECTS, not EDGES, so a function calling into a dep has an
+  empty adjacency and the crossing is invisible to them. MEASURED with a dep chained:
+  `only model -> util` answered `policy ✓` over a call into the dependency while a LOCAL unpermitted scope
+  in the same run fired AS-EFF-011 — the rule was armed; the boundary was the gap. **Worse for `only`**,
+  which asserts A reaches the listed scopes AND NOTHING ELSE — a completeness claim — and exists precisely
+  because `forbid` fails open: a package that calls a third-party library is not a leaf, and the gate
+  called it one. Disclosed on the advisory channel beside the verdict, the ⟨0.29⟩ `outOfScope` posture:
+  say what was not judged, leave the exit code alone. Making the rules cross would need dep-report EDGES
+  and would force operators to enumerate third-party scopes in an `only` list — the enumeration-that-rots
+  that form was designed to escape. Silent when no dep is chained, and when the policy carries no name rule.
 - **⟨0.29⟩ a malformed `net-partner` line was kept as a junk host instead of being disclosed.** The
   grammar is `net-partner <host>`; the `=` spelling an operator reaches for by habit
   (`net-partner = partner.example`) parsed as the HOST `"= partner.example"`, entered the partner set, and

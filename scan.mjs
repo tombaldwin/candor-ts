@@ -1686,6 +1686,17 @@ if (wantDepInits) {
 // staleness check (`d.candor?.version !== ENGINE_VERSION`), silently downgrading every chained dep.
 const ENGINE_VERSION = `candor-ts-${PKG_VERSION}`;
 const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:[], tables:[], incomplete:Set}
+// ⟨0.29⟩ WAS A DEPENDENCY REPORT CHAINED INTO THIS RUN? Read by the gate to disclose the bound on the
+// NAME-matching rule kinds. Keyed on the report being LOADED, not on a hit being applied: a dependency
+// whose reached function is PURE produces no hit at all, and that is precisely the fixture that caught
+// this gap — the operator chained a dep either way, so the name rules are blind to those crossings either
+// way.
+let depReportsRead = 0;
+// ⟨0.29⟩ Keyed on a report being READ, not on entries being ingested and not on a hit being applied: a
+// dependency whose reached function is PURE yields a report with NO entries and produces no hit, which is
+// exactly the fixture that caught this gap twice while I narrowed the predicate. The operator chained a
+// dep either way, so the name-matching rules are blind to those crossings either way.
+const depChained = () => depReportsRead > 0;
 // Packages a loaded sibling report COVERS — exempt from the κ ledger even when a call joins no
 // entry (reports omit pure functions: the silence is the purity claim, SPEC §2 rule 3 — the
 // serde_json rule the Rust/JVM engines already carry; /code-review found TS missing it). Fed from
@@ -1967,6 +1978,7 @@ const corruptDepPkgs = new Set();
       // coverage the first withheld.
       const covers = stale ? staleDepPkgs : incomplete ? incompleteDepPkgs : corrupt ? corruptDepPkgs
                    : judgedNothing ? unjudgedDepPkgs : depCoveredPkgs;   // an untrusted, self-declared-incomplete, corrupt or unjudged report grants no coverage
+      depReportsRead += 1;   // ⟨0.29⟩ see `depChained` — a dep was chained, whatever it contained
       if (corrupt) console.error(`candor-ts: chained dependency report ${f} has ${corruptKeys.length} present-but-unparseable §2 key(s)`
         + ` — granted NO coverage, so calls into it read as INVISIBLE rather than pure (SPEC §2 ⟨0.24⟩): ${corruptKeys.join("; ")}`);
       if (typeof d.package === "string" && d.package) covers.add(d.package);
@@ -6936,6 +6948,33 @@ if (policyPath !== null) {
       // code is deliberately untouched: a zero-match rule is legitimate when one policy is shared across
       // repositories and a layer exists in only some of them, so refusal would make a shared policy
       // unusable. Printed before the violations so a typo'd layer name is visible above the verdict.
+      // ⟨0.29⟩ THE NAME RULES STOP AT THE SCAN BOUNDARY, AND NOW SAY SO. `forbid A -> B` and
+      // `only A -> B …` are matched over the call graph; a chained dependency contributes EFFECTS, not
+      // EDGES, so a function that calls into a dep has an EMPTY adjacency and the crossing is invisible.
+      // MEASURED: with a dep chained, `only model -> util` answered `policy ✓` over
+      // `model.viaDep() -> deplib.infra.dbRead()` while a LOCAL unpermitted scope in the same run fired
+      // AS-EFF-011 — so the rule was armed and the boundary, not the rule, was the gap.
+      //
+      // WORSE FOR `only` THAN FOR `forbid`, which is why this is disclosed rather than left implicit:
+      // `forbid` asks whether ONE named crossing is present, so missing a dep crossing under-reports one
+      // prohibition; `only` asserts A reaches the listed scopes AND NOTHING ELSE — a COMPLETENESS claim —
+      // and it exists precisely because `forbid` fails open. A package that calls a third-party library is
+      // not a leaf, and without this line the gate called it one.
+      //
+      // DISCLOSURE, NOT A VERDICT CHANGE, and not a re-scoping either: making the rules cross would need
+      // dep-report EDGES, and it would force operators to enumerate third-party scopes in an `only` list —
+      // the enumeration-that-rots that form was designed to escape. The ⟨0.29⟩ `outOfScope` posture
+      // exactly: say what was not judged, leave the exit code alone.
+      if (depChained()) {
+        const named = [...(gatePolicy.forbid ?? []), ...(gatePolicy.only ?? [])];
+        if (named.length) {
+          console.error(`candor-ts: ⚠ ${named.length} name-matching rule(s) (\`forbid\`/\`only\`) were `
+            + "matched over THIS scan's call graph only — a chained dependency contributes effects, not "
+            + "call edges, so a crossing INTO a dependency is invisible to them. `deny`/`allow` still "
+            + "cross (effects propagate); an `only` rule cannot certify that a package is a leaf when it "
+            + "calls into one of its dependencies.");
+        }
+      }
       for (const raw of gateOut.zeroMatch ?? []) {
         console.error(`candor: policy rule matched NO function — \`${raw}\`. It was evaluated and bound `
           + `nothing, so it cannot have caught anything. Legitimate when one policy is shared across `
