@@ -46,6 +46,38 @@ const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 // Reused, never re-littered.
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
 const SPEC_VERSION = "0.29";
+
+// A TREE TOO DEEP TO WALK IS "COULD NOT EVALUATE" (exit 2), NEVER "FOUND A VIOLATION" (exit 1).
+//
+// The AST passes recurse (`visitCalls` → `ts.forEachChild` → `visitCalls`), so a deeply nested
+// expression exhausts the JS stack and node dies with an uncaught RangeError — a raw stack trace on
+// stderr and exit 1. Exit 1 is the code for A VIOLATION WAS FOUND. A wrapper that reads the exit code
+// (every CI gate does) is told the gate ran and failed the tree, when in fact nothing was analyzed and
+// no report was written. That is the wrong side of the fail-closed line: loud, but loudly WRONG.
+//
+// MEASURED, this machine, `export function f(): number { return (((…1…))); }`:
+//   depth 400 → pre-⟨0.29⟩ walked it, ⟨0.29⟩ overflows      the rung grew `visitCalls`'s frame
+//   depth 800 → BOTH overflow                               so the crash long predates the rung
+// The rung did not introduce this; it lowered the ceiling past the fuzzer's fixed 400-deep bait and
+// made a standing defect visible. Shrinking the frame back would return the fuzzer to green and leave
+// the wrong exit code live one nesting level further down — the fix that deletes the evidence.
+//
+// Narrow ON PURPOSE: only the stack-exhaustion RangeError is translated. Every other uncaught error
+// keeps the behaviour it had (stack on stderr, exit 1), because widening the net here would convert
+// unknown crashes into a tidy "could not evaluate" and hide the next real bug behind a clean message.
+process.on("uncaughtException", (e) => {
+  if (e instanceof RangeError && /Maximum call stack/i.test(e?.message ?? "")) {
+    console.error("candor-ts: this tree nests deeper than the engine can walk — the AST passes recurse, "
+      + "and the JS stack ran out before the scan finished. NOTHING was analyzed and no report was "
+      + "written, so this is 'could not evaluate' (exit 2), not a clean tree and not a violation. "
+      + "Re-run with a larger stack — `node --stack-size=4000 scan.mjs …` — or scan the offending "
+      + "file on its own to find it.");
+    process.exit(2);
+  }
+  console.error(e?.stack ?? String(e));
+  process.exit(1);
+});
+
 /** The `deps` / `CANDOR_DEPS` separator set — ASCII whitespace plus `:` and `,`.
  *
  * ONE CONSTANT BECAUSE TWO SPELLINGS WERE A SILENT GREEN. The §3.3.1 sink-over-input guard and the

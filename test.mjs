@@ -10495,6 +10495,44 @@ if (blk()) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── A TREE TOO DEEP TO WALK EXITS 2, NOT 1 AND NOT 0 ────────────────────────────────────────────────
+// The AST passes recurse, so deep nesting exhausts the JS stack. Node's default for an uncaught throw
+// is a raw stack trace and EXIT 1 — and exit 1 is this family's code for A VIOLATION WAS FOUND. A CI
+// wrapper reading the code is told the gate ran and failed the tree, when nothing was analyzed at all.
+//
+// WHY THE FUZZER IS NOT ENOUGH, which is the whole reason this row exists. `fuzz.mjs`'s deep_nesting
+// case asserts `!crashed && status ∈ {0,1,2}`. EXIT 0 SATISFIES THAT. A future change that caught the
+// RangeError and returned an empty report would turn the fuzzer green while certifying an unwalked
+// tree as clean — the cardinal sin, arrived at by fixing a crash. The status must be pinned exactly.
+//
+// The rung did not introduce the crash: measured on this machine, depth 800 overflowed BEFORE ⟨0.29⟩
+// too. ⟨0.29⟩ grew `visitCalls`'s frame enough to drop the ceiling past the fuzzer's fixed 400-deep
+// bait, which is what made a standing defect finally visible.
+if (blk()) {
+  const d = scratch("candor-ts-deep-");
+  const run = (src) => {
+    fs.writeFileSync(path.join(d, "a.ts"), src);
+    return spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "a.ts")], { encoding: "utf8" });
+  };
+  const nest = (n) => `export function f(): number { return ${"(".repeat(n)}1${")".repeat(n)}; }\n`;
+
+  const deep = run(nest(5000));
+  check("a tree too deep to walk is COULD NOT EVALUATE (exit 2) — never exit 1, which means a violation was found",
+        deep.status === 2, `status=${deep.status}`);
+  check("…and it says so in prose, with no raw stack trace on stderr (a trace is a crash, not a verdict)",
+        /could not evaluate|nests deeper/.test(deep.stderr) && !/\n\s+at \S+ \(.*\.mjs/.test(deep.stderr),
+        deep.stderr.slice(0, 160));
+  check("…and it does NOT exit 0: an unwalked tree certified clean is the false all-clear this row exists for",
+        deep.status !== 0, `status=${deep.status}`);
+
+  // THE CONTROL. Without it this row is satisfied by an engine that refuses every file it is handed:
+  // exit 2 everywhere passes all three assertions above and deletes the tool.
+  const ok = run(nest(50));
+  check("CONTROL: an ordinarily-nested file still scans clean (exit 0) — the fix refuses the unwalkable, not the merely parenthesised",
+        ok.status === 0, `status=${ok.status} ${ok.stderr.slice(0, 120)}`);
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── ⟨0.28⟩ SPEC §2 — THE DESCRIPTIVE VERBS CARRY THE ⟨0.21⟩ MANIFEST TOO ────────────────────────────
 // The re-disclosure MUST was written over the instance it was found in ("a verb whose VERDICT could
 // change") and ⟨0.28⟩ widens it to the condition that makes it true: ANY verb whose output could be read
