@@ -2352,8 +2352,14 @@ function fsPathLiteral(node, member) {
   const at = (i) => (args[i] && ts.isStringLiteralLike(args[i]) ? args[i].text : null);
   const a0 = at(0);
   const needsTwo = FS_TWO_PATH_MEMBERS.has(member);
-  const complete = a0 !== null && (!needsTwo || at(1) !== null);
-  return { lit: a0, complete };
+  const a1 = needsTwo ? at(1) : null;
+  const complete = a0 !== null && (!needsTwo || a1 !== null);
+  // EVERY literal path position, not just the first. Publishing position 0 and calling a
+  // both-literal two-path call COMPLETE certified the position it never published:
+  // `copyFileSync("/tmp/lit", "/tmp/dst")` under `allow Fs /tmp/lit` answered `policy ✓` at exit 0
+  // while writing `/tmp/dst`. candor-java and candor-swift publish both. Found by generating a case
+  // per node `fs` export and comparing against the four engines, not by re-reading this function.
+  return { lits: [a0, a1].filter((x) => x !== null), complete };
 }
 // CONST-STRING PROPAGATION (java constant-inlining parity): resolve a bare identifier that references a
 // `const NAME = "literal"` string to its literal value, and ONLY then. Returns the string, or null. The
@@ -4544,9 +4550,23 @@ function visitCalls(node) {
           // allowlist discipline, generalized from Net to all 4 effects; sweep [11]). Fs: the fd/FileHandle
           // ops (fd came from open()); the path-taking fs.* fns are establishing. Exec: ChildProcess methods
           // (the command was fixed at spawn); the spawn fns are establishing.
+          // The node `fs` verbs whose FIRST argument is a DESCRIPTOR, not a path — the fd came from a
+          // prior `open()` whose path this analysis already saw, so their invisible destination is not a
+          // gap and marking them `incomplete` charges every buffered write in a real tree.
+          //
+          // ⟨0.29⟩ `readv`/`writev` (+Sync) were MISSING, and the ⟨0.29⟩ positional-literal fix is what
+          // made it visible: before it, `writev(fd, "/tmp/lit")` had its literal found ANYWHERE in the
+          // call and published as a path — a fabrication — so the set was never consulted for these four.
+          // Killing the fabrication moved them into the other wrong bucket. Found by generating a case
+          // per node `fs` export rather than reasoning about the list (24 fd verbs in node, 20 here).
+          //
+          // Forgetting a member here OVER-charges (safe); adding a path-taking verb by mistake
+          // UNDER-reports. An allowlist is the right shape for exactly that reason — the inverse of
+          // the denylist rule that governs the classifier surface.
           const FS_USE_VERBS = new Set(["write", "writeSync", "read", "readSync", "close", "closeSync",
             "fsync", "fsyncSync", "fdatasync", "fdatasyncSync", "ftruncate", "ftruncateSync", "fchmod",
-            "fchmodSync", "fchown", "fchownSync", "futimes", "futimesSync", "fstat", "fstatSync"]);
+            "fchmodSync", "fchown", "fchownSync", "futimes", "futimesSync", "fstat", "fstatSync",
+            "readv", "readvSync", "writev", "writevSync"]);
           const EXEC_USE_VERBS = new Set(["kill", "send", "disconnect", "ref", "unref"]);
           const netEstablishing = (member) =>
             CONNECTING_CTORS.has(ctorClassName) || NET_ESTABLISHING.has(member)
@@ -4672,9 +4692,10 @@ function visitCalls(node) {
           }
           if (eff === "Fs") {
             // ⟨0.29⟩ the PATH POSITION, never the first literal anywhere — see fsPathLiteral.
-            const { lit, complete } = fsPathLiteral(node, member);
-            const pathCaptured = lit && /[/\\]|^[.~]/.test(lit); // path-shaped literals only
-            if (pathCaptured) rec.paths.add(lit);
+            const { lits, complete } = fsPathLiteral(node, member);
+            const captured = lits.filter((l) => /[/\\]|^[.~]/.test(l)); // path-shaped literals only
+            const pathCaptured = captured.length > 0 && captured.length === lits.length;
+            for (const l of captured) rec.paths.add(l);
             // masking (sweep [11]): a path-taking fs.* call whose path is NOT a captured literal (runtime
             // path) leaves it invisible. fd/FileHandle USE-verbs (fd came from a prior open()) are excluded.
             // ⟨0.29⟩ `complete` also covers a two-path op whose SECOND path is runtime, which a captured

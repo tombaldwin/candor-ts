@@ -8,6 +8,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ ⚠ a two-path `Fs` op with a literal in BOTH positions published only the first.**
+  `fs.copyFileSync("/tmp/lit", "/tmp/dst")` under `allow Fs /tmp/lit` answered `policy ✓` at exit 0 while
+  writing `/tmp/dst` — the completeness verdict was computed over both path positions while the surface
+  listed one. candor-java and candor-swift published both. `fsPathLiteral` returns every literal position
+  now. Conformance PART 51's `twoLit` row.
+- **⟨0.29⟩ `readv`/`writev` (+`Sync`) were missing from `FS_USE_VERBS`** and so were charged `incomplete`
+  though their first argument is a DESCRIPTOR, not a path. The positional-literal fix is what exposed it:
+  before, their literal was found anywhere in the call and published as a path, so the set was never
+  consulted — killing the fabrication moved them into the other wrong bucket. Node has 24 fd verbs; this
+  set had 20. Both found by generating a case per `fs` export (144 cases) instead of re-reading the list.
 - **⟨0.29⟩ ⚠ an `Fs` path literal came from ANYWHERE in the call, not the path POSITION.** MEASURED:
   ``fs.writeFileSync(userPath, "/tmp/lit")`` published `paths: ["/tmp/lit"]` — the BYTES BEING WRITTEN — so `allow Fs /tmp/lit`
   answered `policy ✓` at exit 0 over a write to a runtime-controlled destination, where candor-java and
