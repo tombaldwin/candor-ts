@@ -22,7 +22,11 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   cosmetic. No node API places a bare string after the head (args are an array, options an object), so
   this changes no measured behaviour today; it removes the hazard for the next exec-like wrapper whose
   second argument is a string, which is how this identical defect reached `Fs`, `Net` and `Db`.
-  **`firstStringLiteral` now has no callers on any locator surface.**
+  **`firstStringLiteral` is DELETED.** It read every locator surface except the `Exec` head and
+  produced the same defect in each one it touched — the bytes as the path, the payload as the host, a
+  parameter as the table — each a fabricated locator that ALSO suppressed the masking guard. Removed
+  rather than left unused: a "first literal anywhere" in scope is how the class comes back at the next
+  call site somebody adds.
 - **⟨0.29⟩ ⚠ dgram's destination is at argument 2 or 4; argument 0 is the MESSAGE, and it was being
   published as the host.** `urlArgLiteral` fell through to `litAt(0)` for `send`, so
   `sock.send("telemetry.example", 0, 17, 53, dst)` reported `hosts: ["telemetry.example"]` with no
