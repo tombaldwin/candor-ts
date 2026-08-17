@@ -2285,13 +2285,17 @@ function packageManifestEffects(file) {
 }
 
 // ---- the literal surfaces (SPEC §2 hosts/cmds/paths/tables): the statically-decidable subset ------
-// Read ONLY from string literals at a classified call — informative, never complete, never inferred.
-function firstStringLiteral(node) {
-  for (const a of node.arguments ?? []) {
-    if (ts.isStringLiteralLike(a)) return a.text;
-  }
-  return null;
-}
+// Read ONLY from string literals at a classified call — informative, never complete, never inferred,
+// and ALWAYS from the argument POSITION that names the locator.
+//
+// ⟨0.29⟩ `firstStringLiteral` — "the first string literal anywhere in the args" — is DELETED. It was the
+// reader for every locator surface except the `Exec` head, and it produced the same defect in each one it
+// touched: `write(userPath, "/tmp/lit")` published the bytes as the path, `send(msg, …, addr)` published
+// the payload as the host, `query(userSql, "SELECT * FROM audit_log")` published a parameter as the
+// table — each a fabricated locator that ALSO suppressed the masking guard, so a benign-looking literal
+// certified a destination nobody could see. Removed rather than left unused: a "first literal anywhere"
+// in scope is how this class comes back at the next call site somebody adds. Use
+// `programHeadLiteral` / `urlArgLiteral` / `fsPathLiteral` / argument 0 for SQL.
 
 // Is this property/element access a SETTER target reached through a destructuring assignment —
 // `({ k: x.prop } = src)` or `[x.prop] = arr` (sweep [32])? Walk up through PropertyAssignment /
@@ -2313,13 +2317,13 @@ function isDestructuringAssignTarget(node) {
 }
 
 // The literal PROGRAM head a subprocess call NAMES — argv[0] specifically, never a later argument.
-// Unlike firstStringLiteral (the first literal ANYWHERE in the args), this refuses to refine when
+// Unlike a "first literal ANYWHERE in the args" reader, this refuses to refine when
 // the program (arg0) is a runtime value but a trailing arg is a literal whose basename hits the head
 // table: `spawn(toolVar, "curl")` must NOT fabricate Net — the literal is an argument, not the
 // program (spec §4 ⟨0.5⟩: the head is argv[0]). Mirrors candor-java programHeadLiteral and the Rust
 // is_cmd_naming_method gate. Returns null when arg0 is not a static string literal — the safe
-// direction. Used ONLY for the effect refinement, never to widen it; the cosmetic `cmds` surface
-// keeps firstStringLiteral.
+// direction. ⟨0.29⟩ the `cmds` SURFACE reads this too: it was documented as cosmetic, but `cmds` is what
+// `allow Exec <cmd>` gates on (AS-EFF-008).
 function programHeadLiteral(node) {
   const a0 = (node.arguments ?? [])[0];
   return a0 && ts.isStringLiteralLike(a0) ? a0.text : null;
