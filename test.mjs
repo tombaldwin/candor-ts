@@ -2356,6 +2356,61 @@ export function realSpawn(): void { cp.spawnSync("ls", []); }`,
         !scan(d, "--policy", path.join(d, "pol.exec")).r.stdout.includes("src.i.realSpawn"));
 }
 if (blk()) {
+  // ⟨0.29⟩ THE DOM NET GLOBALS BYPASSED THE HOST SURFACE. `XMLHttpRequest.open/send` and the
+  // `WebSocket`/`EventSource` constructors are classified in their own branch (lib.dom declares them with
+  // no importable module for the κ table to key on), and that branch added `Net` and stopped — skipping
+  // the `eff === "Net"` block that captures the endpoint and marks the surface `incomplete` when it is a
+  // runtime value.
+  //
+  // THE HARM IS THE MASKING EVASION, measured at `policy ✓` exit 0 under `allow Net ok.example`:
+  //     await fetch("https://ok.example/a");   // captures ok.example, no hedge
+  //     new WebSocket(u);                      // Net, no host, no `incomplete`  ← goes anywhere
+  // A benign allowed literal certified an invisible endpoint. Same shape as the EventKit/`privacyKind`
+  // and `FS_USE_VERBS` gaps: a refinement the general path performs and a carve-out does not.
+  //
+  // POSITION: `xhr.open(method, url)` puts the URL at argument 1 — the only locator in this engine that is
+  // neither argument 0 nor a labelled argument. `send` carries no url (fixed at `open`) so it is a
+  // USE-VERB and must not hedge, or every XHR with a visible `open` literal would fail closed.
+  const d = project({
+    "src/x.ts": `export async function maskWs(u: string): Promise<void> { await fetch("https://ok.example/a"); new WebSocket(u); }
+export async function maskXhr(u: string): Promise<void> { await fetch("https://ok.example/a"); const x = new XMLHttpRequest(); x.open("GET", u); x.send(); }
+export async function control(): Promise<void> { await fetch("https://ok.example/a"); }
+export function xhrLit(): void { const x = new XMLHttpRequest(); x.open("GET", "https://ok.example/a"); x.send(); }
+export function wsLit(): void { new WebSocket("wss://ok.example/s"); }
+export function esLit(): void { new EventSource("https://ok.example/stream"); }
+export function llmViaXhr(): void { const x = new XMLHttpRequest(); x.open("POST", "https://api.openai.com/v1/chat"); x.send(); }`,
+    "pol.net": "allow Net ok.example\n",
+    "tsconfig.json": `{"compilerOptions":{"target":"es2022","module":"node16","lib":["es2022","dom"],"noEmit":true},"include":["src"]}`,
+  });
+  const rep = scan(d).report;
+  const g = scan(d, "--policy", path.join(d, "pol.net")).r.stdout;
+  const inc = (fn) => (entry(rep, fn)?.incomplete ?? []).join(",");
+  const hosts = (fn) => (entry(rep, fn)?.hosts ?? []).join(",");
+  const eff = (fn) => (entry(rep, fn)?.inferred ?? []).join(",");
+  for (const fn of ["maskWs", "maskXhr"]) {
+    check(`⟨0.29⟩ dom-net: an invisible ${fn === "maskWs" ? "WebSocket" : "XHR"} endpoint hedges the surface rather than riding a benign literal`,
+          inc(`src.x.${fn}`) === "Net", `${fn}: ${inc(`src.x.${fn}`)}`);
+    check(`⟨0.29⟩ dom-net: …so \`allow Net\` fails closed on ${fn}`,
+          g.includes("[AS-EFF-008]") && g.includes(`src.x.${fn}`), g);
+  }
+  // OVER-CHARGE CONTROLS: a literal endpoint must still be CAPTURED and still CERTIFY, and `send` (a
+  // use-verb whose url was fixed at `open`) must not hedge. Without these the fix is satisfied by hedging
+  // every DOM net call, which passes the rows above and makes `allow Net` unusable for browser code.
+  check("⟨0.29⟩ dom-net CONTROL: a literal `xhr.open` url is captured (argument 1, not 0)",
+        hosts("src.x.xhrLit") === "ok.example", hosts("src.x.xhrLit"));
+  check("⟨0.29⟩ dom-net CONTROL: `new WebSocket(literal)` and `new EventSource(literal)` are captured",
+        hosts("src.x.wsLit") === "ok.example" && hosts("src.x.esLit") === "ok.example",
+        `${hosts("src.x.wsLit")} / ${hosts("src.x.esLit")}`);
+  check("⟨0.29⟩ dom-net CONTROL: `send` does not hedge — its endpoint was fixed at `open`",
+        inc("src.x.xhrLit") === "" && !g.includes("src.x.xhrLit"), inc("src.x.xhrLit"));
+  check("⟨0.29⟩ dom-net CONTROL: the clean fetch-only fn still certifies",
+        inc("src.x.control") === "" && !g.includes("src.x.control"), g);
+  // A SECOND HOLE THE SAME FIX CLOSED: with no host captured, the ⟨0.13⟩ model-host refinement could
+  // never fire on this route, so `deny Llm` silently missed a model call made through XMLHttpRequest.
+  check("⟨0.29⟩ dom-net: a model host reached via XHR now refines to Llm (it could not before — no host)",
+        eff("src.x.llmViaXhr").includes("Llm"), eff("src.x.llmViaXhr"));
+}
+if (blk()) {
   // [9] net-cluster fabrication: pure config/metadata members are NOT Net.
   const d = project({
     "src/f.ts": `import * as tls from "node:tls";

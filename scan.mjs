@@ -4546,14 +4546,48 @@ function visitCalls(node) {
           // key on, so they read SILENT-PURE. `XMLHttpRequest.send`/`.open` issue the HTTP request; the
           // `EventSource`/`WebSocket` constructors open a connection on construction. Net. (Found by a
           // Net-deep sweep. The npm `ws` package is already κ-covered; this is the bare browser global.)
-          if (parent === "XMLHttpRequest" && (name === "send" || name === "open")) rec.direct.add("Net");
+          // ⟨0.29⟩ …AND THE HOST SURFACE, which these branches did not touch. Adding `Net` here bypasses
+          // the `eff === "Net"` block that captures the endpoint and — when it is a runtime value — marks
+          // the surface `incomplete`. So an invisible endpoint reached this way was recorded as Net with
+          // NO hedge, and any benign literal in the same function certified it. MEASURED, `policy ✓` at
+          // exit 0 under `allow Net ok.example`:
+          //     await fetch("https://ok.example/a");   // captures ok.example
+          //     new WebSocket(u);                      // Net, no host, no `incomplete`  ← goes anywhere
+          // That is the masking evasion the `incomplete` machinery exists to prevent, reached through the
+          // two Net APIs whose branches skip it. Same shape as the EventKit/`privacyKind` and
+          // `FS_USE_VERBS` gaps: a refinement the general path performs and a carve-out does not.
+          //
+          // POSITION, per the DOM signatures: `xhr.open(method, url)` puts the URL at argument 1 — the
+          // one API in this file whose locator is neither 0 nor a labelled argument. `send` carries NO
+          // url (the endpoint was fixed at `open`), so it is a USE-VERB: it must not mark `incomplete`,
+          // or every XHR with a perfectly visible `open` literal would fail closed.
+          if (parent === "XMLHttpRequest" && (name === "send" || name === "open")) {
+            rec.direct.add("Net");
+            if (name === "open") {
+              const u = (node.arguments ?? [])[1];
+              const lit = u && ts.isStringLiteralLike(u)
+                ? u.text : (u ? (resolveConstUrlString(u) ?? literalHeadHostUrl(u)) : null);
+              const h = lit ? hostLiteral(lit) : null;
+              if (h) { rec.hosts.add(h); for (const e of modelHostEffects(h)) rec.direct.add(e); }
+              else rec.incomplete.add("Net");
+            }
+          }
           // `new EventSource(url)` / `new WebSocket(url)`: the constructor is declared on an anonymous
           // `declare var` object type (symbol `__type`, no usable parent name), but reaching the es-lib
           // branch already proves the ctor resolved to lib.dom (not a project class shadowing the name),
           // so the constructed identifier is the real browser global.
           if (ts.isNewExpression(node)) {
             const ctorName = node.expression.getText();
-            if (ctorName === "EventSource" || ctorName === "WebSocket") rec.direct.add("Net");
+            if (ctorName === "EventSource" || ctorName === "WebSocket") {
+              rec.direct.add("Net");
+              // The URL is argument 0 of both constructors — see the XHR note above for the measurement.
+              const u = (node.arguments ?? [])[0];
+              const lit = u && ts.isStringLiteralLike(u)
+                ? u.text : (u ? (resolveConstUrlString(u) ?? literalHeadHostUrl(u)) : null);
+              const h = lit ? hostLiteral(lit) : null;
+              if (h) { rec.hosts.add(h); for (const e of modelHostEffects(h)) rec.direct.add(e); }
+              else rec.incomplete.add("Net");
+            }
           }
         } else {
           // The member token κ matches: the resolved declaration's name, EXCEPT a `new X()` call,

@@ -8,6 +8,20 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.29⟩ ⚠ the DOM network globals bypassed the host surface, and a benign literal certified an
+  invisible endpoint.** `XMLHttpRequest.open/send` and the `WebSocket`/`EventSource` constructors are
+  classified in their own branch (lib.dom declares them with no importable module for the κ table to key
+  on); that branch added `Net` and stopped, skipping the block that captures the endpoint and marks the
+  surface `incomplete` when it is a runtime value. MEASURED at `policy ✓` exit 0 under
+  `allow Net ok.example`: `await fetch("https://ok.example/a"); new WebSocket(u);` — the fetch's allowed
+  literal certified the function while the WebSocket connected anywhere. The masking evasion the
+  `incomplete` machinery exists to prevent, through the two Net APIs whose branch skipped it.
+
+  `xhr.open(method, url)` puts the URL at argument **1** — the only locator in this engine that is neither
+  argument 0 nor a labelled argument; `send` carries no url (fixed at `open`) and stays a use-verb that
+  does not hedge. **A second hole closed by the same fix**: with no host captured, the ⟨0.13⟩ model-host
+  refinement could never fire on this route, so `deny Llm` silently missed a model call made through
+  `XMLHttpRequest`. Nine rows added, four of them over-charge controls, calibrated by reverting.
 - **⟨0.29⟩ ⚠ a USE-VERB's argument was read as argv[0], fabricating a command and an EFFECT.**
   `child.send(msg)` is IPC to an ALREADY-spawned child — its argument 0 is a message, not a program.
   `EXEC_USE_VERBS` says exactly that and was consulted for the `incomplete` branch but not for the
