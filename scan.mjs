@@ -5181,10 +5181,22 @@ function visitCalls(node) {
         const spec = imp && ts.isImportDeclaration(imp) ? imp.moduleSpecifier : null;
         if (spec && ts.isStringLiteralLike(spec)) {
           if (spec.text.startsWith(".") || spec.text.startsWith("/")) return false;   // the project's own
-          // A bare specifier: this is somebody's `fetch` implementation, not ours.
           let t = sym0;
           if (t.flags & ts.SymbolFlags.Alias) { try { t = checker.getAliasedSymbol(t); } catch { /* unresolved */ } }
-          return (t?.getName?.() ?? callee.text) === "fetch";
+          if ((t?.getName?.() ?? callee.text) !== "fetch") return false;
+          // …AND IT MUST BE SHAPED LIKE FETCH. The name alone is not evidence: a package exporting a pure
+          // `fetch(key)` cache-getter was charged Net, and this file's own header says "resolve, don't
+          // pattern-match". The checker already knows the answer — the web API returns `Promise<Response>`,
+          // a cache-getter returns `{ key: string }` — so ask it rather than trusting the identifier.
+          // Only the IMPORT rule is gated this way; the ambient global stays as it was, because it is
+          // lib.dom's `fetch` by definition and would otherwise stop being charged wherever lib.dom is
+          // absent. When no signature resolves at all, this returns false and the call falls through to
+          // the unresolved-import path, which discloses Unknown — never a concrete effect on a guess.
+          const rt = checker.getTypeAtLocation(callee);
+          for (const sg of (rt?.getCallSignatures?.() ?? [])) {
+            if (/\bResponse\b/.test(checker.typeToString(checker.getReturnTypeOfSignature(sg)))) return true;
+          }
+          return false;
         }
       }
       // Not an import at all: the ambient global, unless the project declares its own.

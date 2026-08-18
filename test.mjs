@@ -10723,6 +10723,36 @@ if (blk()) {
           (eff(rep(), "deep")?.inferred || []).includes("Unknown"), JSON.stringify(eff(rep(), "deep")));
   }
 
+  // AN IMPORTED `fetch` IS CHARGED ON EVIDENCE, NOT ON ITS NAME. A package exporting a pure
+  // `fetch(key)` cache-getter was charged Net because the rule keyed on the identifier; the checker
+  // already distinguishes them (the web API returns `Promise<Response>`), and this file's header says
+  // resolve rather than pattern-match. No node_modules here, so this row pins the CONTROL half — the
+  // charged half is measured in the corpus rounds, where the packages are really installed.
+  fs.mkdirSync(path.join(d, "node_modules", "purelib"), { recursive: true });
+  fs.writeFileSync(path.join(d, "node_modules", "purelib", "package.json"),
+    JSON.stringify({ name: "purelib", version: "1.0.0", main: "index.js", types: "index.d.ts" }));
+  fs.writeFileSync(path.join(d, "node_modules", "purelib", "index.js"),
+    "export function fetch(k) { return { key: k }; }\n");
+  fs.writeFileSync(path.join(d, "node_modules", "purelib", "index.d.ts"),
+    "export declare function fetch(k: string): { key: string };\n");
+  fs.writeFileSync(path.join(d, "package.json"), JSON.stringify({ name: "t", version: "1.0.0" }));
+  fs.writeFileSync(path.join(d, "a.ts"),
+    `import { fetch as pureFetch } from "purelib";\n`
+    + `export function usesPure() { return pureFetch("k"); }\n`
+    + `export function usesReal() { return fetch("https://api.example.com/v1"); }\n`);
+  spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out", path.join(d, "r")], { encoding: "utf8" });
+  const rSig = JSON.parse(fs.readFileSync(path.join(d, "r.json"), "utf8"));
+  const sigEff = (n) => (rSig.functions || []).find((f) => f.fn.endsWith("." + n));
+  // Not "absent": it is PRESENT with no effects and `invisible: ["purelib"]`, disclosing that the
+  // package is uncovered by κ. That is the better answer, and the property to assert is the absence of
+  // the FABRICATION, not the absence of the function.
+  check("CONTROL: a package exporting a PURE `fetch` is not charged Net — the signature says it is not the web API",
+        !((sigEff("usesPure")?.inferred || []).includes("Net")), JSON.stringify(sigEff("usesPure")));
+  check("…and it is DISCLOSED as blind rather than silently omitted (the package is κ-uncovered)",
+        (sigEff("usesPure")?.invisible || []).includes("purelib"), JSON.stringify(sigEff("usesPure")));
+  check("…while the ambient global in the same file is still Net (the signature gate is on the IMPORT rule only)",
+        (sigEff("usesReal")?.inferred || []).includes("Net"), JSON.stringify(sigEff("usesReal")));
+
   // CONTROL 2: aliasing an ordinary function must not become an effect.
   run(`function helper(x: number): number { return x + 1; }\n`
     + `export function pureAlias() { const g = helper; return g(1); }\n`, "--out", path.join(d, "r"));
