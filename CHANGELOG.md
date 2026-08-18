@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.29.1] — 2026-08-18
+
 - **⚠ VERDICT-AFFECTING, AND IT FLIPS A PINNED ROW: module resolution is `Fs`.** `require.resolve(m)`,
   `createRequire(u).resolve(m)` and `import.meta.resolve(m)` read PURE. They walk directories, read
   `package.json` files, and throw MODULE_NOT_FOUND based on what is on disk — the answer is a function
