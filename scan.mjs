@@ -2179,10 +2179,42 @@ const checker = program.getTypeChecker();
 // where hand-written code never reaches it, so the honest-but-vague answer is reserved for input
 // that is actually pathological.
 const ALIAS_HOPS = 16;
+/** Symbols REASSIGNED somewhere in a file — `send = fetch`, `send = helper`. Built once per file.
+ *
+ * The unwrap below reads a declaration's INITIALIZER, and an initializer is not a value: for
+ * `let send = fetch; send = helper; send(url)` it answered `fetch` and charged Net over a call that
+ * reaches a pure local — a FABRICATION this fix introduced, which 0.29.0 did not have. The mirror case
+ * is worse: `let send; send = fetch; send(url)` has no initializer at all, so the unwrap returned the
+ * bare identifier and the call read silent-pure — the cardinal-sin spelling of the very defect the
+ * unwrap exists to close.
+ *
+ * One rule fixes both. A binding that is assigned anywhere is one whose value this analysis does not
+ * know, so it resolves to neither answer: it is reported UNKNOWN, through the same `truncated` path a
+ * too-long alias chain takes. A binding that is never reassigned still resolves precisely. */
+const reassignedCache = new WeakMap();
+const reassignedIn = (sf) => {
+  let set = reassignedCache.get(sf);
+  if (set) return set;
+  set = new Set();
+  const walk = (n) => {
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        && ts.isIdentifier(n.left)) {
+      const sym = checker.getSymbolAtLocation(n.left);
+      if (sym) set.add(sym);
+    }
+    ts.forEachChild(n, walk);
+  };
+  walk(sf);
+  reassignedCache.set(sf, set);
+  return set;
+};
 const unaliasGlobal = (expr) => {
   let hop = 0;
   for (; hop < ALIAS_HOPS && ts.isIdentifier(expr); hop++) {
-    const decl = (checker.getSymbolAtLocation(expr)?.declarations ?? [])[0];
+    const sym = checker.getSymbolAtLocation(expr);
+    const decl = (sym?.declarations ?? [])[0];
+    // ASSIGNED SOMEWHERE ⇒ its value is not its initializer. Neither answer is available, so say so.
+    if (sym && decl && reassignedIn(decl.getSourceFile()).has(sym)) return { node: expr, truncated: true };
     if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return { node: expr, truncated: false };
     const init = decl.initializer;
     if (!ts.isIdentifier(init) && !ts.isPropertyAccessExpression(init)) return { node: expr, truncated: false };
@@ -5227,14 +5259,40 @@ function visitCalls(node) {
     // Breadth measured before shipping: 2 of 34 cloned TS packages call these at all.
     {
       const ct2 = callee.getText().replace(/\s+/g, "");
+      // SHADOW-GUARDED, like the `require(m)` arm one screen up — which this one originally was not.
+      // Matching on TEXT alone charged Fs for a project's own `const require = { resolve: … }` shim, a
+      // DI-injected `require` parameter, and a function merely NAMED `fakecreateRequire`. That is the
+      // fabrication direction, in a rule whose sibling already carries the guard and says why: "a
+      // project's own `require()` shadow never fabricates". Fixing an instance while its sibling
+      // documents the class is this codebase's recurring failure, so the guard is reused verbatim.
+      // RESOLVE THROUGH THE ALIAS — the same trap the `fetch` guard fell into. `import { createRequire }
+      // from "node:module"` declares an ImportSpecifier IN THE IMPORTING FILE, so a declaration-site test
+      // calls node's own function "the project's", and the first cut of this guard duly dropped the real
+      // `createRequire(u).resolve(n)` to pure. What decides is where the symbol is DEFINED.
+      const notProjectDeclared = (id) => {
+        let sym = checker.getSymbolAtLocation(id);
+        if (!sym) return true;                                  // ambient global (node's `require`)
+        if (sym.flags & ts.SymbolFlags.Alias) {
+          try { sym = checker.getAliasedSymbol(sym); } catch { /* unresolved import — treat as external */ }
+        }
+        const decls = sym?.declarations ?? [];
+        return !decls.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+      };
       const fromCreateRequire = (expr) => {
         if (!ts.isIdentifier(expr)) return false;
         const d = (checker.getSymbolAtLocation(expr)?.declarations ?? [])[0];
         if (!d || !ts.isVariableDeclaration(d) || !d.initializer) return false;
-        return ts.isCallExpression(d.initializer)
-          && d.initializer.expression.getText().replace(/\s+/g, "").endsWith("createRequire");
+        if (!ts.isCallExpression(d.initializer)) return false;
+        const ce = d.initializer.expression;
+        // The CALLEE'S OWN NAME must be createRequire — `.endsWith` made `fakecreateRequire()` match.
+        const nm = ts.isIdentifier(ce) ? ce.text
+                 : ts.isPropertyAccessExpression(ce) ? ce.name.text : "";
+        if (nm !== "createRequire") return false;
+        return !ts.isIdentifier(ce) || notProjectDeclared(ce);
       };
-      const modResolve = ct2 === "require.resolve" || ct2 === "import.meta.resolve"
+      const modResolve = ct2 === "import.meta.resolve"
+        || (ct2 === "require.resolve" && ts.isPropertyAccessExpression(callee)
+            && ts.isIdentifier(callee.expression) && notProjectDeclared(callee.expression))
         || (ts.isPropertyAccessExpression(callee) && callee.name.text === "resolve"
             && fromCreateRequire(callee.expression));
       if (modResolve) {

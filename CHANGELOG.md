@@ -96,8 +96,9 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   CONTROLS, which are the fix: a project-local `fetch` shadow fabricates nothing direct OR aliased (the
   unwrap yields the initializer node, so the not-declared-in-this-project guard still decides), aliasing
   an ordinary function stays pure, and the aliased global still captures its HOST so the allowlist and
-  masking gates see it. Bounded to 4 hops through identifier/property-access initializers only — never a
-  computed value. Rows calibrated: 3 fail with the fix disabled.
+  masking gates see it. Bounded to ALIAS_HOPS (16) through identifier/property-access initializers only — never a computed
+  value, and never a REASSIGNED binding (whose initializer is not its value); exhausting the budget
+  discloses Unknown rather than falling back to pure. Rows calibrated: 3 fail with the fix disabled.
   **RESIDUAL, measured and disclosed, not silent:** a global stored in an object property and bound
   (`fetch: globalThis.fetch.bind(globalThis)` … `this._options.fetch(…)`, which is exactly what ky does)
   still isn't resolved — but it reports `Unknown` with `unknownWhy: ["callback:fetch"]` and the gate
