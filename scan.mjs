@@ -4140,6 +4140,18 @@ const identIsGlobalProcess = (id) => {
 const isProcessEnvExpr = (expr) =>
   expr && ts.isPropertyAccessExpression(expr) && expr.name.text === "env" && identIsGlobalProcess(expr.expression);
 
+// …AND `process.argv`, which is the same channel. §1 defines Env as "reading environment variables /
+// THE PROCESS ENVIRONMENT", and argv is process-startup state delivered by the same `exec` call that
+// delivers envp — secrets arrive through it (`--token=…`) exactly as they do through a variable.
+// candor-rust has always charged `std::env::args()` as Env; ts and swift read it as PURE, so a
+// cross-engine parity sweep found the three engines answering one question two ways, with NO
+// conformance row to catch it. This is conformance to §1's existing wording, not a new clause.
+// (The adjacent java ruling does NOT transfer: `System.getProperty` is excluded there because charging
+// it "flooded a scala-library scan with a spurious 14k Env" — JVM `-D` config read pervasively at
+// class-init. `argv` is read once in a main.)
+const isProcessArgvExpr = (expr) =>
+  expr && ts.isPropertyAccessExpression(expr) && expr.name.text === "argv" && identIsGlobalProcess(expr.expression);
+
 // The set of local-binding SYMBOLS that alias process.env — collected below, one pre-pass over the
 // sources. A symbol lands here iff its ONLY initializer/assignment is `= process.env` (a reassignment
 // to anything else removes it → the alias is cleared, per the spec's reassignment rule).
@@ -5063,6 +5075,11 @@ function visitCalls(node) {
   // on process.env or a confirmed alias, destructuring a key off it, and the `in` membership test.
   {
     const markEnv = () => { const owner = enclosing(node); if (owner) fns.get(owner).direct.add("Env"); };
+    // `process.argv` — the same channel, and the same ruling candor-rust has always applied to
+    // `std::env::args()`. Reading the ARRAY is the read: `process.argv[2]`, `process.argv.slice(2)`,
+    // `const [,,x] = process.argv`, or handing it to a parser all reach the same process-startup state.
+    // Marked on the expression itself so every idiom counts without enumerating them.
+    if (isProcessArgvExpr(node)) markEnv();
     // `process.env.KEY` / `env.KEY` (dot) and `process.env["KEY"]` / `env[k]` (bracket, literal OR dynamic key).
     if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && readsProcessEnv(node.expression)) {
       markEnv();
