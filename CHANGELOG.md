@@ -8,6 +8,13 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ The WEB CLIPBOARD was unmodelled — a §6.1 boundary effect the family had rolled out everywhere
+  else.** `navigator.clipboard.writeText/readText/write/read` read PURE, so `deny Clipboard` answered
+  exit 0 over `await navigator.clipboard.writeText(secret)` — and over `readText()` in the other
+  direction, which is data arriving from outside the program. candor-swift charges `NSPasteboard` both
+  ways and candor-rust charges `arboard`; `clipboardy` was never affected because an import resolves
+  through κ. Found by sweeping EVERY effect-bearing global, not the one that prompted the sweep.
+
 - **⚠ Two effect-globals were missing outright, found by sweeping the ALIAS spelling across all of
   them.** `navigator.sendBeacon(url, data)` — the analytics exfiltration primitive, which exists to POST
   data to a server on unload — was charged NOTHING, so `deny Net` answered exit 0 over

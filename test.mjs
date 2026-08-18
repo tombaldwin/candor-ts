@@ -10580,6 +10580,17 @@ if (blk()) {
   check("…and a sendBeacon with a RUNTIME url marks `incomplete: Net` — a destination nobody can see must not be certifiable by an allowlist",
         (eff(rep(), "beaconRuntime")?.incomplete || []).includes("Net"), JSON.stringify(eff(rep(), "beaconRuntime")));
 
+  // THE WEB CLIPBOARD — a §6.1 BOUNDARY effect the family rolled out everywhere and this engine missed.
+  // candor-swift charges NSPasteboard in both directions and candor-rust charges arboard; the browser
+  // API read PURE, so `deny Clipboard` answered exit 0 over `navigator.clipboard.writeText(secret)`.
+  fs.writeFileSync(path.join(d, "pol4"), "deny Clipboard\n");
+  const clip = run(`export async function leak(s: string) { await navigator.clipboard.writeText(s); }\n`
+                 + `export async function snoop() { return navigator.clipboard.readText(); }\n`,
+                   "--policy", path.join(d, "pol4"));
+  check("`navigator.clipboard.writeText/readText` is Clipboard — `deny Clipboard` FIRES in BOTH directions (data out AND data in)",
+        clip.status === 1 && /leak/.test(clip.stdout + clip.stderr) && /snoop/.test(clip.stdout + clip.stderr),
+        `status=${clip.status}`);
+
   // CONTROL 2: aliasing an ordinary function must not become an effect.
   run(`function helper(x: number): number { return x + 1; }\n`
     + `export function pureAlias() { const g = helper; return g(1); }\n`, "--out", path.join(d, "r"));

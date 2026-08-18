@@ -4657,6 +4657,17 @@ function visitCalls(node) {
           // alias was the question, and the DIRECT call turned out to be missing too.
           // The URL is argument 0. No literal ⇒ `incomplete: Net`, the same fail-closed posture the
           // `open`/ctor branches take, so a runtime endpoint cannot be certified by an allowlist.
+          // `navigator.clipboard.writeText/readText/write/read` — Clipboard, a §6.1 BOUNDARY effect:
+          // data leaves the program on write and arrives from outside it on read. The family rolled
+          // Clipboard out everywhere (candor-swift charges NSPasteboard in both directions, candor-rust
+          // charges arboard), and the WEB clipboard was the hole: it read PURE, so
+          //     await navigator.clipboard.writeText(secret)   under `deny Clipboard`  →  exit 0, policy ✓
+          // on published 0.29.0. Found by sweeping every effect-bearing global rather than the one that
+          // prompted the sweep. `clipboardy` was never affected — an import resolves through κ.
+          if (parent === "Clipboard"
+              && (name === "writeText" || name === "readText" || name === "write" || name === "read")) {
+            rec.direct.add("Clipboard");
+          }
           if (parent === "Navigator" && name === "sendBeacon") {
             rec.direct.add("Net");
             const u = (node.arguments ?? [])[0];
