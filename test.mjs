@@ -10606,6 +10606,35 @@ if (blk()) {
   check("CONTROL: a six-deep chain of renamed PURE helpers stays pure — the depth is not what is being charged",
         !eff(rChain, "pureChain"), JSON.stringify((rChain.functions || []).map((f) => f.fn)));
 
+  // `fetch` REACHED THROUGH AN IMPORT — a CARDINAL SIN found on real code (giget's `_utils.download`,
+  // whose whole job is an HTTP download, reported `['Fs']` alone with its 474 packages installed).
+  //
+  // The shadow guard asks "is this fetch declared in a project file?". For `import { fetch } from
+  // "node-fetch-native/proxy"` the declaration is the IMPORT SPECIFIER, which lives in the importing
+  // file — a project file — so the guard called it the project's own and withheld Net. That made the
+  // analysis NON-MONOTONE: without node_modules the call reported Unknown (honest), and INSTALLING the
+  // dependency turned it into nothing. More information, less safe answer.
+  //
+  // No node_modules in this fixture, so the import cannot resolve — which is exactly why the row is
+  // written against a LOCAL module: it pins the CONTROL half (a project-local `fetch` fabricates
+  // nothing) that the fix could most easily have broken. The resolved half is measured in the corpus
+  // rounds, where the packages are really installed.
+  run(`export function fetch(u: string): string { return u; }\n`, "--out", path.join(d, "mock"));
+  fs.writeFileSync(path.join(d, "mock.ts"), `export function fetch(u: string): string { return u; }\n`);
+  fs.writeFileSync(path.join(d, "a.ts"),
+    `import { fetch as mocked } from "./mock";\n`
+    + `export function viaLocal() { return mocked("/local"); }\n`
+    + `export async function viaGlobal() { return fetch("https://real.example.com/v1"); }\n`);
+  const rImp = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "a.ts"),
+                                  "--out", path.join(d, "r")], { encoding: "utf8" });
+  const ri = JSON.parse(fs.readFileSync(path.join(d, "r.json"), "utf8"));
+  check("CONTROL: `import { fetch } from \"./local\"` fabricates NOTHING — resolving through the alias lands in a project file, so the shadow guard still decides",
+        !(ri.functions || []).some((f) => f.fn.endsWith(".viaLocal")),
+        `${rImp.status} ${JSON.stringify((ri.functions || []).map((f) => [f.fn, f.inferred]))}`);
+  check("…while the real global in the same file is still Net — the control did not disable the rule",
+        ((ri.functions || []).find((f) => f.fn.endsWith(".viaGlobal"))?.inferred || []).includes("Net"),
+        JSON.stringify((ri.functions || []).map((f) => [f.fn, f.inferred])));
+
   // CONTROL 2: aliasing an ordinary function must not become an effect.
   run(`function helper(x: number): number { return x + 1; }\n`
     + `export function pureAlias() { const g = helper; return g(1); }\n`, "--out", path.join(d, "r"));

