@@ -2173,15 +2173,34 @@ const checker = program.getTypeChecker();
  * nothing. Bounded to 4 hops and only through identifier/property-access initializers — a rebinding,
  * never a computed value, so this never follows a call or a conditional into a wrong answer.
  */
+// 16, not 4: the bound exists to stop pathological input, not to decide real code. At 4 a FIVE-deep
+// chain tripped the fail-closed arm and charged Unknown — truthful (the analysis did stop looking)
+// but imprecise, and it would have fired on an ordinary chain of renamed PURE helpers too. Set it
+// where hand-written code never reaches it, so the honest-but-vague answer is reserved for input
+// that is actually pathological.
+const ALIAS_HOPS = 16;
 const unaliasGlobal = (expr) => {
-  for (let hop = 0; hop < 4 && ts.isIdentifier(expr); hop++) {
+  let hop = 0;
+  for (; hop < ALIAS_HOPS && ts.isIdentifier(expr); hop++) {
     const decl = (checker.getSymbolAtLocation(expr)?.declarations ?? [])[0];
-    if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return expr;
+    if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return { node: expr, truncated: false };
     const init = decl.initializer;
-    if (!ts.isIdentifier(init) && !ts.isPropertyAccessExpression(init)) return expr;
+    if (!ts.isIdentifier(init) && !ts.isPropertyAccessExpression(init)) return { node: expr, truncated: false };
     expr = init;
   }
-  return expr;
+  // THE BOUND MUST FAIL CLOSED. Stopping because the CHAIN ENDED is an answer; stopping because the
+  // BUDGET ended is not — and the first cut of this helper returned the same thing for both, so a
+  // 5-deep alias chain read PURE while a 4-deep one read Net. That is my own fix failing open at its
+  // own edge: a cliff where the analysis silently stops looking. `truncated` says which happened, and
+  // the callers charge Unknown on it — the posture this engine already takes for a callee it cannot
+  // resolve (a parameter call reports Unknown, never nothing).
+  const stillGoing = ts.isIdentifier(expr)
+    && (() => {
+      const d = (checker.getSymbolAtLocation(expr)?.declarations ?? [])[0];
+      return !!d && ts.isVariableDeclaration(d) && !!d.initializer
+        && (ts.isIdentifier(d.initializer) || ts.isPropertyAccessExpression(d.initializer));
+    })();
+  return { node: expr, truncated: hop >= ALIAS_HOPS && stillGoing };
 };
 const projectFiles = new Set(fileNames.map((f) => path.resolve(f)));
 const sources = program.getSourceFiles().filter((f) => projectFiles.has(path.resolve(f.fileName)));
@@ -4690,7 +4709,9 @@ function visitCalls(node) {
           if (ts.isNewExpression(node)) {
             // …through an alias too: `const W = WebSocket; new W(url)` reads a ctor named "W".
             // Same defect as the call path, one node type over — hence the SHARED unwrap.
-            const ctorName = unaliasGlobal(node.expression).getText();
+            const unCtor = unaliasGlobal(node.expression);
+            const ctorName = unCtor.node.getText();
+            if (unCtor.truncated) { const o = enclosing(node); if (o) fns.get(o).direct.add("Unknown"); }
             if (ctorName === "EventSource" || ctorName === "WebSocket") {
               rec.direct.add("Net");
               // The URL is argument 0 of both constructors — see the XHR note above for the measurement.
@@ -5069,7 +5090,8 @@ function visitCalls(node) {
     // declaration still fails the "not declared in this project" test and fabricates nothing. Bounded to
     // 4 hops, and only through a plain identifier/property-access initializer — a rebinding, never a
     // computed value, so nothing here follows a function call or a conditional into a wrong answer.
-    const callee = unaliasGlobal(node.expression);
+    const un = unaliasGlobal(node.expression);
+    const callee = un.node;
     const ctext = callee.getText().replace(/\s+/g, "");
     let geff = null;
     // The member path AFTER the global `process` object, or null: `process.hrtime` → "hrtime",
@@ -5102,6 +5124,8 @@ function visitCalls(node) {
     // `eval` global-qualifier handling (a runtime global a project would not shadow).
     else if (ctext === "globalThis.fetch" || ctext === "window.fetch" || ctext === "self.fetch")
       geff = "Net";
+    // An alias chain this helper stopped following is an UNRESOLVED callee, not a pure one.
+    if (un.truncated) { const o = enclosing(node); if (o) fns.get(o).direct.add("Unknown"); }
     if (geff) {
       const owner = enclosing(node);
       if (owner) {

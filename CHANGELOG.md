@@ -17,6 +17,15 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   cross-engine PARITY SWEEP — the same operation written in each language, compared. `platform`/`arch`/
   `cpus` are untouched and pinned by the carve-out rows: they read no variable.
 
+- **The alias unwrap's own BOUND was failing open, and that was my fix's defect not the engine's.** It
+  stopped at 4 hops and returned the same result whether the CHAIN had ended or the BUDGET had, so a
+  five-deep alias read PURE while a four-deep one read Net — a silent cliff introduced by the fix for a
+  silent cliff. Exhausting the budget now charges `Unknown` (the posture this engine already takes for a
+  callee it cannot resolve), and the budget is 16 rather than 4: a bound exists to stop pathological
+  input, not to decide real code, and at 4 it would also have charged Unknown over an ordinary chain of
+  renamed PURE helpers. Both rows pinned — a six-deep chain to `fetch` is Net, a six-deep chain of pure
+  helpers stays pure.
+
 - **⚠ The WEB CLIPBOARD was unmodelled — a §6.1 boundary effect the family had rolled out everywhere
   else.** `navigator.clipboard.writeText/readText/write/read` read PURE, so `deny Clipboard` answered
   exit 0 over `await navigator.clipboard.writeText(secret)` — and over `readText()` in the other

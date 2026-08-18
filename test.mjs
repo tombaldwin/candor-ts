@@ -10591,6 +10591,21 @@ if (blk()) {
         clip.status === 1 && /leak/.test(clip.stdout + clip.stderr) && /snoop/.test(clip.stdout + clip.stderr),
         `status=${clip.status}`);
 
+  // THE BOUND ITSELF, which the first cut of this fix got WRONG: it stopped at 4 hops and returned the
+  // same answer whether the CHAIN ended or the BUDGET did, so a 5-deep alias read PURE while a 4-deep
+  // one read Net — a silent cliff introduced by the fix for a silent cliff. The budget is now 16 (deep
+  // enough that written code never reaches it) and exhausting it charges Unknown, the posture this
+  // engine already takes for a callee it cannot resolve.
+  run(`function helper(x: number): number { return x + 1; }\n`
+    + `export function pureChain() { const a = helper; const b = a; const c = b; const d = c; const e = d; const f = e; return f(1); }\n`
+    + `export function netChain() { const a = fetch; const b = a; const c = b; const d = c; const e = d; const f = e; return f("https://deep.example.com"); }\n`,
+      "--out", path.join(d, "r"));
+  const rChain = rep();
+  check("a SIX-deep alias chain still reaches the global — the bound is set past what real code writes, not at it",
+        (eff(rChain, "netChain")?.inferred || []).includes("Net"), JSON.stringify(eff(rChain, "netChain")));
+  check("CONTROL: a six-deep chain of renamed PURE helpers stays pure — the depth is not what is being charged",
+        !eff(rChain, "pureChain"), JSON.stringify((rChain.functions || []).map((f) => f.fn)));
+
   // CONTROL 2: aliasing an ordinary function must not become an effect.
   run(`function helper(x: number): number { return x + 1; }\n`
     + `export function pureAlias() { const g = helper; return g(1); }\n`, "--out", path.join(d, "r"));
