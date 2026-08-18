@@ -8,6 +8,19 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ VERDICT-AFFECTING, AND IT FLIPS A PINNED ROW: module resolution is `Fs`.** `require.resolve(m)`,
+  `createRequire(u).resolve(m)` and `import.meta.resolve(m)` read PURE. They walk directories, read
+  `package.json` files, and throw MODULE_NOT_FOUND based on what is on disk — the answer is a function
+  of the filesystem. The existing row asserted purity on the rationale *"returns a path, loads
+  nothing"*, which answers whether it EXECUTES arbitrary code (it does not, which is why it stays out of
+  `Unknown` unlike `require(m)` beside it) and not whether it READS. The row is updated with that
+  distinction spelled out. The surface is marked `incomplete: Fs` and never publishes a `paths` literal:
+  the argument is a module SPECIFIER, so publishing it as a path would fabricate a location, and the
+  files actually touched are a directory walk nobody wrote down. **A `deny Fs` gate over a build tool
+  that resolves modules will now fire** — breadth measured first: 2 of 34 cloned TS packages call these
+  at all. `path.resolve` and `Promise.resolve` are pinned pure; the rule is the module system, not the
+  name. Found by a new MONOTONICITY oracle (below).
+
 - **⚠ CARDINAL SIN — `fetch` reached through an IMPORT was treated as the project's own.** The shadow
   guard asks "is this `fetch` declared in a project file?", and for `import { fetch } from
   "node-fetch-native/proxy"` the declaration is the IMPORT SPECIFIER — which lives in the importing

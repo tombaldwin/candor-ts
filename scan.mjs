@@ -5210,6 +5210,38 @@ function visitCalls(node) {
       const owner = enclosing(node);
       if (owner) { fns.get(owner).direct.add("Unknown"); fns.get(owner).why.add("reflect:require"); }
     }
+    // MODULE RESOLUTION READS THE FILESYSTEM — `require.resolve(m)`, `createRequire(u).resolve(m)`,
+    // `import.meta.resolve(m)`. None of them EXECUTES the module (that is the `require(m)` arm above,
+    // which discloses Unknown), but all three walk directories, read `package.json` files, and throw
+    // MODULE_NOT_FOUND based on what they find: the answer is a function of what is on disk. It read PURE.
+    //
+    // Found by the MONOTONICITY oracle, and only by it: nypm's `doesDependencyExist` reported `Unknown`
+    // with its dependencies absent and NOTHING once they were installed. (Two of that oracle's three
+    // hits were legitimate refinements — consola resolving `string-width`/`strip-ansi` to genuinely pure
+    // functions — so the instrument narrows the search, it does not decide.)
+    //
+    // INCOMPLETE, never a `paths` literal: the argument is a MODULE SPECIFIER, not a path, and the files
+    // actually touched are a directory walk nobody wrote down. Publishing the specifier as a path would
+    // fabricate a location; marking the surface incomplete is the fail-closed posture the masking guard
+    // already takes for a runtime path, and the honest one for a call that reads unpredictable places.
+    // Breadth measured before shipping: 2 of 34 cloned TS packages call these at all.
+    {
+      const ct2 = callee.getText().replace(/\s+/g, "");
+      const fromCreateRequire = (expr) => {
+        if (!ts.isIdentifier(expr)) return false;
+        const d = (checker.getSymbolAtLocation(expr)?.declarations ?? [])[0];
+        if (!d || !ts.isVariableDeclaration(d) || !d.initializer) return false;
+        return ts.isCallExpression(d.initializer)
+          && d.initializer.expression.getText().replace(/\s+/g, "").endsWith("createRequire");
+      };
+      const modResolve = ct2 === "require.resolve" || ct2 === "import.meta.resolve"
+        || (ts.isPropertyAccessExpression(callee) && callee.name.text === "resolve"
+            && fromCreateRequire(callee.expression));
+      if (modResolve) {
+        const owner = enclosing(node);
+        if (owner) { const r = fns.get(owner); r.direct.add("Fs"); r.incomplete.add("Fs"); }
+      }
+    }
     // Object.assign(target, ...sources) copies each SOURCE's own enumerable props → invokes their
     // getters (the object-spread twin). Enumerate the sources' local getters.
     if (callee.getText().replace(/\s+/g, "") === "Object.assign") {

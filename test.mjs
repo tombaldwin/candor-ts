@@ -5379,8 +5379,18 @@ export function shadowed(y: string) { return require(y); }`,
         entry(report, "src.a.dyn")?.unknownWhy?.includes("reflect:require"));
   check("literal require('node:fs') stays pure (static resolvable load, no method call)",
         entry(report, "src.a.lit") === undefined, JSON.stringify(entry(report, "src.a.lit")));
-  check("require.resolve(m) stays pure (returns a path, loads nothing)",
-        entry(report, "src.a.resolveIt") === undefined);
+  // CHANGED, deliberately: this row used to assert `require.resolve(m)` is PURE, on the rationale
+  // "returns a path, loads nothing". That rationale answers whether it EXECUTES arbitrary code — it
+  // does not, which is why it is not Unknown like `require(m)` beside it. It does not answer whether it
+  // READS THE FILESYSTEM, and it does: resolution walks directories, reads package.json files, and
+  // throws MODULE_NOT_FOUND based on what is on disk. So it is Fs, with the surface marked incomplete
+  // because a module specifier is not a path. Surfaced by the monotonicity oracle on nypm.
+  check("require.resolve(m) is Fs — it loads nothing (so not Unknown) but it READS the filesystem to answer",
+        (entry(report, "src.a.resolveIt")?.inferred || []).includes("Fs"),
+        JSON.stringify(entry(report, "src.a.resolveIt")));
+  check("…and it does NOT disclose Unknown — resolution is not an opaque module LOAD, which is the distinction the row beside it draws",
+        !(entry(report, "src.a.resolveIt")?.inferred || []).includes("Unknown"),
+        JSON.stringify(entry(report, "src.a.resolveIt")));
   check("a project-local `require` shadow stays pure (no fabricated Unknown)",
         entry(report, "src.shadow.shadowed") === undefined, JSON.stringify(entry(report, "src.shadow.shadowed")));
 }
@@ -10634,6 +10644,29 @@ if (blk()) {
   check("…while the real global in the same file is still Net — the control did not disable the rule",
         ((ri.functions || []).find((f) => f.fn.endsWith(".viaGlobal"))?.inferred || []).includes("Net"),
         JSON.stringify((ri.functions || []).map((f) => [f.fn, f.inferred])));
+
+  // MODULE RESOLUTION IS AN Fs READ. `require.resolve` / `createRequire(u).resolve` /
+  // `import.meta.resolve` walk directories and read package.json files — the answer is a function of
+  // what is on disk — and all three read PURE. Found by the MONOTONICITY oracle: nypm's
+  // `doesDependencyExist` reported Unknown with dependencies absent and NOTHING once installed.
+  run(`import { createRequire } from "node:module";\n`
+    + `export function viaCreate(cwd: string, n: string) { const req = createRequire(cwd); return req.resolve(n); }\n`
+    + `export function viaRequire(n: string) { return require.resolve(n); }\n`
+    + `import * as pathm from "path";\n`
+    + `export function viaPath(a: string, b: string) { return pathm.resolve(a, b); }\n`
+    + `export function viaPromise() { return Promise.resolve(1); }\n`,
+      "--out", path.join(d, "r"));
+  const rRes = rep();
+  check("`require.resolve` and `createRequire(u).resolve` are Fs — module resolution reads the filesystem, it just does not execute what it finds",
+        (eff(rRes, "viaCreate")?.inferred || []).includes("Fs")
+          && (eff(rRes, "viaRequire")?.inferred || []).includes("Fs"),
+        JSON.stringify((rRes.functions || []).map((f) => [f.fn, f.inferred])));
+  check("…and the surface is INCOMPLETE — the argument is a module SPECIFIER, not a path, so publishing it as a `paths` literal would fabricate a location",
+        (eff(rRes, "viaRequire")?.incomplete || []).includes("Fs") && !(eff(rRes, "viaRequire")?.paths || []).length,
+        JSON.stringify(eff(rRes, "viaRequire")));
+  check("CONTROL: `path.resolve` and `Promise.resolve` stay pure — the rule is the module system, not the NAME `resolve`",
+        !eff(rRes, "viaPath") && !eff(rRes, "viaPromise"),
+        JSON.stringify((rRes.functions || []).map((f) => f.fn)));
 
   // CONTROL 2: aliasing an ordinary function must not become an effect.
   run(`function helper(x: number): number { return x + 1; }\n`
