@@ -8,6 +8,14 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **`worker_threads.postMessageToThread` is Ipc.** Node 22's module-level send read PURE while every
+  other spelling of the same channel was charged — `parentPort.postMessage`, `worker.postMessage`, a
+  `MessagePort`'s `.postMessage`, `receiveMessageOnPort`. The κ name pattern was anchored, so the newer
+  API slipped past a rule that already covered the concept. Found by ENUMERATING each builtin's exports
+  and diffing them against what the table charges: 92/92 for `node:fs`, and the uncharged entries
+  elsewhere are all deliberate and documented (`net.isIP` is a pure string validator, `dns.getServers`
+  is in-process config, zlib's 28 exports are in-memory transforms).
+
 - **`os.tmpdir()` / `os.homedir()` are Env** — this list charged `os.hostname()` and `os.userInfo()` as
   environment reads and left these two pure, so the engine was inconsistent with ITSELF. They are not
   the "inert host introspection" the carve-out is for: node resolves `homedir()` from `$HOME` and

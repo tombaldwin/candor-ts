@@ -1202,6 +1202,7 @@ test("kappa: classifies the curated module/verb surface", () => {
   assert.equal(kappa("os", "userInfo"), "Env");               // OS user identity
   assert.equal(kappa("node:os", "hostname"), "Env");          // machine name
   assert.equal(kappa("os", "tmpdir"), "Env");                 // resolves $TMPDIR/$TMP/$TEMP
+  assert.equal(kappa("worker_threads", "postMessageToThread"), "Ipc"); // node 22's module-level send
   assert.equal(kappa("node:os", "homedir"), "Env");            // resolves $HOME — an env read behind a name
   assert.equal(kappa("child_process", "exec"), "Exec");
   assert.equal(kappa("pg", "query"), "Db");

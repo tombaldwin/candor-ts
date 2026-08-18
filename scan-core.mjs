@@ -60,7 +60,13 @@ export const KAPPA_RULES = [
   // `receiveMessageOnPort` reads it. Covers `worker.postMessage`, `parentPort.postMessage`, and a
   // `MessagePort`'s `.postMessage` (all typed from this module). `new Worker(...)` spawns the thread but
   // construction is inert here (like the net-cluster ctors) — the message verbs are the IPC boundary.
-  [/^(node:)?worker_threads$/, /^(postMessage|receiveMessageOnPort)$/, "Ipc"],
+  // …AND `postMessageToThread`, node 22's MODULE-LEVEL send. The name is anchored, so the newer API
+  // slipped past a rule that already covered every other spelling: `parentPort.postMessage`,
+  // `worker.postMessage`, a `MessagePort`'s `.postMessage` and `receiveMessageOnPort` were all Ipc while
+  // `postMessageToThread(id, value)` — the same channel, addressed by thread id — read PURE. Found by
+  // enumerating each builtin's EXPORTS and diffing them against what the table charges, rather than by
+  // testing the spellings someone already thought of.
+  [/^(node:)?worker_threads$/, /^(postMessage|postMessageToThread|receiveMessageOnPort)$/, "Ipc"],
   // node:cluster — `fork()` spawns a worker PROCESS and wires its IPC channel.
   [/^(node:)?cluster$/, /^fork$/, "Ipc"],
   // node:vm executes a runtime-supplied code STRING in-process — `runInThisContext`/`runInContext`/
