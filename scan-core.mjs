@@ -162,7 +162,15 @@ export const KAPPA_RULES = [
   // node:os identity reads — userInfo (the OS user record) and hostname (the machine name) are
   // environment/host reads (Env), like System.getenv's host-identity cousins. The rest of node:os
   // (platform/arch/cpus/totalmem/…) is inert host introspection, left pure.
-  [/^(node:)?os$/, /^(userInfo|hostname)$/, "Env"],
+  // …AND `tmpdir`/`homedir`, which this list read as pure until a cross-engine parity sweep asked why.
+  // They are not introspection: node resolves `homedir()` from `$HOME` and `tmpdir()` from
+  // `$TMPDIR`/`$TMP`/`$TEMP`, so they are ENVIRONMENT VARIABLE READS behind a convenience name — the
+  // rule this line already applies to `userInfo`/`hostname`, and the reason `platform`/`arch` stay out.
+  // candor-rust charges the identical operations (`std::env::temp_dir`, `env::var("HOME")`,
+  // `env::current_dir`) as Env, so ts was the outlier AND inconsistent with ITSELF: `os.hostname()` was
+  // Env while `os.homedir()` was pure. MEASURED 2026-08-18: `deny Env` answered exit 0 over
+  // `os.homedir()`. `platform`/`arch`/`cpus` are untouched — they read no variable.
+  [/^(node:)?os$/, /^(userInfo|hostname|tmpdir|homedir)$/, "Env"],
   [/^(argon2|bcrypt|bcryptjs)$/, null, "Rand"],
   // The ORM tier — VERB-PRECISE (the CLASSIFIER discipline: tag the execution boundary, not
   // builders; `createQueryBuilder` is pure, its `getMany`/`execute` is the I/O). Found on the

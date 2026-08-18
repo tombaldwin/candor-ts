@@ -8,6 +8,15 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **`os.tmpdir()` / `os.homedir()` are Env** — this list charged `os.hostname()` and `os.userInfo()` as
+  environment reads and left these two pure, so the engine was inconsistent with ITSELF. They are not
+  the "inert host introspection" the carve-out is for: node resolves `homedir()` from `$HOME` and
+  `tmpdir()` from `$TMPDIR`/`$TMP`/`$TEMP` — environment-variable reads behind a convenience name.
+  `deny Env` answered exit 0 over `os.homedir()`. candor-rust charges the identical operations
+  (`std::env::temp_dir`, `env::var("HOME")`, `env::current_dir`), so ts was the outlier. Found by a
+  cross-engine PARITY SWEEP — the same operation written in each language, compared. `platform`/`arch`/
+  `cpus` are untouched and pinned by the carve-out rows: they read no variable.
+
 - **⚠ The WEB CLIPBOARD was unmodelled — a §6.1 boundary effect the family had rolled out everywhere
   else.** `navigator.clipboard.writeText/readText/write/read` read PURE, so `deny Clipboard` answered
   exit 0 over `await navigator.clipboard.writeText(secret)` — and over `readText()` in the other
