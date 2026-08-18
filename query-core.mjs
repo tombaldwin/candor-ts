@@ -740,7 +740,7 @@ export function loadReport(prefix) {
  */
 export function loadGateReport(prefix) {
   const files = reportFilesAt(prefix);
-  const functions = [], unanalyzed = [], cov = new Map(), corrupt = [];
+  const functions = [], unanalyzed = [], cov = new Map(), corrupt = [], outOfScope = [];
   let hardFail = false, analyzed = 0;
   // ⟨0.24⟩ did the report handed to the gate judge ANYTHING? Per FILE, then ANDed across the multi-report
   // siblings, because the union of several reports has judged something as soon as ONE of them has — the
@@ -799,6 +799,18 @@ export function loadGateReport(prefix) {
         else unanalyzed.push({ path: typeof u.path === "string" ? u.path : "", reason: typeof u.reason === "string" ? u.reason : "" });
       }
     }
+    // ⟨0.30⟩ THE PEEK'S FINDINGS, off the report rather than recomputed — this route CANNOT peek (it has
+    // no target, only a document), and that is exactly why the field rides the report. Concatenated across
+    // siblings like `functions` and `unanalyzed` above. ABSENT stays absent: ⟨0.26⟩ makes an absent key
+    // "this producer cannot answer", and a report produced with no policy was never asked, so it must not
+    // trigger the ⟨0.30⟩ verdict. Only well-formed entries count — a malformed one is corrupt input, and
+    // silently dropping it is how a fail-closed rung turns back into a green one.
+    const oos = parsed.outOfScope;
+    if (Array.isArray(oos))
+      for (const e of oos)
+        if (e && typeof e === "object" && Array.isArray(e.effects) && e.effects.length)
+          outOfScope.push(e);
+        else corrupt.push(`${f}: \`outOfScope\` (an element is not an object carrying a non-empty \`effects\`)`);
     // ⟨0.15⟩ the κ ledger. Merged + re-sorted the PRODUCER's way (count desc, name asc by code point —
     // reportCoverage's rule, and scan.mjs's), so a single-report prefix reproduces the emitted order exactly.
     const unc = parsed.coverage?.uncovered;
@@ -811,7 +823,7 @@ export function loadGateReport(prefix) {
   }
   const coverage = [...cov.entries()].sort((a, b) => b[1] - a[1] || byCodePoint(a[0], b[0]))
     .map(([name, calls]) => ({ name, calls }));
-  return { functions, analyzed, unanalyzed, coverage, judgedNothing, hardFail: hardFail || corrupt.length > 0, corrupt };
+  return { functions, analyzed, unanalyzed, coverage, judgedNothing, outOfScope, hardFail: hardFail || corrupt.length > 0, corrupt };
 }
 // The returned graph carries a non-enumerable `partial` flag (the loadReport `hardFail` precedent):
 // true iff a sidecar file was MATCHED but failed to read/parse — its edges were DROPPED (disclosed on

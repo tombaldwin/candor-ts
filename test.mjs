@@ -4269,6 +4269,81 @@ export function f(): string { return x(); }`,
         JSON.stringify({ keys: Object.keys(r2.report ?? {}), f: entry(r2.report, "src.u.f") }));
 }
 
+// ── ⟨0.30⟩ A PEEKED FUNCTION PERFORMING THE DENIED EFFECT MAKES THE VERDICT INCOMPLETE ───────────
+// ⟨0.29⟩ shipped the peek with NO engine-local coverage at all — its only pin was the cross-engine
+// PART 48, which is why reversing its verdict rule passed 1,419 local tests untouched. These rows are
+// that gap closed, and they assert BOTH directions: the rung's whole risk is an engine that turns every
+// scope note into a red gate, which deletes the gate's usefulness while passing the "it fires" half.
+//
+// THE FIXTURE EXECS `ls` WITH NO ARGUMENT, as PART 48's does and for its reason: `execSync("curl …")`
+// classifies Net AS WELL AS Exec, so the `deny Net` bound row would match legitimately and read as a
+// broken bound. An argument-free `ls` isolates Exec.
+if (blk()) {
+  const tsconfig = JSON.stringify({
+    compilerOptions: { target: "ES2022", module: "ESNext", moduleResolution: "bundler",
+                       skipLibCheck: true, noEmit: true },
+    include: ["src/**/*.ts"],
+  });
+  const d = project({
+    "tsconfig.json": tsconfig,
+    "src/ok.ts": `export function pure(a: number): number { return a + 1; }`,
+    "outside/bad.ts": `import { execSync } from "node:child_process";
+export function runs(): Buffer { return execSync("ls"); }`,
+    "exec.pol": "deny Exec\n",
+    "net.pol": "deny Net\n",
+  });
+  const ex = scan(d, "--policy", path.join(d, "exec.pol"));
+  const oos = ex.report?.outOfScope ?? [];
+  check("⟨0.30⟩ the peek finds the out-of-scope Exec and names the function",
+        oos.length > 0 && oos.some((e) => (e.effects ?? []).includes("Exec")),
+        JSON.stringify(oos));
+  check("⟨0.30⟩ …and the verdict is INCOMPLETE: exit 2, not the ⟨0.29⟩ pass",
+        ex.r.status === 2, `exit ${ex.r.status}: ${ex.r.stderr}`);
+  // The STRUCTURAL half of ⟨0.29⟩ survives, and it is why the code is 2 and not 1: the gate did not judge
+  // this unit, so claiming a violation over it would be false in the other direction.
+  const judged = new Set((ex.report?.functions ?? []).map((e) => e.fn));
+  check("⟨0.30⟩ …while the unjudged fn stays OUT of `functions` (exit 2 means unevaluable, not violated)",
+        !oos.some((e) => judged.has(e.fn)), JSON.stringify([...judged]));
+
+  // THE OVER-CHARGE CONTROL, on the same tree: a policy denying a DIFFERENT effect must stay green. The
+  // bound is what keeps this rung from becoming the noise floor — without this row the feature passes
+  // against an engine that reddens every project with an exclusion.
+  const net = scan(d, "--policy", path.join(d, "net.pol"));
+  check("⟨0.30⟩ CONTROL: a policy denying a different effect is UNMOVED — exit 0, `outOfScope: []`",
+        net.r.status === 0 && Array.isArray(net.report?.outOfScope) && net.report.outOfScope.length === 0,
+        `exit ${net.r.status}: ${JSON.stringify(net.report?.outOfScope)}`);
+
+  // §3.1 ROUTE EQUALITY — the constraint that killed the `net-partner` attempt. It holds here only
+  // because `outOfScope` rides the REPORT, so `gate --report` re-reads what the scan peeked instead of
+  // re-deriving it from a target it does not have.
+  const ga = path.join(d, "a.gate.json"), gb = path.join(d, "b.gate.json");
+  scan(d, "--policy", path.join(d, "exec.pol"), "--gate-json", ga);
+  const q = spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report",
+                               path.join(d, ".candor", "report.json"),
+                               "--policy", path.join(d, "exec.pol"), "--gate-json", gb],
+                      { encoding: "utf8" });
+  check("⟨0.30⟩ §3.1: `gate --report` reaches the SAME exit 2 off the report alone",
+        q.status === 2, `exit ${q.status}: ${q.stderr}`);
+  check("⟨0.30⟩ §3.1: …and the two verdict documents are BYTE-EQUAL",
+        fs.existsSync(ga) && fs.existsSync(gb)
+          && fs.readFileSync(ga, "utf8") === fs.readFileSync(gb, "utf8"),
+        `${fs.existsSync(ga) ? fs.readFileSync(ga, "utf8") : "(no a)"}\n---\n${fs.existsSync(gb) ? fs.readFileSync(gb, "utf8") : "(no b)"}`);
+  const va = JSON.parse(fs.readFileSync(ga, "utf8"));
+  check("⟨0.30⟩ the verdict is honest in the machine channel: ok:false + incomplete:true + NO violations",
+        va.ok === false && va.incomplete === true && (va.violations ?? []).length === 0,
+        JSON.stringify(va).slice(0, 300));
+
+  // ⟨0.26⟩ ABSENT IS NOT EMPTY. A report produced with NO policy was never asked the scope question, so it
+  // must NOT trigger this rung — otherwise every pre-⟨0.30⟩ report becomes exit 2 on contact.
+  scan(d);
+  const noPol = JSON.parse(fs.readFileSync(path.join(d, ".candor", "report.json"), "utf8"));
+  const q2 = spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report",
+                                path.join(d, ".candor", "report.json"),
+                                "--policy", path.join(d, "exec.pol")], { encoding: "utf8" });
+  check("⟨0.30⟩ CONTROL: an ABSENT `outOfScope` is ⟨0.26⟩ cannot-answer, NOT a trigger — exit 0",
+        !("outOfScope" in noPol) && q2.status === 0, `key=${"outOfScope" in noPol} exit=${q2.status}`);
+}
+
 // ── scan-completeness nudge: a high CALL VOLUME into unscanned packages means a missing input ─────
 // A scan that sees the app but none of its dependencies leaves their effects invisible — indistinguishable
 // in the report from "there is nothing there". The trigger is call VOLUME, not package count (candor-java's

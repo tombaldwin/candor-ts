@@ -7356,7 +7356,14 @@ if (gateJsonPath) {
   // must NOT read green — those effects are invisible, so a `deny`/`pure` that "passes" over them is a
   // false-pure. `ok` requires BOTH no violation AND a complete analysis. `analyzed:{count}` (Gap 1) mirrors
   // the report envelope so a --gate-json consumer sees the scan's scope from the verdict alone.
-  const incomplete = unanalyzedUnits.length > 0;
+  // ⟨0.30⟩ THE SECOND CAUSE OF INCOMPLETENESS — a peeked function performs an effect the policy DENIES.
+  // ⟨0.29⟩ required the verdict NOT to move here, on the assumption the peek surfaces uncertainty a gate
+  // may decline to act on. It does not: measured on published 0.29.1 the peek resolves a CONCRETE denied
+  // effect and names the function (axios 37 × `performs Net`, exit 0, `policy ✓`). Reported through
+  // `incomplete`, never through `violations`, because the gate did not JUDGE these units — see the exit
+  // site below for why that makes the code 2 and not 1.
+  const scopeIncomplete = Array.isArray(outOfScopeFindings) && outOfScopeFindings.length > 0;
+  const incomplete = unanalyzedUnits.length > 0 || scopeIncomplete;
   const verdictObj = { spec: SPEC_VERSION, ok: gateViolations.length === 0 && !incomplete,
                        analyzed: { count: fns.size } };
   // ⟨0.24⟩ the vocabulary file that moved the verdict, in the SAME position `gate --report` puts it, because
@@ -7388,8 +7395,14 @@ if (gateJsonPath) {
   // incomplete:true is honest — never a fabricated pass. OMITTED when complete (byte-compatible verdict).
   if (incomplete) {
     verdictObj.incomplete = true;
-    verdictObj.unanalyzed = unanalyzedUnits.map((u) => ({ path: u.path, reason: u.reason }));
+    if (unanalyzedUnits.length)
+      verdictObj.unanalyzed = unanalyzedUnits.map((u) => ({ path: u.path, reason: u.reason }));
   }
+  // ⟨0.30⟩ …and WHICH functions made it incomplete, in the machine channel. The same array the report
+  // carries, so `gate --report` re-emits it from the report and §3.1 byte-equality holds by construction —
+  // this is the anchor the `net-partner` attempt lacked. Omitted when empty, so a clean verdict is
+  // byte-identical to a pre-⟨0.30⟩ one.
+  if (scopeIncomplete) verdictObj.outOfScope = outOfScopeFindings;
   // ⟨0.15 staged⟩ coverage ADVISORY (COVERAGE-DESIGN.md §3): when the κ ledger is non-empty, the
   // verdict discloses what the gate could NOT see — VERDICT-PRESERVING (the ⟨0.9⟩ provable-purity
   // auto-disclosure precedent exactly): ok/violations/exit are computed above and untouched here. A
@@ -7427,6 +7440,22 @@ if (gateViolations.length) {
 const gateConfigured = policyPath !== null || baselinePath !== null;
 if (gateConfigured && unanalyzedUnits.length) {
   console.error(`candor-ts: gate NOT certified — ${unanalyzedUnits.length} source file(s) could not be analyzed (see above); a gate cannot be green over unanalyzed code`);
+  process.exit(2);
+}
+// ⟨0.30⟩ THE SCOPE HALF OF THE SAME POSTURE. `unanalyzed` above is "I opened this file and could not read
+// it"; this is "I never opened it, and when I looked afterwards it performed the effect you denied". Both
+// mean the same thing to a consumer — the gate could not see enough of this tree to certify it — so both
+// are exit 2.
+//
+// EXIT 2, NOT 1, DELIBERATELY: these functions are not in `violations` and not in `functions`, because the
+// gate did not judge them. Exit 1 would claim "I judged your code and it breaks the policy", which is
+// false in the other direction. Exit 2 says "I could not see enough to answer", which is what happened.
+// A real violation (exit 1, above) still dominates: certain beats unevaluable.
+if (gateConfigured && Array.isArray(outOfScopeFindings) && outOfScopeFindings.length) {
+  const n = outOfScopeFindings.length;
+  console.error(`candor-ts: gate NOT certified — ${n} function(s) OUTSIDE this scan's scope perform an `
+    + `effect this policy denies (named above); the gate did not judge them, so the verdict is `
+    + `incomplete rather than a pass`);
   process.exit(2);
 }
 if (policyPath !== null) console.error("candor-ts: policy ✓");

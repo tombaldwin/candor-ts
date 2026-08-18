@@ -2146,7 +2146,11 @@ switch (cmd) {
     // ⟨0.21⟩ COMPLETENESS MANIFEST: a gate cannot be green over code candor never analyzed. The scan path
     // exits 2 on its OWN `unanalyzed`; here the same manifest travels ON the report, so the same verdict
     // follows from it. A real violation (exit 1) dominates, as it does there.
-    const gincomplete = g.unanalyzed.length > 0;
+    // ⟨0.30⟩ the SECOND cause, read off the report because this route cannot peek — the report carries the
+    // peek's findings, which is what makes §3.1 byte-equality hold here by construction rather than by two
+    // authors agreeing. ABSENT is not empty: a report produced with no policy was never asked.
+    const gscope = g.outOfScope ?? [];
+    const gincomplete = g.unanalyzed.length > 0 || gscope.length > 0;
     // The verdict document — the SAME builder shape scan.mjs writes, field for field and in the same key
     // order, because §3.1 ⟨0.24⟩ makes byte-equality with `scan --policy`'s `--gate-json` the acceptance
     // test. `analyzed.count`, `incomplete`/`unanalyzed` and the ⟨0.15⟩ coverage advisory all come off the
@@ -2172,7 +2176,12 @@ switch (cmd) {
     // not be answered, this carries text that never became a rule at all. Omitted when empty; `ok` and
     // the exit do not consult it (the line-level leniency is unchanged, only disclosed).
     if (gpol.ignored?.length) gverdictObj.ignored = gpol.ignored;
-    if (gincomplete) { gverdictObj.incomplete = true; gverdictObj.unanalyzed = g.unanalyzed; }
+    if (gincomplete) {
+      gverdictObj.incomplete = true;
+      if (g.unanalyzed.length) gverdictObj.unanalyzed = g.unanalyzed;
+    }
+    // ⟨0.30⟩ same key, same position as the scan route's — §3.1's byte-equality is the acceptance test.
+    if (gscope.length) gverdictObj.outOfScope = gscope;
     if (g.coverage.length)
       gverdictObj.coverage = { uncovered: g.coverage.length, packages: g.coverage.map((c) => c.name) };
     if (gviol.length) {
@@ -2186,7 +2195,12 @@ switch (cmd) {
     if (gunevaluated.length)
       grefuse(`${gunevaluated.length} policy rule(s) could not be evaluated against this report`, gunevaluated);
     if (gincomplete) {
-      const why = `gate NOT certified — the report declares ${g.unanalyzed.length} unit(s) candor could not analyze; a gate cannot be green over unanalyzed code`;
+      // ⟨0.30⟩ NAME THE CAUSE THAT ACTUALLY FIRED. Two causes reach this exit now, and a message that
+      // always says "could not analyze" would report the wrong repair for the scope one — the operator
+      // would go looking for a parse failure that is not there.
+      const why = g.unanalyzed.length
+        ? `gate NOT certified — the report declares ${g.unanalyzed.length} unit(s) candor could not analyze; a gate cannot be green over unanalyzed code`
+        : `gate NOT certified — the report names ${gscope.length} function(s) OUTSIDE the scan's scope performing an effect this policy denies; the gate did not judge them, so the verdict is incomplete rather than a pass`;
       console.error(`candor-ts: ${why}`);
       // The INCOMPLETE verdict is a JUDGEMENT, not a refusal: it names what was analyzed and what was not,
       // and §3.1 makes byte-equality with `scan --policy`'s document the acceptance test for exactly it.
