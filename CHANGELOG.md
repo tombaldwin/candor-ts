@@ -73,6 +73,12 @@ of the 31 measured flips (execa under `deny Net`). It predates this rung — ⟨
 verdict-bearing — and it is a classifier fix with its own risk, so it is being made separately rather
 than folded into a release.
 
+**The finding states what candor CONCLUDED, not what is true.** The reason string reads *"candor's
+analysis reaches this effect"*, not *"the effect is real"*. For 29 of the 31 measured flips the stronger
+wording would have been accurate; for the 2 above it would not, and this family rates a FALSE disclosure
+worse than a missing one. A finding that asserts ground truth makes a claim the analysis cannot support.
+No verdict changes, and the `did NOT judge` phrase PART 48 pins is untouched.
+
 ### Fixed — found by an adversarial review of the rung above, before release
 
 - **A corrupt `outOfScope` key failed OPEN.** A present-but-malformed key was coerced to nothing, so
