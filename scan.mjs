@@ -6646,7 +6646,8 @@ for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
 const writeAtomic = (file, text) => writeSinkAtomic(file, text);
 // ── ⟨0.29⟩ THE PEEK ───────────────────────────────────────────────────────────────────────────────
 // Read the files this run deliberately did NOT judge, and say so when they hold an effect the policy
-// DENIES. The verdict does not move: `outOfScope` is its own kind and never a violation, because a file
+// DENIES. ⟨0.30⟩ THE VERDICT DOES MOVE — see the exit site below: a non-empty block makes it
+// `ok:false, incomplete:true` at exit 2. It is still never a violation, because a file
 // the gate declined to judge must not decide an exit code.
 //
 // A CHILD `scan.mjs`, not a second analysis path. candor-rust buys this by recursing into `scan_one`;
@@ -6746,15 +6747,45 @@ if (policyPath && excludedFiles.length) {
       //
       // Only the DENY rules are handed over: ⟨0.29⟩ bounds this block to "effects that policy DENIES",
       // and evaluating `allow`/`forbid`/`only` here would widen it past the bound that keeps it quiet.
+      // ⟨0.30⟩ THE PROJECT'S OWN `net-partner` SET, not an empty one. The child scan runs over a temp
+      // tsconfig and never sees the project's `.candor/config`, and this call passed `new Set()` on top of
+      // that — so a `deny Net[known-partner]` peek asked "is this host a declared partner?" against a set
+      // that was always empty. MEASURED both ways: a test file reaching a DECLARED partner answered exit 0
+      // where the same code in scope exits 1 (a false all-clear), and `deny Net[unknown-host]` answered
+      // exit 2 over that same declared partner where in scope it exits 0 (the mirror over-charge).
+      // candor-rust never had this — its peek runs in-process and inherits the config.
+      //
+      // `netClasses` stays null so the resolver recomputes each entry's class from the `hosts` the child
+      // DID capture, against these partners — the child's own `netClass` was computed partner-blind and
+      // must not be trusted here.
+      // ⟨0.30⟩ MATCH SCOPES AGAINST A PROJECT-RELATIVE QUALIFIER, not the child's. The child scan runs
+      // under a temp-directory tsconfig, so its `fn` is derived from THAT root — an absolute dotted path.
+      // Handing those to the matcher made a rule's SCOPE match segments of the checkout directory: on a
+      // tree at `…/fresh/src/execa`, `deny Net src` armed the peek while binding nothing in scope, so the
+      // verdict depended on where the repo happened to be cloned. CI checkouts live under names nobody
+      // chose (Bitbucket uses `agent/build`), which makes that a verdict decided by infrastructure.
+      //
+      // The project-relative path is already known here — it is what this run disclosed as excluded — and
+      // the finding below is already named from it. The MATCHER must see the same thing the FINDING does.
+      const relQual = (f) => {
+        const childLoc = (f.loc ?? "").split(":")[0] ?? "";
+        const hit = excludedFiles.find((e) => childLoc.endsWith(e.path)
+                                           || childLoc.endsWith(path.basename(e.path)));
+        if (!hit) return f.fn;
+        const stem = hit.path.replace(/\.[cm]?[jt]sx?$/, "").split(path.sep).join(".");
+        const leaf = f.fn.split(".").pop() ?? f.fn;
+        return `${stem}.${leaf}`;
+      };
+      const peekEntries = (doc.functions ?? []).map((f) => ({ ...f, fn: relQual(f) }));
       const peekViolations = evaluatePolicy({ ...peekPolicy, allow: [], forbid: [], only: [] },
-                                            doc.functions ?? [], {}, new Map(), new Set(), null, null);
+                                            peekEntries, {}, new Map(), netPartners, null, null);
       const deniedByFn = new Map();
       for (const v of peekViolations) {
         if (!deniedByFn.has(v.fn)) deniedByFn.set(v.fn, new Set());
         for (const e of v.effects ?? []) deniedByFn.get(v.fn).add(e);
       }
       for (const f of doc.functions ?? []) {
-        const hits = [...(deniedByFn.get(f.fn) ?? [])].sort();
+        const hits = [...(deniedByFn.get(relQual(f)) ?? [])].sort();
         if (!hits.length) continue;
         // NAME IT FROM THE PROJECT, NOT FROM THE CHILD'S TEMP ROOT. The child's tsconfig lives in a
         // temp directory, so it derives module qualifiers from THAT root and the fn came out as a

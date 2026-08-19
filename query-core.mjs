@@ -585,7 +585,12 @@ export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing
  *  gate raises, which is what keeps the advisory verbs bound to it. */
 export function reportOutOfScope(prefix) {
   const out = [];
-  for (const f of reportFilesAt(prefix)) {
+  // ACCEPT A FULL PATH AS WELL AS A PREFIX. `reportFilesAt` appends `.json`, so a locator that already
+  // ends in `.json` — which is exactly what `--report <file>` gives — expanded to nothing and this
+  // returned `[]`. The hedge then never fired and `unverified --strict` certified a report the gate
+  // refuses. `loadGateReport` tolerates both spellings, so the two disagreed about the same locator.
+  const files = (prefix.endsWith(".json") && fs.existsSync(prefix)) ? [prefix] : reportFilesAt(prefix);
+  for (const f of files) {
     try {
       const d = JSON.parse(fs.readFileSync(f, "utf8"));
       if (Array.isArray(d?.outOfScope)) out.push(...d.outOfScope.filter((e) => e && typeof e === "object"));
