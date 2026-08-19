@@ -13,6 +13,11 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # A deadline. With no `timeout-minutes` GitHub's 6-hour default applies, so a stuck runner
+    # blocks the release gate (release-preflight [10] reads CI green on HEAD) while looking
+    # exactly like a slow job — measured twice on 2026-08-19, at 3h45m and 54m. Gated by
+    # release-preflight [7b], which asks every workflow in every released repo.
+    timeout-minutes: 20
     permissions:
       id-token: write   # OIDC — this is what authenticates the publish; no secret is stored
       contents: read
