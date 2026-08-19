@@ -557,10 +557,16 @@ export function reportCompleteness(prefix) {
   // want different repairs and because `judgedNothing` is PINNED to "reports declaring `analyzed.count:
   // 0`", which a row-3 report is not.
   return { unanalyzed: reportUnanalyzed(prefix), judgedNothing: reportJudgedNothingFiles(prefix),
-           noManifest: reportNoManifestFiles(prefix), unreadable: reportUnreadableFiles(prefix),
+           noManifest: reportNoManifestFiles(prefix),
            // ⟨0.30⟩ the peek's findings, so an advisory verb keying `--strict` on this object is at least
            // as pessimistic as the gate over the same bytes (the ⟨0.24⟩ MUST).
-           outOfScope: reportOutOfScope(prefix) };
+           ...(() => {
+             const o = reportOutOfScope(prefix);
+             // A corrupt key rides `unreadable`, which is ALREADY an arm of the strict exit — so the
+             // fail-closed path is the one the ⟨0.24⟩ rule established, not a new one beside it.
+             return { outOfScope: o.findings,
+                      unreadable: [...reportUnreadableFiles(prefix), ...o.corrupt] };
+           })() };
 }
 
 /**
@@ -590,13 +596,24 @@ export function reportOutOfScope(prefix) {
   // returned `[]`. The hedge then never fired and `unverified --strict` certified a report the gate
   // refuses. `loadGateReport` tolerates both spellings, so the two disagreed about the same locator.
   const files = (prefix.endsWith(".json") && fs.existsSync(prefix)) ? [prefix] : reportFilesAt(prefix);
+  const corrupt = [];
   for (const f of files) {
     try {
       const d = JSON.parse(fs.readFileSync(f, "utf8"));
-      if (Array.isArray(d?.outOfScope)) out.push(...d.outOfScope.filter((e) => e && typeof e === "object"));
-    } catch { /* unreadable/corrupt is `unreadable`'s business, not this key's */ }
+      // PRESENT-BUT-NOT-A-LIST IS CORRUPT, and it must reach the ADVISORY verbs too. Read leniently here,
+      // the key vanished and `--strict` certified a report `gate --report` refuses at exit 2 — the ⟨0.24⟩
+      // relation broken one shape over from where it was closed. The gate already refuses this; an
+      // advisory verb that does not is LESS pessimistic than the gate over the same bytes.
+      if (d?.outOfScope !== undefined && !Array.isArray(d.outOfScope)) { corrupt.push(f); continue; }
+      if (Array.isArray(d?.outOfScope)) {
+        for (const e of d.outOfScope) {
+          if (e && typeof e === "object") out.push(e);
+          else { corrupt.push(f); break; }
+        }
+      }
+    } catch { /* unparseable TEXT is `unreadable`'s business, not this key's */ }
   }
-  return out;
+  return { findings: out, corrupt };
 }
 
 /**
