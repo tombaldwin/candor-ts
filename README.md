@@ -210,7 +210,7 @@ read the Rust source".
 
 ## Status
 
-0.28.0, speaking candor-spec 0.30: the analysis core, the gate (`--policy` / `--gate-json` /
+0.30.0, speaking candor-spec 0.30: the analysis core, the gate (`--policy` / `--gate-json` /
 `.candor/config`), the full §3.1 query surface (including `containment`, `blindspots`, the
 `--include-unknown` dispatch frontier, and ⟨0.24⟩ `gate --report` — the gate applied to an EXISTING
 report, byte-equivalent to `scan --policy`'s verdict), the MCP server, the LSP server, and the watch loop are

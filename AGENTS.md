@@ -292,3 +292,12 @@ far as candor could see, but it could not see through these" (a LOWER bound), no
 dependency can opt out of that blind spot by declaring `"candorEffects": ["Net", …]` in its
 `package.json` (the §5.1 effect manifest, read declared-not-verified) — its calls then classify to
 the declared set instead of contributing nothing.
+
+- **⟨0.30⟩ A GREEN GATE CAN NOW EXIT 2 — read `outOfScope` before you trust a pass.** When a policy is
+  configured, candor also reads the files the scan EXCLUDED (test files, build scripts, archives under the
+  root, files outside the build's program) and reports any that perform an effect the policy DENIES, under
+  the report's `outOfScope` key. A non-empty block makes the verdict `ok:false`, `incomplete:true`, exit 2
+  — *"I could not see enough of this tree to certify it"*, which is NOT the same as "your code violates":
+  those functions are never in `violations`, because the gate did not judge them. Branch on `incomplete`
+  to tell the two apart. An absent key means the producer was never asked (no policy at scan time), and an
+  empty one means asked-and-clear.
