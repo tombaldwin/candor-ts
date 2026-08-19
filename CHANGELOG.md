@@ -10,6 +10,13 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [0.30.0] — 2026-08-19
 
+- **Two published bins crashed on startup, and had since 0.29.0.** `candor-ts-sensitivity` and
+  `candor-ts-transitive-recall` are declared bins and were in the published `files`, but the
+  `scratch.mjs` they both import was NOT — so `npm i -g candor-ts` installed two commands that died
+  with `ERR_MODULE_NOT_FOUND`. Verified by executing every declared bin out of a real `npm pack`
+  tarball with dependencies installed; all eight now run. Found in a pre-publish audit, one release
+  after the import landed.
+
 - **Spec floor 0.30.** The declaration this build emits as `candor.spec` moves with the family; see
   candor-spec's changelog for the rung.
 

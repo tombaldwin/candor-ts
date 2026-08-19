@@ -66,6 +66,7 @@
     "verify-emit.mjs",
     "verify-loader.mjs",
     "verify-syscall.mjs",
+    "scratch.mjs",
     "sensitivity.mjs",
     "transitive-recall.mjs"
   ],
