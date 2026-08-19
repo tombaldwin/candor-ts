@@ -8,6 +8,9 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **Spec floor 0.30.** The declaration this build emits as `candor.spec` moves with the family; see
+  candor-spec's changelog for the rung.
+
 ### ⚠ ⟨0.30⟩ VERDICT-AFFECTING — a gate that was GREEN can now exit 2
 
 **What changed.** When a policy is configured, candor "peeks": it reads the files the scan itself
