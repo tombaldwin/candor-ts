@@ -6800,8 +6800,9 @@ if (policyPath && excludedFiles.length) {
         outOfScopeFindings.push({
           fn: f.fn.split(".").pop() ?? f.fn, path: where, effects: hits, class: cls,
           reason: `OUTSIDE this scan's scope (${cls}) — the gate did NOT judge it. `
-                + "The effect is real, and the verdict is INCOMPLETE because of it — the gate did not "
-                + "judge this unit, so it cannot certify the tree.",
+                + "candor's ANALYSIS of that file reaches this effect; the gate did not judge it, so "
+                + "the verdict is INCOMPLETE rather than a pass. (An analysis result, not a claim about "
+                + "what the code does at runtime — see the release notes' known over-charge.)",
         });
       }
       outOfScopeFindings.sort((a, b) => (a.path + a.fn).localeCompare(b.path + b.fn));
