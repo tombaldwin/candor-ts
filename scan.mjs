@@ -6769,7 +6769,8 @@ if (policyPath && excludedFiles.length) {
         outOfScopeFindings.push({
           fn: f.fn.split(".").pop() ?? f.fn, path: where, effects: hits, class: cls,
           reason: `OUTSIDE this scan's scope (${cls}) — the gate did NOT judge it. `
-                + "The effect is real; the verdict does not account for it.",
+                + "The effect is real, and the verdict is INCOMPLETE because of it — the gate did not "
+                + "judge this unit, so it cannot certify the tree.",
         });
       }
       outOfScopeFindings.sort((a, b) => (a.path + a.fn).localeCompare(b.path + b.fn));
@@ -6793,7 +6794,7 @@ if (outOfScopeFindings) {
     if (f.path) console.error(`             ${f.path}`);
   }
   if (outOfScopeFindings.length) {
-    console.error("             The verdict does not account for "
+    console.error("             The verdict below is INCOMPLETE because of "
       + (outOfScopeFindings.length === 1 ? "it." : `these ${outOfScopeFindings.length}.`));
   }
 }
