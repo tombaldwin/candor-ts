@@ -8,6 +8,53 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+### ⚠ ⟨0.30⟩ VERDICT-AFFECTING — a gate that was GREEN can now exit 2
+
+**What changed.** When a policy is configured, candor "peeks": it reads the files the scan itself
+excluded (test files, build scripts, archives under the root, files outside the build's program) and
+reports any that perform an effect the policy DENIES. Until now that block was disclosure only — ⟨0.29⟩
+required the exit code to stay exactly what it would have been without it. **It no longer does.** A
+non-empty `outOfScope` now makes the verdict `ok: false`, `incomplete: true`, **exit 2**.
+
+**Why.** The ⟨0.29⟩ rule assumed the peek surfaces UNCERTAINTY, which a gate may reasonably decline to
+act on. Measured on published 0.29.1, it does not: it resolves a CONCRETE denied effect and names the
+function. Under `deny Net`, `axios` had **37 functions the engine had concluded perform Net** — printed,
+per function — and still exited 0 with `policy ✓`. (`axios` ships 5 real `.ts` files, every one a type
+test, against 160 `.js` implementation files.) Also measured: `node-fetch` 15, `ky` 9, `execa` 9, `zx` 3,
+`ofetch` 1. An engine that concludes a function performs the denied effect, prints that conclusion, and
+then certifies the tree is committing the cardinal sin holding its own evidence.
+
+**Exit 2, not exit 1.** These functions are never reported as `violations` and never appear in
+`functions`: the gate did not JUDGE them, so claiming a violation would be false in the other direction.
+Exit 2 says *I could not see enough of this tree to answer*, reusing the `{ok:false, incomplete:true}`
+vocabulary ⟨0.21⟩ already defines. A real violation (exit 1) still dominates.
+
+**What does NOT change.** The block is bounded to effects your policy DENIES, so the trigger is never
+"you excluded something" but "you excluded something that does the thing you forbade". Across 27 real
+packages this flips 6 and leaves 14 green — every one of those with an empty peek, because the scan read
+them in full. A present-and-empty `outOfScope` stays exit 0. A report produced with NO policy has no
+`outOfScope` key at all, and gating it stays exit 0, so pre-⟨0.30⟩ reports are unaffected on contact.
+
+**If this turns your gate red.** Read the `⚠` lines: each names a function, its file, and the effect.
+Either bring those files into the scan (so the gate judges them properly) or address the effect. The
+verdict document carries the same list under `outOfScope` for machine consumers.
+
+### Fixed — found by an adversarial review of the rung above, before release
+
+- **A corrupt `outOfScope` key failed OPEN.** A present-but-malformed key was coerced to nothing, so
+  `gate --report` answered exit 0 / `ok: true` over a report whose peek had resolved a denied effect —
+  the exact fail-open coercion the strict read exists to prevent. It now refuses (exit 2), naming the key.
+- **The peek used the GATE'S OWN matcher.** It had flattened the policy into a set of effect NAMES,
+  which discards `Net[known-partner]`-style destination classes and rule scopes, and reads `pure` — a
+  deny rule with an empty effect list meaning *every effect except Unknown* — as denying NOTHING. So the
+  strictest policy silently disarmed the rung (exit 0 where `deny Exec` exits 2 on the same tree), while
+  a class-filtered rule fired on hosts it does not deny. Both directions are gone.
+- **`unverified --strict` and `fix-gate --strict` follow the gate.** They answered clean at exit 0 over a
+  report `gate --report` refuses at 2, which breaks the standing rule that an advisory verb must never be
+  less sensitive to incompleteness than the gate over the same bytes.
+- **The finding text no longer contradicts the verdict** — it said "the verdict does not account for it"
+  directly above the line saying the verdict is incomplete because of it.
+
 ## [0.29.1] — 2026-08-18
 
 - **⚠ VERDICT-AFFECTING, AND IT FLIPS A PINNED ROW: module resolution is `Fs`.** `require.resolve(m)`,
