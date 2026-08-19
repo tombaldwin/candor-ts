@@ -557,7 +557,10 @@ export function reportCompleteness(prefix) {
   // want different repairs and because `judgedNothing` is PINNED to "reports declaring `analyzed.count:
   // 0`", which a row-3 report is not.
   return { unanalyzed: reportUnanalyzed(prefix), judgedNothing: reportJudgedNothingFiles(prefix),
-           noManifest: reportNoManifestFiles(prefix), unreadable: reportUnreadableFiles(prefix) };
+           noManifest: reportNoManifestFiles(prefix), unreadable: reportUnreadableFiles(prefix),
+           // ⟨0.30⟩ the peek's findings, so an advisory verb keying `--strict` on this object is at least
+           // as pessimistic as the gate over the same bytes (the ⟨0.24⟩ MUST).
+           outOfScope: reportOutOfScope(prefix) };
 }
 
 /**
@@ -574,7 +577,22 @@ export function reportCompleteness(prefix) {
  * exit code; see `advisoryAnswer`, whose exit-bearing callers key `--strict` on manifest + unreadable.
  */
 export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing?.length
-                                         || c.noManifest?.length || c.unreadable?.length));
+                                         || c.noManifest?.length || c.unreadable?.length
+                                         || c.outOfScope?.length));
+
+/** ⟨0.30⟩ The peek's findings across the reports under a locator. Read leniently HERE (a malformed key is
+ *  the gate's refusal to make, and this feeds a disclosure) but non-emptiness raises the same hedge the
+ *  gate raises, which is what keeps the advisory verbs bound to it. */
+export function reportOutOfScope(prefix) {
+  const out = [];
+  for (const f of reportFilesAt(prefix)) {
+    try {
+      const d = JSON.parse(fs.readFileSync(f, "utf8"));
+      if (Array.isArray(d?.outOfScope)) out.push(...d.outOfScope.filter((e) => e && typeof e === "object"));
+    } catch { /* unreadable/corrupt is `unreadable`'s business, not this key's */ }
+  }
+  return out;
+}
 
 /**
  * ⟨0.28⟩ The disclosure KEYS, defined ONCE, for spreading into a verb's answer document — `{}` when there
@@ -806,7 +824,14 @@ export function loadGateReport(prefix) {
     // trigger the ⟨0.30⟩ verdict. Only well-formed entries count — a malformed one is corrupt input, and
     // silently dropping it is how a fail-closed rung turns back into a green one.
     const oos = parsed.outOfScope;
-    if (Array.isArray(oos))
+    // PRESENT-BUT-NOT-A-LIST IS CORRUPT, NOT ABSENT. This had no `else` on the Array.isArray guard, so
+    // `"outOfScope": "oops"` was silently coerced to nothing and `gate --report` answered exit 0,
+    // `ok:true`, "no violations" over a report whose peek had found a denied effect — the exact
+    // fail-open coercion the strict read exists to prevent, in the commit that claims to prevent it.
+    // rust, java and swift all refuse this shape; only this route did not. (Found by review, MEASURED.)
+    if (oos !== undefined && !Array.isArray(oos))
+      corrupt.push(`${f}: \`outOfScope\` is present and is not a list`);
+    else if (Array.isArray(oos))
       for (const e of oos)
         if (e && typeof e === "object" && Array.isArray(e.effects) && e.effects.length)
           outOfScope.push(e);

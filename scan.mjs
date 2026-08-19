@@ -6678,7 +6678,11 @@ let peekRead = false;
 const peekUnread = new Set();
 let peekUnattributed = false;
 if (policyPath && excludedFiles.length) {
-  let denied = new Set();
+  // ⟨0.30⟩ HOISTED, because the matcher below needs it. It was a `const` inside the try, so the
+  // evaluatePolicy call added in this rung threw ReferenceError straight into the "a peek that cannot
+  // run must not fail the gate" catch — findings silently empty, gate green. The catch is right; a bug
+  // hiding behind it is not, which is why the trigger below is now a POSITIVE test on the rules.
+  let peekPolicy = null;
   try {
     const pol = parsePolicy(fs.readFileSync(policyPath, "utf8"), {});
     // ⟨0.29⟩ A REFUSED POLICY LEAVES THE KEY ABSENT (SPEC §2). The peek is a producer reading the policy,
@@ -6687,10 +6691,14 @@ if (policyPath && excludedFiles.length) {
     // parser's SALVAGE of an unhonourable file — the rewriting `fatalPolicyErrors` exists to refuse.
     // candor-java already withheld here; this engine, candor-rust and candor-swift did not.
     if (!fatalPolicyErrors(pol.errors).length) {
-      denied = new Set((pol.deny ?? []).flatMap((r) => r.effects ?? []));
+      peekPolicy = pol;
     }
   } catch { /* an unreadable policy is the gate's business to refuse, not the peek's */ }
-  if (denied.size) {
+  // ⟨0.30⟩ THE TRIGGER IS "ARE THERE DENY RULES", not "is the flattened effect-name set non-empty". The
+  // old test read the name set, and `pure` is a deny rule with an EMPTY effect list meaning "every effect
+  // except Unknown" — so under the STRICTEST policy the set was empty, the peek never ran, and the tree
+  // passed at exit 0 while the strictly weaker `deny Exec` exited 2 on the same files. MEASURED four-way.
+  if ((peekPolicy?.deny ?? []).length) {
     outOfScopeFindings = [];
     const peekDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-peek-"));
     try {
@@ -6721,8 +6729,32 @@ if (policyPath && excludedFiles.length) {
         // all of them claiming completeness.
         if (hit) peekUnread.add(hit.cls); else peekUnattributed = true;
       }
+      // ⟨0.30⟩ THE PEEK ASKS THE GATE'S OWN MATCHER, not a flat set of effect NAMES. §6.2 already
+      // requires it — "THE GATE AND THE DISCLOSURE MUST APPLY THE SAME RULE, AND SHOULD SHARE THE SAME
+      // CODE" — and the name-set approximation was wrong in BOTH directions once ⟨0.30⟩ made this
+      // verdict-bearing (both MEASURED four-way in review):
+      //
+      //   OVER-CHARGE: `deny Net[known-partner]` denies only that destination class, but the name set
+      //   held bare "Net", so a peeked fn fetching an UNKNOWN host — which the rule does not deny —
+      //   turned the verdict red, while the identical code IN scope passed. Rule SCOPES were dropped the
+      //   same way: a layer-scoped `deny Exec server` fired on a test file the scope excludes.
+      //
+      //   UNDER-REPORT: `pure` is a deny rule with an EMPTY effect list, meaning "every effect except
+      //   Unknown". Flattened, it contributed NOTHING, so the denied set was empty and the peek never
+      //   ran — the STRICTEST policy silently disarmed the rung while the strictly weaker `deny Exec`
+      //   exited 2 on the identical tree. A four-way false all-clear.
+      //
+      // Only the DENY rules are handed over: ⟨0.29⟩ bounds this block to "effects that policy DENIES",
+      // and evaluating `allow`/`forbid`/`only` here would widen it past the bound that keeps it quiet.
+      const peekViolations = evaluatePolicy({ ...peekPolicy, allow: [], forbid: [], only: [] },
+                                            doc.functions ?? [], {}, new Map(), new Set(), null, null);
+      const deniedByFn = new Map();
+      for (const v of peekViolations) {
+        if (!deniedByFn.has(v.fn)) deniedByFn.set(v.fn, new Set());
+        for (const e of v.effects ?? []) deniedByFn.get(v.fn).add(e);
+      }
       for (const f of doc.functions ?? []) {
-        const hits = (f.inferred ?? []).filter((e) => denied.has(e));
+        const hits = [...(deniedByFn.get(f.fn) ?? [])].sort();
         if (!hits.length) continue;
         // NAME IT FROM THE PROJECT, NOT FROM THE CHILD'S TEMP ROOT. The child's tsconfig lives in a
         // temp directory, so it derives module qualifiers from THAT root and the fn came out as a

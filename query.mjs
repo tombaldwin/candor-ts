@@ -1852,7 +1852,12 @@ switch (cmd) {
     // --report` REFUSES over a corrupt member — measured, exit 2 — so exiting 0/1 here claimed this verb
     // got FURTHER than the gate on identical bytes. The unreadable note above already SAID the exit was
     // bounded by the gate's while this line did not read the field — a documented limitation, unmeasured.
-    process.exit(fgUnan.length || fgComp.unreadable.length || fgr.unevaluated?.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
+    // ⟨0.30⟩ …and the peek's findings, because ⟨0.24⟩ binds this verb to the GATE's pessimism: "AN
+    // ADVISORY VERB MUST NEVER BE LESS SENSITIVE TO INCOMPLETENESS THAN THE GATE OVER THE SAME BYTES",
+    // and "THE SAME RULE BINDS EVERY ADVISORY VERB THAT ANSWERS `ok` — `unverified`, `fix-gate`, and any
+    // later sibling". ⟨0.30⟩ moved the gate to exit 2 on this cause and left these verbs certifying:
+    // MEASURED, `gate --report` exited 2 while this printed a clean answer at exit 0 over the same bytes.
+    process.exit(fgUnan.length || fgComp.unreadable.length || fgComp.outOfScope?.length || fgr.unevaluated?.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
     break; // unreachable
   }
   case "unverified": {
@@ -1917,7 +1922,8 @@ switch (cmd) {
     // ⟨0.28⟩ `unreadable` joins the `--strict` exit-2 trigger — see fix-gate above. Measured on this verb
     // before the fix: over one good report plus one unparsable sibling, `gate --report` exited 2 and
     // `unverified --strict` exited 0 — and `--strict` is how CI consumes it.
-    process.exit(uUnan.length || uComp.unreadable.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
+    // ⟨0.30⟩ the peek's findings too — see the fix-gate exit above for the ⟨0.24⟩ MUST this satisfies.
+    process.exit(uUnan.length || uComp.unreadable.length || uComp.outOfScope?.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
     break; // unreachable
   }
   case "gate": {
