@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.30.0] — 2026-08-19
+
 - **Spec floor 0.30.** The declaration this build emits as `candor.spec` moves with the family; see
   candor-spec's changelog for the rung.
 
