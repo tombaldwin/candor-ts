@@ -6914,6 +6914,25 @@ if (policyPath && excludedFiles.length) {
     }
   }
 }
+// ⟨0.30⟩ NOTHING ANALYZABLE, AND THE PEEK FOUND NOTHING EITHER: REFUSE — AND REFUSE BEFORE AN ENVELOPE
+// EXISTS. The peek above is the whole reason this run got past the early refusal; if it named something,
+// the ⟨0.30⟩ arm at the end reports it and exits 2 with `outOfScope` IN the report, so `gate --report` over
+// that report reaches the same 2 and §3.1 holds. If it named nothing there is nothing to report, and the
+// run must go back to being a refusal.
+//
+// WHY HERE AND NOT AT THE END, measured: the first version of this change let the clean case fall through
+// to a normal ending and exit 2 from an arm after the verdict was written — so the process exited 2 while
+// `--gate-json` said `ok: true`, and `gate --report` over the report it left behind exited 0. The exit code
+// was right and the DOCUMENT was green; a SARIF consumer reads the document. §3.1's byte-equality is
+// quantified over "any report a scan produced", so the only safe refusal is one that produces no report at
+// all — once an envelope exists, the scan route owns the gate route's answer.
+if (NO_SOURCES && !(Array.isArray(outOfScopeFindings) && outOfScopeFindings.length)) {
+  console.error(`candor-ts: gate NOT certified — no analyzable TypeScript source under ${target}, and the `
+    + `files this scan excluded perform no effect this policy denies; a gate cannot be green over a tree `
+    + `it did not read`);
+  refuseEarlyToStream(`no analyzable TypeScript source under ${target}`);
+  process.exit(2);
+}
 if (outOfScopeFindings) {
   envelope.outOfScope = outOfScopeFindings;
   // SAY IT ON STDERR TOO. The report block is for machines; an operator reading `policy ✓` needs to know
@@ -7619,16 +7638,6 @@ if (gateConfigured && Array.isArray(outOfScopeFindings) && outOfScopeFindings.le
   console.error(`candor-ts: gate NOT certified — ${n} function(s) OUTSIDE this scan's scope perform an `
     + `effect this policy denies (named above); the gate did not judge them, so the verdict is `
     + `incomplete rather than a pass`);
-  process.exit(2);
-}
-// ⟨0.30⟩ THE THIRD EXIT-2 CAUSE ON THIS PATH: nothing analyzable was read at all. Reached only when the
-// refusal above deliberately fell through to run the peek, so the findings are named ABOVE this line and
-// this is the backstop that keeps the verdict where it was. Ordered after the two arms above so their
-// more specific messages win, and after the violation exit so a certain violation still dominates.
-// Without it, a tree with zero analyzed files and a clean excluded sibling printed `policy ✓` at exit 0.
-if (NO_SOURCES) {
-  console.error(`candor-ts: gate NOT certified — no analyzable TypeScript source under ${target}; a gate `
-    + `cannot be green over a tree it did not read`);
   process.exit(2);
 }
 if (policyPath !== null) console.error("candor-ts: policy ✓");

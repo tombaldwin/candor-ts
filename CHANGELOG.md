@@ -8,6 +8,17 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **A refusal produces no report — fixing a document/exit disagreement introduced by the entry below.**
+  The no-sources fix let the clean case fall through to a normal ending and exit 2 from an arm *after* the
+  verdict was written: the process exited 2 while `--gate-json` said `ok: true`, and `gate --report` over
+  the report it left behind answered 0. Exit code right, document green, and a machine consumer reads the
+  document. §3.1's byte-equality is quantified over *"any report a scan produced"*, so the only safe
+  refusal is one that produces no report at all — once an envelope exists the scan route owns the gate
+  route's answer over it. The refusal now happens straight after the peek, before any envelope: a peek
+  that names something reports it (`ok:false, incomplete:true`, and `gate --report` reaches the same 2), a
+  peek that names nothing refuses (`ok:false, refused:true`, no report). Found by two independent
+  reviewers on the published-artifact review, and pinned four-way by conformance PART 56.
+
 - **⚠ R54 — an fd/stream write reached through a helper is no longer charged `Net`.** `process.stdout` is
   typed `tty.WriteStream`, which EXTENDS `net.Socket`, so `.write` resolved into the net cluster's typings
   and the whole-module Net rule painted it. The carve-out matched the receiver's TEXT
