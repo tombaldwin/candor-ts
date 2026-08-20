@@ -1397,12 +1397,34 @@ const EXCLUDED_REASON = {
     + "analyzed — a file your build excludes may still run in CI or at install time",
   "not-a-parsed-source": "not in this run's parse set",
 };
-if (fileNames.length === 0) {
+// ⟨0.30⟩ NO ANALYZABLE SOURCE IS STILL A REASON TO LOOK AT WHAT WAS EXCLUDED.
+//
+// This refusal used to exit here, before the peek existed in the run at all. Measured on the PUBLISHED
+// 0.30.0: a declarations-only package whose `.js` performs the denied effect answered `no TypeScript
+// sources`, exit 2, and named NOTHING — while candor-rust, over the analogous shape (no `.rs` sources, a
+// `build.rs` running `curl`), reached its peek and named `build::main performs Exec`. Both fail closed,
+// so no gate went green; but naming the function IS this rung's premise, and whether a user got names
+// turned on where a package happens to keep its declarations — `axios` ships `index.d.ts` at the root and
+// got 13 findings, `ky` ships them under `distribution/` and got a bare refusal.
+//
+// So: when a policy is configured and there IS something excluded to look at, the run continues to the
+// peek and the findings are named. The refusal itself does not move — see the NO_SOURCES arm beside the
+// other exit-2 causes at the end of this file. THAT ORDER IS THE WHOLE CARE POINT: the first version of
+// this change let the run fall through to a normal ending, and a clean-sibling tree — zero files
+// analyzed, nothing wrong in the excluded `.js` — answered `policy ✓` at EXIT 0. A green over a tree the
+// engine never read is the cardinal sin, introduced by a disclosure fix, and it was caught by writing
+// that control fixture BEFORE the fix rather than after.
+const NO_SOURCES = fileNames.length === 0;
+if (NO_SOURCES && !(policyPath && excludedFiles.length)) {
   console.error(`candor-ts: no TypeScript sources under ${target}`);
   // An empty scan is an exit-2 cause like any other: a consumer reading the stream after it must not
   // get nothing. §3.1 exempts no cause, and this one is easy to hit in CI (a path that moved).
   refuseEarlyToStream(`no TypeScript sources under ${target}`);
   process.exit(2);
+}
+if (NO_SOURCES) {
+  console.error(`candor-ts: no TypeScript sources under ${target} — reading what this scan excluded, `
+    + `because a policy is configured and there are excluded files to look at`);
 }
 // Builtin typings FALLBACK: the engine ships @types/node as its own dependency, so a target that
 // hasn't installed it still resolves node:fs/node:net/… (found by the first npx-distribution
@@ -7521,6 +7543,16 @@ if (gateConfigured && Array.isArray(outOfScopeFindings) && outOfScopeFindings.le
   console.error(`candor-ts: gate NOT certified — ${n} function(s) OUTSIDE this scan's scope perform an `
     + `effect this policy denies (named above); the gate did not judge them, so the verdict is `
     + `incomplete rather than a pass`);
+  process.exit(2);
+}
+// ⟨0.30⟩ THE THIRD EXIT-2 CAUSE ON THIS PATH: nothing analyzable was read at all. Reached only when the
+// refusal above deliberately fell through to run the peek, so the findings are named ABOVE this line and
+// this is the backstop that keeps the verdict where it was. Ordered after the two arms above so their
+// more specific messages win, and after the violation exit so a certain violation still dominates.
+// Without it, a tree with zero analyzed files and a clean excluded sibling printed `policy ✓` at exit 0.
+if (NO_SOURCES) {
+  console.error(`candor-ts: gate NOT certified — no analyzable TypeScript source under ${target}; a gate `
+    + `cannot be green over a tree it did not read`);
   process.exit(2);
 }
 if (policyPath !== null) console.error("candor-ts: policy ✓");
