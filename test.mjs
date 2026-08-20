@@ -4268,6 +4268,43 @@ export function f(): string { return x(); }`,
         entry(r2.report, "src.u.f")?.inferred.includes("Unknown") && !("coverage" in r2.report),
         JSON.stringify({ keys: Object.keys(r2.report ?? {}), f: entry(r2.report, "src.u.f") }));
 }
+// ⟨0.31⟩ THE LOCATOR MUST NAME THE FILE THE FUNCTION IS ACTUALLY IN, even when two excluded files share
+// a basename. Both lookups here were `find(e => loc.endsWith(e.path) || loc.endsWith(basename(e.path)))`
+// — the `||` inside one `.find`, so a BASENAME match on an earlier entry beat a FULL PATH match on a
+// later one. MEASURED: with `src/one/dup.test.ts` and `src/two/dup.test.ts`, `fn_two` was disclosed at
+// `src/one/dup.test.ts`. Nothing is hidden by that — both functions are reported with the right effects
+// — but the report asserts a function is somewhere it is not, and an operator following the locator
+// finds a different function or none. candor-rust and candor-swift both name each function's own file.
+//
+// Same-basename files are not a corner: `index.ts`, `mod.ts` and `i.test.ts` repeat in every monorepo,
+// which is exactly where this was found.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", module: "ESNext", moduleResolution: "bundler",
+                         skipLibCheck: true, noEmit: true },
+      include: ["src/**/*.ts"],
+    }),
+    "src/ok.ts": `export function pure(a: number): number { return a + 1; }`,
+    "src/one/dup.test.ts": `import { readFileSync } from "node:fs";
+export function fnOne(): Buffer { return readFileSync("/tmp/one"); }`,
+    "src/two/dup.test.ts": `import { readFileSync } from "node:fs";
+export function fnTwo(): Buffer { return readFileSync("/tmp/two"); }`,
+    "fs.pol": "deny Fs\n",
+  });
+  const r = scan(d, "--policy", path.join(d, "fs.pol"));
+  const found = r.report?.outOfScope ?? [];
+  const at = (fn) => found.find((e) => e.fn === fn)?.path;
+  check("⟨0.31⟩ two excluded files sharing a basename are each named by their OWN path",
+        at("fnOne") === "src/one/dup.test.ts" && at("fnTwo") === "src/two/dup.test.ts",
+        JSON.stringify(found.map((e) => [e.fn, e.path])));
+  // …and not by reporting nothing, which would satisfy the row above while deleting the disclosure.
+  check("⟨0.31⟩ CONTROL: both functions are still disclosed",
+        found.length === 2 && found.every((e) => (e.effects ?? []).includes("Fs")),
+        JSON.stringify(found));
+}
+
+
 
 // ── ⟨0.30⟩ A PEEKED FUNCTION PERFORMING THE DENIED EFFECT MAKES THE VERDICT INCOMPLETE ───────────
 // ⟨0.29⟩ shipped the peek with NO engine-local coverage at all — its only pin was the cross-engine

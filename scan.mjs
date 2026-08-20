@@ -6896,10 +6896,46 @@ if (policyPath && excludedFiles.length) {
       //
       // The project-relative path is already known here — it is what this run disclosed as excluded — and
       // the finding below is already named from it. The MATCHER must see the same thing the FINDING does.
+      // ⟨0.31⟩ ONE LOOKUP, because this was written twice — once for the MATCHER's qualifier and once
+      // for the FINDING's path — and both copies carried the same defect.
+      //
+      // Both were `excludedFiles.find(e => childLoc.endsWith(e.path) || childLoc.endsWith(basename))`.
+      // The `||` sits INSIDE a single `.find`, so a BASENAME match on an earlier entry beats a FULL PATH
+      // match on a later one. MEASURED on a project with `src/one/dup.test.ts` and `src/two/dup.test.ts`:
+      // `fn_two` was disclosed at `src/one/dup.test.ts` — a locator naming a file the function is not in.
+      // An operator following it finds a different function, or none. candor-rust and candor-swift both
+      // name each function's own file here; this was ts alone.
+      //
+      // TWO PASSES, and the order is the fix. A full relative-path suffix match is unambiguous, so it is
+      // tried across EVERY entry first, longest match winning when one excluded path is a suffix of
+      // another. Only then the basename, and only when it names exactly ONE excluded file.
+      //
+      // WHEN IT IS STILL AMBIGUOUS, THIS RETURNS NOTHING, and the caller falls back to the child's own
+      // absolute temp path. That is deliberate: an ugly-but-true locator is a worse READ than a tidy
+      // project-relative one and a far better ANSWER than a false one. The basename fallback exists
+      // because the child scan runs under a temp-directory tsconfig (see the note above), so guessing
+      // here is guessing about someone else's filesystem.
+      const locateExcluded = (childLoc) => {
+        if (!childLoc) return null;
+        // LONGEST MATCH, and that is what makes a bare `endsWith` safe here rather than an oversight.
+        // `endsWith` does cross a segment boundary — `…/dup.test.ts` ends with `up.test.ts` — but the
+        // file being located is itself excluded, so its OWN project-relative path is in this list and is
+        // a suffix of `childLoc`. Any longer suffix would have to match further leading segments
+        // exactly, and these paths are unique, so the true entry always wins. A segment-boundary test
+        // was written here and removed again: no failing case could be constructed for it, and it can
+        // only ever REJECT a match that a leading `./` or a separator difference would otherwise make.
+        let best = null;
+        for (const e of excludedFiles) {
+          if (childLoc.endsWith(e.path) && (!best || e.path.length > best.path.length)) best = e;
+        }
+        if (best) return best;
+        const base = path.basename(childLoc);
+        const byBase = excludedFiles.filter((e) => path.basename(e.path) === base);
+        return byBase.length === 1 ? byBase[0] : null;
+      };
       const relQual = (f) => {
         const childLoc = (f.loc ?? "").split(":")[0] ?? "";
-        const hit = excludedFiles.find((e) => childLoc.endsWith(e.path)
-                                           || childLoc.endsWith(path.basename(e.path)));
+        const hit = locateExcluded(childLoc);
         if (!hit) return f.fn;
         const stem = hit.path.replace(/\.[cm]?[jt]sx?$/, "").split(path.sep).join(".");
         const leaf = f.fn.split(".").pop() ?? f.fn;
@@ -6922,8 +6958,7 @@ if (policyPath && excludedFiles.length) {
         // exists by the time anyone reads it. The project-relative path is already known here (it is
         // what was excluded), so match on basename and report the path we already trust.
         const childLoc = (f.loc ?? "").split(":")[0] ?? "";
-        const hit = excludedFiles.find((e) => childLoc.endsWith(e.path)
-                                           || childLoc.endsWith(path.basename(e.path)));
+        const hit = locateExcluded(childLoc);
         const where = hit?.path ?? childLoc;
         const cls = hit?.cls ?? "excluded";
         outOfScopeFindings.push({

@@ -8,6 +8,26 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ `outOfScope` named the wrong file when two excluded files shared a basename.** MEASURED with
+  `src/one/dup.test.ts` and `src/two/dup.test.ts`: `fn_two` was disclosed at `src/one/dup.test.ts`. The
+  lookup read `find(e => loc.endsWith(e.path) || loc.endsWith(basename(e.path)))` — the `||` inside a
+  single `.find`, so a basename match on an earlier entry beat a full-path match on a later one.
+
+  Nothing was hidden: both functions were reported, with the right effects and class. But the report
+  asserted a function was in a file it is not in, and an operator following that locator lands on a
+  different function or on nothing. candor-rust and candor-swift both name each function's own file here;
+  candor-java's locator is the jar, with the qualified name disambiguating.
+
+  Two passes now, and the order is the point: a full relative-path suffix match across every entry first
+  (longest wins), then the basename, and only when it names exactly one excluded file. If it is still
+  ambiguous the lookup returns nothing and the child's own absolute path is reported instead — an
+  ugly-but-true locator is a better answer than a tidy false one, and the basename fallback exists only
+  because the peek's child scan runs under a temp-directory tsconfig. The two copies of this lookup are
+  now one.
+
+  Same-basename files are not a corner case: `index.ts`, `mod.ts` and `i.test.ts` repeat in every
+  monorepo, which is where this was found.
+
 - **A refusal produces no report — fixing a document/exit disagreement introduced by the entry below.**
   The no-sources fix let the clean case fall through to a normal ending and exit 2 from an arm *after* the
   verdict was written: the process exited 2 while `--gate-json` said `ok: true`, and `gate --report` over
