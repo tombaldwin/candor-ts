@@ -45,7 +45,7 @@ const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 // literal stamped into the envelope's `spec` field, so the doc lines and the report can never drift.
 // Reused, never re-littered.
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
-const SPEC_VERSION = "0.30";
+const SPEC_VERSION = "0.31";
 
 // A TREE TOO DEEP TO WALK IS "COULD NOT EVALUATE" (exit 2), NEVER "FOUND A VIOLATION" (exit 1).
 //
