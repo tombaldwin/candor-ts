@@ -8,6 +8,37 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ A single-file target of a kind this engine cannot read was certified GREEN.** `candor-ts notes.txt
+  --policy p` printed `policy ✓` and exited 0 with `ok: true` over a file it never parsed — the compiler
+  dropped it silently and the "no sources" predicate never fired, because the name was in the list. rust,
+  java and swift all refuse the same input. That is the §3.3 ⟨0.31⟩ unevaluable-target cause answered
+  green by the release that introduces it: a typo'd path in CI that happens to name a file was a
+  permanent pass. The single-file branch now applies the same admission rule as the directory walk, which
+  is where that rule already lived.
+
+- **An excluded file this engine cannot READ no longer claims to have been peeked.** With a policy
+  denying `Fs`, a readable excluded file exits 2 and names the function; `chmod 000` on that one file and
+  the same tree exited 0 with `peeked: true` and an empty `outOfScope` — byte-identical to a clean peek,
+  with readability the only difference. The child's TypeScript program drops an unreadable file with no
+  diagnostic, so the existing accounting never saw it. The parent now checks the premise it is in a
+  position to check, and the class withdraws its completeness claim, which is what candor-rust already
+  answered on the same shape.
+
+- **`outOfScope` locators: the third copy of the lookup, and the reason suffix-matching was wrong.** A
+  previous entry said two copies became one; there were three, and the survivor drove class attribution
+  for `peeked` — worse in kind than a mislabelled locator. All three now share one resolver, and it
+  RESOLVES rather than matches: the peek child reports locations relative to its own temp root, so they
+  are resolved against that root and relativised back to the scan root. Suffix-matching was defeated by a
+  project directory named `app` holding both `x.test.ts` and `app/x.test.ts` — the root file's absolute
+  path genuinely ends with the nested file's relative path, on a segment boundary, and is the longer
+  match. Suffix and basename survive only as fallbacks, the basename one only when unambiguous.
+
+- **A refusal writes its reason to a `--gate-json` FILE sink.** Only stream sinks got it, so a run
+  refusing with `--gate-json g.json` left the arming stub — "the run failed, crashed or was killed" —
+  describing a deliberate refusal as a crash. It replaces only a document this run itself armed: writing
+  to the sink path directly bypassed ⟨0.28⟩'s guard that arming must never destroy the source it is
+  about to scan, which six ⟨0.28⟩ rows caught. Refusals now also name a remedy, per §3.3(d).
+
 ## [0.31.0] — 2026-08-20
 
 - **⚠ `outOfScope` named the wrong file when two excluded files shared a basename.** MEASURED with

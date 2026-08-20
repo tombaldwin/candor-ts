@@ -489,7 +489,30 @@ const failClosedReportDoc = (reason) => {
   const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/[\n\r]/g, " ");
   return `{\n "candor": {\n  "version": "candor-ts-${PKG_VERSION}",\n  "toolchain": "node-${process.versions.node}",\n  "spec": "${SPEC_VERSION}"\n },\n "functions": [],\n "analyzed": { "count": 0 },\n "unanalyzed": [\n  { "path": "<run>", "reason": "${esc(reason)}" }\n ]\n}`;
 };
-const refuseEarlyToStream = (why) => {
+// ⟨0.31⟩ The gate sink this run ARMED, and the ONLY path `refuseEarly` may overwrite.
+//
+// The first version of that helper wrote straight to `preGateSink`, which broke the ⟨0.28⟩ rule it sits
+// beside: a `--gate-json` naming a source file under the scan target is REFUSED and nothing is written
+// there, precisely so arming cannot destroy the source it is about to scan. Writing the refusal document
+// to the same path bypassed that guard and truncated the fixture's own source — six ⟨0.28⟩ rows caught
+// it. A refusal may replace this run's OWN placeholder; it may not write anywhere the arming declined to.
+let armedGateSink = null;
+const refuseEarly = (why) => {
+  // ⟨0.31⟩ A FILE `--gate-json` SINK GETS THE REASON TOO, and until now it did not: this only ever
+  // wrote to STREAM sinks, so a run refusing with `--gate-json g.json` left the ARMING STUB in place —
+  // "the gate did not complete — this document was written when the run STARTED and was never replaced
+  // … the run failed, crashed or was killed". That describes a crash. This run did none of those things;
+  // it deliberately refused, and it knows exactly why.
+  //
+  // ⟨0.24⟩ pins the refusal document's `reason` as a string NAMING THE CAUSE, and a false description is
+  // rated worse here than a missing one — an operator reading "crashed" goes looking for a crash. The
+  // stub is the right answer only while the run's fate is genuinely unknown; once it has decided to
+  // refuse, leaving the stub is a stale document, which is the thing this whole sink exists to prevent.
+  if (armedGateSink) {
+    try {
+      fs.writeFileSync(armedGateSink, JSON.stringify(refusalVerdict(SPEC_VERSION, why, null), null, 1) + "\n");
+    } catch { /* an unwritable sink is already refused elsewhere; never mask the real cause with this */ }
+  }
   if (preGateSink === "-") console.log(JSON.stringify(refusalVerdict(SPEC_VERSION, why, null), null, 1));
   else if (preWantJson && !reportStreamWritten) {
     // Skipped when stdout is already claimed by `--gate-json -` (the two-stream case is refused
@@ -770,7 +793,7 @@ const disarmUnwrittenOutReports = () => {
       console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as ${flag} ${other} — refusing `
         + `(exit 2). The verdict is armed before the policy is read, so this would overwrite your policy `
         + `and then gate on the wreckage. Nothing was written; give the verdict its own path.`);
-      refuseEarlyToStream(`--gate-json ${gate} names the same file as ${flag} ${other}`);
+      refuseEarly(`--gate-json ${gate} names the same file as ${flag} ${other}`);
       process.exit(2);
     }
   }
@@ -782,7 +805,7 @@ const disarmUnwrittenOutReports = () => {
       + `about to read and then scan the wreckage. A non-source sink under the target `
       + `(${path.join(targetContainmentRoot(preTarget) ?? ".", ".candor", "verdict.json")}, say) is the `
       + `recommended layout and stays permitted.`);
-    refuseEarlyToStream(`--gate-json ${gate} is a source file under the scan target ${preTarget}`);
+    refuseEarly(`--gate-json ${gate} is a source file under the scan target ${preTarget}`);
     process.exit(2);
   }
   // `.candor/config` is never a verdict sink, wherever it is. The per-input checks above can only name
@@ -795,13 +818,13 @@ const disarmUnwrittenOutReports = () => {
       console.error(`candor-ts: --gate-json ${gate} is a .candor/config — refusing (exit 2). The verdict `
         + `is armed before the config is read, so this would destroy the config that configures this `
         + `run. Nothing was written; give the verdict its own path.`);
-      refuseEarlyToStream(`--gate-json ${gate} is a .candor/config`);   // ⟨0.28⟩ report stream too
+      refuseEarly(`--gate-json ${gate} is a .candor/config`);   // ⟨0.28⟩ report stream too
       process.exit(2);
     }
   }
   if (gate && singleSink && sameArtifact(gate, process.env.CANDOR_CONFIG)) {
     console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as CANDOR_CONFIG — refusing (exit 2).`);
-    refuseEarlyToStream(`--gate-json ${gate} names the same file as CANDOR_CONFIG`);   // ⟨0.28⟩
+    refuseEarly(`--gate-json ${gate} names the same file as CANDOR_CONFIG`);   // ⟨0.28⟩
     process.exit(2);
   }
   // ⟨0.28⟩ A REPEATED `--gate-json` IS REFUSED, AND EVERY PATH NAMED GETS THE REFUSAL. Placed after the
@@ -856,7 +879,7 @@ const disarmUnwrittenOutReports = () => {
       if (bad) offending.add(g);
     }
     if (offending.size === distinct.length) {
-      refuseEarlyToStream(`every named --gate-json path collides with an input`);   // ⟨0.28⟩ report stream
+      refuseEarly(`every named --gate-json path collides with an input`);   // ⟨0.28⟩ report stream
       process.exit(2);
     }
   }
@@ -878,7 +901,7 @@ const disarmUnwrittenOutReports = () => {
     // (its verdict arm keys on `preGateSink === "-"` and doesn't know one was just printed). When `-`
     // isn't in the list, refuseEarlyToStream's report arm handles the `--json` case; when it is, the
     // verdict is already there and `--json` was refused earlier (line 333), so nothing more is owed.
-    if (!distinct.includes("-")) refuseEarlyToStream(`--gate-json was given more than once (${list})`);
+    if (!distinct.includes("-")) refuseEarly(`--gate-json was given more than once (${list})`);
     process.exit(2);
   }
   if (gate && gate !== "-") armGateJsonFailClosed(gate);
@@ -932,7 +955,7 @@ const disarmUnwrittenOutReports = () => {
       const inputs = runInputs(preTarget, policy);
       for (const p of namedOuts) armOutPrefixFailClosed(p, inputs);
     }
-    refuseEarlyToStream(`--out was given more than once (${list}) — a run writes one report set to one prefix`);
+    refuseEarly(`--out was given more than once (${list}) — a run writes one report set to one prefix`);
     process.exit(2);
   }
   if (preOut && !preWantJson) armOutPrefixFailClosed(preOut, runInputs(preTarget, policy));
@@ -957,7 +980,7 @@ for (let i = 0; i < argv.length; i++) {
     const v = argv[i + 1];
     if (v === undefined || v.startsWith("--")) {
       console.error(`candor-ts: ${a} requires a value (${usage})`);
-      refuseEarlyToStream(`${a} requires a value`);
+      refuseEarly(`${a} requires a value`);
       process.exit(2);
     }
     if (a === "--out") outPrefix = v; else if (a === "--policy") policyPath = v; else gateJsonPath = v;
@@ -971,21 +994,21 @@ for (let i = 0; i < argv.length; i++) {
     console.error(`candor-ts: unknown flag ${a} (${usage})`);
     // ⟨0.27⟩ §3.3 names an unknown flag as a broken-gate-config exit-2 cause; the stream sink gets the
     // refusal document too (see refuseEarlyToStream — the file sink is already armed).
-    refuseEarlyToStream(`unknown flag ${a}`);
+    refuseEarly(`unknown flag ${a}`);
     process.exit(2);
   }
   else if (target === null) target = a;
   else if (outPrefix === null) outPrefix = a; // legacy positional prefix
   else {
     console.error(`candor-ts: unexpected extra argument ${a} (${usage})`);
-    refuseEarlyToStream(`unexpected extra argument ${a}`);
+    refuseEarly(`unexpected extra argument ${a}`);
     process.exit(2);
   }
 }
 if (wantAgents) { printAgents(); process.exit(0); }
 if (target === null) {
   console.error(usage);
-  refuseEarlyToStream("no scan target");
+  refuseEarly("no scan target");
   process.exit(2);
 }
 
@@ -1092,7 +1115,7 @@ function enforceEnginePin(targetPath) {
   // duplicate put TWO documents on the stream — which parses as neither. The other branch (a build that
   // cannot determine its own release) RETURNS rather than exiting: disclosed, not scored, so no refusal
   // belongs there.
-  refuseEarlyToStream(`.candor/config pins engine ${pin}, which this build does not satisfy`);
+  refuseEarly(`.candor/config pins engine ${pin}, which this build does not satisfy`);
   process.exit(2);
 }
 
@@ -1136,7 +1159,7 @@ function loadCandorConfig(targetPath, { lenient = false } = {}) {
       // The config is the EARLIEST exit-2 cause, and the one the stream sink is least likely to be
       // armed for — which is exactly why it was the last one still leaving stdout empty. Found by
       // PART 36 (b11), a row written before this line was.
-      refuseEarlyToStream(`CANDOR_CONFIG set but ${file} is not a readable file`);
+      refuseEarly(`CANDOR_CONFIG set but ${file} is not a readable file`);
       process.exit(2);
     }
   } else {
@@ -1148,7 +1171,7 @@ function loadCandorConfig(targetPath, { lenient = false } = {}) {
   catch (e) {
     if (lenient) throw new Error(`config ${file} exists but could not be read (${e.message})`);
     console.error(`candor-ts: config ${file} exists but could not be read (${e.message}) — failing (exit 2)`);
-    refuseEarlyToStream(`config ${file} exists but could not be read`);
+    refuseEarly(`config ${file} exists but could not be read`);
     process.exit(2);
   }
   const cfg = {};
@@ -1230,6 +1253,7 @@ function writeSinkAtomic(p, text) {
 }
 
 function armGateJsonFailClosed(p) {
+  armedGateSink = p;   // ⟨0.31⟩ this path is now ours to replace if the run refuses
   try {
     writeSinkAtomic(p, JSON.stringify({
       spec: SPEC_VERSION, ok: false, refused: true,
@@ -1323,18 +1347,37 @@ if (!stat) {
   // RETURNS — it is not a `Never`, and calling it INSTEAD of the exit lets the run continue past its
   // own refusal (measured, while getting this wrong: an unreadable dep wrote its refusal and then
   // exited 0). rust's equivalent is typed `-> !`, which is why the same slip could not happen there.
-  refuseEarlyToStream(`no such path: ${target}`);
+  refuseEarly(`no such path: ${target}`);
   process.exit(2);
 }
 let usedTsconfig = null;   // the tsconfig this run actually read, so a later disclosure can name the
                            // cause that APPLIES rather than the one that usually does.
+// ⟨0.31⟩ THE one admission rule. The directory walk had it inline and the single-file branch had none,
+// which is how a target this engine cannot read reached a green verdict. `.d.ts` is excluded because a
+// declaration carries no body to analyse, and `.min.js` because a minified bundle is not a source.
+const admitsAsSource = (name) =>
+  (/\.[mc]?tsx?$/.test(name) && !name.endsWith(".d.ts"))
+  || (allowJs && /\.[mc]?jsx?$/.test(name) && !/\.min\.js$/.test(name));
+
 if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
   rootDir = path.dirname(path.resolve(target));
   usedTsconfig = path.resolve(target);
   fileNames = fromTsconfig(path.resolve(target), rootDir);
 } else if (stat.isFile()) {
   rootDir = path.dirname(path.resolve(target));
-  fileNames = [path.resolve(target)];
+  // ⟨0.31⟩ A SINGLE-FILE TARGET IS ADMITTED BY THE SAME RULE AS A FILE INSIDE A DIRECTORY, and this
+  // branch used to admit it UNCONDITIONALLY. MEASURED: `candor-ts x.txt --policy p` printed
+  // `policy ✓` and exited 0 with `ok: true` over a file this engine cannot read — the compiler
+  // silently dropped it and `NO_SOURCES` was false because the name was in the list. rust, java and
+  // swift all refuse the same input at exit 2.
+  //
+  // That is precisely the §3.3 ⟨0.31⟩ cause this rung adds — "the walk admitted no file this engine
+  // can read" — answered with a green gate, in the release that introduces the clause. A typo'd path
+  // in CI (`--policy` pointed at a file, a glob that matched a README) is a permanent pass.
+  //
+  // Single-file targets remain supported: a real `.ts` still scans. What changed is that the file has
+  // to be one this engine parses, which is what the directory walk always required.
+  fileNames = admitsAsSource(path.basename(target)) ? [path.resolve(target)] : [];
 } else {
   rootDir = path.resolve(target);
   const tsconfig = path.join(rootDir, "tsconfig.json");
@@ -1348,8 +1391,7 @@ if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
         const p = path.join(d, ent.name);
         if (!IS_PEEK && isTestPath(path.relative(rootDir, p))) continue;   // ⟨0.29⟩ see IS_PEEK
         if (ent.isDirectory()) walk(p);
-        else if (/\.[mc]?tsx?$/.test(ent.name) && !ent.name.endsWith(".d.ts")) fileNames.push(p);
-        else if (allowJs && /\.[mc]?jsx?$/.test(ent.name) && !/\.min\.js$/.test(ent.name)) fileNames.push(p);
+        else if (admitsAsSource(ent.name)) fileNames.push(p);
       }
     })(rootDir);
   }
@@ -1417,9 +1459,17 @@ const EXCLUDED_REASON = {
 const NO_SOURCES = fileNames.length === 0;
 if (NO_SOURCES && !(policyPath && excludedFiles.length)) {
   console.error(`candor-ts: no TypeScript sources under ${target}`);
+  // §3.3(d) MUST: the refusal names what a target of this engine's kind looks like. Without it the
+  // message says only that something is wrong, and the commonest cause — a path that moved, or one
+  // pointing at a file this engine does not parse — has an obvious fix the reader is left to guess.
+  console.error(`        candor-ts reads .ts/.tsx/.mts/.cts (and .js with --allow-js) — point it at a `
+              + `project directory or a TypeScript file. Exit 2 (unevaluable): a target this engine `
+              + `cannot read is not a clean scan.`);
   // An empty scan is an exit-2 cause like any other: a consumer reading the stream after it must not
   // get nothing. §3.1 exempts no cause, and this one is easy to hit in CI (a path that moved).
-  refuseEarlyToStream(`no TypeScript sources under ${target}`);
+  refuseEarly(`no TypeScript sources under ${target} — candor-ts reads .ts/.tsx/.mts/.cts `
+            + `(and .js with --allow-js); point it at a project directory or a TypeScript file. `
+            + `Exit 2 (unevaluable): a target this engine cannot read is not a clean scan.`);
   process.exit(2);
 }
 if (NO_SOURCES) {
@@ -1458,7 +1508,7 @@ if (!wantJson) {
         console.error(`candor-ts: the report set at --out ${outPrefix} includes ${w}, which is the SAME `
           + `FILE as ${label} ${other} — refusing (exit 2). Writing the report there would destroy an `
           + `input of this run. Nothing was scanned; give the report set its own prefix.`);
-        refuseEarlyToStream(`the report set at ${outPrefix} would overwrite ${label} ${other}`);
+        refuseEarly(`the report set at ${outPrefix} would overwrite ${label} ${other}`);
         process.exit(2);
       }
     }
@@ -1966,7 +2016,7 @@ const corruptDepPkgs = new Set();
       // The TOKEN arm needed this too. The read and parse arms below were routed to the stream and this
       // one was not — three exits for one rule, two of them answered on the machine channel and one
       // silent, which a conformance row (PART 36 b8) caught immediately once the cause was posed at all.
-      refuseEarlyToStream(`configured dependency ${tok} is not a readable file or directory`);
+      refuseEarly(`configured dependency ${tok} is not a readable file or directory`);
       process.exit(2);
     }
   }
@@ -1990,7 +2040,7 @@ const corruptDepPkgs = new Set();
       console.error(`        failing (exit 2, unevaluable). A configured dep this scan cannot read is not`);
       console.error(`        reduced coverage: its callers would serialise \`inferred: []\`, a purity claim`);
       console.error(`        about code this scan never saw.`);
-      refuseEarlyToStream(`configured dependency report ${f} could not be read`);
+      refuseEarly(`configured dependency report ${f} could not be read`);
       process.exit(2);
     }
     let parsed;
@@ -2000,7 +2050,7 @@ const corruptDepPkgs = new Set();
       console.error(`candor-ts: CANDOR_DEPS report ${f} is not valid JSON —`);
       console.error(`        failing (exit 2, unevaluable). Same reason as an unreadable one: a report`);
       console.error(`        that cannot be parsed makes no claim, and continuing would publish one.`);
-      refuseEarlyToStream(`configured dependency report ${f} is not valid JSON`);
+      refuseEarly(`configured dependency report ${f} is not valid JSON`);
       process.exit(2);
     }
     try {
@@ -6675,7 +6725,7 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
     // ⟨0.28⟩ report stream: this exit-2 fires BEFORE the envelope is printed, so a `--json` run would
     // otherwise leave stdout empty for the whole class of trust-marker contradictions. The latch is
     // still unset at this point; the helper writes the fail-closed doc as stdout's only content.
-    refuseEarlyToStream(`${contradictions.length} report entr${contradictions.length === 1 ? "y contradicts its" : "ies contradict their"} own trust markers`);
+    refuseEarly(`${contradictions.length} report entr${contradictions.length === 1 ? "y contradicts its" : "ies contradict their"} own trust markers`);
     process.exit(2);
   }
 }
@@ -6830,6 +6880,30 @@ if (policyPath && excludedFiles.length) {
   // passed at exit 0 while the strictly weaker `deny Exec` exited 2 on the same files. MEASURED four-way.
   if ((peekPolicy?.deny ?? []).length) {
     outOfScopeFindings = [];
+    // ⟨0.31⟩ A FILE THIS ENGINE CANNOT READ CANNOT BE PEEKED, AND THE CLASS MUST SAY SO.
+    //
+    // MEASURED: an excluded file performing a denied `Fs`, with the policy `deny Fs`. Readable, the peek
+    // finds it and the gate exits 2 naming the function. `chmod 000` on that ONE file and the same run
+    // exits 0 with `ok: true`, `outOfScope: []` and `excluded: [{class: …, peeked: true}]` — byte-
+    // identical to a genuinely clean peek. The only difference between a red gate and a green one is
+    // whether the engine could open the file, and nothing in the report says so.
+    //
+    // The child's TypeScript program drops an unreadable file SILENTLY: no diagnostic, and no entry in
+    // `unanalyzed`, so the `peekUnread` accounting below never fires. candor-rust answers `peeked: false`
+    // on the same shape, so this was ts alone.
+    //
+    // Asked HERE, in the parent, because the parent is the process that decided these files are in the
+    // peek's scope and can check the premise directly. A file the parent cannot read is one the child
+    // cannot read either. This is ⟨0.26⟩'s manifest rule applied to the peek: a claim of completeness
+    // over a set requires having actually covered the set, and a PARTIAL peek publishing `peeked: true`
+    // answers worse than one that admits it read nothing.
+    for (const e of excludedFiles) {
+      try {
+        fs.accessSync(path.resolve(rootDir, e.path), fs.constants.R_OK);
+      } catch {
+        peekUnread.add(e.cls);   // its class withdraws the completeness claim; the gate stays cautious
+      }
+    }
     const peekDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-peek-"));
     try {
       fs.writeFileSync(path.join(peekDir, "tsconfig.json"), JSON.stringify({
@@ -6850,10 +6924,62 @@ if (policyPath && excludedFiles.length) {
           stdio: ["ignore", "pipe", "ignore"] });
       const doc = JSON.parse(out);
       peekRead = true;   // the child returned a report this run could read — see `peekRead`
+      // ⟨0.31⟩ ONE LOOKUP FOR ALL THREE CALLERS. This was written THREE times — the matcher's
+      // qualifier, the finding's path, and the `unanalyzed`→`peekUnread` attribution below — and every
+      // copy carried the same defect:
+      //     find(e => loc.endsWith(e.path) || loc.endsWith(basename(e.path)))
+      // The `||` sits INSIDE one `.find`, so a BASENAME match on an earlier entry beats a FULL PATH
+      // match on a later one. MEASURED: with `src/one/dup.test.ts` and `src/two/dup.test.ts`, a
+      // function from `two` was disclosed at `one`. A previous fix collapsed two of the three copies
+      // and its commit message said so; the third survived here, where the failure mode is not a
+      // fabricated locator but CLASS MIS-ATTRIBUTION feeding `peeked` — worse in kind.
+      //
+      // AND SUFFIX MATCHING IS ITSELF THE BUG. The replacement tried "longest suffix wins" and argued
+      // no counterexample existed; here is one: a project directory literally NAMED `app`, holding
+      // `x.test.ts` and `app/x.test.ts`. The root file's absolute path `/…/app/x.test.ts` genuinely
+      // ends with the NESTED file's relative path `app/x.test.ts`, on a proper segment boundary, and
+      // it is the longer match — so the root function is disclosed at the nested file. A
+      // segment-boundary test would not have caught it either.
+      //
+      // So: RESOLVE, don't match. The child is handed absolute paths under `rootDir`, so its reported
+      // location relativises back to exactly the `e.path` this run recorded. Suffix and basename
+      // remain only as fallbacks for a child that reported something unrelativisable, and the basename
+      // one is used only when it names exactly ONE excluded file. When nothing resolves this returns
+      // null and the caller reports the child's own path — an ugly true locator beats a tidy false one.
+      const locateExcluded = (childLoc) => {
+        if (!childLoc) return null;
+        // RESOLVE AGAINST THE CHILD'S OWN ROOT. The child scan runs under a tsconfig in `peekDir`, and
+        // reports locations RELATIVE TO THAT — `../../../../../private/tmp/…/app/x.test.ts`. Resolving
+        // such a path against the parent's cwd yields nonsense, which is why the first attempt at an
+        // exact match never matched anything and quietly fell through to the suffix arm that carries
+        // the bug. Resolve against `peekDir`, then relativise to `rootDir`, and the result is exactly
+        // the `e.path` this run recorded.
+        const abs = path.resolve(peekDir, childLoc);
+        let rel = path.relative(rootDir, abs);
+        let exact = excludedFiles.find((e) => e.path === rel);
+        // …and once more through realpath, because macOS resolves `/tmp` to `/private/tmp` and a run
+        // invoked through the symlinked spelling would otherwise miss its own files.
+        if (!exact) {
+          try {
+            rel = path.relative(fs.realpathSync(rootDir), fs.realpathSync(abs));
+            exact = excludedFiles.find((e) => e.path === rel);
+          } catch { /* the file may not exist from here; fall through to the suffix arms */ }
+        }
+        if (exact) return exact;
+        let best = null;
+        for (const e of excludedFiles) {
+          const sfx = path.sep + e.path;
+          if ((childLoc === e.path || childLoc.endsWith(sfx) || childLoc.endsWith("/" + e.path))
+              && (!best || e.path.length > best.path.length)) best = e;
+        }
+        if (best) return best;
+        const base = path.basename(childLoc);
+        const byBase = excludedFiles.filter((e) => path.basename(e.path) === base);
+        return byBase.length === 1 ? byBase[0] : null;
+      };
       for (const u of Array.isArray(doc.unanalyzed) ? doc.unanalyzed : []) {
         const where = String(u?.path ?? "");
-        const hit = excludedFiles.find((e) => where.endsWith(e.path)
-                                           || where.endsWith(path.basename(e.path)));
+        const hit = locateExcluded(where);
         // The peek walks ONLY excluded files, so an unread path matching no exclusion is one this code
         // cannot attribute — fail closed across every class rather than let one unattributable file leave
         // all of them claiming completeness.
@@ -6896,43 +7022,6 @@ if (policyPath && excludedFiles.length) {
       //
       // The project-relative path is already known here — it is what this run disclosed as excluded — and
       // the finding below is already named from it. The MATCHER must see the same thing the FINDING does.
-      // ⟨0.31⟩ ONE LOOKUP, because this was written twice — once for the MATCHER's qualifier and once
-      // for the FINDING's path — and both copies carried the same defect.
-      //
-      // Both were `excludedFiles.find(e => childLoc.endsWith(e.path) || childLoc.endsWith(basename))`.
-      // The `||` sits INSIDE a single `.find`, so a BASENAME match on an earlier entry beats a FULL PATH
-      // match on a later one. MEASURED on a project with `src/one/dup.test.ts` and `src/two/dup.test.ts`:
-      // `fn_two` was disclosed at `src/one/dup.test.ts` — a locator naming a file the function is not in.
-      // An operator following it finds a different function, or none. candor-rust and candor-swift both
-      // name each function's own file here; this was ts alone.
-      //
-      // TWO PASSES, and the order is the fix. A full relative-path suffix match is unambiguous, so it is
-      // tried across EVERY entry first, longest match winning when one excluded path is a suffix of
-      // another. Only then the basename, and only when it names exactly ONE excluded file.
-      //
-      // WHEN IT IS STILL AMBIGUOUS, THIS RETURNS NOTHING, and the caller falls back to the child's own
-      // absolute temp path. That is deliberate: an ugly-but-true locator is a worse READ than a tidy
-      // project-relative one and a far better ANSWER than a false one. The basename fallback exists
-      // because the child scan runs under a temp-directory tsconfig (see the note above), so guessing
-      // here is guessing about someone else's filesystem.
-      const locateExcluded = (childLoc) => {
-        if (!childLoc) return null;
-        // LONGEST MATCH, and that is what makes a bare `endsWith` safe here rather than an oversight.
-        // `endsWith` does cross a segment boundary — `…/dup.test.ts` ends with `up.test.ts` — but the
-        // file being located is itself excluded, so its OWN project-relative path is in this list and is
-        // a suffix of `childLoc`. Any longer suffix would have to match further leading segments
-        // exactly, and these paths are unique, so the true entry always wins. A segment-boundary test
-        // was written here and removed again: no failing case could be constructed for it, and it can
-        // only ever REJECT a match that a leading `./` or a separator difference would otherwise make.
-        let best = null;
-        for (const e of excludedFiles) {
-          if (childLoc.endsWith(e.path) && (!best || e.path.length > best.path.length)) best = e;
-        }
-        if (best) return best;
-        const base = path.basename(childLoc);
-        const byBase = excludedFiles.filter((e) => path.basename(e.path) === base);
-        return byBase.length === 1 ? byBase[0] : null;
-      };
       const relQual = (f) => {
         const childLoc = (f.loc ?? "").split(":")[0] ?? "";
         const hit = locateExcluded(childLoc);
@@ -6996,7 +7085,13 @@ if (NO_SOURCES && !(Array.isArray(outOfScopeFindings) && outOfScopeFindings.leng
   console.error(`candor-ts: gate NOT certified — no analyzable TypeScript source under ${target}, and the `
     + `files this scan excluded perform no effect this policy denies; a gate cannot be green over a tree `
     + `it did not read`);
-  refuseEarlyToStream(`no analyzable TypeScript source under ${target}`);
+  // §3.3(d) MUST — the same remedy the no-policy branch names. This arm explains WHY the gate is not
+  // certified and, without this, still leaves the reader to guess what a valid target looks like.
+  console.error(`        candor-ts reads .ts/.tsx/.mts/.cts (and .js with --allow-js) — point it at a `
+              + `project directory or a TypeScript file.`);
+  refuseEarly(`no analyzable TypeScript source under ${target} — candor-ts reads `
+            + `.ts/.tsx/.mts/.cts (and .js with --allow-js); point it at a project directory or a `
+            + `TypeScript file.`);
   process.exit(2);
 }
 if (outOfScopeFindings) {
