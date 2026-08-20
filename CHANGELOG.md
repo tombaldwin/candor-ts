@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.31.0] — 2026-08-20
+
 - **⚠ `outOfScope` named the wrong file when two excluded files shared a basename.** MEASURED with
   `src/one/dup.test.ts` and `src/two/dup.test.ts`: `fn_two` was disclosed at `src/one/dup.test.ts`. The
   lookup read `find(e => loc.endsWith(e.path) || loc.endsWith(basename(e.path)))` — the `||` inside a
