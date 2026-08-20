@@ -8,6 +8,26 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ R54 — an fd/stream write reached through a helper is no longer charged `Net`.** `process.stdout` is
+  typed `tty.WriteStream`, which EXTENDS `net.Socket`, so `.write` resolved into the net cluster's typings
+  and the whole-module Net rule painted it. The carve-out matched the receiver's TEXT
+  (`process.stdout.…`), so one level of indirection defeated it:
+
+      const pick = fd => (fd === 1 ? process.stdout : createWriteStream("", {fd}));
+      pick(3).write("hello");        // was: Net, netClass unknown-host. There is no socket.
+
+  Measured on execa in the ⟨0.30⟩ blast-radius sweep: **six test fixtures charged `performs Net`** — 2 of
+  the 31 verdict flips, and the only two of that sweep that were not genuine. execa performs no network;
+  A/B on its real source goes from exit 2 to `policy ✓`.
+
+  The decision is now made from the receiver's TYPE, as a **denylist**: `Net` is suppressed only when
+  EVERY constituent is a proven non-network stream class (`tty`/`fs` `WriteStream`/`ReadStream`, declared
+  in @types/node's own typings). An unknown constituent, an `any`, a project class of the same name, or a
+  real `net.Socket` all KEEP the charge — the failure direction is an over-report, never a false
+  all-clear. `stream.Writable`/`Readable` are deliberately EXCLUDED: a real `net.Socket` IS a
+  `stream.Duplex` and satisfies them. Scoped to `Net` alone, so the `Fs` an `fs.WriteStream` legitimately
+  carries is untouched. Six regression cases, three of them under-report controls written before the fix.
+
 - **`publish.yml` no longer re-runs the full battery over bytes ci.yml just tested.** `release.sh`
   cannot tag until release-preflight `[10]` sees CI green on HEAD, so by the time the tag fires, ci.yml
   has already run `npm test` on that exact SHA — and more besides. Repeating it cost **12 minutes on the
