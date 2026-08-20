@@ -3485,6 +3485,74 @@ function enclosing(node) {
 // and the whole-module Net rule paints them — but console fd 0/1/2 I/O is not Net (§1 has no Console effect).
 // `net.Socket.on`/`.write` return the stream (`this`), so a chained call's receiver is still the std stream;
 // the exact-string check missed it (the receiver is the inner CallExpression). Walk the chain to its head.
+// R54 — THE STD-STREAM CARVE-OUT, DECIDED FROM THE RECEIVER'S TYPE RATHER THAN ITS SPELLING.
+//
+// `rootsAtStdStream` above matches the TEXT of the receiver chain, so it only ever recognised
+// `process.stdout.write(...)` written literally. MEASURED on `execa` in the ⟨0.30⟩ blast-radius sweep:
+// one level of indirection defeats it —
+//
+//     const pick = fd => (fd === 1 ? process.stdout : createWriteStream("", {fd}));
+//     pick(3).write("hello");     // charged Net, netClass unknown-host. There is no socket.
+//
+// The receiver types as `tty.WriteStream | fs.WriteStream`, `tty.WriteStream` EXTENDS `net.Socket`, so
+// resolving `.write` lands in the net cluster's typings and the whole-module Net rule paints it. It
+// accounted for 2 of the 31 ⟨0.30⟩ verdict flips — the only two of that sweep that were not genuine.
+//
+// DENYLIST, NOT ALLOWLIST, and the direction is stated so it can be checked: this suppresses Net ONLY
+// when EVERY constituent of the receiver's type is a PROVEN non-network stream class. An unknown
+// constituent, an `any`, a project type, or a real `net.Socket` all fail the test and KEEP the charge.
+// The failure mode is therefore an over-report, never a false all-clear.
+//
+// THE SAFE SET IS CONCRETE CLASSES ONLY. `stream.Writable`/`Readable` are deliberately ABSENT: a real
+// `net.Socket` IS a `stream.Duplex` and therefore satisfies them, so admitting the base types would
+// suppress Net on genuine sockets — the exact silent under-report this family has measured arriving in
+// 4 of 5 over-charge fixes. Only `tty`/`fs` stream classes, and only when declared in @types/node's own
+// `tty.d.ts`/`fs.d.ts`, so a project class named `WriteStream` cannot buy the carve-out.
+const SAFE_STREAM_CLASSES = new Set(["WriteStream", "ReadStream"]);
+// `process` is in the set because that is where @types/node DECLARES the std streams' own
+// `WriteStream`/`ReadStream` (process.stdout is `WriteStream & { fd: 1 }`, declared in process.d.ts and
+// extending tty's). Measured: without it the predicate rejected the very case it exists for.
+const SAFE_STREAM_MODULES = new Set(["tty", "fs", "process"]);
+function receiverIsProvenNonNetworkStream(expr) {
+  if (!expr) return false;
+  let t;
+  try { t = checker.getTypeAtLocation(expr); } catch { return false; }
+  if (!t) return false;
+  const parts = (t.isUnion && t.isUnion()) ? t.types : [t];
+  if (!parts.length) return false;
+  // INTERSECTIONS CARRY NO SINGLE SYMBOL, and every real case here is one: `process.stdout` types as
+  // `tty.WriteStream & { fd: 1 }`, and the helper's union is `(WriteStream & {fd:1}) | WriteStream`.
+  // The first attempt asked each union part for its symbol, got none for the intersection, and
+  // suppressed nothing — measured, before this comment existed.
+  const flatten = (ty) => (ty.isIntersection && ty.isIntersection()) ? ty.types : [ty];
+  const declaredSafely = (sym) => {
+    const decls = sym.getDeclarations?.() ?? [];
+    if (!decls.length) return false;
+    return decls.every((d) => {
+      const f = path.resolve(d.getSourceFile().fileName);
+      const m = f.match(/@types\/node\/(.+?)\.d\.ts$/);
+      return !!m && SAFE_STREAM_MODULES.has(m[1]);
+    });
+  };
+  return parts.every((part) => {
+    let sawSafe = false;
+    for (const member of flatten(part)) {
+      const sym = member.getSymbol?.() ?? member.symbol;
+      const name = sym?.getName?.();
+      // An ANONYMOUS shape (`{ fd: 1 }`) carries no class identity: it neither proves nor disproves,
+      // so it is skipped. If EVERY member is anonymous, `sawSafe` stays false and the charge is kept.
+      // TypeScript names anonymous shapes SYNTHETICALLY — `__type` for a type literal,
+      // `__object` for an object literal — so `!name` alone does not skip them and the
+      // `{ fd: 1 }` half of `process.stdout`'s intersection fell through to the rejection
+      // below. Measured: this is what still suppressed nothing after the intersection fix.
+      if (!name || name.startsWith("__")) continue;
+      if (!SAFE_STREAM_CLASSES.has(name) || !declaredSafely(sym)) return false;
+      sawSafe = true;
+    }
+    return sawSafe;
+  });
+}
+
 function rootsAtStdStream(expr) {
   let e = expr;
   for (;;) {
@@ -4869,6 +4937,14 @@ function visitCalls(node) {
           // purely from a `process.stdout.write` — the precision failure.
           if (eff && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))
               && rootsAtStdStream(node.expression.expression))
+            eff = null;
+          // R54 — the same carve-out through a helper, decided from the receiver's TYPE. SCOPED TO Net
+          // DELIBERATELY: an `fs.WriteStream` receiver legitimately carries Fs, and suppressing whatever
+          // effect happened to resolve would swallow that — the same under-report one door along. Only
+          // the fabricated network charge is removed.
+          if (eff === "Net"
+              && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))
+              && receiverIsProvenNonNetworkStream(node.expression.expression))
             eff = null;
           if (eff) {
             rec.direct.add(eff);

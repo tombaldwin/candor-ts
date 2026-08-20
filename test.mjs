@@ -6568,6 +6568,51 @@ export function dispatch(b: Base): void { b.m(); }`;
         JSON.stringify(overD));
 }
 
+// ── R54: an fd/stream write reached through a HELPER is not Net ───────────────────────────────────
+// `process.stdout` is typed `tty.WriteStream`, which EXTENDS `net.Socket`, so `.write` resolves into the
+// net cluster's typings and the whole-module Net rule paints it. The carve-out for that used to match the
+// receiver's TEXT (`process.stdout.…`), so one level of indirection defeated it. MEASURED on execa in the
+// ⟨0.30⟩ blast-radius sweep: six test fixtures charged `performs Net` — 2 of the 31 verdict flips, and
+// the only two of that sweep that were not genuine. execa performs no network at all.
+//
+// THE THREE CASES ARE ONE TEST ON PURPOSE. Narrowing an over-charge is the move this family has measured
+// producing silent under-reports (4 defects in 5 such fixes), so the fabricated charge and the genuine one
+// it must not touch are asserted together, and a third case guards the effect that legitimately rides the
+// same receiver.
+if (blk()) {
+  const d = project({
+    "src/r54.ts": `import { createWriteStream } from "node:fs";
+import { Socket } from "node:net";
+const pick = (fd: number) => (fd === 1 ? process.stdout : createWriteStream("", { fd }));
+export function viaHelper() { pick(3).write("hello"); }
+export function direct() { process.stdout.write("hello"); }
+const pickSock = (n: number) => (n === 1 ? new Socket() : new Socket());
+export function sockViaHelper() { pickSock(3).write("hello"); }
+export function sockDirect() { new Socket().write("hello"); }
+const f = createWriteStream("/tmp/x");
+export function toFile() { f.write("hello"); }`,
+  });
+  const { report } = scan(d);
+  const inf = (fn) => (report.functions.find((e) => e.fn === fn)?.inferred) ?? [];
+  check("R54 fd/stream write through a helper is NOT Net (the over-charge)",
+        !inf("src.r54.viaHelper").includes("Net"), JSON.stringify(inf("src.r54.viaHelper")));
+  check("R54 …and the Fs it legitimately carries is untouched",
+        inf("src.r54.viaHelper").includes("Fs"), JSON.stringify(inf("src.r54.viaHelper")));
+  check("R54 a direct process.stdout.write stays pure",
+        !inf("src.r54.direct").includes("Net"), JSON.stringify(inf("src.r54.direct")));
+  // THE UNDER-REPORT CONTROLS — written before the fix, and the reason it is safe to ship.
+  check("R54 CONTROL: a REAL net.Socket through the IDENTICAL indirection still charges Net",
+        inf("src.r54.sockViaHelper").includes("Net"), JSON.stringify(inf("src.r54.sockViaHelper")));
+  check("R54 CONTROL: a direct net.Socket write still charges Net",
+        inf("src.r54.sockDirect").includes("Net"), JSON.stringify(inf("src.r54.sockDirect")));
+  // The Fs of an fs.WriteStream is charged where the stream is OPENED, not at each `.write()` — so the
+  // module unit carries it and `toFile` does not. Written first as `toFile` must-carry-Fs, which failed;
+  // measured against HEAD, the answer was IDENTICAL before and after R54, so the assertion was wrong
+  // rather than the code. Kept as the module-level check it should always have been.
+  check("R54 CONTROL: opening an fs.WriteStream still charges Fs (unchanged by the Net carve-out)",
+        inf("src.r54.<module>").includes("Fs"), JSON.stringify(inf("src.r54.<module>")));
+}
+
 // ── R32: node:stream provided method → the subclass's `_write`/`_read` override ────────────────────
 // A Writable's public `.write()`/`.end()` drive the user's `_write` INSIDE node core (invisible), so a
 // custom effectful stream reached only via the public API read silent-pure. The fix edges the driver to
