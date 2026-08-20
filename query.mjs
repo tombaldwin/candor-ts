@@ -2170,6 +2170,14 @@ switch (cmd) {
     const gverdictObj = { spec: SPEC_VERSION, ok: gviol.length === 0 && !gincomplete,
                           analyzed: { count: g.analyzed } };
     if (gvocab) gverdictObj.policyVocabulary = gvocab;
+    // ⟨0.31⟩ the partner declaration that moved the producer's classification, READ OFF THE REPORT —
+    // never recomputed here. This route has no target to anchor `net-partner` at, and the note above
+    // says why recomputing would be wrong anyway: `netClass` is read verbatim off the wire, so
+    // re-classifying through THIS machine's config is the re-derivation §3.1 forbids and would make the
+    // verdict depend on the consumer's CWD. The producer recorded which of its declared partners
+    // actually participated; both routes copy that one record, and byte-equality holds by construction.
+    // Same position as the scan route puts it, for the same reason as `policyVocabulary` above.
+    if (g.netPartners?.length) gverdictObj.netPartners = g.netPartners;
     gverdictObj.violations = gviol;
     if (gunevaluated.length) gverdictObj.unevaluated = gunevaluated;
     // ⟨0.27⟩ SPEC §4 `zeroMatch` — the same list the stderr lines above carry, in the machine channel,

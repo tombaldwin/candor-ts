@@ -404,10 +404,25 @@ export function isTelemetryHost(hostLiteral) { return hostInSet(hostLiteral, TEL
 // Literals.netDestClass.
 export function netDestClass(hostLiteral, partners) {
   if (isTelemetryHost(hostLiteral)) return "known-telemetry";
-  const host = normHost(hostLiteral);
-  const partnerMatch = partners && (partners.has(host) || [...partners].some((p) => host.endsWith("." + p)));
-  if (partnerMatch || isModelHost(hostLiteral)) return "known-partner";
+  if (partnerFor(hostLiteral, partners) !== null || isModelHost(hostLiteral)) return "known-partner";
   return "unknown-host";
+}
+/**
+ * ⟨0.31⟩ WHICH declared partner a host matched, or null — the SAME match `netDestClass` decides on,
+ * extracted so the DISCLOSURE and the DECISION cannot use different rules.
+ *
+ * That is not a stylistic preference. The first attempt at the `net-partner` disclosure re-implemented
+ * this match and normalised differently from the classifier — `partner.example:443` never equalled the
+ * declared `partner.example` — so the disclosure came back SILENTLY EMPTY on every real run while the
+ * verdict it was reporting on had flipped. A disclosure normalised differently from the decision it
+ * reports can only be wrong, and the way to make that impossible is one function with two callers.
+ */
+export function partnerFor(hostLiteral, partners) {
+  if (!partners || !partners.size) return null;
+  const host = normHost(hostLiteral);
+  if (partners.has(host)) return host;
+  for (const p of partners) if (host.endsWith("." + p)) return p;
+  return null;
 }
 // ⟨0.20⟩ The closed `Net` destination-class vocabulary, for the `deny Net[<dest…>]` policy filter.
 export const NET_DEST_CLASSES = ["known-telemetry", "known-partner", "unknown-host"];

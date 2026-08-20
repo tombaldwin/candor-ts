@@ -34,7 +34,7 @@ import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNe
 import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents, writeStdoutSync } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, fsKind, commandHeadEffects, hostLiteral, tablesInSql,
-         modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf } from "./scan-core.mjs";
+         modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf, partnerFor } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -6190,6 +6190,8 @@ for (const m of ["hosts", "tables", "cmds", "paths", "blind", "incomplete", "fsK
 // nothing for the rest of the run. Printed once, here, beside the other config diagnostics.
 const netPartnerErrs = [];
 const netPartners = parseNetPartners(discoverConfigText(target), netPartnerErrs);
+// ⟨0.31⟩ the declared partners that actually MOVED a classification in this run — see the envelope key.
+const partnersUsed = new Set();
 for (const e of netPartnerErrs) console.error(`candor-ts: ${e.why} — ${e.raw}`);
 const functions = [];
 for (const [name, rec] of fns) {
@@ -6221,7 +6223,16 @@ for (const [name, rec] of fns) {
   // ⟨0.20⟩ Net destination-class (NET-DESTINATION-CLASS-DESIGN.md): the classes present in this fn's
   // transitive Net surface — exact host-literal match, fail-closed unknown-host on a masked surface (rec
   // .incomplete has Net) OR a Net with no visible host. The class travels the call graph like the effect.
-  if (inf.includes("Net")) entry.netClass = netClassesOf([...rec.hosts], rec.incomplete.has("Net"), netPartners);
+  if (inf.includes("Net")) {
+    entry.netClass = netClassesOf([...rec.hosts], rec.incomplete.has("Net"), netPartners);
+    // ⟨0.31⟩ RECORD WHICH DECLARED PARTNER PARTICIPATED, at the point the class is decided. Asking
+    // `partnerFor` — the function `netDestClass` itself asks — is what keeps the disclosure and the
+    // decision on one rule; the reverted first attempt re-matched and normalised differently.
+    for (const h of rec.hosts) {
+      const pm = partnerFor(h, netPartners);
+      if (pm) partnersUsed.add(pm);
+    }
+  }
   if (inf.includes("Db") && rec.tables.size) entry.tables = [...rec.tables].sort();
   if (inf.includes("Exec") && rec.cmds.size) entry.cmds = [...rec.cmds].sort();
   if (inf.includes("Fs") && rec.paths.size) entry.paths = [...rec.paths].sort();
@@ -6729,6 +6740,26 @@ if (uncoveredLedger.length) {
 // and NOT cross-engine comparable — qualifiers differ). ALWAYS present.
 const analyzedQuals = [...fns.keys()].sort();
 envelope.analyzed = { count: fns.size, digest: fnv1aHex(analyzedQuals) };
+// ⟨0.31⟩ `netPartners` — WHICH ambient `.candor/config` declared a partner, and which of its hosts
+// actually participated. MEASURED: `deny Net[unknown-host]` over a call to `partner.example` exits 1;
+// adding `net-partner partner.example` to `.candor/config` exits 0 with `ok:true`, and nothing in the
+// verdict named the file, its path, or the host. An operator reading that green could not tell an
+// ambient file turned a red into it — the same failure §3.1's `policyVocabulary` exists to refuse for
+// `unknown-alias`, whose argument reaches this key and whose MUST did not.
+//
+// IT LIVES IN THE REPORT, and that is what makes it emittable at all. `net-partner` anchors at the
+// TARGET, and `gate --report` has no target — it reads the producer's already-computed `netClass`. A
+// verdict-only disclosure is therefore computable on one route and not the other, which breaks §3.1's
+// byte-equality and is exactly why the first attempt was reverted (candor-ts's own suite: "pure: NOT
+// byte-equal"). Recorded by the PRODUCER, both routes read the same source, and they agree by
+// construction — the shape ⟨0.30⟩'s `outOfScope` already uses for the same structural reason.
+//
+// Omitted when empty, so a project declaring no partners — or declaring some that never matched — is
+// byte-identical to a pre-rung report. A declaration that changed nothing is not provenance.
+if (partnersUsed.size) {
+  const cfg = discoverConfigPath(target);
+  if (cfg) envelope.netPartners = { config: cfg, hosts: [...partnersUsed].sort() };
+}
 // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the target's own source candor could NOT analyze (unparsed .ts).
 // OMITTED when empty — a complete scan stays byte-identical to a pre-rung report — so a MACHINE reading
 // --json sees the incompleteness the stderr warning alone used to hide.
@@ -7551,6 +7582,11 @@ if (gateJsonPath) {
   // ⟨0.24⟩ the vocabulary file that moved the verdict, in the SAME position `gate --report` puts it, because
   // §3.1 makes byte-equality between the two routes the acceptance test. Omitted when no alias was used.
   if (policyVocabulary) verdictObj.policyVocabulary = policyVocabulary;
+  // ⟨0.31⟩ …and the partner declaration that moved it, COPIED FROM THE REPORT rather than recomputed.
+  // Copying is the point: `gate --report` cannot compute this (no target), so if the two routes derived
+  // it independently they could not agree. Reading the producer's record on both routes is what makes
+  // the byte-equality hold instead of break. Same position in both, for the same reason as the line above.
+  if (envelope.netPartners) verdictObj.netPartners = [envelope.netPartners];
   verdictObj.violations = gateViolations;
   // ⟨0.24⟩ …and when a certain violation DOMINATED a policy refusal, the refusal is disclosed here rather
   // than deleted (SPEC §3.1: "the RAW policy line, verbatim", one entry per rule, omitted when empty). A

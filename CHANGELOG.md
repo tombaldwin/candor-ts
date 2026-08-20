@@ -19,6 +19,29 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   peek that names nothing refuses (`ok:false, refused:true`, no report). Found by two independent
   reviewers on the published-artifact review, and pinned four-way by conformance PART 56.
 
+- **⟨0.31⟩ `netPartners` — the ambient config that moved a verdict is named in it.** MEASURED: under
+  `deny Net[unknown-host]`, a call to `partner.example` exits **1**; adding `net-partner partner.example`
+  to `.candor/config` exits **0** with `ok: true` — and nothing in the verdict named the file, its path,
+  or the host. An operator reading that green could not tell an ambient file turned a red into it. That is
+  the failure §3.1's `policyVocabulary` already refuses for `unknown-alias`, whose argument reaches this
+  key and whose MUST did not.
+
+  The report now carries `netPartners: { config, hosts }` — which config declared partners, and which of
+  them actually **participated**. The verdict carries the list of those records on **both** routes.
+
+  Three things the reverted first attempt got wrong, each closed structurally rather than by care:
+  *anchoring* — it is self-contained, never folded into `policyVocabulary`, because that anchors at the
+  policy file's directory while `net-partner` anchors at the target and one key naming one source would
+  be lying about two; *normalisation* — `partnerFor` is now the single matcher and `netDestClass` calls
+  it, so the disclosure asks the same function the decision asks (the first attempt re-matched, and
+  `partner.example:443` never equalled `partner.example`, so it came back silently empty on every real
+  run); *§3.1 byte-equality* — the provenance lives in the REPORT, so `gate --report`, which has no target
+  to anchor at, copies the producer's record verbatim instead of recomputing. Both routes read one source
+  and agree by construction. Verified byte-equal.
+
+  Additive: a project declaring no partners, or declaring one that never matched, is byte-identical to a
+  pre-rung report — a declaration that changed nothing is not provenance.
+
 - **⚠ R54 — an fd/stream write reached through a helper is no longer charged `Net`.** `process.stdout` is
   typed `tty.WriteStream`, which EXTENDS `net.Socket`, so `.write` resolved into the net cluster's typings
   and the whole-module Net rule painted it. The carve-out matched the receiver's TEXT

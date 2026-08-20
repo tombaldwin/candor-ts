@@ -6568,6 +6568,49 @@ export function dispatch(b: Base): void { b.m(); }`;
         JSON.stringify(overD));
 }
 
+// ── ⟨0.31⟩ netPartners: the ambient config that moved a verdict is named in it ─────────────────────
+// MEASURED before this existed: `deny Net[unknown-host]` over a call to `partner.example` exits 1;
+// adding `net-partner partner.example` to `.candor/config` exits 0 with `ok:true`, and NOTHING in the
+// verdict named the file, its path, or the host. An operator reading that green could not tell an
+// ambient file turned a red into it.
+//
+// FOUR PROPERTIES, and the last two are why the first attempt at this was reverted:
+//   1. the verdict names the config and the participating host
+//   2. §3.1 BYTE-EQUALITY — `scan --policy` and `gate --report` produce the same document. The first
+//      attempt computed this only on the scan route (the gate route has no target to anchor
+//      `net-partner` at) and candor-ts's own suite caught it: "pure: NOT byte-equal". It holds here
+//      because the PRODUCER records it in the report and both routes copy that one record.
+//   3. ADDITIVE — a project declaring no partners is byte-identical to a pre-rung report.
+//   4. A DECLARATION THAT CHANGED NOTHING IS NOT PROVENANCE — a partner that never matched is absent.
+if (blk()) {
+  const d = project({
+    "src/i.ts": `export async function call() { await fetch("https://partner.example/v1"); }`,
+    ".candor/config": "net-partner partner.example\n",
+    "pol": "deny Net[unknown-host]\n",
+  });
+  const { report } = scan(d, "--policy", `${d}/pol`);
+  check("⟨0.31⟩ the report names the config that moved the classification",
+        typeof report.netPartners?.config === "string" && report.netPartners.config.includes(".candor/config"),
+        JSON.stringify(report.netPartners));
+  check("⟨0.31⟩ …and the participating host, not merely that a config existed",
+        (report.netPartners?.hosts ?? []).includes("partner.example"), JSON.stringify(report.netPartners));
+  const noPartner = project({
+    "src/i.ts": `export async function call() { await fetch("https://partner.example/v1"); }`,
+    "pol": "deny Net[unknown-host]\n",
+  });
+  const { report: r2 } = scan(noPartner, "--policy", `${noPartner}/pol`);
+  check("⟨0.31⟩ ADDITIVE: no partners declared leaves the key absent",
+        r2.netPartners === undefined, JSON.stringify(r2.netPartners));
+  const unused = project({
+    "src/i.ts": `export async function call() { await fetch("https://partner.example/v1"); }`,
+    ".candor/config": "net-partner never-called.example\n",
+    "pol": "deny Net[unknown-host]\n",
+  });
+  const { report: r3 } = scan(unused, "--policy", `${unused}/pol`);
+  check("⟨0.31⟩ a declared partner that never matched is NOT provenance",
+        r3.netPartners === undefined, JSON.stringify(r3.netPartners));
+}
+
 // ── R54: an fd/stream write reached through a HELPER is not Net ───────────────────────────────────
 // `process.stdout` is typed `tty.WriteStream`, which EXTENDS `net.Socket`, so `.write` resolves into the
 // net cluster's typings and the whole-module Net rule paints it. The carve-out for that used to match the
