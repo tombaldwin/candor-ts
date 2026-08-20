@@ -8,6 +8,15 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **`publish.yml` no longer re-runs the full battery over bytes ci.yml just tested.** `release.sh`
+  cannot tag until release-preflight `[10]` sees CI green on HEAD, so by the time the tag fires, ci.yml
+  has already run `npm test` on that exact SHA — and more besides. Repeating it cost **12 minutes on the
+  0.30.0 cut**, and that sat on the release's critical path: the cross-repo pin bump cannot be pushed
+  until npm carries the package, because the pins start the IDE jobs that install it. The battery is now
+  skipped only when a SUCCESSFUL ci.yml run exists for the same commit — no run, a failed run, an API
+  hiccup or a `workflow_dispatch` on an untested commit all run it. The guard can only ever cost a
+  duplicate run, never a skipped one.
+
 ## [0.30.0] — 2026-08-19
 
 - **Two published bins crashed on startup, and had since 0.29.0.** `candor-ts-sensitivity` and

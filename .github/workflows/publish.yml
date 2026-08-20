@@ -21,6 +21,7 @@ jobs:
     permissions:
       id-token: write   # OIDC — this is what authenticates the publish; no secret is stored
       contents: read
+      actions: read     # to ask whether ci.yml already passed this exact commit (see the battery step)
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v5
@@ -32,8 +33,31 @@ jobs:
       - run: npm install --no-fund --no-audit
       # Gate: the same full battery as ci.yml — behavioral + fabrication probe + §7.13 fuzzer.
       # A broken build must not reach npm.
+      #
+      # …but not TWICE over the same bytes. `release.sh` cannot tag until release-preflight [10] sees CI
+      # green on HEAD, so by the time this workflow runs, ci.yml has already executed `npm test` on this
+      # exact SHA — and more besides (transitive-recall, self-gate). Re-running it cost 12 minutes on the
+      # 0.30.0 cut, and that 12 minutes is the release's critical path: the pin bump cannot be pushed
+      # until npm carries the package, because the pin starts the IDE jobs that install it.
+      #
+      # FAIL-CLOSED: the battery is skipped only when a SUCCESSFUL ci.yml run exists for this exact
+      # commit. No run, a failed run, an API hiccup, or a manual workflow_dispatch on an untested commit
+      # all leave `green` false and the battery runs. The guard can only ever cost a duplicate run.
+      - name: Has ci.yml already passed this exact commit?
+        id: ciseen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh run list -R "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
+                --json conclusion -q '[.[] | select(.conclusion == "success")] | length' 2>/dev/null || echo 0)
+          echo "successful ci.yml runs at $GITHUB_SHA: ${n:-0}"
+          if [ "${n:-0}" -ge 1 ]; then echo "green=true" >> "$GITHUB_OUTPUT"; else echo "green=false" >> "$GITHUB_OUTPUT"; fi
       - name: Full test battery (behavioral + probe + fuzzer)
+        if: steps.ciseen.outputs.green != 'true'
         run: npm test
+      - name: Battery skipped — ci.yml is green on this exact commit
+        if: steps.ciseen.outputs.green == 'true'
+        run: echo "ci.yml ran the same \`npm test\` battery on $GITHUB_SHA and passed; not repeating it." 
       # Idempotency guard: the release cycle sometimes publishes this version manually before the tag
       # lands (release-verify needs it live synchronously), so the tag-triggered run would otherwise
       # red-fail with "cannot publish over the previously published versions". Skip cleanly when the
