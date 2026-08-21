@@ -37,7 +37,13 @@ function siblings(prefix, predicate) {
 // sibling is `.encountered-*`/`.calibrated.json` passes the existence check but loads ZERO functions →
 // an authoritative-empty result (silent under-report; review find). `.gate.json` has no functions array,
 // so merging it "disclosed a malformed report" on every query over the recommended CI layout — noisy, excluded.
-export const isReport = (f) => !f.endsWith(".callgraph.json") && !f.endsWith(".hierarchy.json") && !f.endsWith(".locs.json") && !f.includes(".encountered-") && !f.endsWith(".calibrated.json") && !f.endsWith(".gate.json");
+// ⟨0.32⟩ `.refused.json` joins the reserved set (SPEC §2.2). It is a refusal MARKER, not a report — it
+// carries no `functions` array, and a prefix whose only sibling is one would otherwise pass the existence
+// check and load zero functions, which is the authoritative-empty silent under-report this predicate
+// exists to prevent. CAUGHT BY PART 56 the moment ⟨0.32⟩ landed in this engine: a refusal "left a report",
+// because discovery counted the marker the refusal had just written. Adding a file kind beside the
+// reports means teaching discovery about it in the same change.
+export const isReport = (f) => !f.endsWith(".callgraph.json") && !f.endsWith(".hierarchy.json") && !f.endsWith(".locs.json") && !f.includes(".encountered-") && !f.endsWith(".calibrated.json") && !f.endsWith(".gate.json") && !f.endsWith(".refused.json");
 
 // A report exists at the prefix if there's an exact `<prefix>.json` (candor-ts) OR a sibling
 // `<prefix>.<crate>.scan.json` (the candor-scan/Rust multi-report form) — the loaders read both, so a

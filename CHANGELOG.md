@@ -8,6 +8,21 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.32⟩ A refusal records itself beside the reports it would have written.** A run given no `--out`
+  writes to its default prefix, and a refusal left whatever the last successful run put there readable as
+  current — `gate --report <tree>` answering `policy ✓` at exit 0 off the previous run's bytes. The
+  refusal now writes `<prefix>.refused.json`, which overwrites nothing; `gate --report` consults it and
+  declines to certify; a completing run removes it.
+
+  Written during argv parsing, the earliest moment the prefix is known — which is the whole reason a
+  marker beats arming the prefix, since arming that early is the measured data loss (this engine's own
+  first ⟨0.28⟩ armer left candor-rust's committed report dirty). The first version of this port latched
+  the prefix downstream and produced no marker on exactly the argv-death case it exists for.
+
+  `.refused.json` joins the reserved segment set: `isReport` discriminates by name, so without it a
+  prefix whose only sibling was a marker passed the existence check and loaded zero functions — the
+  authoritative-empty silent under-report that predicate exists to prevent.
+
 ## [0.31.0] — 2026-08-20
 
 - **⚠ A single-file target of a kind this engine cannot read was certified GREEN.** `candor-ts notes.txt

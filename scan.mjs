@@ -186,6 +186,37 @@ const IS_PEEK = argv.includes("--peek-excluded");
 const CONFIG_KEYS = new Set(["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "net-partner", "unknown-ratchet", "engine"]);
 const CONFIG_KEYS_IMPLEMENTED = new Set(["policy", "baseline", "deps", "unknown-ratchet", "engine"]);
 
+// ⟨0.32⟩ THE REFUSAL MARKER — SPEC §3.3.1 ⟨0.32⟩.
+//
+// A run given no `--out` still writes reports, to its default prefix, and a refusal leaves whatever the
+// last successful run put there readable as current. Arming that prefix is NOT the answer: this engine's
+// own first version of the ⟨0.28⟩ armer did exactly that and left candor-rust's COMMITTED report dirty
+// while running a conformance probe. Naming a prefix is a declaration; a default is a convention.
+//
+// So the refusal is recorded BESIDE the reports and overwrites nothing. Because it destroys nothing it
+// is written at the EARLIEST moment the prefix is known — during argv parsing — which is what lets it
+// cover the argv-death case arming structurally cannot reach.
+//
+// It carries its own `prefix` because §3.3.1's direct-file locator accepts any `.json` name whatever its
+// dot-segments: a consumer handed one file cannot recover the prefix from the filename.
+let refusalPrefix = null, refusalTarget = null;
+const noteRefusalPrefix = (pfx) => { if (refusalPrefix === null) refusalPrefix = pfx; };
+const noteRefusalTarget = (t)   => { if (refusalTarget === null) refusalTarget = t; };
+const writeRefusalMarker = (why) => {
+  if (!refusalPrefix) return;
+  try {
+    fs.mkdirSync(path.dirname(refusalPrefix), { recursive: true });
+    fs.writeFileSync(`${refusalPrefix}.refused.json`, JSON.stringify({
+      candor: { spec: SPEC_VERSION }, refused: true,
+      prefix: refusalPrefix, target: refusalTarget ?? ".", reason: String(why),
+    }, null, 1) + "\n");
+  } catch { /* a marker that cannot be written fails OPEN — the status quo, never worse */ }
+};
+const clearRefusalMarker = () => {
+  if (!refusalPrefix) return;
+  try { fs.rmSync(`${refusalPrefix}.refused.json`, { force: true }); } catch { /* nothing to clear */ }
+};
+
 // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
 //
 // This pre-pass learns the sink and this run's inputs with NO side effects, before the parse loop
@@ -228,7 +259,7 @@ const preScan = (av) => {
     }
     // The scan TARGET, needed to discover the `.candor/config` whose `policy` key may name an input
     // this sink must not overwrite.
-    if (!a.startsWith("-") && target === null) target = a;
+    if (!a.startsWith("-") && target === null) { target = a; noteRefusalTarget(a); }
   }
   return { gate, policy, target, out };
 };
@@ -464,6 +495,21 @@ const runInputs = (target, policyFlag) => {
 // live (before the arg loop but after this block) it was in the temporal dead zone at every gate-input
 // refusal, and stdout stayed empty on every one of them. Measured while writing this move.
 const preGateSink = preScan(argv).gate;
+// ⟨0.32⟩ LATCH THE DEFAULT PREFIX HERE, AT PRE-PARSE — not where `outPrefix` is finally resolved.
+//
+// That resolution happens after argument parsing, so a refusal DURING parsing (an unknown flag is the
+// everyday case) never reaches it and the marker is absent on exactly the case it exists for. Measured:
+// the first version of this port latched downstream and `--zzz-not-a-flag` left no marker at all.
+//
+// Arming could not be moved this early — that is the measured data loss, and this engine's own first
+// ⟨0.28⟩ armer left candor-rust's committed report dirty. A write that destroys nothing can be.
+//
+// The raw target is used rather than the resolved root: they coincide for a directory target, and being
+// slightly wrong about WHERE costs a marker nobody reads, while being late costs the marker entirely.
+{
+  const preT = preScan(argv).target;
+  if (preT) { noteRefusalTarget(preT); noteRefusalPrefix(path.join(preT, ".candor", "report")); }
+}
 // ⟨0.28⟩ SPEC §3.3.1 (4) — THE SAME RULE ONE HOP UPSTREAM, FOR THE REPORT STREAM. `--json` is the
 // stdout REPORT sink; on any exit-2 the fail-closed ⟨0.21⟩ Row-1 report is written to stdout as the
 // stream's only content. Measured 2026-08-10 across all four engines: `--json --zzz-not-a-flag` exited
@@ -498,6 +544,7 @@ const failClosedReportDoc = (reason) => {
 // it. A refusal may replace this run's OWN placeholder; it may not write anywhere the arming declined to.
 let armedGateSink = null;
 const refuseEarly = (why) => {
+  writeRefusalMarker(why);   // ⟨0.32⟩ over the RUN, not over the exit sites
   // ⟨0.31⟩ A FILE `--gate-json` SINK GETS THE REASON TOO, and until now it did not: this only ever
   // wrote to STREAM sinks, so a run refusing with `--gate-json g.json` left the ARMING STUB in place —
   // "the gate did not complete — this document was written when the run STARTED and was never replaced
@@ -983,7 +1030,8 @@ for (let i = 0; i < argv.length; i++) {
       refuseEarly(`${a} requires a value`);
       process.exit(2);
     }
-    if (a === "--out") outPrefix = v; else if (a === "--policy") policyPath = v; else gateJsonPath = v;
+    if (a === "--out") { outPrefix = v; noteRefusalPrefix(v); }
+    else if (a === "--policy") policyPath = v; else gateJsonPath = v;
     i++;
   }
   // Any leading-dash token that isn't a recognized flag is an unknown flag — NOT a positional target
@@ -998,7 +1046,7 @@ for (let i = 0; i < argv.length; i++) {
     process.exit(2);
   }
   else if (target === null) target = a;
-  else if (outPrefix === null) outPrefix = a; // legacy positional prefix
+  else if (outPrefix === null) { outPrefix = a; noteRefusalPrefix(a); } // legacy positional prefix
   else {
     console.error(`candor-ts: unexpected extra argument ${a} (${usage})`);
     refuseEarly(`unexpected extra argument ${a}`);
@@ -1491,6 +1539,7 @@ if (!compilerOptions.typeRoots) {
   compilerOptions.typeRoots = roots;
 }
 if (!outPrefix) outPrefix = path.join(rootDir, ".candor", "report");
+noteRefusalPrefix(outPrefix);   // ⟨0.32⟩ no-op if `--out` already latched one
 // ⟨0.28⟩ THE REPORT SET REACHES ITS SINK BY A SECOND ROUTE, AND THE INPUT RULE MUST COVER BOTH. The armer
 // asks the input exemption of every file it arms, so `--out tsconfig` over a `tsconfig.json` TARGET was
 // correctly left unarmed — and then the FINAL `writeAtomic(`${outPrefix}.json`)` destroyed it anyway, at
@@ -7188,6 +7237,13 @@ for (const sf of sources) {
 }
 if (!wantJson) {
   writeAtomic(`${outPrefix}.hierarchy.json`, JSON.stringify(hierarchy, null, 1));
+  // ⟨0.32⟩ THE WRITE PHASE FINISHED, so the marker's claim ("the most recent attempt over this prefix
+  // refused") is no longer true. Cleared against the RESOLVED prefix as well as the latched one: the
+  // latch is made at pre-parse from the raw target and the resolved `outPrefix` may differ (a tsconfig
+  // target resolves to its directory), and a marker left behind makes every later gate refuse for ever
+  // — the permanent-red mirror of the permanent-green this rung closes.
+  clearRefusalMarker();
+  try { fs.rmSync(`${outPrefix}.refused.json`, { force: true }); } catch { /* nothing to clear */ }
   console.error(`candor-ts: wrote ${functions.length} effectful functions (${fns.size} analyzed, ${sources.length} files) to ${outPrefix}.json`);
 }
 // ⟨0.28⟩ The run has finished writing its report set: hand back any file it armed and turned out not to

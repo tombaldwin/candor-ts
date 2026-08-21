@@ -552,7 +552,48 @@ function discoverReportPrefix() {
 // A null prefix (no --report AND nothing discovered) is a LOUD exit-2 failure — never a silent empty
 // answer. A resolved prefix that names NO report files is likewise loud (hasReport). One helper so every
 // verb's no-report path is identical to the Rust engine's (report_or_discover + the no-files check).
+// ⟨0.32⟩ SPEC §3.3.1 — did the most recent attempt over these reports REFUSE?
+//
+// A consumer cannot work this out for itself. The hazard is an EVENT — a refusal that happened AFTER
+// these bytes were written — witnessed only by the run that refused; no function of the report and the
+// tree recovers it. So the refusing run writes a marker beside the reports and this reads it.
+//
+// Resolved for all three §3.3.1 locator forms. The DIRECT-FILE case is why the marker carries its own
+// `prefix`: that form accepts any `.json` name whatever its dot-segments, so the prefix cannot come from
+// the filename — the marker is found by scanning the file's directory and asking which recorded prefix
+// covers it.
+function refusalMarkerFor(prefix) {
+  const read = (f) => {
+    try {
+      const d = JSON.parse(fs.readFileSync(f, "utf8"));
+      return d && d.refused === true && typeof d.prefix === "string" ? d : null;
+    } catch { return null; }
+  };
+  try {
+    if (prefix.endsWith(".json") && fs.existsSync(prefix) && fs.statSync(prefix).isFile()) {
+      const dir = path.dirname(path.resolve(prefix));
+      const me = path.resolve(prefix);
+      for (const n of fs.readdirSync(dir)) {
+        if (!n.endsWith(".refused.json")) continue;
+        const d = read(path.join(dir, n));
+        if (d && me.startsWith(path.resolve(d.prefix))) return d;
+      }
+      return null;
+    }
+  } catch { return null; }
+  return read(`${prefix}.refused.json`);
+}
+
 function requireReport(prefix) {
+  if (prefix !== null) {
+    const m = refusalMarkerFor(prefix);
+    if (m) {
+      console.error(`candor-ts: the most recent scan over '${m.prefix}' REFUSED — these reports are from `
+                  + `an earlier run and this verb will not certify them. Cause: ${m.reason}. `
+                  + `Re-scan ${m.target || "the target"}; a completing run clears the marker.`);
+      process.exit(2);
+    }
+  }
   if (prefix === null) {
     console.error("candor-ts: no report found (no --report and no .candor/ discovered) — scan the crate first.");
     process.exit(2);
