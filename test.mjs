@@ -10345,16 +10345,24 @@ if (blk()) {
   // THE SCOPE BOUNDARY OF THE ROWS ABOVE, pinned as UNCHANGED rather than as correct — the same discipline
   // the bad-target row itself was held under until this commit. A typo'd EFFECT (`path <real fn> Netwerk`)
   // is arguably a bad target too, and `where` refuses exactly that typo (exit 2, "unknown effect"). But
-  // MEASURED on a valid report, rust, java AND swift all answer `path: []` at exit 0 here — so `path` and
-  // `where` disagree in all four engines, uniformly. Gating it in candor-ts alone would manufacture a
-  // fresh one-engine divergence out of the fix for one, which is the whole failure mode this rung exists
-  // to close. It is a FOUR-WAY rung of its own; when it is opened, this row changes deliberately.
+  // THE RUNG THIS ROW DEFERRED TO HAS SHIPPED. It used to read: rust, java and swift all answer
+  // `path: []` at exit 0 for a typo'd effect, so gating it in candor-ts alone would manufacture a fresh
+  // one-engine divergence out of one engine's fix — a FOUR-WAY rung of its own, and "when it is opened,
+  // this row changes deliberately". It is open: all four engines now refuse, pinned by conformance
+  // PART 61, so the row flips here rather than being deleted. The scope note WAS the pin.
   const typoEff = pathQ("src.app.g", "Netwerk", "--json");
-  let typoDoc = null; try { typoDoc = JSON.parse(typoEff.stdout); } catch { /* stays null */ }
-  check("⟨0.28⟩ SCOPE: a typo'd EFFECT on `path` is NOT part of this rung — still `path: []` at exit 0, which is what rust/java/swift all do (a four-way rung, not a one-engine fix)",
-        typoEff.status === 0 && !!typoDoc && !("unanswerable" in typoDoc)
-          && Array.isArray(typoDoc.path) && typoDoc.path.length === 0 && typoDoc.effect === "Netwerk",
-        `status=${typoEff.status} ${typoEff.stdout}`.slice(0, 220));
+  check("a typo'd EFFECT on `path` is REFUSED (exit 2), not answered `path: []` at exit 0 — four-way, conformance PART 61",
+        typoEff.status === 2 && /unknown effect/.test(typoEff.stderr || ""),
+        `status=${typoEff.status} ${(typoEff.stderr || "").slice(0, 160)}`);
+  // The control the fix needs beside it: a KNOWN effect the report simply lacks must STILL answer, or
+  // the guard is indistinguishable from "path always refuses" and would pass the row above while
+  // destroying the verb.
+  const absentEff = pathQ("src.app.g", "Clipboard", "--json");
+  let absentDoc = null; try { absentDoc = JSON.parse(absentEff.stdout); } catch { /* stays null */ }
+  check("CONTROL: a KNOWN effect the report lacks still answers `path: []` at exit 0",
+        absentEff.status === 0 && !!absentDoc && Array.isArray(absentDoc.path)
+          && absentDoc.path.length === 0 && absentDoc.effect === "Clipboard",
+        `status=${absentEff.status} ${absentEff.stdout}`.slice(0, 220));
 
   // …and the orphan is handed back WHOLE. Restoring the report while leaving its sidecars deleted is a
   // third state neither the pre-run tree nor the armed tree ever had.
