@@ -1696,6 +1696,18 @@ switch (cmd) {
     // "does not perform undefined" at exit 0 — a false all-clear over a question that was never posed.
     if (!fn || !eff) { console.error("usage: candor-ts-query path <fn> <Effect> [--report <locator>] [--json]"); process.exit(2); }
     const fns = loadReportOrDie(prefix);
+    // A TYPO'D EFFECT NAME IS A LOUD ERROR HERE TOO. `where` has refused an unknown effect since the
+    // corpus audit; `path` did not, and answered "<fn> does not perform Fsz" at exit 0 — a typo scored
+    // as a confident NEGATIVE, in the verb people reach for to check one specific claim.
+    //
+    // Same rule as `where`, deliberately: a KNOWN effect that is simply absent is a legitimate negative
+    // answer, and an unknown name PRESENT in the report (a spec extension effect from another engine) is
+    // allowed. The error is only for a name NEITHER known NOR present.
+    if (!KNOWN_EFFECTS.includes(eff) && eff !== "Unknown"
+        && !fns.some(f => (f.inferred || []).includes(eff))) {
+      console.error(`candor-ts-query path: unknown effect '${eff}' (known: ${KNOWN_EFFECTS.join(", ")})`);
+      process.exit(2);
+    }
     // ⟨0.28⟩ Sidecar first, then the report's embedded `calls` edges (rust's `path` runs on the report's
     // edges alone — see the callers verb). The unanswerable arm below keeps the genuinely-absent case.
     let cg = loadCallgraph(prefix);
