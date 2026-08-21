@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.31.0] — 2026-08-20
+
 - **⚠ A single-file target of a kind this engine cannot read was certified GREEN.** `candor-ts notes.txt
   --policy p` printed `policy ✓` and exited 0 with `ok: true` over a file it never parsed — the compiler
   dropped it silently and the "no sources" predicate never fired, because the name was in the list. rust,
@@ -38,8 +40,6 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   describing a deliberate refusal as a crash. It replaces only a document this run itself armed: writing
   to the sink path directly bypassed ⟨0.28⟩'s guard that arming must never destroy the source it is
   about to scan, which six ⟨0.28⟩ rows caught. Refusals now also name a remedy, per §3.3(d).
-
-## [0.31.0] — 2026-08-20
 
 - **⚠ `outOfScope` named the wrong file when two excluded files shared a basename.** MEASURED with
   `src/one/dup.test.ts` and `src/two/dup.test.ts`: `fn_two` was disclosed at `src/one/dup.test.ts`. The
