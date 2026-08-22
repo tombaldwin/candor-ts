@@ -11,7 +11,8 @@
 import fs from "node:fs";
 import nodePath from "node:path";
 import { reasonClass, REASON_CLASSES, DYNAMIC_CLASSES, resolveReasonClasses, reasonClassesMatch,
-         classFilterExcludes, netClassResolver, reportNetClasses, unanswerableScoped } from "./policy.mjs";
+         classFilterExcludes, netClassResolver, reportNetClasses, unanswerableScoped,
+         effectiveInferred, identityUnits } from "./policy.mjs";
 
 // Sibling report/callgraph files of a multi-report prefix (candor-scan writes <prefix>.<crate>.scan.json,
 // one per workspace member) — so the loaders read ANY engine's output, not just candor-ts's <prefix>.json.
@@ -1586,7 +1587,7 @@ function deniedLayer(fn, eff, policyParsed, scopeMatches, ctx = null) {
   for (const r of policyParsed.deny) {
     const denies = r.effects.length === 0 ? eff !== "Unknown" : r.effects.includes(eff);
     if (!denies || (r.scope && !scopeMatches(fn, r.scope))) continue;
-    if (ctx && classFilterExcludes(r, ctx.entry(fn), eff, ctx.reasonAcc, ctx.netClassOf)) continue;
+    if (ctx && classFilterExcludes(r, ctx.entry(fn), eff, ctx.reasonAcc, ctx.netClassOf, ctx.units)) continue;
     if (ctx?.withhold && ctx.withhold(r, fn, eff)) continue;
     return r.scope ?? "";
   }
@@ -1639,14 +1640,18 @@ function deniedLayer(fn, eff, policyParsed, scopeMatches, ctx = null) {
  * whether or not the caller loaded a callgraph — which is why MCP's `candor_unverified`, which loads no
  * sidecar, gets the same narrowing as the CLI.
  */
-export function narrowingContext(fns, cg = {}, policyParsed = null) {
+export function narrowingContext(fns, cg = {}, policyParsed = null, units = null) {
   const byName = indexFns(fns);
-  const reasonAcc = resolveReasonClasses(fns, cg);
+  // ⟨0.33⟩ the unit identity the GATE uses over these same bytes — `null` is the identity, which is what
+  // the scan-time note in scan.mjs wants. `uk` is how every accumulator on this page is keyed; `byName`
+  // stays a NAME index, because the advisory verbs are called with the names a human typed.
+  const uk = (e) => (units ? units.key(e) : e?.fn);
+  const reasonAcc = resolveReasonClasses(fns, cg, units);
   // VERBATIM OFF THE WIRE: every `Net`-bearing entry maps to its `netClass` or to the EMPTY set, so the
   // derivation is unreachable and the report is the only source of the class (reportNetClasses' argument).
-  const netMap = reportNetClasses(fns, { authoritative: true });
+  const netMap = reportNetClasses(fns, { authoritative: true, units });
   const { unevaluated, withhold } = policyParsed
-    ? unanswerableScoped(policyParsed, fns, reasonAcc, netMap)
+    ? unanswerableScoped(policyParsed, fns, reasonAcc, netMap, units)
     : { unevaluated: [], withhold: null };
   // The disclosure, keyed by FUNCTION. `unanswerableScoped` groups by RULE because that is the granularity
   // a gate verdict lists; an advisory verb names FUNCTIONS, so the same triples are indexed both ways here
@@ -1656,8 +1661,8 @@ export function narrowingContext(fns, cg = {}, policyParsed = null) {
   if (withhold)
     for (const f of fns)
       for (const r of policyParsed.deny)
-        for (const eff of f.inferred ?? []) {
-          if (!withhold(r, f.fn, eff)) continue;
+        for (const eff of effectiveInferred(f, reasonAcc, units)) {
+          if (!withhold(r, uk(f), eff)) continue;
           const u = byRaw.get(r.raw);
           if (!u) continue;                                  // unreachable: every held triple has a group
           const cur = heldByFn.get(f.fn) ?? new Map();
@@ -1666,9 +1671,16 @@ export function narrowingContext(fns, cg = {}, policyParsed = null) {
         }
   return {
     reasonAcc,
-    netClassOf: netClassResolver(new Map(), new Set(), netMap),
+    netClassOf: netClassResolver(new Map(), new Set(), netMap, units),
     entry: (fn) => byName.get(fn) ?? null,
-    withhold,
+    units,
+    /** ⟨0.33⟩ a function's resolved reason classes, looked up by the UNIT the name resolves to. */
+    classesOf: (fn) => reasonAcc.get(uk(byName.get(fn) ?? { fn })),
+    // ⟨0.33⟩ the advisory verbs hold a NAME; the withhold is keyed by UNIT (unanswerableScoped). Resolving
+    // here rather than at each call site is deliberate — a name-keyed probe of a unit-keyed set does not
+    // error, it answers `false`, which reads as "the gate could judge this" and puts back the fabricated
+    // remedy the withhold exists to suppress.
+    withhold: withhold ? (r, fn, eff) => withhold(r, uk(byName.get(fn) ?? { fn }), eff) : null,
     unevaluated,
     held: (fn, eff = null) =>
       [...(heldByFn.get(fn)?.values() ?? [])].filter((h) => eff === null || h.effect === eff),
@@ -1772,7 +1784,7 @@ function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMa
 // `107755b`): `refused: true`, the `unevaluated` disclosure, and **NO `crossing` KEY AT ALL** — absent, not
 // `false`, because a claim it cannot make must not be spelled as a claim it can.
 export function fix(cg, fns, target, eff, policyParsed, scopeMatches) {
-  const ctx = narrowingContext(fns, cg, policyParsed);   // ⟨0.24⟩ the rule's class filter + the gate's refusal
+  const ctx = narrowingContext(fns, cg, policyParsed, identityUnits());   // ⟨0.24⟩ the rule's class filter + the gate's refusal
   // Resolve against REPORT function names only (not callgraph nodes, which include pure fns absent from the
   // report) — so `fix <pure-fn>` is a uniform "no such fn" across engines, not a TS-only crossing:false.
   // (/code-review — candor-query/java/swift all match report fns only.)
@@ -1811,7 +1823,7 @@ export function fix(cg, fns, target, eff, policyParsed, scopeMatches) {
 // EITHER. Dropping the plan without the disclosure would trade a fabricated instruction for a false
 // all-clear, which is the failure this project keeps measuring in fabrication repairs.
 export function fixGate(cg, fns, policyParsed, scopeMatches) {
-  const ctx = narrowingContext(fns, cg, policyParsed);   // ⟨0.24⟩ the class filter + the gate's refusal
+  const ctx = narrowingContext(fns, cg, policyParsed, identityUnits());   // ⟨0.24⟩ the class filter + the gate's refusal
   const byName = indexFns(fns);
   const rev = reverseGraph(cg);
   const plans = new Map();
@@ -1910,7 +1922,7 @@ export function unverifiedHoleRule(fn, inferred, policyParsed, scopeMatches, ctx
   const entry = ctx ? ctx.entry(fn) : null;
   // An effect the rule NAMES but whose class filter excludes here is not a violation — it is exactly what
   // the gate tolerates, so the pass is real, and the Unknown it passes with makes that pass unverified.
-  const fires = (r, x) => !(ctx && classFilterExcludes(r, entry, x, ctx.reasonAcc, ctx.netClassOf))
+  const fires = (r, x) => !(ctx && classFilterExcludes(r, entry, x, ctx.reasonAcc, ctx.netClassOf, ctx.units))
                        && !(ctx?.withhold && ctx.withhold(r, fn, x));
   for (const r of policyParsed.deny) {
     if (r.scope && !scopeMatches(fn, r.scope)) continue;
@@ -1954,13 +1966,15 @@ export function unverified(fns, policyParsed, scopeMatches, classSpec = null, cg
   // ⟨0.24⟩ the POLICY's own `Unknown[…]`/`Net[…]` narrowing, which is a different question from `--class`
   // (the reader's drill-down) and was never asked at all: `reasonAcc` here rides the ctx, so the two
   // narrowings resolve the class set exactly once and from the same code as the gate.
-  const ctx = narrowingContext(fns, cg, policyParsed);
+  const ctx = narrowingContext(fns, cg, policyParsed, identityUnits());
   const holes = [];
   const held = [];
   for (const e of fns) {
     // Same predicate + upgrade as the gate note (scan.mjs) — one source of truth for a hole.
-    const r = unverifiedHoleRule(e.fn, e.inferred, policyParsed, scopeMatches, ctx);
-    if (r && !(cf && !reasonClassesMatch(ctx.reasonAcc.get(e.fn), cf))) {
+    // ⟨0.33⟩ the effect set the GATE reads, not the raw wire one — an entry whose callee name the merge
+    // could not resolve carries `Unknown` here too, or this verb would clear a hole the gate refuses.
+    const r = unverifiedHoleRule(e.fn, effectiveInferred(e, ctx.reasonAcc, ctx.units), policyParsed, scopeMatches, ctx);
+    if (r && !(cf && !reasonClassesMatch(ctx.classesOf(e.fn), cf))) {
       const [rule, upgrade] = ruleUpgrade(r);
       holes.push({ fn: e.fn, rule, unknownWhy: e.unknownWhy ?? [], upgrade });
     }

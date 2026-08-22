@@ -21,7 +21,7 @@ import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses,
          parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText,
-         unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors,
+         unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, identityUnits,
          policyZeroRules } from "./policy.mjs";
 
 const VERSION = createRequire(import.meta.url)("./package.json").version; // single-sourced, like scan.mjs
@@ -405,8 +405,11 @@ const TOOLS = {
             : `a report found at prefix \`${clip(p)}\` failed to load — refusing to gate over a report that did not load cleanly; a partial signature makes a green verdict meaningless (the effects of the report that did not load are exactly the ones a violation would come from). Re-run the scan`));
       const gfns = g.functions;
       const cg = Q.loadCallgraph(p);
-      const gnet = reportNetClasses(gfns, { authoritative: true });
-      const { unevaluated, withhold } = unanswerableScoped(pol, gfns, resolveReasonClasses(gfns, cg), gnet);
+      // ⟨0.33⟩ the same unit identity the CLI gate uses over these bytes (SPEC §2.2) — one object, so this
+      // surface cannot join two members by name while the CLI keeps them apart.
+      const gunits = identityUnits();
+      const gnet = reportNetClasses(gfns, { authoritative: true, units: gunits });
+      const { unevaluated, withhold } = unanswerableScoped(pol, gfns, resolveReasonClasses(gfns, cg, gunits), gnet, gunits);
       // ⟨0.29⟩ …AND THE TWO WHOLE-POLICY UNANSWERABLE KINDS. This tool passed the WHOLE policy to
       // `evaluatePolicy`, so `forbid` was answered from a report — MEASURED: with no callgraph sidecar,
       // `violations: 0` and nothing disclosed (a silent green over a rule that was never enforced); with a
@@ -421,7 +424,7 @@ const TOOLS = {
       // to suppress a certain violation).
       if (wp.onlyUnanswerable)
         throw new Error(`this policy asks only questions a report cannot answer — ${wp.unevaluated[0].why}`);
-      const v = evaluatePolicy(wp.answerable, gfns, cg, new Map(), new Set(), gnet, withhold);
+      const v = evaluatePolicy(wp.answerable, gfns, cg, new Map(), new Set(), gnet, withhold, gunits);
       // ⟨0.21⟩ COMPLETENESS MANIFEST — this tool implemented no incompleteness rule at all: it answered
       // `{ok:true, violations:[]}` over a report DECLARING `unanalyzed`, where the CLI exits 2. A gate
       // cannot be green over code candor never analyzed, and the manifest travels ON the report, so the

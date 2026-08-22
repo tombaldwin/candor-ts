@@ -27,7 +27,7 @@ import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, d
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
          policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules,
          fatalPolicyErrors, refusalVerdict,
-         unanswerableScoped, wholePolicyUnanswerable } from "./policy.mjs";
+         unanswerableScoped, wholePolicyUnanswerable, identityUnits } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
 import { printAgents, writeStdoutSync } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
@@ -2168,12 +2168,16 @@ switch (cmd) {
     // THE REPORT ROUTE'S `(S, D)`: `S` = each entry's `inferred`, verbatim; `D` = the reason classes
     // resolved over the entries' OWN `calls` edges (the sidecar is NOT passed — that is the MUST NOT), by
     // the SAME resolution the scan gate and `unverified --class` use. `netClass` verbatim, likewise.
-    const gnet = reportNetClasses(g.functions, { authoritative: true });
-    const gacc = resolveReasonClasses(g.functions, {});
+    // ⟨0.33⟩ THE UNIT IDENTITY FOR A MULTI-REPORT PREFIX (SPEC §2.2). Built ONCE here and handed to every
+    // accumulator, so the gate, its refusal and its verdict all key the same way — a private copy is how
+    // the advisory verbs came to disagree with the gate before.
+    const gunits = identityUnits();
+    const gnet = reportNetClasses(g.functions, { authoritative: true, units: gunits });
+    const gacc = resolveReasonClasses(g.functions, {}, gunits);
     // THE THIRD REFUSAL — the only one that depends on the REPORT rather than the policy alone, and the
     // only one whose GRANULARITY is per (rule, function). See unanswerableScoped for why it is minimal, and
     // why it no longer short-circuits.
-    const { unevaluated: gscoped, withhold: gwithhold } = unanswerableScoped(gpol, g.functions, gacc, gnet);
+    const { unevaluated: gscoped, withhold: gwithhold } = unanswerableScoped(gpol, g.functions, gacc, gnet, gunits);
     for (const u of gscoped) { console.error(`candor-ts: gate: ${u.why}`); gunevaluated.push(u); }
     // ONE matcher for both routes into the gate (SPEC §6.2: "THE GATE AND THE DISCLOSURE MUST APPLY THE
     // SAME RULE, AND SHOULD SHARE THE SAME CODE"). `scan --policy` and this verb both land in
@@ -2186,7 +2190,7 @@ switch (cmd) {
     // matcher would be the very evaluation-on-partial-evidence they are unanswerable FOR — `allow` would
     // fire AS-EFF-008 "no visible literal" on every report entry whose surface the wire does not carry.
     const gviol = evaluatePolicy(gwp.answerable,
-                                 g.functions, {}, new Map(), new Set(), gnet, gwithhold);
+                                 g.functions, {}, new Map(), new Set(), gnet, gwithhold, gunits);
     // Route the human output exactly as a scan does: to stderr whenever stdout carries the verdict
     // document, so `candor-ts-query gate … --json | jq` sees pure JSON.
     const gsay = (json || gateJsonPath === "-") ? (l) => console.error(l) : (l) => console.log(l);

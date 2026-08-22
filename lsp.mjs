@@ -45,7 +45,7 @@ import { createRequire } from "node:module";
 import nodePath from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as Q from "./query-core.mjs";
-import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, policyZeroRules } from "./policy.mjs";
+import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, policyZeroRules, identityUnits } from "./policy.mjs";
 
 // Version: from the sibling package.json when running inside the npm package; a single-file BUNDLE of
 // this server (the IDE-plugin embedding) has no sibling package.json — fall back rather than crash.
@@ -382,9 +382,11 @@ function diagnosticsFor(docPath) {
   // never carried. `authoritative: true` for the same reason the MCP gate takes it: an entry without
   // `netClass` gets the EMPTY set rather than a derivation from `hosts`, so the report is the only source of
   // the class and nothing is re-classified with this machine's evidence about the producer's project.
-  const dnet = reportNetClasses(fns, { authoritative: true });
+  // ⟨0.33⟩ the same unit identity the CLI gate uses over these bytes (SPEC §2.2).
+  const dunits = identityUnits();
+  const dnet = reportNetClasses(fns, { authoritative: true, units: dunits });
   const { unevaluated: dunevaluated, withhold: dwithhold } =
-    unanswerableScoped(dpol, fns, resolveReasonClasses(fns, Q.loadCallgraph(reportPrefix)), dnet);
+    unanswerableScoped(dpol, fns, resolveReasonClasses(fns, Q.loadCallgraph(reportPrefix), dunits), dnet, dunits);
   // ⟨0.29⟩ `forbid`/`allow` are STRIPPED and DISCLOSED here too. This path handed the whole policy to
   // `evaluatePolicy`, so an editor drew AS-EFF-009 squiggles from a report — evidence SPEC §3.1 rules
   // cannot support them — or, with no sidecar, drew nothing and said nothing, which reads as "no layering
@@ -403,7 +405,7 @@ function diagnosticsFor(docPath) {
   for (const u of dunevaluated)
     warnOnce(`candor-lsp: ${u.why}\n  NO diagnostics are drawn for that rule — their ABSENCE here is the refusal, not an all-clear.`);
   const violations = evaluatePolicy(dwp.answerable, fns, Q.loadCallgraph(reportPrefix),
-                                    new Map(), new Set(), dnet, dwithhold);
+                                    new Map(), new Set(), dnet, dwithhold, dunits);
   const locByFn = new Map(fns.filter((e) => e.loc).map((e) => [e.fn, locParts(e.loc)]));
   const out = [];
   for (const v of violations) {

@@ -17,6 +17,54 @@ export const REASON_CLASSES = ["reflect", "dispatch", "indirect", "native", "unr
 // the flag and the policy filter name the same vocabulary, so `--class dynamic` and `Unknown[dynamic]`
 // cannot drift into meaning different sets.
 export const DYNAMIC_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved"];
+
+// ⟨0.33⟩ THE UNIT IDENTITY, AS A PLUGGABLE POLICY — `units`, threaded through every function on this page
+// that keys an accumulator by a function.
+//
+// It exists because a MULTI-REPORT gate must join by `hash` and never by bare `fn` (SPEC §2.2: "names may
+// legitimately repeat across packages"), and this engine joined by `fn`. Measured on candor-ts at spec
+// 0.31: `gate --report` over member `a` REFUSED a scoped rule at exit 2, and gating that same member
+// beside an unrelated sibling exited 0 with `policy ✓` — a false green produced by ADDING a report. The
+// harm is not effects merging (union can only add violations); it is REASONS merging, because a reason
+// set is what makes an `Unknown` ANSWERABLE. `a`'s reasonless Unknown borrowed `b`'s `callback:` class,
+// the filter saw a class the rule does not deny, and tolerated: "I cannot say" became "I checked".
+//
+// AND THE KEY SWAP CANNOT BE MADE ALONE, which is why the identity is a PARAMETER rather than a hardcoded
+// `e.hash`. A policy SCOPE is written against the NAME (`deny Exec app::`) and the verdict ROW must print
+// the NAME (§3.3.1 byte-equality with `scan --policy`), so a key that is not a name has to travel BESIDE
+// the name, never instead of it. Keying by hash without that separation is a false green introduced while
+// fixing a false green — the shape where killing an over-charge introduces a silent under-report. Hence
+// the split landing: this identity is plumbed and verified a NO-OP first, and only then swapped.
+//
+// `identityUnits()` is the SCAN route's identity and the default everywhere: a scan gates ONE analysis
+// world, its keys are already names, so that route cannot change behaviour by construction.
+export const AMBIGUOUS = Symbol("candor:ambiguous-callee");
+
+export function identityUnits() {
+  return {
+    key: (e) => e?.fn,
+    /** A callee/caller NAME resolved to a unit key, `AMBIGUOUS`, or null. Under identity a name IS a key. */
+    resolveCall: (_callerKey, name) => name,
+    /** Every unit key declaring `name`. Under identity, the name itself. */
+    unitsNamed: (name) => [name],
+  };
+}
+
+/** `units.key` with the identity default applied, for the sites that take `units` as an option. */
+const unitKey = (units, e) => (units ? units.key(e) : e?.fn);
+
+/**
+ * ⟨0.33⟩ The effect set the GATE reads for one entry: the report's `inferred`, plus `Unknown` when the
+ * merge could not resolve one of this entry's callee names (see `reportUnits`). An unresolvable callee
+ * means the transitive set on the wire cannot be completed here, and `Unknown` is what this family says
+ * about a reach it cannot follow. Never subtracts.
+ */
+export function effectiveInferred(f, reasonAcc, units = null) {
+  const inf = f?.inferred ?? [];
+  const amb = reasonAcc?.ambiguous;
+  if (!amb || amb.size === 0 || inf.includes("Unknown")) return inf;
+  return amb.has(unitKey(units, f)) ? [...inf, "Unknown"] : inf;
+}
 /** Map a raw `unknownWhy` token (e.g. `reflect:eval`, `callback:fetch`) to its normative reason class. */
 export function reasonClass(why) {
   const w = String(why).trim().toLowerCase();
@@ -49,8 +97,11 @@ export function reasonClass(why) {
 // function whose Unknown is purely INHERITED carries no reason of its own — 24% of Unknown-bearing entries
 // on this engine's sources and 57-58% on execa/got. Matching against the direct field reads a field that
 // answers a different question.
-export function resolveReasonClasses(functions, callgraph = {}) {
+export function resolveReasonClasses(functions, callgraph = {}, units = null) {
+  const U = units ?? identityUnits();
   const acc = new Map();
+  // ⟨0.33⟩ the units whose OWN callee name the merge could not resolve — see the contribution below.
+  const ambiguous = new Set();
   // ⟨0.24⟩ THE REACH IS THE REPORT'S OWN, not the sidecar's. §2 embeds the call edges per entry (`calls`)
   // precisely so a consumer without the sidecar can reconstruct the graph, and rust (`reason_class_acc`),
   // java (`gateInputFromReport`: `edges…addAll(e.calls())`) and swift all resolve the reason classes over
@@ -69,9 +120,37 @@ export function resolveReasonClasses(functions, callgraph = {}) {
     if (!s) { s = new Set(); edges.set(caller, s); }
     s.add(callee);
   };
-  for (const f of functions ?? []) for (const c of f.calls ?? []) addEdge(f.fn, c);
+  // ⟨0.33⟩ NODES AND EDGES. `calls` names a callee by BARE `fn`, so keying the accumulators by a unit key
+  // while joining the EDGES by name leaves the same defect one layer down — harder to see, because the
+  // node table looks right. Every edge endpoint therefore goes through `units.resolveCall`, which is
+  // identity on the scan route and the hash join on the report route.
+  const link = (callerKey, name) => {
+    const r = U.resolveCall(callerKey, name);
+    // AMBIGUOUS: two or more units declare this name and nothing here can say which is meant. Dropping
+    // the edge is right — picking would invent a reach — but dropping it SILENTLY is not, and that was
+    // measured on candor-rust: the caller lost the reason class it would have inherited, stayed
+    // ANSWERABLE through a reason of its own, and a RED verdict went GREEN by adding a report. So the
+    // ambiguity is CONTRIBUTED at the caller's entry instead (below), before the fixpoint.
+    if (r === AMBIGUOUS) { ambiguous.add(callerKey); return; }
+    if (r != null) addEdge(callerKey, r);
+  };
+  for (const f of functions ?? []) {
+    const ck = U.key(f);
+    for (const c of f.calls ?? []) link(ck, c);
+  }
   for (const [caller, callees] of Object.entries(callgraph ?? {})) {
-    for (const c of Array.isArray(callees) ? callees : []) addEdge(caller, c);
+    // The SIDECAR's caller is a NAME too, and it takes the SAME rule rather than a carve-out: one unit
+    // declaring it resolves, several means the edge cannot be attributed and each candidate carries the
+    // ambiguity. Attaching it to all of them would be the name join again, in the caller direction —
+    // and that direction is the harmful one, since a borrowed class is what makes an Unknown answerable.
+    // A name no entry declares keeps a key of its own (`unitsNamed` returns it), so an intermediate hop
+    // the report omits as effect-free still carries classes through, exactly as it did before.
+    const ckeys = U.unitsNamed(caller);
+    if (ckeys.length === 1) {
+      for (const c of Array.isArray(callees) ? callees : []) link(ckeys[0], c);
+    } else if (ckeys.length > 1) {
+      for (const k of ckeys) ambiguous.add(k);
+    }
   }
   for (const f of functions ?? []) {
     const cs = new Set((f.unknownWhy ?? []).map(reasonClass));
@@ -88,7 +167,17 @@ export function resolveReasonClasses(functions, callgraph = {}) {
     // direct Unknown it could not name (scan.mjs), which is the same rule one layer earlier, at the source.
     // It fires for a FOREIGN report (java/rust/swift/an older build), which every query verb also reads.
     if ((f.direct ?? []).includes("Unknown") && !(f.unknownWhy ?? []).length) cs.add("unresolved");
-    if (cs.size) acc.set(f.fn, cs);
+    if (cs.size) acc.set(U.key(f), cs);
+  }
+  // ⟨0.33⟩ …and the AMBIGUITY CONTRIBUTES, exactly as the reasonless Unknown above it does — at the
+  // caller's own entry, before the fixpoint. `dispatch` is the right class by the vocabulary's own
+  // definition ("unresolved virtual/dynamic dispatch, SAME-NAME AMBIGUITY"), and it is evidence THIS
+  // merge holds — it saw two declarers — never a class borrowed from another function's body, so it
+  // cannot make some other function's Unknown answerable, which is what the original defect did.
+  for (const k of ambiguous) {
+    let s = acc.get(k);
+    if (!s) { s = new Set(); acc.set(k, s); }
+    s.add("dispatch");
   }
   // …then propagate over the call graph to a fixpoint, so `Unknown[reflect]` at a caller inheriting
   // Unknown from a reflect-caused callee still fires (matches java/rust reasonClassAcc).
@@ -104,6 +193,10 @@ export function resolveReasonClasses(functions, callgraph = {}) {
       }
     }
   }
+  // ⟨0.33⟩ The unresolvable-callee set rides the accumulator NON-ENUMERABLY (the `zeroMatch` precedent
+  // below), so every existing caller keeps a plain `Map` and nothing that serializes one acquires a field
+  // the spec has not pinned. `effectiveInferred` is the only reader.
+  Object.defineProperty(acc, "ambiguous", { value: ambiguous, enumerable: false });
   return acc;
 }
 
@@ -593,15 +686,18 @@ export function literalAllowed(effect, reached, values) {
 //     entry (exit 2), so no gate DECISION rests on the empty set; what the mode additionally prevents is
 //     the class list a BARE `deny Net` violation REPORTS being re-derived from `hosts` — asserting a
 //     destination class the report never made, in a field a consumer reads as the producer's judgment.
-export function reportNetClasses(functions, { authoritative = false } = {}) {
+export function reportNetClasses(functions, { authoritative = false, units = null } = {}) {
   const m = new Map();
   for (const f of functions ?? []) {
     const carried = Array.isArray(f.netClass) ? f.netClass : [];
     if (carried.length === 0 && !(authoritative && (f.inferred ?? []).includes("Net"))) continue;
-    const prev = m.get(f.fn);
-    // A repeated `fn` is malformed input; UNION rather than overwrite — the direction that cannot turn a
-    // violation into a pass (java `gateInputFromReport` merges the same way).
-    m.set(f.fn, prev ? [...new Set([...prev, ...carried])].sort() : carried);
+    // ⟨0.33⟩ keyed by the UNIT, not by the bare name — two members of a workspace may legitimately share
+    // one (SPEC §2.2), and merging their destination classes is the same borrowing the reason-class merge
+    // was measured doing. A repeated KEY is one unit reported twice; UNION rather than overwrite — the
+    // direction that cannot turn a violation into a pass (java `gateInputFromReport` merges the same way).
+    const k = unitKey(units, f);
+    const prev = m.get(k);
+    m.set(k, prev ? [...new Set([...prev, ...carried])].sort() : carried);
   }
   return m;
 }
@@ -730,11 +826,16 @@ export function wholePolicyUnanswerable(pol, verb = "this route") {
   };
 }
 
-export function unanswerableScoped(pol, functions, reasonAcc, netMap) {
+// ⟨0.33⟩ THE WITHHOLD IS KEYED BY UNIT; THE DISCLOSURE NAMES THE FUNCTION. Keying the held set by name
+// would withhold the rule on EVERY same-named unit — and a withheld triple is a violation NOT reported,
+// so that is the fail-OPEN direction: one member's missing evidence deleting another member's certain
+// violation. `evaluatePolicy` and `narrowingContext` pass the unit key in turn. `why` still lists NAMES,
+// because a key is not something an operator can look up in their own source.
+export function unanswerableScoped(pol, functions, reasonAcc, netMap, units = null) {
   const held = new Set(), byRule = new Map();
-  const key = (raw, fn, eff) => `${raw}\u0000${fn}\u0000${eff}`;
-  const note = (r, fn, eff, why) => {
-    held.add(key(r.raw, fn, eff));
+  const key = (raw, uk, eff) => `${raw}\u0000${uk}\u0000${eff}`;
+  const note = (r, uk, fn, eff, why) => {
+    held.add(key(r.raw, uk, eff));
     let e = byRule.get(r.raw);
     if (!e) { e = { rule: r.raw, fns: [], why }; byRule.set(r.raw, e); }
     e.fns.push(fn);
@@ -742,15 +843,16 @@ export function unanswerableScoped(pol, functions, reasonAcc, netMap) {
   for (const r of pol.deny) {
     for (const f of functions) {
       if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
-      const inf = f.inferred ?? [];
-      if (r.netClasses?.length && inf.includes("Net") && !(netMap.get(f.fn)?.length))
-        note(r, f.fn, "Net", "narrows on the Net DESTINATION CLASS, but %F carr%S Net with no "
+      const uk = unitKey(units, f);
+      const inf = effectiveInferred(f, reasonAcc, units);
+      if (r.netClasses?.length && inf.includes("Net") && !(netMap.get(uk)?.length))
+        note(r, uk, f.fn, "Net", "narrows on the Net DESTINATION CLASS, but %F carr%S Net with no "
           + "`netClass` in this report — the field the filter reads is absent, so the narrowing would "
           + "succeed for lack of evidence and drop a Net the bare `deny Net` catches. NOT EVALUATED for "
           + "those functions rather than passed: an absent optional field must not relax a fail-closed "
           + "gate. Use the bare `deny Net`, or gate at scan time (candor-ts <src> --policy <file>).");
-      if (r.unknownClasses?.length && inf.includes("Unknown") && !(reasonAcc.get(f.fn)?.size))
-        note(r, f.fn, "Unknown", "narrows on the Unknown REASON CLASS, but %F carr%S Unknown with no "
+      if (r.unknownClasses?.length && inf.includes("Unknown") && !(reasonAcc.get(uk)?.size))
+        note(r, uk, f.fn, "Unknown", "narrows on the Unknown REASON CLASS, but %F carr%S Unknown with no "
           + "reason reachable in this report — neither %P own `unknownWhy` nor a `calls` edge to one. "
           + "§6.2 resolves the class set TRANSITIVELY over the gate's reach; with the channel missing, "
           + "every narrowed filter silently tolerates while only the bare `deny Unknown` fires. NOT "
@@ -766,7 +868,7 @@ export function unanswerableScoped(pol, functions, reasonAcc, netMap) {
     return { rule, why: `\`${rule}\` ` + why.replace("%F", list).replace("%S", names.length === 1 ? "ies" : "y")
                                             .replace("%P", names.length === 1 ? "its" : "their") };
   });
-  return { unevaluated, withhold: held.size ? (r, fn, eff) => held.has(key(r.raw, fn, eff)) : null };
+  return { unevaluated, withhold: held.size ? (r, uk, eff) => held.has(key(r.raw, uk, eff)) : null };
 }
 
 /**
@@ -805,12 +907,17 @@ export function unanswerableScoped(pol, functions, reasonAcc, netMap) {
 /** ⟨0.24⟩ ONE definition of a function's Net destination classes for a run: the report's own field when it
  *  carries one (reportNetClasses), else the derivation from the surfaces the caller supplied. Exported so
  *  the ADVISORY verbs resolve the class the same way the gate does — see `classFilterExcludes`. */
-export function netClassResolver(incomplete = new Map(), partners = new Set(), netClasses = null) {
+export function netClassResolver(incomplete = new Map(), partners = new Set(), netClasses = null, units = null) {
   // `has`, not `get(…) ?? derive`: an entry mapped to the EMPTY set is a report that carried no class, and
   // on the authoritative route that absence is the answer — deriving one there would re-classify.
-  return (f) => (netClasses && netClasses.has(f.fn))
-    ? netClasses.get(f.fn)
-    : netClassesOf(f.hosts ?? [], incomplete.get(f.fn)?.has("Net") ?? false, partners);
+  // ⟨0.33⟩ `netClasses` is keyed by UNIT (reportNetClasses); `incomplete` stays keyed by NAME, because it
+  // is the SCAN route's own live structure and that route's keys are names by construction.
+  return (f) => {
+    const k = unitKey(units, f);
+    return (netClasses && netClasses.has(k))
+      ? netClasses.get(k)
+      : netClassesOf(f.hosts ?? [], incomplete.get(f.fn)?.has("Net") ?? false, partners);
+  };
 }
 
 /**
@@ -842,16 +949,19 @@ export function netClassResolver(incomplete = new Map(), partners = new Set(), n
  * An entry ABSENT from the report excludes NOTHING: a missing entry is missing evidence, and the direction
  * that cannot turn a boundary crossing into a silent pass is "the rule still applies".
  */
-export function classFilterExcludes(r, entry, eff, reasonAcc, netClassOf) {
+export function classFilterExcludes(r, entry, eff, reasonAcc, netClassOf, units = null) {
   if (!entry) return false;
+  // ⟨0.33⟩ the lookup key comes from the ENTRY, never from its name: a name-keyed lookup into a
+  // unit-keyed map does not error, it returns `undefined`, and `undefined` reads here as "no classes" —
+  // which `reasonClassesMatch` floors at `unresolved`. Silent, and in whichever direction the filter falls.
   if (eff === "Unknown" && r.unknownClasses?.length)
-    return !reasonClassesMatch(reasonAcc.get(entry.fn), r.unknownClasses);
+    return !reasonClassesMatch(reasonAcc.get(unitKey(units, entry)), r.unknownClasses);
   if (eff === "Net" && r.netClasses?.length)
     return !netClassOf(entry).some((c) => r.netClasses.includes(c));
   return false;
 }
 
-export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map(), partners = new Set(), netClasses = null, withhold = null) {
+export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map(), partners = new Set(), netClasses = null, withhold = null, units = null) {
   const out = [];
   // `Llm` ⟨0.13⟩ reaches the SAME hosts surface as Net (an Llm host WAS captured as a Net host literal).
   const surfaces = { Net: "hosts", Llm: "hosts", Exec: "cmds", Fs: "paths", Db: "tables" };
@@ -865,12 +975,16 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
   };
   // Reason-scoped Unknown: the Unknown reason CLASS travels the call graph the same way the Unknown
   // EFFECT does. ONE copy of that resolution, shared with the disclosure side — see resolveReasonClasses.
-  const reasonAcc = resolveReasonClasses(functions, callgraph);
+  const reasonAcc = resolveReasonClasses(functions, callgraph, units);
   // ⟨0.24⟩ ONE definition of a function's Net destination classes for this run (netClassResolver above):
   // the report's own field when it carries one, else the derivation from the surfaces the caller supplied.
   // The gate's TEST and the class list it REPORTS both read it, so the two can't disagree about one function.
-  const netClassOf = netClassResolver(incomplete, partners, netClasses);
+  const netClassOf = netClassResolver(incomplete, partners, netClasses, units);
   for (const f of functions) {
+    // ⟨0.33⟩ the KEY identifies the unit; `f.fn` is the NAME, and the name is what a policy SCOPE matches
+    // and what the verdict row prints (§3.3.1 byte-equality with `scan --policy` rests on it).
+    const uk = unitKey(units, f);
+    const inferredOf = effectiveInferred(f, reasonAcc, units);
     for (const r of pol.deny) {
       if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
       // `pure` (empty forbidden set) forbids every EFFECT — not `Unknown`, which is the §4 trust
@@ -878,8 +992,8 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       // The reference engine (candor-java) and the rust deep engine exclude it identically; candor-ts
       // wrongly counted an Unknown-only fn as a `pure` violation until 2026-07-09.
       const hits = r.effects.length === 0
-        ? f.inferred.filter((e) => e !== "Unknown")
-        : f.inferred.filter((e) => r.effects.includes(e));
+        ? inferredOf.filter((e) => e !== "Unknown")
+        : inferredOf.filter((e) => r.effects.includes(e));
       // Reason-scoped Unknown: a `deny E Unknown[classes]` keeps its Unknown hit only for a fn whose
       // TRANSITIVE reason classes include one of those; Net destination-class: a `deny Net[dest…]` keeps its
       // Net hit only for a fn reaching one of those destinations, else tolerates (only asserted-safe ones).
@@ -887,13 +1001,13 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       // travels the call graph via f.hosts + f.incomplete, propagated transitively before the gate (scan.mjs).
       // ⟨0.24⟩ BOTH now live in `classFilterExcludes`, so `fix-gate` and `unverified` apply the same filter
       // instead of computing from the effect set alone (see that function's measurement).
-      let kept = hits.filter((e) => !classFilterExcludes(r, f, e, reasonAcc, netClassOf));
+      let kept = hits.filter((e) => !classFilterExcludes(r, f, e, reasonAcc, netClassOf, units));
       // ⟨0.24⟩ …and LAST, because it overrides the matchers rather than joining them: an effect whose match
       // this report cannot evidence is neither a violation nor a pass. The caller lists it as `unevaluated`.
-      if (withhold && kept.length) kept = kept.filter((e) => !withhold(r, f.fn, e));
+      if (withhold && kept.length) kept = kept.filter((e) => !withhold(r, uk, e));
       if (kept.length) {
         // When Unknown is denied, report ALL reason classes on the fn (transitive) — every reason the gate bit.
-        const rc = kept.includes("Unknown") ? [...(reasonAcc.get(f.fn) ?? [])].sort() : undefined;
+        const rc = kept.includes("Unknown") ? [...(reasonAcc.get(uk) ?? [])].sort() : undefined;
         // ⟨0.20⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
         const ncv = kept.includes("Net") ? netClassOf(f) : undefined;
         push("AS-EFF-006", f.fn, kept, `\`${f.fn}\` performs { ${kept.join(", ")} }, forbidden by policy: \`${r.raw}\``, rc, ncv);
