@@ -2375,6 +2375,28 @@ const unanalyzedUnits = [];
     seen.add(abs);
     unanalyzedUnits.push({ path: path.relative(rootDir, abs), reason: "source failed to parse" });
   }
+  // ⟨0.33⟩ …AND A FILE THAT COULD NOT BE OPENED AT ALL. The loop above is built from
+  // `getSyntacticDiagnostics()`, i.e. files tsc OPENED and could not PARSE. A file it could not OPEN —
+  // mode 000, a broken symlink, a truncated checkout, a stale artifact mount — produces NO syntactic
+  // diagnostic and NO SourceFile, so it landed in neither manifest.
+  //
+  // MEASURED before this, on an ordinary (non-test) source: `deny Exec` printed
+  // `wrote 0 effectful functions (2 analyzed, 1 files)` and `policy ✓` at exit 0, with `unanalyzed`
+  // absent and `excluded: []`. The count is of units from the file that WAS readable and the other is
+  // simply gone — so the manifest built to catch exactly this reported a healthy-looking number.
+  // rust, java and swift all exit 2 here with the file named in `unanalyzed`; this engine was alone.
+  //
+  // A root file with no SourceFile is that case. It fails closed like a parse failure because it IS
+  // one, a step earlier: absence licenses a purity claim only where the report says the file was
+  // CONSIDERED (§2), and this one said nothing at all.
+  {
+    const have = new Set(sources.map((f) => path.resolve(f.fileName)));
+    for (const abs of projectFiles) {
+      if (have.has(abs) || seen.has(abs)) continue;
+      seen.add(abs);
+      unanalyzedUnits.push({ path: path.relative(rootDir, abs), reason: "source could not be read" });
+    }
+  }
   // The loud human channel (rust does this too): a green report must not quietly hide the incompleteness.
   if (unanalyzedUnits.length)
     console.error(`candor-ts: ${unanalyzedUnits.length} source file(s) failed to parse — NOT analyzed (see the report's \`unanalyzed\`); a gate cannot be green over unanalyzed code`);
