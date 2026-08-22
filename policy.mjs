@@ -54,6 +54,73 @@ export function identityUnits() {
 const unitKey = (units, e) => (units ? units.key(e) : e?.fn);
 
 /**
+ * ⟨0.33⟩ THE MULTI-REPORT UNIT IDENTITY (SPEC §2.2) — for `gate --report` and every verb that reads a
+ * report PREFIX, which may match several sibling files (a workspace writes one report per member).
+ *
+ * THE KEY IS `hash` REFINED BY `fn`, NOT `hash` ALONE, and that is an engine-MEASURED deviation from
+ * candor-rust rather than a hedge. A rust `hash` is a DefPathHash, unique per unit; THIS engine emits
+ * `<package>#<local tail>` (scan.mjs), which is not unique — measured on hono's own sources, 13 hashes are
+ * shared by two or more DISTINCT `fn`s, with five different `handle` functions all keying `src#handle`.
+ * Keying by bare `hash` would MERGE those five into one unit and let each borrow the others' reason
+ * classes: the very defect this closes, reopened inside a single report. `hash` refined by `fn` is
+ * strictly FINER than either bare key, so it never joins two entries that bare-`fn` kept apart, and it
+ * never joins across packages by name — which is what §2.2's MUST is about. No `hash`: the name is the key.
+ *
+ * The key is a JSON PAIR rather than a joined string, so there is no separator that could occur inside
+ * either field and no two distinct (hash, fn) pairs can collapse into one key. A SYNTHETIC key (a
+ * callgraph name no entry declares, see `unitsNamed`) is the bare name, which is never JSON-pair shaped.
+ */
+export function reportUnits(functions) {
+  const byName = new Map();
+  const pkgByKey = new Map();
+  const key = (e) => {
+    const h = typeof e?.hash === "string" ? e.hash : "";
+    return h ? JSON.stringify([h, String(e.fn)]) : String(e?.fn);
+  };
+  for (const f of functions ?? []) {
+    const k = key(f);
+    let s = byName.get(f.fn);
+    if (!s) { s = new Set(); byName.set(f.fn, s); }
+    s.add(k);
+    // The unit's PACKAGE, off the `hash` prefix and recorded here rather than parsed back out of the key
+    // — the key is an opaque identifier, and reading structure out of an identifier is how a rescue branch
+    // comes to depend on the shape a hash happens to have today.
+    const h = typeof f.hash === "string" ? f.hash : "";
+    const i = h.indexOf("#");
+    if (i > 0) pkgByKey.set(k, h.slice(0, i));
+  }
+  const pkgOf = (k) => pkgByKey.get(k) ?? "";
+  return {
+    key,
+    unitsNamed: (name) => {
+      const s = byName.get(name);
+      // A name NO entry declares is its own key. The §2.2 sidecar carries EVERY function while the report
+      // carries only the effectful ones, so an intermediate hop is routinely name-only — dropping it would
+      // break the chain that carries a callee's reason class up to its caller, and a LOST class is exactly
+      // how an unanswerable Unknown comes to look answerable.
+      return s ? [...s] : [name];
+    },
+    resolveCall: (callerKey, name) => {
+      const s = byName.get(name);
+      if (!s || s.size === 0) return name;      // not an entry: its own key, as above
+      if (s.size === 1) return [...s][0];
+      // SAME PACKAGE FIRST, and only where it settles the question on its own: a member calling a name its
+      // OWN package declares means that one, which is the common case and unambiguous.
+      const mine = pkgOf(callerKey);
+      if (mine) {
+        const same = [...s].filter((k) => pkgOf(k) === mine);
+        if (same.length === 1) return same[0];
+      }
+      // Otherwise two or more units declare it and nothing here can say which is meant. Picking is what
+      // the bare-`fn` join did implicitly, and it is wrong both ways — right by luck when the guess lands,
+      // inventing a reach when it does not. The CALLER carries the ambiguity instead; see
+      // `resolveReasonClasses`, where dropping it silently was measured reopening this very defect.
+      return AMBIGUOUS;
+    },
+  };
+}
+
+/**
  * ⟨0.33⟩ The effect set the GATE reads for one entry: the report's `inferred`, plus `Unknown` when the
  * merge could not resolve one of this entry's callee names (see `reportUnits`). An unresolvable callee
  * means the transitive set on the wire cannot be completed here, and `Unknown` is what this family says

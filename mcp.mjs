@@ -21,7 +21,7 @@ import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses,
          parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText,
-         unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, identityUnits,
+         unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, reportUnits,
          policyZeroRules } from "./policy.mjs";
 
 const VERSION = createRequire(import.meta.url)("./package.json").version; // single-sourced, like scan.mjs
@@ -407,7 +407,7 @@ const TOOLS = {
       const cg = Q.loadCallgraph(p);
       // ⟨0.33⟩ the same unit identity the CLI gate uses over these bytes (SPEC §2.2) — one object, so this
       // surface cannot join two members by name while the CLI keeps them apart.
-      const gunits = identityUnits();
+      const gunits = reportUnits(gfns);
       const gnet = reportNetClasses(gfns, { authoritative: true, units: gunits });
       const { unevaluated, withhold } = unanswerableScoped(pol, gfns, resolveReasonClasses(gfns, cg, gunits), gnet, gunits);
       // ⟨0.29⟩ …AND THE TWO WHOLE-POLICY UNANSWERABLE KINDS. This tool passed the WHOLE policy to

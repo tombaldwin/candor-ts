@@ -12,7 +12,7 @@ import fs from "node:fs";
 import nodePath from "node:path";
 import { reasonClass, REASON_CLASSES, DYNAMIC_CLASSES, resolveReasonClasses, reasonClassesMatch,
          classFilterExcludes, netClassResolver, reportNetClasses, unanswerableScoped,
-         effectiveInferred, identityUnits } from "./policy.mjs";
+         effectiveInferred, reportUnits } from "./policy.mjs";
 
 // Sibling report/callgraph files of a multi-report prefix (candor-scan writes <prefix>.<crate>.scan.json,
 // one per workspace member) — so the loaders read ANY engine's output, not just candor-ts's <prefix>.json.
@@ -1583,16 +1583,38 @@ export function whatif(cg, target, eff, policyParsed, scopeMatches) {
 // here, and the caller must DISCLOSE it rather than compute a remedy from it. `continue` is the whole
 // mechanism: the rule is skipped, a later rule may still deny, and if none does, `deniedLayer` returns null
 // and the caller reads `ctx.held(fn, eff)` to tell "nothing forbids this" from "the gate could not say".
-function deniedLayer(fn, eff, policyParsed, scopeMatches, ctx = null) {
+function denyingRule(fn, eff, policyParsed, scopeMatches, ctx = null, unit = null) {
+  const entry = unit ?? (ctx ? ctx.entry(fn) : null);
   for (const r of policyParsed.deny) {
     const denies = r.effects.length === 0 ? eff !== "Unknown" : r.effects.includes(eff);
     if (!denies || (r.scope && !scopeMatches(fn, r.scope))) continue;
-    if (ctx && classFilterExcludes(r, ctx.entry(fn), eff, ctx.reasonAcc, ctx.netClassOf, ctx.units)) continue;
-    if (ctx?.withhold && ctx.withhold(r, fn, eff)) continue;
-    return r.scope ?? "";
+    if (ctx && classFilterExcludes(r, entry, eff, ctx.reasonAcc, ctx.netClassOf, ctx.units)) continue;
+    if (ctx?.withhold && ctx.withhold(r, entry ?? fn, eff)) continue;
+    return r;
   }
   return null;
 }
+function deniedLayer(fn, eff, policyParsed, scopeMatches, ctx = null, unit = null) {
+  const r = denyingRule(fn, eff, policyParsed, scopeMatches, ctx, unit);
+  return r === null ? null : (r.scope ?? "");
+}
+
+/**
+ * ⟨0.33⟩ An effect the MERGE contributed rather than the report — today only the `Unknown` a unit acquires
+ * when a callee NAME it declares is declared by two or more units (SPEC §2.2; see `reportUnits`). There is
+ * no `direct` site for it and therefore no span to hoist, so `fix`/`fix-gate` must DISCLOSE it rather than
+ * invent a remedy — and must not fall silent either, or the gate charges a violation while the verb that
+ * exists to fix it answers "nothing left to fix". That silence is what the ⟨0.24⟩ withhold ruling calls
+ * trading a fabricated instruction for a false all-clear.
+ */
+const mergeContributedHold = (entry, rule) => ({
+  fn: entry.fn, rule: rule.raw, effect: "Unknown",
+  why: `\`${rule.raw.trim()}\` fires on \`${entry.fn}\`, but the Unknown it fires on is this MERGE's: a `
+     + "callee this entry names is declared by two or more units in the report set, so the reach cannot be "
+     + "resolved and no site can be named (SPEC §2.2 — a consumer joins by `hash`, never by bare `fn`). "
+     + "There is nothing to hoist, so NO remedy is offered; the gate still reports the violation. Gate at "
+     + "scan time (candor-ts <src> --policy <file>), or gate the member's report on its own."
+});
 
 /**
  * ⟨0.24⟩ The narrowing context the class filter needs, over a LOADED report: a function's transitive
@@ -1646,6 +1668,8 @@ export function narrowingContext(fns, cg = {}, policyParsed = null, units = null
   // the scan-time note in scan.mjs wants. `uk` is how every accumulator on this page is keyed; `byName`
   // stays a NAME index, because the advisory verbs are called with the names a human typed.
   const uk = (e) => (units ? units.key(e) : e?.fn);
+  /** A unit key from an ENTRY (exact) or from a NAME (resolved through the name index — see `classesOf`). */
+  const unitOf = (x) => uk(typeof x === "string" ? (byName.get(x) ?? { fn: x }) : x);
   const reasonAcc = resolveReasonClasses(fns, cg, units);
   // VERBATIM OFF THE WIRE: every `Net`-bearing entry maps to its `netClass` or to the EMPTY set, so the
   // derivation is unreachable and the report is the only source of the class (reportNetClasses' argument).
@@ -1665,25 +1689,29 @@ export function narrowingContext(fns, cg = {}, policyParsed = null, units = null
           if (!withhold(r, uk(f), eff)) continue;
           const u = byRaw.get(r.raw);
           if (!u) continue;                                  // unreachable: every held triple has a group
-          const cur = heldByFn.get(f.fn) ?? new Map();
+          // ⟨0.33⟩ indexed by UNIT, read back by unit — `held(fn)` still accepts a name for the
+          // name-driven verbs, and `held(entry)` is exact where the caller is iterating entries.
+          const cur = heldByFn.get(uk(f)) ?? new Map();
           cur.set(`${r.raw}\0${eff}`, { fn: f.fn, rule: r.raw, effect: eff, why: u.why });
-          heldByFn.set(f.fn, cur);
+          heldByFn.set(uk(f), cur);
         }
   return {
     reasonAcc,
     netClassOf: netClassResolver(new Map(), new Set(), netMap, units),
     entry: (fn) => byName.get(fn) ?? null,
     units,
-    /** ⟨0.33⟩ a function's resolved reason classes, looked up by the UNIT the name resolves to. */
-    classesOf: (fn) => reasonAcc.get(uk(byName.get(fn) ?? { fn })),
-    // ⟨0.33⟩ the advisory verbs hold a NAME; the withhold is keyed by UNIT (unanswerableScoped). Resolving
-    // here rather than at each call site is deliberate — a name-keyed probe of a unit-keyed set does not
-    // error, it answers `false`, which reads as "the gate could judge this" and puts back the fabricated
-    // remedy the withhold exists to suppress.
-    withhold: withhold ? (r, fn, eff) => withhold(r, uk(byName.get(fn) ?? { fn }), eff) : null,
+    // ⟨0.33⟩ THE UNIT, FROM AN ENTRY WHERE THE CALLER HAS ONE AND FROM A NAME WHERE IT DOES NOT. The
+    // advisory verbs are driven by names a human typed, so a name has to resolve; but a verb ITERATING
+    // entries must pass the entry, or two same-named units both resolve to whichever one `byName` kept and
+    // one of them is answered for by the other — the same §2.2 harm this rung closes, one layer out.
+    classesOf: (x) => reasonAcc.get(unitOf(x)),
+    // The withhold is keyed by UNIT (unanswerableScoped); resolving here rather than at each call site is
+    // deliberate, because a name-keyed probe of a unit-keyed set does not error — it answers `false`,
+    // which reads as "the gate could judge this" and puts back the fabricated remedy it exists to suppress.
+    withhold: withhold ? (r, x, eff) => withhold(r, unitOf(x), eff) : null,
     unevaluated,
-    held: (fn, eff = null) =>
-      [...(heldByFn.get(fn)?.values() ?? [])].filter((h) => eff === null || h.effect === eff),
+    held: (x, eff = null) =>
+      [...(heldByFn.get(unitOf(x))?.values() ?? [])].filter((h) => eff === null || h.effect === eff),
   };
 }
 
@@ -1784,7 +1812,7 @@ function computeRemedy(start, eff, layer, cg, rev, byName, policyParsed, scopeMa
 // `107755b`): `refused: true`, the `unevaluated` disclosure, and **NO `crossing` KEY AT ALL** — absent, not
 // `false`, because a claim it cannot make must not be spelled as a claim it can.
 export function fix(cg, fns, target, eff, policyParsed, scopeMatches) {
-  const ctx = narrowingContext(fns, cg, policyParsed, identityUnits());   // ⟨0.24⟩ the rule's class filter + the gate's refusal
+  const ctx = narrowingContext(fns, cg, policyParsed, reportUnits(fns));   // ⟨0.24⟩ the rule's class filter + the gate's refusal
   // Resolve against REPORT function names only (not callgraph nodes, which include pure fns absent from the
   // report) — so `fix <pure-fn>` is a uniform "no such fn" across engines, not a TS-only crossing:false.
   // (/code-review — candor-query/java/swift all match report fns only.)
@@ -1794,9 +1822,14 @@ export function fix(cg, fns, target, eff, policyParsed, scopeMatches) {
   // prefer a match that actually performs the effect, so a bare leaf resolves to the violating function
   const start = m.find((n) => (byName.get(n)?.inferred ?? []).includes(eff)) ?? m[0];
   const se = byName.get(start);
-  if (!se || !(se.inferred ?? []).includes(eff))
+  if (!se || !effectiveInferred(se, ctx.reasonAcc, ctx.units).includes(eff))
     return { fn: start, effect: eff, crossing: false, reason: "does-not-perform" };
-  const layer = deniedLayer(start, eff, policyParsed, scopeMatches, ctx);
+  // ⟨0.33⟩ the same split `fix-gate` makes: an effect the MERGE contributed has no site to hoist, so it is
+  // disclosed as unevaluated rather than answered `not-forbidden` (which would read as a clean boundary).
+  const mcr = (se.inferred ?? []).includes(eff)
+    ? null : denyingRule(start, eff, policyParsed, scopeMatches, ctx, se);
+  if (mcr) return { fn: start, effect: eff, refused: true, unevaluated: unevaluatedOf([mergeContributedHold(se, mcr)]) };
+  const layer = deniedLayer(start, eff, policyParsed, scopeMatches, ctx, se);
   if (layer === null) {
     // ORDER MATTERS: the withhold is checked only where NO rule denied, because a rule that fires on
     // evidence the report DOES carry is certain and dominates (PAPER3 Lemma 2 — the same precedence the
@@ -1823,7 +1856,7 @@ export function fix(cg, fns, target, eff, policyParsed, scopeMatches) {
 // EITHER. Dropping the plan without the disclosure would trade a fabricated instruction for a false
 // all-clear, which is the failure this project keeps measuring in fabrication repairs.
 export function fixGate(cg, fns, policyParsed, scopeMatches) {
-  const ctx = narrowingContext(fns, cg, policyParsed, identityUnits());   // ⟨0.24⟩ the class filter + the gate's refusal
+  const ctx = narrowingContext(fns, cg, policyParsed, reportUnits(fns));   // ⟨0.24⟩ the class filter + the gate's refusal
   const byName = indexFns(fns);
   const rev = reverseGraph(cg);
   const plans = new Map();
@@ -1831,14 +1864,20 @@ export function fixGate(cg, fns, policyParsed, scopeMatches) {
   // Iterate functions in sorted-name order so the first-writer-wins `fn` representative of a collapsed
   // remedy is deterministic across engines (candor-query/java/swift all iterate a sorted key set).
   for (const e of [...fns].sort((a, b) => (a.fn < b.fn ? -1 : a.fn > b.fn ? 1 : 0))) {
-    for (const eff of [...(e.inferred ?? [])].sort()) {
-      const layer = deniedLayer(e.fn, eff, policyParsed, scopeMatches, ctx);
-      if (layer !== null) {
-        const p = computeRemedy(e.fn, eff, layer, cg, rev, byName, policyParsed, scopeMatches, ctx);
+    // ⟨0.33⟩ THE GATE'S EFFECT SET, not the wire's — this verb has to see every effect `evaluatePolicy`
+    // sees or it answers "nothing left to fix" over a violation the gate reports (measured: gate exit 1,
+    // `fix-gate --strict` exit 0 with `ok: true`). `wire` separates the two so the merge's own
+    // contribution is DISCLOSED rather than remedied; see `mergeContributedHold`.
+    const wire = new Set(e.inferred ?? []);
+    for (const eff of [...effectiveInferred(e, ctx.reasonAcc, ctx.units)].sort()) {
+      const r = denyingRule(e.fn, eff, policyParsed, scopeMatches, ctx, e);
+      if (r !== null) {
+        if (!wire.has(eff)) { held.push(mergeContributedHold(e, r)); continue; }
+        const p = computeRemedy(e.fn, eff, r.scope ?? "", cg, rev, byName, policyParsed, scopeMatches, ctx);
         const key = `${p.effect}|${p.layer}|${p.site}|${p.hoistTo}`;
         if (!plans.has(key)) plans.set(key, p);
       } else {
-        held.push(...ctx.held(e.fn, eff));   // see `fix`: only where nothing certain denied
+        held.push(...ctx.held(e, eff));   // see `fix`: only where nothing certain denied
       }
     }
   }
@@ -1916,14 +1955,16 @@ export function ruleUpgrade(r) {
  *  a violation would silently drop the function from this list on the strength of a violation nobody made,
  *  which is the same silence in a second place. Withheld ⇒ not a firing ⇒ the function stays a hole here,
  *  the LESS-confident direction, which is the one this verb is allowed to move in. */
-export function unverifiedHoleRule(fn, inferred, policyParsed, scopeMatches, ctx = null) {
+export function unverifiedHoleRule(fn, inferred, policyParsed, scopeMatches, ctx = null, unit = null) {
   const inf = inferred ?? [];
   if (!inf.includes("Unknown")) return null;
-  const entry = ctx ? ctx.entry(fn) : null;
+  // ⟨0.33⟩ `unit` is the ENTRY when the caller is iterating entries (two units may share `fn`, and the
+  // name index keeps only one of them); it falls back to the name lookup for the name-driven callers.
+  const entry = unit ?? (ctx ? ctx.entry(fn) : null);
   // An effect the rule NAMES but whose class filter excludes here is not a violation — it is exactly what
   // the gate tolerates, so the pass is real, and the Unknown it passes with makes that pass unverified.
   const fires = (r, x) => !(ctx && classFilterExcludes(r, entry, x, ctx.reasonAcc, ctx.netClassOf, ctx.units))
-                       && !(ctx?.withhold && ctx.withhold(r, fn, x));
+                       && !(ctx?.withhold && ctx.withhold(r, entry ?? fn, x));
   for (const r of policyParsed.deny) {
     if (r.scope && !scopeMatches(fn, r.scope)) continue;
     const violates = r.effects.length === 0
@@ -1966,22 +2007,22 @@ export function unverified(fns, policyParsed, scopeMatches, classSpec = null, cg
   // ⟨0.24⟩ the POLICY's own `Unknown[…]`/`Net[…]` narrowing, which is a different question from `--class`
   // (the reader's drill-down) and was never asked at all: `reasonAcc` here rides the ctx, so the two
   // narrowings resolve the class set exactly once and from the same code as the gate.
-  const ctx = narrowingContext(fns, cg, policyParsed, identityUnits());
+  const ctx = narrowingContext(fns, cg, policyParsed, reportUnits(fns));
   const holes = [];
   const held = [];
   for (const e of fns) {
     // Same predicate + upgrade as the gate note (scan.mjs) — one source of truth for a hole.
     // ⟨0.33⟩ the effect set the GATE reads, not the raw wire one — an entry whose callee name the merge
     // could not resolve carries `Unknown` here too, or this verb would clear a hole the gate refuses.
-    const r = unverifiedHoleRule(e.fn, effectiveInferred(e, ctx.reasonAcc, ctx.units), policyParsed, scopeMatches, ctx);
-    if (r && !(cf && !reasonClassesMatch(ctx.classesOf(e.fn), cf))) {
+    const r = unverifiedHoleRule(e.fn, effectiveInferred(e, ctx.reasonAcc, ctx.units), policyParsed, scopeMatches, ctx, e);
+    if (r && !(cf && !reasonClassesMatch(ctx.classesOf(e), cf))) {
       const [rule, upgrade] = ruleUpgrade(r);
       holes.push({ fn: e.fn, rule, unknownWhy: e.unknownWhy ?? [], upgrade });
     }
     // …and, INDEPENDENTLY of whether it is also a provable-purity hole, every rule the gate withheld on
     // this function: one entry per (function, rule), in report order, beside the holes rather than in a
     // separate array a consumer reading `unverified[]` would never look at.
-    const h = ctx.held(e.fn);
+    const h = ctx.held(e);
     for (const u of unevaluatedOf(h)) holes.push({ fn: e.fn, rule: u.rule, why: u.why });
     held.push(...h);
   }

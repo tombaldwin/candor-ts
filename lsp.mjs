@@ -45,7 +45,7 @@ import { createRequire } from "node:module";
 import nodePath from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as Q from "./query-core.mjs";
-import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, policyZeroRules, identityUnits } from "./policy.mjs";
+import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, policyZeroRules, reportUnits } from "./policy.mjs";
 
 // Version: from the sibling package.json when running inside the npm package; a single-file BUNDLE of
 // this server (the IDE-plugin embedding) has no sibling package.json — fall back rather than crash.
@@ -383,7 +383,7 @@ function diagnosticsFor(docPath) {
   // `netClass` gets the EMPTY set rather than a derivation from `hosts`, so the report is the only source of
   // the class and nothing is re-classified with this machine's evidence about the producer's project.
   // ⟨0.33⟩ the same unit identity the CLI gate uses over these bytes (SPEC §2.2).
-  const dunits = identityUnits();
+  const dunits = reportUnits(fns);
   const dnet = reportNetClasses(fns, { authoritative: true, units: dunits });
   const { unevaluated: dunevaluated, withhold: dwithhold } =
     unanswerableScoped(dpol, fns, resolveReasonClasses(fns, Q.loadCallgraph(reportPrefix), dunits), dnet, dunits);

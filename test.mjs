@@ -11857,6 +11857,144 @@ if (blk()) {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+
+// ── ⟨0.33⟩ SPEC §2.2 — A SIBLING REPORT CANNOT ANSWER FOR ANOTHER MEMBER ──────────────────────────
+//
+// §2.2 has always required a consumer to "join across reports by `hash`, never by bare `fn` (names may
+// legitimately repeat across packages)". This engine joined by `fn`, and it was MEASURED: `gate --report`
+// over member `a` REFUSED a scoped rule at exit 2, and gating that SAME member beside an unrelated sibling
+// exited 0 with `policy ✓` — a false green produced by ADDING a report.
+//
+// THE HARM IS NOT EFFECTS MERGING. `a`'s `main` carries an Unknown with NO reachable reason —
+// UNANSWERABLE, so the gate refuses. The sibling gives that NAME a reason (`callback:`, class `indirect`),
+// the filter sees a class the rule does not deny, and TOLERATES. Union is safe for EFFECTS and unsafe for
+// REASONS: adding an effect can only add violations; adding a reason turns "I cannot say" into "I checked".
+//
+// The reports are HAND-AUTHORED on purpose. §3.1 says this verb serves a report it did not produce, so a
+// foreign or degraded member report is IN CONTRACT — and a self-produced set cannot reach this state (an
+// inherited Unknown always carries its callee in `calls`), which is why no corpus round found it.
+// The fixtures are byte-identical to candor-spec conformance PART 63.
+if (blk()) {
+  const gateReport = (prefix, pol) =>
+    spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", prefix, "--policy", pol],
+              { encoding: "utf8" });
+  const A = JSON.stringify({ candor: { version: "scan-0.31.0", toolchain: "stable", spec: "0.31" }, package: "a",
+    analyzed: { count: 1, digest: "0000000000000000" }, resolves: ["fs", "incomplete"], excluded: [], outOfScope: [],
+    functions: [{ fn: "main", loc: "src/main.rs:1:1", inferred: ["Unknown"], direct: [], hash: "a#main" }] });
+  const B = JSON.stringify({ candor: { version: "scan-0.31.0", toolchain: "stable", spec: "0.31" }, package: "b",
+    analyzed: { count: 2, digest: "0000000000000000" }, resolves: ["fs", "incomplete"], excluded: [], outOfScope: [],
+    functions: [{ fn: "main", loc: "src/lib.rs:1:1", inferred: [], direct: [], hash: "b#main", calls: ["quiet"] },
+                { fn: "quiet", loc: "src/lib.rs:5:1", inferred: ["Unknown"], direct: ["Unknown"], hash: "b#quiet",
+                  unknownWhy: ["callback:cb"] }] });
+  const d = project({
+    "only-a/report.a.scan.json": A,
+    "only-b/report.b.scan.json": B,
+    "both/report.a.scan.json": A,
+    "both/report.b.scan.json": B,
+    "pol.candor": "deny Unknown[dispatch]\n",
+  });
+  const pol = path.join(d, "pol.candor");
+  const a = gateReport(path.join(d, "only-a", "report"), pol);
+  const bAlone = gateReport(path.join(d, "only-b", "report"), pol);
+  const ab = gateReport(path.join(d, "both", "report"), pol);
+  check("⟨0.33⟩ §2.2: a member whose Unknown has NO reachable reason REFUSES a class-scoped deny (exit 2)",
+        a.status === 2, `exit ${a.status}: ${a.stderr}`.slice(0, 300));
+  check("⟨0.33⟩ §2.2: …and ADDING an unrelated sibling does NOT turn that refusal into a pass (exit 2, was 0)",
+        ab.status === 2, `exit ${ab.status}: ${ab.stdout}${ab.stderr}`.slice(0, 300));
+  // THE CONTROL that keeps the row from passing for an engine that simply refuses every merge: the sibling
+  // gated ALONE carries its own reason, so it must still ANSWER — and answer 0.
+  check("⟨0.33⟩ §2.2 CONTROL: the sibling gated ALONE still ANSWERS (exit 0) — the merge is not refused wholesale",
+        bAlone.status === 0, `exit ${bAlone.status}: ${bAlone.stdout}${bAlone.stderr}`.slice(0, 300));
+
+  // ── THE SECOND FLIP, and it is the one the FIRST FIX CAUSES if the ambiguity is dropped silently.
+  // Keying the merge by unit means an ambiguous callee NAME resolves to nothing — right, because picking a
+  // declarer would invent a reach. But dropping it SILENTLY reopens the defect by another route: the caller
+  // loses the reason class it would have inherited, stays ANSWERABLE through a reason of its own, and a RED
+  // verdict goes GREEN by adding a report. MEASURED on a mutant of this fix: amb-both 1 → 0.
+  const AH = JSON.stringify({ candor: { version: "scan-0.31.0", toolchain: "stable", spec: "0.31" }, package: "a",
+    analyzed: { count: 1, digest: "0000000000000000" }, resolves: ["fs", "incomplete"], excluded: [], outOfScope: [],
+    functions: [{ fn: "helper", loc: "src/lib.rs:1:1", inferred: ["Exec", "Unknown"], direct: ["Exec", "Unknown"],
+                  unknownWhy: ["dispatch:vtable"], hash: "a#helper" }] });
+  const BH = JSON.stringify({ candor: { version: "scan-0.31.0", toolchain: "stable", spec: "0.31" }, package: "b",
+    analyzed: { count: 1, digest: "0000000000000000" }, resolves: ["fs", "incomplete"], excluded: [], outOfScope: [],
+    functions: [{ fn: "helper", loc: "src/lib.rs:1:1", inferred: [], direct: [], hash: "b#helper" }] });
+  const CC = JSON.stringify({ candor: { version: "scan-0.31.0", toolchain: "stable", spec: "0.31" }, package: "c",
+    analyzed: { count: 1, digest: "0000000000000000" }, resolves: ["fs", "incomplete"], excluded: [], outOfScope: [],
+    functions: [{ fn: "caller", loc: "src/lib.rs:1:1", inferred: ["Unknown"], direct: ["Unknown"],
+                  unknownWhy: ["callback:cb"], calls: ["helper"], hash: "c#caller" }] });
+  const d2 = project({
+    "amb-ctrl/report.a.scan.json": AH,
+    "amb-ctrl/report.c.scan.json": CC,
+    "amb-both/report.a.scan.json": AH,
+    "amb-both/report.b.scan.json": BH,
+    "amb-both/report.c.scan.json": CC,
+    "pol-amb.candor": "deny Unknown[dispatch] caller\n",
+    "pol-exec.candor": "deny Exec\n",
+  });
+  const ambPol = path.join(d2, "pol-amb.candor"), execPol = path.join(d2, "pol-exec.candor");
+  const ctrl = gateReport(path.join(d2, "amb-ctrl", "report"), ambPol);
+  const both = gateReport(path.join(d2, "amb-both", "report"), ambPol);
+  check("⟨0.33⟩ ambiguity CONTROL: ONE declarer resolves, so the caller INHERITS Unknown[dispatch] and the rule fires (exit 1)",
+        ctrl.status === 1, `exit ${ctrl.status}: ${ctrl.stdout}${ctrl.stderr}`.slice(0, 300));
+  check("⟨0.33⟩ an AMBIGUOUS callee CONTRIBUTES Unknown[dispatch] instead of vanishing — a third report keeps the verdict RED (exit 1)",
+        both.status === 1, `exit ${both.status}: ${both.stdout}${both.stderr}`.slice(0, 300));
+  // The UNSCOPED control on the same two trees: a rule that asks nothing about reason classes must be
+  // unmoved by any of this, or the rows above are passing on an engine that reddens every merge.
+  const e1 = gateReport(path.join(d2, "amb-ctrl", "report"), execPol);
+  const e2 = gateReport(path.join(d2, "amb-both", "report"), execPol);
+  check("⟨0.33⟩ CONTROL: the UNSCOPED `deny Exec` is unmoved on both trees (1 and 1) — the ambiguity contributes a REASON, never an Exec",
+        e1.status === 1 && e2.status === 1, `${e1.status}/${e2.status}`);
+
+  // ── THE INTRA-REPORT CONTROL, and it is why this engine keys by `hash` REFINED BY `fn` rather than by
+  // bare `hash` the way candor-rust can. A rust hash is a DefPathHash, unique per unit; THIS engine emits
+  // `<package>#<local tail>`, which is NOT unique — measured on hono's own sources, 13 hashes are shared by
+  // two or more DISTINCT `fn`s (five different `handle` functions all key `src#handle`). Keying by bare
+  // `hash` would merge those and let each borrow the others' reason classes: the very defect above,
+  // reopened INSIDE one report. Here `x.handle` is unanswerable and `y.handle` carries a `callback:` reason
+  // under the same hash — if they merged, the refusal would become a pass.
+  const d3 = project({
+    "r/report.scan.json": JSON.stringify({ candor: { version: "scan-0.31.0", toolchain: "stable", spec: "0.31" },
+      package: "p", analyzed: { count: 2, digest: "0000000000000000" }, resolves: ["fs", "incomplete"],
+      excluded: [], outOfScope: [],
+      functions: [{ fn: "x.handle", loc: "x.ts:1:1", inferred: ["Unknown"], direct: [], hash: "p#handle" },
+                  { fn: "y.handle", loc: "y.ts:1:1", inferred: ["Unknown"], direct: ["Unknown"],
+                    hash: "p#handle", unknownWhy: ["callback:cb"] }] }),
+    "pol.candor": "deny Unknown[dispatch]\n",
+  });
+  const one = gateReport(path.join(d3, "r", "report"), path.join(d3, "pol.candor"));
+  check("⟨0.33⟩ INTRA-REPORT control: two DISTINCT fns sharing one `hash` do NOT merge — the reasonless one still REFUSES (exit 2)",
+        one.status === 2, `exit ${one.status}: ${one.stdout}${one.stderr}`.slice(0, 300));
+
+  // ── THE ADVISORY BINDING (⟨0.24⟩): a verb may be LESS certain than the gate, never MORE. The Unknown the
+  // merge contributes is not on the wire and has no `direct` site, so there is nothing to hoist — but
+  // answering `ok: true, remedies: []` beside a gate that exits 1 is a false all-clear on the agent
+  // channel. MEASURED on the first cut of this fix: gate 1, `fix-gate --strict` 0.
+  const d4 = project({
+    "r/report.a.scan.json": AH,
+    "r/report.b.scan.json": BH,
+    "r/report.c.scan.json": JSON.stringify({ candor: { version: "scan-0.31.0", toolchain: "stable", spec: "0.31" },
+      package: "c", analyzed: { count: 1, digest: "0000000000000000" }, resolves: ["fs", "incomplete"],
+      excluded: [], outOfScope: [],
+      functions: [{ fn: "caller", loc: "c.ts:1:1", inferred: ["Fs"], direct: ["Fs"], calls: ["helper"],
+                    hash: "c#caller" }] }),
+    "r/report.c.scan.callgraph.json": JSON.stringify({ caller: ["helper"] }),
+    "pol.candor": "deny Unknown caller\n",
+  });
+  const p4 = path.join(d4, "r", "report"), pol4 = path.join(d4, "pol.candor");
+  const g4 = gateReport(p4, pol4);
+  const fg4 = spawnSync("node", [path.join(HERE, "query.mjs"), "fix-gate", "--report", p4,
+                                 "--policy", pol4, "--strict"], { encoding: "utf8" });
+  check("⟨0.33⟩ the merge's Unknown reaches the GATE — a caller whose wire `inferred` carries none still violates `deny Unknown` (exit 1)",
+        g4.status === 1, `exit ${g4.status}: ${g4.stdout}${g4.stderr}`.slice(0, 300));
+  check("⟨0.33⟩ …and `fix-gate --strict` DISCLOSES it (exit 2, `unevaluated`) rather than answering `ok: true` — no remedy from a reach that did not resolve, and no silence either",
+        fg4.status === 2 && /unevaluated/.test(fg4.stdout) && !/"ok": true/.test(fg4.stdout),
+        `exit ${fg4.status}: ${fg4.stdout}`.slice(0, 300));
+  fs.rmSync(d, { recursive: true, force: true });
+  fs.rmSync(d2, { recursive: true, force: true });
+  fs.rmSync(d3, { recursive: true, force: true });
+  fs.rmSync(d4, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

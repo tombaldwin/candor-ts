@@ -27,7 +27,7 @@ import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, d
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
          policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules,
          fatalPolicyErrors, refusalVerdict,
-         unanswerableScoped, wholePolicyUnanswerable, identityUnits } from "./policy.mjs";
+         unanswerableScoped, wholePolicyUnanswerable, reportUnits } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
 import { printAgents, writeStdoutSync } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
@@ -2171,7 +2171,7 @@ switch (cmd) {
     // ⟨0.33⟩ THE UNIT IDENTITY FOR A MULTI-REPORT PREFIX (SPEC §2.2). Built ONCE here and handed to every
     // accumulator, so the gate, its refusal and its verdict all key the same way — a private copy is how
     // the advisory verbs came to disagree with the gate before.
-    const gunits = identityUnits();
+    const gunits = reportUnits(g.functions);
     const gnet = reportNetClasses(g.functions, { authoritative: true, units: gunits });
     const gacc = resolveReasonClasses(g.functions, {}, gunits);
     // THE THIRD REFUSAL — the only one that depends on the REPORT rather than the policy alone, and the
