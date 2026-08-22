@@ -8,6 +8,28 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ ⟨0.33⟩ A sibling report can no longer answer for another member (SPEC §2.2).** `gate --report` over
+  one member of a multi-report prefix REFUSED a class-scoped `deny` at exit 2, and gating that same member
+  beside an unrelated sibling exited 0 with `policy ✓` — a false green produced by ADDING a report. §2.2
+  has always required a consumer to join by `hash` and never by bare `fn` ("names may legitimately repeat
+  across packages"); this engine joined by `fn`, so two distinct functions sharing a name merged into one
+  unit and the unanswerable `Unknown` of one borrowed the other's reason class. Union is safe for EFFECTS
+  and unsafe for REASONS: adding an effect can only add violations, while adding a reason turns "I cannot
+  say" into "I checked, it's fine".
+
+  The merge now keys by `hash` REFINED BY `fn` rather than by `hash` alone, because this engine's hash is
+  `<package>#<local tail>` and is not unique — on hono's sources 13 hashes are shared by two or more
+  distinct `fn`s — so bare-`hash` keying would have reopened the same borrowing inside a single report.
+  Call EDGES resolve through the same identity: a callee resolves against its own package first, then
+  against a unique declarer, and an AMBIGUOUS name contributes `Unknown[dispatch]` at the caller rather
+  than vanishing (dropping it silently is a second route to the same false green). Policy scopes and the
+  verdict's `fn` remain the NAME, so `scan --policy` / `gate --report` byte-equality is unchanged.
+
+  Ordinary verdicts do not move: zod, hono, got and execa gate byte-identically before and after across
+  gate, `--gate-json`, `unverified`, `--class` and `fix-gate`. On a multi-report prefix the violation set
+  is identical and the only change is ten rows losing a `setup` reason class they had borrowed from
+  another package's same-named module.
+
 - **⟨0.32⟩ A refusal records itself beside the reports it would have written.** A run given no `--out`
   writes to its default prefix, and a refusal left whatever the last successful run put there readable as
   current — `gate --report <tree>` answering `policy ✓` at exit 0 off the previous run's bytes. The
