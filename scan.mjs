@@ -7769,6 +7769,28 @@ if (policyRefusal && !gateViolations.length) {
   writeRefusal(policyRefusal.why, policyRefusal.unevaluated);
   process.exit(2);
 }
+// ⟨0.32⟩ THE THIRD CAUSE OF AN INCOMPLETE VERDICT — a class this scan did not READ. ⟨0.30⟩ keys on what
+// the peek FOUND, and a peek that could not open a file finds nothing, which is byte-identical to
+// finding it clean.
+//
+// COMPUTED HERE, OUTSIDE the `--gate-json` guard below, and that placement is the whole point. Inside
+// it, this value would exist only when `--gate-json` was passed, so the exit arm further down would
+// fire for those users and be SILENTLY INERT for everyone else — a check that quietly depends on a flag
+// being present, which is the CI-gate hazard this project has just been handed from the field. Three
+// attempts at hoisting a declaration out of that block failed; the guard, not the scope, was the
+// blocker, and succeeding at the hoist would have been worse than failing.
+//
+// Two conditions, both earned in candor-java: `judgedElsewhere` is the producer's carve-out for a
+// DERIVED copy of already-judged code, and the rule fires only if the peek RAN — `peeked: false` also
+// means no policy was configured and nothing was asked, which records an absence of QUESTION rather
+// than of evidence. Without that gate every no-policy report fails closed on contact.
+//
+// MEASURED, and NOT covered by `unanalyzed`: an excluded `*.test.ts` at mode 000 reports
+// `excluded: [{class: "test-file", peeked: false}]` with `unanalyzed` ABSENT — the file is not in the
+// tsconfig program, so the unreadable-file rule cannot see it — and the gate exited 0.
+const unreadClasses = peekRead
+  ? (envelope.excluded ?? []).filter((e) => !e.peeked && !e.judgedElsewhere).map((e) => e.class)
+  : [];
 // --gate-json ⟨0.8⟩: the structured gate verdict { spec, ok, violations:[{rule,fn,effects,detail}] }, from
 // the SAME gateViolations that set the exit code (so it can't disagree). Written whenever the flag is set —
 // ok:true,[] when no gate is configured. Must precede the exit(1) below.
@@ -7784,7 +7806,8 @@ if (gateJsonPath) {
   // `incomplete`, never through `violations`, because the gate did not JUDGE these units — see the exit
   // site below for why that makes the code 2 and not 1.
   const scopeIncomplete = Array.isArray(outOfScopeFindings) && outOfScopeFindings.length > 0;
-  const incomplete = unanalyzedUnits.length > 0 || scopeIncomplete;
+  // ⟨0.32⟩ …and the unread classes, computed above the guard so the exit arm sees the same value.
+  const incomplete = unanalyzedUnits.length > 0 || scopeIncomplete || unreadClasses.length > 0;
   const verdictObj = { spec: SPEC_VERSION, ok: gateViolations.length === 0 && !incomplete,
                        analyzed: { count: fns.size } };
   // ⟨0.24⟩ the vocabulary file that moved the verdict, in the SAME position `gate --report` puts it, because
@@ -7882,6 +7905,17 @@ if (gateConfigured && Array.isArray(outOfScopeFindings) && outOfScopeFindings.le
   console.error(`candor-ts: gate NOT certified — ${n} function(s) OUTSIDE this scan's scope perform an `
     + `effect this policy denies (named above); the gate did not judge them, so the verdict is `
     + `incomplete rather than a pass`);
+  process.exit(2);
+}
+// ⟨0.32⟩ THE THIRD CAUSE, on the exit code. AFTER the unanalyzed and outOfScope arms deliberately: a
+// concrete denied effect outside the scan is a better message than "something went unread", and a real
+// violation dominates both. The verdict DOCUMENT carries the same fact from the same variable, so the
+// two cannot disagree about a run — measured before this, the document said ok:false while the process
+// exited 0, which is the worst split of the three.
+if (gateConfigured && unreadClasses.length) {
+  console.error(`candor-ts: gate NOT certified — this scan did not READ ${unreadClasses.join(", ")}. `
+    + `Their effects are absent because nothing looked, not because there are none, so the verdict is `
+    + `INCOMPLETE rather than a pass.`);
   process.exit(2);
 }
 if (policyPath !== null) console.error("candor-ts: policy ✓");
