@@ -682,13 +682,26 @@ export function scopeMatchesPermitted(name, scope) {
 }
 
 export function scopeMatches(name, scope) {
+  // A TRAILING SEPARATOR MEANS EXACT SEGMENT — `app::` matches the segment `app` and nothing else,
+  // while bare `app` keeps the documented prefix behaviour and still matches `application_name`.
+  //
+  // REPORTED FROM THE FIELD (2026-08-23) and reproduced four-way: `forbid aws -> app` fired 14 times on
+  // honest AWS SDK calls, and writing `app::` did not help — the split drops empty parts, so `app::`
+  // became exactly ["app"] and the separator never survived to mean anything. The reporter deleted the
+  // rule, which is the real cost: the genuine violation it existed to catch will now never fire, and
+  // NOTHING in the policy file records that a boundary stopped being checked.
+  //
+  // ADDITIVE: bare `app` is unchanged, so no existing verdict moves. Only `app::` — which today
+  // silently behaves as `app` — starts meaning what everyone who writes it intends.
+  const exact = /(::|\.)\s*$/.test(scope);
   const segs = name.split(/[.:]+/).filter(Boolean);
   const parts = scope.split(/[.:]+/).filter(Boolean);
   if (parts.length === 0 || parts.length > segs.length) return false;
   const last = parts[parts.length - 1], init = parts.slice(0, -1);
   outer: for (let i = 0; i + parts.length <= segs.length; i++) {
     for (let k = 0; k < init.length; k++) if (segs[i + k] !== init[k]) continue outer;
-    if (segs[i + parts.length - 1].startsWith(last)) return true;
+    const tail = segs[i + parts.length - 1];
+    if (exact ? tail === last : tail.startsWith(last)) return true;
   }
   return false;
 }
