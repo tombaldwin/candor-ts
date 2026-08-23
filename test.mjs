@@ -11995,6 +11995,326 @@ if (blk()) {
   fs.rmSync(d4, { recursive: true, force: true });
 }
 
+// ── THE NODE-CORE CLASSIFIER FLOOR: A MEMBER THIS ENGINE HAS NOT REVIEWED IS `Unknown`, NEVER PURE ──
+//
+// MEASURED on a corpus round, at spec 0.32, with `deny Fs`:
+//
+//     import * as fs from 'fs';
+//     export function readIt(p: string) { return new fs.ReadStream(p); }   // opens the file
+//     export function control(p: string) { return fs.readFileSync(p); }    // reported Fs, correctly
+//
+// `control` reported `Fs`. `readIt` was **absent from `functions` entirely** — which under SPEC §2 rule 3
+// is a POSITIVE PURITY CLAIM — with no `Unknown`, at exit 0, `ok: true`. `analyzed: 3`, so the file was
+// read and the unit was minted; the engine looked at a filesystem open and said nothing. That is the
+// cardinal sin, on the single most common effect in the vocabulary.
+//
+// THE MECHANISM IS NOT THE ONE THE SYMPTOM SUGGESTS. κ's `fs` rule is whole-module (`null` member
+// matcher), so it would have charged `Fs` for ANY member including the synthesized `new` — the rule was
+// never consulted, because the MODULE was wrong. `fs.ReadStream` declares no constructor of its own, so
+// `getResolvedSignature()` resolves `new fs.ReadStream(p)` to the INHERITED `stream.Readable` constructor
+// in `stream.d.ts`, and `declModule` keys on the file that declares the resolved signature: module
+// `stream`, which κ says nothing about. `new http.ClientRequest(o)` is `Net` correctly because
+// `ClientRequest` DOES declare its own constructor — so the vein is inconsistent rather than absent,
+// which is exactly why no hand-written fixture found it.
+//
+// THE SECOND HALF is the posture behind it, written in this file's own words at the ledger site: "an
+// unlisted builtin (path, util) is known-pure, not blind". That reads as CONSIDERED and was never
+// measured. It is true of `path` and false of `v8.writeHeapSnapshot`, `inspector.open`,
+// `process.report.writeReport`, `new worker_threads.Worker(file)` and `repl.start()` — every one of which
+// read silent-pure. An ALLOWLIST fails in the under-report direction (see the denylist rule at the net
+// cluster), so the floor is inverted: node core is FINITE and enumerable, every module is reviewed, and a
+// member neither classified nor reviewed-pure is `Unknown[native:…]`.
+//
+// THE CONTROLS COME FIRST AND ARE THE DELIVERABLE. Making misses `Unknown` is trivially achievable by
+// making EVERYTHING Unknown, which deletes the product; and re-keying `new` on the class's module is
+// trivially achievable by charging every construction, which fabricates. Both directions are pinned.
+if (blk()) {
+  const TSCONFIG = `{ "compilerOptions": { "target": "ES2022", "module": "NodeNext",
+    "moduleResolution": "NodeNext", "strict": false }, "include": ["src"] }`;
+  const d = project({
+    "tsconfig.json": TSCONFIG,
+    // THE SIN, both halves of the constructor-is-the-effect pair.
+    "src/sin.ts": `import * as fsm from 'fs';
+export function readIt(p: string) { return new fsm.ReadStream(p); }
+export function writeIt(p: string) { return new fsm.WriteStream(p); }
+export function control(p: string) { return fsm.readFileSync(p); }`,
+    // OVER-CHARGE CONTROL 1 — a USER-DEFINED class that happens to be called `ReadStream`. It does
+    // nothing. If the fix keys on the NAME rather than on the declaring module, this fabricates `Fs`
+    // onto a pure function, and the report would be wrong in the direction that costs trust.
+    "src/mine.ts": `export class ReadStream { constructor(public p: string) {} }
+export class WriteStream { constructor(public p: string) {} }
+export function mineRead(p: string) { return new ReadStream(p); }
+export function mineWrite(p: string) { return new WriteStream(p); }`,
+    // OVER-CHARGE CONTROL 2 — genuinely pure node core. Every one of these is deterministic in-process
+    // computation, string manipulation, or console/TTY I/O for which §1 has no effect. They must stay
+    // ABSENT from the report: not an effect, and not an `Unknown` either. This is the row that fails if
+    // "unmodelled ⇒ Unknown" is implemented as "unclassified ⇒ Unknown".
+    "src/pure.ts": `import * as pathm from 'path';
+import * as os from 'os';
+import * as crypto from 'crypto';
+import * as util from 'util';
+import * as zlib from 'zlib';
+import * as ev from 'events';
+import * as stream from 'stream';
+import * as urlm from 'url';
+export function pureCore(x: any) {
+  const h = crypto.createHash('sha256'); h.update('a'); const dig = h.digest('hex');
+  const e = new ev.EventEmitter(); e.on('x', () => {}); e.emit('x');
+  const p = new stream.PassThrough(); p.write('x'); p.end();
+  return [pathm.join('a', 'b'), pathm.resolve('a'), os.platform(), os.cpus().length,
+          util.format('%s', x), util.inspect(x), zlib.gzipSync(Buffer.from('')),
+          new urlm.URL('http://a.example').host, Buffer.from('a'), JSON.stringify({}),
+          process.cwd(), process.memoryUsage().rss, dig];
+}`,
+    // OVER-CHARGE CONTROL 3 — the net cluster's PROVEN-INERT construction. `new http.Agent()` is a
+    // connection-pool config object and `new http.Server()` opens nothing until `.listen()`; the κ rule
+    // exempts the synthesized `new` token on purpose. Re-keying `new` on the CLASS's module must not
+    // walk past that carve-out, or the fix converts a documented precision decision into a fabrication.
+    "src/inert.ts": `import * as http from 'http';
+import * as netm from 'net';
+export function agent() { return new http.Agent(); }
+export function server() { return new netm.Server(); }
+export function validate(s: string) { return netm.isIP(s); }`,
+    // THE RESIDUAL — node-core surface this engine has NOT reviewed. Silent-pure before; each of these
+    // is a real boundary (a REPL evaluates whatever it is fed, `dlopen` loads a native addon, a Worker
+    // runs a file this scan never saw, `setFlagsFromString` reconfigures the VM).
+    "src/residual.ts": `import * as repl from 'repl';
+import * as v8 from 'v8';
+import * as wt from 'worker_threads';
+export function startRepl() { return repl.start(); }
+export function vmFlags() { return v8.setFlagsFromString('--stack-size=1'); }
+export function spawnWorker() { return new wt.Worker('/w.js'); }
+export function loadNative(p: string) { return process.dlopen({ exports: {} }, p); }`,
+    // THE NAMED MISSES — reviewed and MODELLED, so they land on a concrete effect rather than on the
+    // Unknown floor. A residual that swallows these would be honest and useless.
+    "src/named.ts": `import * as v8 from 'v8';
+import * as inspector from 'inspector';
+export function heap() { return v8.writeHeapSnapshot(); }
+export function debugPort() { return inspector.open(9229); }
+export function report() { return process.report!.writeReport(); }
+export function envFile() { return process.loadEnvFile('.env'); }`,
+    "fs.pol": "deny Fs\n",
+    "unknown.pol": "deny Unknown\n",
+    "net.pol": "deny Net\n",
+  });
+  const { report } = scan(d);
+  const eff = (fn) => entry(report, fn)?.inferred ?? null;   // null = ABSENT = the purity claim
+  const why = (fn) => entry(report, fn)?.unknownWhy ?? [];
+
+  // ── the sin, both directions ──
+  check("node core: `new fs.ReadStream(p)` reports Fs — a constructor whose ctor decl is INHERITED from `stream` is still an `fs` member",
+        (eff("src.sin.readIt") ?? []).includes("Fs"), JSON.stringify(entry(report, "src.sin.readIt")));
+  check("node core: `new fs.WriteStream(p)` reports Fs (the same vein, the other direction)",
+        (eff("src.sin.writeIt") ?? []).includes("Fs"), JSON.stringify(entry(report, "src.sin.writeIt")));
+  check("node core CONTROL: the sibling `fs.readFileSync` was always Fs — this row is what makes the two above a DIFFERENCE",
+        (eff("src.sin.control") ?? []).includes("Fs"));
+  // THE GATE ROW GETS ITS OWN TREE, holding NOTHING but the construction. Run against the tree above it
+  // would have passed before the fix as well — `control`'s `readFileSync` is Fs, so the exit code says
+  // nothing about `readIt`. A policy row over a fixture with a second cause is not a row.
+  {
+    const only = project({
+      "tsconfig.json": TSCONFIG,
+      "src/only.ts": `import * as fsm from 'fs';
+export function readIt(p: string) { return new fsm.ReadStream(p); }`,
+      "fs.pol": "deny Fs\n",
+    });
+    const g = scan(only, "--policy", path.join(only, "fs.pol"));
+    check("node core: `deny Fs` over a tree whose ONLY effect is `new fs.ReadStream` is a VIOLATION (exit 1), was exit 0 `policy ✓`",
+          g.r.status === 1, `exit ${g.r.status}: ${g.r.stderr}`.slice(0, 200));
+    fs.rmSync(only, { recursive: true, force: true });
+  }
+
+  // ── the over-charge controls: these held BEFORE the fix and must hold after ──
+  check("OVER-CHARGE CONTROL: a USER-DEFINED `class ReadStream` that does nothing gains NO effect (absent = pure)",
+        eff("src.mine.mineRead") === null, JSON.stringify(entry(report, "src.mine.mineRead")));
+  check("OVER-CHARGE CONTROL: …and neither does a user-defined `WriteStream`",
+        eff("src.mine.mineWrite") === null, JSON.stringify(entry(report, "src.mine.mineWrite")));
+  check("OVER-CHARGE CONTROL: genuinely pure node core (path/os/crypto-digest/util/zlib/events/stream/url/Buffer/process.cwd) stays PURE — no effect AND no Unknown",
+        eff("src.pure.pureCore") === null, JSON.stringify(entry(report, "src.pure.pureCore")));
+  check("OVER-CHARGE CONTROL: `new http.Agent()` stays pure — the net cluster's inert-construction carve-out survives the class-module re-key",
+        eff("src.inert.agent") === null, JSON.stringify(entry(report, "src.inert.agent")));
+  check("OVER-CHARGE CONTROL: `new net.Server()` stays pure (opens nothing until `.listen()`)",
+        eff("src.inert.server") === null, JSON.stringify(entry(report, "src.inert.server")));
+  check("OVER-CHARGE CONTROL: `net.isIP()` stays pure — a member the net rule proves inert must not fall to the Unknown floor",
+        eff("src.inert.validate") === null, JSON.stringify(entry(report, "src.inert.validate")));
+  // Its own tree, for the reason the two policy rows above have one: the tree that holds the whole
+  // fixture also holds `inspector.open()`, which is Net on purpose — its exit code would be 1 whatever
+  // the inert constructions did, and a row that cannot fail is not a control.
+  {
+    const only = project({
+      "tsconfig.json": TSCONFIG,
+      "src/only.ts": `import * as http from 'http';
+import * as netm from 'net';
+export function agent() { return new http.Agent(); }
+export function server() { return new netm.Server(); }
+export function validate(s: string) { return netm.isIP(s); }`,
+      "net.pol": "deny Net\n",
+    });
+    const g = scan(only, "--policy", path.join(only, "net.pol"));
+    check("OVER-CHARGE CONTROL: `deny Net` over a tree of nothing BUT inert net-cluster construction is exit 0",
+          g.r.status === 0, `exit ${g.r.status}: ${g.r.stderr}`.slice(0, 200));
+    fs.rmSync(only, { recursive: true, force: true });
+  }
+
+  // ── the residual: unreviewed core fails CLOSED, and says why ──
+  for (const [fn, what] of [["src.residual.startRepl", "repl.start()"],
+                            ["src.residual.vmFlags", "v8.setFlagsFromString()"],
+                            ["src.residual.spawnWorker", "new worker_threads.Worker(file)"],
+                            ["src.residual.loadNative", "process.dlopen()"]]) {
+    check(`node-core RESIDUAL: ${what} is Unknown, not silent-pure`,
+          (eff(fn) ?? []).includes("Unknown"), JSON.stringify(entry(report, fn)));
+    check(`node-core RESIDUAL: …and it carries a \`native:\` reason class, so \`Unknown[native]\` can select it (${what})`,
+          why(fn).some((w) => w.startsWith("native:")), JSON.stringify(why(fn)));
+  }
+  // Its own tree, for the reason the `deny Fs` row has one: a mixed fixture's exit code is not evidence.
+  {
+    const only = project({
+      "tsconfig.json": TSCONFIG,
+      "src/only.ts": `import * as repl from 'repl';
+export function startRepl() { return repl.start(); }`,
+      "unknown.pol": "deny Unknown\n",
+      "unknown-native.pol": "deny Unknown[native]\n",
+    });
+    const g = scan(only, "--policy", path.join(only, "unknown.pol"));
+    const gn = scan(only, "--policy", path.join(only, "unknown-native.pol"));
+    check("node-core RESIDUAL: `deny Unknown` fires on a tree whose ONLY hole is unreviewed core (exit 1)",
+          g.r.status === 1, `exit ${g.r.status}: ${g.r.stderr}`.slice(0, 200));
+    check("node-core RESIDUAL: …and the class-scoped `deny Unknown[native]` selects it too — the reason is on the wire, not just the effect",
+          gn.r.status === 1, `exit ${gn.r.status}: ${gn.r.stderr}`.slice(0, 200));
+    fs.rmSync(only, { recursive: true, force: true });
+  }
+
+  // ── the named misses land on a CONCRETE effect, not on the floor ──
+  check("node core: `v8.writeHeapSnapshot()` writes a file — Fs",
+        (eff("src.named.heap") ?? []).includes("Fs"), JSON.stringify(entry(report, "src.named.heap")));
+  check("node core: `inspector.open(port)` opens the debugger's websocket — Net",
+        (eff("src.named.debugPort") ?? []).includes("Net"), JSON.stringify(entry(report, "src.named.debugPort")));
+  check("node core: `process.report.writeReport()` writes a file — Fs",
+        (eff("src.named.report") ?? []).includes("Fs"), JSON.stringify(entry(report, "src.named.report")));
+  check("node core: `process.loadEnvFile()` reads a file — Fs",
+        (eff("src.named.envFile") ?? []).includes("Fs"), JSON.stringify(entry(report, "src.named.envFile")));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── THE CENSUS AND THE ANALYSIS WALK MUST AGREE ABOUT WHAT A DIRECTORY IS ─────────────────────────
+//
+// MEASURED at spec 0.32, byte-identical code, one policy (`deny Exec`), two directory names:
+//
+//     lib/shipped.js   →  exit 2, `excluded: [{class:"outside-the-tsconfig-program", count:1}]`,
+//                         `outOfScope: [{fn:"run", effects:["Exec"]}]`
+//     dist/shipped.js  →  exit 0, `policy ✓`, `excluded: []`
+//
+// The ⟨0.29⟩ census walk carries its own `SKIP_DIR` — `dist`, `build`, `out`, `coverage`, `.next` and
+// EVERY dot-directory — which the analysis walk does not have. So the two halves of one report disagreed
+// about which files exist, and `excluded: []` is not a silence: ⟨0.27⟩ makes zero-match a POSITIVE
+// statement, and ⟨0.32⟩ builds an INCOMPLETE verdict on top of it. A false disclosure disarms the rung
+// that consumes it. 121 of 744 real packages in a corpus draw ship their only readable source under such
+// a directory, and it fires on this project's own VS Code extension, whose `dist/extension.cjs` carries
+// `child_process`, `fs` and `https`.
+//
+// `node_modules` and `.git` STAY skipped, and that is not an inconsistency: the analysis walk skips
+// `node_modules` too (via `isTestPath`), and `.git` holds no source. Those two are the whole difference,
+// and the difference is now the SAME on both sides.
+if (blk()) {
+  const TSCONFIG = `{ "compilerOptions": { "target": "ES2022", "module": "NodeNext",
+    "moduleResolution": "NodeNext", "strict": false }, "include": ["src"] }`;
+  const SHIPPED = `const cp = require('child_process');
+function run(c) { return cp.execSync(c); }
+module.exports = { run };`;
+  // One tree per generated-output directory name, so a row names the directory it is about.
+  for (const dir of ["dist", "build", "out", "coverage", ".next", ".output"]) {
+    const d = project({
+      "tsconfig.json": TSCONFIG,
+      "src/ok.ts": `export function fine(a: number) { return a + 1; }`,
+      [`${dir}/shipped.js`]: SHIPPED,
+      "pol.candor": "deny Exec\n",
+    });
+    const { r, report } = scan(d, "--policy", path.join(d, "pol.candor"));
+    check(`census: code under \`${dir}/\` is DISCLOSED as excluded — the census walks what the analysis walk walks`,
+          (report?.excluded ?? []).some((e) => e.count > 0), JSON.stringify(report?.excluded));
+    check(`census: …and \`deny Exec\` over it is INCOMPLETE (exit 2), not \`policy ✓\` at exit 0 (\`${dir}/\`)`,
+          r.status === 2, `exit ${r.status}: ${r.stderr}`.slice(0, 200));
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // ── CONTROL: the two directories that must STAY skipped. `node_modules` is unbounded — dragging it
+  // into the census would put every transitive dependency through the peek's TypeScript program, and
+  // `excluded` would report the size of the lockfile rather than the size of the blind spot.
+  {
+    const d = project({
+      "tsconfig.json": TSCONFIG,
+      "src/ok.ts": `export function fine(a: number) { return a + 1; }`,
+      "node_modules/evil/index.js": SHIPPED,
+      ".git/hooks/pre-commit.js": SHIPPED,
+      "pol.candor": "deny Exec\n",
+    });
+    const { r, report } = scan(d, "--policy", path.join(d, "pol.candor"));
+    check("census CONTROL: `node_modules/` and `.git/` stay out of the census (exit 0, nothing excluded) — the analysis walk skips them too",
+          r.status === 0 && (report?.excluded ?? []).length === 0,
+          `exit ${r.status}: ${JSON.stringify(report?.excluded)}`);
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // ── CONTROL: `dist/` as the BUILD OUTPUT of an already-analysed `src/`, which is the common case and
+  // the one where a naive fix goes wrong in two ways at once.
+  //
+  // WHAT THE HONEST ANSWER IS, and why. candor has no build provenance: nothing in the tree proves
+  // `dist/a.js` is the compiled image of `src/a.ts` rather than a stale artifact, a hand-edit, or a
+  // bundle that pulled in something `src/` never imported — and the shipped artifact is what actually
+  // runs at install and import time. So the file is DISCLOSED, always. What must NOT happen is either of:
+  //
+  //   (a) DOUBLE-COUNTING — `analyzed.count` is the units this scan judged, and a peeked file is by
+  //       definition not one of them. The peek runs in a child process over its own file list and its
+  //       findings land in `outOfScope`, never in `functions`, so the count is unmoved. Pinned below.
+  //   (b) A SPURIOUS REFUSAL — when `src/` ALREADY violates, the answer is the exit-1 violation naming
+  //       the function, not an exit-2 "I could not see enough". The gate's arms are ordered for exactly
+  //       this (certain beats unevaluable) and that ordering is what keeps this fix from converting a
+  //       precise answer into a vaguer one. Pinned below.
+  {
+    const SRC = `import { execSync } from 'child_process';
+export function run(c: string) { return execSync(c); }`;
+    const BUILT = `const { execSync } = require('child_process');
+function run(c) { return execSync(c); }
+module.exports = { run };`;
+    // The count is asserted DIFFERENTIALLY, against the same tree WITHOUT the build directory. Asserting
+    // a literal would have been asserting the unit-minting convention (a module-init unit is minted too),
+    // which is not what this row is about — and would go green for the wrong reason on any change to it.
+    const bare = project({ "tsconfig.json": TSCONFIG, "src/a.ts": SRC, "pol.candor": "deny Exec\n" });
+    const d = project({ "tsconfig.json": TSCONFIG, "src/a.ts": SRC, "dist/a.js": BUILT,
+                        "pol.candor": "deny Exec\n" });
+    const b = scan(bare, "--policy", path.join(bare, "pol.candor"));
+    const { r, report } = scan(d, "--policy", path.join(d, "pol.candor"));
+    check("census CONTROL (build output of analysed src): the REAL violation still dominates — exit 1 naming the function, never a spurious exit 2",
+          r.status === 1, `exit ${r.status}: ${r.stderr}`.slice(0, 300));
+    check("census CONTROL (build output of analysed src): NO double-count — `analyzed.count` is the units this scan JUDGED, and it is IDENTICAL with and without the build directory",
+          report?.analyzed?.count === b.report?.analyzed?.count,
+          `with dist ${JSON.stringify(report?.analyzed)} vs without ${JSON.stringify(b.report?.analyzed)}`);
+    check("census CONTROL (build output of analysed src): the built copy is DISCLOSED even though its source twin was judged — candor has no build provenance and cannot prove the two agree",
+          (report?.excluded ?? []).some((e) => e.count === 1), JSON.stringify(report?.excluded));
+    fs.rmSync(bare, { recursive: true, force: true });
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // ── CONTROL: a CLEAN `dist/` beside a clean `src/`. Disclosed (the files exist and were not read),
+  // peeked, and found to do nothing the policy denies — so the verdict is a PASS. If this row went red
+  // the fix would have turned every built package into an unevaluable one.
+  {
+    const d = project({
+      "tsconfig.json": TSCONFIG,
+      "src/a.ts": `export function add(a: number, b: number) { return a + b; }`,
+      "dist/a.js": `function add(a, b) { return a + b; }
+module.exports = { add };`,
+      "pol.candor": "deny Exec\n",
+    });
+    const { r, report } = scan(d, "--policy", path.join(d, "pol.candor"));
+    check("census CONTROL: a CLEAN `dist/` is disclosed AND peeked AND passes (exit 0, `outOfScope: []`)",
+          r.status === 0 && (report?.outOfScope ?? []).length === 0
+            && (report?.excluded ?? []).some((e) => e.count === 1 && e.peeked === true),
+          `exit ${r.status}: ${JSON.stringify(report?.excluded)} ${JSON.stringify(report?.outOfScope)}`);
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

@@ -8,6 +8,85 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ ⟨0.32⟩ A node-core member this engine has not reviewed is `Unknown`, never pure — and a
+  constructor is attributed to the class you wrote, not to the base it inherits from.** Two silent false
+  all-clears, one classifier surface.
+
+  MEASURED, `deny Fs`, with a control in the same file: `readIt(p) { return new fs.ReadStream(p); }` was
+  **absent from `functions` entirely** — under SPEC §2 rule 3 a positive purity claim — with no
+  `Unknown`, at exit 0 and `ok: true`, while the sibling `fs.readFileSync(p)` reported `Fs` correctly.
+  `analyzed: 3`, so the file was read and the unit was minted; the engine looked at a filesystem open and
+  said nothing. The mechanism is not the one the symptom suggests: κ's `fs` rule is WHOLE-MODULE and
+  would have charged `Fs` for any member including the synthesized `new`, but `fs.ReadStream` declares no
+  constructor of its own, so `getResolvedSignature()` resolved to `stream.Readable`'s constructor in
+  `stream.d.ts` and the module was read off the base's file. `new http.ClientRequest(o)` was `Net`
+  correctly for the mirror-image reason — `ClientRequest` DOES declare its own constructor — so the vein
+  was inconsistent rather than absent, which is why hand-written fixtures never produced it. The class
+  now comes from the `new` expression, and κ is re-keyed onto the class's own module when the
+  constructor's module answered nothing (a hole-filler; it never overrides a rule that fired).
+
+  The second half is the posture underneath it, written at the coverage-ledger site as "an unlisted
+  builtin (path, util) is known-pure, not blind". True of `path` and `util`; false of
+  `v8.writeHeapSnapshot()` (writes a heap dump), `inspector.open()` (binds a port), `process.dlopen()`
+  (loads native code), `process.chdir()`, `repl.start()` and `new worker_threads.Worker(file)` — all six
+  silent-pure. A limitation written as a comment reads as considered, which is what kept it unmeasured.
+  Node core is finite, so the floor is a **denylist**: every builtin's export surface is reviewed
+  (`NODE_CORE_REVIEWED`), and a member neither classified by κ nor named there is
+  `Unknown[native:<module>.<member>]`. Forgetting an entry now over-charges instead of under-reporting,
+  and an API node adds next year fails closed. Newly modelled on the way through:
+  `v8.writeHeapSnapshot`/`takeCoverage`/`stopCoverage` → `Fs`, `inspector.open` → `Net`,
+  `process.loadEnvFile`/`process.report.writeReport` → `Fs`, `process.getuid`/`getgid`/… → `Env` (the
+  `os.userInfo` precedent), `os.networkInterfaces` → `Env`, `util.debuglog`/`debug` → `Env` (they read
+  `$NODE_DEBUG`), `module.enableCompileCache`/`flushCompileCache`/`getCompileCacheDir` → `Fs`.
+
+  **The controls are the deliverable**, because "unmodelled ⇒ Unknown" is trivially achievable by making
+  everything Unknown, and re-keying `new` is trivially achievable by charging every construction. Pinned
+  PURE in the same test block: `path.join`, `path.resolve`, `os.platform`, `crypto.createHash().digest()`,
+  `util.format`, `util.inspect`, `zlib.gzipSync`, `new EventEmitter()`, `new stream.PassThrough()`,
+  `new URL()`, `Buffer.from`, `JSON.stringify`, `process.cwd()`, `process.memoryUsage()`,
+  `new http.Agent()`, `new net.Server()`, `net.isIP()`, and a USER-DEFINED `class ReadStream` that does
+  nothing. Three of the entries were earned rather than guessed: the corpus round found the floor
+  re-charging `process.stdout.write`/`process.stdin.on` as `Unknown[native:net.write]` — the fabricated
+  `Net` the std-stream carve-out exists to remove, reintroduced under another name by a fix in the other
+  direction — so a classifier that DECIDED a call is pure is now distinguished from one that failed to
+  answer; it charged 410 ordinary CJS `require()` calls across 51 of 85 packages, an `Unknown` over
+  evidence the engine holds; and the SELF-GATE caught `process.kill(process.pid, sig)` in this repo's own
+  `scratch.mjs` coming back as `Exec`, which would make `deny Exec` mean something other than "can this
+  run a program". `kill`, `chdir` and `umask` are therefore in neither list and land on the honest floor.
+
+  CORPUS REGRESSION, 85 real packages × `deny Fs`/`Net`/`Exec`/`Unknown` = 340 pairs, before and after:
+  **1 exit-code flip** (`@humanfs/node`, `deny Unknown` 0 → 2, and that is the census fix below, not this
+  one), Unknown-bearing functions **3324 → 3324** — no flood — and exactly **two** new `native:` findings,
+  both hand-verified true positives: eslint's `workerExecutor` really does `new Worker(workerURL)`, and
+  cross-spawn's `resolveCommandAttempt` really does `process.chdir(parsed.options.cwd)`. isexe gained
+  `Env` on three functions because `checkMode` calls `process.getuid()`. Scan wall-clock +6.6%.
+
+- **⚠ ⟨0.32⟩ The `excluded` census walks what the analysis walk walks — `dist/`, `build/`, `out/`,
+  `coverage/` and dot-directories are no longer invisible.** MEASURED on byte-identical code under one
+  policy (`deny Exec`), differing only in the directory name:
+
+  ```
+  lib/shipped.js   → exit 2, excluded: [{class: "outside-the-tsconfig-program", count: 1}],
+                     outOfScope: [{fn: "run", effects: ["Exec"]}]
+  dist/shipped.js  → exit 0, policy ✓, excluded: []
+  ```
+
+  The ⟨0.29⟩ census carried its own skip list that nothing upstream shares, so the two halves of one
+  report disagreed about which files exist. `excluded: []` is not silence — ⟨0.27⟩ makes zero-match a
+  positive statement and ⟨0.30⟩/⟨0.32⟩ build the INCOMPLETE verdict on top of it — so a census that
+  under-reports does not omit a note, it disarms the rung that consumes it. 121 of 744 packages in a
+  corpus draw ship their only readable source under such a directory, and it fires on this project's own
+  VS Code extension: `dist/extension.cjs` carries `child_process`, and the scan now names two findings in
+  it that it previously did not count at all. `node_modules` and `.git` still skip, which is AGREEMENT
+  rather than an exception — the analysis walk skips `node_modules` too, via `isTestPath`.
+
+  A `dist/` that is the build output of an already-analysed `src/` is DISCLOSED, deliberately: candor has
+  no build provenance, so nothing proves the built file is the compiled image of the source rather than a
+  stale artifact or a bundle that pulled in an extra import, and the shipped artifact is what runs at
+  install and import time. It does not double-count (`analyzed.count` is the units this scan JUDGED, and
+  is byte-identical with and without the directory) and it does not refuse spuriously (a REAL violation
+  in `src/` still exits 1 naming the function — certain beats unevaluable). Both are pinned as controls.
+
 - **⚠ ⟨0.32⟩ A sibling report can no longer answer for another member (SPEC §2.2).** `gate --report` over
   one member of a multi-report prefix REFUSED a class-scoped `deny` at exit 2, and gating that same member
   beside an unrelated sibling exited 0 with `policy ✓` — a false green produced by ADDING a report. §2.2

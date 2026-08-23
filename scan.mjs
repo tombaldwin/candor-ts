@@ -33,8 +33,9 @@ import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNe
          netClassResolver, resolveReasonClasses } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents, writeStdoutSync } from "./contract.mjs";
-import { isTestPath, kappa, kappaKnows, fsKind, commandHeadEffects, hostLiteral, tablesInSql,
-         modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf, partnerFor } from "./scan-core.mjs";
+import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadEffects, hostLiteral,
+         tablesInSql, modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf,
+         partnerFor } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -1453,10 +1454,31 @@ if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
 // Walked ONCE from the same root, skipping the directories nobody means. CLASSES WITH COUNTS, never file
 // lists: an excluded set that can contain node_modules is unbounded, and a gate that prints thousands of
 // paths is one people scroll past.
+//
+// ⟨0.32⟩ …AND "THE DIRECTORIES NOBODY MEANS" HAD ITS OWN LIST, WHICH THE ANALYSIS WALK DOES NOT HAVE.
+// This set used to hold `dist`, `build`, `out`, `coverage`, `.next` AND every dot-directory. Nothing
+// upstream skips those, so the two halves of one report disagreed about which files exist.
+//
+// MEASURED at spec 0.32, byte-identical code, one policy (`deny Exec`), two directory names:
+//   lib/shipped.js   → exit 2, `excluded: [{class: "outside-the-tsconfig-program", count: 1}]`,
+//                      `outOfScope: [{fn: "run", effects: ["Exec"]}]`
+//   dist/shipped.js  → exit 0, `policy ✓`, `excluded: []`
+//
+// `excluded: []` is not silence. ⟨0.27⟩ makes zero-match a POSITIVE statement, ⟨0.29⟩ publishes it as
+// this run's scope, and ⟨0.30⟩/⟨0.32⟩ build the INCOMPLETE verdict on top of it — so a census that
+// under-reports does not merely omit a note, it disarms the rung that consumes it. The skip list was
+// added as tidiness and turned into a false disclosure. 121 of 744 real packages in a corpus draw ship
+// their only readable source under one of these names, and it fires on this project's own VS Code
+// extension, whose `dist/extension.cjs` carries `child_process`, `fs` and `https`.
+//
+// `node_modules` and `.git` STAY, and that is agreement rather than an exception: the analysis walk skips
+// `node_modules` too (`isTestPath`), and `.git` holds no source. Those two are the whole difference, and
+// the difference is now the same on both sides. A generated directory is exactly the code a gate most
+// needs to hear about — it is what actually ships.
 const excludedFiles = [];
 {
   const inSet = new Set(fileNames.map((f) => path.resolve(f)));
-  const SKIP_DIR = new Set(["node_modules", ".git", "dist", "build", "out", "coverage", ".next"]);
+  const SKIP_DIR = new Set(["node_modules", ".git"]);
   let rootIsDir = false;
   try { rootIsDir = fs.statSync(rootDir).isDirectory(); } catch { /* not walkable */ }
   if (rootIsDir) {
@@ -1464,7 +1486,7 @@ const excludedFiles = [];
       let ents; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
       for (const ent of ents) {
         const q = path.join(d, ent.name);
-        if (ent.isDirectory()) { if (!SKIP_DIR.has(ent.name) && !ent.name.startsWith(".")) walkAll(q); continue; }
+        if (ent.isDirectory()) { if (!SKIP_DIR.has(ent.name)) walkAll(q); continue; }
         if (!PARSED_SOURCE_EXT.test(ent.name)) continue;   // another language is not this engine's claim
         if (inSet.has(path.resolve(q))) continue;          // analyzed, therefore not excluded
         const rel = path.relative(rootDir, q);
@@ -2402,6 +2424,15 @@ const unanalyzedUnits = [];
     console.error(`candor-ts: ${unanalyzedUnits.length} source file(s) failed to parse — NOT analyzed (see the report's \`unanalyzed\`); a gate cannot be green over unanalyzed code`);
 }
 
+
+// ⟨0.32⟩ Did this declaration come out of @types/node — i.e. is it NODE CORE rather than a package that
+// merely shares a builtin's name? Asked of the FILE, because `declModule` turns
+// `@types/node/util.d.ts` into `util` and npm ships real packages called `util`, `path`, `process`,
+// `buffer`, `events`, `stream`, `url`, `assert` and `console` (the browserify shims are all installed in
+// ordinary bundler trees). A name-keyed test would hand every one of them node's review, which is the
+// borrowed-evidence shape — an answer about A used to certify B.
+const declIsNodeTypes = (decl) => !!decl
+  && /(^|\/)node_modules\/@types\/node\//.test(path.resolve(decl.getSourceFile().fileName).replace(/\\/g, "/"));
 
 // The module a declaration came from: a project file → "<local>", @types/node → the builtin name,
 // node_modules/<pkg> → the package name, the ES lib → "<es-lib>".
@@ -5024,9 +5055,30 @@ function visitCalls(node) {
           const netEstablishing = (member) =>
             CONNECTING_CTORS.has(ctorClassName) || NET_ESTABLISHING.has(member)
             || (/^(node:)?dgram$/.test(mod) && member === "send");
+          // ⟨0.32⟩ THE CLASS BEING CONSTRUCTED, TAKEN FROM THE `new` EXPRESSION rather than from the
+          // resolved constructor. A class that declares no constructor of its own INHERITS one, and
+          // `getResolvedSignature()` hands back the BASE's — which lives in the base's file, so both the
+          // class NAME and the MODULE were read off the wrong declaration.
+          //
+          // MEASURED at spec 0.32, `deny Fs`, with `fs.readFileSync` in the same file as a control:
+          //   readIt(p) { return new fs.ReadStream(p); }   -> ABSENT from `functions`, no Unknown, exit 0
+          //   control(p) { return fs.readFileSync(p); }    -> Fs, correctly
+          // `fs.ReadStream` declares no constructor, so the signature resolved to `stream.Readable`'s in
+          // `stream.d.ts`; `declModule` keys on the declaring file, so the module read `stream`, which κ
+          // says nothing about. κ's `fs` rule is WHOLE-MODULE — it would have charged `Fs` for any member
+          // including the synthesized `new` — so the classifier was never wrong, it was never asked.
+          // `new http.ClientRequest(o)` is `Net` correctly for the mirror-image reason: `ClientRequest`
+          // DOES declare its own constructor. The vein is inconsistent rather than absent, which is
+          // exactly why 44 hand-written fixtures never produced it.
+          const ctorClassDecl = ts.isNewExpression(node)
+            ? (checker.getSymbolAtLocation(node.expression)?.declarations ?? [])
+                .find((cd) => ts.isClassDeclaration(cd) || ts.isClassExpression(cd)
+                           || ts.isInterfaceDeclaration(cd) || ts.isVariableDeclaration(cd))
+            : undefined;
           const ctorClassName = ts.isNewExpression(node)
-            ? (ts.isConstructorDeclaration(decl) ? decl.parent?.name?.getText?.()
-               : (decl.name ? decl.name.getText() : ""))
+            ? (ctorClassDecl?.name?.getText?.()
+               ?? (ts.isConstructorDeclaration(decl) ? decl.parent?.name?.getText?.()
+                   : (decl.name ? decl.name.getText() : "")))
             : "";
           const isConstruction = ts.isConstructorDeclaration(decl) || ts.isNewExpression(node);
           // The κ member token. A named decl (function/method declaration) carries its own name; but a
@@ -5048,7 +5100,19 @@ function visitCalls(node) {
           const member = isConstruction
             ? (CONNECTING_CTORS.has(ctorClassName) ? ctorClassName : "new")
             : (decl.name ? decl.name.getText() : bindingName(decl));
-          let eff = kappa(mod, member); // (CLASSIFY)
+          // ⟨0.32⟩ THE MODULE κ IS READ AGAINST — `mod` for everything except a construction whose
+          // constructor came from somewhere else, which is re-keyed onto the CLASS's own module.
+          //
+          // ONLY WHEN `mod` ANSWERED NOTHING, deliberately: this fills a hole, it never overrides a rule
+          // that fired. And only for the κ lookup and the surfaces derived FROM a classified call — the
+          // κ-coverage ledger and the CANDOR_DEPS join below still read `mod`, because those ask "which
+          // PACKAGE did resolution land in", which is a different question with a different right answer.
+          let kMod = mod;
+          if (ctorClassDecl && !kappa(mod, member)) {
+            const cm = declModule(ctorClassDecl);
+            if (cm !== mod && kappa(cm, member)) kMod = cm;
+          }
+          let eff = kappa(kMod, member); // (CLASSIFY)
           // process.stdout/stderr/stdin are typed `tty.WriteStream`, which EXTENDS `net.Socket`, so a
           // `.write()`/`.end()` on them resolves to `net.Socket.write` and the whole-module Net rule
           // paints it Net. But a console write to fd 0/1/2 is TTY/console I/O, NOT network — there is no
@@ -5056,9 +5120,17 @@ function visitCalls(node) {
           // (a real `net.Socket` you constructed and `.write()` to still classifies Net — only the three
           // std streams are freed). Real-world sweep: nanoid/commander(×43)/bunyan/pino fabricated Net
           // purely from a `process.stdout.write` — the precision failure.
+          // ⟨0.32⟩ `effSuppressed` — this classifier DECIDED the call is pure, it did not fail to answer.
+          // The node-core floor below turns an unanswered core member into `Unknown`, and without this
+          // distinction it re-charges exactly the calls these two carve-outs exist to free. MEASURED on
+          // the corpus round that added the floor: `process.stdout.write` and `process.stdin.on` came
+          // back as `Unknown[native:net.write]` / `native:net.on` in acorn, debug and eslint — the
+          // fabricated `Net` these lines removed, reintroduced under a different name by a fix in the
+          // other direction, in the same release.
+          let effSuppressed = false;
           if (eff && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))
               && rootsAtStdStream(node.expression.expression))
-            eff = null;
+            { eff = null; effSuppressed = true; }
           // R54 — the same carve-out through a helper, decided from the receiver's TYPE. SCOPED TO Net
           // DELIBERATELY: an `fs.WriteStream` receiver legitimately carries Fs, and suppressing whatever
           // effect happened to resolve would swallow that — the same under-report one door along. Only
@@ -5066,7 +5138,7 @@ function visitCalls(node) {
           if (eff === "Net"
               && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))
               && receiverIsProvenNonNetworkStream(node.expression.expression))
-            eff = null;
+            { eff = null; effSuppressed = true; }
           if (eff) {
             rec.direct.add(eff);
             // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. DIRECT only
@@ -5077,13 +5149,13 @@ function visitCalls(node) {
               // A verb revealing no direction records the POISON marker "?" rather than nothing. Abstaining
               // would let a caller inherit a neighbour's ["write"] and claim "writes but never reads" over a
               // reach whose kind was never determined — the partial claim §2 forbids. Suppressed at emit.
-              const ks = fsKind(mod, member);
+              const ks = fsKind(kMod, member);
               if (ks.length === 0) rec.fsKinds.add("?"); else for (const k of ks) rec.fsKinds.add(k);
             }
             // a κ rule that resolves to the Unknown trust-marker (node:vm code execution) is a direct
             // Unknown SOURCE — SPEC §4 requires a why on it, like eval's `reflect:eval`. (The rest of
             // the κ table is concrete effects, which carry no why.)
-            if (eff === "Unknown") rec.why.add(`reflect:${mod.replace(/^node:/, "")}.${member}`);
+            if (eff === "Unknown") rec.why.add(`reflect:${kMod.replace(/^node:/, "")}.${member}`);
           }
           // the literal surfaces, read only at a CLASSIFIED call (SPEC §2)
           if (eff === "Net") {
@@ -5091,7 +5163,7 @@ function visitCalls(node) {
             // fetch/axios/the HTTP verbs), NEVER the first literal anywhere in the args: a trailing literal
             // in headers/body/options must not be read as the host (FINDING 6). Ollama's model decision runs
             // through the parsed host too, never a raw string that merely contains ":11434" (FINDING 1/9).
-            const urlLit = urlArgLiteral(node, member, mod);
+            const urlLit = urlArgLiteral(node, member, kMod);
             const ollama = ollamaFromUrlArg(urlLit);
             if (ollama === "capture-model" || ollama === "capture-plain") {
               const h = hostLiteral(urlLit);
@@ -5186,6 +5258,39 @@ function visitCalls(node) {
             // ⟨0.29⟩ `complete` also covers a two-path op whose SECOND path is runtime, which a captured
             // position-0 literal would otherwise certify.
             if (!(pathCaptured && complete) && !FS_USE_VERBS.has(member)) rec.incomplete.add("Fs");
+          }
+          // ── ⟨0.32⟩ THE NODE-CORE FLOOR: an unclassified member of node core fails CLOSED ─────────
+          //
+          // κ is an allowlist, and a miss inside @types/node used to land on PURE — written down two
+          // hundred lines below, at the coverage ledger, as "an unlisted builtin (path, util) is
+          // known-pure, not blind". MEASURED false for `v8.writeHeapSnapshot()` (writes a heap dump),
+          // `inspector.open()` (binds a port), `process.dlopen()` (loads native code), `repl.start()`
+          // (evaluates whatever it is fed) and `new worker_threads.Worker(file)` (runs a file this scan
+          // never saw): all five ABSENT from `functions`, which under §2 rule 3 is a positive purity
+          // claim. A limitation written as a comment reads as considered, which is what kept it
+          // unmeasured.
+          //
+          // Node core is FINITE, so the fix is a denylist (`NODE_CORE_REVIEWED`) rather than a longer
+          // allowlist — forgetting an entry there over-charges, which is the survivable direction, and
+          // is what makes an API node adds next year fail closed instead of silently pure.
+          //
+          // THE PREDICATE IS ON THE FILE, NOT ON THE MODULE NAME. `declModule` derives `util`, `path`,
+          // `process` and `buffer` from `@types/node/<x>.d.ts`, and npm ships REAL packages under every
+          // one of those names (the browserify shims). Keying the floor on the name would hand those
+          // packages node's review by accident — the same borrowed-evidence shape §2.2 was fixed for.
+          //
+          // A CONSTRUCTION IS ASKED ABOUT BY ITS CLASS NAME, not by the synthesized `new`. κ's `new`
+          // exemptions are precision decisions about specific constructors (`new http.Agent()` opens
+          // nothing), never a claim that every class in the module is inert — and `new
+          // worker_threads.Worker(f)` has to be separable from `new worker_threads.MessageChannel()`.
+          if (!eff && !effSuppressed && declIsNodeTypes(ctorClassDecl && kMod !== mod ? ctorClassDecl : decl)
+              && nodeCoreUnreviewed(kMod, isConstruction ? (ctorClassName || "new") : member)) {
+            rec.direct.add("Unknown");
+            // §4's `native:` verbatim — a boundary to code this engine cannot analyse. java spells the
+            // same class `native:<method>` and rust `native:extern fn`; the body-less-declaration pass in
+            // this file already emits it for the local half of the same idea.
+            rec.why.add(`native:${kMod.replace(/^node:/, "")}.`
+                        + `${isConstruction ? `new ${ctorClassName || ""}` : member}`);
           }
           // CANDOR_DEPS: an unclassified call into a package with a loaded sibling report inherits
           // that function's recorded transitive effects (+ literal surfaces) by `hash`.

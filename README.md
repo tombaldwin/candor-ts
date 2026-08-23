@@ -95,11 +95,17 @@ socket.io/nodemailer, gaxios + googleapis-common + google-auth-library, stripe, 
 posthog-node, bull/bullmq), the database drivers (pg/mysql2/mongodb/redis/ioredis/sqlite3/
 better-sqlite3/knex) **and the ORM tier** (TypeORM — with `@Entity("…")` table extraction —
 Prisma, Mongoose, Sequelize, drizzle-orm), plus execa/cross-spawn/shelljs/open, fs-extra/
-graceful-fs/rimraf/glob/chokidar, dotenv, winston/pino/bunyan. An unlisted package contributes
+graceful-fs/rimraf/glob/chokidar, dotenv, winston/pino/bunyan. An unlisted npm package contributes
 nothing — candor never guesses an effect — but the scan **names it**: the receipt's coverage-ledger
 line (marker: `classifier doesn't cover`) lists every package the code demonstrably calls that
 candor's classifier neither classifies nor has reviewed-pure, and each function carries the
 `invisible` list it (transitively) reaches.
+
+⟨0.32⟩ **Node core is the one part of the classifier that is a denylist, not a curated list.** The
+builtins are a finite set, so every module's surface is reviewed and a core member that is neither
+classified nor reviewed effect-free reads `Unknown[native:<module>.<member>]` — never pure. That is
+why `v8.writeHeapSnapshot()` is `Fs`, `inspector.open()` is `Net`, and `repl.start()`,
+`process.dlopen()` and `new worker_threads.Worker(file)` are visible holes rather than silence.
 
 ## MCP server — candor as agent ground truth
 

@@ -77,6 +77,49 @@ export const KAPPA_RULES = [
   // the classify site (the only κ rule that resolves to the Unknown trust-marker, SPEC §4).
   [/^(node:)?vm$/, /^(runInThisContext|runInContext|runInNewContext|compileFunction)$/, "Unknown"],
   [/^(node:)?sqlite$/, null, "Db"],
+  // ── ⟨0.32⟩ THE NAMED NODE-CORE MISSES. Every one of these read SILENT-PURE, found by enumerating each
+  // builtin's EXPORTS against what this table charges (the method that found `postMessageToThread`), not
+  // by testing spellings someone had already thought of. They are modelled rather than left to the
+  // NODE_CORE_REVIEWED floor below because a concrete effect is a better answer than `Unknown`, and a
+  // floor that swallows the cases we CAN name is honest and useless.
+  //
+  // node:v8 — `writeHeapSnapshot(file)` writes a multi-hundred-megabyte heap dump to disk;
+  // `takeCoverage`/`stopCoverage` flush V8 coverage into $NODE_V8_COVERAGE. All three are Fs.
+  // (`serialize`/`deserialize`/`getHeap*Statistics` are in-process and stay pure — see the floor.)
+  [/^(node:)?v8$/, /^(writeHeapSnapshot|takeCoverage|stopCoverage)$/, "Fs"],
+  // node:inspector — `open(port, host)` starts the inspector's WebSocket SERVER and binds a port. That
+  // is a listening network socket in a process that never mentioned the network: Net.
+  [/^(node:)?inspector(\/promises)?$/, /^open$/, "Net"],
+  // `process` — the global's own surface (declModule reads it from @types/node/process.d.ts). MIXED, so
+  // member-precise like every other mixed module here:
+  //   Fs   `loadEnvFile()` reads a .env off disk; `report.writeReport()` writes a diagnostic report.
+  //        Both unambiguously touch a file.
+  //   Env  the OS identity reads, for the reason `os.userInfo`/`os.hostname` are Env (same fact, other
+  //        spelling) — this table was inconsistent with itself until that pair was fixed. Confirmed a
+  //        true positive on the corpus: isexe's `checkMode` calls `process.getuid()`.
+  // Everything else (cwd/argv/env/hrtime/memoryUsage/nextTick/exit/emitWarning/…) is introspection or
+  // scheduling and is reviewed pure in the floor below; `dlopen`, `binding`, `kill`, `chdir`, `umask`
+  // and the `set*id` privilege verbs are deliberately in NEITHER list, so they reach the floor and
+  // fail closed as `Unknown[native:…]`.
+  //
+  // `kill`, `chdir` and `umask` WERE classified here — Exec, Fs and Fs — and the SELF-GATE caught it:
+  // `scratch.<module>` calls `process.kill(process.pid, sig)` to re-raise a signal after cleaning up,
+  // and that appeared as a new AS-EFF-006 "performs Exec — not a declared self-invocation site". It is
+  // not a subprocess. `deny Exec` exists to answer "can this code run a program", and answering yes for
+  // a `kill(2)` makes the effect mean something else — the fabrication direction, introduced while
+  // closing an under-report, which is the exact shape this project has measured four times. `Unknown`
+  // is the honest answer for an operation §1 has no name for: it is no longer silent, and it does not
+  // claim an effect this engine cannot defend against the other three.
+  [/^(node:)?process$/, /^(loadEnvFile|writeReport)$/, "Fs"],
+  [/^(node:)?process$/, /^(getuid|geteuid|getgid|getegid|getgroups)$/, "Env"],
+  // node:module — the compile cache is a real on-disk cache directory.
+  [/^(node:)?module$/, /^(enableCompileCache|flushCompileCache|getCompileCacheDir)$/, "Fs"],
+  // node:util — `debuglog(section)`/`debug(section)` READ $NODE_DEBUG to decide whether the returned
+  // logger is live. An environment read behind a convenience name, exactly like `os.homedir()`.
+  [/^(node:)?util$/, /^(debuglog|debug)$/, "Env"],
+  // The Web Crypto RNG reached through @types/node's own global typings rather than through lib.dom
+  // (the es-lib arm at the classify site covers the `Crypto` interface; this covers the node spelling).
+  [/^web-globals\/crypto$/, /^(getRandomValues|randomUUID|generateKey)/, "Rand"],
   // the curated npm tier
   [/^(axios|got|node-fetch|undici|ws|socket\.io(-client)?|nodemailer)$/, null, "Net"],
   // gaxios is the axios-like HTTP client under googleapis (request/get/post/put/patch/delete/head do
@@ -176,7 +219,11 @@ export const KAPPA_RULES = [
   // `env::current_dir`) as Env, so ts was the outlier AND inconsistent with ITSELF: `os.hostname()` was
   // Env while `os.homedir()` was pure. MEASURED 2026-08-18: `deny Env` answered exit 0 over
   // `os.homedir()`. `platform`/`arch`/`cpus` are untouched — they read no variable.
-  [/^(node:)?os$/, /^(userInfo|hostname|tmpdir|homedir)$/, "Env"],
+  // …and `networkInterfaces()`, added with the ⟨0.32⟩ core floor rather than left implicitly pure: it
+  // reads the host's network configuration (addresses, MACs), which is the same host-identity family as
+  // `hostname`. The floor below marks the REST of node:os reviewed-pure, and that is a positive claim —
+  // so a member nobody believes is inert must not be swept into it.
+  [/^(node:)?os$/, /^(userInfo|hostname|tmpdir|homedir|networkInterfaces)$/, "Env"],
   [/^(argon2|bcrypt|bcryptjs)$/, null, "Rand"],
   // The ORM tier — VERB-PRECISE (the CLASSIFIER discipline: tag the execution boundary, not
   // builders; `createQueryBuilder` is pure, its `getMany`/`execute` is the I/O). Found on the
@@ -273,6 +320,164 @@ export function kappa(moduleName, member) {
     if (mre.test(moduleName) && (!vre || vre.test(member))) return eff;
   }
   return null;
+}
+
+// ---- ⟨0.32⟩ THE NODE-CORE FLOOR: reviewed-effect-free surface, and everything else fails closed ----
+//
+// WHY THIS EXISTS. The κ table is an ALLOWLIST, and the classify site used to read a miss inside node
+// core as PURE — written down, at the coverage-ledger site, as "an unlisted builtin (path, util) is
+// known-pure, not blind". That is true of `path` and `util` and false of `v8.writeHeapSnapshot`,
+// `inspector.open`, `process.dlopen`, `repl.start()` and `new worker_threads.Worker(file)`, every one of
+// which reported nothing at all — which under SPEC §2 rule 3 is a positive purity claim, over a heap
+// dump, a listening socket, a native-code load and two code-execution boundaries. A limitation written
+// as a comment reads as CONSIDERED, which is what stopped it being measured for as long as it stood.
+//
+// THE SHAPE IS A DENYLIST, for the reason stated at the net cluster: an allowlist under-reports whatever
+// you forgot, and "whatever you forgot" is precisely what node adds every six months. This inverts it —
+// node core is FINITE and enumerable, each module's export surface was read, and a member that is
+// neither classified by κ above nor named here is `Unknown[native:<mod>.<member>]`. The cost of being
+// wrong flips with it: forgetting something here now over-charges (visible, complainable) instead of
+// under-reporting (silent, and the cardinal sin).
+//
+// AND IT IS THE HALF THAT NEEDS THE CONTROL. "Unmodelled ⇒ Unknown" is trivially achievable by making
+// everything Unknown, which deletes the product — `path.join`, `crypto.createHash().digest()`,
+// `util.format`, `new EventEmitter()`, `Buffer.from`, `process.cwd()` are the ordinary furniture of
+// every Node program. test.mjs pins them PURE in the same block that pins the misses Unknown.
+//
+// `[module regex, member regex — null = the whole module]`. Read against the same token κ is read
+// against, except that a CONSTRUCTION is asked about by its CLASS NAME rather than the synthesized
+// `new`: `new worker_threads.Worker(f)` has to be separable from `new worker_threads.MessageChannel()`,
+// and κ's module-wide `new` exemptions are what make that necessary (they are precision decisions about
+// construction, not statements that every class in the module is inert).
+export const NODE_CORE_REVIEWED = [
+  // ── wholly reviewed, effect-free at the call boundary ──
+  // Deterministic in-process computation and string manipulation: assert (throws), async_hooks (in-process
+  // hook registration), buffer, constants, diagnostics_channel (in-process pub/sub), domain, events, path,
+  // perf_hooks (in-process timing), punycode, querystring, string_decoder, url, util/types, zlib.
+  // Console/TTY I/O — `console`, `readline`, `tty`: §1 has no Console effect and this engine already
+  // suppresses the fabricated `Net` on `process.stdout.write` for the same reason; classifying them here
+  // would contradict that decision one door along.
+  // `stream` and its submodules: transport plumbing. A stream's effect belongs to the concrete source or
+  // sink, and is charged where THAT was constructed (`fs.createReadStream` → Fs) — charging `.pipe()` too
+  // would double-count the same open.
+  // `timers`: scheduling. §1's `Clock` is a clock READ; arming a timer reads nothing.
+  // The typings-layout files — `globals`, `globals.typedarray`, `buffer.buffer`, `index`,
+  // `compatibility/*`, `ts5.x/*`, `stream/iter`, `zlib/iter` — are the same surfaces under other file
+  // names; `test`/`test/reporters` is the test runner, whose files this engine excludes anyway.
+  [/^(node:)?(assert(\/strict)?|async_hooks|buffer|console|constants|diagnostics_channel|domain|events|path(\/(posix|win32))?|perf_hooks|punycode|querystring|readline(\/promises)?|stream(\/(consumers|promises|web|iter))?|string_decoder|timers(\/promises)?|tty|url|util\/types|zlib(\/iter)?)$/, null],
+  [/^(buffer\.buffer|globals(\.typedarray)?|index|compatibility\/.*|ts5\.[0-9]+\/.*|test(\/.*)?)$/, null],
+  // The Node-supplied web globals. Inert or in-process: AbortController, Blob, console, DOMException,
+  // TextEncoder/TextDecoder, EventTarget, `import.meta`, structuredClone/MessageChannel, navigator,
+  // performance, ReadableStream/WritableStream, setTimeout, URL/URLSearchParams.
+  // `web-globals/fetch` holds `fetch` itself — classified `Net` by the GLOBAL-NAME classifier in scan.mjs
+  // (which also captures the host literal), before this floor is consulted; the rest of that file
+  // (Request/Response/Headers/FormData) is inert construction. It is listed here so the floor does not
+  // stack a second, reasonless `Unknown` on top of a call this engine already answers precisely.
+  // `web-globals/storage` is DELIBERATELY ABSENT: Node's `localStorage`/`sessionStorage` persist to a
+  // file, so it is not inert and has not been modelled — it fails closed.
+  [/^web-globals\/(abortcontroller|blob|console|crypto|domexception|encoding|events|fetch|importmeta|messaging|navigator|performance|streams|timers|url)$/, null],
+  // ── mixed modules: the reviewed-pure half, member by member ──
+  // node:crypto is deterministic computation plus entropy; κ above takes the entropy (`random*`,
+  // `generateKey*`, `generatePrime*`). Written as a denylist of ONE: `setEngine` loads a shared OpenSSL
+  // engine library into the process, which is a native-code load, not a hash.
+  [/^(node:)?crypto$/, /^(?!setEngine$)/],
+  // node:os — the host-identity reads are Env above; the rest is inert introspection
+  // (platform/arch/cpus/freemem/uptime/EOL/…).
+  [/^(node:)?os$/, null],
+  // node:util — everything but `debuglog`/`debug`, which κ takes as Env above.
+  [/^(node:)?util$/, null],
+  // The net cluster's own carve-outs, verbatim from the κ rule that exempts them, PLUS the classes whose
+  // construction that rule proves inert. `new` is the synthesized token; the class names are what a
+  // construction is asked about here. `WebSocket` is deliberately absent — it CONNECTS.
+  [/^(node:)?(net|dgram|tls|http2?|https)$/,
+   /^(new|isIP|isIPv4|isIPv6|getCiphers|createSecureContext|checkServerIdentity|validateHeaderName|validateHeaderValue|setKeepAlive|setNoDelay|ref|unref|address|Agent|Server|Socket|Stream|BlockList|SocketAddress|TLSSocket|SecureContext|IncomingMessage|OutgoingMessage|ServerResponse|ClientRequest|Http2ServerRequest|Http2ServerResponse|METHODS|STATUS_CODES|globalAgent|maxHeaderSize|rootCertificates|convertALPNProtocols|createSecurePair|getDefaultSettings|getPackedSettings|getUnpackedSettings|sensitiveHeaders|constants|getDefaultAutoSelectFamily|setDefaultAutoSelectFamily|getDefaultAutoSelectFamilyAttemptTimeout|setDefaultAutoSelectFamilyAttemptTimeout)$/],
+  // node:dns — the same: the κ rule's exemptions plus the inert `Resolver` construction.
+  [/^(node:)?dns(\/promises)?$/,
+   /^(new|getServers|setServers|getDefaultResultOrder|setDefaultResultOrder|Resolver|promises)$/],
+  // node:worker_threads — the message verbs are Ipc above. `Worker` is deliberately ABSENT: `new
+  // Worker(file)` loads and runs a file this scan never analysed, which is a boundary, not construction.
+  // A spawned Worker's own handle members are in-process: `terminate` stops a THREAD (there is no §1
+  // effect for that, and `process.kill` is Exec because it signals another PROCESS, which is a different
+  // operation), `ref`/`unref` move it in and out of the event-loop keepalive, and the stream/heap
+  // accessors return objects. Found by the corpus round: eslint's real `worker.terminate()` came back
+  // Unknown beside the genuine `new Worker` finding, which buries the one that matters under the one
+  // that does not.
+  [/^(node:)?worker_threads$/,
+   /^(new|isMainThread|threadId|resourceLimits|workerData|parentPort|SHARE_ENV|MessagePort|MessageChannel|BroadcastChannel|markAsUncloneable|markAsUntransferable|isMarkedAsUntransferable|moveMessagePortToContext|setEnvironmentData|getEnvironmentData|terminate|ref|unref|performance|getHeapSnapshot|stdin|stdout|stderr)$/],
+  // node:cluster — `fork`/`disconnect` are the Ipc boundary; the rest is configuration and state.
+  [/^(node:)?cluster$/,
+   /^(new|isWorker|isMaster|isPrimary|workers|settings|schedulingPolicy|SCHED_NONE|SCHED_RR|setupPrimary|setupMaster|Worker)$/],
+  // node:vm — the four evaluation verbs are Unknown above. `new vm.Script(code)` only COMPILES; the
+  // execution is a later `runInContext`, which κ catches. `createContext`/`isContext`/`measureMemory`
+  // touch nothing outside the process.
+  [/^(node:)?vm$/, /^(new|createContext|createScript|isContext|measureMemory|constants|Script)$/],
+  // node:v8 — the disk-writing verbs are Fs above. What remains is in-process: the structured-clone
+  // serializer, the heap STATISTICS (numbers, not files), `getHeapSnapshot` (returns a Readable; the
+  // caller decides where it goes), and `queryObjects`. `setFlagsFromString`, `promiseHooks`,
+  // `startupSnapshot`, `setHeapSnapshotNearHeapLimit` and `GCProfiler` are absent on purpose.
+  [/^(node:)?v8$/,
+   /^(new|cachedDataVersionTag|getHeapSnapshot|getHeapStatistics|getHeapSpaceStatistics|getHeapCodeStatistics|serialize|deserialize|queryObjects|Serializer|Deserializer|DefaultSerializer|DefaultDeserializer)$/],
+  // node:inspector — `open` is Net above. `url`/`close`/`waitForDebugger` touch no new resource. The
+  // `Session` surface (`connect`, `post`) drives the V8 inspector protocol, which can write heap
+  // snapshots and start profilers, so it is absent and fails closed — as is `inspector.generated`, the
+  // protocol-domain typings its `post` resolves through.
+  [/^(node:)?inspector(\/promises)?$/, /^(new|url|close|waitForDebugger)$/],
+  // node:module — the compile cache is Fs above. `createRequire` MINTS a require function (inert; the
+  // load happens at the returned function's call, which resolves back into this module under a name
+  // that is not listed, so it fails closed). `register`, `runMain` and the `_`-prefixed loader internals
+  // are absent on purpose: they run module code.
+  // …and `require` itself, plus `""` — the token an interface CALL SIGNATURE resolves to, which is how
+  // `NodeRequire` declares `require(id)`. That is not a concession: scan.mjs already decided this, in
+  // the `require(<non-literal>)` arm, and decided it the other way for the case that matters — a
+  // LITERAL `require('./x')` is a static, resolvable load whose module TypeScript resolves and whose
+  // top-level effects this scan attributes to the loaded file's own `<module>` unit, while a DYNAMIC
+  // `require(v)` already discloses `Unknown[reflect:require]`. MEASURED when the floor first ran without
+  // this: 410 findings across 51 of 85 corpus packages, every one of them an ordinary CJS `require` of a
+  // module the engine had in fact read. An `Unknown` over evidence the engine holds is not caution, it
+  // is a second answer contradicting the first.
+  [/^(node:)?module$/,
+   /^(|new|require|isBuiltin|builtinModules|constants|createRequire|syncBuiltinESMExports|findSourceMap|SourceMap|Module|wrap|globalPaths|stripTypeScriptTypes)$/],
+  // `process` — the introspection, scheduling and stream surface. `dlopen` (loads a native addon),
+  // `binding`/`_linkedBinding` (internal C++ bindings), the `set*id`/`setgroups`/`initgroups` privilege
+  // verbs and the `_`-prefixed internals are absent on purpose. `""` is the token a CALL SIGNATURE on an
+  // interface resolves to — `process.memoryUsage()` is declared that way — and it is reviewed pure here
+  // rather than left to fail closed, because the alternative is an `Unknown` on a call that returns a
+  // number.
+  [/^(node:)?process$/,
+  // `bigint` is `process.hrtime.bigint()` — a monotonic clock READ, declared on the `HRTime` interface
+  // in the same file, so it arrives here under its own bare name. Pure for the reason `Date.now()` is
+  // pure in this engine: nothing charges `Clock` for reading a timer, and charging one spelling of it
+  // and not the other is the inconsistency the `os.homedir`/`os.hostname` fix was about.
+   /^(|new|version|versions|arch|platform|release|config|features|moduleLoadList|uptime|getActiveResourcesInfo|cpuUsage|resourceUsage|memoryUsage|constrainedMemory|availableMemory|exit|exitCode|abort|finalization|hrtime|bigint|allowedNodeEnvironmentFlags|assert|emitWarning|nextTick|sourceMapsEnabled|setSourceMapsEnabled|getBuiltinModule|hasUncaughtExceptionCaptureCallback|setUncaughtExceptionCaptureCallback|cwd|env|argv|argv0|execArgv|execPath|pid|ppid|title|debugPort|stdout|stdin|stderr|openStdin|ref|unref|getReport|report|throwDeprecation|traceDeprecation|noDeprecation)$/],
+  // The EventEmitter surface, wherever a core module RE-DECLARES it for typed events instead of
+  // inheriting it. `process.on("exit", …)` resolves to an overload declared in `process.d.ts`, not to
+  // `events.d.ts`, so the module-wide `events` entry above never saw it and an inert listener
+  // registration read Unknown (measured on eslint, twice). Registering, removing or counting listeners
+  // reaches nothing outside the process; `emit` runs local handlers this engine analyses lexically.
+  // (Only the modules whose κ rule can return null. The net cluster and dns classify every non-exempt
+  // member `Net`, including these, so listing them there would state something this table does not mean.)
+  [/^(node:)?(process|worker_threads|cluster|inspector(\/promises)?|v8|module|vm|repl|trace_events|wasi)$/,
+   /^(on|once|off|addListener|prependListener|prependOnceListener|removeListener|removeAllListeners|emit|listeners|rawListeners|listenerCount|eventNames|setMaxListeners|getMaxListeners)$/],
+];
+
+/**
+ * ⟨0.32⟩ Is this node-core member one κ does not classify AND nobody has reviewed effect-free?
+ *
+ * The caller has already asked `kappa()` and got null, and has already established that the declaration
+ * came from `@types/node` — the check is on the FILE, never on the module name, because an npm package
+ * may legitimately be called `util`, `path` or `process` (the browserify shims are) and a name-keyed
+ * test would hand those packages node's review by accident.
+ *
+ * True ⇒ the call site charges `Unknown` with a `native:` reason. That is §4's definition verbatim: a
+ * boundary to code this engine cannot analyse, which is the class java spells `native:<method>` and rust
+ * `native:extern fn`.
+ */
+export function nodeCoreUnreviewed(moduleName, member) {
+  const m = member ?? "";
+  for (const [mre, vre] of NODE_CORE_REVIEWED) {
+    if (mre.test(moduleName) && (!vre || vre.test(m))) return false;
+  }
+  return true;
 }
 // Packages REVIEWED and ratified effect-free at the call boundary (decorator/metadata plumbing,
 // pure computation, operator algebras whose side effects live in visible user callbacks). This is

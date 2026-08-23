@@ -232,10 +232,16 @@ want-JSON flag.
 - **The classifier is curated** — the node builtins plus a growing npm tier; the README's
   "classifier" paragraph is the ONE current list (this file deliberately doesn't duplicate it — a
   vendored copy here drifted a full generation once).
-  An unlisted package contributes nothing — an effect through it is invisible, not `Unknown`. The
+  An unlisted npm package contributes nothing — an effect through it is invisible, not `Unknown`. The
   scanner **names these per scan**: the receipt's coverage-ledger line (marker: `classifier doesn't
   cover`) lists every npm package the code demonstrably calls that candor's classifier neither
   classifies nor has reviewed-pure — read it before concluding "no effect" through anything it names.
+  ⟨0.32⟩ **NODE CORE is the exception, and it fails closed.** Node's builtins are a finite set, every
+  module's surface has been reviewed, and a core member that is neither classified nor reviewed
+  effect-free reads `Unknown[native:<module>.<member>]` rather than pure. `repl.start()`,
+  `process.dlopen()`, `process.chdir()`, `v8.setFlagsFromString()` and `new worker_threads.Worker(file)`
+  are holes you can see and `deny Unknown[native]` can select — and an API node adds next year is a hole
+  too, until someone reviews it.
 - **`process.env.X` reads are `Env`** (a property read, not a call); `Date.now()` is `Clock`.
 - **DI-style code reads `Unknown` a lot, by design**: a function-typed parameter or field being
   called is genuinely indeterminate (rimraf's injected-fs style yields many `Unknown`s — that's the
