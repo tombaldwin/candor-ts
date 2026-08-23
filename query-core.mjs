@@ -1600,7 +1600,7 @@ function deniedLayer(fn, eff, policyParsed, scopeMatches, ctx = null, unit = nul
 }
 
 /**
- * ⟨0.33⟩ An effect the MERGE contributed rather than the report — today only the `Unknown` a unit acquires
+ * ⟨0.32⟩ An effect the MERGE contributed rather than the report — today only the `Unknown` a unit acquires
  * when a callee NAME it declares is declared by two or more units (SPEC §2.2; see `reportUnits`). There is
  * no `direct` site for it and therefore no span to hoist, so `fix`/`fix-gate` must DISCLOSE it rather than
  * invent a remedy — and must not fall silent either, or the gate charges a violation while the verb that
@@ -1664,7 +1664,7 @@ const mergeContributedHold = (entry, rule) => ({
  */
 export function narrowingContext(fns, cg = {}, policyParsed = null, units = null) {
   const byName = indexFns(fns);
-  // ⟨0.33⟩ the unit identity the GATE uses over these same bytes — `null` is the identity, which is what
+  // ⟨0.32⟩ the unit identity the GATE uses over these same bytes — `null` is the identity, which is what
   // the scan-time note in scan.mjs wants. `uk` is how every accumulator on this page is keyed; `byName`
   // stays a NAME index, because the advisory verbs are called with the names a human typed.
   const uk = (e) => (units ? units.key(e) : e?.fn);
@@ -1689,7 +1689,7 @@ export function narrowingContext(fns, cg = {}, policyParsed = null, units = null
           if (!withhold(r, uk(f), eff)) continue;
           const u = byRaw.get(r.raw);
           if (!u) continue;                                  // unreachable: every held triple has a group
-          // ⟨0.33⟩ indexed by UNIT, read back by unit — `held(fn)` still accepts a name for the
+          // ⟨0.32⟩ indexed by UNIT, read back by unit — `held(fn)` still accepts a name for the
           // name-driven verbs, and `held(entry)` is exact where the caller is iterating entries.
           const cur = heldByFn.get(uk(f)) ?? new Map();
           cur.set(`${r.raw}\0${eff}`, { fn: f.fn, rule: r.raw, effect: eff, why: u.why });
@@ -1700,7 +1700,7 @@ export function narrowingContext(fns, cg = {}, policyParsed = null, units = null
     netClassOf: netClassResolver(new Map(), new Set(), netMap, units),
     entry: (fn) => byName.get(fn) ?? null,
     units,
-    // ⟨0.33⟩ THE UNIT, FROM AN ENTRY WHERE THE CALLER HAS ONE AND FROM A NAME WHERE IT DOES NOT. The
+    // ⟨0.32⟩ THE UNIT, FROM AN ENTRY WHERE THE CALLER HAS ONE AND FROM A NAME WHERE IT DOES NOT. The
     // advisory verbs are driven by names a human typed, so a name has to resolve; but a verb ITERATING
     // entries must pass the entry, or two same-named units both resolve to whichever one `byName` kept and
     // one of them is answered for by the other — the same §2.2 harm this rung closes, one layer out.
@@ -1824,7 +1824,7 @@ export function fix(cg, fns, target, eff, policyParsed, scopeMatches) {
   const se = byName.get(start);
   if (!se || !effectiveInferred(se, ctx.reasonAcc, ctx.units).includes(eff))
     return { fn: start, effect: eff, crossing: false, reason: "does-not-perform" };
-  // ⟨0.33⟩ the same split `fix-gate` makes: an effect the MERGE contributed has no site to hoist, so it is
+  // ⟨0.32⟩ the same split `fix-gate` makes: an effect the MERGE contributed has no site to hoist, so it is
   // disclosed as unevaluated rather than answered `not-forbidden` (which would read as a clean boundary).
   const mcr = (se.inferred ?? []).includes(eff)
     ? null : denyingRule(start, eff, policyParsed, scopeMatches, ctx, se);
@@ -1864,7 +1864,7 @@ export function fixGate(cg, fns, policyParsed, scopeMatches) {
   // Iterate functions in sorted-name order so the first-writer-wins `fn` representative of a collapsed
   // remedy is deterministic across engines (candor-query/java/swift all iterate a sorted key set).
   for (const e of [...fns].sort((a, b) => (a.fn < b.fn ? -1 : a.fn > b.fn ? 1 : 0))) {
-    // ⟨0.33⟩ THE GATE'S EFFECT SET, not the wire's — this verb has to see every effect `evaluatePolicy`
+    // ⟨0.32⟩ THE GATE'S EFFECT SET, not the wire's — this verb has to see every effect `evaluatePolicy`
     // sees or it answers "nothing left to fix" over a violation the gate reports (measured: gate exit 1,
     // `fix-gate --strict` exit 0 with `ok: true`). `wire` separates the two so the merge's own
     // contribution is DISCLOSED rather than remedied; see `mergeContributedHold`.
@@ -1958,7 +1958,7 @@ export function ruleUpgrade(r) {
 export function unverifiedHoleRule(fn, inferred, policyParsed, scopeMatches, ctx = null, unit = null) {
   const inf = inferred ?? [];
   if (!inf.includes("Unknown")) return null;
-  // ⟨0.33⟩ `unit` is the ENTRY when the caller is iterating entries (two units may share `fn`, and the
+  // ⟨0.32⟩ `unit` is the ENTRY when the caller is iterating entries (two units may share `fn`, and the
   // name index keeps only one of them); it falls back to the name lookup for the name-driven callers.
   const entry = unit ?? (ctx ? ctx.entry(fn) : null);
   // An effect the rule NAMES but whose class filter excludes here is not a violation — it is exactly what
@@ -2012,7 +2012,7 @@ export function unverified(fns, policyParsed, scopeMatches, classSpec = null, cg
   const held = [];
   for (const e of fns) {
     // Same predicate + upgrade as the gate note (scan.mjs) — one source of truth for a hole.
-    // ⟨0.33⟩ the effect set the GATE reads, not the raw wire one — an entry whose callee name the merge
+    // ⟨0.32⟩ the effect set the GATE reads, not the raw wire one — an entry whose callee name the merge
     // could not resolve carries `Unknown` here too, or this verb would clear a hole the gate refuses.
     const r = unverifiedHoleRule(e.fn, effectiveInferred(e, ctx.reasonAcc, ctx.units), policyParsed, scopeMatches, ctx, e);
     if (r && !(cf && !reasonClassesMatch(ctx.classesOf(e), cf))) {

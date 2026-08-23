@@ -2375,7 +2375,7 @@ const unanalyzedUnits = [];
     seen.add(abs);
     unanalyzedUnits.push({ path: path.relative(rootDir, abs), reason: "source failed to parse" });
   }
-  // ⟨0.33⟩ …AND A FILE THAT COULD NOT BE OPENED AT ALL. The loop above is built from
+  // ⟨0.32⟩ …AND A FILE THAT COULD NOT BE OPENED AT ALL. The loop above is built from
   // `getSyntacticDiagnostics()`, i.e. files tsc OPENED and could not PARSE. A file it could not OPEN —
   // mode 000, a broken symlink, a truncated checkout, a stale artifact mount — produces NO syntactic
   // diagnostic and NO SourceFile, so it landed in neither manifest.

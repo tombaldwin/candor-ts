@@ -2168,7 +2168,7 @@ switch (cmd) {
     // THE REPORT ROUTE'S `(S, D)`: `S` = each entry's `inferred`, verbatim; `D` = the reason classes
     // resolved over the entries' OWN `calls` edges (the sidecar is NOT passed — that is the MUST NOT), by
     // the SAME resolution the scan gate and `unverified --class` use. `netClass` verbatim, likewise.
-    // ⟨0.33⟩ THE UNIT IDENTITY FOR A MULTI-REPORT PREFIX (SPEC §2.2). Built ONCE here and handed to every
+    // ⟨0.32⟩ THE UNIT IDENTITY FOR A MULTI-REPORT PREFIX (SPEC §2.2). Built ONCE here and handed to every
     // accumulator, so the gate, its refusal and its verdict all key the same way — a private copy is how
     // the advisory verbs came to disagree with the gate before.
     const gunits = reportUnits(g.functions);

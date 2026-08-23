@@ -405,7 +405,7 @@ const TOOLS = {
             : `a report found at prefix \`${clip(p)}\` failed to load — refusing to gate over a report that did not load cleanly; a partial signature makes a green verdict meaningless (the effects of the report that did not load are exactly the ones a violation would come from). Re-run the scan`));
       const gfns = g.functions;
       const cg = Q.loadCallgraph(p);
-      // ⟨0.33⟩ the same unit identity the CLI gate uses over these bytes (SPEC §2.2) — one object, so this
+      // ⟨0.32⟩ the same unit identity the CLI gate uses over these bytes (SPEC §2.2) — one object, so this
       // surface cannot join two members by name while the CLI keeps them apart.
       const gunits = reportUnits(gfns);
       const gnet = reportNetClasses(gfns, { authoritative: true, units: gunits });

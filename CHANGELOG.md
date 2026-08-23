@@ -8,7 +8,7 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
-- **⚠ ⟨0.33⟩ A sibling report can no longer answer for another member (SPEC §2.2).** `gate --report` over
+- **⚠ ⟨0.32⟩ A sibling report can no longer answer for another member (SPEC §2.2).** `gate --report` over
   one member of a multi-report prefix REFUSED a class-scoped `deny` at exit 2, and gating that same member
   beside an unrelated sibling exited 0 with `policy ✓` — a false green produced by ADDING a report. §2.2
   has always required a consumer to join by `hash` and never by bare `fn` ("names may legitimately repeat

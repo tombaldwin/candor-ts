@@ -11858,7 +11858,7 @@ if (blk()) {
 }
 
 
-// ── ⟨0.33⟩ SPEC §2.2 — A SIBLING REPORT CANNOT ANSWER FOR ANOTHER MEMBER ──────────────────────────
+// ── ⟨0.32⟩ SPEC §2.2 — A SIBLING REPORT CANNOT ANSWER FOR ANOTHER MEMBER ──────────────────────────
 //
 // §2.2 has always required a consumer to "join across reports by `hash`, never by bare `fn` (names may
 // legitimately repeat across packages)". This engine joined by `fn`, and it was MEASURED: `gate --report`
@@ -11897,13 +11897,13 @@ if (blk()) {
   const a = gateReport(path.join(d, "only-a", "report"), pol);
   const bAlone = gateReport(path.join(d, "only-b", "report"), pol);
   const ab = gateReport(path.join(d, "both", "report"), pol);
-  check("⟨0.33⟩ §2.2: a member whose Unknown has NO reachable reason REFUSES a class-scoped deny (exit 2)",
+  check("⟨0.32⟩ §2.2: a member whose Unknown has NO reachable reason REFUSES a class-scoped deny (exit 2)",
         a.status === 2, `exit ${a.status}: ${a.stderr}`.slice(0, 300));
-  check("⟨0.33⟩ §2.2: …and ADDING an unrelated sibling does NOT turn that refusal into a pass (exit 2, was 0)",
+  check("⟨0.32⟩ §2.2: …and ADDING an unrelated sibling does NOT turn that refusal into a pass (exit 2, was 0)",
         ab.status === 2, `exit ${ab.status}: ${ab.stdout}${ab.stderr}`.slice(0, 300));
   // THE CONTROL that keeps the row from passing for an engine that simply refuses every merge: the sibling
   // gated ALONE carries its own reason, so it must still ANSWER — and answer 0.
-  check("⟨0.33⟩ §2.2 CONTROL: the sibling gated ALONE still ANSWERS (exit 0) — the merge is not refused wholesale",
+  check("⟨0.32⟩ §2.2 CONTROL: the sibling gated ALONE still ANSWERS (exit 0) — the merge is not refused wholesale",
         bAlone.status === 0, `exit ${bAlone.status}: ${bAlone.stdout}${bAlone.stderr}`.slice(0, 300));
 
   // ── THE SECOND FLIP, and it is the one the FIRST FIX CAUSES if the ambiguity is dropped silently.
@@ -11934,15 +11934,15 @@ if (blk()) {
   const ambPol = path.join(d2, "pol-amb.candor"), execPol = path.join(d2, "pol-exec.candor");
   const ctrl = gateReport(path.join(d2, "amb-ctrl", "report"), ambPol);
   const both = gateReport(path.join(d2, "amb-both", "report"), ambPol);
-  check("⟨0.33⟩ ambiguity CONTROL: ONE declarer resolves, so the caller INHERITS Unknown[dispatch] and the rule fires (exit 1)",
+  check("⟨0.32⟩ ambiguity CONTROL: ONE declarer resolves, so the caller INHERITS Unknown[dispatch] and the rule fires (exit 1)",
         ctrl.status === 1, `exit ${ctrl.status}: ${ctrl.stdout}${ctrl.stderr}`.slice(0, 300));
-  check("⟨0.33⟩ an AMBIGUOUS callee CONTRIBUTES Unknown[dispatch] instead of vanishing — a third report keeps the verdict RED (exit 1)",
+  check("⟨0.32⟩ an AMBIGUOUS callee CONTRIBUTES Unknown[dispatch] instead of vanishing — a third report keeps the verdict RED (exit 1)",
         both.status === 1, `exit ${both.status}: ${both.stdout}${both.stderr}`.slice(0, 300));
   // The UNSCOPED control on the same two trees: a rule that asks nothing about reason classes must be
   // unmoved by any of this, or the rows above are passing on an engine that reddens every merge.
   const e1 = gateReport(path.join(d2, "amb-ctrl", "report"), execPol);
   const e2 = gateReport(path.join(d2, "amb-both", "report"), execPol);
-  check("⟨0.33⟩ CONTROL: the UNSCOPED `deny Exec` is unmoved on both trees (1 and 1) — the ambiguity contributes a REASON, never an Exec",
+  check("⟨0.32⟩ CONTROL: the UNSCOPED `deny Exec` is unmoved on both trees (1 and 1) — the ambiguity contributes a REASON, never an Exec",
         e1.status === 1 && e2.status === 1, `${e1.status}/${e2.status}`);
 
   // ── THE INTRA-REPORT CONTROL, and it is why this engine keys by `hash` REFINED BY `fn` rather than by
@@ -11962,7 +11962,7 @@ if (blk()) {
     "pol.candor": "deny Unknown[dispatch]\n",
   });
   const one = gateReport(path.join(d3, "r", "report"), path.join(d3, "pol.candor"));
-  check("⟨0.33⟩ INTRA-REPORT control: two DISTINCT fns sharing one `hash` do NOT merge — the reasonless one still REFUSES (exit 2)",
+  check("⟨0.32⟩ INTRA-REPORT control: two DISTINCT fns sharing one `hash` do NOT merge — the reasonless one still REFUSES (exit 2)",
         one.status === 2, `exit ${one.status}: ${one.stdout}${one.stderr}`.slice(0, 300));
 
   // ── THE ADVISORY BINDING (⟨0.24⟩): a verb may be LESS certain than the gate, never MORE. The Unknown the
@@ -11984,9 +11984,9 @@ if (blk()) {
   const g4 = gateReport(p4, pol4);
   const fg4 = spawnSync("node", [path.join(HERE, "query.mjs"), "fix-gate", "--report", p4,
                                  "--policy", pol4, "--strict"], { encoding: "utf8" });
-  check("⟨0.33⟩ the merge's Unknown reaches the GATE — a caller whose wire `inferred` carries none still violates `deny Unknown` (exit 1)",
+  check("⟨0.32⟩ the merge's Unknown reaches the GATE — a caller whose wire `inferred` carries none still violates `deny Unknown` (exit 1)",
         g4.status === 1, `exit ${g4.status}: ${g4.stdout}${g4.stderr}`.slice(0, 300));
-  check("⟨0.33⟩ …and `fix-gate --strict` DISCLOSES it (exit 2, `unevaluated`) rather than answering `ok: true` — no remedy from a reach that did not resolve, and no silence either",
+  check("⟨0.32⟩ …and `fix-gate --strict` DISCLOSES it (exit 2, `unevaluated`) rather than answering `ok: true` — no remedy from a reach that did not resolve, and no silence either",
         fg4.status === 2 && /unevaluated/.test(fg4.stdout) && !/"ok": true/.test(fg4.stdout),
         `exit ${fg4.status}: ${fg4.stdout}`.slice(0, 300));
   fs.rmSync(d, { recursive: true, force: true });

@@ -18,7 +18,7 @@ export const REASON_CLASSES = ["reflect", "dispatch", "indirect", "native", "unr
 // cannot drift into meaning different sets.
 export const DYNAMIC_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved"];
 
-// ⟨0.33⟩ THE UNIT IDENTITY, AS A PLUGGABLE POLICY — `units`, threaded through every function on this page
+// ⟨0.32⟩ THE UNIT IDENTITY, AS A PLUGGABLE POLICY — `units`, threaded through every function on this page
 // that keys an accumulator by a function.
 //
 // It exists because a MULTI-REPORT gate must join by `hash` and never by bare `fn` (SPEC §2.2: "names may
@@ -54,7 +54,7 @@ export function identityUnits() {
 const unitKey = (units, e) => (units ? units.key(e) : e?.fn);
 
 /**
- * ⟨0.33⟩ THE MULTI-REPORT UNIT IDENTITY (SPEC §2.2) — for `gate --report` and every verb that reads a
+ * ⟨0.32⟩ THE MULTI-REPORT UNIT IDENTITY (SPEC §2.2) — for `gate --report` and every verb that reads a
  * report PREFIX, which may match several sibling files (a workspace writes one report per member).
  *
  * THE KEY IS `hash` REFINED BY `fn`, NOT `hash` ALONE, and that is an engine-MEASURED deviation from
@@ -121,7 +121,7 @@ export function reportUnits(functions) {
 }
 
 /**
- * ⟨0.33⟩ The effect set the GATE reads for one entry: the report's `inferred`, plus `Unknown` when the
+ * ⟨0.32⟩ The effect set the GATE reads for one entry: the report's `inferred`, plus `Unknown` when the
  * merge could not resolve one of this entry's callee names (see `reportUnits`). An unresolvable callee
  * means the transitive set on the wire cannot be completed here, and `Unknown` is what this family says
  * about a reach it cannot follow. Never subtracts.
@@ -167,7 +167,7 @@ export function reasonClass(why) {
 export function resolveReasonClasses(functions, callgraph = {}, units = null) {
   const U = units ?? identityUnits();
   const acc = new Map();
-  // ⟨0.33⟩ the units whose OWN callee name the merge could not resolve — see the contribution below.
+  // ⟨0.32⟩ the units whose OWN callee name the merge could not resolve — see the contribution below.
   const ambiguous = new Set();
   // ⟨0.24⟩ THE REACH IS THE REPORT'S OWN, not the sidecar's. §2 embeds the call edges per entry (`calls`)
   // precisely so a consumer without the sidecar can reconstruct the graph, and rust (`reason_class_acc`),
@@ -187,7 +187,7 @@ export function resolveReasonClasses(functions, callgraph = {}, units = null) {
     if (!s) { s = new Set(); edges.set(caller, s); }
     s.add(callee);
   };
-  // ⟨0.33⟩ NODES AND EDGES. `calls` names a callee by BARE `fn`, so keying the accumulators by a unit key
+  // ⟨0.32⟩ NODES AND EDGES. `calls` names a callee by BARE `fn`, so keying the accumulators by a unit key
   // while joining the EDGES by name leaves the same defect one layer down — harder to see, because the
   // node table looks right. Every edge endpoint therefore goes through `units.resolveCall`, which is
   // identity on the scan route and the hash join on the report route.
@@ -236,7 +236,7 @@ export function resolveReasonClasses(functions, callgraph = {}, units = null) {
     if ((f.direct ?? []).includes("Unknown") && !(f.unknownWhy ?? []).length) cs.add("unresolved");
     if (cs.size) acc.set(U.key(f), cs);
   }
-  // ⟨0.33⟩ …and the AMBIGUITY CONTRIBUTES, exactly as the reasonless Unknown above it does — at the
+  // ⟨0.32⟩ …and the AMBIGUITY CONTRIBUTES, exactly as the reasonless Unknown above it does — at the
   // caller's own entry, before the fixpoint. `dispatch` is the right class by the vocabulary's own
   // definition ("unresolved virtual/dynamic dispatch, SAME-NAME AMBIGUITY"), and it is evidence THIS
   // merge holds — it saw two declarers — never a class borrowed from another function's body, so it
@@ -260,7 +260,7 @@ export function resolveReasonClasses(functions, callgraph = {}, units = null) {
       }
     }
   }
-  // ⟨0.33⟩ The unresolvable-callee set rides the accumulator NON-ENUMERABLY (the `zeroMatch` precedent
+  // ⟨0.32⟩ The unresolvable-callee set rides the accumulator NON-ENUMERABLY (the `zeroMatch` precedent
   // below), so every existing caller keeps a plain `Map` and nothing that serializes one acquires a field
   // the spec has not pinned. `effectiveInferred` is the only reader.
   Object.defineProperty(acc, "ambiguous", { value: ambiguous, enumerable: false });
@@ -758,7 +758,7 @@ export function reportNetClasses(functions, { authoritative = false, units = nul
   for (const f of functions ?? []) {
     const carried = Array.isArray(f.netClass) ? f.netClass : [];
     if (carried.length === 0 && !(authoritative && (f.inferred ?? []).includes("Net"))) continue;
-    // ⟨0.33⟩ keyed by the UNIT, not by the bare name — two members of a workspace may legitimately share
+    // ⟨0.32⟩ keyed by the UNIT, not by the bare name — two members of a workspace may legitimately share
     // one (SPEC §2.2), and merging their destination classes is the same borrowing the reason-class merge
     // was measured doing. A repeated KEY is one unit reported twice; UNION rather than overwrite — the
     // direction that cannot turn a violation into a pass (java `gateInputFromReport` merges the same way).
@@ -893,7 +893,7 @@ export function wholePolicyUnanswerable(pol, verb = "this route") {
   };
 }
 
-// ⟨0.33⟩ THE WITHHOLD IS KEYED BY UNIT; THE DISCLOSURE NAMES THE FUNCTION. Keying the held set by name
+// ⟨0.32⟩ THE WITHHOLD IS KEYED BY UNIT; THE DISCLOSURE NAMES THE FUNCTION. Keying the held set by name
 // would withhold the rule on EVERY same-named unit — and a withheld triple is a violation NOT reported,
 // so that is the fail-OPEN direction: one member's missing evidence deleting another member's certain
 // violation. `evaluatePolicy` and `narrowingContext` pass the unit key in turn. `why` still lists NAMES,
@@ -977,7 +977,7 @@ export function unanswerableScoped(pol, functions, reasonAcc, netMap, units = nu
 export function netClassResolver(incomplete = new Map(), partners = new Set(), netClasses = null, units = null) {
   // `has`, not `get(…) ?? derive`: an entry mapped to the EMPTY set is a report that carried no class, and
   // on the authoritative route that absence is the answer — deriving one there would re-classify.
-  // ⟨0.33⟩ `netClasses` is keyed by UNIT (reportNetClasses); `incomplete` stays keyed by NAME, because it
+  // ⟨0.32⟩ `netClasses` is keyed by UNIT (reportNetClasses); `incomplete` stays keyed by NAME, because it
   // is the SCAN route's own live structure and that route's keys are names by construction.
   return (f) => {
     const k = unitKey(units, f);
@@ -1018,7 +1018,7 @@ export function netClassResolver(incomplete = new Map(), partners = new Set(), n
  */
 export function classFilterExcludes(r, entry, eff, reasonAcc, netClassOf, units = null) {
   if (!entry) return false;
-  // ⟨0.33⟩ the lookup key comes from the ENTRY, never from its name: a name-keyed lookup into a
+  // ⟨0.32⟩ the lookup key comes from the ENTRY, never from its name: a name-keyed lookup into a
   // unit-keyed map does not error, it returns `undefined`, and `undefined` reads here as "no classes" —
   // which `reasonClassesMatch` floors at `unresolved`. Silent, and in whichever direction the filter falls.
   if (eff === "Unknown" && r.unknownClasses?.length)
@@ -1048,7 +1048,7 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
   // The gate's TEST and the class list it REPORTS both read it, so the two can't disagree about one function.
   const netClassOf = netClassResolver(incomplete, partners, netClasses, units);
   for (const f of functions) {
-    // ⟨0.33⟩ the KEY identifies the unit; `f.fn` is the NAME, and the name is what a policy SCOPE matches
+    // ⟨0.32⟩ the KEY identifies the unit; `f.fn` is the NAME, and the name is what a policy SCOPE matches
     // and what the verdict row prints (§3.3.1 byte-equality with `scan --policy` rests on it).
     const uk = unitKey(units, f);
     const inferredOf = effectiveInferred(f, reasonAcc, units);

@@ -382,7 +382,7 @@ function diagnosticsFor(docPath) {
   // never carried. `authoritative: true` for the same reason the MCP gate takes it: an entry without
   // `netClass` gets the EMPTY set rather than a derivation from `hosts`, so the report is the only source of
   // the class and nothing is re-classified with this machine's evidence about the producer's project.
-  // ⟨0.33⟩ the same unit identity the CLI gate uses over these bytes (SPEC §2.2).
+  // ⟨0.32⟩ the same unit identity the CLI gate uses over these bytes (SPEC §2.2).
   const dunits = reportUnits(fns);
   const dnet = reportNetClasses(fns, { authoritative: true, units: dunits });
   const { unevaluated: dunevaluated, withhold: dwithhold } =
