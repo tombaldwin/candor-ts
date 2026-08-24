@@ -8,6 +8,51 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.32⟩ …and there were FIVE routes, not four: the EDITOR showed a clean file over code nothing had
+  read.** The entry below is titled *four routes, one rule*. `lsp.mjs` had zero occurrences of
+  `excluded`, `peeked` or `unread`, and it is the server `integrations/vscode` and the JetBrains plugin
+  BOTH BUNDLE — so this was the shipped editor experience, on the surface with the fewest ways to notice
+  it. MEASURED over one report (a `dist/shipped.js` running `curl … | sh` that the no-policy scan never
+  opened) and one discovered `deny Exec`:
+
+  ```
+  CLI  gate --report      exit 2, names the unread class
+  MCP  candor_gate        {ok:false, incomplete:true, unread:[…]}
+  LSP                     publishes [] — no diagnostic, no logMessage, no showMessage
+  ```
+
+  A control run with an IN-SCOPE `execSync` squiggles correctly, so the silence was specific to the
+  unread-code cause and not a broken fixture. The file argued against itself: four lines above the code
+  that returns `[]`, its ⟨0.24⟩ judged-nothing hedge says *"an empty editor reads as 'the gate is
+  green'"*.
+
+  ALL THREE INCOMPLETENESS CAUSES, not just the one this rung is named for — measurement showed the
+  route equally silent on ⟨0.21⟩ `unanalyzed` and ⟨0.30⟩ `outOfScope`, which are one `gincomplete`
+  disjunction on the CLI gate and one `incomplete` on the MCP tool. Carrying one of three would have
+  left the same defect in the same function for the next audit to find. The condition is read off the
+  same `reportCompleteness` value every other route reads and applied once: `unread` gated on
+  `pol.deny.length` (`pure` rides that vector, so a `pure`-only policy still arms it), the other two
+  unconditional, each cause NAMED ONLY WHEN IT FIRED.
+
+  THE CHANNEL, argued rather than assumed. This surface has no exit code and no verdict document, so the
+  rung collapses onto messages. `window/logMessage` carries the detail and the repair, as every other
+  hedge in the file does. A `window/showMessage` rides WITH it because ⟨0.32⟩ is EXIT-BEARING on all
+  four other routes, where ⟨0.24⟩'s judged-nothing hedge deliberately is not (`gate --report` exits 0
+  over a judged-nothing report) — putting the louder cause on the quieter channel would invert an
+  ordering the rest of the package agrees on. **No diagnostic is drawn**: there is no source range for a
+  file the scan never opened, so the only line available is line 0 of whatever document happens to be
+  open, and a squiggle there would attribute the hole to an innocent file, in every mapped language, on
+  every open. Both messages are `warnOnce`-deduped on a text that is a function of the policy and the
+  report, not of the edit.
+
+- **⟨0.30⟩/⟨0.32⟩ …and a SIXTH: the MCP `candor_unverified` tool answered `{ok:true, unverified:[]}`
+  where `candor_gate` IN THE SAME PROCESS answered `incomplete`.** Found by sweeping the route inventory
+  rather than assuming it. ⟨0.32⟩ carried both scope causes into the CLI's `unverified`/`fix-gate` and
+  into the MCP `candor_gate`, and left this tool on the ⟨0.24⟩ four-argument `advisoryAnswer` call — the
+  sibling-route habit inside a single file. Over the same bytes the CLI sibling `unverified --strict`
+  omitted `ok`, named `unread` and exited 2. ⟨0.24⟩'s MUST is unchanged and binds every channel a verb
+  answers on: an advisory verb may be LESS certain than the gate, NEVER MORE.
+
 - **⚠ ⟨0.32⟩ The unread-code rule reached only the SCAN route — `gate --report` certified code nobody
   had opened.** ⟨0.32⟩'s central rule is that a class this scan did not READ makes the verdict
   INCOMPLETE. It shipped in `scan.mjs` and nowhere else, so the shape this tool is actually deployed in —

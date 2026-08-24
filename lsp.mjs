@@ -11,6 +11,11 @@
  *     gate also fails an allow rule whose literal surface is INCOMPLETE (a masked/invisible endpoint,
  *     kept internal per the java/rust engines — not a report field), so no-squiggle here can still be
  *     red in CI. The engine's --gate-json is the authoritative form (same caveat as MCP candor_gate).
+ *     ⟨0.21⟩/⟨0.30⟩/⟨0.32⟩ — and where the report itself cannot support a green verdict (a declared
+ *     `unanalyzed`, the producer's peek naming an out-of-scope denied effect, or a class the scan never
+ *     OPENED), the squiggles are not the whole verdict and the gap is DISCLOSED on window/logMessage +
+ *     window/showMessage. No diagnostic: code the scan never read has no line here to sit on. See
+ *     `discloseIncompleteness`.
  *   • Hover: effect PROVENANCE — for each inherited effect, the `path` hop chain to the function that
  *     performs it directly ("Net via mid → leaf (source)"), plus unknownWhy when the fn discloses opacity.
  *   • CodeAction (pre-edit whatif): inside a function the report knows, one action per BOUNDARY effect
@@ -280,6 +285,26 @@ function hoverAt(docPath, line) {
 // ---- Diagnostics (the live gate) ---------------------------------------------------------------------
 const warned = new Set();
 function warnOnce(message) { if (!warned.has(message)) { warned.add(message); logMessage(message); } }
+/**
+ * ⟨0.32⟩ A LOUDER `warnOnce`, for the causes that are EXIT-BEARING on every other route.
+ *
+ * Everything `warnOnce` carries today is a disclosure the CLI makes AT EXIT 0 — ⟨0.24⟩ ruled count-0 "a
+ * disclosure, not an exit code", the unevaluated-rule rows ride alongside a verdict, and `ignored` does
+ * not move `ok`. The incompleteness causes below are the other kind: `gate --report` EXITS 2 over them,
+ * `candor_gate` withholds `ok`, and `fix-gate`/`unverified --strict` exit 2. This surface has no exit
+ * code and no verdict document, so the whole rung collapses onto messages — and putting the LOUDER cause
+ * on the QUIETER channel (an output pane the developer has to go and open) would invert an ordering the
+ * other four routes agree on. So: the log line carries the detail and the repair, and a `window/
+ * showMessage` says that CI is red over these bytes. Both are `warnOnce`-deduped on the LOG text, which
+ * is a function of the policy and the report rather than of the edit, so a save loop cannot turn either
+ * into the per-keystroke noise that gets an advisory switched off.
+ */
+function warnLoudOnce(message, brief) {
+  if (warned.has(message)) return;
+  warned.add(message);
+  logMessage(message);
+  showMessage(2, brief);          // Warning — the same severity the activity push uses for a red gate
+}
 // ⟨0.24⟩ the file `activePolicy()` last read, so the vocabulary anchor can be the POLICY FILE's dir.
 let activePolicyPath = null;
 function activePolicy() {
@@ -337,6 +362,77 @@ const zeroRulePolicyWarn = (what) =>
     + `here is NOT an all-clear: \`gate\` REFUSES over this policy outright (exit 2, SPEC §6.2). If you did `
     + `not mean to gate, remove the policy configuration rather than pointing it at a file with no rules.`);
 
+/**
+ * ⟨0.21⟩/⟨0.30⟩/⟨0.32⟩ THE INCOMPLETENESS CAUSES, ON THE ROUTE THAT CARRIED NONE OF THEM.
+ *
+ * MEASURED at `9f22581` — the commit titled "four routes, one rule", where there were FIVE. Over a
+ * report whose `excluded` records a `dist/shipped.js` running `curl … | sh` that the scan never opened,
+ * under a discovered `deny Exec`: `gate --report` exits 2 naming the class, the MCP `candor_gate` tool
+ * withholds `ok`, and this server published `[]` — no diagnostic, no log line, no message. `lsp.mjs` had
+ * zero occurrences of `excluded`, `peeked` or `unread`, and it is silent on the ⟨0.21⟩ and ⟨0.30⟩ causes
+ * for the same reason: `diagnosticsFor` read NO completeness key at all. This is the SHIPPED EDITOR
+ * EXPERIENCE — `integrations/vscode` and the JetBrains plugin both bundle this exact server — so the
+ * cardinal sin arrived in the place with the fewest ways to notice it: an editor showing a clean file
+ * over code nothing read. The argument was already in this file four lines below, about a different
+ * cause: "an empty editor reads as 'the gate is green'".
+ *
+ * ONE RULE, NOT A SIXTH SPELLING OF IT. The condition is the CLI gate's, read off the same
+ * `reportCompleteness` value the CLI and MCP routes read, applied ONCE:
+ *
+ *   · `unread` (⟨0.32⟩) is gated on `pol.deny.length` — only a `deny`/`pure` rule's answer depends on
+ *     code outside the scan's scope, so refusing an `allow`/`forbid`/`only` policy for want of a peek
+ *     would be an over-charge. `pure` RIDES the deny vector (parsePolicy pushes it there), so the test
+ *     is `deny.length` and not a search for the token, and flattening that away would delete the rule
+ *     for every `pure`-only policy.
+ *   · `unanalyzed` (⟨0.21⟩) and `outOfScope` (⟨0.30⟩) are UNCONDITIONAL, exactly as they are on the CLI
+ *     gate: a unit candor could not read is unread whatever the policy asks, and `outOfScope` is by
+ *     construction the peek's findings UNDER the producer's own policy.
+ *
+ * ALL THREE, not just the one this rung is named for. They are one `gincomplete` disjunction on the CLI
+ * and one `incomplete` on the MCP tool; carrying one of three into this route would have left the same
+ * defect, in the same function, for the next audit to find — which is the habit this whole rung exists
+ * to break. Each cause is NAMED ONLY WHEN IT FIRED, the MCP tool's rule: a sentence about unanalyzed
+ * code beside an incompleteness that is really an unopened `dist/` sends the reader to the wrong repair.
+ *
+ * NO DIAGNOSTIC IS DRAWN, and that is the answer to "a squiggle on what". There is no source range for a
+ * file the scan never opened: the code is absent from `functions` precisely because nothing looked, so
+ * the only line available is line 0 of whatever document happens to be open — which would attribute the
+ * hole to an innocent file, in every language the client maps, on every open. That is the fabrication
+ * mirror of the silence being fixed. The ⟨0.24⟩ judged-nothing hedge reached the same conclusion for the
+ * same reason ("there is no line to pin it to"); the activity overlay's line-0 diagnostic is not a
+ * counter-example, because its record NAMES the edited file and this one names no file in the workspace.
+ */
+function discloseIncompleteness(unanalyzed, outOfScope, unread) {
+  const causes = [];
+  // The CLI's order (`unanalyzed` → `outOfScope` → `unread`), so a report tripping two of them reads the
+  // same way here as it does in CI. The repairs genuinely differ — a parse to fix, a selector that
+  // REACHES the code, a scan that was ASKED the question — so each cause carries its own.
+  if (unanalyzed.length)
+    causes.push(`the report DECLARES ${unanalyzed.length} unit(s) candor could not analyze, and a gate `
+      + `cannot be green over unanalyzed code:\n`
+      + unanalyzed.map((u) => `        ${u.path || "(unnamed unit)"}${u.reason ? `  (${u.reason})` : ""}`).join("\n"));
+  if (outOfScope.length)
+    causes.push(`the report names ${outOfScope.length} function(s) OUTSIDE the scan's scope performing `
+      + `an effect this policy denies (the producer's peek found them). The gate did not judge them, so the verdict is `
+      + `INCOMPLETE rather than a pass — re-scan with a selector that REACHES that code:\n`
+      + outOfScope.map((o) => `        ${o.fn} performs ${(o.effects ?? []).join(", ")}`).join("\n"));
+  if (unread.length)
+    causes.push(`the scan did not READ ${unread.join(", ")}. Those files' effects are absent from the `
+      + `report because nothing looked, not because there are none, so nothing in them can be squiggled `
+      + `here — re-scan the sources WITH this policy (candor-ts <dir> --policy <file>); a scan that was `
+      + `never asked cannot certify what it never opened.`);
+  if (!causes.length) return;
+  warnLoudOnce(
+    `candor-lsp: this report cannot support a GREEN gate — \`gate --report\` over the same bytes exits 2 `
+    + `(INCOMPLETE), so the squiggles in this editor are NOT the whole verdict:\n`
+    + causes.map((c) => `    · ${c}`).join("\n")
+    + `\n  NO diagnostic can be drawn for any of the above: the code it names is not in the report, so it `
+    + `has no line in this editor to sit on. Its ABSENCE from the squiggles is the incompleteness itself, `
+    + `not an all-clear.`,
+    `candor gate: INCOMPLETE — this report cannot support a green verdict (CI exits 2 over these bytes). `
+    + `See the candor log for what went unjudged and how to fix it.`);
+}
+
 function diagnosticsFor(docPath) {
   const text = activePolicy();
   if (text === null || !hasReport(reportPrefix)) return [];
@@ -374,6 +470,15 @@ function diagnosticsFor(docPath) {
     warnOnce(`candor-lsp: ${dpol.ignored.length} line(s) of the configured policy were DROPPED by the `
       + `parse, so the gate you are seeing is SMALLER than the gate that was written (SPEC §6.2 ⟨0.28⟩):\n`
       + dpol.ignored.map((g) => `    line ${g.line}: ${g.text}`).join("\n"));
+  // ⟨0.21⟩/⟨0.30⟩/⟨0.32⟩ …AND THE CAUSES THAT MAKE THE GATE ITSELF INCOMPLETE — see
+  // `discloseIncompleteness` for the mechanism and the channel argument. Read through the SAME
+  // `reportCompleteness` the CLI gate, `fix-gate`, `unverified` and the MCP tools read, so the editor
+  // cannot come to a different view of one report from the CI job that judges the same commit. The
+  // `unread` condition is applied HERE, to the value, for the reason the CLI states at its own call
+  // site: one list, one condition, so two consumers of it cannot disagree about a run.
+  const dcomp = Q.reportCompleteness(reportPrefix);
+  discloseIncompleteness(dcomp.unanalyzed ?? [], dcomp.outOfScope ?? [],
+                         dpol.deny.length ? (dcomp.unread ?? []) : []);
   // ⟨0.24⟩ THE ANSWERABILITY WITHHOLD, which this surface ran WITHOUT — `evaluatePolicy` was called with no
   // `withhold` predicate and the DEFAULT netClass mode, so both directions of the §3.1 harm were live in the
   // editor. Measured against the CLI on one report and one policy: `deny Unknown[reflect]` drew NO squiggle

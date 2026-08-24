@@ -527,7 +527,10 @@ const TOOLS = {
                  + "over a report declaring code candor could NOT analyze, `ok` IS ABSENT and `{incomplete:true, "
                  + "unanalyzed}` takes its place — a function in an unanalyzed file is missing from the report "
                  + "entirely, so it cannot be enumerated as an unverified pass, and an empty array there is not "
-                 + "an all-clear (spec §3.2). `ok` is ABSENT for a second reason too, and the entries that come "
+                 + "an all-clear (spec §3.2). `incomplete:true` also rides the two SCOPE causes, on the same "
+                 + "terms as candor_gate: `outOfScope` (the producer's peek named a function outside the scan's "
+                 + "scope performing a denied effect) and `unread` (a class the producing scan never OPENED — "
+                 + "re-scan those sources WITH this policy). `ok` is ABSENT for a further reason too, and the entries that come "
                  + "with it are the sharpest ones: where the policy narrows on evidence this report does not carry, "
                  + "candor_gate REFUSES — and this verb then NAMES each function the gate could not judge, as "
                  + "`{fn, rule, why}` where `why` is THE MISSING EVIDENCE and never a derived class, plus the gate's "
@@ -560,8 +563,19 @@ const TOOLS = {
       if (policyAskedNothing(upol)) return zeroRuleCaveat(polPath, p);
       // ⟨0.28⟩ `noManifest` (SPEC §2 row 3) rides here too — a report with no `analyzed` key declares
       // nothing, and listing it under `judgedNothing` would be the false disclosure the rung split out.
+      // ⟨0.30⟩/⟨0.32⟩ …AND THE TWO SCOPE CAUSES, which this call was the last route in the package to
+      // read. MEASURED: over a report whose `excluded` names a class the producing scan never opened,
+      // under `deny Exec`, `candor_gate` in THIS SAME PROCESS answered `{ok:false, incomplete:true,
+      // unread:[…]}` while this tool answered `{ok:true, unverified:[]}` — and the CLI sibling
+      // `unverified --strict` over the identical bytes omitted `ok`, named the class and exited 2.
+      // ⟨0.24⟩'s MUST binds every channel a verb answers on: an advisory verb may be LESS certain than
+      // the gate, NEVER MORE. The `unread` condition is the gate's, off the same value, applied once —
+      // only a `deny`/`pure` rule's answer depends on code outside the scan's scope, and `pure` rides
+      // the `deny` vector, so this is `deny.length` rather than a search for the token.
+      const uUnread = upol.deny.length ? (ucomp.unread ?? []) : [];
       return Q.advisoryAnswer(Q.unverified(loadReportLoud(p), upol, scopeMatches),
-                              ucomp.unanalyzed, ucomp.judgedNothing, ucomp.unreadable, ucomp.noManifest);
+                              ucomp.unanalyzed, ucomp.judgedNothing, ucomp.unreadable, ucomp.noManifest,
+                              ucomp.outOfScope ?? [], uUnread);
     },
   },
   candor_containment: {

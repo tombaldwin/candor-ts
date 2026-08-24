@@ -210,7 +210,13 @@ refactor, as a showMessage and a transient diagnostic, cleared on the file's nex
 CAVEAT — the MCP/LSP gate verdicts are computed FROM THE REPORT: the engine's own `--policy` /
 `--gate-json` run additionally fails an allow rule whose literal surface is incomplete (a masked
 endpoint — internal state, not a report field), so treat a report-side green as advisory and the
-scan-time gate as the CI truth.
+scan-time gate as the CI truth. ⟨0.21⟩/⟨0.30⟩/⟨0.32⟩ — where the REPORT cannot support a green verdict
+at all (a declared `unanalyzed`, an out-of-scope denied effect the producer's peek named, or a class the
+producing scan never OPENED), every route says so: `gate --report` exits 2, `candor_gate` and
+`candor_unverified` withhold `ok` and name the cause, and the LSP — which has neither an exit code nor a
+verdict document — discloses on `window/logMessage` + `window/showMessage`. **An empty editor is not an
+all-clear**: code the scan never read has no line to squiggle, so its absence from the diagnostics IS
+the incompleteness. Re-scan those sources WITH the policy.
 
 Name queries resolve exact > segment-suffix (`db.save` matches `src.db.save`, never
 `src.db.save_all`) > substring — the same ladder as the other engines. The trailing `1` is the
