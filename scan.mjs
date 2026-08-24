@@ -7026,6 +7026,11 @@ let outOfScopeFindings = null;
 // `outOfScope: []` — byte-identical to a clean peek, and the ⟨0.26⟩ partial-manifest failure inside the
 // rung built to prevent it. It is an outcome now.
 let peekRead = false;
+// ⟨0.32⟩ …AND WAS IT EVEN ASKED? A DIFFERENT QUESTION from `peekRead`, and the difference is the whole of
+// the ⟨0.32⟩ unread-code rule: `peekRead` is "the child came back with a report I could parse", this is
+// "this run's policy needs the excluded code read". The two split when the peek DIES — see the rule at
+// `unreadClasses`.
+let peekAttempted = false;
 // ⟨0.29⟩ …AND DID IT READ THEM ALL? A child report the parent could PARSE is a different fact from every
 // excluded file having been opened. The child publishes its own ⟨0.21⟩ `unanalyzed` manifest and this
 // code read only `functions`, so an excluded file that failed to parse INSIDE the peek produced
@@ -7055,6 +7060,10 @@ if (policyPath && excludedFiles.length) {
   // except Unknown" — so under the STRICTEST policy the set was empty, the peek never ran, and the tree
   // passed at exit 0 while the strictly weaker `deny Exec` exited 2 on the same files. MEASURED four-way.
   if ((peekPolicy?.deny ?? []).length) {
+    // ⟨0.32⟩ THE PEEK WAS ATTEMPTED — this run's policy asks a question whose answer depends on code
+    // outside the scan's scope, and there is something excluded to look at. The `unreadClasses` rule below
+    // keys on THIS, not on whether the peek then succeeded; see the note there.
+    peekAttempted = true;
     outOfScopeFindings = [];
     // ⟨0.31⟩ A FILE THIS ENGINE CANNOT READ CANNOT BE PEEKED, AND THE CLASS MUST SAY SO.
     //
@@ -7886,14 +7895,28 @@ if (policyRefusal && !gateViolations.length) {
 // blocker, and succeeding at the hoist would have been worse than failing.
 //
 // Two conditions, both earned in candor-java: `judgedElsewhere` is the producer's carve-out for a
-// DERIVED copy of already-judged code, and the rule fires only if the peek RAN — `peeked: false` also
-// means no policy was configured and nothing was asked, which records an absence of QUESTION rather
-// than of evidence. Without that gate every no-policy report fails closed on contact.
+// DERIVED copy of already-judged code, and the rule fires only if the peek was ASKED FOR — `peeked:
+// false` also means no policy was configured and nothing was asked, which records an absence of QUESTION
+// rather than of evidence. Without that gate every no-policy run fails closed on contact.
 //
 // MEASURED, and NOT covered by `unanalyzed`: an excluded `*.test.ts` at mode 000 reports
 // `excluded: [{class: "test-file", peeked: false}]` with `unanalyzed` ABSENT — the file is not in the
 // tsconfig program, so the unreadable-file rule cannot see it — and the gate exited 0.
-const unreadClasses = peekRead
+//
+// ⟨0.32⟩ `peekAttempted`, NOT `peekRead`, and the two are different questions: "this run's policy needs
+// the excluded code read" versus "the child came back with something I could parse". They split when the
+// peek DIES, and that split was a scan-route FAIL-OPEN in its own right — MEASURED 2026-08-24, on a tree
+// whose excluded `dist/shipped.js` runs `execSync`, with `deny Exec`: export a `CANDOR_POLICY` naming a
+// file that does not exist and the peek child (which inherits the environment and has no `--policy` flag
+// of its own) hits its unreadable-policy refusal, `execFileSync` throws, every class is published
+// `peeked: false` — and this run said `policy ✓` at exit 0 over code nothing had opened, where the same
+// command without the stray variable exits 2. A peek that could not run read exactly as much as a peek
+// nobody asked for.
+//
+// It is also what makes the two ROUTES answer alike (SPEC §3.1): `gate --report` reads `peeked` off the
+// report and cannot see that this process's child died, so keying the scan route on `peekRead` left the
+// gate route refusing a report the producing scan had certified.
+const unreadClasses = peekAttempted
   ? (envelope.excluded ?? []).filter((e) => !e.peeked && !e.judgedElsewhere).map((e) => e.class)
   : [];
 // --gate-json ⟨0.8⟩: the structured gate verdict { spec, ok, violations:[{rule,fn,effects,detail}] }, from

@@ -4370,15 +4370,41 @@ export function runs(): Buffer { return execSync("ls"); }`,
         va.ok === false && va.incomplete === true && (va.violations ?? []).length === 0,
         JSON.stringify(va).slice(0, 300));
 
-  // ⟨0.26⟩ ABSENT IS NOT EMPTY. A report produced with NO policy was never asked the scope question, so it
-  // must NOT trigger this rung — otherwise every pre-⟨0.30⟩ report becomes exit 2 on contact.
+  // ⟨0.26⟩ ABSENT IS NOT EMPTY. A report produced with NO policy was never asked the scope question, so
+  // THIS RUNG must not fire off it — otherwise every pre-⟨0.30⟩ report becomes an `outOfScope` exit 2 on
+  // contact, reporting a finding nobody made.
+  //
+  // ⟨0.32⟩ THE EXIT CODE MOVED, AND THIS ROW USED TO PIN THE FAIL-OPEN. It asserted `exit 0` over a tree
+  // whose `outside/bad.ts` runs `execSync` and which the producing scan never opened — a green over
+  // unread code, which is exactly what ⟨0.32⟩'s unread-class rule exists to stop. What the row is ABOUT
+  // is unchanged and now stated directly: the ⟨0.30⟩ arm (a NAMED function outside the scope) must stay
+  // silent, because no peek ever ran; the ⟨0.32⟩ arm answers instead, and it says something weaker and
+  // true — nothing looked. The two are distinguished by the MESSAGE, not by the exit code they share.
   scan(d);
   const noPol = JSON.parse(fs.readFileSync(path.join(d, ".candor", "report.json"), "utf8"));
   const q2 = spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report",
                                 path.join(d, ".candor", "report.json"),
                                 "--policy", path.join(d, "exec.pol")], { encoding: "utf8" });
-  check("⟨0.30⟩ CONTROL: an ABSENT `outOfScope` is ⟨0.26⟩ cannot-answer, NOT a trigger — exit 0",
-        !("outOfScope" in noPol) && q2.status === 0, `key=${"outOfScope" in noPol} exit=${q2.status}`);
+  check("⟨0.30⟩ CONTROL: an ABSENT `outOfScope` is ⟨0.26⟩ cannot-answer, NOT a trigger — this rung stays SILENT (no function is named)",
+        !("outOfScope" in noPol) && !/OUTSIDE the scan's scope/.test(q2.stderr),
+        `key=${"outOfScope" in noPol} exit=${q2.status}: ${q2.stderr}`.slice(0, 300));
+  check("⟨0.32⟩ …and the honest answer over that same report is the UNREAD-CLASS one: exit 2 naming the class nothing opened",
+        q2.status === 2 && /did not READ/.test(q2.stderr), `exit ${q2.status}: ${q2.stderr}`.slice(0, 300));
+  // …and the ⟨0.26⟩ half of the original row, on a tree where NOTHING is excluded: with no unread class
+  // to fall back on, an absent `outOfScope` really does gate green. Without this the row above could pass
+  // on an engine that had simply turned every report into an exit 2.
+  const clean = project({
+    "tsconfig.json": tsconfig,
+    "src/ok.ts": `export function pure(a: number): number { return a + 1; }`,
+    "exec.pol": "deny Exec\n",
+  });
+  scan(clean);
+  const q3 = spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report",
+                                path.join(clean, ".candor", "report.json"),
+                                "--policy", path.join(clean, "exec.pol")], { encoding: "utf8" });
+  check("⟨0.30⟩ CONTROL: …and with NOTHING excluded, a no-policy report still gates GREEN (exit 0) — the absent key is not itself a refusal",
+        q3.status === 0, `exit ${q3.status}: ${q3.stderr}`.slice(0, 300));
+  fs.rmSync(clean, { recursive: true, force: true });
 }
 
 // ── scan-completeness nudge: a high CALL VOLUME into unscanned packages means a missing input ─────
@@ -12311,6 +12337,347 @@ module.exports = { add };`,
           r.status === 0 && (report?.outOfScope ?? []).length === 0
             && (report?.excluded ?? []).some((e) => e.count === 1 && e.peeked === true),
           `exit ${r.status}: ${JSON.stringify(report?.excluded)} ${JSON.stringify(report?.outOfScope)}`);
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+}
+
+// ── ⟨0.32⟩ THE UNREAD-CODE RULE IS A PROPERTY OF THE VERDICT, NOT OF THE ROUTE ────────────────────
+//
+// ⟨0.32⟩ landed the "a class this scan did not READ makes the verdict INCOMPLETE" rule in scan.mjs and
+// NOWHERE ELSE, so the CI shape this project is actually deployed in — scan once, gate the artifact
+// later — kept certifying code nobody had opened. MEASURED on this fixture before the fix:
+//
+//   candor-ts <tree> --policy 'deny Exec'                  -> exit 2, names the excluded fn's Exec
+//   candor-ts <tree> --out N                                 (no policy)
+//   query.mjs gate --report N --policy 'deny Exec'         -> exit 0, `ok: true`, NO disclosure
+//
+// THE RULE, one sentence, both routes: a class the producing scan did not READ licenses nothing, and
+// whether that matters is decided by the policy applied NOW, not by the producer's history. `peeked:
+// false` has two causes — "opened it and failed" and "never asked" — and a REPORT cannot tell them
+// apart, because they leave the identical hole: those files' effects are absent from `functions`
+// because nothing looked, and ⟨0.21⟩ licenses a purity claim only over units the scan judged.
+if (blk()) {
+  const TSCONFIG = `{ "compilerOptions": { "target": "ES2022", "module": "NodeNext",
+    "moduleResolution": "NodeNext", "strict": false }, "include": ["src"] }`;
+  const EXECS = `const cp = require('child_process');
+function run(c) { return cp.execSync(c); }
+module.exports = { run };`;
+  const CLEAN = `function add(a, b) { return a + b; }
+module.exports = { add };`;
+  const gate = (prefix, pol, gj) =>
+    spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", prefix, "--policy", pol,
+                       ...(gj ? ["--gate-json", gj] : [])], { encoding: "utf8" });
+  const doc = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } };
+
+  // ── 1. THE DEFECT, on the shape a CI actually produces: a report written by a scan with no policy.
+  {
+    const d = project({
+      "tsconfig.json": TSCONFIG,
+      "src/ok.ts": `export function fine(a: number) { return a + 1; }`,
+      "dist/shipped.js": EXECS,
+      "pol.candor": "deny Exec\n",
+    });
+    const pol = path.join(d, "pol.candor"), n = path.join(d, "n");
+    const withPol = scan(d, "--policy", pol);
+    spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out", n], { encoding: "utf8" });
+    const nRep = doc(`${n}.json`);
+    // THE PREMISE, asserted before the row that depends on it: this tree really does leave the engine
+    // with a class it never opened, and the producer really was never asked the scope question. A row
+    // whose fixture does not reach the code under test is a green that means nothing.
+    check("⟨0.32⟩ route PREMISE: a no-policy scan publishes `excluded[].peeked: false` and NO `outOfScope` — nothing was asked, so nothing was read",
+          (nRep?.excluded ?? []).some((e) => e.peeked === false) && !("outOfScope" in (nRep ?? {})),
+          JSON.stringify(nRep?.excluded));
+    check("⟨0.32⟩ route PREMISE: the SCAN route over the same tree and policy answers exit 2",
+          withPol.r.status === 2, `exit ${withPol.r.status}: ${withPol.r.stderr}`.slice(0, 200));
+    const gj = path.join(d, "q.gate.json");
+    const q = gate(`${n}.json`, pol, gj);
+    check("⟨0.32⟩ `gate --report` over a report produced WITHOUT a policy is INCOMPLETE, not `ok: true` (exit 2, was 0)",
+          q.status === 2, `exit ${q.status}: ${q.stdout}${q.stderr}`.slice(0, 300));
+    check("⟨0.32⟩ …and it NAMES the class and the repair (re-scan with this policy) rather than saying `no violations`",
+          /did not READ/.test(q.stderr) && /outside-the-tsconfig-program/.test(q.stderr)
+            && /--policy/.test(q.stderr), q.stderr.slice(0, 400));
+    const v = doc(gj);
+    check("⟨0.32⟩ …and the document is a JUDGEMENT: ok:false + incomplete:true + `violations: []`, never a refusal",
+          v?.ok === false && v?.incomplete === true && (v?.violations ?? null)?.length === 0
+            && !("refused" in (v ?? {})),
+          JSON.stringify(v).slice(0, 300));
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // ── 2. THE OVER-CHARGE CONTROLS. The rung's whole risk is an engine that refuses every report with an
+  // exclusion in it, which deletes the verb while passing the "it fires" half.
+  {
+    // (a) a FULLY PEEKED report — the producer was asked, opened everything, and found nothing denied.
+    const d = project({
+      "tsconfig.json": TSCONFIG,
+      "src/ok.ts": `export function fine(a: number) { return a + 1; }`,
+      "dist/shipped.js": CLEAN,
+      "pol.candor": "deny Exec\n",
+    });
+    const pol = path.join(d, "pol.candor");
+    const s = scan(d, "--policy", pol);
+    const gj = path.join(d, "q.gate.json");
+    const q = gate(path.join(d, ".candor", "report.json"), pol, gj);
+    check("⟨0.32⟩ CONTROL: a report whose classes were PEEKED and clean still certifies — exit 0 on both routes",
+          s.r.status === 0 && q.status === 0 && (s.report?.excluded ?? []).every((e) => e.peeked === true),
+          `scan ${s.r.status} gate ${q.status}: ${JSON.stringify(s.report?.excluded)}`);
+    check("⟨0.32⟩ CONTROL: …and its verdict document is a clean `ok: true` with no `incomplete` key",
+          doc(gj)?.ok === true && !("incomplete" in (doc(gj) ?? {})), JSON.stringify(doc(gj)).slice(0, 200));
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+  {
+    // (b) a tree with NOTHING excluded, gated off a no-policy report: the rule has nothing to bite on.
+    const d = project({
+      "tsconfig.json": TSCONFIG,
+      "src/ok.ts": `export function fine(a: number) { return a + 1; }`,
+      "pol.candor": "deny Exec\n",
+    });
+    const n = path.join(d, "n");
+    spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out", n], { encoding: "utf8" });
+    const q = gate(`${n}.json`, path.join(d, "pol.candor"));
+    check("⟨0.32⟩ CONTROL: a tree with an EMPTY `excluded` gates green off a no-policy report (exit 0)",
+          q.status === 0 && (doc(`${n}.json`)?.excluded ?? null)?.length === 0,
+          `exit ${q.status}: ${JSON.stringify(doc(`${n}.json`)?.excluded)}`);
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+  {
+    // (c) the PRODUCER's own carve-outs and the pre-⟨0.29⟩ producer, on hand-authored reports — §3.1
+    // serves reports this engine did not write, and `judgedElsewhere` is a fact only the producer can
+    // state (the class TOKENS are engine-chosen, so a consumer inferring "derived" from the name gates
+    // another engine's report differently from the engine that wrote it).
+    const env = (extra) => JSON.stringify({
+      candor: { version: "scan-0.32.0", toolchain: "stable", spec: "0.32" }, package: "p",
+      analyzed: { count: 1, digest: "0000000000000000" },
+      functions: [{ fn: "p.main", loc: "src/main.ts:1:1", inferred: [], direct: [], hash: "p#main" }],
+      ...extra,
+    });
+    const d = project({
+      "je/report.p.scan.json": env({ excluded: [{ class: "build-output", count: 3, peeked: false,
+                                                  judgedElsewhere: true }] }),
+      "absent/report.p.scan.json": env({}),
+      "empty/report.p.scan.json": env({ excluded: [] }),
+      "pol.candor": "deny Exec\n",
+    });
+    const pol = path.join(d, "pol.candor");
+    check("⟨0.32⟩ CONTROL: `judgedElsewhere` carves out — a DERIVED copy of already-judged code is not unread (exit 0)",
+          gate(path.join(d, "je", "report"), pol).status === 0);
+    check("⟨0.32⟩ CONTROL: an ABSENT `excluded` (a pre-⟨0.29⟩ producer) still certifies — refusing it would refuse every older report (exit 0)",
+          gate(path.join(d, "absent", "report"), pol).status === 0);
+    check("⟨0.32⟩ CONTROL: `excluded: []` — asked and clear — still certifies (exit 0)",
+          gate(path.join(d, "empty", "report"), pol).status === 0);
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // ── 3. STRICT READ (SPEC §2 ⟨0.24⟩): `excluded` now MOVES the verdict, so a present-but-unparseable
+  // one is corrupt input NAMED in the refusal — never coerced to the safe-LOOKING empty value, which is
+  // the claim "this scan excluded nothing" and deletes the rule. `peeked` is the sharpest case in this
+  // language: `"peeked": "no"` is TRUTHY, so an unchecked read turns an unread class into a peeked one.
+  {
+    const env = (excluded) => JSON.stringify({
+      candor: { version: "scan-0.32.0", toolchain: "stable", spec: "0.32" }, package: "p",
+      analyzed: { count: 1, digest: "0000000000000000" }, excluded,
+      functions: [{ fn: "p.main", loc: "src/main.ts:1:1", inferred: [], direct: [], hash: "p#main" }],
+    });
+    const d = project({
+      "str/report.p.scan.json": env("oops"),
+      "truthy/report.p.scan.json": env([{ class: "test-file", count: 1, peeked: "no" }]),
+      "elem/report.p.scan.json": env([{ count: 1, peeked: false }]),
+      "pol.candor": "deny Exec\n",
+    });
+    const pol = path.join(d, "pol.candor");
+    for (const [dir, what] of [["str", "`excluded` present and not a list"],
+                               ["truthy", "a NON-BOOLEAN `peeked` (truthy in JS — it would read as peeked)"],
+                               ["elem", "an element with no `class`"]]) {
+      const gj = path.join(d, `${dir}.gate.json`);
+      const q = gate(path.join(d, dir, "report"), pol, gj);
+      check(`⟨0.32⟩ STRICT: ${what} REFUSES and names the key (exit 2), never a coerced green`,
+            q.status === 2 && /`excluded`/.test(q.stderr) && doc(gj)?.refused === true
+              && !("violations" in (doc(gj) ?? {})),
+            `exit ${q.status}: ${q.stderr}`.slice(0, 300));
+    }
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // ── 4. THE QUESTION, NOT THE HISTORY: only a `deny`/`pure` rule's answer depends on code outside the
+  // scan's scope, so a policy carrying no deny rule must never be refused for want of a peek. On this
+  // verb an `allow` rule is already unanswerable from a report for an unrelated reason, so the row
+  // asserts WHICH refusal fired — a defensive guard stated as defensive, not left to read as
+  // load-bearing.
+  {
+    const d = project({
+      "tsconfig.json": TSCONFIG,
+      "src/ok.ts": `export function fine(a: number) { return a + 1; }`,
+      "dist/shipped.js": EXECS,
+      "allow.candor": "allow Net api.example.com\n",
+    });
+    const n = path.join(d, "n");
+    spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out", n], { encoding: "utf8" });
+    const q = gate(`${n}.json`, path.join(d, "allow.candor"));
+    check("⟨0.32⟩ CONTROL: a policy with NO deny rule is not refused FOR WANT OF A PEEK — the allow rule's own unanswerability is what fires",
+          q.status === 2 && /`allow` rule/.test(q.stderr) && !/did not READ/.test(q.stderr),
+          `exit ${q.status}: ${q.stderr}`.slice(0, 300));
+    // …and the SCAN route's half of the same question: an allow-only policy over a tree with an unread
+    // class exits 0, and its DOCUMENT says so too. candor-rust's copy of this rung had these two keyed on
+    // different predicates and wrote `ok: false, incomplete: true` at exit 0 — a split only a machine
+    // reading the JSON could see. This engine keys both halves on one variable; the row pins that.
+    const gj = path.join(d, "s.gate.json");
+    const s = scan(d, "--policy", path.join(d, "allow.candor"), "--gate-json", gj);
+    check("⟨0.32⟩ CONTROL: the SCAN route's document AGREES WITH ITS OWN EXIT under an allow-only policy — exit 0 and `ok: true`, no `incomplete`",
+          s.r.status === 0 && doc(gj)?.ok === true && !("incomplete" in (doc(gj) ?? {})),
+          `exit ${s.r.status}: ${JSON.stringify(doc(gj))}`.slice(0, 300));
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // ── 5. A CERTAIN VIOLATION STILL DOMINATES (SPEC §3.1 precedence: violation 1 > refusal 2 >
+  // incomplete 2). Without this row the fix could turn every precise exit 1 into a vague exit 2.
+  {
+    const d = project({
+      "tsconfig.json": TSCONFIG,
+      "src/bad.ts": `import { execSync } from "node:child_process";
+export function runs(): Buffer { return execSync("ls"); }`,
+      "dist/shipped.js": EXECS,
+      "pol.candor": "deny Exec\n",
+    });
+    const n = path.join(d, "n"), pol = path.join(d, "pol.candor");
+    spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out", n], { encoding: "utf8" });
+    const q = gate(`${n}.json`, pol);
+    check("⟨0.32⟩ CONTROL: an IN-SCOPE violation still dominates the unread class — exit 1 naming the function, not a vaguer exit 2",
+          q.status === 1 && /src\.bad\.runs/.test(q.stdout + q.stderr),
+          `exit ${q.status}: ${q.stdout}${q.stderr}`.slice(0, 300));
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // ── 6. §3.1 ROUTE EQUALITY ON AN UNREAD CLASS — the acceptance test for the whole rung: the same
+  // policy over the same report, one route each, must produce BYTE-EQUAL documents and the same exit.
+  // The unread class here is real: the parent cannot open the file, so the peek cannot either.
+  {
+    const d = project({
+      "tsconfig.json": TSCONFIG,
+      "src/ok.ts": `export function fine(a: number) { return a + 1; }`,
+      "dist/shipped.js": CLEAN,
+      "pol.candor": "deny Exec\n",
+    });
+    fs.chmodSync(path.join(d, "dist", "shipped.js"), 0o000);
+    const pol = path.join(d, "pol.candor");
+    const sgj = path.join(d, "s.gate.json"), qgj = path.join(d, "q.gate.json");
+    const s = scan(d, "--policy", pol, "--gate-json", sgj);
+    check("⟨0.32⟩ route-equality PREMISE: an unreadable excluded file really does publish `peeked: false` (else the rows below are vacuous)",
+          (s.report?.excluded ?? []).some((e) => e.peeked === false), JSON.stringify(s.report?.excluded));
+    const q = gate(path.join(d, ".candor", "report.json"), pol, qgj);
+    check("⟨0.32⟩ §3.1: both routes reach exit 2 over an unread class",
+          s.r.status === 2 && q.status === 2, `scan ${s.r.status} gate ${q.status}: ${q.stderr}`.slice(0, 300));
+    check("⟨0.32⟩ §3.1: …and the two verdict documents are BYTE-EQUAL",
+          fs.existsSync(sgj) && fs.existsSync(qgj)
+            && fs.readFileSync(sgj, "utf8") === fs.readFileSync(qgj, "utf8"),
+          `${fs.existsSync(sgj) ? fs.readFileSync(sgj, "utf8") : "(no s)"}\n---\n${fs.existsSync(qgj) ? fs.readFileSync(qgj, "utf8") : "(no q)"}`);
+    fs.chmodSync(path.join(d, "dist", "shipped.js"), 0o644);
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // ── 7. THE SCAN ROUTE'S OWN PREDICATE: "the peek was ATTEMPTED", not "the peek SUCCEEDED".
+  //
+  // A peek that dies leaves every class `peeked: false` — the same hole as never asking — and the scan
+  // route used to answer `policy ✓` at exit 0 over it while `gate --report`, reading that same report,
+  // has to refuse. MEASURED, and the trigger is a real configuration rather than a contrivance: the peek
+  // child inherits the environment, so a stray `CANDOR_POLICY` pointing at a missing file makes the child
+  // exit 2 (its own unreadable-policy refusal), `execFileSync` throw, and the parent publish
+  // `excluded[].peeked: false` beside `outOfScope: []` — a scan that read NOTHING of the excluded set,
+  // reporting `policy ✓` over a `dist/` that runs `execSync`.
+  {
+    const mk = (js) => project({
+      "tsconfig.json": TSCONFIG,
+      "src/ok.ts": `export function fine(a: number) { return a + 1; }`,
+      "dist/shipped.js": js,
+      "pol.candor": "deny Exec\n",
+    });
+    const d = mk(CLEAN);
+    const pol = path.join(d, "pol.candor"), sgj = path.join(d, "s.gate.json");
+    const sabotage = { ...process.env, CANDOR_POLICY: path.join(d, "no-such.pol") };
+    const s = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", pol, "--gate-json", sgj],
+                        { encoding: "utf8", env: sabotage });
+    const rep = doc(path.join(d, ".candor", "report.json"));
+    check("⟨0.32⟩ peek-failure PREMISE: a dead peek publishes `peeked: false` on every class (else the row below is vacuous)",
+          (rep?.excluded ?? []).length > 0 && (rep?.excluded ?? []).every((e) => e.peeked === false),
+          JSON.stringify(rep?.excluded));
+    check("⟨0.32⟩ a peek that could not RUN is unread code, not a pass — the SCAN route exits 2 (was 0, `policy ✓`)",
+          s.status === 2 && /did not READ/.test(s.stderr), `exit ${s.status}: ${s.stderr}`.slice(0, 300));
+    check("⟨0.32⟩ …and its document says the same thing the exit does: ok:false + incomplete:true",
+          doc(sgj)?.ok === false && doc(sgj)?.incomplete === true, JSON.stringify(doc(sgj)).slice(0, 200));
+    const qgj = path.join(d, "q.gate.json");
+    const q = gate(path.join(d, ".candor", "report.json"), pol, qgj);
+    check("⟨0.32⟩ …and `gate --report` over that report agrees, BYTE-EQUAL — one rule, two routes",
+          q.status === 2 && fs.readFileSync(sgj, "utf8") === fs.readFileSync(qgj, "utf8"),
+          `exit ${q.status}: ${fs.readFileSync(qgj, "utf8")}`.slice(0, 300));
+    // THE CONTROL, one variable apart: the SAME tree and policy with the peek alive reads the excluded
+    // file, finds nothing denied, and passes. Without it this fix would be indistinguishable from one
+    // that reddens every tree with a `dist/`.
+    const ok = scan(d, "--policy", pol);
+    check("⟨0.32⟩ CONTROL: the same tree with a LIVE peek passes — exit 0, `peeked: true` — the only difference is whether anything was read",
+          ok.r.status === 0 && (ok.report?.excluded ?? []).every((e) => e.peeked === true),
+          `exit ${ok.r.status}: ${JSON.stringify(ok.report?.excluded)}`);
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // ── 8. THE ADVISORY BINDING (SPEC §3.2 ⟨0.24⟩: an advisory verb may be LESS certain than the gate,
+  // NEVER MORE) — and the document/exit split found beside it.
+  //
+  // MEASURED at HEAD, over a report carrying the ⟨0.30⟩ `outOfScope` key: `fix-gate --strict` and
+  // `unverified --strict` both printed `{"ok": true, …: []}` **AT EXIT 2**. The exit had obeyed the
+  // binding since ⟨0.30⟩ and the DOCUMENT never did — the two halves of one answer disagreeing, with the
+  // document on the certifying side. A CI wrapper reads the exit; an agent reads the document.
+  {
+    const d = project({
+      "tsconfig.json": TSCONFIG,
+      "src/ok.ts": `export function fine(a: number) { return a + 1; }`,
+      "dist/shipped.js": EXECS,
+      "pol.candor": "deny Exec\n",
+    });
+    const pol = path.join(d, "pol.candor"), n = path.join(d, "n");
+    // The ⟨0.30⟩ shape: a report whose producer DID peek and named the finding.
+    const s = scan(d, "--policy", pol);
+    // The ⟨0.32⟩ shape: the same tree, produced with no policy — nothing was opened.
+    spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out", n], { encoding: "utf8" });
+    const adv = (verb, rep) =>
+      spawnSync("node", [path.join(HERE, "query.mjs"), verb, "--report", rep, "--policy", pol, "--strict"],
+                { encoding: "utf8" });
+    for (const verb of ["fix-gate", "unverified"]) {
+      const oos = adv(verb, path.join(d, ".candor", "report.json"));
+      const od = (() => { try { return JSON.parse(oos.stdout); } catch { return null; } })();
+      check(`⟨0.30⟩ §3.2: \`${verb} --strict\` over a report carrying \`outOfScope\` WITHHOLDS \`ok\` — the document now says what its own exit 2 says (it printed \`ok: true\` beside exit 2)`,
+            oos.status === 2 && od !== null && !("ok" in od) && od.incomplete === true
+              && (od.outOfScope ?? []).length > 0,
+            `exit ${oos.status}: ${oos.stdout}`.slice(0, 300));
+      const unr = adv(verb, `${n}.json`);
+      const ud = (() => { try { return JSON.parse(unr.stdout); } catch { return null; } })();
+      check(`⟨0.32⟩ §3.2: \`${verb} --strict\` over a report with an UNREAD class exits 2 and names it — the gate refuses these bytes, so this verb must not certify them`,
+            unr.status === 2 && ud !== null && !("ok" in ud) && ud.incomplete === true
+              && ud.unread?.includes("outside-the-tsconfig-program"),
+            `exit ${unr.status}: ${unr.stdout}`.slice(0, 300));
+    }
+    check("⟨0.30⟩ §3.2 PREMISE: the producing scan really did name the out-of-scope finding (else the rows above are vacuous)",
+          (s.report?.outOfScope ?? []).length > 0, JSON.stringify(s.report?.outOfScope).slice(0, 200));
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+  {
+    // THE OVER-CHARGE CONTROL for both: a complete, fully-peeked report still gets a plain `ok` answer at
+    // exit 0 from both verbs. Without it the rows above pass on a build that hedges everything.
+    const d = project({
+      "tsconfig.json": TSCONFIG,
+      "src/ok.ts": `export function fine(a: number) { return a + 1; }`,
+      "dist/shipped.js": CLEAN,
+      "pol.candor": "deny Exec\n",
+    });
+    const pol = path.join(d, "pol.candor");
+    scan(d, "--policy", pol);
+    for (const verb of ["fix-gate", "unverified"]) {
+      const r = spawnSync("node", [path.join(HERE, "query.mjs"), verb, "--report",
+                                   path.join(d, ".candor", "report.json"), "--policy", pol, "--strict"],
+                          { encoding: "utf8" });
+      const rd = (() => { try { return JSON.parse(r.stdout); } catch { return null; } })();
+      check(`⟨0.32⟩ CONTROL: \`${verb} --strict\` over a COMPLETE, fully-peeked report answers \`ok: true\` at exit 0 — unchanged`,
+            r.status === 0 && rd?.ok === true && !("incomplete" in (rd ?? {})),
+            `exit ${r.status}: ${r.stdout}`.slice(0, 200));
+    }
     fs.rmSync(d, { recursive: true, force: true });
   }
 }

@@ -852,6 +852,56 @@ fs.rmSync(W, { recursive: true, force: true });
   fs.rmSync(I, { recursive: true, force: true });
 }
 
+// ── ⟨0.30⟩/⟨0.32⟩ …AND THE OTHER TWO CAUSES, WHICH THIS TOOL CARRIED NEITHER OF ────────────────────
+// The rule above was ported to this route when ⟨0.21⟩ landed and the two later causes were not: this
+// tool answered `{ok: true, violations: []}` over a report whose peek NAMED an out-of-scope function
+// performing the denied effect (⟨0.30⟩), and over one declaring a class the producing scan never opened
+// (⟨0.32⟩) — both of which make the CLI exit 2 on the same bytes. The agent channel is the one whose
+// consumer cannot ask a follow-up question, which is the argument this file makes about `ignored`.
+//
+// HAND-AUTHORED REPORTS, because §3.1 serves reports this engine did not produce and the shapes are the
+// wire's, not this engine's: `excluded[].peeked` and `judgedElsewhere` are producer facts.
+{
+  const I = scratch("candor-mcp-scope-");
+  const V = { candor: { version: "handwritten", spec: "0.32" }, package: "app",
+              analyzed: { count: 1, digest: "0" },
+              functions: [{ fn: "app.calc", inferred: [], direct: [], hash: "app#calc" }] };
+  fs.writeFileSync(`${I}/scope.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: true }],
+    outOfScope: [{ fn: "t.runs", path: "src/x.test.ts", effects: ["Exec"], class: "test-file", reason: "outside" }] }));
+  fs.writeFileSync(`${I}/unread.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: false }] }));
+  fs.writeFileSync(`${I}/peeked.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: true }], outOfScope: [] }));
+  fs.writeFileSync(`${I}/derived.json`, JSON.stringify({ ...V, excluded: [{ class: "build-output", count: 2, peeked: false, judgedElsewhere: true }] }));
+  fs.writeFileSync(`${I}/p.pol`, "deny Exec\n");
+  fs.writeFileSync(`${I}/allow.pol`, "allow Net api.example.com\n");
+  const scall = (id, rep, pol = "p.pol") => ({ jsonrpc: "2.0", id, method: "tools/call",
+    params: { name: "candor_gate", arguments: { report: `${I}/${rep}`, policy: `${I}/${pol}` } } });
+  const sr = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+                               scall(2, "scope"), scall(3, "unread"), scall(4, "peeked"),
+                               scall(5, "derived"), scall(6, "unread", "allow.pol")],
+                              [], { CANDOR_REPORT: `${I}/scope` });
+  const st = (id) => JSON.parse(sr.find((r) => r.id === id).result.content[0].text);
+  ok("⟨0.30⟩ candor_gate: a report whose peek NAMED an out-of-scope denied effect cannot gate GREEN — ok:false, incomplete:true, `outOfScope` named (the CLI exits 2 on the same bytes)",
+     st(2).ok === false && st(2).incomplete === true && st(2).outOfScope?.[0]?.fn === "t.runs"
+     && st(2).unanalyzed === undefined,
+     JSON.stringify(st(2)).slice(0, 300));
+  ok("⟨0.32⟩ candor_gate: a class the producing scan never READ cannot gate GREEN — ok:false, incomplete:true, `unread` names the class",
+     st(3).ok === false && st(3).incomplete === true && st(3).unread?.[0] === "test-file"
+     && st(3).unanalyzed === undefined,
+     JSON.stringify(st(3)).slice(0, 300));
+  ok("⟨0.32⟩ candor_gate CONTROL: a PEEKED-and-clear class still gates green — no `incomplete`, no `unread`",
+     st(4).ok === true && st(4).incomplete === undefined && st(4).unread === undefined,
+     JSON.stringify(st(4)).slice(0, 260));
+  ok("⟨0.32⟩ candor_gate CONTROL: `judgedElsewhere` (a derived copy of already-judged code) carves out — still green",
+     st(5).ok === true && st(5).incomplete === undefined, JSON.stringify(st(5)).slice(0, 260));
+  // The allow-only policy is refused by this tool for its OWN reason (an `allow` rule is unanswerable
+  // from a report), and that refusal is a TEXT error rather than a document — so the row asserts WHICH
+  // cause fired, which is the point: a policy with no deny rule must never be refused for want of a peek.
+  const s6 = sr.find((r) => r.id === 6).result.content[0].text;
+  ok("⟨0.32⟩ candor_gate CONTROL: a policy with NO deny rule is not refused for want of a peek — the `allow` rule's own unanswerability is what fires",
+     /allow/.test(s6) && !/did not READ|unread/.test(s6), s6.slice(0, 300));
+  fs.rmSync(I, { recursive: true, force: true });
+}
+
 // ── ⟨0.24⟩ THE SAME RULE ON candor_unverified — the OTHER CHANNEL (SPEC §3.2 `ec1a441`) ─────────────
 // `candor_gate` above refuses to read green over a declared manifest. `candor_unverified` read the same
 // bytes and returned `ok: true` with an empty array — on the surface an agent trusts and no human reads,

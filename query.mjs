@@ -1900,7 +1900,16 @@ switch (cmd) {
       emitZeroRuleCaveat("fix-gate", policyFile, fgComp);
       process.exit(fgUnan.length || fgComp.unreadable.length ? (strict ? 2 : 0) : 0);
     }
-    emit(advisoryAnswer(fgr, fgUnan, fgComp.judgedNothing, fgComp.unreadable, fgComp.noManifest));
+    // ⟨0.32⟩ the classes the producer never opened, under the SAME condition the gate applies (only a
+    // `deny`/`pure` rule's answer depends on code outside the scan's scope), computed ONCE and handed to
+    // both the document and the exit below so the two cannot disagree about a run.
+    const fgUnread = fgpol.deny.length ? (fgComp.unread ?? []) : [];
+    // ⟨0.30⟩/⟨0.32⟩ THE TWO SCOPE CAUSES NOW REACH THE DOCUMENT, not just the exit. MEASURED before this
+    // argument existed: over a report carrying `outOfScope`, this verb printed `{"ok": true, "remedies":
+    // []}` AT EXIT 2 — the exit obeyed §3.2's "never MORE certain than the gate" while the document it
+    // printed certified. The exit expression below is unchanged for `outOfScope` and gains the ⟨0.32⟩ arm.
+    emit(advisoryAnswer(fgr, fgUnan, fgComp.judgedNothing, fgComp.unreadable, fgComp.noManifest,
+                        fgComp.outOfScope ?? [], fgUnread));
     // ⟨0.28⟩ `unreadable` joins the `--strict` exit-2 trigger (SPEC §3.2's pessimism relation): `gate
     // --report` REFUSES over a corrupt member — measured, exit 2 — so exiting 0/1 here claimed this verb
     // got FURTHER than the gate on identical bytes. The unreadable note above already SAID the exit was
@@ -1910,7 +1919,9 @@ switch (cmd) {
     // and "THE SAME RULE BINDS EVERY ADVISORY VERB THAT ANSWERS `ok` — `unverified`, `fix-gate`, and any
     // later sibling". ⟨0.30⟩ moved the gate to exit 2 on this cause and left these verbs certifying:
     // MEASURED, `gate --report` exited 2 while this printed a clean answer at exit 0 over the same bytes.
-    process.exit(fgUnan.length || fgComp.unreadable.length || fgComp.outOfScope?.length || fgr.unevaluated?.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
+    // ⟨0.32⟩ …and the class nothing OPENED, for the same MUST: `gate --report` exits 2 over it, so a verb
+    // that answered 0 on the same bytes would have got FURTHER than the gate.
+    process.exit(fgUnan.length || fgComp.unreadable.length || fgComp.outOfScope?.length || fgUnread.length || fgr.unevaluated?.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
     break; // unreachable
   }
   case "unverified": {
@@ -1971,12 +1982,17 @@ switch (cmd) {
       emitZeroRuleCaveat("unverified", policyFile, uComp);
       process.exit(uUnan.length || uComp.unreadable.length ? (strict ? 2 : 0) : 0);
     }
-    emit(advisoryAnswer(r, uUnan, uComp.judgedNothing, uComp.unreadable, uComp.noManifest));
+    // ⟨0.30⟩/⟨0.32⟩ the two scope causes, in the document as well as the exit — see the fix-gate site for
+    // the measurement (`{"ok": true, "unverified": []}` at exit 2 over a report carrying `outOfScope`).
+    const uUnread = upol.deny.length ? (uComp.unread ?? []) : [];
+    emit(advisoryAnswer(r, uUnan, uComp.judgedNothing, uComp.unreadable, uComp.noManifest,
+                        uComp.outOfScope ?? [], uUnread));
     // ⟨0.28⟩ `unreadable` joins the `--strict` exit-2 trigger — see fix-gate above. Measured on this verb
     // before the fix: over one good report plus one unparsable sibling, `gate --report` exited 2 and
     // `unverified --strict` exited 0 — and `--strict` is how CI consumes it.
     // ⟨0.30⟩ the peek's findings too — see the fix-gate exit above for the ⟨0.24⟩ MUST this satisfies.
-    process.exit(uUnan.length || uComp.unreadable.length || uComp.outOfScope?.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
+    // ⟨0.32⟩ …and the class nothing OPENED — see the fix-gate exit above.
+    process.exit(uUnan.length || uComp.unreadable.length || uComp.outOfScope?.length || uUnread.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
     break; // unreachable
   }
   case "gate": {
@@ -2097,6 +2113,18 @@ switch (cmd) {
     // human channel simply did not show it.
     for (const u of gunevaluated) console.error(`candor-ts: gate: ${u.why}`);
     const g = loadGateReport(prefix);
+    // ⟨0.32⟩ DOES THIS POLICY'S ANSWER DEPEND ON THE CODE THE PRODUCER LEFT UNREAD? — the ONE place that
+    // condition is applied on this route (the rule itself is stated at the reading site in
+    // query-core.mjs's `loadGateReport`). `deny` is the rule vector that carries `pure` too;
+    // `allow`/`forbid`/`only` live in their own, and none of them is answered from code OUTSIDE the scan's
+    // scope, so refusing them for want of a peek would be an over-charge — the same short-circuit
+    // scan.mjs's peek applies to the same question.
+    //
+    // APPLIED TO THE VALUE, not repeated at the exit arm, and that is deliberate: this list feeds BOTH
+    // `gincomplete` (hence `ok`/`incomplete` in the verdict document) and the exit code below, so a
+    // condition stated at only one of them lets the two disagree — a document reading `ok: false,
+    // incomplete: true` beside exit 0. candor-rust's copy of this rung had exactly that split.
+    const gunread = gpol.deny.length ? g.unread : [];
     // ANY report under the locator that did not load cleanly REFUSES THE WHOLE GATE — not just the case
     // where they ALL failed. The old guard was `functions.length === 0 && hardFail`, i.e. it fired only
     // when nothing survived anywhere, so a multi-report prefix with ONE clean sibling and one truncated
@@ -2213,7 +2241,10 @@ switch (cmd) {
     // peek's findings, which is what makes §3.1 byte-equality hold here by construction rather than by two
     // authors agreeing. ABSENT is not empty: a report produced with no policy was never asked.
     const gscope = g.outOfScope ?? [];
-    const gincomplete = g.unanalyzed.length > 0 || gscope.length > 0;
+    // ⟨0.32⟩ the THIRD cause, read off `excluded[].peeked` — code the PRODUCER never opened. Distinct from
+    // the ⟨0.30⟩ one above: that is "the peek looked and found the effect you deny", this is "nothing
+    // looked at all", and the two want different repairs.
+    const gincomplete = g.unanalyzed.length > 0 || gscope.length > 0 || gunread.length > 0;
     // The verdict document — the SAME builder shape scan.mjs writes, field for field and in the same key
     // order, because §3.1 ⟨0.24⟩ makes byte-equality with `scan --policy`'s `--gate-json` the acceptance
     // test. `analyzed.count`, `incomplete`/`unanalyzed` and the ⟨0.15⟩ coverage advisory all come off the
@@ -2269,9 +2300,15 @@ switch (cmd) {
       // ⟨0.30⟩ NAME THE CAUSE THAT ACTUALLY FIRED. Two causes reach this exit now, and a message that
       // always says "could not analyze" would report the wrong repair for the scope one — the operator
       // would go looking for a parse failure that is not there.
+      // ⟨0.32⟩ …and a THIRD, last in the same order scan.mjs uses (`unanalyzed` → `outOfScope` → unread),
+      // so a report that trips two of them names the same cause on both routes. Its message differs from
+      // the `outOfScope` one because the repair does: that one wants a scan whose SELECTOR reaches the
+      // code, this one wants a scan that was ASKED the question at all.
       const why = g.unanalyzed.length
         ? `gate NOT certified — the report declares ${g.unanalyzed.length} unit(s) candor could not analyze; a gate cannot be green over unanalyzed code`
-        : `gate NOT certified — the report names ${gscope.length} function(s) OUTSIDE the scan's scope performing an effect this policy denies; the gate did not judge them, so the verdict is incomplete rather than a pass`;
+        : gscope.length
+        ? `gate NOT certified — the report names ${gscope.length} function(s) OUTSIDE the scan's scope performing an effect this policy denies; the gate did not judge them, so the verdict is incomplete rather than a pass`
+        : `gate NOT certified — the report says the scan did not READ ${gunread.join(", ")}. Their effects are absent because nothing looked, not because there are none, so the verdict is INCOMPLETE rather than a pass. Re-scan the sources with this policy (candor-ts <dir> --policy <file>) — a scan that was never asked cannot certify what it never opened`;
       console.error(`candor-ts: ${why}`);
       // The INCOMPLETE verdict is a JUDGEMENT, not a refusal: it names what was analyzed and what was not,
       // and §3.1 makes byte-equality with `scan --policy`'s document the acceptance test for exactly it.

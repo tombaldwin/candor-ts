@@ -8,6 +8,59 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ ⟨0.32⟩ The unread-code rule reached only the SCAN route — `gate --report` certified code nobody
+  had opened.** ⟨0.32⟩'s central rule is that a class this scan did not READ makes the verdict
+  INCOMPLETE. It shipped in `scan.mjs` and nowhere else, so the shape this tool is actually deployed in —
+  scan in CI, gate the artifact later — kept answering green. MEASURED at `396d6f4`, one tree whose
+  excluded `dist/shipped.js` runs `execSync`:
+
+  ```
+  candor-ts <tree> --policy 'deny Exec'                  exit 2, names the excluded fn's Exec
+  candor-ts <tree> --out N                                 (no policy)
+  query.mjs gate --report N --policy 'deny Exec'         exit 0, ok: true, NO disclosure
+  ```
+
+  THE RULE, now stated once and applied on every route: a class the producing scan did not READ licenses
+  nothing, and whether that matters is decided by the policy applied NOW, not by the producer's history.
+  `peeked: false` has two causes — *opened it and failed* and *never asked* — and from a report they are
+  indistinguishable, because they leave the identical hole: those files' effects are absent from
+  `functions` because nothing looked, and ⟨0.21⟩ licenses a purity claim only over units the scan judged.
+  The carve-out is about the QUESTION (only a `deny`/`pure` rule's answer depends on code outside the
+  scan's scope), and it is applied ONCE to the value, never at the exit arm — the same list feeds
+  `incomplete`/`ok` in the document and the exit code, and a condition on one of them lets the two
+  disagree. `excluded` joins the strictly-read §2 keys: present-but-unparseable is a refusal NAMING the
+  key, never coerced to "this scan excluded nothing" (and `"peeked": "no"` is TRUTHY in this language, so
+  an unchecked read turns an unread class into a peeked one).
+
+  FOUND BESIDE IT, three more routes with the same hole. (a) The scan route keyed `unreadClasses` on
+  *the peek SUCCEEDED* rather than *the peek was ASKED FOR*: export a `CANDOR_POLICY` naming a file that
+  does not exist and the peek child — which inherits the environment — dies on its own unreadable-policy
+  refusal, every class publishes `peeked: false`, and the scan said `policy ✓` at exit 0 over code
+  nothing had opened. (b) The MCP `candor_gate` tool carried NEITHER the ⟨0.30⟩ `outOfScope` cause nor
+  this one, so the agent channel answered `{ok: true, violations: []}` where the CLI exits 2; it now
+  names which of the three causes fired. (c) `fix-gate --strict` and `unverified --strict` printed
+  `{"ok": true, …: []}` **at exit 2** over a report carrying `outOfScope` — the exit had obeyed §3.2's
+  *never MORE certain than the gate* since ⟨0.30⟩ and the document never did.
+
+  MEASURED, 363 real packages × `deny Exec`/`Net`/`Fs` = 1,089 pairs, both routes, before and after
+  (26 before-rows are excluded: their gate process died under the harness's own load and left an
+  arm-stamp document, which is contamination, not a verdict):
+
+  · **564 of 1,063 pairs newly refuse** — 206 of 363 packages — because gating a report produced
+    WITHOUT a policy now fails closed on any tree with a test file, a `.d.ts` or a `dist/`. That is the
+    rung, not a side effect: the repair is one flag and the message names it. Hand-checked
+    (`json-schema-traverse`, `fast-json-stable-stringify`, `word-wrap`): every newly-named class is real
+    files the no-policy scan never opened, and re-scanning WITH the policy flips it to `peeked: true` and
+    a definite answer.
+  · **0 newly refusing on the policy-produced report** — the route whose producer WAS asked is unmoved.
+  · **0 byte-equality failures** before or after: the scan's `--gate-json` and `gate --report`'s over the
+    same report stay byte-equal on all 1,089.
+  · **0 over-charges** (refusing with nothing unread) and **0 under-reports** (exit 0 with an unread
+    class named in the report). **0 violations lost**: all 86 scan-route exit-1 pairs still exit 1, and a
+    real violation still dominates INCOMPLETE.
+  · The scan route's exit distribution is IDENTICAL before and after (959/86/44) — the peek-was-asked
+    predicate costs nothing on a corpus where no peek dies.
+
 - **⚠ ⟨0.32⟩ A node-core member this engine has not reviewed is `Unknown`, never pure — and a
   constructor is attributed to the class you wrote, not to the base it inherits from.** Two silent false
   all-clears, one classifier surface.

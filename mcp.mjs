@@ -358,7 +358,7 @@ const TOOLS = {
     },
   },
   candor_gate: {
-    description: "The policy verdict over this report: { ok, violations:[{rule, fn, effects, detail}] } — 'would this repo pass its architecture gate?'. Uses `policy` if given, else the repo's checked-in .candor/config policy (spec §3.4). ALWAYS CHECK `ok`, never the length of `violations`: a rule whose narrowing evidence the report does not carry is NOT EVALUATED, and then the result is `{ ok:false, refused:true, reason, unevaluated:[{rule, why}] }` WITH NO `violations` KEY — an absent key, not an empty list, because the gate is making no claim there. `unevaluated` also rides a firing verdict (a certain violation dominates a refusal). `{ incomplete:true, unanalyzed }` means the report declares code candor could not analyze, so the gate cannot be green. Computed from the report — the engine's own --gate-json run is the authoritative CI form: it additionally fails an allow rule whose literal surface is INCOMPLETE (a masked/invisible endpoint), which is not a report field, so a green here can still be red in CI.",
+    description: "The policy verdict over this report: { ok, violations:[{rule, fn, effects, detail}] } — 'would this repo pass its architecture gate?'. Uses `policy` if given, else the repo's checked-in .candor/config policy (spec §3.4). ALWAYS CHECK `ok`, never the length of `violations`: a rule whose narrowing evidence the report does not carry is NOT EVALUATED, and then the result is `{ ok:false, refused:true, reason, unevaluated:[{rule, why}] }` WITH NO `violations` KEY — an absent key, not an empty list, because the gate is making no claim there. `unevaluated` also rides a firing verdict (a certain violation dominates a refusal). `incomplete:true` means the gate CANNOT be green, and the key beside it says which of the three causes fired: `unanalyzed` (the report declares code candor could not analyze), `outOfScope` (the producer's peek NAMED a function outside the scan's scope performing an effect this policy denies), or `unread` (a class the producing scan never OPENED — its effects are absent because nothing looked, not because there are none; re-scan those sources WITH this policy). Computed from the report — the engine's own --gate-json run is the authoritative CI form: it additionally fails an allow rule whose literal surface is INCOMPLETE (a masked/invisible endpoint), which is not a report field, so a green here can still be red in CI.",
     schema: { type: "object", properties: { policy: { type: "string", description: "path to a §6.2 policy file (optional; defaults to the repo's .candor/config `policy`)" }, ...reportArg }, required: [] },
     run: (a, p) => {
       let text, polPath = a.policy ?? null;
@@ -429,7 +429,19 @@ const TOOLS = {
       // `{ok:true, violations:[]}` over a report DECLARING `unanalyzed`, where the CLI exits 2. A gate
       // cannot be green over code candor never analyzed, and the manifest travels ON the report, so the
       // same verdict follows from it here. Additive to the pinned `{ok, violations}` shape.
-      const incomplete = g.unanalyzed.length > 0;
+      // ⟨0.30⟩/⟨0.32⟩ …AND THE OTHER TWO CAUSES, which this route carried NEITHER of — the sibling-route
+      // habit again, on the channel whose consumer cannot ask a follow-up question. Both ride the REPORT,
+      // exactly as they do for `gate --report`, so this tool re-reads the producer's record rather than
+      // deriving anything of its own:
+      //   · `outOfScope` (⟨0.30⟩) — the producer's peek NAMED a function outside the scan's scope
+      //     performing an effect this policy denies. The CLI exits 2; this tool answered `ok: true`.
+      //   · `unread` (⟨0.32⟩) — a class the producer never OPENED (`excluded[].peeked: false`), so its
+      //     effects are absent from `functions` because nothing looked. Decided by the policy applied NOW
+      //     (only a `deny`/`pure` rule's answer depends on code outside the scan's scope), which is the
+      //     same condition both CLI routes apply, from the same value, once.
+      const gscope = g.outOfScope ?? [];
+      const gunread = pol.deny.length ? g.unread : [];
+      const incomplete = g.unanalyzed.length > 0 || gscope.length > 0 || gunread.length > 0;
       // ⟨0.24⟩ …and a report that JUDGED NOTHING is not an all-clear (SPEC §2's three-row table, bound to
       // every report-reading route by §3.1: "the obligation is on the reading, not on the route by which
       // the report arrived"). This tool is exactly such a route — it gates whatever `report` points at,
@@ -479,7 +491,15 @@ const TOOLS = {
               + "claim about any unit they contain. The named report(s) are the gap; the verdict above covers "
               + "only the siblings that DID judge. Re-scan those sources, or point `report` at the package that "
               + "has them." } : {};
-      const inc = incomplete ? { incomplete: true, unanalyzed: g.unanalyzed } : {};
+      // EACH CAUSE NAMED ONLY WHEN IT FIRED. `unanalyzed: []` beside `incomplete: true` would be a
+      // positive claim that candor read every file — the safe-LOOKING value, and the one an agent would
+      // act on — for an incompleteness with a different cause and a different repair.
+      const inc = incomplete
+        ? { incomplete: true,
+            ...(g.unanalyzed.length ? { unanalyzed: g.unanalyzed } : {}),
+            ...(gscope.length ? { outOfScope: gscope } : {}),
+            ...(gunread.length ? { unread: gunread } : {}) }
+        : {};
       // ⟨0.24⟩ PRECEDENCE (SPEC §3.1 `7271c69`/`4c79958`): violation (1) > refusal (2) > incomplete (2), and
       // the REFUSAL SHAPE is the one the CLI writes — `ok:false`, `refused:true`, and NO `violations` KEY AT
       // ALL, because the gate is making no claim about violations and `[]` is precisely the claim it cannot

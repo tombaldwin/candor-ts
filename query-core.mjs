@@ -567,6 +567,15 @@ export function reportCompleteness(prefix) {
            noManifest: reportNoManifestFiles(prefix),
            // ⟨0.30⟩ the peek's findings, so an advisory verb keying `--strict` on this object is at least
            // as pessimistic as the gate over the same bytes (the ⟨0.24⟩ MUST).
+           // ⟨0.32⟩ …and the classes the producing scan never OPENED. NOT an arm of `mustHedge` below, and
+           // that is a decision rather than an omission: `unread` is non-empty on almost every report a
+           // no-policy scan writes (any tree with a test file, a `.d.ts` or a `dist/`), and the verbs
+           // `mustHedge` serves carry no policy — so there is nothing to condition it on and a hedge on
+           // every run trains the reader to ignore it, which is the argument this file already makes for
+           // omitting `coverage`. The two verbs that DO carry a policy (`fix-gate`, `unverified`) read this
+           // field directly and apply the gate's own condition to it: only a `deny`/`pure` rule's answer
+           // depends on code outside the scan's scope.
+           unread: reportUnread(prefix),
            ...(() => {
              const o = reportOutOfScope(prefix);
              // A corrupt key rides `unreadable`, which is ALREADY an arm of the strict exit — so the
@@ -621,6 +630,29 @@ export function reportOutOfScope(prefix) {
     } catch { /* unparseable TEXT is `unreadable`'s business, not this key's */ }
   }
   return { findings: out, corrupt };
+}
+
+/** ⟨0.32⟩ The classes the producing scan never OPENED, across the reports under a locator — `excluded[]`
+ *  entries that are neither `peeked` nor `judgedElsewhere`, deduped, in report order.
+ *
+ *  LENIENT, like `reportOutOfScope` beside it and for the same reason: a malformed key is the GATE's
+ *  refusal to make (it reads the same bytes strictly, in `loadGateReport`, and NAMES the key), and this
+ *  feeds a disclosure. A non-boolean `peeked` is skipped here rather than trusted, so the leniency never
+ *  runs in the fail-open direction — `"peeked": "no"` is TRUTHY in this language, and a lenient reader that
+ *  simply believed it would turn an unread class into a peeked one. */
+export function reportUnread(prefix) {
+  const files = (prefix.endsWith(".json") && fs.existsSync(prefix)) ? [prefix] : reportFilesAt(prefix);
+  const out = new Set();
+  for (const f of files) {
+    try {
+      const d = JSON.parse(fs.readFileSync(f, "utf8"));
+      if (!Array.isArray(d?.excluded)) continue;
+      for (const e of d.excluded)
+        if (e && typeof e === "object" && typeof e.class === "string" && e.class
+            && e.peeked !== true && e.judgedElsewhere !== true) out.add(e.class);
+    } catch { /* unparseable TEXT is `unreadable`'s business, not this key's */ }
+  }
+  return [...out];
 }
 
 /**
@@ -721,10 +753,11 @@ export const absorbCompleteness = (a, b) => ({
  * over-claim the strict exit exists to prevent. (`mustHedge` is the same distinction, stated for a verb
  * that has no exit code for it to matter to.)
  */
-export function advisoryAnswer(body, unanalyzed, judgedNothing = [], unreadable = [], noManifest = []) {
+export function advisoryAnswer(body, unanalyzed, judgedNothing = [], unreadable = [], noManifest = [],
+                               outOfScope = [], unread = []) {
   const unevaluated = body?.unevaluated;
   if (!unanalyzed?.length && !unevaluated?.length && !judgedNothing?.length && !unreadable?.length
-      && !noManifest?.length)
+      && !noManifest?.length && !outOfScope?.length && !unread?.length)
     return body;  // COMPLETE: unchanged, byte for byte, `ok` and all.
   const { ok, ...rest } = body;                          // eslint-disable-line no-unused-vars -- omitted BY DESIGN
   // The array of report paths, same key and same shape as `completenessFields` — ONE wire spelling for
@@ -735,10 +768,19 @@ export function advisoryAnswer(body, unanalyzed, judgedNothing = [], unreadable 
   // never emitted a manifest cannot support it (row 3: *no manifest, no claim*).
   const judged = { ...(judgedNothing?.length ? { judgedNothing } : {}),
                    ...(noManifest?.length ? { noManifest } : {}) };
+  // ⟨0.30⟩/⟨0.32⟩ THE TWO SCOPE CAUSES — the ones the `--strict` exit has consulted since ⟨0.30⟩ while this
+  // document did not, which is the document/exit split in its worse direction. MEASURED 2026-08-24 on
+  // `fix-gate --strict` and `unverified --strict` over a report carrying `outOfScope`: BOTH printed
+  // `{"ok": true, …: []}` **at exit 2** — the exit was right and the document certified. A CI wrapper reads
+  // the exit; an agent reads the document, and the agent channel is the one that cannot ask a follow-up
+  // question. Same keys and same order as the gate's verdict document, so one consumer parses both.
+  const scope = { ...(outOfScope?.length ? { outOfScope } : {}),
+                  ...(unread?.length ? { unread } : {}) };
   // Key order matches the gate's verdict document: the finding, then `unevaluated`, then the manifest.
-  if (unanalyzed?.length) return { ...rest, incomplete: true, unanalyzed, ...judged };
-  return (judgedNothing?.length || noManifest?.length || unreadable?.length)
-    ? { ...rest, incomplete: true, ...judged } : rest;
+  if (unanalyzed?.length) return { ...rest, incomplete: true, unanalyzed, ...scope, ...judged };
+  return (judgedNothing?.length || noManifest?.length || unreadable?.length
+          || outOfScope?.length || unread?.length)
+    ? { ...rest, incomplete: true, ...scope, ...judged } : rest;
 }
 
 export function loadReport(prefix) {
@@ -778,7 +820,7 @@ export function loadReport(prefix) {
  * `net-partner` re-mapping of the `netClass` this report already states. The reach the reason-class
  * fixpoint runs over is the entries' OWN §2 `calls` field — report data in, report data out.
  *
- * Returns `{functions, analyzed, unanalyzed, coverage, judgedNothing, hardFail, corrupt}`. `hardFail`
+ * Returns `{functions, analyzed, unanalyzed, coverage, judgedNothing, unread, hardFail, corrupt}`. `hardFail`
  * carries the `loadReport` meaning exactly: a file was FOUND and yielded nothing trustworthy (never "there
  * was no file" — the caller's `requireReport` owns that), so a corrupt report can be refused instead of
  * gated green. `corrupt` NAMES every present-but-unparseable §2 key found (SPEC §2 ⟨0.24⟩ requires the
@@ -787,7 +829,8 @@ export function loadReport(prefix) {
  */
 export function loadGateReport(prefix) {
   const files = reportFilesAt(prefix);
-  const functions = [], unanalyzed = [], cov = new Map(), corrupt = [], outOfScope = [], netPartners = [];
+  const functions = [], unanalyzed = [], cov = new Map(), corrupt = [], outOfScope = [], netPartners = [],
+        unread = [];
   let hardFail = false, analyzed = 0;
   // ⟨0.24⟩ did the report handed to the gate judge ANYTHING? Per FILE, then ANDed across the multi-report
   // siblings, because the union of several reports has judged something as soon as ONE of them has — the
@@ -865,6 +908,48 @@ export function loadGateReport(prefix) {
         if (e && typeof e === "object" && Array.isArray(e.effects) && e.effects.length)
           outOfScope.push(e);
         else corrupt.push(`${f}: \`outOfScope\` (an element is not an object carrying a non-empty \`effects\`)`);
+    // ⟨0.32⟩ THE CLASSES THE PRODUCER DID NOT READ, off `excluded[].peeked` — the ⟨0.32⟩ unread-code rule,
+    // which until now existed ONLY in scan.mjs. A user who scans in CI and gates the artifact later got a
+    // green over code nobody had opened; MEASURED at HEAD before this line existed, on a tree whose
+    // excluded `dist/shipped.js` runs `execSync`: `candor-ts <tree> --policy 'deny Exec'` exits 2 naming
+    // the function, while gating the report of a bare `candor-ts <tree> --out N` under the SAME policy
+    // exited 0 with `ok: true` and no disclosure.
+    //
+    // THE RULE, stated here and applied ONCE in query.mjs's gate: a class the producing scan did not READ
+    // licenses nothing, and whether that matters is decided by the policy applied NOW, not by the
+    // producer's history. `peeked: false` genuinely has two causes — "opened it and failed" and "never
+    // asked" — but from a REPORT they are indistinguishable, because they leave the identical hole: those
+    // files' effects are absent from `functions` because nothing looked, and ⟨0.21⟩ licenses a purity
+    // claim only over units the scan actually judged. The carve-out is about the QUESTION (only a
+    // `deny`/`pure` rule's answer depends on code outside the scan's scope), not about the history.
+    //
+    // `judgedElsewhere` is the PRODUCER's carve-out for a derived copy of already-judged code, and only
+    // the producer may set it: the class TOKENS are engine-chosen (`build-output` here, `build-output-
+    // archive` in candor-java), so a consumer inferring "derived" from a name would gate another engine's
+    // report differently from the engine that wrote it.
+    //
+    // STRICT, like every other verdict-bearing key on this route: `excluded` now MOVES the verdict, so a
+    // present-but-unparseable one is corrupt input NAMED in the refusal, never coerced to `[]` — the
+    // safe-LOOKING value, which is the claim "this scan excluded nothing" and deletes the rule. `peeked`
+    // is the sharpest case the language offers: `"peeked": "no"` is TRUTHY, so an unchecked read turns an
+    // unread class into a peeked one. ABSENT stays permissive: `excluded` is a ⟨0.29⟩ key, and refusing
+    // over its absence would refuse every report an older producer ever wrote.
+    const exc = parsed.excluded;
+    if (exc !== undefined && !Array.isArray(exc))
+      corrupt.push(`${f}: \`excluded\` is present and is not a list`);
+    else if (Array.isArray(exc))
+      for (const e of exc) {
+        if (!e || typeof e !== "object" || Array.isArray(e) || typeof e.class !== "string" || !e.class
+            || ("peeked" in e && typeof e.peeked !== "boolean")
+            || ("judgedElsewhere" in e && typeof e.judgedElsewhere !== "boolean")
+            || ("count" in e && !(typeof e.count === "number" && Number.isInteger(e.count) && e.count >= 0)))
+          corrupt.push(`${f}: \`excluded\` (an element is not \`{class, count, peeked, reason}\` — `
+            + `\`class\` a non-empty string, \`count\` a non-negative integer, \`peeked\`/\`judgedElsewhere\` booleans)`);
+        // An ABSENT `peeked` reads as FALSE, which is the fail-closed direction and what candor-rust's
+        // `#[serde(default)]` does on the same field: a producer that does not say it read the class has
+        // not said it read the class.
+        else if (e.peeked !== true && e.judgedElsewhere !== true) unread.push(e.class);
+      }
     // ⟨0.31⟩ the producer's PARTNER PROVENANCE, carried through verbatim and never recomputed — this
     // route has no target to anchor `net-partner` at, and re-classifying through the consumer's own
     // config is the re-derivation §3.1 forbids. A prefix can match several reports (a workspace writes
@@ -890,7 +975,12 @@ export function loadGateReport(prefix) {
   }
   const coverage = [...cov.entries()].sort((a, b) => b[1] - a[1] || byCodePoint(a[0], b[0]))
     .map(([name, calls]) => ({ name, calls }));
-  return { functions, analyzed, unanalyzed, coverage, judgedNothing, outOfScope, netPartners, hardFail: hardFail || corrupt.length > 0, corrupt };
+  // ⟨0.32⟩ `unread` is DEDUPED: a class is the unit of the answer (the producer publishes one entry per
+  // class), and a multi-report prefix — a workspace writing one report per member — otherwise repeats the
+  // same class once per member in a message whose job is to name what to re-scan. The verdict is unmoved
+  // either way; only the sentence is.
+  return { functions, analyzed, unanalyzed, coverage, judgedNothing, outOfScope, netPartners,
+           unread: [...new Set(unread)], hardFail: hardFail || corrupt.length > 0, corrupt };
 }
 // The returned graph carries a non-enumerable `partial` flag (the loadReport `hardFail` precedent):
 // true iff a sidecar file was MATCHED but failed to read/parse — its edges were DROPPED (disclosed on
