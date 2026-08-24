@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, discoverConfigText,
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
          policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules,
-         fatalPolicyErrors, refusalVerdict,
+         fatalPolicyErrors, refusalVerdict, sortViolations,
          unanswerableScoped, wholePolicyUnanswerable, reportUnits } from "./policy.mjs";
 import { hasReport } from "./query-core.mjs";
 import { printAgents, writeStdoutSync } from "./contract.mjs";
@@ -191,7 +191,18 @@ const put = (a, data, proseFn) => { if (!proseFn || wantJsonOut(a)) emit(data); 
 // disclosure, not an exit code"), so the gate exits 0 there. A note that sends the reader to a CI job which
 // then passes teaches them the warning is noise — the disclosure discrediting itself. The count-0 sentence
 // is also the more urgent one and says so: nothing downstream fails closed on those bytes.
-const gateLine = (comp) => (comp.unanalyzed.length || comp.unreadable?.length
+//
+// ⟨0.32⟩ THE UNREAD-CLASS CAUSE GETS ITS OWN SENTENCE, because both of the others are FALSE of it in
+// opposite directions: "exits 2 over these bytes" is unqualified and these verbs hold no policy to say it
+// under, while "exits 0 over a judged-nothing report" names a cause that is not present and sends the
+// reader to a CI job that will pass. `gate --report` can only ever evaluate a deny-family rule — measured
+// 2026-08-24, all four engines refuse an `allow`-only policy as NO RULES and a `forbid` rule as
+// unevaluable on that route — so the exit is a certainty once a policy exists; the gap is that none does
+// here. Checked FIRST, because a report can carry an unread class and unanalyzed units together and this
+// is the sentence naming the cause the other two do not.
+const gateLine = (comp) => (comp.unread?.length && !comp.unanalyzed.length && !comp.unreadable?.length
+  ? "`gate --report` exits 2 over these bytes under any policy it can evaluate (they are all `deny`/`pure`), and this verb holds none — so NOTHING DOWNSTREAM IS FAILING CLOSED ON IT HERE and this note is the whole of the warning."
+  : comp.unanalyzed.length || comp.unreadable?.length
   ? "`gate --report` exits 2 over these bytes."
   : "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU — `gate --report` exits 0 over a judged-nothing report (⟨0.24⟩: a disclosure, not an exit code), so this note is the whole of the warning.");
 
@@ -225,6 +236,17 @@ const incompleteAnswerNote = (comp, soWhat, tail) => {
     causes.push(`include ${comp.noManifest.length} report(s) carrying NO \`analyzed\` manifest at all`);
   if (comp.unreadable?.length)
     causes.push(`include ${comp.unreadable.length} file(s) that could not be parsed at all`);
+  // ⟨0.30⟩/⟨0.32⟩ THE TWO SCOPE CAUSES, which `mustHedge` has counted since ⟨0.30⟩ and this sentence
+  // never named. Over a report whose ONLY cause is one of them the head came out as
+  // `⚠ INCOMPLETE — the report(s) under this locator , so …` — an EMPTY clause, because `causes` was
+  // built from the three manifest rows alone. A hedge whose sentence says nothing is the deleted
+  // disclosure arriving inside the disclosure; candor-rust and candor-java each measured the same line
+  // on the same rung. It was unreachable here while the unread cause was kept out of `mustHedge`, and
+  // reachable on nearly every no-policy report the moment it was not.
+  if (comp.outOfScope?.length)
+    causes.push(`name ${comp.outOfScope.length} function(s) OUTSIDE the scan's scope performing an effect the producing scan's policy DENIED`);
+  if (comp.unread?.length)
+    causes.push(`declare ${comp.unread.length} exclusion class(es) the scan did NOT READ (\`excluded[].peeked: false\`)`);
   console.log(`candor-ts: ⚠ INCOMPLETE — the report(s) under this locator ${causes.join(", and ")}, so ${soWhat}:`);
   for (const u of comp.unanalyzed) console.log(`    ${u.path}${u.reason ? `  (${u.reason})` : ""}`);
   if (comp.judgedNothing.length)
@@ -233,6 +255,10 @@ const incompleteAnswerNote = (comp, soWhat, tail) => {
     console.log(`    ${f} — no \`analyzed\` manifest (a pre-⟨0.21⟩ producer): it makes no claim about what was judged, so its silence licenses none either. Re-scan with a current engine.`);
   for (const f of comp.unreadable ?? [])
     console.log(`    ${f} — could not be parsed (corrupt or mid-write), so whatever it says is not in this answer`);
+  for (const o of comp.outOfScope ?? [])
+    console.log(`    ${o.fn ?? "(unnamed)"} — OUTSIDE the producing scan's scope: it performs ${(o.effects ?? []).join(", ")}, and the gate did not judge it`);
+  for (const c of comp.unread ?? [])
+    console.log(`    ${c} — this exclusion class went UNREAD (\`excluded[].peeked: false\`): its effects are absent because nothing looked, not because there are none. Re-run the producing scan WITH a \`deny\`/\`pure\` policy so the peek reads it (candor-ts <dir> --policy <file>)`);
   console.log(`    ${tail} ${gateLine(comp)}`);
 };
 
@@ -2266,7 +2292,9 @@ switch (cmd) {
     // actually participated; both routes copy that one record, and byte-equality holds by construction.
     // Same position as the scan route puts it, for the same reason as `policyVocabulary` above.
     if (g.netPartners?.length) gverdictObj.netPartners = g.netPartners;
-    gverdictObj.violations = gviol;
+    // ⟨0.32⟩ SPEC §2 — the sort key includes the unit identity. See `sortViolations`; the SAME call
+    // is made on the scan route, because §3.1 makes the two documents byte-equal.
+    gverdictObj.violations = sortViolations(gviol);
     if (gunevaluated.length) gverdictObj.unevaluated = gunevaluated;
     // ⟨0.27⟩ SPEC §4 `zeroMatch` — the same list the stderr lines above carry, in the machine channel,
     // in the same position the scan route puts it (§3.1's byte-equality MUST binds the two documents).

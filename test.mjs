@@ -1986,6 +1986,19 @@ export function place(db: DatabaseSync): void { save(db); }`,
   const viol = v?.violations?.find((x) => x.fn === "src.domain.place");
   check("--gate-json names the violating fn with its rule", viol?.rule === "AS-EFF-006", JSON.stringify(v?.violations)?.slice(0, 160));
   check("--gate-json carries the denied effects", Array.isArray(viol?.effects) && viol.effects.includes("Db"), JSON.stringify(viol?.effects));
+  // ⟨0.32⟩ SPEC §2 — **A VERDICT ROW CARRIES THE UNIT IT IS ABOUT.** `hash` BESIDE `fn`, never instead
+  // of it: the NAME is what a policy scope matches and what a human reads, and swapping in the qualified
+  // form would silently stop every scoped rule matching. THE KEY SET IS PINNED EXACTLY rather than
+  // asserted key by key, so a later rung that quietly grows a sixth field fails here instead of passing
+  // an assertion that reads only the keys it already knows about.
+  check("⟨0.32⟩ --gate-json row carries the §2.2 unit identity beside the name",
+        typeof viol?.hash === "string" && viol.hash.endsWith("#place"),
+        `hash=${JSON.stringify(viol?.hash)}`);
+  check("⟨0.32⟩ …and `fn` is still the NAME a scope matches (identity is ADDED, never substituted)",
+        viol?.fn === "src.domain.place", `fn=${JSON.stringify(viol?.fn)}`);
+  check("⟨0.32⟩ …and a single-member verdict row's key set is EXACTLY {rule, fn, hash, effects, detail}",
+        JSON.stringify(Object.keys(viol ?? {}).sort()) === JSON.stringify(["detail", "effects", "fn", "hash", "rule"]),
+        JSON.stringify(Object.keys(viol ?? {})));
 
   // clean case: --gate-json with no gate configured writes ok:true, []
   const gp2 = path.join(d, "gate2.json");

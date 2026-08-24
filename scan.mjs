@@ -29,7 +29,7 @@ import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText,
-         reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules, fatalPolicyErrors, refusalVerdict,
+         reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules, fatalPolicyErrors, refusalVerdict, sortViolations,
          netClassResolver, resolveReasonClasses } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents, writeStdoutSync } from "./contract.mjs";
@@ -6419,6 +6419,15 @@ const netPartners = parseNetPartners(discoverConfigText(target), netPartnerErrs)
 // ⟨0.31⟩ the declared partners that actually MOVED a classification in this run — see the envelope key.
 const partnersUsed = new Set();
 for (const e of netPartnerErrs) console.error(`candor-ts: ${e.why} — ${e.raw}`);
+// ⟨0.32⟩ ONE DERIVATION OF THE §2.2 UNIT IDENTITY, because it is now written in two places — the report
+// entry below, and the AS-EFF-005 verdict row, which iterates `inferred` and holds only a name. §3.1
+// makes this route's verdict byte-equal to `gate --report`'s, and that route copies this string off the
+// wire; two derivations of one identity is exactly how the two drift by a package suffix. Empty for a
+// name this scan has no record of, and empty is OMITTED from the row rather than guessed at.
+const unitHash = (name) => {
+  const rec = fns.get(name);
+  return rec ? `${pkgName}#${rec.local}` : "";
+};
 const functions = [];
 for (const [name, rec] of fns) {
   const inf = [...inferred.get(name)].sort();
@@ -6428,7 +6437,7 @@ for (const [name, rec] of fns) {
   const entry = {
     fn: name,
     loc: rec.loc,
-    hash: `${pkgName}#${rec.local}`, // SPEC §2: the cross-package join key (package + local tail)
+    hash: unitHash(name), // SPEC §2: the cross-package join key (package + local tail)
     inferred: inf,
     direct: [...rec.direct].sort(),
     // ⟨0.26⟩ `declared`/`undeclared`/`overdeclared` are DELIBERATELY ABSENT. They are the §5
@@ -7661,7 +7670,11 @@ if (baselinePath !== null) {
         // Default OFF preserves the ⟨0.16⟩ advisory posture (Unknown-gains = resolution noise). Mirrors
         // the reference engine (candor-java Policy.checkBaseline).
         if (unknownRatchet) {
-          gateViolations.push({ rule: "AS-EFF-005", fn: name, effects: ["Unknown"],
+          // ⟨0.32⟩ `hash` — SPEC §2, every verdict row carries the unit it is about. Built here rather
+          // than read off an entry because this loop walks `inferred`, not `functions`; `unitHash` is the
+          // one derivation, shared with the report entry.
+          gateViolations.push({ rule: "AS-EFF-005", fn: name, ...(unitHash(name) ? { hash: unitHash(name) } : {}),
+            effects: ["Unknown"],
             detail: `\`${name}\` gained an unresolved call (Unknown) not in the baseline — a NEW blind spot `
               + `(unknown-ratchet); resolve it, or regenerate the baseline to grandfather it` });
         } else {
@@ -7669,7 +7682,8 @@ if (baselinePath !== null) {
         }
         continue;
       }
-      gateViolations.push({ rule: "AS-EFF-005", fn: name, effects: real,
+      gateViolations.push({ rule: "AS-EFF-005", fn: name, ...(unitHash(name) ? { hash: unitHash(name) } : {}),
+        effects: real,
         detail: `\`${name}\` gained effect { ${real.join(", ")} } not present in the baseline` });
     }
     if (unknownOnly.length) {
@@ -7788,7 +7802,14 @@ if (policyPath !== null) {
         const p = discoverConfigPath(policyVocabularyAnchor(policyPath, target));
         if (p) policyVocabulary = { config: p, aliases: gatePolicy.aliasesUsed };
       }
-      const gateOut = evaluatePolicy(gatePolicy, functions, cg, incompleteMap, netPartners);
+      // ⟨0.32⟩ …and the NAME -> unit-identity table, so an AS-EFF-009/011 row about a PURE function
+      // still carries its unit. A pure function has no report ENTRY, so the entry-list fallback inside
+      // `evaluatePolicy` cannot see it — and `forbid`'s violator is typically pure. `unitHash` is the one
+      // derivation, shared with the report entries above.
+      const gateHashByName = new Map();
+      for (const name of fns.keys()) { const h = unitHash(name); if (h) gateHashByName.set(name, h); }
+      const gateOut = evaluatePolicy(gatePolicy, functions, cg, incompleteMap, netPartners,
+                                     null, null, null, gateHashByName);
       // ⟨0.27⟩ SPEC §4 — a rule that bound NO function is disclosed, never scored as satisfied. The exit
       // code is deliberately untouched: a zero-match rule is legitimate when one policy is shared across
       // repositories and a layer exists in only some of them, so refusal would make a shared policy
@@ -7946,7 +7967,9 @@ if (gateJsonPath) {
   // it independently they could not agree. Reading the producer's record on both routes is what makes
   // the byte-equality hold instead of break. Same position in both, for the same reason as the line above.
   if (envelope.netPartners) verdictObj.netPartners = [envelope.netPartners];
-  verdictObj.violations = gateViolations;
+  // ⟨0.32⟩ SPEC §2 — the sort key includes the unit identity. See `sortViolations`; the SAME call
+  // is made on the `gate --report` route, because §3.1 makes the two documents byte-equal.
+  verdictObj.violations = sortViolations(gateViolations);
   // ⟨0.24⟩ …and when a certain violation DOMINATED a policy refusal, the refusal is disclosed here rather
   // than deleted (SPEC §3.1: "the RAW policy line, verbatim", one entry per rule, omitted when empty). A
   // consumer reading exit 1 must be able to see that the POLICY half of the gate never ran — the same

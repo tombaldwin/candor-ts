@@ -8,6 +8,80 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **A verdict row could not say WHICH unit it was about — the ⟨0.32⟩ identity clause, closed.**
+  SPEC §2: *"a verdict row MUST carry enough identity for a consumer to tell two units apart… the sort
+  key MUST include that identity."* MEASURED, `gate --report` over two reports whose members both define
+  `go` and both violate `deny Exec` — two BYTE-IDENTICAL rows:
+
+  ```
+  { "rule": "AS-EFF-006", "fn": "go", "effects": ["Exec"], "detail": "`go` performs { Exec } …" },
+  { "rule": "AS-EFF-006", "fn": "go", "effects": ["Exec"], "detail": "`go` performs { Exec } …" }
+  ```
+
+  A reader cannot tell two broken members from one listed twice, and a consumer that fingerprints on
+  name alone — candor's own SARIF action did — hides one finding behind the other.
+
+  **`hash` BESIDE `fn`, never instead of it.** §2.2 already binds a consumer to join a verdict row back
+  to its report entry BY HASH, so a row that omits it forces exactly the name join that clause forbids;
+  and the NAME is what a policy scope matches, so substituting the qualified form would silently stop
+  every scoped rule matching — a false green introduced by fixing a false green. **In this engine the
+  identity is the PAIR**, and that is not a weaker port: a `hash` here is `<package>#<local tail>` and is
+  measurably not unique (13 shared by ≥2 distinct `fn`s in hono alone), which is why `reportUnits` keys
+  by `hash` REFINED BY `fn`. A row carries the module-qualified `fn` and the package-qualified `hash`,
+  and the pair is what tells two units apart.
+
+  **AND `forbid`'S VIOLATOR IS TYPICALLY PURE**, which is where the first cut of this got it wrong. A
+  function that merely CALLS across a layer performs nothing, so it has NO REPORT ENTRY — and an
+  identity derived from the entry list cannot see it. MEASURED: the AS-EFF-009 row for exactly that
+  shape came out with no `hash` here while candor-rust, candor-java and candor-swift all emitted one,
+  because they build it from the scan's own name table. `scan.mjs` now passes `unitHash` over `fns`,
+  which holds every function including the pure ones; the entry-list fallback stays for the callers with
+  no such table (MCP, LSP, the unit tests).
+
+  **AND THE SORT KEY IS HALF THE CLAUSE.** `(rule, detail)` ties on the twins — `detail` is rendered
+  from the NAME — and §3.3.1 makes the document's ORDER part of the byte-equality between
+  `scan --policy` and `gate --report`. This engine had **no sort at all** on either route: order was
+  `functions`-array order crossed with policy-rule order, which agrees between the routes only for as
+  long as the report is written in the order the scan discovered. `sortViolations` is one definition,
+  called from both assembly sites, keyed `(rule, detail, hash)` and compared with `<`/`>` (⟨0.24⟩
+  §3.3.1: locale-INDEPENDENT).
+
+  **NOT ADDITIVE, stated plainly:** a new key on the violation record means a verdict document is no
+  longer byte-identical to a pre-⟨0.32⟩ one. Unavoidable — the MUST is that the row carry identity, and
+  no arrangement of the four existing keys does. Everything that can be additive is: every pre-existing
+  key keeps its name, position and value, and `hash` is OMITTED when the producer has none to give (a
+  hand-authored report, which §3.1 says this route serves) — ⟨0.26⟩'s *cannot answer*, never a
+  fabricated id. Route byte-equality re-measured on a real scan-then-gate pipeline: identical.
+  Conformance PART 68 pins it four-way; its `rev` control re-lays the same two reports under swapped
+  file stems, so an engine ordering by the discovery walk fails where one ordering by identity passes.
+
+- **`tour` said "nothing hidden" over a class the scan never opened — the ⟨0.32⟩ descriptive hedge,
+  ruled and closed four-way.** Over a report whose `excluded` names a class with `peeked: false`, this
+  engine, candor-rust and candor-swift printed *"candor: nothing hidden — every effect sits where its
+  name says it should"* at exit 0, while candor-java hedged and named the class. **candor-java was
+  right, and the ruling is now in a comment in all four engines so it is not re-litigated.**
+
+  **IT IS A DISCLOSURE, NOT A VERDICT** — `tour` answers no `ok` and has no exit-code obligation, so
+  ⟨0.24⟩'s advisory-verb pessimism MUST does not reach it and the exit code is unchanged. What reaches
+  it is §2 ⟨0.28⟩ (*"any verb whose output could be read as a negative finding about the code — a
+  verdict, an empty result set, or a zero count"*) and §3.1 ⟨0.18⟩, which already forbids **that exact
+  sentence** over a ≥⅓-Unknown graph. An unread exclusion class is the same ignorance by another route,
+  and the ⅓ threshold structurally cannot see it: an unread unit contributes no entry, so it moves
+  neither the numerator nor the denominator.
+
+  **THE ARGUMENT THIS FILE USED TO CARRY WAS THE WRONG WAY ROUND**: *"the verbs `mustHedge` serves carry
+  no policy, so there is nothing to condition it on."* The condition ⟨0.32⟩ states is the QUESTION IN
+  FORCE, and a verb with no policy is not asking a NARROWER question than `deny Exec` — it is asking the
+  widest one there is. The two verbs that DO carry a policy still read `unread` directly for their exit
+  code, so `fix-gate`/`unverified --strict` are untouched.
+
+  Two disclosure defects fell out of wiring it: the note's head clause was built from the three MANIFEST
+  rows alone, so a report whose ONLY cause was `outOfScope` or an unread class produced
+  `⚠ INCOMPLETE — the report(s) under this locator ,` — a hedge that names nothing, which is the deleted
+  disclosure arriving inside the disclosure (candor-rust and candor-java each measured the same line on
+  the same rung); and the tail sentence would have claimed `gate --report` exits 2 with no policy in
+  force to say it under. Both causes now have a sentence, and the unread cause has its own tail.
+
 - **⟨0.32⟩ …and there were FIVE routes, not four: the EDITOR showed a clean file over code nothing had
   read.** The entry below is titled *four routes, one rule*. `lsp.mjs` had zero occurrences of
   `excluded`, `peeked` or `unread`, and it is the server `integrations/vscode` and the JetBrains plugin

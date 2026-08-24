@@ -655,6 +655,29 @@ export function refusalVerdict(spec, reason, unevaluated = null) {
   return o;
 }
 
+/** ⟨0.32⟩ **THE VERDICT'S ROW ORDER — SPEC §2: "the sort key MUST include that identity".**
+ *
+ * The other half of the ⟨0.32⟩ identity clause, stated separately in the spec because carrying `hash`
+ * in the ROW without carrying it in the KEY is half a fix. `(rule, detail)` TIES on two units that
+ * share a name — `detail` is built from the NAME — so the pair's order was whatever each route happened
+ * to accumulate in, and §3.3.1 makes the document's ORDER part of the byte-equality between
+ * `scan --policy` and `gate --report`. This engine had NO sort at all on either route: order was the
+ * `functions`-array order crossed with policy-rule order, which agrees between the two routes only for
+ * as long as the report is written in the order the scan discovered.
+ *
+ * ONE definition, called from both assembly sites — two copies of a rule is how this family ended up
+ * with two element rules for the manifest reader. Compared with `<`/`>` and never `localeCompare`:
+ * ⟨0.24⟩ §3.3.1 requires every ordering to be locale-INDEPENDENT. `Array.prototype.sort` has been
+ * stable since ES2019, so rows with an equal key keep their arrival order.
+ */
+export function sortViolations(violations) {
+  const c = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
+  return violations.sort((a, b) =>
+    c(a?.rule ?? "", b?.rule ?? "")
+    || c(a?.detail ?? "", b?.detail ?? "")
+    || c(a?.hash ?? "", b?.hash ?? ""));
+}
+
 /** §6.2 scope match: by NAME SEGMENT, last segment a prefix.
  * Segments split on BOTH "." and "::" — Rust/Java qualify with "::" while TS uses ".", and a shared
  * policy must match across engines (a `Foo::bar` scope authored against Rust was inert in TS before). */
@@ -1041,18 +1064,64 @@ export function classFilterExcludes(r, entry, eff, reasonAcc, netClassOf, units 
   return false;
 }
 
-export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map(), partners = new Set(), netClasses = null, withhold = null, units = null) {
+export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map(), partners = new Set(), netClasses = null, withhold = null, units = null, hashByName = null) {
   const out = [];
   // `Llm` ⟨0.13⟩ reaches the SAME hosts surface as Net (an Llm host WAS captured as a Net host literal).
   const surfaces = { Net: "hosts", Llm: "hosts", Exec: "cmds", Fs: "paths", Db: "tables" };
   // §6.2 ⟨0.19⟩: `reasonClass` (all classes on the fn) rides an AS-EFF-006 Unknown violation; ⟨0.20⟩ `netClass`
   // (all destination classes on the fn) rides a Net violation. Both omitted when empty (byte-identical verdict).
-  const push = (rule, fn, effects, detail, reasonClass, netClass) => {
-    const rec = { rule, fn, effects, detail };
+  //
+  // ⟨0.32⟩ **AND `hash` — THE UNIT THIS ROW IS ABOUT (SPEC §2).** *"A verdict row MUST carry enough
+  // identity for a consumer to tell two units apart… the sort key MUST include that identity."* MEASURED
+  // on this engine 2026-08-24, `gate --report` over two reports whose members both define `go` and both
+  // violate `deny Exec`: two BYTE-IDENTICAL rows, `{rule, fn, effects, detail}`, with nothing
+  // attributing either to a package. A reader cannot tell two broken members from one listed twice, and
+  // a consumer that fingerprints on name alone — candor's own SARIF action did — hides one finding
+  // behind the other.
+  //
+  // `hash` AND NOT `package`/`loc`, because §2.2 already binds a consumer to join a verdict row back to
+  // its report entry BY HASH; a row that omits it forces exactly the name join that clause forbids.
+  // BESIDE `fn`, NEVER INSTEAD OF IT: the NAME is what a policy scope matches and what a human reads,
+  // and swapping in the qualified form would silently stop every scoped rule matching — a false green
+  // introduced by fixing a false green. Omitted when the producer has none to give (a hand-authored
+  // report with no `hash`, which §3.1 says this route serves): absent is ⟨0.26⟩'s *cannot answer*,
+  // never a fabricated id. Positioned directly after `fn`, so the row reads `{rule, fn, hash, …}` in
+  // every engine.
+  //
+  // **AND IN THIS ENGINE THE IDENTITY IS THE PAIR, NOT `hash` ALONE — which is not a weaker port, it is
+  // the same key `reportUnits` already uses.** A rust `hash` is a DefPathHash, unique per unit; THIS
+  // engine emits `<package>#<local tail>`, and that is measurably not unique — on hono's own sources 13
+  // hashes are shared by two or more distinct `fn`s, five `handle` functions all keying `src#handle`
+  // (see `reportUnits`, which keys by `hash` REFINED BY `fn` for exactly that reason). So a row here
+  // carries the module-qualified `fn` AND the package-qualified `hash`, and the pair is what tells two
+  // units apart. Emitting `hash` alone would be the identity §2.2 forbids joining on.
+  const push = (rule, fn, effects, detail, reasonClass, netClass, hash) => {
+    const rec = { rule, fn };
+    if (hash) rec.hash = hash;
+    rec.effects = effects;
+    rec.detail = detail;
     if (reasonClass && reasonClass.length) rec.reasonClass = reasonClass;
     if (netClass && netClass.length) rec.netClass = netClass;
     out.push(rec);
   };
+  // ⟨0.32⟩ NAME -> unit identity, for the two rule codes that iterate the CALL GRAPH rather than the
+  // entry list (AS-EFF-009/011) and so hold a name where the others hold the entry itself. Scan-route
+  // only in practice — `gate --report` passes an EMPTY callgraph, because a report's `calls` is
+  // effect-relevant while those rules match on NAME, so they are refused as unevaluable there — and a
+  // scan gates ONE analysis world, in which a name identifies a unit.
+  //
+  // THE CALLER'S MAP WINS, and that is not a convenience — `forbid`'s violator is TYPICALLY PURE (a
+  // `model.outer` that merely CALLS across a layer performs nothing), and a pure function has NO REPORT
+  // ENTRY, so the fallback below cannot see it. MEASURED 2026-08-24: the AS-EFF-009 row for exactly that
+  // shape came out with no `hash` here while candor-java and candor-swift both emitted one, because they
+  // build the identity from the scan's own name table rather than from the entry list. scan.mjs passes
+  // `unitHash` over `fns`, which holds every function including the pure ones. The fallback stays for the
+  // callers that have no such table (the MCP/LSP routes and the unit tests): FIRST writer wins rather
+  // than last, so its value is a function of the entry list and not of iteration order.
+  const hashOf = hashByName ?? new Map();
+  if (!hashByName)
+    for (const f of functions)
+      if (typeof f?.hash === "string" && f.hash && !hashOf.has(f.fn)) hashOf.set(f.fn, f.hash);
   // Reason-scoped Unknown: the Unknown reason CLASS travels the call graph the same way the Unknown
   // EFFECT does. ONE copy of that resolution, shared with the disclosure side — see resolveReasonClasses.
   const reasonAcc = resolveReasonClasses(functions, callgraph, units);
@@ -1090,7 +1159,7 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
         const rc = kept.includes("Unknown") ? [...(reasonAcc.get(uk) ?? [])].sort() : undefined;
         // ⟨0.20⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
         const ncv = kept.includes("Net") ? netClassOf(f) : undefined;
-        push("AS-EFF-006", f.fn, kept, `\`${f.fn}\` performs { ${kept.join(", ")} }, forbidden by policy: \`${r.raw}\``, rc, ncv);
+        push("AS-EFF-006", f.fn, kept, `\`${f.fn}\` performs { ${kept.join(", ")} }, forbidden by policy: \`${r.raw}\``, rc, ncv, f.hash);
       }
     }
     for (const r of pol.allow) {
@@ -1106,10 +1175,10 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       const surfaceIncomplete = incomplete.get(f.fn)?.has(r.effect)
         || (r.effect === "Llm" && incomplete.get(f.fn)?.has("Net"));
       if (reached.length === 0 || surfaceIncomplete) {
-        push("AS-EFF-008", f.fn, [r.effect], `\`${f.fn}\` performs ${r.effect} with no visible literal — the surface cannot be certified: \`${r.raw}\``);
+        push("AS-EFF-008", f.fn, [r.effect], `\`${f.fn}\` performs ${r.effect} with no visible literal — the surface cannot be certified: \`${r.raw}\``, undefined, undefined, f.hash);
       } else {
         const bad = reached.filter((v) => !literalAllowed(r.effect, v, r.values));
-        if (bad.length) push("AS-EFF-008", f.fn, [r.effect], `\`${f.fn}\` reaches { ${bad.join(", ")} } outside the allowlist: \`${r.raw}\``);
+        if (bad.length) push("AS-EFF-008", f.fn, [r.effect], `\`${f.fn}\` reaches { ${bad.join(", ")} } outside the allowlist: \`${r.raw}\``, undefined, undefined, f.hash);
       }
     }
   }
@@ -1127,7 +1196,7 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
           queue.push(c);
         }
       }
-      if (hit) push("AS-EFF-009", fn, [], `\`${fn}\` reaches into a forbidden layer (via \`${hit}\`), violating policy: \`${r.raw}\``);
+      if (hit) push("AS-EFF-009", fn, [], `\`${fn}\` reaches into a forbidden layer (via \`${hit}\`), violating policy: \`${r.raw}\``, undefined, undefined, hashOf.get(fn));
     }
   }
   // ⟨0.29⟩ AS-EFF-011 — `only A -> B …`: a fn in A may reach A and the listed scopes, NOTHING else. The
@@ -1157,7 +1226,7 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
       // ⟨0.29⟩ ITS OWN CODE, not `forbid`'s — a rule code is what a CI suppression keys on, and these two
       // are opposite constructs. Sharing 009 would make an existing `forbid` suppression silently mute
       // `only` violations its author never accepted.
-      if (hit) push("AS-EFF-011", fn, [], `\`${fn}\` reaches \`${hit}\`, which this permission rule does not permit: \`${r.raw}\``);
+      if (hit) push("AS-EFF-011", fn, [], `\`${fn}\` reaches \`${hit}\`, which this permission rule does not permit: \`${r.raw}\``, undefined, undefined, hashOf.get(fn));
     }
   }
   // ⟨0.27⟩ SPEC §4 — A RULE WHOSE SCOPE BOUND NO FUNCTION IS UNANSWERABLE, AND IS DISCLOSED RATHER THAN

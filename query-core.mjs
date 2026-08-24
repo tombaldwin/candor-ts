@@ -567,14 +567,12 @@ export function reportCompleteness(prefix) {
            noManifest: reportNoManifestFiles(prefix),
            // ⟨0.30⟩ the peek's findings, so an advisory verb keying `--strict` on this object is at least
            // as pessimistic as the gate over the same bytes (the ⟨0.24⟩ MUST).
-           // ⟨0.32⟩ …and the classes the producing scan never OPENED. NOT an arm of `mustHedge` below, and
-           // that is a decision rather than an omission: `unread` is non-empty on almost every report a
-           // no-policy scan writes (any tree with a test file, a `.d.ts` or a `dist/`), and the verbs
-           // `mustHedge` serves carry no policy — so there is nothing to condition it on and a hedge on
-           // every run trains the reader to ignore it, which is the argument this file already makes for
-           // omitting `coverage`. The two verbs that DO carry a policy (`fix-gate`, `unverified`) read this
-           // field directly and apply the gate's own condition to it: only a `deny`/`pure` rule's answer
-           // depends on code outside the scan's scope.
+           // ⟨0.32⟩ …and the classes the producing scan never OPENED. This IS an arm of `mustHedge`
+           // below — see the ruling there. It used to read *"NOT an arm … the verbs `mustHedge` serves
+           // carry no policy, so there is nothing to condition it on"*, and that was overturned four-way
+           // on 2026-08-24. The two verbs that DO carry a policy (`fix-gate`, `unverified`) still read
+           // this field directly for their EXIT code and apply the gate's own condition to it: only a
+           // `deny`/`pure` rule's answer depends on code outside the scan's scope.
            unread: reportUnread(prefix),
            ...(() => {
              const o = reportOutOfScope(prefix);
@@ -597,10 +595,46 @@ export function reportCompleteness(prefix) {
  * claim it got LESS far than the gate on identical input, the mirror of the over-claim the strict exit
  * exists to prevent. So count-0 reaches both DISCLOSURE channels through this predicate and stops at the
  * exit code; see `advisoryAnswer`, whose exit-bearing callers key `--strict` on manifest + unreadable.
+ *
+ * ⟨0.32⟩ **AND `unread` IS AN ARM OF THIS — RULED 2026-08-24 AFTER A FOUR-WAY DIVERGENCE. DO NOT
+ * RE-LITIGATE IT HERE.** Over a report whose `excluded` names a class the scan never opened, `tour`
+ * printed the bare *"nothing hidden — every effect sits where its name says it should"* at exit 0 in
+ * this engine, candor-rust and candor-swift, while candor-java hedged and named the class. **candor-java
+ * was right.**
+ *
+ * **IT IS A DISCLOSURE, NOT A VERDICT, AND IT MUST NOT MOVE AN EXIT CODE** — which is why the arm is
+ * here and nowhere near the `--strict` predicate. ⟨0.24⟩'s advisory-verb pessimism MUST binds verbs that
+ * answer `ok`; `tour` answers none and has no exit-code obligation, so that clause does not reach it.
+ * What reaches it is SPEC §2 ⟨0.28⟩, which widens the re-disclosure MUST to *"any verb whose output
+ * could be read as a negative finding about the code — a verdict, an empty result set, or a zero
+ * count"*, and SPEC §3.1 ⟨0.18⟩, which already forbids THIS EXACT SENTENCE over a ≥⅓-Unknown graph. An
+ * unread exclusion class is the same ignorance arriving by a different route, and the ⅓ threshold
+ * structurally CANNOT see it: an unread unit contributes no entry, so it moves neither the numerator
+ * nor the denominator.
+ *
+ * **AND THE ARGUMENT THAT KEPT IT OUT WAS THE WRONG WAY ROUND.** Three engines reasoned *"these verbs
+ * carry no policy, so there is nothing to condition it on"*. The condition ⟨0.32⟩ states is the QUESTION
+ * IN FORCE, and a verb with no policy is not asking a NARROWER question than `deny Exec` — it is asking
+ * the widest one there is, the whole effect surface. A `deny`/`pure` rule's answer can depend on unread
+ * code; an `allow`/`forbid`/`only`/`layer` policy's answer cannot; a descriptive verb's answer always
+ * can.
+ *
+ * **THE TRIGGER IS THE GATE'S, MINUS THE POLICY CONDITION**: `peeked !== true` with no
+ * `judgedElsewhere`, off the same key through the same reader (`reportUnread`), `count` IGNORED —
+ * measured 2026-08-24, all four gates refuse over a `count: 0` unread class and certify over a
+ * `judgedElsewhere: true` one. One matcher, so a report that earns an unhedged `tour` is exactly a
+ * report `gate --report` can certify. The NOISE objection — this fires on nearly every no-policy report
+ * — is real, and it is answered by the REMEDY rather than by silence: scan with the policy, the peek
+ * reads the class, `peeked` turns true and the hedge goes away.
+ *
+ * **KNOWN RESIDUAL, stated rather than asserted away:** `peeked: true` means the class was READ, not
+ * ANALYZED — the peek looks only for effects the PRODUCER's policy denied — so an undenied effect inside
+ * a peeked class is still outside `tour`'s graph and outside this hedge. That is the gate's residual
+ * too (SPEC §2 ⟨0.32⟩ files it), and closing it is a rung, not a fix.
  */
 export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing?.length
                                          || c.noManifest?.length || c.unreadable?.length
-                                         || c.outOfScope?.length));
+                                         || c.outOfScope?.length || c.unread?.length));
 
 /** ⟨0.30⟩ The peek's findings across the reports under a locator. Read leniently HERE (a malformed key is
  *  the gate's refusal to make, and this feeds a disclosure) but non-emptiness raises the same hedge the
@@ -688,6 +722,13 @@ export function completenessFields(c) {
   // safe under every cause. It is separate from `judgedNothing` because that key is pinned to "reports
   // declaring `analyzed.count: 0`" and a row-3 report declares nothing: merging them would make one key
   // mean two things and lose the distinction §2's three-row table exists to draw.
+  // ⟨0.32⟩ `unread` (an exclusion class nothing opened) raises the flag and adds NO key of its own
+  // either, by the same rule as `unreadable` one comment up — and deliberately, now that it hedges the
+  // descriptive verbs. candor-rust publishes an `unread` array on its ADVISORY documents and is the only
+  // engine that does (measured 2026-08-24: `fix-gate --json` over one unread report — rust
+  // `{"incomplete": true, "unread": […]}`, java and swift `{"incomplete": true}` alone). Minting it here,
+  // on six verbs where three engines publish nothing, is §3.3.1's "four independent guesses with a
+  // conformance failure scheduled". The prose note names the class; the flag is the wire surface.
   return { incomplete: true,
            ...(c.unanalyzed?.length ? { unanalyzed: c.unanalyzed } : {}),
            ...(c.judgedNothing?.length ? { judgedNothing: c.judgedNothing } : {}),

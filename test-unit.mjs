@@ -23,7 +23,7 @@ import {
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
   discoverConfigPolicy, evaluatePolicy, reasonClass, parseUnknownAliases, parseNetPartners,
-  resolveReasonClasses,
+  resolveReasonClasses, sortViolations, reportUnits,
 } from "./policy.mjs";
 import {
   isTestPath, kappa, kappaKnows, fsKind, commandHeadEffects, hostLiteral, tablesInSql,
@@ -134,6 +134,39 @@ test("config unknown-alias: resolves a user name, rejects a reserved one", () =>
   // an UNDEFINED alias name is dropped-with-warning → empty filter (behaves like bare Unknown[*])
   assert.deepEqual(parsePolicy("deny Net Unknown[nope] api\n", aliases).deny[0].unknownClasses, []);
 });
+// ── ⟨0.32⟩ SPEC §2 — THE VERDICT-ROW IDENTITY CLAUSE ─────────────────────────────────────────────
+// *"A verdict row MUST carry enough identity for a consumer to tell two units apart… the sort key MUST
+// include that identity."* MEASURED on this engine 2026-08-24: two reports whose members both define
+// `go` and both violate `deny Exec` produced two BYTE-IDENTICAL rows. A reader cannot tell two broken
+// members from one listed twice, and a consumer that fingerprints on name alone — candor's own SARIF
+// action did — hides one finding behind the other. Both halves are asserted, because identity in the
+// ROW without identity in the KEY is half a fix: §3.3.1 makes the document's ORDER part of the
+// byte-equality between `scan --policy` and `gate --report`, and the two routes accumulate differently.
+test("⟨0.32⟩ evaluatePolicy: a verdict row carries the unit, beside the name, and the sort key uses it", () => {
+  const twins = [
+    { fn: "go", hash: "b#go", inferred: ["Exec"], direct: ["Exec"] },
+    { fn: "go", hash: "a#go", inferred: ["Exec"], direct: ["Exec"] },
+  ];
+  const rows = sortViolations(evaluatePolicy(parsePolicy("deny Exec\n"), twins, {}, new Map(), new Set(),
+                                             null, null, reportUnits(twins)));
+  assert.equal(rows.length, 2, "both twins violate");
+  assert.deepEqual(rows.map((r) => r.hash), ["a#go", "b#go"],
+                   "the SORT KEY breaks the tie the (rule, detail) pair leaves — `detail` is built from the NAME");
+  assert.deepEqual(rows.map((r) => r.fn), ["go", "go"],
+                   "`fn` stays the NAME on both rows: identity is ADDED, never substituted (a scope matches the name)");
+  assert.notDeepEqual(rows[0], rows[1], "THE DEFECT: two byte-identical rows a reader cannot tell apart");
+  // THE OVER-CHARGE CONTROL. The cheapest way to pass the row above is to put SOMETHING in every row;
+  // this pins the whole key set of a single-unit verdict, so a rung that grows a sixth field fails here.
+  const one = evaluatePolicy(parsePolicy("deny Exec\n"),
+                             [{ fn: "go", hash: "a#go", inferred: ["Exec"], direct: ["Exec"] }], {});
+  assert.deepEqual(Object.keys(one[0]).sort(), ["detail", "effects", "fn", "hash", "rule"]);
+  // …AND THE OTHER CONTROL: a producer with NO identity to give omits the field rather than inventing
+  // one. ⟨0.26⟩ — absent is *this producer cannot answer*, and §3.1 says this route serves a
+  // hand-authored report.
+  const bare = evaluatePolicy(parsePolicy("deny Exec\n"), [{ fn: "go", inferred: ["Exec"], direct: ["Exec"] }], {});
+  assert.equal("hash" in bare[0], false, "no `hash` on the wire beats a fabricated id");
+});
+
 test("evaluatePolicy: reason class propagates transitively to callers", () => {
   // caller inherits Unknown from a reflect-caused callee; only the callee has the direct reason.
   const functions = [
