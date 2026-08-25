@@ -2001,7 +2001,10 @@ switch (cmd) {
     // engine was the only one right, which is the signal to fix the other three rather than argue.
     { const wp = wholePolicyUnanswerable(fgpol, "a report route");
       if (wp.unevaluated.length) fgr.unevaluated = [...(fgr.unevaluated ?? []), ...wp.unevaluated]; }
-    const fgComp = reportCompleteness(prefix);
+    // ⟨0.33⟩ this verb's OWN deny/pure rules ride along so `reportCompleteness` can compare them against
+    // every gated report's `scannedUnder` — the ⟨0.24⟩ pessimism MUST, off the SAME reader `gate --report`
+    // uses (`reportUnaskedRules`).
+    const fgComp = reportCompleteness(prefix, fgpol.deny);
     const fgUnan = fgComp.unanalyzed;
     if (fgUnan.length) advisoryIncompleteNote("fix-gate", fgUnan);
     // ⟨0.28⟩ …and the count-0 cause, which reaches the DOCUMENT and the PROSE but deliberately NOT the exit
@@ -2027,12 +2030,15 @@ switch (cmd) {
     // `deny`/`pure` rule's answer depends on code outside the scan's scope), computed ONCE and handed to
     // both the document and the exit below so the two cannot disagree about a run.
     const fgUnread = fgpol.deny.length ? (fgComp.unread ?? []) : [];
-    // ⟨0.30⟩/⟨0.32⟩ THE TWO SCOPE CAUSES NOW REACH THE DOCUMENT, not just the exit. MEASURED before this
-    // argument existed: over a report carrying `outOfScope`, this verb printed `{"ok": true, "remedies":
+    // ⟨0.33⟩ the FOURTH cause — computed by `reportCompleteness` (structurally `[]` when `fgpol.deny` is
+    // empty), never re-derived here, for the identical reason `fgUnread` above rides one value.
+    const fgUnasked = fgComp.unaskedRules ?? [];
+    // ⟨0.30⟩/⟨0.32⟩/⟨0.33⟩ THE THREE SCOPE CAUSES NOW REACH THE DOCUMENT, not just the exit. MEASURED before
+    // this argument existed: over a report carrying `outOfScope`, this verb printed `{"ok": true, "remedies":
     // []}` AT EXIT 2 — the exit obeyed §3.2's "never MORE certain than the gate" while the document it
-    // printed certified. The exit expression below is unchanged for `outOfScope` and gains the ⟨0.32⟩ arm.
+    // printed certified. The exit expression below is unchanged for `outOfScope` and gains the ⟨0.32⟩/⟨0.33⟩ arms.
     emit(advisoryAnswer(fgr, fgUnan, fgComp.judgedNothing, fgComp.unreadable, fgComp.noManifest,
-                        fgComp.outOfScope ?? [], fgUnread));
+                        fgComp.outOfScope ?? [], fgUnread, fgUnasked));
     // ⟨0.28⟩ `unreadable` joins the `--strict` exit-2 trigger (SPEC §3.2's pessimism relation): `gate
     // --report` REFUSES over a corrupt member — measured, exit 2 — so exiting 0/1 here claimed this verb
     // got FURTHER than the gate on identical bytes. The unreadable note above already SAID the exit was
@@ -2044,7 +2050,10 @@ switch (cmd) {
     // MEASURED, `gate --report` exited 2 while this printed a clean answer at exit 0 over the same bytes.
     // ⟨0.32⟩ …and the class nothing OPENED, for the same MUST: `gate --report` exits 2 over it, so a verb
     // that answered 0 on the same bytes would have got FURTHER than the gate.
-    process.exit(fgUnan.length || fgComp.unreadable.length || fgComp.outOfScope?.length || fgUnread.length || fgr.unevaluated?.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
+    // ⟨0.33⟩ …and the class something DID open, under a deny set narrower than this verb's own, for the
+    // identical MUST — "`--strict` answers 2 wherever `gate --report` would".
+    process.exit(fgUnan.length || fgComp.unreadable.length || fgComp.outOfScope?.length || fgUnread.length
+                || fgUnasked.length || fgr.unevaluated?.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
     break; // unreachable
   }
   case "unverified": {
@@ -2086,7 +2095,8 @@ switch (cmd) {
     // engine was the only one right, which is the signal to fix the other three rather than argue.
     { const wp = wholePolicyUnanswerable(upol, "a report route");
       if (wp.unevaluated.length) r.unevaluated = [...(r.unevaluated ?? []), ...wp.unevaluated]; }
-    const uComp = reportCompleteness(prefix);
+    // ⟨0.33⟩ this verb's OWN deny/pure rules ride along — see the `fix-gate` site above for the rule.
+    const uComp = reportCompleteness(prefix, upol.deny);
     const uUnan = uComp.unanalyzed;
     if (uUnan.length) advisoryIncompleteNote("unverified", uUnan);
     // ⟨0.28⟩ …and the count-0 cause. MEASURED before this line: `{ok: true, unverified: []}` over a report
@@ -2105,17 +2115,21 @@ switch (cmd) {
       emitZeroRuleCaveat("unverified", policyFile, uComp);
       process.exit(uUnan.length || uComp.unreadable.length ? (strict ? 2 : 0) : 0);
     }
-    // ⟨0.30⟩/⟨0.32⟩ the two scope causes, in the document as well as the exit — see the fix-gate site for
-    // the measurement (`{"ok": true, "unverified": []}` at exit 2 over a report carrying `outOfScope`).
+    // ⟨0.30⟩/⟨0.32⟩/⟨0.33⟩ the three scope causes, in the document as well as the exit — see the fix-gate
+    // site for the measurement (`{"ok": true, "unverified": []}` at exit 2 over a report carrying
+    // `outOfScope`).
     const uUnread = upol.deny.length ? (uComp.unread ?? []) : [];
+    const uUnasked = uComp.unaskedRules ?? [];
     emit(advisoryAnswer(r, uUnan, uComp.judgedNothing, uComp.unreadable, uComp.noManifest,
-                        uComp.outOfScope ?? [], uUnread));
+                        uComp.outOfScope ?? [], uUnread, uUnasked));
     // ⟨0.28⟩ `unreadable` joins the `--strict` exit-2 trigger — see fix-gate above. Measured on this verb
     // before the fix: over one good report plus one unparsable sibling, `gate --report` exited 2 and
     // `unverified --strict` exited 0 — and `--strict` is how CI consumes it.
     // ⟨0.30⟩ the peek's findings too — see the fix-gate exit above for the ⟨0.24⟩ MUST this satisfies.
     // ⟨0.32⟩ …and the class nothing OPENED — see the fix-gate exit above.
-    process.exit(uUnan.length || uComp.unreadable.length || uComp.outOfScope?.length || uUnread.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
+    // ⟨0.33⟩ …and the class something DID open, under a narrower deny set — see the fix-gate exit above.
+    process.exit(uUnan.length || uComp.unreadable.length || uComp.outOfScope?.length || uUnread.length
+                || uUnasked.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
     break; // unreachable
   }
   case "gate": {
@@ -2235,7 +2249,10 @@ switch (cmd) {
     // unenforced and not which. The `unevaluated` array in the JSON document already carried `rule`; the
     // human channel simply did not show it.
     for (const u of gunevaluated) console.error(`candor-ts: gate: ${u.why}`);
-    const g = loadGateReport(prefix);
+    // ⟨0.33⟩ this gate's OWN rules ride along so `loadGateReport` can compare them against every gated
+    // report's `scannedUnder` (SPEC §2 ⟨0.33⟩) — the ONE place this route computes that condition; see
+    // `g.unaskedRules` below.
+    const g = loadGateReport(prefix, gpol.deny);
     // ⟨0.32⟩ DOES THIS POLICY'S ANSWER DEPEND ON THE CODE THE PRODUCER LEFT UNREAD? — the ONE place that
     // condition is applied on this route (the rule itself is stated at the reading site in
     // query-core.mjs's `loadGateReport`). `deny` is the rule vector that carries `pure` too;
@@ -2367,7 +2384,14 @@ switch (cmd) {
     // ⟨0.32⟩ the THIRD cause, read off `excluded[].peeked` — code the PRODUCER never opened. Distinct from
     // the ⟨0.30⟩ one above: that is "the peek looked and found the effect you deny", this is "nothing
     // looked at all", and the two want different repairs.
-    const gincomplete = g.unanalyzed.length > 0 || gscope.length > 0 || gunread.length > 0;
+    // ⟨0.33⟩ the FOURTH cause — a class the producer's peek DID read, but under a deny set that does not
+    // cover this gate's own. Distinct from `gunread` above: that is "nothing looked", this is "something
+    // looked, for a narrower question than the one being asked now". Computed by `loadGateReport` from
+    // the SAME `scannedUnder`/`excluded[].peeked` pair the gate route reads for its other two scope
+    // causes, never re-derived here.
+    const gunasked = g.unaskedRules ?? [];
+    const gincomplete = g.unanalyzed.length > 0 || gscope.length > 0 || gunread.length > 0
+                       || gunasked.length > 0;
     // The verdict document — the SAME builder shape scan.mjs writes, field for field and in the same key
     // order, because §3.1 ⟨0.24⟩ makes byte-equality with `scan --policy`'s `--gate-json` the acceptance
     // test. `analyzed.count`, `incomplete`/`unanalyzed` and the ⟨0.15⟩ coverage advisory all come off the
@@ -2425,15 +2449,22 @@ switch (cmd) {
       // ⟨0.30⟩ NAME THE CAUSE THAT ACTUALLY FIRED. Two causes reach this exit now, and a message that
       // always says "could not analyze" would report the wrong repair for the scope one — the operator
       // would go looking for a parse failure that is not there.
-      // ⟨0.32⟩ …and a THIRD, last in the same order scan.mjs uses (`unanalyzed` → `outOfScope` → unread),
+      // ⟨0.32⟩ …and a THIRD, in the same order scan.mjs uses (`unanalyzed` → `outOfScope` → `unread`),
       // so a report that trips two of them names the same cause on both routes. Its message differs from
       // the `outOfScope` one because the repair does: that one wants a scan whose SELECTOR reaches the
       // code, this one wants a scan that was ASKED the question at all.
+      // ⟨0.33⟩ …and a FOURTH, LAST, because each cause above names a MORE concrete gap than this one: a
+      // class the producer's peek DID read, but under a deny set that does not cover this gate's own —
+      // SPEC §2 ⟨0.33⟩. The remedy says "the SAME policy", not "a policy": the operator DID scan with a
+      // policy, and reading ⟨0.32⟩'s remedy loosely (any policy re-scans it) is what produces this hole,
+      // because the peek only ever looked for the PRODUCER's denied effects.
       const why = g.unanalyzed.length
         ? `gate NOT certified — the report declares ${g.unanalyzed.length} unit(s) candor could not analyze; a gate cannot be green over unanalyzed code`
         : gscope.length
         ? `gate NOT certified — the report names ${gscope.length} function(s) OUTSIDE the scan's scope performing an effect this policy denies; the gate did not judge them, so the verdict is incomplete rather than a pass`
-        : `gate NOT certified — the report says the scan did not READ ${gunread.join(", ")}. Their effects are absent because nothing looked, not because there are none, so the verdict is INCOMPLETE rather than a pass. Re-scan the sources with this policy (candor-ts <dir> --policy <file>) — a scan that was never asked cannot certify what it never opened`;
+        : gunread.length
+        ? `gate NOT certified — the report says the scan did not READ ${gunread.join(", ")}. Their effects are absent because nothing looked, not because there are none, so the verdict is INCOMPLETE rather than a pass. Re-scan the sources with this policy (candor-ts <dir> --policy <file>) — a scan that was never asked cannot certify what it never opened`
+        : `gate NOT certified — this report's peek was bounded by the deny set its producing scan held, and that set does not cover ${gunasked.length} rule(s) of this policy: ${gunasked.join(", ")}. The excluded files it reports as read were searched for OTHER effects, so an empty finding there is not an answer to this question, and the verdict is INCOMPLETE rather than a pass. Re-run the producing scan under THE SAME policy this gate is applying (candor-ts <dir> --policy <file> --json <report>) — not merely under a policy`;
       console.error(`candor-ts: ${why}`);
       // The INCOMPLETE verdict is a JUDGEMENT, not a refusal: it names what was analyzed and what was not,
       // and §3.1 makes byte-equality with `scan --policy`'s document the acceptance test for exactly it.

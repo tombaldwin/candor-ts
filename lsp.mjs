@@ -402,11 +402,12 @@ const zeroRulePolicyWarn = (what) =>
  * same reason ("there is no line to pin it to"); the activity overlay's line-0 diagnostic is not a
  * counter-example, because its record NAMES the edited file and this one names no file in the workspace.
  */
-function discloseIncompleteness(unanalyzed, outOfScope, unread) {
+function discloseIncompleteness(unanalyzed, outOfScope, unread, unaskedRules) {
   const causes = [];
-  // The CLI's order (`unanalyzed` → `outOfScope` → `unread`), so a report tripping two of them reads the
-  // same way here as it does in CI. The repairs genuinely differ — a parse to fix, a selector that
-  // REACHES the code, a scan that was ASKED the question — so each cause carries its own.
+  // The CLI's order (`unanalyzed` → `outOfScope` → `unread` → `unaskedRules`), so a report tripping two
+  // of them reads the same way here as it does in CI. The repairs genuinely differ — a parse to fix, a
+  // selector that REACHES the code, a scan that was ASKED the question, a scan asked the SAME question —
+  // so each cause carries its own.
   if (unanalyzed.length)
     causes.push(`the report DECLARES ${unanalyzed.length} unit(s) candor could not analyze, and a gate `
       + `cannot be green over unanalyzed code:\n`
@@ -421,6 +422,16 @@ function discloseIncompleteness(unanalyzed, outOfScope, unread) {
       + `report because nothing looked, not because there are none, so nothing in them can be squiggled `
       + `here — re-scan the sources WITH this policy (candor-ts <dir> --policy <file>); a scan that was `
       + `never asked cannot certify what it never opened.`);
+  // ⟨0.33⟩ SPEC §2 ⟨0.33⟩ — a class the peek DID read, but under a deny set that does not cover this
+  // policy's own. Distinct from `unread` above: that is "nothing looked", this is "something looked, for
+  // a narrower question than the one this editor is asking now" — the peek is bounded to the PRODUCER's
+  // denied effects (⟨0.29⟩), so an empty finding there answers nothing about a rule it was never put.
+  if (unaskedRules?.length)
+    causes.push(`this report's peek was bounded by the deny set its producing scan held, and that set `
+      + `does not cover ${unaskedRules.length} rule(s) of this policy: ${unaskedRules.join(", ")}. The `
+      + `excluded files it reports as read were searched for OTHER effects, so nothing in them can be `
+      + `squiggled here — re-run the producing scan under THE SAME policy this editor is applying `
+      + `(candor-ts <dir> --policy <file>), not merely under a policy.`);
   if (!causes.length) return;
   warnLoudOnce(
     `candor-lsp: this report cannot support a GREEN gate — \`gate --report\` over the same bytes exits 2 `
@@ -470,15 +481,17 @@ function diagnosticsFor(docPath) {
     warnOnce(`candor-lsp: ${dpol.ignored.length} line(s) of the configured policy were DROPPED by the `
       + `parse, so the gate you are seeing is SMALLER than the gate that was written (SPEC §6.2 ⟨0.28⟩):\n`
       + dpol.ignored.map((g) => `    line ${g.line}: ${g.text}`).join("\n"));
-  // ⟨0.21⟩/⟨0.30⟩/⟨0.32⟩ …AND THE CAUSES THAT MAKE THE GATE ITSELF INCOMPLETE — see
+  // ⟨0.21⟩/⟨0.30⟩/⟨0.32⟩/⟨0.33⟩ …AND THE CAUSES THAT MAKE THE GATE ITSELF INCOMPLETE — see
   // `discloseIncompleteness` for the mechanism and the channel argument. Read through the SAME
   // `reportCompleteness` the CLI gate, `fix-gate`, `unverified` and the MCP tools read, so the editor
-  // cannot come to a different view of one report from the CI job that judges the same commit. The
-  // `unread` condition is applied HERE, to the value, for the reason the CLI states at its own call
-  // site: one list, one condition, so two consumers of it cannot disagree about a run.
-  const dcomp = Q.reportCompleteness(reportPrefix);
+  // cannot come to a different view of one report from the CI job that judges the same commit. `dpol.deny`
+  // rides along so `reportUnaskedRules` can compare THIS policy's own rules against the report's
+  // `scannedUnder` — the identical value the CLI reads for the same bytes (SPEC §2 ⟨0.33⟩). The `unread`
+  // condition is applied HERE, to the value, for the reason the CLI states at its own call site: one
+  // list, one condition, so two consumers of it cannot disagree about a run.
+  const dcomp = Q.reportCompleteness(reportPrefix, dpol.deny);
   discloseIncompleteness(dcomp.unanalyzed ?? [], dcomp.outOfScope ?? [],
-                         dpol.deny.length ? (dcomp.unread ?? []) : []);
+                         dpol.deny.length ? (dcomp.unread ?? []) : [], dcomp.unaskedRules ?? []);
   // ⟨0.24⟩ THE ANSWERABILITY WITHHOLD, which this surface ran WITHOUT — `evaluatePolicy` was called with no
   // `withhold` predicate and the DEFAULT netClass mode, so both directions of the §3.1 harm were live in the
   // editor. Measured against the CLI on one report and one policy: `deny Unknown[reflect]` drew NO squiggle

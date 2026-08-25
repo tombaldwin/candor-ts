@@ -31,7 +31,7 @@ import os from "node:os";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText,
          reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules, fatalPolicyErrors, refusalVerdict, sortViolations,
          netClassResolver, resolveReasonClasses } from "./policy.mjs";
-import { unverifiedHoleRule, ruleUpgrade, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
+import { unverifiedHoleRule, ruleUpgrade, canonicalDenySet, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents, writeStdoutSync } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadEffects, hostLiteral,
          tablesInSql, modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf,
@@ -7030,6 +7030,13 @@ const writeAtomic = (file, text) => writeSinkAtomic(file, text);
 // ABSENT, because nothing was asked and `[]` would be a claim. With a policy, only effects that policy
 // DENIES are reported — otherwise the noise floor is "everything you excluded".
 let outOfScopeFindings = null;
+// ⟨0.33⟩ THE QUESTION THIS PEEK WAS PUT — the canonical expanded deny/pure rules it is about to match
+// with. SPEC §2 ⟨0.33⟩ `scannedUnder.deny`: `outOfScopeFindings`/`excluded[].peeked` are true only
+// RELATIVE to this set, because the ⟨0.29⟩ bound above filters the peek to effects THIS policy denies —
+// so a consumer gating the report with a DIFFERENT deny set is answering a question nobody asked. Set
+// under the SAME condition as `outOfScopeFindings` (present iff the peek was attempted at all), never
+// re-derived on a second parse: this run's own `peekPolicy.deny` IS the matcher the peek used.
+let scannedUnderRules = null;
 // ⟨0.29⟩ DID THE PEEK ACTUALLY READ ANYTHING? `peeked` was a constant of the exclusion CLASS, so a peek
 // that never ran, could not spawn, or produced unparseable output still published `peeked: true` beside
 // `outOfScope: []` — byte-identical to a clean peek, and the ⟨0.26⟩ partial-manifest failure inside the
@@ -7074,6 +7081,12 @@ if (policyPath && excludedFiles.length) {
     // keys on THIS, not on whether the peek then succeeded; see the note there.
     peekAttempted = true;
     outOfScopeFindings = [];
+    // ⟨0.33⟩ RECORDED HERE, ALONGSIDE `outOfScopeFindings`'s own assignment, and BEFORE any file is
+    // opened — a policy whose only deny rule matches nothing under this tree still asked the question,
+    // so `scannedUnder: {deny: [...]}` must read "asked-and-clear", not "never asked". `canonicalDenySet`
+    // is the SAME renderer `ruleUpgrade` quotes back to an operator for the provable-purity upgrade, so
+    // the string an operator reads and the string a gate compares cannot become two spellings of one rule.
+    scannedUnderRules = canonicalDenySet(peekPolicy.deny);
     // ⟨0.31⟩ A FILE THIS ENGINE CANNOT READ CANNOT BE PEEKED, AND THE CLASS MUST SAY SO.
     //
     // MEASURED: an excluded file performing a denied `Fs`, with the policy `deny Fs`. Readable, the peek
@@ -7290,6 +7303,12 @@ if (NO_SOURCES && !(Array.isArray(outOfScopeFindings) && outOfScopeFindings.leng
 }
 if (outOfScopeFindings) {
   envelope.outOfScope = outOfScopeFindings;
+  // ⟨0.33⟩ …and THE QUESTION IT WAS PUT, immediately after the answer it qualifies (SPEC §2 ⟨0.33⟩'s
+  // position: "so a reader meets the two together"). Same condition as `outOfScope` above by
+  // construction — both are set inside the identical peek-attempted branch — so a report carrying one
+  // never lacks the other, and a pre-⟨0.33⟩ report (no policy, or one this run refused) stays
+  // byte-identical because neither key exists.
+  envelope.scannedUnder = { deny: scannedUnderRules };
   // SAY IT ON STDERR TOO. The report block is for machines; an operator reading `policy ✓` needs to know
   // in the same breath that a file this scan did not judge holds the effect they denied.
   for (const f of outOfScopeFindings) {

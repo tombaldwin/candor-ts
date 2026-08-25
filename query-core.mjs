@@ -553,7 +553,7 @@ export function reportUnanalyzed(prefix) {
  * every run trains the reader to ignore it, the same reason ⟨0.15⟩ omits `coverage` when nothing is
  * uncovered.
  */
-export function reportCompleteness(prefix) {
+export function reportCompleteness(prefix, denyRules = []) {
   // `judgedNothing` is the PER-FILE list, not the ANDed boolean the gate asks: the disclosure names
   // WHICH report judged nothing, so a locator with one silent member among several still hedges — the
   // semantics rust and java pin, and a repair the reader can aim (that file, not "somewhere here").
@@ -574,6 +574,13 @@ export function reportCompleteness(prefix) {
            // this field directly for their EXIT code and apply the gate's own condition to it: only a
            // `deny`/`pure` rule's answer depends on code outside the scan's scope.
            unread: reportUnread(prefix),
+           // ⟨0.33⟩ …and the rules THIS CALLER'S policy holds that a peeked class's producer was never
+           // asked about (`reportUnaskedRules`) — the SAME arm shape as `unread` one line up, and bound
+           // by the identical ⟨0.24⟩ pessimism MUST. `denyRules` defaults to `[]`, which is the
+           // STRUCTURAL carve-out for every caller of this function that carries no policy at all (the
+           // majority — `show`/`where`/`callers`/`map`/`tour`/… never pass one), so this key is a silent
+           // no-op for them rather than a sixth call site to remember the condition at.
+           unaskedRules: reportUnaskedRules(prefix, denyRules),
            ...(() => {
              const o = reportOutOfScope(prefix);
              // A corrupt key rides `unreadable`, which is ALREADY an arm of the strict exit — so the
@@ -634,7 +641,12 @@ export function reportCompleteness(prefix) {
  */
 export const mustHedge = (c) => !!(c && (c.unanalyzed?.length || c.judgedNothing?.length
                                          || c.noManifest?.length || c.unreadable?.length
-                                         || c.outOfScope?.length || c.unread?.length));
+                                         || c.outOfScope?.length || c.unread?.length
+                                         // ⟨0.33⟩ a peek bounded by a deny set narrower than this
+                                         // caller's own — see `reportUnaskedRules`. Structurally `[]`
+                                         // for every caller (the majority) that never passes `denyRules`
+                                         // to `reportCompleteness`, so this arm is a no-op for them.
+                                         || c.unaskedRules?.length));
 
 /** ⟨0.30⟩ The peek's findings across the reports under a locator. Read leniently HERE (a malformed key is
  *  the gate's refusal to make, and this feeds a disclosure) but non-emptiness raises the same hedge the
@@ -687,6 +699,57 @@ export function reportUnread(prefix) {
     } catch { /* unparseable TEXT is `unreadable`'s business, not this key's */ }
   }
   return [...out];
+}
+
+/**
+ * ⟨0.33⟩ THE ADVISORY TWIN of `loadGateReport`'s `scannedUnder` subset test — SPEC §2 ⟨0.33⟩'s "AND THE
+ * ADVISORY VERBS FOLLOW IT": the rules THIS caller's policy holds that a report's producer, under the
+ * SAME peek-was-bounded reasoning, was never asked about. One helper for the gate route and this one,
+ * deliberately, so the ⟨0.24⟩ pessimism relation (an advisory verb must never be LESS sensitive to
+ * incompleteness than the gate over the same bytes) cannot drift the way it already has three times in
+ * this family — `unanalyzed`, `outOfScope`, `excluded[].peeked` each reached `gate --report` before they
+ * reached `unverified`/`fix-gate`, and each time it was a NEW cause landing at one site and not its
+ * siblings.
+ *
+ * STRUCTURAL CARVE-OUT FIRST: `denyRules` empty means this caller's policy holds no `deny`/`pure` rule at
+ * all (an `allow`/`forbid`/`only`-only policy, or none) — an EMPTY canonical set, which is a subset of
+ * everything — so the per-report loop below is skipped rather than run to compute nothing. This is the
+ * same carve-out `loadGateReport` takes, and it is what keeps a policy-less verb like `tour` inert here:
+ * `reportCompleteness`'s default `denyRules = []` makes this function a no-op for every caller that never
+ * passes one.
+ *
+ * LENIENT, like `reportOutOfScope`/`reportUnread` beside it and for the same reason: a malformed
+ * `scannedUnder` is the GATE's refusal to make (`loadGateReport` reads the same bytes STRICTLY and NAMES
+ * the key in a refusal), and this feeds a disclosure rather than an exit code. A garbled or absent
+ * `scannedUnder` reads here as the EMPTY SET — the same fail-closed reading `loadGateReport` takes, just
+ * reached without a refusal document to carry it: this function may only ever be MORE cautious than
+ * silence, never less.
+ *
+ * PER REPORT, never over the union of a report set: `scannedUnder` and `peeked` are facts about ONE
+ * producing scan, so a locator naming a policy-scanned report beside a no-policy sibling must not let the
+ * first one's deny set answer for the second one's peeked classes. The per-file `theirs` set is built
+ * fresh for every file and never merged across them; only the resulting MISSING RULE STRINGS are unioned
+ * (deduplicated, code-point sorted) across a multi-report prefix, exactly as `loadGateReport` does.
+ */
+export function reportUnaskedRules(prefix, denyRules) {
+  const mine = denyRules?.length ? canonicalDenySet(denyRules) : [];
+  if (!mine.length) return [];
+  const files = (prefix.endsWith(".json") && fs.existsSync(prefix)) ? [prefix] : reportFilesAt(prefix);
+  const out = new Set();
+  for (const f of files) {
+    try {
+      const d = JSON.parse(fs.readFileSync(f, "utf8"));
+      const exc = Array.isArray(d?.excluded) ? d.excluded : [];
+      const peeked = exc.some((e) => e && typeof e === "object" && e.peeked === true
+                                     && e.judgedElsewhere !== true);
+      if (!peeked) continue;
+      const su = d?.scannedUnder;
+      const theirs = (su && typeof su === "object" && !Array.isArray(su) && Array.isArray(su.deny))
+        ? new Set(su.deny.filter((x) => typeof x === "string")) : new Set();
+      for (const r of mine) if (!theirs.has(r)) out.add(r);
+    } catch { /* unparseable TEXT is `unreadable`'s business, not this key's */ }
+  }
+  return [...out].sort(byCodePoint);
 }
 
 /**
@@ -795,10 +858,10 @@ export const absorbCompleteness = (a, b) => ({
  * that has no exit code for it to matter to.)
  */
 export function advisoryAnswer(body, unanalyzed, judgedNothing = [], unreadable = [], noManifest = [],
-                               outOfScope = [], unread = []) {
+                               outOfScope = [], unread = [], unaskedRules = []) {
   const unevaluated = body?.unevaluated;
   if (!unanalyzed?.length && !unevaluated?.length && !judgedNothing?.length && !unreadable?.length
-      && !noManifest?.length && !outOfScope?.length && !unread?.length)
+      && !noManifest?.length && !outOfScope?.length && !unread?.length && !unaskedRules?.length)
     return body;  // COMPLETE: unchanged, byte for byte, `ok` and all.
   const { ok, ...rest } = body;                          // eslint-disable-line no-unused-vars -- omitted BY DESIGN
   // The array of report paths, same key and same shape as `completenessFields` — ONE wire spelling for
@@ -809,18 +872,21 @@ export function advisoryAnswer(body, unanalyzed, judgedNothing = [], unreadable 
   // never emitted a manifest cannot support it (row 3: *no manifest, no claim*).
   const judged = { ...(judgedNothing?.length ? { judgedNothing } : {}),
                    ...(noManifest?.length ? { noManifest } : {}) };
-  // ⟨0.30⟩/⟨0.32⟩ THE TWO SCOPE CAUSES — the ones the `--strict` exit has consulted since ⟨0.30⟩ while this
-  // document did not, which is the document/exit split in its worse direction. MEASURED 2026-08-24 on
-  // `fix-gate --strict` and `unverified --strict` over a report carrying `outOfScope`: BOTH printed
-  // `{"ok": true, …: []}` **at exit 2** — the exit was right and the document certified. A CI wrapper reads
-  // the exit; an agent reads the document, and the agent channel is the one that cannot ask a follow-up
-  // question. Same keys and same order as the gate's verdict document, so one consumer parses both.
+  // ⟨0.30⟩/⟨0.32⟩/⟨0.33⟩ THE THREE SCOPE CAUSES — the ones the `--strict` exit has consulted since ⟨0.30⟩
+  // while this document did not, which is the document/exit split in its worse direction. MEASURED
+  // 2026-08-24 on `fix-gate --strict` and `unverified --strict` over a report carrying `outOfScope`: BOTH
+  // printed `{"ok": true, …: []}` **at exit 2** — the exit was right and the document certified. A CI
+  // wrapper reads the exit; an agent reads the document, and the agent channel is the one that cannot ask
+  // a follow-up question. Same keys and same order as the gate's verdict document, so one consumer parses
+  // both. `unaskedRules` is the ⟨0.33⟩ fourth cause — a peeked class read under a deny set narrower than
+  // this caller's own — riding beside its two siblings for the identical reason.
   const scope = { ...(outOfScope?.length ? { outOfScope } : {}),
-                  ...(unread?.length ? { unread } : {}) };
+                  ...(unread?.length ? { unread } : {}),
+                  ...(unaskedRules?.length ? { unaskedRules } : {}) };
   // Key order matches the gate's verdict document: the finding, then `unevaluated`, then the manifest.
   if (unanalyzed?.length) return { ...rest, incomplete: true, unanalyzed, ...scope, ...judged };
   return (judgedNothing?.length || noManifest?.length || unreadable?.length
-          || outOfScope?.length || unread?.length)
+          || outOfScope?.length || unread?.length || unaskedRules?.length)
     ? { ...rest, incomplete: true, ...scope, ...judged } : rest;
 }
 
@@ -868,10 +934,20 @@ export function loadReport(prefix) {
  * refusal to name the key), entry-level and envelope-level; non-empty implies `hardFail`.
  * `judgedNothing` is the ⟨0.24⟩ reading of `analyzed.count` (see `claimsToHaveJudgedNothing`).
  */
-export function loadGateReport(prefix) {
+export function loadGateReport(prefix, denyRules = []) {
   const files = reportFilesAt(prefix);
   const functions = [], unanalyzed = [], cov = new Map(), corrupt = [], outOfScope = [], netPartners = [],
         unread = [];
+  // ⟨0.33⟩ THIS GATE'S OWN canonical deny/pure rules, computed ONCE rather than per report — a subset
+  // test against ten sibling reports must ask the identical question ten times, not re-derive it. Empty
+  // when this route carries no `deny`/`pure` rule at all (an `allow`/`forbid`/`only`-only policy, or no
+  // policy), which is the STRUCTURAL carve-out SPEC §2 ⟨0.33⟩ requires: an empty rule set is a subset of
+  // everything, so the per-file loop below contributes nothing to `unasked` however the report reads.
+  const mine = denyRules?.length ? canonicalDenySet(denyRules) : [];
+  // ⟨0.33⟩ the rules NO gated report's producer was asked about — a SET, because a multi-report prefix
+  // otherwise repeats one missing rule once per sibling. Deduplicated and code-point sorted at the return
+  // below, the same collation `unread`'s dedup and the verdict's `zeroMatch` use.
+  const unasked = new Set();
   let hardFail = false, analyzed = 0;
   // ⟨0.24⟩ did the report handed to the gate judge ANYTHING? Per FILE, then ANDed across the multi-report
   // siblings, because the union of several reports has judged something as soon as ONE of them has — the
@@ -882,6 +958,12 @@ export function loadGateReport(prefix) {
   let judgedNothing = true;
   for (const f of files) {
     let parsed;
+    // ⟨0.33⟩ did THIS FILE's peek read a class it does not carry `judgedElsewhere: true` for? The
+    // precondition of the cross-policy refusal, reset per file because `scannedUnder` and `peeked` are
+    // facts about ONE producing scan (SPEC §2 ⟨0.33⟩: "the condition is PER REPORT, never over the union
+    // of a report set") — a policy-scanned sibling's deny set must never answer for a no-policy sibling's
+    // peeked classes.
+    let filePeeked = false;
     try { parsed = JSON.parse(fs.readFileSync(f, "utf8")); }
     catch { console.error(`candor-ts: report ${f} failed to parse — its functions are OMITTED from this gate (corrupt or mid-write); re-run the scan`); hardFail = true; continue; }
     const { entries, corrupt: entryCorrupt } = normFns(parsed, f);
@@ -990,7 +1072,31 @@ export function loadGateReport(prefix) {
         // `#[serde(default)]` does on the same field: a producer that does not say it read the class has
         // not said it read the class.
         else if (e.peeked !== true && e.judgedElsewhere !== true) unread.push(e.class);
+        // ⟨0.33⟩ …and the mirror case: a class the peek DID read (and that is not a `judgedElsewhere`
+        // copy of already-judged code) is exactly the class whose clean answer was bounded by THIS
+        // report's `scannedUnder` — the precondition below.
+        else if (e.peeked === true && e.judgedElsewhere !== true) filePeeked = true;
       }
+    // ⟨0.33⟩ THE QUESTION THIS REPORT'S PEEK WAS PUT — read STRICTLY, like every other verdict-bearing §2
+    // key on this route (`excluded`/`outOfScope` immediately above). A non-object, or a `deny` that is
+    // not an array of strings, IMPEACHES THE DOCUMENT: the safe-LOOKING coercion here is the FAIL-OPEN
+    // direction — "the producer held these rules" — the mirror of `peeked`'s own fail-open, where the
+    // safe-looking coercion was "no exclusions". ABSENT is untouched: a pre-⟨0.33⟩ producer never carried
+    // this key, and the subset test below reads that as the EMPTY SET (refuses), never as a licence.
+    let fileScannedUnder = null;
+    if ("scannedUnder" in parsed) {
+      const su = parsed.scannedUnder;
+      if (!su || typeof su !== "object" || Array.isArray(su) || !Array.isArray(su.deny)
+          || su.deny.some((x) => typeof x !== "string"))
+        corrupt.push(`${f}: \`scannedUnder\` (expected an object \`{deny: [string, …]}\`)`);
+      else fileScannedUnder = new Set(su.deny);
+    }
+    // ⟨0.33⟩ …and, when this file's peek read something, which of THIS gate's own rules that report's
+    // producer was never asked about. An absent `fileScannedUnder` reads as the empty set — never a
+    // licence — so a pre-⟨0.33⟩ producer's `peeked: true` fails closed here exactly as SPEC §2 ⟨0.33⟩
+    // requires. A class the peek never opened at all is `unread`'s gap, not this one's.
+    if (mine.length && filePeeked)
+      for (const r of mine) if (!(fileScannedUnder ?? new Set()).has(r)) unasked.add(r);
     // ⟨0.31⟩ the producer's PARTNER PROVENANCE, carried through verbatim and never recomputed — this
     // route has no target to anchor `net-partner` at, and re-classifying through the consumer's own
     // config is the re-derivation §3.1 forbids. A prefix can match several reports (a workspace writes
@@ -1021,7 +1127,12 @@ export function loadGateReport(prefix) {
   // same class once per member in a message whose job is to name what to re-scan. The verdict is unmoved
   // either way; only the sentence is.
   return { functions, analyzed, unanalyzed, coverage, judgedNothing, outOfScope, netPartners,
-           unread: [...new Set(unread)], hardFail: hardFail || corrupt.length > 0, corrupt };
+           unread: [...new Set(unread)],
+           // ⟨0.33⟩ SPEC §2 — the gate's own rules that some gated report's producer was never asked
+           // about; `[]` when `mine` is empty (no deny/pure rule at all) or every peeked class's producer
+           // covered them.
+           unaskedRules: [...unasked].sort(byCodePoint),
+           hardFail: hardFail || corrupt.length > 0, corrupt };
 }
 // The returned graph carries a non-enumerable `partial` flag (the loadReport `hardFail` precedent):
 // true iff a sidecar file was MATCHED but failed to read/parse — its edges were DROPPED (disclosed on
@@ -2060,6 +2171,33 @@ export function ruleUpgrade(r) {
     return [`deny ${effs}${suffix}`,
             `deny ${r.effects.map((e) => (e === "Unknown" ? "Unknown" : term(e))).join(" ")}${suffix}`];
   return [`deny ${effs}${suffix}`, `deny ${effs} Unknown${suffix}`];
+}
+
+/**
+ * ⟨0.33⟩ A deny/pure rule LIST as a canonical SET — the §6.2 spelling of every rule THE MATCHER USED,
+ * deduplicated and CODE-POINT sorted (`byCodePoint`, the same collation the `zeroMatch` verdict list
+ * already uses), so one policy produces one document however its lines were ordered, and a consumer's
+ * subset test is a plain membership test rather than an order-sensitive comparison.
+ *
+ * RENDERED THROUGH `ruleUpgrade`'s own SOURCE spelling — the first element of the pair it already quotes
+ * back to an operator for the provable-purity upgrade — rather than a second renderer. That is the same
+ * move candor-java made (`Policy.canonicalDenyRule`, shared with `ruleUpgrade`): the string an operator is
+ * quoted and the string a gate compares cannot become two spellings of one rule.
+ *
+ * NOT effect NAMES: `pure` is a rule with an EMPTY effect list meaning "every effect except Unknown", so
+ * flattening to names loses it entirely and the STRICTEST policy would compare equal to an empty one — the
+ * four-way false all-clear ⟨0.30⟩ closed on the peek itself, arriving one layer out. NOT the raw policy
+ * line either: §3.1 already notes alias expansion breaks byte-equality, so two configs defining
+ * `unknown-alias corp` differently would give the identical raw line `deny Unknown[corp]` two meanings.
+ * `ruleUpgrade`'s rendering is the EXPANDED form — post-alias, post-`.candor/config` — because that is
+ * what the peek actually asked (SPEC §2 ⟨0.33⟩, `scannedUnder.deny`).
+ *
+ * One element per RULE — a rule denying several effects is ONE element, not one per effect.
+ */
+export function canonicalDenySet(rules) {
+  const out = new Set();
+  for (const r of rules ?? []) out.add(ruleUpgrade(r)[0]);
+  return [...out].sort(byCodePoint);
 }
 
 /** The single predicate for a provable-purity hole (eval/fixloop/DISPATCH-NOTE.md): a function that is

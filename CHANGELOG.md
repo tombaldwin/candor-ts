@@ -8,6 +8,32 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ `scannedUnder` — a peek answers only the question it was put (SPEC §2 ⟨0.33⟩).** `excluded[].peeked:
+  true` was only ever true RELATIVE to the deny set the PRODUCER held (⟨0.29⟩ bounds the peek to effects
+  policy DENIES), and the report never recorded what that set was — so `gate --report`/`candor_gate`/
+  `fix-gate --strict`/`unverified --strict` gating a report with a DIFFERENT deny set got a definite
+  answer to a question nobody asked. MEASURED on this engine at 0.32.1, a tree whose excluded `dist/`
+  module runs `execSync("id")`: `candor-ts <tree> --policy 'deny Net' --out A` writes `peeked: true`
+  beside `outOfScope: []` at exit 0; `--policy 'deny Exec'` over the same tree exits 2; `candor-ts-query
+  gate --report A --policy 'deny Exec'` answered exit 0, no violations — the hole.
+  PRODUCER: `scan.mjs` now records `scannedUnder: { deny: [<expanded rule>, …] }` beside `outOfScope`,
+  under the identical emission rule (present iff a policy was configured and honoured), rendered through
+  the SAME `ruleUpgrade` spelling already quoted back to an operator for the provable-purity upgrade, so
+  the two cannot drift into two spellings of one rule.
+  CONSUMER: `gate --report` (`loadGateReport`, read STRICTLY) and the advisory verbs (`reportCompleteness`
+  → `reportUnaskedRules`, read leniently and fail-closed) refuse — `ok:false, incomplete:true`, exit 2 —
+  when a peeked, non-`judgedElsewhere` class's report does not cover this run's own expanded deny rules,
+  naming the unasked rules and pointing at THE SAME policy. An ABSENT `scannedUnder` is the EMPTY SET for
+  this test, so a pre-⟨0.33⟩ report carrying `peeked: true` fails closed. Ported to the MCP `candor_gate`/
+  `candor_unverified` tools and the LSP diagnostics server (`integrations/vscode` and the JetBrains
+  plugin's shipped editor experience) — the same five routes ⟨0.30⟩/⟨0.32⟩ reached, off the identical
+  reader in each case, so this cause cannot land at one and not its siblings a fourth time. `fix`/
+  `whatif` are unchanged, matching their existing ⟨0.30⟩/⟨0.32⟩ exclusion (they do not answer `ok` over
+  these two causes either — a pre-existing gap, not part of this rung).
+  Four over-charge controls hold: the SAME policy scan-then-gate pipeline, a consumer's rules a strict
+  SUBSET of the producer's, no peeked exclusions at all, and `pure` (an empty-effect-list deny rule)
+  correctly refusing rather than comparing equal to an empty set. Conformance PART 69.
+
 - **The README/AGENTS/package.json spec-claim gate reads two spellings it could not see.** The claim
   grammar widened from `spec` + one to FOUR of `[-: "]` to one to EIGHT of `[-: "*)\]]`, which is what
   it takes to reach a version behind an ALIGNED envelope column (`"spec":    "0.32"`) or a markdown link

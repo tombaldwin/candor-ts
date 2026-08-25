@@ -869,7 +869,12 @@ fs.rmSync(W, { recursive: true, force: true });
   fs.writeFileSync(`${I}/scope.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: true }],
     outOfScope: [{ fn: "t.runs", path: "src/x.test.ts", effects: ["Exec"], class: "test-file", reason: "outside" }] }));
   fs.writeFileSync(`${I}/unread.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: false }] }));
-  fs.writeFileSync(`${I}/peeked.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: true }], outOfScope: [] }));
+  // ⟨0.33⟩ `scannedUnder` carries the SAME rule this fixture is about to be gated under (`p.pol`,
+  // `deny Exec`), canonically spelled — the over-charge control is precisely a producer that was ASKED
+  // this question and answered clean, not a producer whose question is unrecorded (which SPEC §2 ⟨0.33⟩
+  // reads as the empty set and refuses over).
+  fs.writeFileSync(`${I}/peeked.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: true }],
+    outOfScope: [], scannedUnder: { deny: ["deny Exec"] } }));
   fs.writeFileSync(`${I}/derived.json`, JSON.stringify({ ...V, excluded: [{ class: "build-output", count: 2, peeked: false, judgedElsewhere: true }] }));
   fs.writeFileSync(`${I}/p.pol`, "deny Exec\n");
   fs.writeFileSync(`${I}/allow.pol`, "allow Net api.example.com\n");
@@ -957,7 +962,10 @@ fs.rmSync(W, { recursive: true, force: true });
   fs.writeFileSync(`${I}/unread.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: false }] }));
   fs.writeFileSync(`${I}/scope.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: true }],
     outOfScope: [{ fn: "t.runs", path: "src/x.test.ts", effects: ["Exec"], class: "test-file", reason: "outside" }] }));
-  fs.writeFileSync(`${I}/peeked.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: true }], outOfScope: [] }));
+  // ⟨0.33⟩ `scannedUnder` carries the SAME rule this fixture is gated under below (`p.pol`, `pure app`),
+  // canonically spelled — see the sibling fixture above for why an unrecorded question fails closed here.
+  fs.writeFileSync(`${I}/peeked.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: true }],
+    outOfScope: [], scannedUnder: { deny: ["pure app"] } }));
   fs.writeFileSync(`${I}/p.pol`, "pure app\n");            // `pure` rides the deny vector — the ⟨0.32⟩ condition
   fs.writeFileSync(`${I}/allow.pol`, "allow Net api.example.com\n");
   const vcall = (id, name, rep, pol = "p.pol") => ({ jsonrpc: "2.0", id, method: "tools/call",
