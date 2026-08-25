@@ -351,6 +351,26 @@ const putNestedWithCaveat = (a, key, data, proseFn, comp, soWhat, tail) => {
 };
 // The one sentence every hedged prose arm ends with, so the six cannot drift into six wordings.
 const NOT_A = (claim) => `— but see the INCOMPLETE note above; this is NOT "${claim}"`;
+
+// ---- ⟨0.32⟩ THE THREE GRAPH-TRAVERSAL VERBS THAT CARRIED NO COMPLETENESS READER AT ALL ----------------
+//
+// `callers`, `impact` and `path`. The ⟨0.28⟩ rung that widened SPEC §2's re-disclosure MUST to "any verb
+// whose output could be read as a NEGATIVE FINDING about the code — a verdict, an empty result set, or a
+// zero count" enumerated six verbs and skipped these three; the ⟨0.32⟩ unread-class cause then made the
+// gap fire on nearly every no-policy report. MEASURED at HEAD 2026-08-25, over a report whose `excluded`
+// names one class with `peeked: false`, all three answered FLAT at exit 0 with nothing on either channel —
+// and the same three tools answered flat on the MCP surface, which is the consumer that cannot ask a
+// follow-up question. Reproduced identically in candor-rust and candor-java.
+//
+// Each verb's own `soWhat`/`tail` pair, hoisted because `callers` has TWO answering sites (the complete
+// graph and the effect-only fallback) and `path` has THREE. A wording written at one site and forgotten at
+// the next is how this file's own comments say the last two fixes here went wrong.
+const CALLERS_SOWHAT = "the caller set below covers only the call graph candor could see";
+const CALLERS_TAIL = "A caller living in an unread unit is ABSENT from the graph, so it appears in neither `direct` nor `transitive` — and an EMPTY answer reads as *nothing calls this*, which is a claim this report cannot support. Re-scan before treating this as the blast radius.";
+const IMPACT_SOWHAT = "the blast radius below covers only the callers candor could see";
+const IMPACT_TAIL = "A caller living in an unread unit is ABSENT from the graph, so it is missing from this count and from the entry points — and `affectedCount: 0` reads as *safe to edit*, which is a claim this report cannot support. Re-scan before treating this as the blast radius.";
+const PATH_SOWHAT = "the chain below is traced over only the call graph candor could see";
+const PATH_TAIL = "A hop through an unread unit BREAKS the chain, so `path` can answer EMPTY for a function that really does reach the effect — and an empty `path` reads as *this function does not reach it*, which is a claim this report cannot support. Re-scan before treating an empty chain as an answer.";
 const csv = (xs) => (xs && xs.length ? xs.join(", ") : "none");
 const rows = (xs, pre = "    ") => { for (const x of xs) console.log(pre + x); };
 // Per-verb prose renderers. Read the SAME shapes query-core returns (so JSON and prose can't drift); kept
@@ -371,15 +391,27 @@ const P = {
     if (d.directly.length) { console.log(`  perform it directly (${d.directly.length}):`); rows(d.directly); }
     if (d.inherited.length) { console.log(`  reach it transitively (${d.inherited.length}):`); rows(d.inherited); }
   },
-  callers: (d) => {
+  callers: (d, hedge) => {
     // ⟨0.28⟩ UNREACHABLE FROM THE CLI since the callers verb split the empty-`of` case into its two real
     // causes below (no graph at all -> `unanswerable`, exit 2; a name absent from a real graph -> "no
     // function matching", exit 2). Kept as a renderer guard only; do NOT route a new caller through it —
     // this sentence is a determined negative and is the wrong answer when there is no call graph.
-    if (!d.of.length) { console.log("candor: no function in the call graph matches that name."); return; }
+    if (!d.of?.length) {
+      // ⟨0.32⟩ …and the effect-only-fallback arm routes `{}` through here, where `d.of` is undefined. The
+      // hedged spelling is the one that matters: over a report naming an unread class this sentence is
+      // itself a determined negative.
+      console.log(hedge
+        ? `candor: no function in the call graph candor COULD SEE matches that name ${NOT_A("there is no such function")}.`
+        : "candor: no function in the call graph matches that name.");
+      return;
+    }
     console.log(`candor callers — who reaches \`${d.of.join("`, `")}\`:`);
     console.log(`  direct callers (${d.direct.length}): ${csv(d.direct)}`);
     console.log(`  transitive callers (${d.transitive.length}): ${csv(d.transitive)}`);
+    // ⟨0.32⟩ "0 callers" IS the prose spelling of `direct: []`, so the note alone is not enough — a fix
+    // that leaves the calm reading standing MOVES the false all-clear rather than removing it. Same shape
+    // `show` and `blindspots` already take.
+    if (hedge && !d.transitive.length) console.log(`  ${NOT_A("nothing calls it")}.`);
   },
   show: (d, hedge) => {
     // ⟨0.28⟩ the empty sentence stops citing the ⟨0.21⟩ purity convention when the report cannot back it:
@@ -450,11 +482,14 @@ const P = {
     }
     for (const [e, v] of effs) console.log(`  ${e}: ${v.count} (via ${csv(v.via)})`);
   },
-  impact: (d) => {
+  impact: (d, hedge) => {
     console.log(`candor impact — the blast radius of \`${d.fn}\`:`);
     console.log(`  ${d.affectedCount} effectful function(s) transitively call it${d.affected.length ? ":" : "."}`);
     if (d.affected.length) rows(d.affected);
     if (d.entryPoints.length) { console.log(`  reachable from ${d.entryPoints.length} entry point(s):`); rows(d.entryPoints.map((ep) => `${ep.fn}  [${csv(ep.inferred)}]`)); }
+    // ⟨0.32⟩ `affectedCount: 0` is this verb's strongest claim — *nothing calls this, safe to change* — and
+    // the sentence above is its prose spelling. Under a hedge it is exactly what the note withdrew.
+    if (hedge && !d.affected.length) console.log(`  ${NOT_A("nothing calls it, safe to change")}.`);
   },
   blindspots: (d, hedge) => {
     if (!d.sources.length) {
@@ -515,7 +550,7 @@ const knownFnNames = (cg, fns) => [...new Set([...Object.keys(cg), ...fns.map((e
 // UNTOUCHED (conformance PART 5 pins `{effect, fn, path:[{fn,loc,source}]}` four-way): this path is
 // only taken when the caller did NOT pass --json, and it reads the SAME `path` array corePath computes.
 // Prints to stdout and returns nothing (matches the JSON-only verbs' fire-and-forget style).
-function renderPathHuman(fns, cg, fnQ, eff) {
+function renderPathHuman(fns, cg, fnQ, eff, hedge = false) {
   // Resolve the start over the REPORT entries (as Rust does) — that's where `inferred` lives, and the
   // no-effect wording quotes it. The RESOLVED name (not the raw query) is then handed to corePath,
   // which re-resolves over the CALLGRAPH keys — a DIFFERENT name set: a raw partial query could pick
@@ -536,14 +571,19 @@ function renderPathHuman(fns, cg, fnQ, eff) {
     // `inferred` is printed in Rust's `{:?}` debug shape: each name quoted, ", "-joined, in `[...]`,
     // in the report's original order (unsorted). An empty set prints `[]`.
     const dbg = `[${inferred.map((e) => `"${e}"`).join(", ")}]`;
-    console.log(`${start} does not perform ${eff}  (inferred: ${dbg})`);
+    // ⟨0.32⟩ "does not perform" is the prose spelling of `path: []`, and over a report naming a class the
+    // scan never opened it is a determined negative the report cannot support — the effect could enter
+    // through a callee in the unread unit, which contributes no `inferred` entry at all.
+    console.log(`${start} does not perform ${eff}  (inferred: ${dbg})`
+      + (hedge ? `  ${NOT_A(`${start} cannot reach ${eff}`)}` : ""));
     return;
   }
   const r = corePath(fns, cg, start, eff);
   if (r.path.length === 0) {
     // Inferred, but no LOCAL direct source on a `calls` path — reached cross-crate or via Unknown.
     console.log(`${start} performs ${eff} but its source is not a local function `
-      + `(cross-crate, or via Unknown) — not statically traceable.`);
+      + `(cross-crate, or via Unknown) — not statically traceable.`
+      + (hedge ? `  ${NOT_A("there is no traceable local source")}` : ""));
     return;
   }
   console.log(`candor path — how \`${start}\` comes to perform ${eff}:\n`);
@@ -1374,12 +1414,25 @@ switch (cmd) {
       // so the answer is empty at exit 0, never a fabricated "no such function" (rust corpus-audit #5,
       // byte-matching its two arms: `{}` on the machine channel, the re-scan pointer on the human one).
       if (!completeGraph) {
-        put(args, {}, () => console.log(`candor: no caller of \`${q}\` in the effect-relevant graph (the full call-graph sidecar is absent; re-scan with --out to see pure-only callers).`));
+        // ⟨0.32⟩ AND THIS ARM TAKES THE HEDGE TOO. `{}` is the STRONGEST determined negative the format
+        // has — every key a consumer reads defaults to empty, so `d.direct ?? []` cannot tell it from
+        // `{"direct": []}`. The sidecar-absence sentence is a DIFFERENT limitation (an effect-only graph)
+        // and does not cover a report whose own `excluded` names a class nothing opened.
+        putAnswer(args, {}, () => console.log(`candor: no caller of \`${q}\` in the effect-relevant graph (the full call-graph sidecar is absent; re-scan with --out to see pure-only callers).`),
+          reportCompleteness(prefix), CALLERS_SOWHAT, CALLERS_TAIL);
         break;
       }
       console.error(`candor-ts-query callers: no function matching '${q}' in the call graph`); process.exit(2);
     }
-    put(args, cres, P.callers);
+    // ⟨0.32⟩ `putAnswer`, not `put`: this verb carried NO completeness reader at all — measured at HEAD
+    // over a report whose `excluded` names one class with `peeked: false`, `callers` answered
+    // `{"of":[…],"direct":["a.top"],"transitive":["a.top"]}` at exit 0 with no caveat on EITHER channel,
+    // and an EMPTY `direct` over the same bytes reads as *nothing calls this*. Its key set is FIXED, so
+    // the caveat spreads in beside the answer exactly as it does for `where` — no nesting, no reserved-key
+    // collision, and the exit does not move. `show`/`map` OVER-hedged (`putNestedWithCaveat` above, and
+    // the descriptive/certifying boundary is stated there); these three UNDER-hedged, which is the
+    // direction this family calls the cardinal sin.
+    putAnswer(args, cres, P.callers, reportCompleteness(prefix), CALLERS_SOWHAT, CALLERS_TAIL);
     break;
   }
   case "map": {
@@ -1550,7 +1603,11 @@ switch (cmd) {
     if (coreMatches(knownFnNames(impCg, impFns), q).length === 0) {
       console.error(`candor-ts-query impact: no function matching '${q}'`); process.exit(2);
     }
-    put(args, coreImpact(impFns, impCg, q), P.impact);
+    // ⟨0.32⟩ `putAnswer`, not `put` — this verb had NO completeness reader at all (see `CALLERS_SOWHAT`
+    // above for the measurement and the boundary). `affectedCount: 0` is the strongest claim in this
+    // verb's vocabulary, and over a report whose own `excluded` names a class nothing opened it rests on
+    // a graph missing whatever lives in that class. Fixed key set, so the caveat spreads in at the root.
+    putAnswer(args, coreImpact(impFns, impCg, q), P.impact, reportCompleteness(prefix), IMPACT_SOWHAT, IMPACT_TAIL);
     break;
   }
   case "blindspots": {
@@ -1812,13 +1869,23 @@ switch (cmd) {
     if (coreMatches(knownFnNames(cg, fns), fn).length === 0) {
       console.error(`candor-ts-query path: no function matching '${fn}'`); process.exit(2);
     }
-    if (wantJson) emit(corePath(fns, cg, fn, eff));           // conformance PART 5 shape — UNCHANGED
+    // ⟨0.32⟩ THE COMPLETENESS READER THIS VERB DID NOT HAVE (see `PATH_SOWHAT` above). `path: []` is the
+    // determined negative here — *this function does not reach that effect* — and a hop through an unread
+    // unit BREAKS the chain, so a hedging report can produce that answer for a function that really does
+    // reach it. Read once and used on BOTH arms; the key set is fixed, so the caveat spreads at the root
+    // and the conformance PART 5 shape is unchanged on a complete report (`completenessFields` → `{}`).
+    const pcomp = reportCompleteness(prefix);
+    if (wantJson) emit(withCompleteness(corePath(fns, cg, fn, eff), pcomp));
     else {
       // The accepted 0.11 default change (the human chain replaced JSON as the no-flag output) gets a
       // ONE-line stderr breadcrumb, so a pre-0.11 pipeline that broke on the new default is pointed at
       // --json rather than left guessing. stderr only — stdout stays the human chain; --json untouched.
       console.error("candor-ts-query: tip — `--json` selects the machine-readable path shape (the default before 0.11)");
-      renderPathHuman(fns, cg, fn, eff);
+      // The note goes on STDOUT with the answer it qualifies, like every other verb here: a caveat on the
+      // other stream is one `2>/dev/null` from gone. `renderPathHuman` takes the hedge flag so its two
+      // determined-negative sentences ("does not perform", "not statically traceable") can withdraw.
+      incompleteAnswerNote(pcomp, PATH_SOWHAT, PATH_TAIL);
+      renderPathHuman(fns, cg, fn, eff, mustHedge(pcomp));
     }
     break;
   }

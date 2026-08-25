@@ -1202,6 +1202,65 @@ export function mid(): void { leaf(); }
        JSON.stringify(imp).slice(0, 200));
   }
 
+  // ── ⟨0.32⟩ THE SILENT HALF OF THE RUNG-A CLASS, ON THE AGENT CHANNEL. `candor_show`/`candor_map`
+  // OVER-hedged (the caveat replaced the data, ruled the other way above); `candor_impact`,
+  // `candor_callers` and `candor_path` carried NO completeness reader at all. The header on
+  // `withCompleteness` in mcp.mjs said `candor_show`/`candor_impact` "already fail closed here on the
+  // fn-existence guard", and that was true of ONE cause and hid three tools: the guard fires when the
+  // report contains no such NAME, and says nothing about a report that contains the name and declares
+  // part of the tree unread.
+  //
+  // MEASURED over this server's own stdio transport, on a report whose `excluded` names one class with
+  // `peeked: false` — the shape a single-file scan with unparsed `.js`/`.mjs` siblings publishes:
+  //
+  //   candor_callers {"of":[…],"direct":["app.mid"],"transitive":[…]}          no caveat
+  //   candor_impact  {"fn":…,"affectedCount":1,"affected":["app.mid"],…}       no caveat
+  //   candor_path    {"fn":…,"effect":"Net","path":[…2 steps…]}                no caveat
+  //
+  // The agent is the consumer that CANNOT ASK A FOLLOW-UP QUESTION: `affectedCount === 0` reads as
+  // "safe to change" and `path.length === 0` as "this does not reach Net", and there is no oddly-bare
+  // answer for it to notice. All three certify nothing, so they are on the descriptive side of the
+  // ⟨0.32⟩ boundary — the caveat rides BESIDE the answer and no exit code moves.
+  {
+    const unreadP = mk("unread-cip", (o) => {
+      o.excluded = [{ class: "not-a-parsed-source", count: 1, peeked: false, reason: "not in this run's parse set" }];
+    });
+    const shoot = async (pfx) => {
+      const rs = await mcpSession([
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "candor_callers", arguments: { fn: "app.leaf", report: pfx } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "candor_impact", arguments: { fn: "app.leaf", report: pfx } } },
+        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "candor_path", arguments: { fn: "app.mid", effect: "Net", report: pfx } } },
+      ]);
+      const b = Object.fromEntries(rs.map((r) => [r.id, r]));
+      return [1, 2, 3].map((i) => (b[i].result.isError ? null : JSON.parse(b[i].result.content[0].text)));
+    };
+    const [uCal, uImp, uPath] = await shoot(unreadP);
+    // THE DEFECT ASSERTIONS, on the ROW NAMES — never "the key exists". A hedge that shipped an empty
+    // `direct`/`affected`/`path` would pass a presence check while deleting the answer.
+    ok("⟨0.32⟩ MCP: `candor_callers` over a report naming an UNREAD exclusion class carries `incomplete: true` — an agent cannot otherwise tell 'nobody calls this' from 'nothing opened that code'",
+       uCal?.incomplete === true, JSON.stringify(uCal).slice(0, 240));
+    ok("⟨0.32⟩ MCP: …and the CALLERS travel beside the caveat, by NAME",
+       uCal?.direct?.length === 1 && uCal.direct[0] === "app.mid", JSON.stringify(uCal).slice(0, 240));
+    ok("⟨0.32⟩ MCP: `candor_impact` over the same report carries `incomplete: true` — `affectedCount: 0` on this channel is *safe to change*, read by a consumer with no follow-up question available to it",
+       uImp?.incomplete === true, JSON.stringify(uImp).slice(0, 240));
+    ok("⟨0.32⟩ MCP: …and the BLAST RADIUS travels beside the caveat, by NAME and COUNT",
+       uImp?.affectedCount === 1 && uImp.affected?.[0] === "app.mid", JSON.stringify(uImp).slice(0, 240));
+    ok("⟨0.32⟩ MCP: `candor_path` over the same report carries `incomplete: true` — a hop through an unread unit BREAKS the chain, so `path: []` here is not a determined no",
+       uPath?.incomplete === true, JSON.stringify(uPath).slice(0, 240));
+    ok("⟨0.32⟩ MCP: …and the CHAIN travels beside the caveat, in order",
+       (uPath?.path ?? []).map((s) => s.fn).join(">") === "app.mid>app.leaf", JSON.stringify(uPath).slice(0, 240));
+    // INTACT CONTROL — without it every row above passes just as well from a wrapper that hedges
+    // unconditionally, which is a hedge an agent learns to ignore. Pinned key sets, so the caveat cannot
+    // arrive by reshaping the tool's document.
+    const [cCal, cImp, cPath] = await shoot(P);
+    for (const [name, doc, keys] of [["candor_callers", cCal, ["of", "direct", "transitive"]],
+                                     ["candor_impact", cImp, ["fn", "affectedCount", "affected", "entryPoints"]],
+                                     ["candor_path", cPath, ["fn", "effect", "path", "note"]]])
+      ok(`⟨0.32⟩ MCP CONTROL: ${name} over an INTACT report is unhedged and keeps its pinned key set`,
+         doc !== null && !("incomplete" in doc) && Object.keys(doc).every((k) => keys.includes(k)),
+         JSON.stringify(doc).slice(0, 200));
+  }
+
   // ── ⟨0.28⟩ A ZERO-RULE POLICY ON THE AGENT CHANNEL (SPEC §2). The three policy-relative tools share the
   // CLI's loader and answered relative to a policy that asked nothing. MEASURED against the pre-rung
   // server on this fixture: `candor_whatif` → `{…,"ok":true}`, `candor_fix` →

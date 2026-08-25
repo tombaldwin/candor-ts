@@ -216,6 +216,13 @@ function capCallers(r) {
 // `{"entryPoints":0,"effects":{}}`, `candor_containment` → `{"contained":[],"ambient":{}}` — five flat
 // all-clears with no hedge. `candor_show`/`candor_impact` already fail closed on the fn-existence guard.
 //
+// ⟨0.32⟩ **AND THAT LAST SENTENCE WAS TRUE OF ONE CAUSE AND HID THREE TOOLS.** The fn-existence guard
+// fires when the report contains no such NAME; it says nothing about a report that contains the name and
+// declares part of the tree unread. MEASURED over this server's own stdio transport on a report whose
+// `excluded` names one class with `peeked: false`: `candor_impact`, `candor_callers` and `candor_path` all
+// answered FLAT — the SILENT half of the class `candor_show`/`candor_map` had the loud half of. All three
+// now take this wrapper; all three have fixed key sets, so nothing is nested and nothing is displaced.
+//
 // THE AGENT IS THE CONSUMER THAT CANNOT ASK A FOLLOW-UP QUESTION. A human running the CLI at least sees an
 // oddly bare answer; a loop reading `blindspots.sources.length === 0` records "no blind spots" and moves on.
 // Additive and a no-op on a complete report (`completenessFields` returns `{}`), so every pinned tool shape
@@ -295,7 +302,14 @@ const TOOLS = {
   candor_impact: {
     description: "Backward blast radius: every effectful function that transitively calls `fn`, and which runtime entry points are downstream. Answers 'if I change this, what surfaces at runtime?' — the cheapest possible alternative to tracing callers by hand.",
     schema: { type: "object", properties: { fn: { type: "string", description: "the function/unit to assess" }, ...reportArg }, required: ["fn"] },
-    run: (a, p) => { const fns = loadReportLoud(p); return capImpact(Q.impact(fns, graphOrReportEdges(p, fns), a.fn)); },
+    // ⟨0.32⟩ `withCompleteness` — this tool had NO completeness reader, and neither did `candor_path` or
+    // `candor_callers`. MEASURED over this server's own stdio transport on a report whose `excluded`
+    // names one class with `peeked: false`: all three answered FLAT, and `affectedCount: 0` on the AGENT
+    // channel is *nothing calls this, safe to change* — read by a consumer with no follow-up question
+    // available to it. Fixed key sets, so the caveat spreads at the root and every pinned tool shape is
+    // unchanged on a complete report (`completenessFields` → `{}`). These three certify nothing, so they
+    // are on the descriptive side of the ⟨0.32⟩ boundary stated on `nestWithCaveat` below.
+    run: (a, p) => { const fns = loadReportLoud(p); return withCompleteness(p, capImpact(Q.impact(fns, graphOrReportEdges(p, fns), a.fn))); },
   },
   candor_where: {
     description: "Which functions perform a given effect (e.g. Net, Db, Exec, Fs) — `directly` vs `inherited` via a callee. The effect-surface map.",
@@ -310,12 +324,15 @@ const TOOLS = {
   candor_path: {
     description: "Forward provenance: the shortest call chain from `fn` to the nearest function that performs `effect` DIRECTLY — 'this reaches Net through WHAT?'.",
     schema: { type: "object", properties: { fn: { type: "string" }, effect: { type: "string" }, ...reportArg }, required: ["fn", "effect"] },
-    run: (a, p) => { const fns = loadReportLoud(p); return Q.path(fns, graphOrReportEdges(p, fns), a.fn, a.effect); },
+    // ⟨0.32⟩ see `candor_impact` above: `path: []` to an agent is *this function does not reach that
+    // effect*, and a hop through an unread unit breaks the chain.
+    run: (a, p) => { const fns = loadReportLoud(p); return withCompleteness(p, Q.path(fns, graphOrReportEdges(p, fns), a.fn, a.effect)); },
   },
   candor_callers: {
     description: "Who calls `fn` — direct (one hop) and transitive callers over the effect-relevant call graph.",
     schema: { type: "object", properties: { fn: { type: "string" }, ...reportArg }, required: ["fn"] },
-    run: (a, p) => capCallers(Q.callers(graphOrReportEdges(p, loadReportLoud(p)), a.fn)),
+    // ⟨0.32⟩ see `candor_impact` above: an empty `direct` to an agent is *nobody calls this*.
+    run: (a, p) => withCompleteness(p, capCallers(Q.callers(graphOrReportEdges(p, loadReportLoud(p)), a.fn))),
   },
   candor_show: {
     description: "A function's effects (inferred = transitive, direct = own body) plus its literal surfaces (hosts/cmds/paths/tables) when present.",

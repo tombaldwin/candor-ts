@@ -8,6 +8,42 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **`callers`, `impact` and `path` carried NO completeness reader at all, on the CLI *and* on the AGENT
+  channel — the SILENT half of the same class.** ⟨0.28⟩ widened SPEC §2's re-disclosure MUST to *"any
+  verb whose output could be read as a NEGATIVE FINDING about the code — a verdict, an empty result set,
+  or a zero count"*, enumerated six verbs, and skipped these three; the ⟨0.32⟩ unread-class cause then
+  made the gap fire on nearly every no-policy report. MEASURED at HEAD over a report whose `excluded`
+  names one class with `peeked: false` — what a single-file scan with unparsed `.js`/`.mjs` siblings
+  publishes, and what a rust crate with one `tests/` dir publishes:
+
+  ```
+  callers a.wrapper --json  {"of":[…],"direct":["a.top"],"transitive":["a.top"]}  exit 0  no caveat
+  impact  a.wrapper --json  {"fn":…,"affectedCount":1,"affected":["a.top"],…}     exit 0  no caveat
+  path    a.top Fs  --json  {"effect":"Fs","fn":…,"path":[…3 steps…]}             exit 0  no caveat
+  ```
+
+  **AND THE SAME THREE TOOLS ANSWERED FLAT ON MCP.** Driven over this server's own stdio JSON-RPC
+  transport, `candor_callers`, `candor_impact` and `candor_path` returned their answers with no hedge —
+  the edit-time channel, where a consumer reading `affectedCount === 0` records "safe to change" and has
+  no follow-up question available to it. The `withCompleteness` header claimed
+  `candor_show`/`candor_impact` "already fail closed here on the fn-existence guard"; that was true of
+  ONE cause and hid three tools, because the guard fires on a missing NAME and says nothing about a
+  report that contains the name and declares part of the tree unread.
+
+  Where `show`/`map` OVER-hedged (the caveat replaced the data, ruled the other way in the entry below),
+  these three UNDER-hedged. **The remedy is the existing mechanism, not a fourth spelling:** all three
+  documents have a FIXED key set at their root, so nothing nests and no reserved-key collision can arise
+  — they take `putAnswer` on the CLI and `withCompleteness` on MCP, exactly as `where` does. Both of
+  `callers`' answering arms are covered (including the `{}` effect-only fallback, the strongest
+  determined negative the format has) and both of `path`'s, and the prose renderers withdraw their
+  determined negatives under a hedge — *"nothing calls it"*, *"safe to change"*, *"does not perform"* —
+  because leaving the calm sentence standing under the note MOVES the false all-clear rather than
+  removing it.
+
+  **The boundary does not move.** `gate`, and `unverified`/`fix-gate`/`whatif`/`fix` under `--strict`,
+  answer `ok` and still REFUSE over these same bytes (⟨0.24⟩; conformance PARTs 62 and 67). Healthy
+  output is byte-identical, diffed against the pre-change build on both channels.
+
 - **`show` and `map` returned the WARNING INSTEAD OF THE ANSWER — the ⟨0.32⟩ descriptive hedge, ruled
   the other way and closed four-way.** ⟨0.28⟩ Rung A tells a verb *whose pinned shape cannot carry the
   caveat* to emit the CAVEAT DOCUMENT **instead of** its result document, and yesterday's rung armed

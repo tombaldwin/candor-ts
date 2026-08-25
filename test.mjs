@@ -11307,6 +11307,85 @@ if (blk()) {
           `${mj2.stdout}`.slice(0, 240));
   }
 
+  // ── ⟨0.32⟩ THE SILENT HALF OF THE SAME CLASS: `callers`, `impact` AND `path` HAD NO COMPLETENESS
+  // READER AT ALL. `show`/`map` OVER-hedged (the caveat replaced the data, ruled the other way above);
+  // these three UNDER-hedged. MEASURED at HEAD 2026-08-25 over a report whose `excluded` names one class
+  // with `peeked: false` — what a single-file scan with unparsed `.js`/`.mjs` siblings publishes, and what
+  // a rust crate with one `tests/` dir publishes:
+  //
+  //   callers a.wrapper --json  {"of":[…],"direct":["a.top"],"transitive":["a.top"]}  exit 0  no caveat
+  //   impact  a.wrapper --json  {"fn":…,"affectedCount":1,"affected":["a.top"],…}     exit 0  no caveat
+  //   path    a.top Fs  --json  {"effect":"Fs","fn":…,"path":[…3 steps…]}             exit 0  no caveat
+  //
+  // — nothing on the human channel either, and the same three tools answered flat on the MCP surface
+  // (test-mcp.mjs carries that half). Reproduced identically in candor-rust and candor-java.
+  //
+  // The three documents each have a FIXED key set at their root, so unlike `show`/`map` there is nothing
+  // to nest: they take `putAnswer`, the helper `where`/`reachable`/`blindspots`/`containment` already use.
+  // The boundary is unmoved — the verbs that answer `ok` still REFUSE over these bytes (the BOUNDARY
+  // CONTROL rows above; conformance PARTs 62 and 67).
+  {
+    const unread3 = state("unread3", (o) => {
+      o.excluded = [{ class: "not-a-parsed-source", count: 1, peeked: false, reason: "not in this run's parse set" }];
+    });
+    // The three verbs, their argv, the ANSWER key to assert by NAME, and the value it must still carry.
+    const CIP = [
+      ["callers", ["callers", "app.mid"], (doc) => Array.isArray(doc.direct) && doc.direct.length === 1
+                                                  && doc.direct[0] === "src.app.main"],
+      ["impact", ["impact", "app.mid"], (doc) => doc.affectedCount === 1
+                                                && Array.isArray(doc.affected) && doc.affected[0] === "src.app.main"],
+      ["path", ["path", "app.main", "Fs"], (doc) => Array.isArray(doc.path) && doc.path.length === 3
+                                                   && doc.path.map((s) => s.fn).join(">") === "src.app.main>src.app.mid>src.app.leaf"],
+    ];
+    for (const [label, argv, answerOk] of CIP) {
+      const j = dq(argv, unread3, "--json");
+      let doc = null; try { doc = JSON.parse(j.stdout); } catch { /* null → the row fails loudly */ }
+      check(`⟨0.32⟩ \`${label}\` over a report naming an UNREAD exclusion class carries \`incomplete: true\` — it had NO completeness reader at all, so an empty \`direct\`/\`affected\`/\`path\` read as a determined negative about code nobody opened`,
+            !!doc && doc.incomplete === true, `status=${j.status} ${j.stdout}`.slice(0, 260));
+      // THE DEFECT ASSERTION, on the ROW NAMES — never "the key exists". A hedge that shipped an empty
+      // answer would pass a presence check while deleting exactly what a descriptive verb is for.
+      check(`⟨0.32⟩ …and \`${label}\` returns its answer BESIDE the caveat, by NAME — the data AND the warning, never the warning instead of the data`,
+            !!doc && answerOk(doc), `${j.stdout}`.slice(0, 300));
+      check(`⟨0.32⟩ …and \`${label}\` still exits 0 — a descriptive verb's hedge is a DISCLOSURE, not an exit code (⟨0.24⟩), and the verbs that answer \`ok\` keep refusing over the same bytes`,
+            j.status === 0, `status=${j.status}`);
+      // The OTHER channel. A mutant that keeps the whole JSON fix and deletes the printed line survives
+      // every absence-assert on the document (candor-spec `ec1a441`, measured in candor-rust).
+      const h = dq(argv, unread3, "--text");
+      check(`⟨0.32⟩ …and the HUMAN arm of \`${label}\` prints the ⚠ INCOMPLETE note ON STDOUT and NAMES the unread class — a caveat on the other stream is one \`2>/dev/null\` from gone`,
+            /⚠ INCOMPLETE/.test(h.stdout) && /not-a-parsed-source/.test(h.stdout) && !/⚠ INCOMPLETE/.test(h.stderr),
+            `out=${h.stdout}`.slice(0, 300) + ` err=${h.stderr}`.slice(0, 160));
+      // INTACT CONTROL — without it every row above passes just as well from a verb that hedges
+      // unconditionally, which makes every ordinary answer read as partial: the disclosure discrediting
+      // itself. Both channels, and the pinned key set asserted so the caveat cannot arrive by reshaping.
+      const ij2 = dq(argv, intactP, "--json"), ih2 = dq(argv, intactP, "--text");
+      let idoc = null; try { idoc = JSON.parse(ij2.stdout); } catch { /* null → fails loudly */ }
+      check(`⟨0.32⟩ CONTROL: \`${label}\` over an INTACT report gains NO caveat key and keeps its pinned shape, on both channels`,
+            ij2.status === 0 && !!idoc && !("incomplete" in idoc) && answerOk(idoc)
+              && Object.keys(idoc).every((k) => ["of", "direct", "transitive", "possibleViaUnknownDispatch",
+                                                 "fn", "affectedCount", "affected", "entryPoints",
+                                                 "effect", "path"].includes(k))
+              && !/⚠ INCOMPLETE/.test(ih2.stdout),
+            `json=${ij2.stdout}`.slice(0, 260) + ` text=${ih2.stdout}`.slice(0, 160));
+      // …and the ⟨0.24⟩ MIRROR CONTROL: a report that judged 7 units and found none effectful is making a
+      // purity CLAIM. Hedging that would withdraw the claim §2 rule 3 protects.
+      const pj2 = dq(argv, pureP, "--json");
+      check(`⟨0.32⟩ CONTROL: \`${label}\` over an ALL-PURE report (\`analyzed.count: 7\`, \`functions: []\`) does NOT hedge — that answer is a claim the report is entitled to make`,
+            !/incomplete/.test(pj2.stdout), `status=${pj2.status} ${pj2.stdout}`.slice(0, 220));
+    }
+    // `path`'s EMPTY-answer arm is a SEPARATE emit site and is the sharpest cell here: `path: []` is
+    // *this function does not reach that effect*, the precise reassurance a reader asks `path` for.
+    const pe = dq(["path", "app.main", "Net"], unread3, "--json");
+    let pedoc = null; try { pedoc = JSON.parse(pe.stdout); } catch { /* null → fails loudly */ }
+    check("⟨0.32⟩ `path`'s EMPTY-chain arm hedges too — `path: []` over an unread class is *this function does not reach that effect*, asserted about code nobody opened",
+          pe.status === 0 && !!pedoc && pedoc.incomplete === true && Array.isArray(pedoc.path) && pedoc.path.length === 0,
+          `status=${pe.status} ${pe.stdout}`.slice(0, 260));
+    // …and `callers`' empty-answer PROSE withdraws its determined negative, the way `show`/`blindspots`
+    // already do. "has no callers" IS the prose spelling of `direct: []`.
+    const ce = dq(["callers", "app.main"], unread3, "--text");
+    check("⟨0.32⟩ `callers`' empty-answer PROSE withdraws *nothing calls this* when hedging — the sentence is the prose spelling of the empty JSON, and leaving it standing MOVES the false all-clear",
+          /NOT "nothing calls it"/.test(ce.stdout), `${ce.stdout}`.slice(0, 300));
+  }
+
   // ── THE ARRAY EARNS ITS SHAPE ON A MULTI-REPORT LOCATOR: it names WHICH member judged nothing, which
   // `true` never could. PER FILE, the rust/java semantics ("a locator naming several members must
   // disclose EACH silent one by name") — the gate's ANDed boolean is a different question (`did this
