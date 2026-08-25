@@ -269,8 +269,8 @@ const incompleteAnswerNote = (comp, soWhat, tail) => {
 // construct it. `map` was the one caller whose top level is a USER NAMESPACE, and it answered by MERGING
 // the hedge over a module literally named `incomplete` and disclosing the loss on stderr — a lost row the
 // operator was told about, which was the best available answer while the caveat had to ride the result.
-// It no longer does: `map` takes `putCaveatInstead` below, where the caveat REPLACES the document and
-// nothing is displaced. Every remaining caller has a FIXED key set of its own (`where`
+// It no longer does: `map` takes `putNestedWithCaveat` below, where its namespace sits one level down
+// under `modules` and nothing is displaced. Every remaining caller has a FIXED key set of its own (`where`
 // {effect,directly,inherited}, `reachable` {entryPoints,effects}, `containment` {contained,ambient},
 // `blindspots` {sources,totalUnknown}), so a collision here is not constructible from any report.
 // Deleted rather than kept as a dormant guard: a check whose condition cannot arise reads as coverage.
@@ -287,10 +287,9 @@ const putAnswer = (a, data, proseFn, comp, soWhat, tail) => {
   return data;
 };
 
-// ---- ⟨0.28⟩ RUNG A — SPEC §2: "A VERB WHOSE PINNED SHAPE CANNOT CARRY THE CAVEAT MUST EMIT THE CAVEAT
-// DOCUMENT INSTEAD OF ITS RESULT DOCUMENT." Not a result document with the caveat omitted, and not an
-// empty result of the pinned shape. `putAnswer` above SPREADS the caveat into the answer, which works for
-// every verb with a fixed key set; two verbs have no such place:
+// ---- ⟨0.28⟩ RUNG A — SPEC §2: a verb whose pinned shape CANNOT CARRY the caveat changes SHAPE over a
+// hedging report. `putAnswer` above SPREADS the caveat into the answer, which works for every verb with a
+// fixed key set; two verbs have no such place at their root:
 //
 //   show   pinned to a TOP-LEVEL ARRAY — nowhere to put a key at all. MEASURED here 2026-08-12 over a
 //          report declaring one `unanalyzed` unit: `[]`, exit 0, no caveat on ANY channel. *Nothing
@@ -304,10 +303,35 @@ const putAnswer = (a, data, proseFn, comp, soWhat, tail) => {
 // airtight in one namespace and merely unlikely in another is not a convention; it is a deferred
 // collision."
 //
-// THE TYPE CHANGE IS THE POINT. A consumer doing `for (const x of doc)` over `show` gets a TypeError
-// rather than a silent zero-iteration loop — the one case where breaking a consumer is the CORRECT
-// outcome, because the consumer was being lied to. The exit does not move (⟨0.24⟩: a disclosure, not an
-// exit code), and HEALTHY OUTPUT IS BYTE-IDENTICAL: the shape changes only on the hedge path.
+// ⟨0.32⟩ **AND WHAT THE HEDGING DOCUMENT CONTAINS WAS RULED AGAIN ON 2026-08-25: THE RESULT *AND* THE
+// WARNING, NEVER THE WARNING INSTEAD OF THE RESULT.** Rung A's original answer was the CAVEAT DOCUMENT
+// INSTEAD of the result, written while the trigger was a manifest a scan had FAILED to produce — there
+// was little result to lose. ⟨0.32⟩'s unread-class cause then armed the same substitution on nearly every
+// no-policy report. MEASURED on a single-file scan with unparsed `.js`/`.mjs` siblings, and on a rust
+// crate with one `tests/` dir:
+//
+//     show <fn> --json   ->  {"incomplete": true}      the rows are GONE
+//     map       --json   ->  {"incomplete": true}      the map is GONE
+//
+// and through mcp.mjs the SAME document reached an AGENT (`candor_show`/`candor_map`), which is the
+// channel that cannot ask a follow-up question.
+//
+// **THE BOUNDARY, STATED: THESE TWO ARE DESCRIPTIVE — THEY CERTIFY NOTHING.** No `ok`, no verdict, no
+// exit-code obligation, so there is no claim for a pessimism rule to protect and withholding the rows
+// buys no soundness. The verbs on the OTHER side of the boundary are the ones that answer `ok` — `gate`,
+// and `unverified`/`fix-gate`/`whatif`/`fix` under `--strict` — and they MUST keep refusing over these
+// same bytes (⟨0.24⟩'s "never LESS sensitive than the gate"; conformance PARTs 62 and 67 pin it). Nothing
+// in this helper touches them. The same codebase already answers the descriptive question this way one
+// verb over: `gains --json` keeps its gained set and adds `incomplete: true` beside it.
+//
+// SO THE RESULT MOVES ONE LEVEL DOWN, under a key this helper is given, and the caveat sits at the root.
+// That placement is what lets both properties hold at once: no reserved-key convention is needed (`map`'s
+// module namespace is nested, so a module named `incomplete` cannot collide with the boolean), and no row
+// is displaced. THE TYPE CHANGE IS STILL THE POINT — a consumer doing `for (const x of doc)` over `show`
+// still gets a TypeError rather than a silent zero-iteration loop — and relative to the shape this
+// replaces the change is purely ADDITIVE: a consumer that already handles the hedge sees one more key.
+// The exit does not move (⟨0.24⟩: a disclosure, not an exit code), and HEALTHY OUTPUT IS BYTE-IDENTICAL:
+// the shape changes only on the hedge path.
 //
 // The PROSE arm is `putAnswer`'s, verbatim — prose has no shape problem, and the clause is about the
 // machine document. Sharing the note + renderer call keeps the two channels from drifting.
@@ -316,8 +340,11 @@ const putAnswer = (a, data, proseFn, comp, soWhat, tail) => {
 // it delegated to `putAnswer`, whose `{ ...data, ...{} }` turned `show`'s ARRAY into `{"0": {…}}` — the
 // pinned top-level array destroyed on the very path this rung promises to leave byte-identical. Caught by
 // the intact-input control before it left the machine. So the healthy arm emits `data` itself.
-const putCaveatInstead = (a, data, proseFn, comp, soWhat, tail) => {
-  if (!proseFn || wantJsonOut(a)) { emit(mustHedge(comp) ? completenessFields(comp) : data); return data; }
+const putNestedWithCaveat = (a, key, data, proseFn, comp, soWhat, tail) => {
+  if (!proseFn || wantJsonOut(a)) {
+    emit(mustHedge(comp) ? { [key]: data, ...completenessFields(comp) } : data);
+    return data;
+  }
   incompleteAnswerNote(comp, soWhat, tail);
   proseFn(data, mustHedge(comp));
   return data;
@@ -1251,11 +1278,12 @@ switch (cmd) {
     // A missing/empty <query> is a LOUD usage error (exit 2, like candor-java) — never a silently-empty
     // `[]` at exit 0, which reads as an authoritative "no such function" over a question never asked.
     if (!q) { console.error("usage: candor-ts-query show <query> [--report <locator>] [--json]"); process.exit(2); }
-    // ⟨0.28⟩ RUNG A — `show`'s pinned shape is a TOP-LEVEL ARRAY, so over a hedging report it emits the
-    // CAVEAT DOCUMENT INSTEAD (see `putCaveatInstead`). Before this it took plain `put` and had no
-    // completeness reader at all: measured, `[]` at exit 0 over a report whose own manifest names a file
-    // candor could not read — the only verb of the six with no caveat on EITHER channel.
-    putCaveatInstead(args, coreShow(loadReportOrDie(prefix), q), P.show, reportCompleteness(prefix),
+    // ⟨0.28⟩ RUNG A — `show`'s pinned shape is a TOP-LEVEL ARRAY, so over a hedging report it changes
+    // shape (see `putNestedWithCaveat`). Before that rung it took plain `put` and had no completeness
+    // reader at all: measured, `[]` at exit 0 over a report whose own manifest names a file candor could
+    // not read — the only verb of the six with no caveat on EITHER channel. ⟨0.32⟩ the rows now travel
+    // under `functions` BESIDE the caveat rather than being replaced by it: `show` certifies nothing.
+    putNestedWithCaveat(args, "functions", coreShow(loadReportOrDie(prefix), q), P.show, reportCompleteness(prefix),
       `the function(s) shown below are only those candor could SEE match \`${q}\``,
       "A function in an unread unit is ABSENT from the report, so it cannot be shown here at all. Re-scan for a complete answer.");
     break;
@@ -1359,9 +1387,11 @@ switch (cmd) {
     const { prefix } = resolveReportVerb(args, 0);
     // ⟨0.28⟩ `map` answers `{}`, which SPEC §2 calls the STRONGEST determined negative there is: every key
     // a consumer reads defaults to empty, so `d["db"] ?? {}` cannot tell an empty map from an unexamined
-    // one. RUNG A: its top level is a USER NAMESPACE, so the caveat REPLACES the module map rather than
-    // merging into it — the merged shape displaced a real module row to make space for the hedge.
-    putCaveatInstead(args, coreMap(loadReportOrDie(prefix)), P.map, reportCompleteness(prefix),
+    // one. RUNG A: its top level is a USER NAMESPACE, so the caveat may not merge into it — the merged
+    // shape displaced a real module row to make space for the hedge. ⟨0.32⟩ the map now NESTS under
+    // `modules` with the caveat at the root, which removes the collision instead of deferring it AND
+    // keeps the answer: `map` certifies nothing, so there was never a claim to withhold.
+    putNestedWithCaveat(args, "modules", coreMap(loadReportOrDie(prefix)), P.map, reportCompleteness(prefix),
       "the module rows below cover only the source candor read",
       "A module living wholly in an unread unit is MISSING from this overview, and one that IS listed may be missing functions. Re-scan for a complete map.");
     break;

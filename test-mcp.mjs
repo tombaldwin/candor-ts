@@ -1110,8 +1110,8 @@ export function mid(): void { leaf(); }
     ok(`⟨0.28⟩ CONTROL: ${name} over an ALL-PURE report (\`analyzed.count: 9\`, \`functions: []\`) does NOT hedge`,
        !("incomplete" in doc), JSON.stringify(doc).slice(0, 200));
 
-  // ── ⟨0.28⟩ RUNG A ON THE AGENT CHANNEL: the two tools whose pinned shape cannot CARRY the caveat
-  // emit the CAVEAT DOCUMENT INSTEAD. `candor_show` returns the CLI's array and had no completeness
+  // ── ⟨0.28⟩ RUNG A ON THE AGENT CHANNEL: the two tools whose pinned shape cannot CARRY the caveat at
+  // their ROOT change shape. `candor_show` returns the CLI's array and had no completeness
   // reader at all; `candor_map` is keyed by the operator's own module names and used to MERGE the hedge
   // into that namespace, displacing a real row. MEASURED here 2026-08-12 against the pre-rung server,
   // over a report declaring one `unanalyzed` unit:
@@ -1132,13 +1132,22 @@ export function mid(): void { leaf(); }
       return [JSON.parse(by[1].result.content[0].text), JSON.parse(by[2].result.content[0].text)];
     };
     const [hShow, hMap] = await shot(partialP);
-    ok("⟨0.28⟩ Rung A (MCP): `candor_show` over a report declaring `unanalyzed` returns the CAVEAT DOCUMENT instead of its ARRAY — before this it answered the rows with no caveat on any channel",
+    ok("⟨0.28⟩ Rung A (MCP): `candor_show` over a report declaring `unanalyzed` answers an OBJECT, not its ARRAY — before this rung it answered the rows with no caveat on any channel",
        !Array.isArray(hShow) && hShow.incomplete === true && hShow.unanalyzed?.length === 1
-         && Object.keys(hShow).every((k) => ["incomplete", "unanalyzed", "judgedNothing"].includes(k)),
+         && Object.keys(hShow).every((k) => ["functions", "incomplete", "unanalyzed", "judgedNothing", "noManifest"].includes(k)),
        JSON.stringify(hShow).slice(0, 240));
-    ok("⟨0.28⟩ Rung A (MCP): `candor_map` emits the caveat document with NO module row beside it — the merged shape displaced a real module to make space for the hedge",
-       hMap.incomplete === true && Object.keys(hMap).every((k) => ["incomplete", "unanalyzed", "judgedNothing"].includes(k)),
+    // ⟨0.32⟩ THE DEFECT ASSERTION ON THE AGENT CHANNEL: the ANSWER is still in it. Measured over this
+    // server's own stdio transport before the ruling — `{"incomplete":true}` and nothing else, handed to
+    // an agent that had asked what a function does. Asserted as the row/module COUNT, because the
+    // safe-looking empty value passes a presence check while deleting what the ruling restored.
+    ok("⟨0.32⟩ Rung A (MCP): …and the ROWS travel beside the caveat — `candor_show` certifies nothing, so there was never a claim to protect by withholding them",
+       hShow.functions?.length === 1 && hShow.functions[0].fn === "app.leaf",
+       JSON.stringify(hShow).slice(0, 240));
+    ok("⟨0.28⟩ Rung A (MCP): `candor_map` puts its module namespace one level down under `modules` — the merged shape displaced a real module to make space for the hedge, and nesting removes the collision instead of deferring it",
+       hMap.incomplete === true && Object.keys(hMap).every((k) => ["modules", "incomplete", "unanalyzed", "judgedNothing", "noManifest"].includes(k)),
        JSON.stringify(hMap).slice(0, 240));
+    ok("⟨0.32⟩ Rung A (MCP): …and the MAP travels beside the caveat — an agent reading `Object.keys(map).length === 0` was being told this codebase performs no effects",
+       Object.keys(hMap.modules ?? {}).length > 0, JSON.stringify(hMap).slice(0, 240));
     // ⟨0.28⟩ …AND WITH A NAME THE REPORT DOES NOT CONTAIN, which is where the rung was still open.
     // The row above queries `app.leaf`, a fn that EXISTS, so `Q.show`'s fn-existence guard passes and
     // the caveat is reached. With a name it does not contain the guard THREW FIRST — and it threw
@@ -1154,6 +1163,9 @@ export function mid(): void { leaf(); }
       ]);
       const r = rs[0].result;
       const doc = r?.isError ? null : JSON.parse(r.content[0].text);
+      // ⟨0.32⟩ THIS is the one case where the caveat stands ALONE, and it is because there is no result
+      // to return rather than because one was withheld: `Q.show`'s guard REFUSES the query, and over a
+      // report that examined nothing that refusal is not a fact about the code.
       ok("⟨0.28⟩ Rung A (MCP): `candor_show` over a JUDGED-NOTHING report answers the CAVEAT DOCUMENT for a name the report does not contain — the fn-existence guard must not pre-empt the hedge, or an agent is told a function is absent by a report that examined nothing",
          doc !== null && doc.incomplete === true && Array.isArray(doc.judgedNothing) && doc.judgedNothing.length === 1,
          r?.isError ? "tool error: " + String(r.content?.[0]?.text).slice(0, 140) : JSON.stringify(doc).slice(0, 200));

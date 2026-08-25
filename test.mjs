@@ -11180,22 +11180,59 @@ if (blk()) {
   check("⟨0.28⟩ CONTROL: containment vs an INTACT baseline is unhedged and still exits 0 — the ratchet's exit follows the LEAKS, never the caveat",
         ratchetOk.status === 0 && !/incomplete/.test(ratchetOk.stdout), `status=${ratchetOk.status} ${ratchetOk.stdout}`.slice(0, 200));
 
+  // ── ⟨0.32⟩ THE CONTROL FOR THE DESCRIPTIVE/CERTIFYING BOUNDARY — written BEFORE the Rung A change
+  // that made `show`/`map` return their result beside the caveat, and unchanged by it. The direction that
+  // must NOT move is this one: a verb that answers `ok` still REFUSES over a report whose `excluded` names
+  // a class the producing scan never opened. Getting that wrong re-opens the cardinal sin, and both arms
+  // are pinned by conformance PARTs 62 and 67.
+  {
+    const unreadP = state("unread", (o) => {
+      o.excluded = [{ class: "non-library-target", count: 1, peeked: false, reason: "tests/" }];
+    });
+    const polF = path.join(d, "deny.policy"); fs.writeFileSync(polF, "deny Exec\n");
+    const gj = spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", `${unreadP}.json`,
+                                  "--policy", polF, "--json"], { encoding: "utf8" });
+    let gdoc = null; try { gdoc = JSON.parse(gj.stdout); } catch { /* null → fails loudly */ }
+    check("⟨0.32⟩ BOUNDARY CONTROL: `gate --report` still REFUSES over an unread exclusion class — exit 2, `ok: false`, `incomplete: true`",
+          gj.status === 2 && !!gdoc && gdoc.ok === false && gdoc.incomplete === true,
+          `status=${gj.status} ${gj.stdout}`.slice(0, 240));
+    for (const v of ["unverified", "fix-gate"]) {
+      const aj = spawnSync("node", [path.join(HERE, "query.mjs"), v, "--strict", "--report", `${unreadP}.json`,
+                                    "--policy", polF, "--json"], { encoding: "utf8" });
+      let adoc = null; try { adoc = JSON.parse(aj.stdout); } catch { /* null → fails loudly */ }
+      check(`⟨0.32⟩ BOUNDARY CONTROL: \`${v} --strict\` still refuses over the same bytes — exit 2, and \`ok\` OMITTED rather than falsified (⟨0.24⟩)`,
+            aj.status === 2 && !!adoc && !("ok" in adoc) && adoc.incomplete === true,
+            `status=${aj.status} ${aj.stdout}`.slice(0, 240));
+    }
+    // …and the DESCRIPTIVE side of the same boundary: the hedge appears and the exit does not move. This
+    // half is what makes the two arms above a boundary rather than a blanket.
+    for (const argv of [["show", "app.leaf"], ["map"]]) {
+      const dj = spawnSync("node", [path.join(HERE, "query.mjs"), ...argv, "--report", `${unreadP}.json`,
+                                    "--json"], { encoding: "utf8" });
+      let ddoc = null; try { ddoc = JSON.parse(dj.stdout); } catch { /* null → fails loudly */ }
+      check(`⟨0.32⟩ BOUNDARY CONTROL: \`${argv[0]}\` hedges over an unread class at exit 0 — a descriptive verb's hedge is a DISCLOSURE, not an exit code`,
+            dj.status === 0 && !!ddoc && ddoc.incomplete === true, `status=${dj.status} ${dj.stdout}`.slice(0, 240));
+    }
+  }
+
   // `map`'s top level is a USER NAMESPACE — the one document whose own rows could collide with the keys
-  // this rung must add. ⟨0.28⟩ RUNG A DISSOLVES THE COLLISION rather than disclosing it: the caveat
-  // REPLACES the module map, so a module named `incomplete` is not displaced by a hedge, it is simply
-  // absent along with every other row. The previous shape merged the keys and named the lost row loudly —
-  // the best answer available while the caveat had to ride the result, and still a dropped row. The
-  // stderr warning is GONE and this row asserts that: a disclosure about a displacement that can no
-  // longer happen is the `net-partner` false disclosure pointed backwards.
+  // this rung must add. ⟨0.28⟩ RUNG A DISSOLVES THE COLLISION rather than disclosing it, and ⟨0.32⟩ then
+  // ruled HOW: the module namespace NESTS one level down under `modules` and the caveat sits at the root,
+  // so a module named `incomplete` is neither displaced (the pre-Rung-A merged shape, which named the
+  // lost row loudly and still dropped it) nor withheld (Rung A's first answer, the caveat INSTEAD of the
+  // map — which the ⟨0.32⟩ unread-class cause then armed on nearly every no-policy report). The stderr
+  // warning stays GONE and this row asserts that: a disclosure about a displacement that can no longer
+  // happen is the `net-partner` false disclosure pointed backwards.
   const colP = state("collide", (o) => {
     o.functions = o.functions.map((e) => ({ ...e, fn: e.fn.replace(/^src\.app\./, "incomplete.") }));
     o.unanalyzed = [{ path: "src/gone.ts", reason: "parse error" }];
   });
   const col = spawnSync("node", [path.join(HERE, "query.mjs"), "map", "--report", `${colP}.json`, "--json"], { encoding: "utf8" });
   let cdoc = null; try { cdoc = JSON.parse(col.stdout); } catch { /* null → fails loudly */ }
-  check("⟨0.28⟩ Rung A: over a report whose module is literally named `incomplete`, `map` emits the CAVEAT DOCUMENT and nothing else — the collision cannot arise because no module row rides beside the hedge",
+  check("⟨0.32⟩ Rung A: over a report whose module is literally named `incomplete`, `map` KEEPS the row — it is a key of `modules`, the boolean is a key of the root, and neither can displace the other",
         !!cdoc && cdoc.incomplete === true && Array.isArray(cdoc.unanalyzed)
-          && Object.keys(cdoc).every((k) => ["incomplete", "unanalyzed", "judgedNothing"].includes(k)),
+          && !!cdoc.modules?.incomplete && Array.isArray(cdoc.modules.incomplete.effects)
+          && Object.keys(cdoc).every((k) => ["modules", "incomplete", "unanalyzed", "judgedNothing", "noManifest"].includes(k)),
         `${col.stdout}`.slice(0, 260));
   check("⟨0.28⟩ Rung A: …and the old collision warning is GONE — a stderr disclosure about a displacement that can no longer happen is a false disclosure",
         !/row literally named/.test(col.stderr), `${col.stderr}`.slice(0, 240));
@@ -11208,23 +11245,35 @@ if (blk()) {
   //     show app.save --report <report with analyzed.count: 0>         --json   →  []       exit 0
   //
   // `[]` over a manifest naming a file the scan could not read is *nothing performs this effect*, asserted
-  // about code nobody examined. The ruling: emit the CAVEAT DOCUMENT INSTEAD. The TYPE CHANGE is the
-  // point — a consumer doing `for (const x of doc)` gets a TypeError rather than a silent zero-iteration
-  // loop, which is the one case where breaking a consumer is the correct outcome.
+  // about code nobody examined. The TYPE CHANGE is the point — a consumer doing `for (const x of doc)`
+  // gets a TypeError rather than a silent zero-iteration loop, which is the one case where breaking a
+  // consumer is the correct outcome.
+  //
+  // ⟨0.32⟩ AND WHAT RIDES IN THAT OBJECT WAS RULED AGAIN ON 2026-08-25: THE ROWS *AND* THE CAVEAT. Rung
+  // A's "the caveat document INSTEAD" fired on nearly every no-policy report once the unread-class cause
+  // armed it, and `show` certifies nothing — no `ok`, no verdict — so there was never a claim to protect
+  // by withholding the answer. The rows travel under `functions`.
   //
   // The `@`-prefix escape §2.2 uses for sidecars is unavailable, and the ruling names THIS engine for
   // why: `map` is keyed by module names and an npm scoped package is `@scope/name`, so `@incomplete` is a
-  // key a real ts module could own.
+  // key a real ts module could own. Nesting under `modules` is what removes that collision for good.
   {
     const sq = (pfx, ...flags) => spawnSync("node", [path.join(HERE, "query.mjs"), "show", "app.leaf",
       "--report", `${pfx}.json`, ...flags], { encoding: "utf8" });
-    for (const [cause, pfx, key] of [["an `unanalyzed`", partialP, "unanalyzed"],
-                                     ["a judged-nothing", count0P, "judgedNothing"]]) {
+    for (const [cause, pfx, key, rows] of [["an `unanalyzed`", partialP, "unanalyzed", 1],
+                                           ["a judged-nothing", count0P, "judgedNothing", 0]]) {
       const j = sq(pfx, "--json");
       let doc = null; try { doc = JSON.parse(j.stdout); } catch { /* null → the row fails loudly */ }
-      check(`⟨0.28⟩ Rung A: \`show\` over ${cause} report emits the CAVEAT DOCUMENT instead of its ARRAY — an array here is the pre-⟨0.28⟩ silent wrong answer, and an OBJECT is the loud stop the ruling asks for`,
+      check(`⟨0.28⟩ Rung A: \`show\` over ${cause} report answers an OBJECT, not its ARRAY — an array here is the pre-⟨0.28⟩ silent wrong answer, and the root type change is the loud stop the ruling asks for`,
             !!doc && !Array.isArray(doc) && doc.incomplete === true && Array.isArray(doc[key])
-              && Object.keys(doc).every((k) => ["incomplete", "unanalyzed", "judgedNothing"].includes(k)),
+              && Object.keys(doc).every((k) => ["functions", "incomplete", "unanalyzed", "judgedNothing", "noManifest"].includes(k)),
+            `${j.stdout}`.slice(0, 260));
+      // ⟨0.32⟩ THE DEFECT ASSERTION: the ANSWER is still in it. Asserted as the row COUNT rather than
+      // "the key exists" — the safe-looking empty array passes a presence check while deleting exactly
+      // what the ruling restored. The count-0 report genuinely has no row, and that is the control: the
+      // hedged `functions: []` is the answer the report supports, and `incomplete` says why.
+      check(`⟨0.32⟩ Rung A: …and the rows travel BESIDE the caveat over ${cause} report (${rows} row(s)) — the data AND the warning, never the warning instead of the data`,
+            !!doc && Array.isArray(doc.functions) && doc.functions.length === rows,
             `${j.stdout}`.slice(0, 260));
       check(`⟨0.28⟩ Rung A: …and \`show\` still exits 0 over ${cause} report — the caveat is a disclosure, not a verdict (⟨0.24⟩)`,
             j.status === 0, `status=${j.status}`);
@@ -11641,9 +11690,10 @@ if (blk()) {
           && /⚠ INCOMPLETE/.test(h3.stdout),
         `${h3.stdout}`.slice(0, 300));
   const s3 = doc(q(["show", "src.app.leaf"], row3));
-  check("⟨0.28⟩ noManifest: the key rides the Rung A CAVEAT DOCUMENT too — `show` over a row-3 report emits `{incomplete, noManifest}` and nothing else",
+  check("⟨0.28⟩ noManifest: the key rides `show`'s Rung A hedging document too — `{functions, incomplete, noManifest}`, the caveat vocabulary beside the answer (⟨0.32⟩) and nothing else",
         !!s3 && !Array.isArray(s3) && s3.incomplete === true && Array.isArray(s3.noManifest)
-          && Object.keys(s3).every((k) => ["incomplete", "noManifest"].includes(k)),
+          && Array.isArray(s3.functions)
+          && Object.keys(s3).every((k) => ["functions", "incomplete", "noManifest"].includes(k)),
         `${JSON.stringify(s3)}`.slice(0, 240));
   const u3 = q(["unverified"], row3, "--policy", path.join(d, "policy"));
   const u3d = doc(u3);

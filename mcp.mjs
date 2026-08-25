@@ -221,15 +221,16 @@ function capCallers(r) {
 // Additive and a no-op on a complete report (`completenessFields` returns `{}`), so every pinned tool shape
 // is unchanged on an ordinary one.
 // The collision loop this used to carry is gone with ⟨0.28⟩ Rung A: `candor_map` was its only possible
-// trigger and now takes `caveatInstead`, where nothing is displaced. Every remaining caller has a fixed
+// trigger and now takes `nestWithCaveat`, where its namespace sits one level down and nothing is
+// displaced. Every remaining caller has a fixed
 // key set, so the condition is not constructible — and a guard whose condition cannot arise reads as
 // coverage.
 const withCompleteness = (p, doc) => ({ ...doc, ...Q.completenessFields(Q.reportCompleteness(p)) });
-// ⟨0.28⟩ RUNG A, ON THE AGENT CHANNEL — SPEC §2: a verb whose pinned shape cannot carry the caveat emits
-// the CAVEAT DOCUMENT INSTEAD of its result document. Two tools qualify and both are handled here,
-// because THE MCP HALF HAS BEEN THE MISSED ROUTE TWICE IN THIS REPO — and it is the worse one: an agent
-// reading `Object.keys(map).length === 0` records "this codebase performs no effects" and moves on, with
-// no follow-up question available to it.
+// ⟨0.28⟩ RUNG A, ON THE AGENT CHANNEL — SPEC §2: a verb whose pinned shape cannot carry the caveat
+// changes SHAPE over a hedging report. Two tools qualify and both are handled here, because THE MCP HALF
+// HAS BEEN THE MISSED ROUTE TWICE IN THIS REPO — and it is the worse one: an agent reading
+// `Object.keys(map).length === 0` records "this codebase performs no effects" and moves on, with no
+// follow-up question available to it.
 //
 //   candor_show  the CLI's `show` is pinned to an ARRAY; this tool returns `Q.show(...)`, the same array,
 //                and had no completeness reader at all.
@@ -239,30 +240,45 @@ const withCompleteness = (p, doc) => ({ ...doc, ...Q.completenessFields(Q.report
 //
 // A no-op on a complete report, so both pinned tool shapes are unchanged on an ordinary one.
 // ⟨0.28⟩ THE DOC ARRIVES AS A THUNK, and that is the whole fix rather than a style preference.
-// This took `doc` by value, so JavaScript evaluated `Q.show(loadReportLoud(p), a.fn)` BEFORE
-// `caveatInstead` was ever called — and `Q.show`'s fn-existence guard throws. Over a judged-nothing
-// report `candor_show <anything>` therefore answered "no function matching …" to an AGENT: a
-// determined negative about the code, produced by a report that examined none of it, on the surface
-// where a wrong answer is acted on rather than read. The CLI was already correct (measured: it emits
-// the caveat document), so this was the MCP half of a rung the CLI had shipped — the third time today
-// that half was the one nobody checked.
+// This took `doc` by value, so JavaScript evaluated `Q.show(loadReportLoud(p), a.fn)` BEFORE the helper
+// was ever called — and `Q.show`'s fn-existence guard throws. Over a judged-nothing report
+// `candor_show <anything>` therefore answered "no function matching …" to an AGENT: a determined
+// negative about the code, produced by a report that examined none of it, on the surface where a wrong
+// answer is acted on rather than read.
 //
-// Hedging is now decided BEFORE the answer is computed, so no guard inside the verb can pre-empt it.
 // AND CORRUPTION IS NOT A HEDGE — the deferral made that distinction load-bearing where it had been
 // free. `mustHedge` is true on the `unreadable` arm too, so simply deferring turned `candor_map` over a
 // CORRUPT report from a loud tool error into `{"incomplete": true}`: a disclosure where the contract
 // says refuse (§2 ⟨0.24⟩ — a signature key that cannot be read impeaches the document, it does not
-// qualify it). Caught by the existing row, which is the second time today that fixing a false negative
-// introduced a wrong downgrade in the same edit.
+// qualify it). So the loud causes fall THROUGH to the thunk, whose loader throws; corruption anywhere in
+// the set wins over a hedge elsewhere in it.
 //
-// So the loud causes fall THROUGH to the thunk, whose loader throws; only the qualifying causes
-// substitute a caveat. Corruption anywhere in the set wins over a hedge elsewhere in it.
-const caveatInstead = (p, doc) => {
+// ⟨0.32⟩ **AND THE HEDGING BRANCH NOW RETURNS THE RESULT *AND* THE WARNING — RULED 2026-08-25.** It used
+// to return `Q.completenessFields(comp)` alone, which was tolerable while the only triggers were a scan
+// that had FAILED (there was no answer to withhold). ⟨0.32⟩'s unread-class cause armed the same
+// substitution on nearly every no-policy report, so MEASURED over this server's own stdio transport, on a
+// report whose `excluded` names one unpeeked class: `candor_show` and `candor_map` both handed the agent
+// `{"incomplete":true}` and NOTHING ELSE. These two tools CERTIFY NOTHING — no `ok`, no verdict — so
+// there is no claim for a pessimism rule to protect, and an agent that asked what the code does was
+// answered with a caveat about a question it did not ask. `candor_gate` and the `--strict` advisory
+// tools are on the other side of that boundary and are untouched: they answer `ok` and must keep
+// refusing (⟨0.24⟩; conformance PARTs 62 and 67).
+//
+// The result NESTS under the caller's key so `map`'s module namespace cannot collide with the caveat
+// vocabulary, matching the CLI's `putNestedWithCaveat` byte for byte.
+//
+// THE THUNK IS STILL CALLED LAST AND ITS THROW IS STILL HONOURED. `Q.show`'s fn-existence guard is a
+// REFUSAL, not a result, and over a hedging report that refusal is not a fact about the code — so the
+// caveat stands alone there, exactly as this surface answered before. That is the one case where the
+// warning is all there is, and it is because there is no data, not because the data was withheld.
+const nestWithCaveat = (p, key, doc) => {
   const comp = Q.reportCompleteness(p);
   const call = () => (typeof doc === "function" ? doc() : doc);
   if (comp?.unreadable?.length) return call();          // refuse loudly, via the loader
-  if (Q.mustHedge(comp)) return Q.completenessFields(comp);
-  return call();
+  if (!Q.mustHedge(comp)) return call();
+  let result;
+  try { result = call(); } catch { return Q.completenessFields(comp); }
+  return { [key]: result, ...Q.completenessFields(comp) };
 };
 // ⟨0.28⟩ The graph the three graph verbs answer over: the §2.2 sidecar when there is one, else the
 // report's own embedded `calls` edges (Q.reportCallsGraph) — the same fallback the CLI and rust/java
@@ -304,12 +320,12 @@ const TOOLS = {
   candor_show: {
     description: "A function's effects (inferred = transitive, direct = own body) plus its literal surfaces (hosts/cmds/paths/tables) when present.",
     schema: { type: "object", properties: { fn: { type: "string" }, ...reportArg }, required: ["fn"] },
-    run: (a, p) => caveatInstead(p, () => Q.show(loadReportLoud(p), a.fn)),
+    run: (a, p) => nestWithCaveat(p, "functions", () => Q.show(loadReportLoud(p), a.fn)),
   },
   candor_map: {
     description: "Per-module effect overview: each module's union of effects and function count. The architecture-at-a-glance.",
     schema: { type: "object", properties: { ...reportArg } },
-    run: (_a, p) => caveatInstead(p, () => Q.map(loadReportLoud(p))),
+    run: (_a, p) => nestWithCaveat(p, "modules", () => Q.map(loadReportLoud(p))),
   },
   candor_whatif: {
     description: "Hypothetically add `effect` to `fn` and report the blast radius; with `policy`, also the deny-rule violations it would cause. Pre-edit gate check.",
