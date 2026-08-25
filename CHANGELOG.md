@@ -8,6 +8,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.32.1] — 2026-08-25
+
+- **Family build bump — this engine is unchanged.** Floor stays 0.32; the CLI, the MCP tools and the LSP
+  server answer exactly as they did at 0.32.0, so nothing here is ⚠ and no report bytes move. The patch
+  belongs to candor-java, whose v0.32.0 native binaries were withheld by `native.yml`'s parity gate after
+  the image answered `0 functions` over a tree the jar found 210 in. Reaching the rebuilt ones means
+  moving `ENGINE_PIN`, which is one value for the entire family — `npx candor-ts@$ENGINE_PIN` included —
+  so this package is republished at 0.32.1 to keep that resolvable. `scan.mjs`, `query.mjs`, `policy.mjs`
+  and `lsp.mjs` are untouched, and the two IDE clients' `candorTsVersion` pins move with it.
+
 ## [0.32.0] — 2026-08-25
 
 - **`callers`, `impact` and `path` carried NO completeness reader at all, on the CLI *and* on the AGENT
