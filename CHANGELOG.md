@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [0.32.1] — 2026-08-25
 
+- Build version → 0.32.1 (`package.json`); no analyzer change.
+
 - **Family build bump — this engine is unchanged.** Floor stays 0.32; the CLI, the MCP tools and the LSP
   server answer exactly as they did at 0.32.0, so nothing here is ⚠ and no report bytes move. The patch
   belongs to candor-java, whose v0.32.0 native binaries were withheld by `native.yml`'s parity gate after
