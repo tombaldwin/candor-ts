@@ -7106,23 +7106,36 @@ if (blk()) {
   const SPEC = (fs.readFileSync(path.join(HERE, "scan.mjs"), "utf8")
     .match(/const SPEC_VERSION = "([0-9]+\.[0-9]+)"/) ?? [])[1];
   check("the doc gate reads the spec floor off scan.mjs (not a literal)", !!SPEC, String(SPEC));
-  // Any `spec` + version, capturing a trailing historical marker so it can be told apart.
-  const claim = /spec[-: "]{1,4}([0-9]+\.[0-9]+)(, informative\))?/g;
+  // THE FAMILY'S SHARED CLAIM GRAMMAR: `spec` + one to EIGHT of [-: "*)\]] + <digits>.<digits>,
+  // capturing a trailing historical marker so it can be told apart. Covers `spec 0.32`, `spec-0.32`,
+  // `"spec": "0.32"`, the ALIGNED `"spec":    "0.32"` and the markdown-link `[candor-spec](…) 0.32`,
+  // while `spec §6.1` / `SPEC §2.2` — SECTION references — never read as versions.
+  //
+  // The last two are the ⟨0.32⟩ widening, and each was live in a shipped doc while every gate in the
+  // family read clean over it: SPEC.md's own aligned envelope column puts SIX characters between the
+  // word and the version, which `{1,4}` cannot cross, and candor-swift/README.md line 3 separates them
+  // with `) `. The control below is the same fixture in all five engines, so the copies of this grammar
+  // cannot drift apart without a red run somewhere.
+  const claim = /spec[-: "*)\]]{1,8}([0-9]+\.[0-9]+)(, informative\))?/g;
   const staleIn = (doc) =>
     [...doc.matchAll(claim)].filter((m) => !m[2] && m[1] !== SPEC).map((m) => m[0]);
 
   // A NEGATIVE CONTROL for the exemption. If `, informative)` ever stopped matching, the filter above
   // would silently pass everything and this whole gate would become a no-op that still printed ok.
-  const probe = `(spec 0.8, informative) and a live spec: "0.9" and a section ref spec §6.1`;
-  check("the historical-marker exemption discriminates (skips `, informative)`, keeps a live claim, ignores `spec §`)",
-        JSON.stringify(staleIn(probe)) === JSON.stringify([`spec: "0.9`]), JSON.stringify(staleIn(probe)));
+  // It is also the CALIBRATION for the grammar itself: the aligned and markdown-link lines are only
+  // seen by the widened form, so a silent revert to `{1,4}` reddens here rather than going quiet.
+  const probe = `(spec 0.8, informative) and a live spec: "0.9" and a section ref spec §6.1\n`
+    + `an aligned envelope column, { "spec":    "0.5" }\n`
+    + `a markdown link [candor-spec](https://example.org/candor-spec) 0.4\n`;
+  check("the historical-marker exemption discriminates (skips `, informative)`, keeps a live claim, ignores `spec §`) AND the grammar sees the aligned-JSON and markdown-link spellings",
+        JSON.stringify(staleIn(probe)) === JSON.stringify([`spec: "0.9`, `spec":    "0.5`, `spec) 0.4`]), JSON.stringify(staleIn(probe)));
 
   // package.json's description is the npm REGISTRY page — a current-contract claim with the widest
   // audience of any doc here, and the last one anybody looks at.
   for (const f of ["README.md", "AGENTS.md", "package.json"]) {
     const doc = fs.readFileSync(path.join(HERE, f), "utf8");
     check(`${f} states the current spec contract (spec ${SPEC})`,
-          new RegExp(`spec[-: "]{1,4}${SPEC.replace(".", "\\.")}\\b`).test(doc));
+          new RegExp(`spec[-: "*)\\]]{1,8}${SPEC.replace(".", "\\.")}\\b`).test(doc));
     const stale = staleIn(doc);
     check(`${f} carries no stale spec-generation string`, stale.length === 0, JSON.stringify(stale));
   }

@@ -8,6 +8,14 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **The README/AGENTS/package.json spec-claim gate reads two spellings it could not see.** The claim
+  grammar widened from `spec` + one to FOUR of `[-: "]` to one to EIGHT of `[-: "*)\]]`, which is what
+  it takes to reach a version behind an ALIGNED envelope column (`"spec":    "0.32"`) or a markdown link
+  (`[candor-spec](…) 0.32`). Both spellings were live in shipped documents in this family while every
+  gate read clean over them. The floor is still read off `scan.mjs`, and the negative control now
+  carries both new spellings, so a silent revert to the narrow form fails the control instead of
+  quietly checking less.
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (`package.json`); no analyzer change.
