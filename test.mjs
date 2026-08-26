@@ -12472,7 +12472,7 @@ export function startRepl() { return repl.start(); }`,
 
 // ── THE CENSUS AND THE ANALYSIS WALK MUST AGREE ABOUT WHAT A DIRECTORY IS ─────────────────────────
 //
-// MEASURED at spec 0.32, byte-identical code, one policy (`deny Exec`), two directory names:
+// MEASURED (spec 0.32, informative), byte-identical code, one policy (`deny Exec`), two directory names:
 //
 //     lib/shipped.js   →  exit 2, `excluded: [{class:"outside-the-tsconfig-program", count:1}]`,
 //                         `outOfScope: [{fn:"run", effects:["Exec"]}]`

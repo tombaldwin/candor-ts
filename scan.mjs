@@ -1459,7 +1459,7 @@ if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
 // This set used to hold `dist`, `build`, `out`, `coverage`, `.next` AND every dot-directory. Nothing
 // upstream skips those, so the two halves of one report disagreed about which files exist.
 //
-// MEASURED at spec 0.32, byte-identical code, one policy (`deny Exec`), two directory names:
+// MEASURED (spec 0.32, informative), byte-identical code, one policy (`deny Exec`), two directory names:
 //   lib/shipped.js   → exit 2, `excluded: [{class: "outside-the-tsconfig-program", count: 1}]`,
 //                      `outOfScope: [{fn: "run", effects: ["Exec"]}]`
 //   dist/shipped.js  → exit 0, `policy ✓`, `excluded: []`
@@ -5060,7 +5060,7 @@ function visitCalls(node) {
           // `getResolvedSignature()` hands back the BASE's — which lives in the base's file, so both the
           // class NAME and the MODULE were read off the wrong declaration.
           //
-          // MEASURED at spec 0.32, `deny Fs`, with `fs.readFileSync` in the same file as a control:
+          // MEASURED (spec 0.32, informative), `deny Fs`, with `fs.readFileSync` in the same file as a control:
           //   readIt(p) { return new fs.ReadStream(p); }   -> ABSENT from `functions`, no Unknown, exit 0
           //   control(p) { return fs.readFileSync(p); }    -> Fs, correctly
           // `fs.ReadStream` declares no constructor, so the signature resolved to `stream.Readable`'s in
