@@ -4420,6 +4420,55 @@ export function runs(): Buffer { return execSync("ls"); }`,
   fs.rmSync(clean, { recursive: true, force: true });
 }
 
+// ── ⟨0.33⟩ `outOfScope`/`scannedUnder` MUST NOT COLLAPSE "ASKED AND CLEAR" INTO "NEVER ASKED" ────────
+// MEASURED four-way over a policy-scanned tree with NOTHING excluded: candor-java and candor-rust both
+// emit `outOfScope: []` and `scannedUnder: {deny: […]}` — a policy stood and it denied nothing found
+// outside the scan, which SPEC §2 ⟨0.29⟩/⟨0.33⟩ both say is a CLAIM, present-and-empty. candor-ts emitted
+// NEITHER key unless `excludedFiles.length` was non-zero, so this tree produced the SAME document a
+// no-policy scan does — a false "nobody asked" over code that really was asked and answered clear. It
+// failed CLOSED (no report here ever carries a `peeked: true` class, so no ⟨0.32⟩/⟨0.33⟩ rule fires off
+// the gap), but it is still the ⟨0.26⟩ partial-manifest collapse this wire format exists to prevent.
+if (blk()) {
+  const tsconfig = JSON.stringify({
+    compilerOptions: { target: "ES2022", module: "ESNext", moduleResolution: "bundler",
+                       skipLibCheck: true, noEmit: true },
+    include: ["src/**/*.ts"],
+  });
+  const d = project({
+    "tsconfig.json": tsconfig,
+    "src/ok.ts": `export function pure(a: number): number { return a + 1; }`,
+    "exec.pol": "deny Exec\n",
+  });
+  const r = scan(d, "--policy", path.join(d, "exec.pol"));
+  check("⟨0.33⟩ a policy-scanned tree with NOTHING excluded still emits `outOfScope: []` — asked and clear, never omitted as though never asked",
+        r.r.status === 0 && Array.isArray(r.report?.outOfScope) && r.report.outOfScope.length === 0,
+        `exit ${r.r.status}: ${JSON.stringify(r.report ?? {})}`.slice(0, 400));
+  check("⟨0.33⟩ …and `scannedUnder` records the deny set the peek was put, even with nothing to peek",
+        JSON.stringify(r.report?.scannedUnder) === JSON.stringify({ deny: ["deny Exec"] }),
+        JSON.stringify(r.report?.scannedUnder));
+
+  // CONTROL, WRITTEN FIRST: with NO policy at all, both keys stay ABSENT — the ⟨0.26⟩ *cannot answer*.
+  // Emitting `[]` here would be a fresh false claim in the OPPOSITE direction (nothing was asked at all).
+  const noPol = scan(d);
+  check("⟨0.33⟩ CONTROL: with NO policy configured, both keys stay ABSENT",
+        !("outOfScope" in (noPol.report ?? {})) && !("scannedUnder" in (noPol.report ?? {})),
+        JSON.stringify(Object.keys(noPol.report ?? {})));
+
+  // CONTROL: over a policy the engine REFUSES (a typo'd effect name), the peek never reads a policy that
+  // never stood — both keys stay ABSENT, and the plain report (functions/excluded/analyzed) still writes.
+  const badPolDir = project({
+    "tsconfig.json": tsconfig,
+    "src/ok.ts": `export function pure(a: number): number { return a + 1; }`,
+    "bad.pol": "deny Nett app\n",
+  });
+  const refused = scan(badPolDir, "--policy", path.join(badPolDir, "bad.pol"));
+  check("⟨0.33⟩ CONTROL: over a policy the engine REFUSES, both keys stay ABSENT (exit 2, report still written)",
+        refused.r.status === 2 && refused.report !== null
+          && !("outOfScope" in refused.report) && !("scannedUnder" in refused.report),
+        `exit ${refused.r.status}: ${JSON.stringify(refused.report)}`.slice(0, 400));
+  fs.rmSync(badPolDir, { recursive: true, force: true });
+}
+
 // ── scan-completeness nudge: a high CALL VOLUME into unscanned packages means a missing input ─────
 // A scan that sees the app but none of its dependencies leaves their effects invisible — indistinguishable
 // in the report from "there is nothing there". The trigger is call VOLUME, not package count (candor-java's

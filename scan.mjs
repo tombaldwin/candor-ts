@@ -7054,7 +7054,17 @@ let peekAttempted = false;
 // per CLASS, so the answer is too: a class is peeked only when no file of that class went unread.
 const peekUnread = new Set();
 let peekUnattributed = false;
-if (policyPath && excludedFiles.length) {
+if (policyPath) {
+  // ⟨0.33⟩ NO LONGER GATED ON `excludedFiles.length`. A tree with a policy and NOTHING excluded used to
+  // skip this whole block, so `outOfScopeFindings`/`scannedUnderRules` stayed `null` and both
+  // `outOfScope` and `scannedUnder` were OMITTED — the SAME document a tree with no policy at all
+  // produces. SPEC §2 ⟨0.29⟩/⟨0.33⟩ bind both keys' presence to "a policy was CONFIGURED and HONOURED",
+  // never to "there was something to peek": present-and-empty is *asked-and-clear*, and collapsing it
+  // into *never asked* is the exact ⟨0.26⟩ partial-manifest failure this format exists to prevent.
+  // MEASURED four-way: candor-java and candor-rust both emit `outOfScope: []` and `scannedUnder` over a
+  // no-exclusion tree; this engine emitted neither. The subprocess peek itself still has nothing to do
+  // when there is nothing excluded — that stays conditioned on `excludedFiles.length` below — but the
+  // QUESTION was still asked and the answer is still recorded.
   // ⟨0.30⟩ HOISTED, because the matcher below needs it. It was a `const` inside the try, so the
   // evaluatePolicy call added in this rung threw ReferenceError straight into the "a peek that cannot
   // run must not fail the gate" catch — findings silently empty, gate green. The catch is right; a bug
@@ -7077,8 +7087,9 @@ if (policyPath && excludedFiles.length) {
   // passed at exit 0 while the strictly weaker `deny Exec` exited 2 on the same files. MEASURED four-way.
   if ((peekPolicy?.deny ?? []).length) {
     // ⟨0.32⟩ THE PEEK WAS ATTEMPTED — this run's policy asks a question whose answer depends on code
-    // outside the scan's scope, and there is something excluded to look at. The `unreadClasses` rule below
-    // keys on THIS, not on whether the peek then succeeded; see the note there.
+    // outside the scan's scope. ⟨0.33⟩ this fires even when NOTHING is excluded — the question was still
+    // put, and `[]` answers it. The `unreadClasses` rule below keys on THIS, not on whether the peek then
+    // succeeded; see the note there.
     peekAttempted = true;
     outOfScopeFindings = [];
     // ⟨0.33⟩ RECORDED HERE, ALONGSIDE `outOfScopeFindings`'s own assignment, and BEFORE any file is
@@ -7087,6 +7098,10 @@ if (policyPath && excludedFiles.length) {
     // is the SAME renderer `ruleUpgrade` quotes back to an operator for the provable-purity upgrade, so
     // the string an operator reads and the string a gate compares cannot become two spellings of one rule.
     scannedUnderRules = canonicalDenySet(peekPolicy.deny);
+    // ⟨0.33⟩ NOTHING TO PEEK: the question above is still asked and answered (`outOfScopeFindings`/
+    // `scannedUnderRules` are already set), but spawning a child scan over an empty file list buys
+    // nothing — skip the subprocess entirely and leave the findings at the trivially-true `[]`.
+    if (excludedFiles.length) {
     // ⟨0.31⟩ A FILE THIS ENGINE CANNOT READ CANNOT BE PEEKED, AND THE CLASS MUST SAY SO.
     //
     // MEASURED: an excluded file performing a denied `Fs`, with the policy `deny Fs`. Readable, the peek
@@ -7273,6 +7288,7 @@ if (policyPath && excludedFiles.length) {
       // a real answer, and "we looked and found nothing" is what an empty list says.
     } finally {
       fs.rmSync(peekDir, { recursive: true, force: true });
+    }
     }
   }
 }

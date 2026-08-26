@@ -114,6 +114,19 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   first note so two spellings of one sentence cannot drift apart. Comment-only — no assertion, no fixture
   and no emitted value moves.
 
+- **`outOfScope`/`scannedUnder` were OMITTED, not `[]`, over a policy-scanned tree with no exclusions —
+  collapsing "asked and clear" into "never asked".** MEASURED four-way: candor-java and candor-rust both
+  emit `outOfScope: []` and `scannedUnder: {deny: […]}` whenever a policy is configured and honoured,
+  independent of whether anything was excluded; candor-ts emitted neither key unless `excludedFiles.length`
+  was non-zero, so a clean tree under `deny Exec` produced the SAME document a no-policy scan does — a
+  false "nobody asked" over code that really was asked and answered clear. It failed CLOSED (an absent
+  `scannedUnder` reads as the empty deny set, and no report has a `peeked: true` class to trigger the
+  ⟨0.32⟩/⟨0.33⟩ rules), so no verdict certified wrongly, but it was still a false statement about what was
+  asked — the ⟨0.26⟩ partial-manifest collapse this format exists to prevent. `scan.mjs`'s peek trigger no
+  longer requires `excludedFiles.length`; only the subprocess spawn (nothing to gain from peeking an empty
+  set) stays conditioned on it. No policy, or a policy the engine refuses, still leaves both keys ABSENT; a
+  tree WITH exclusions is byte-identical to before (`cmp`-verified).
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (`package.json`); no analyzer change.
