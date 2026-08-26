@@ -3823,6 +3823,32 @@ function unanswerableKey(decl) {
   if ((ts.isMethodDeclaration(decl) || ts.isPropertyDeclaration(decl)
        || ts.isGetAccessorDeclaration(decl) || ts.isSetAccessorDeclaration(decl))
       && (ts.getCombinedModifierFlags(decl) & ts.ModifierFlags.Abstract)) return decl; // `abstract` member of a declared class
+  // A BARE call/construct signature reached DIRECTLY — not through a property/method (that shape is
+  // already normalized above by `memberSigOf`) but as the callable shape of the value itself:
+  // `interface Fetcher { (url: string): Response }`, a callable type alias, or an intersection of call
+  // signatures (tar's `TarCommand<AsyncClass, SyncClass>` — `exports.create` is typed this way and
+  // reached as a bare `tar.create(...)` call, not a member dispatch). There is no body under this key in
+  // ANY implementation — a call signature declares a shape, never flesh — so a chained report's silence
+  // answers nothing, the same evidential status as an interface method. Measured: --dep-inits chained a
+  // real `tar` scan (its module units DO carry Unknown-tagged effects) and this call still read
+  // SILENT-PURE, because `unanswerableKey` returned null for it — the join correctly found no crossDeps
+  // hit (a bare call signature mints no name to hash), but with no `abstraction` either, neither
+  // disclosure arm fires and the call vanishes from the callgraph. Restricted to a signature with NO
+  // name (`decl.name` is always absent on Call/ConstructSignatureDeclaration, so this never overlaps a
+  // named member) — the same reason PropertySignature/MethodSignature are unconditionally unanswerable.
+  if (ts.isCallSignatureDeclaration(decl) || ts.isConstructSignatureDeclaration(decl)) return decl;
+  // A bare FUNCTION-TYPE node with no redirect above — `memberSigOf` only lifts one whose PARENT is a
+  // property/method signature; this is everything else the checker can still resolve a call onto: a
+  // VALUE-BINDING export's explicit annotation (`export declare const chownr: (p, uid, gid, cb) =>
+  // void`, the shape `.d.ts` emits for `export const chownr = (p, ...) => {...}` — chownr, and any
+  // package using this ordinary TS style, not just tar's intersection-of-call-signatures), a callable
+  // type alias's aliased type, or a parameter/type-argument position. A FunctionTypeNode is a type
+  // annotation, never a body — the same "shape, not flesh" argument as a call/construct signature above
+  // — so landing here means the checker resolved a TYPE, and the join two blocks up already tried and
+  // failed to build a key from it (`nameDecl.name` is undefined on a FunctionTypeNode, so `localTail`
+  // stayed null and no lookup ran) — there is no report shape that could have answered this key, chained
+  // or not, so its absence is not evidence of anything.
+  if (ts.isFunctionTypeNode(decl)) return decl;
   return null;
 }
 // ⟨scan-boundary, half 1⟩ THE DISCLOSURE ITSELF, in ONE place. It had two copies — the CallExpression arm

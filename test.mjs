@@ -3778,6 +3778,116 @@ if (blk()) {
         ifaceGate.status === 1, String(ifaceGate.status) + ifaceGate.stdout);
 }
 
+// ── 11d2. a BARE call/construct signature or value-binding function type — no member, no owner ────
+// candor-spec corpus round vs published 0.33.0: `tar`'s `create` export is typed
+// `TarCommand<AsyncClass, SyncClass>`, an INTERSECTION OF BARE CALL SIGNATURES (`{ (opt): T } & {
+// (opt, entries): T } & …`) with no property/method wrapping any of them — `checker
+// .getResolvedSignature` resolves to a `CallSignatureDeclaration` whose PARENT is a `TypeLiteral`, not
+// a `PropertySignature`/`MethodSignature`, so `unanswerableKey` (the ifaceApp test above covers the
+// MethodSignature shape) returned null for it. Once `--dep-inits`/`CANDOR_DEPS` marks the package
+// COVERED, the κ-ledger's `invisible` hedge correctly falls silent (the package IS covered) and the
+// abstraction-disclosure arm ALSO stayed silent (it had no `abstraction` to name) — TOTAL SILENCE:
+// `tar.create(...)` vanished from `functions`/the callgraph entirely, `policy ✓` at exit 0, no
+// `Unknown`, no `invisible`. MEASURED reproducible independently against a second shape — an ordinary
+// `.d.ts` VALUE-BINDING export (`export declare const chownr: (p, uid, gid, cb) => void`, what tsc
+// emits for `export const chownr = (p, ...) => {...}`) — a bare `FunctionTypeNode` whose parent is a
+// `VariableDeclaration`, not a property/method signature either.
+if (blk()) {
+  const callsigDep = project({
+    "package.json": `{"name":"callsigdep"}`,
+    "src/mk.ts": `import * as fsm from "node:fs";
+export const create = (opt: { file: string }) => { fsm.writeFileSync(opt.file, ""); };`,
+  });
+  scan(callsigDep);
+  const callsigApp = project({
+    "package.json": `{"name":"callsigapp","dependencies":{"callsigdep":"1.0.0"}}`,
+    "node_modules/callsigdep/package.json": `{"name":"callsigdep","types":"index.d.ts","main":"index.js"}`,
+    // an INTERSECTION OF BARE CALL SIGNATURES, exactly tar's `TarCommand` shape — no member, no owner.
+    "node_modules/callsigdep/index.d.ts":
+      `export declare const create: { (opt: { file: string }): void } & { (): void };`,
+    "node_modules/callsigdep/index.js": ``,
+    "src/main.ts": `import { create } from "callsigdep";
+export function run(): void { create({ file: "/tmp/out" }); }`,
+  });
+  const callsigDeps = path.join(callsigDep, ".candor", "report.json");
+  // WITHOUT the chain first: the honest baseline this fix must not disturb — `invisible`, never silence.
+  scan(callsigApp);
+  const csUnchained = entry(JSON.parse(fs.readFileSync(path.join(callsigApp, ".candor", "report.json"), "utf8")), "src.main.run");
+  check("CONTROL: unchained, a bare-call-signature dep call is DISCLOSED as invisible, not silently pure",
+        csUnchained != null && csUnchained.inferred.length === 0 && csUnchained.invisible?.includes("callsigdep"),
+        JSON.stringify(csUnchained));
+  spawnSync("node", [path.join(HERE, "scan.mjs"), callsigApp], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: callsigDeps } });
+  const csChained = entry(JSON.parse(fs.readFileSync(path.join(callsigApp, ".candor", "report.json"), "utf8")), "src.main.run");
+  check("a bare call-signature dep call is DISCLOSED as Unknown once chained — never silent (the cardinal sin)",
+        csChained != null && csChained.inferred.includes("Unknown") && csChained.invisible == null,
+        JSON.stringify(csChained));
+
+  // the second shape: a plain value-binding export's FUNCTION-TYPE annotation (chownr's actual shape).
+  const bindingDep = project({
+    "package.json": `{"name":"bindingdep"}`,
+    "src/op.ts": `import * as fsm from "node:fs";
+export const doIt = (p: string) => { fsm.writeFileSync(p, ""); };`,
+  });
+  scan(bindingDep);
+  const bindingApp = project({
+    "package.json": `{"name":"bindingapp","dependencies":{"bindingdep":"1.0.0"}}`,
+    "node_modules/bindingdep/package.json": `{"name":"bindingdep","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/bindingdep/index.d.ts": `export declare const doIt: (p: string) => void;`,
+    "node_modules/bindingdep/index.js": ``,
+    "src/main.ts": `import { doIt } from "bindingdep";
+export function run(): void { doIt("/tmp/out"); }`,
+  });
+  const bindingDeps = path.join(bindingDep, ".candor", "report.json");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), bindingApp], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: bindingDeps } });
+  const bindChained = entry(JSON.parse(fs.readFileSync(path.join(bindingApp, ".candor", "report.json"), "utf8")), "src.main.run");
+  check("a value-binding export's bare function-type call is DISCLOSED as Unknown once chained — never silent",
+        bindChained != null && bindChained.inferred.includes("Unknown") && bindChained.invisible == null,
+        JSON.stringify(bindChained));
+
+  // CONTROL: a dep the join ALREADY resolves (an ordinary named function export) keeps resolving —
+  // the fix must not cost the flag's whole reason to exist.
+  const namedDep = project({
+    "package.json": `{"name":"nameddep"}`,
+    "src/op.ts": `import * as fsm from "node:fs";\nexport function doWrite(p: string): void { fsm.writeFileSync(p, ""); }`,
+  });
+  scan(namedDep);
+  const namedApp = project({
+    "package.json": `{"name":"namedapp","dependencies":{"nameddep":"1.0.0"}}`,
+    "node_modules/nameddep/package.json": `{"name":"nameddep","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/nameddep/index.d.ts": `export declare function doWrite(p: string): void;`,
+    "node_modules/nameddep/index.js": ``,
+    "src/main.ts": `import { doWrite } from "nameddep";\nexport function run(): void { doWrite("/tmp/out"); }`,
+  });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), namedApp],
+            { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: path.join(namedDep, ".candor", "report.json") } });
+  const namedChained = entry(JSON.parse(fs.readFileSync(path.join(namedApp, ".candor", "report.json"), "utf8")), "src.main.run");
+  check("CONTROL: an ordinary named-function export still joins to a DETERMINED `Fs`, not `Unknown`",
+        namedChained?.inferred.includes("Fs") && !namedChained?.inferred.includes("Unknown"), JSON.stringify(namedChained));
+}
+
+// ── 11d3. the SAME bare-call-signature shape reached through the REAL `--dep-inits` flag, not
+// CANDOR_DEPS — closing the loop on the actual corpus-round repro (a real node_modules dependency
+// scanned by a spawned child, not a hand-fed sibling report) ───────────────────────────────────────
+if (blk()) {
+  const app = project({
+    "package.json": `{"name":"depinitscallsigapp"}`,
+    "src/main.ts": `import { create } from "callsigdep2";\nexport function run(): void { create({ file: "/tmp/out" }); }`,
+  });
+  const nm = path.join(app, "node_modules", "callsigdep2");
+  fs.mkdirSync(nm, { recursive: true });
+  fs.writeFileSync(path.join(nm, "package.json"), JSON.stringify({ name: "callsigdep2", version: "0.0.0", main: "index.js", types: "index.d.ts" }));
+  fs.writeFileSync(path.join(nm, "index.d.ts"),
+    `export declare const create: { (opt: { file: string }): void } & { (): void };`);
+  fs.writeFileSync(path.join(nm, "index.js"),
+    `"use strict";\nconst fs = require("fs");\nexports.create = (opt) => { fs.writeFileSync(opt.file, ""); };`);
+  const { report } = scan(app, "--dep-inits");
+  const run = entry(report, "src.main.run");
+  check("--dep-inits: a real node_modules dep's bare call-signature export is DISCLOSED as Unknown, never silent",
+        run != null && run.inferred.includes("Unknown") && run.invisible == null, JSON.stringify(run));
+  check("--dep-inits: the call survives in its own callgraph — the corpus round's `callgraph[\"app.run\"]: []` symptom",
+        fs.existsSync(`${path.join(app, ".candor", "report")}.callgraph.json`), "");
+}
+
 // ── 11e. ⟨0.24⟩ a chained report that JUDGED NOTHING grants no coverage ───────────────────────────
 // SPEC §2's three-row table. The same door as 11a with a third key: staleness says the report is not ours
 // to repeat, incompleteness says it could not read its own source, and this says there is nothing in it to

@@ -9,6 +9,36 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 ## Unreleased
 
 ## [0.33.0] — 2026-08-26
+- **⚠ `--dep-inits` silently dropped a call it could not join, turning a correctly-flagged blind spot
+  into a clean pass — the exact cardinal sin the flag exists to shrink.** MEASURED on published
+  0.33.0: `import * as tar from 'tar'; export function run() { return tar.create({file:'out.tar'},
+  ['.']); }` under `deny Fs` discloses `invisible: ["tar"]` and `coverage.uncovered` without the flag
+  (honest — the classifier doesn't cover `tar`); WITH `--dep-inits` — the flag whose whole point is to
+  chain `tar`'s own scanned effects into the join — `app.run` vanished from `functions` entirely
+  (`callgraph["app.run"]` read `[]`), `policy ✓` at exit 0, no `Unknown`, no `invisible`, no stderr hint.
+  ROOT CAUSE: `tar.create` is typed `TarCommand<AsyncClass, SyncClass>`, an intersection of BARE call
+  signatures (`{ (opt): T } & { (opt, entries): T } & …`) with no member name — `checker
+  .getResolvedSignature` resolves to a `CallSignatureDeclaration` whose parent is a `TypeLiteral`, not a
+  `PropertySignature`/`MethodSignature`. `unanswerableKey` (the one place SPEC §4's "no body could ever
+  exist under this key" disclosure decides whether to fire) did not recognize this shape, so once
+  `--dep-inits` marked `tar` as a chained/covered package the ledger's `invisible` hedge fell silent
+  (correctly — the package IS covered) and the abstraction-disclosure arm ALSO stayed silent (incorrectly
+  — it had no abstraction to name), leaving neither voice to speak: total silence instead of `Unknown`.
+  Generalized the same fix to a bare `FunctionTypeNode` with no property/method parent — the shape a
+  `.d.ts` emits for an ordinary `export const f: (x) => y = (x) => {...}` value-binding export (measured
+  independently reproducible against `chownr`, unrelated to tar's specific intersection shape) — since
+  the join two blocks up already builds no key for either shape (`nameDecl.name` is `undefined` on both
+  node kinds) and no chained report, past or future, could ever answer one. `unanswerableKey` now returns
+  the decl for both, so `discloseUnanswerableKey` fires its existing single disclosure path (`Unknown` +
+  a best-effort `callback:`/`dispatch:` reason) instead of dropping the call. Three controls hold: a
+  package `--dep-inits` already resolved via a plain named export keeps resolving, byte-identical;
+  without `--dep-inits` the report is byte-identical to pre-fix; a package with no external deps at all
+  is byte-identical on both paths. Full test battery green (1578 tests, probe, fuzz, self-gate, effect-set
+  oracle). The directory-independent `"package"` field mentioned alongside this in the corpus round is
+  the existing `path.basename(rootDir)`/`package.json` fallback, not a dep-init identity leak — confirmed
+  by reproducing byte-identical `pkgName` behaviour with and without `--dep-inits` in a differently-named
+  directory.
+
 - **The ⟨0.33⟩ absent-`scannedUnder` refusal is now pinned — nothing watched it before.** A report
   carrying a `peeked: true` class and NO `scannedUnder` key is the shape every pre-0.33 report has,
   so it is this rung's most-exercised path in the wild. The behaviour was already correct; the gap
