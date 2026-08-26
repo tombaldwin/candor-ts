@@ -12928,6 +12928,61 @@ export function runs(): Buffer { return execSync("ls"); }`,
     }
     fs.rmSync(d, { recursive: true, force: true });
   }
+
+  // ── 9. ⟨0.33⟩ SPEC §2 — A PEEKED CLASS WITH NO `scannedUnder` AT ALL MUST REFUSE, NOT CERTIFY.
+  //
+  // `excluded[].peeked: true` is true only RELATIVE TO the deny set the producer's peek was bounded by
+  // (⟨0.29⟩ bounds the peek to effects the PRODUCER's policy denies), and `scannedUnder` is the ⟨0.33⟩
+  // key that records what that set was. An ABSENT `scannedUnder` is the shape EVERY report written
+  // before this rung is in — this row is the rung's most-exercised path in the wild, not an edge case —
+  // and it must read as the EMPTY deny set, never a licence: SPEC §2 ⟨0.33⟩, "an absent `scannedUnder`
+  // is the empty set for this test".
+  //
+  // Named to match the sibling engines' pin for this exact shape, so a reader finds all four together:
+  // candor-rust's cli.rs test (4)/(4b) inside
+  // `gate_report_refuses_a_deny_rule_over_classes_the_producer_never_read`, candor-java's
+  // `UnreadCodeRouteTest.aPeekedReportWithoutScannedUnderRefuses`, candor-swift's
+  // `testAPeekedReportWithoutScannedUnderRefuses`. Before this row, `grep scannedUnder test.mjs` returned
+  // nothing — commit f2ed3ae upgraded the only two fixtures of that shape (test-mcp.mjs) to CARRY the
+  // key rather than add a row pinning the refusal when it is missing, so nothing here watched a
+  // regression on the absent-key path.
+  {
+    const env = (extra) => JSON.stringify({
+      candor: { version: "scan-0.33.0", toolchain: "stable", spec: "0.33" }, package: "p",
+      analyzed: { count: 1, digest: "0000000000000000" },
+      excluded: [{ class: "build-script", count: 1, peeked: true, reason: "compile time" }],
+      outOfScope: [],
+      functions: [{ fn: "p.main", loc: "src/main.ts:1:1", inferred: [], direct: [], hash: "p#main" }],
+      ...extra,
+    });
+    const d = project({
+      "covered/report.p.scan.json": env({ scannedUnder: { deny: ["deny Exec"] } }),
+      "bare/report.p.scan.json": env({}),
+      "pol.candor": "deny Exec\n",
+    });
+    const pol = path.join(d, "pol.candor");
+
+    // THE OVER-CHARGE CONTROL, WRITTEN FIRST: the identical report WITH a `scannedUnder` that COVERS
+    // this gate's own deny set must still certify. Without this row the fix below is satisfied by
+    // refusing every report that ever carries `peeked: true`, which deletes the ⟨0.32⟩ control the same
+    // fixture family already pins two sections up.
+    const covq = gate(path.join(d, "covered", "report"), pol);
+    check("⟨0.33⟩ CONTROL: a peeked class WITH a `scannedUnder` covering this gate's own deny set still certifies (exit 0)",
+          covq.status === 0, `exit ${covq.status}: ${covq.stderr}`.slice(0, 300));
+
+    // THE RUNG ITSELF: the SAME bytes MINUS `scannedUnder` — the pre-⟨0.33⟩ shape — must now REFUSE.
+    const bgj = path.join(d, "bare.gate.json");
+    const bareq = gate(path.join(d, "bare", "report"), pol, bgj);
+    check("⟨0.33⟩ a peeked class with NO `scannedUnder` key at all REFUSES (exit 2) rather than certifying — an absent key reads as the empty deny set, never a licence; this is the shape every pre-⟨0.33⟩ report is in",
+          bareq.status === 2, `exit ${bareq.status}: ${bareq.stdout}${bareq.stderr}`.slice(0, 300));
+    check("⟨0.33⟩ …and the refusal NAMES the unmet rule, so an operator knows what to re-scan under",
+          /does not cover/.test(bareq.stderr) && /deny Exec/.test(bareq.stderr),
+          bareq.stderr.slice(0, 400));
+    const bd = doc(bgj);
+    check("⟨0.33⟩ …and the DOCUMENT agrees with the exit: ok:false, incomplete:true — a machine consumer reads that key, not the exit code",
+          bd?.ok === false && bd?.incomplete === true, JSON.stringify(bd).slice(0, 300));
+    fs.rmSync(d, { recursive: true, force: true });
+  }
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
