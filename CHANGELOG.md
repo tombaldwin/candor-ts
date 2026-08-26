@@ -9,6 +9,12 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 ## Unreleased
 
 ## [0.33.0] — 2026-08-26
+- **The ⟨0.33⟩ absent-`scannedUnder` refusal is now pinned — nothing watched it before.** A report
+  carrying a `peeked: true` class and NO `scannedUnder` key is the shape every pre-0.33 report has,
+  so it is this rung's most-exercised path in the wild. The behaviour was already correct; the gap
+  was that no test asserted it, and conformance PART 69 cannot — its corruption shapes all carry the
+  key, and its skip probe reads an absent one as "this engine has not ported the rung". A regression
+  would have been a silent fail-open. Falsified against a mutant before being trusted.
 
 - **MIGRATION — ⟨0.33⟩ IS NOT ADDITIVE, and the cost is measured, not estimated.** If you gate a
   **STORED** report that a pre-0.33 engine produced — committed to a repo, cached between CI jobs, or
