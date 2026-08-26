@@ -1398,6 +1398,84 @@ export function save(): void { nfs.writeFileSync("x", "1"); }
   fs.rmSync(G, { recursive: true, force: true });
 }
 
+// ── BACKLOG ITEM 2 — `candor_whatif`'s `ok`-WITHDRAWAL ON THE MCP SURFACE ────────────────────────────
+// Commit ae70ce4 fixed `ok`-withdrawal on the CLI, MCP `candor_whatif`, and LSP `candor.whatif` in one
+// commit and shipped ZERO tests for it. Conformance PART 70 pins the CLI only; before this block, MCP
+// carried none of the four ⟨0.24⟩/⟨0.30⟩/⟨0.32⟩/⟨0.33⟩ incompleteness causes for this tool — not even
+// the original ⟨0.21⟩ `unanalyzed` one, so a regression here had NOTHING watching it.
+//
+// THE FIXTURE reproduces PART 70's own shape (a two-function load/top pair; `deny Exec` as the policy)
+// as raw REPORT mutations rather than real peeked subprocess scans: `reportCompleteness`/`mustHedge`
+// (query-core.mjs) read the report's OWN `excluded`/`outOfScope`/`scannedUnder` keys — the exact bytes
+// the ⟨0.29⟩/⟨0.33⟩ producer writes — so a synthetic report exercises the identical consumer code path
+// a real scan's peek output would drive, without spawning three more child scans.
+{
+  const WI = scratch("candor-mcp-whatif-inc-");
+  fs.writeFileSync(`${WI}/app.ts`, `import * as fsm from "node:fs";
+export function load(): void { fsm.readFileSync("/etc/x"); }
+export function top(): void { load(); }
+`);
+  execFileSync("node", [`${HERE}/scan.mjs`, `${WI}/app.ts`, `${WI}/base`], { stdio: "ignore" });
+  const base = JSON.parse(fs.readFileSync(`${WI}/base.json`, "utf8"));
+  ok("PREMISE (MCP whatif ok-withdrawal): the base fixture carries app.load + app.top with `excluded: []` — else the cells below are vacuous",
+     Array.isArray(base.functions) && base.functions.some((f) => f.fn === "app.load")
+       && base.functions.some((f) => f.fn === "app.top") && eq(base.excluded, []),
+     JSON.stringify(base).slice(0, 240));
+  const mk = (name, mut) => { const doc = JSON.parse(JSON.stringify(base)); mut(doc);
+                              fs.writeFileSync(`${WI}/${name}.json`, JSON.stringify(doc));
+                              fs.copyFileSync(`${WI}/base.callgraph.json`, `${WI}/${name}.callgraph.json`);
+                              return `${WI}/${name}`; };
+  // ⟨0.30⟩ the peek found a denied effect OUTSIDE the scan's scope — `outOfScope` non-empty.
+  const scopeP = mk("scope", (o) => {
+    o.excluded = [{ class: "outside-the-tsconfig-program", count: 1, peeked: true, reason: "x" }];
+    o.outOfScope = [{ fn: "other", path: "outside/x.ts", effects: ["Exec"],
+                      class: "outside-the-tsconfig-program", reason: "x" }];
+    o.scannedUnder = { deny: ["deny Exec"] };
+  });
+  // ⟨0.32⟩ a class the scan never OPENED (`peeked: false`) — fires because the caller's OWN policy
+  // holds a `deny` rule.
+  const unreadP = mk("unread", (o) => {
+    o.excluded = [{ class: "test-file", count: 1, peeked: false, reason: "x" }];
+  });
+  // ⟨0.33⟩ a class that WAS peeked, but under a narrower deny set (`deny Net`) than this call's own
+  // (`deny Exec`) — `outOfScope: []` beside it so this cell is not ALSO the ⟨0.30⟩ one.
+  const crossP = mk("cross", (o) => {
+    o.excluded = [{ class: "vendor", count: 1, peeked: true, reason: "x" }];
+    o.outOfScope = [];
+    o.scannedUnder = { deny: ["deny Net"] };
+  });
+  const ctlP = `${WI}/base`;   // COMPLETE: excluded: [], no outOfScope/scannedUnder — the over-charge control
+  fs.writeFileSync(`${WI}/exec.policy`, "deny Exec\n");
+  const POL = `${WI}/exec.policy`;
+  const wi = async (report, fn, effect) => {
+    const rs = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "candor_whatif", arguments: { fn, effect, policy: POL, report } } }]);
+    return JSON.parse(rs[0].result.content[0].text);
+  };
+  for (const [tag, prefix, wantKey] of [["⟨0.30⟩ outOfScope", scopeP, "outOfScope"],
+                                        ["⟨0.32⟩ unread class", unreadP, "unread"],
+                                        ["⟨0.33⟩ cross-policy", crossP, "unaskedRules"]]) {
+    const r = await wi(prefix, "app.load", "Exec");
+    ok(`${tag} (MCP candor_whatif): \`ok\` is OMITTED (never \`false\`), \`incomplete: true\`, \`affected\`/\`violations\` still ship, no \`refused\`, exit-shaped as an answer`,
+       !("ok" in r) && r.incomplete === true && Array.isArray(r.affected) && r.affected.length > 0
+         && Array.isArray(r.violations) && r.violations.length > 0 && r.refused !== true
+         && Array.isArray(r[wantKey]) && r[wantKey].length > 0,
+       JSON.stringify(r));
+  }
+  // CONTROLS, BOTH POLARITIES, over the COMPLETE report — one polarity alone is not an answer: an
+  // engine that withdraws `ok` unconditionally, or answers `ok: false` to everything, would pass a
+  // single-polarity check. `deny Exec` genuinely denies `Exec` and does not deny `Net`.
+  const ctlDenied = await wi(ctlP, "app.load", "Exec");
+  ok("⟨0.24⟩ MCP candor_whatif CONTROL (violating polarity): the COMPLETE report still answers `ok:false` with non-empty `violations`, no `incomplete`",
+     ctlDenied.ok === false && Array.isArray(ctlDenied.violations) && ctlDenied.violations.length > 0
+       && !("incomplete" in ctlDenied), JSON.stringify(ctlDenied));
+  const ctlClean = await wi(ctlP, "app.load", "Net");
+  ok("⟨0.24⟩ MCP candor_whatif CONTROL (clean polarity): the SAME complete report answers `ok:true` with an EMPTY `violations` for an undenied effect",
+     ctlClean.ok === true && Array.isArray(ctlClean.violations) && ctlClean.violations.length === 0
+       && !("incomplete" in ctlClean), JSON.stringify(ctlClean));
+  fs.rmSync(WI, { recursive: true, force: true });
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 // KEEP THE EVIDENCE ON FAILURE. A failing row prints the path to its fixture tree, and the sweep
 // would delete it on the way out — at exactly the moment someone needs to look. scratch.mjs has

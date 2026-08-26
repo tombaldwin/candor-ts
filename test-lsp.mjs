@@ -1152,6 +1152,94 @@ export function handler(): void { mid(); }
   for (const dir of [U, V, P, N, NB, PU, HA, HJ, HS, HU]) fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ── BACKLOG ITEM 2 — `candor.whatif`'s `ok`-WITHDRAWAL ON THE LSP EXECUTECOMMAND RESULT ──────────────
+// Commit ae70ce4 fixed `ok`-withdrawal on the CLI, MCP `candor_whatif`, and LSP `candor.whatif` in one
+// commit and shipped ZERO tests for it. The ⟨0.32⟩ block just above tests `diagnosticsFor` — the
+// STANDING GATE disclosure `didOpen` triggers — which shares `discloseIncompleteness` with `runWhatif`
+// but is a DIFFERENT call site answering a DIFFERENT question ("is this open file's squiggle set
+// trustworthy", not "what would this hypothetical do"). Nothing before this block drove
+// `workspace/executeCommand candor.whatif` and read its RESULT document for `ok`/`incomplete` at all —
+// not even the original ⟨0.21⟩ `unanalyzed` cause — so a regression in `runWhatif`'s own
+// `Q.advisoryAnswer` call had nothing watching it.
+//
+// THE FIXTURE is the same load/top pair as the MCP block (query-core.mjs's `reportCompleteness` reads
+// the report's OWN keys, so a handwritten report exercises the identical consumer code a real peek's
+// output would), written straight to `.candor/report.json`/`.candor/report.callgraph.json` — `runWhatif`
+// re-reads both PER CALL (the file is not cached across executeCommand invocations), so a handwritten
+// pair is exactly as live as the real thing. No `didOpen` is sent: `runWhatif` needs no open document
+// (`uri`/`line` are optional, used only for the diagnostic pin), so this stays clear of
+// `diagnosticsFor`'s own disclosure firing first and dedup (`warnOnce`) masking a second one.
+{
+  const BASE_FNS = [
+    { fn: "app.load", loc: "app.ts:1:1", hash: "wi#load", inferred: ["Fs"], direct: ["Fs"], paths: ["/etc/x"], fs: ["read"] },
+    { fn: "app.top", loc: "app.ts:2:1", hash: "wi#top", inferred: ["Fs"], direct: [], calls: ["app.load"], paths: ["/etc/x"], fs: ["read"] },
+  ];
+  const BASE_CG = { "app.load": [], "app.top": ["app.load"] };
+  const mkWI = (name, mut) => {
+    const dir = scratch(`candor-lsp-whatif-inc-${name}-`);
+    fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+    fs.mkdirSync(path.join(dir, ".candor"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "src", "app.ts"),
+      "export function load(): void {}\nexport function top(): void {}\n");
+    const doc = { candor: { version: "handwritten", spec: "0.33" }, package: "app",
+                 analyzed: { count: 2, digest: "0" }, functions: BASE_FNS, excluded: [] };
+    mut(doc);
+    fs.writeFileSync(path.join(dir, ".candor", "report.json"), JSON.stringify(doc));
+    fs.writeFileSync(path.join(dir, ".candor", "report.callgraph.json"), JSON.stringify(BASE_CG));
+    fs.writeFileSync(path.join(dir, "exec.policy"), "deny Exec\n");
+    fs.writeFileSync(path.join(dir, ".candor", "config"), "policy exec.policy\n");
+    return dir;
+  };
+  // ⟨0.30⟩ the peek found a denied effect OUTSIDE the scan's scope.
+  const scopeW = mkWI("scope", (o) => {
+    o.excluded = [{ class: "outside-the-tsconfig-program", count: 1, peeked: true, reason: "x" }];
+    o.outOfScope = [{ fn: "other", path: "outside/x.ts", effects: ["Exec"],
+                      class: "outside-the-tsconfig-program", reason: "x" }];
+    o.scannedUnder = { deny: ["deny Exec"] };
+  });
+  // ⟨0.32⟩ a class the scan never OPENED — fires because this call's own policy holds a `deny` rule.
+  const unreadW = mkWI("unread", (o) => {
+    o.excluded = [{ class: "test-file", count: 1, peeked: false, reason: "x" }];
+  });
+  // ⟨0.33⟩ a class that WAS peeked, but under a narrower deny set (`deny Net`) than this call's own.
+  const crossW = mkWI("cross", (o) => {
+    o.excluded = [{ class: "vendor", count: 1, peeked: true, reason: "x" }];
+    o.outOfScope = [];
+    o.scannedUnder = { deny: ["deny Net"] };
+  });
+  const ctlW = mkWI("ctl", () => {});   // COMPLETE: excluded: [] — the over-charge control
+  const runWI = (dir, fn, effect, n) => lspSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(dir).href } },
+    { jsonrpc: "2.0", method: "initialized", params: {} },
+    { jsonrpc: "2.0", id: 10, method: "workspace/executeCommand",
+      params: { command: "candor.whatif", arguments: [{ fn, effect }] } },
+    { jsonrpc: "2.0", id: 99, method: "shutdown" },
+  ], n, {}, 8000);
+  for (const [tag, dir, wantKey] of [["⟨0.30⟩ outOfScope", scopeW, "outOfScope"],
+                                     ["⟨0.32⟩ unread class", unreadW, "unread"],
+                                     ["⟨0.33⟩ cross-policy", crossW, "unaskedRules"]]) {
+    const { inbound } = await runWI(dir, "app.load", "Exec", 6);   // init + log + 2×show + exec + shutdown
+    const r = inbound.find((m) => m.id === 10)?.result;
+    ok(`${tag} (LSP candor.whatif): the executeCommand RESULT omits \`ok\` (never \`false\`), carries \`incomplete: true\`, \`affected\`/\`violations\` still ship, no \`refused\``,
+       !!r && !("ok" in r) && r.incomplete === true && Array.isArray(r.affected) && r.affected.length > 0
+         && Array.isArray(r.violations) && r.violations.length > 0 && r.refused !== true
+         && Array.isArray(r[wantKey]) && r[wantKey].length > 0,
+       JSON.stringify(r));
+  }
+  // CONTROLS, BOTH POLARITIES, over the COMPLETE report.
+  const { inbound: ctlDeniedIn } = await runWI(ctlW, "app.load", "Exec", 4);   // init + show(verdict) + exec + shutdown
+  const ctlDenied = ctlDeniedIn.find((m) => m.id === 10)?.result;
+  ok("⟨0.24⟩ LSP candor.whatif CONTROL (violating polarity): the COMPLETE report still answers `ok:false` with non-empty `violations`, no `incomplete`",
+     !!ctlDenied && ctlDenied.ok === false && Array.isArray(ctlDenied.violations) && ctlDenied.violations.length > 0
+       && !("incomplete" in ctlDenied), JSON.stringify(ctlDenied));
+  const { inbound: ctlCleanIn } = await runWI(ctlW, "app.load", "Net", 4);
+  const ctlClean = ctlCleanIn.find((m) => m.id === 10)?.result;
+  ok("⟨0.24⟩ LSP candor.whatif CONTROL (clean polarity): the SAME complete report answers `ok:true` with an EMPTY `violations` for an undenied effect",
+     !!ctlClean && ctlClean.ok === true && Array.isArray(ctlClean.violations) && ctlClean.violations.length === 0
+       && !("incomplete" in ctlClean), JSON.stringify(ctlClean));
+  for (const dir of [scopeW, unreadW, crossW, ctlW]) fs.rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);
 // KEEP THE EVIDENCE ON FAILURE. A failing row prints the path to its fixture tree, and the sweep
 // would delete it on the way out — at exactly the moment someone needs to look. scratch.mjs has

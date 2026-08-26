@@ -127,6 +127,21 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   set) stays conditioned on it. No policy, or a policy the engine refuses, still leaves both keys ABSENT; a
   tree WITH exclusions is byte-identical to before (`cmp`-verified).
 
+- **`candor_whatif` (MCP) and `candor.whatif` (LSP) had ZERO tests for the `ok`-withdrawal `ae70ce4`
+  shipped.** That commit fixed `ok`-withdrawal on all three `whatif` surfaces (CLI, MCP, LSP) for the
+  ⟨0.30⟩ `outOfScope`, ⟨0.32⟩ unread-class and ⟨0.33⟩ cross-policy causes in one change and added no
+  coverage — conformance PART 70 pins the CLI only, and before this the CLI had accumulated all four
+  incompleteness causes across four rungs while MCP and LSP carried none of them, not even the original
+  ⟨0.21⟩ `unanalyzed` one. `test-mcp.mjs` and `test-lsp.mjs` now each pin all three later causes (plus
+  both over-charge controls, both polarities) on a synthetic load/top report fixture reproducing PART
+  70's own shape as raw report mutations — `reportCompleteness`/`mustHedge` (query-core.mjs) read the
+  report's own `excluded`/`outOfScope`/`scannedUnder` keys, so a handwritten report exercises the same
+  consumer path a real peek's output would. The LSP block is new territory, not a duplicate of the
+  existing ⟨0.32⟩ LSP block: that one drives `textDocument/didOpen` and reads `diagnosticsFor`'s
+  disclosure; nothing before this drove `workspace/executeCommand candor.whatif` and read its RESULT
+  document for `ok`/`incomplete`. Falsified against `ae70ce4`'s parent commit on both files (RED on all
+  three cause cells, controls unaffected) and restored (GREEN).
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (`package.json`); no analyzer change.
