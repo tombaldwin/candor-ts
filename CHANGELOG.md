@@ -8,6 +8,28 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **MIGRATION — ⟨0.33⟩ IS NOT ADDITIVE, and the cost is measured, not estimated.** If you gate a
+  **STORED** report that a pre-0.33 engine produced — committed to a repo, cached between CI jobs, or
+  published by a dependency and gated downstream — expect exit 2. Measured over **32 real third-party
+  projects, 67 reports, 402 report×policy pairs, all four engines**, published **0.32.1** binaries as
+  the producer against **0.33** HEAD as the consumer: **202 of the 265 pairs that pass today — 76.2% —
+  flip to exit 2** with the policy unchanged. It is deterministic rather than statistical: a report
+  carrying any `peeked: true` class refuses **202 of 202**, a report carrying none passes **63 of 63**,
+  and **26 of the 32 projects** have at least one.
+
+  **THE REMEDY: re-scan with a 0.33 engine under the SAME policy the gate applies** — not merely *a*
+  policy, which is the loose reading this rung exists to close. It discharges the cost in full:
+  **265 of 265** pairs green again, no residual tax and nothing to suppress. A pipeline that scans and
+  gates in ONE run under ONE policy is **unaffected** — producer and consumer are the same run, so
+  `P ⊆ P` holds by construction. Nor is legitimate narrowing over-charged: **62 pairs** whose
+  producer's deny set genuinely covers the gate's took **0 refusals**, and over the full cross-policy
+  sweep of **918 gates**, **529 refuse correctly and none fails open**.
+
+  **The operators this hits are the ones who followed ⟨0.32⟩'s own remedy** — *scan with the policy* —
+  because that is exactly what puts a `peeked: true` class into a report. They migrated one rung ago
+  and are being asked to migrate again, for a hole that remedy did not close. The wording was the
+  defect and the wording is the fix. It fails **CLOSED**.
+
 - **⚠ `scannedUnder` — a peek answers only the question it was put (SPEC §2 ⟨0.33⟩).** `excluded[].peeked:
   true` was only ever true RELATIVE to the deny set the PRODUCER held (⟨0.29⟩ bounds the peek to effects
   policy DENIES), and the report never recorded what that set was — so `gate --report`/`candor_gate`/
@@ -33,6 +55,21 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   Four over-charge controls hold: the SAME policy scan-then-gate pipeline, a consumer's rules a strict
   SUBSET of the producer's, no peeked exclusions at all, and `pure` (an empty-effect-list deny rule)
   correctly refusing rather than comparing equal to an empty set. Conformance PART 69.
+
+- **⟨0.24⟩ `whatif` answered `ok` where the gate refuses over the identical bytes — three causes, three
+  surfaces (conformance PART 70).** `advisoryAnswer` has carried the ⟨0.30⟩ `outOfScope`, ⟨0.32⟩
+  unread-class and ⟨0.33⟩ cross-policy parameters since the `fix-gate`/`unverified` rungs; the CLI's
+  `whatif` call site never passed them, and neither the MCP `candor_whatif` tool nor the LSP
+  `candor.whatif` editor command applied `advisoryAnswer` at all — the LSP command returned the raw core
+  result unconditionally. So the ⟨0.24⟩ pessimism relation, which says an advisory verb may not be less
+  pessimistic than the gate, was broken on this verb for three consecutive rungs, and the LSP is the
+  third surface in a row this family's rungs have reached last. All three now read the same
+  `reportCompleteness`/`advisoryAnswer` machinery, with `unread` gated on the caller's own `deny`/`pure`
+  rules (`whatif`'s policy is OPTIONAL, unlike `fix-gate`'s and `unverified`'s, so a bare `whatif`
+  passes `[]` — the structural carve-out `reportUnaskedRules` already takes for every no-policy caller).
+  The EXIT is untouched: this verb has no `--strict`, §3.2 rules no exit for it, and inventing one is
+  the failure the clause beside it exists to prevent. Byte-identical on a complete report and on the
+  pre-existing `unanalyzed` cause, diffed against `9790ce3`'s `query.mjs`/`mcp.mjs`/`lsp.mjs`.
 
 - **`diff` carried NO completeness reader at all, on the CLI *and* the MCP `candor_diff` tool.** It sat
   one case above `containment`'s `putAnswer(...)` and one below `gains`' prefixed spread, both fixed at
