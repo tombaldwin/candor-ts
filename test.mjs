@@ -11628,6 +11628,99 @@ if (blk()) {
           `status=${go.status} err=${go.stderr}`.slice(0, 220));
   }
 
+  // ── ⟨0.33⟩ `diff` RESTS ON THE SAME TWO REPORTS `gains` DOES AND HAD NO COMPLETENESS READER AT ALL —
+  // it sat one case above `containment`'s `putAnswer(...)` and one below `gains`' prefixed spread,
+  // untouched since ⟨0.28⟩. MEASURED at HEAD 2026-08-26 over a CURRENT report naming one
+  // `excluded[].peeked: false` class vs a pure baseline: `{"changes":[…3 real gains…]}` at exit 1, no
+  // caveat on EITHER channel — the MCP `candor_diff` tool carried the identical gap (test-mcp.mjs).
+  // Reuses `gainsCompletenessFields` VERBATIM rather than mint a fourth spelling for `diff`'s identical
+  // two-report shape (Tom's ruling: a fourth spelling is worse than none).
+  const unreadDiffP = state("unreadDiff", (o) => {
+    o.excluded = [{ class: "not-a-parsed-source", count: 1, peeked: false, reason: "not in this run's parse set" }];
+  });
+  const dfq = (cur, base, ...flags) =>
+    spawnSync("node", [path.join(HERE, "query.mjs"), "diff", `${cur}.json`, `${base}.json`, ...flags], { encoding: "utf8" });
+  const dfjson = (cur, base, ...flags) => { const r = dfq(cur, base, "--json", ...flags);
+    let doc = null; try { doc = JSON.parse(r.stdout); } catch { /* null → the row fails loudly */ } return { r, doc }; };
+
+  // The UNREAD-CLASS cause, with a REAL gained change still standing beside the caveat — the defect
+  // assertion, on the row NAMES, never "the key exists" (a hedge that shipped an empty answer would pass
+  // a presence check while deleting exactly what this verb is for).
+  {
+    const { r, doc } = dfjson(unreadDiffP, pureP);
+    check("⟨0.33⟩ diff over a CURRENT report naming an UNREAD exclusion class carries `incomplete: true` — it had NO completeness reader at all, so a real gained-effect list read as complete over code nobody opened",
+          !!doc && doc.incomplete === true && Array.isArray(doc.changes) && doc.changes.length > 0,
+          `${r.stdout}`.slice(0, 300));
+    check("⟨0.33⟩ …and diff returns its answer BESIDE the caveat, by NAME — the data AND the warning, never the warning instead of the data",
+          !!doc && doc.changes.some((c) => c.fn === "src.app.leaf" && c.gained.includes("Fs")),
+          `${r.stdout}`.slice(0, 300));
+    check("⟨0.33⟩ …and diff's gained-effect exit is UNCHANGED by the caveat (still 1) — a disclosure, not a verdict",
+          r.status === 1, `status=${r.status}`);
+    const h = dfq(unreadDiffP, pureP, "--text");
+    check("⟨0.33⟩ …and the HUMAN arm of `diff` prints the ⚠ INCOMPLETE note ON STDOUT and NAMES the unread class — a caveat on the other stream is one `2>/dev/null` from gone",
+          /⚠ INCOMPLETE/.test(h.stdout) && /not-a-parsed-source/.test(h.stdout) && !/⚠ INCOMPLETE/.test(h.stderr),
+          `out=${h.stdout}`.slice(0, 300) + ` err=${h.stderr}`.slice(0, 160));
+  }
+  // `diff`'s EMPTY-changes arm is the sharpest cell here: `changes: []` is *nothing changed vs the
+  // baseline*, the precise reassurance a reader asks `diff` for — asserted about code nobody opened.
+  {
+    const { r, doc } = dfjson(unreadDiffP, intactP);
+    check("⟨0.33⟩ diff's EMPTY-changes arm hedges too — `changes: []` over an unread class is *nothing changed*, asserted about code nobody opened",
+          r.status === 0 && !!doc && doc.incomplete === true && Array.isArray(doc.changes) && doc.changes.length === 0,
+          `status=${r.status} ${r.stdout}`.slice(0, 260));
+    const h = dfq(unreadDiffP, intactP, "--text");
+    check("⟨0.33⟩ …and diff's PROSE withdraws *nothing changed* when hedging — the sentence is the prose spelling of the empty JSON, and leaving it standing MOVES the false all-clear",
+          /NOT "nothing changed"/.test(h.stdout), `${h.stdout}`.slice(0, 300));
+  }
+  // The CURRENT half under BOTH judged-nothing causes.
+  for (const [cause, pfx, wantUnan] of [["an armed", armedP, true], ["a count-0, NO-`unanalyzed`,", count0P, false]]) {
+    const { r, doc } = dfjson(pfx, intactP);
+    check(`⟨0.33⟩ diff over ${cause} CURRENT report carries \`incomplete: true\` — a changes list out of a report that judged nothing may be missing a real gain`,
+          !!doc && doc.incomplete === true
+            && Array.isArray(doc.judgedNothing) && doc.judgedNothing[0] === `${pfx}.json`
+            && (wantUnan ? doc.unanalyzed?.length === 1 : !("unanalyzed" in doc))
+            && !("baselineIncomplete" in doc),
+          `${r.stdout}`.slice(0, 300));
+    check(`⟨0.33⟩ …and diff over ${cause} current still exits per its own gained-effect rule, unmoved by the caveat`,
+          r.status === (doc?.changes?.some((c) => c.gained.length) ? 1 : 0), `status=${r.status} ${r.stdout}`.slice(0, 200));
+  }
+  // The BASELINE half — the comparison FLOOR is soft, so a change that was always there can read as newly
+  // appeared. Only the `baseline*` keys move: the current side is intact and must stay silent.
+  {
+    const { r, doc } = dfjson(intactP, partialP);
+    check("⟨0.33⟩ diff over a BASELINE that declares `unanalyzed` carries `baselineIncomplete` + `baselineUnanalyzed` — a change that was always there can read as newly appeared",
+          !!doc && doc.baselineIncomplete === true && doc.baselineUnanalyzed?.length === 1
+            && !("incomplete" in doc) && !("unanalyzed" in doc) && Array.isArray(doc.changes),
+          `${r.stdout}`.slice(0, 300));
+    check("⟨0.33⟩ …and diff says it on the HUMAN channel too — on STDOUT, with the answer it qualifies, naming the BASELINE as the soft half",
+          /⚠ INCOMPLETE/.test(dfq(intactP, partialP, "--text").stdout)
+            && /BASELINE half of this comparison/.test(dfq(intactP, partialP, "--text").stdout)
+            && !/⚠ INCOMPLETE/.test(dfq(intactP, partialP, "--text").stderr),
+          `${dfq(intactP, partialP, "--text").stdout}`.slice(0, 260));
+  }
+  // BOTH sides at once — the two disclosures are SEPARATE keys, not one merged flag.
+  {
+    const { doc } = dfjson(armedP, partialP);
+    check("⟨0.33⟩ diff with BOTH sides incomplete discloses them SEPARATELY — a reviewer can tell a short changes list from a soft floor, which one merged `incomplete` could not",
+          !!doc && doc.incomplete === true && doc.unanalyzed?.length === 1
+            && doc.baselineIncomplete === true && doc.baselineUnanalyzed?.length === 1,
+          `${JSON.stringify(doc)}`.slice(0, 300));
+  }
+  // THE CONTROL: two INTACT reports. Unhedged on both channels, byte-identical to a pre-⟨0.33⟩ run.
+  {
+    const r = dfq(intactP, intactP, "--json"), h = dfq(intactP, intactP, "--text");
+    check("⟨0.33⟩ CONTROL: diff over two INTACT reports is UNHEDGED on both channels and exits 0 (no self-diff) — a hedge on every run trains the reader to ignore it",
+          r.status === 0 && !/incomplete/.test(r.stdout) && !/judgedNothing/.test(r.stdout)
+            && r.stderr === "" && h.stderr === "" && /vs the baseline\. ✓/.test(h.stdout),
+          `json=${r.stdout}`.slice(0, 200) + ` err=${h.stderr}`.slice(0, 160));
+    // …and the ⟨0.24⟩ MIRROR CONTROL: an all-pure baseline is a purity CLAIM, not a silence — hedging it
+    // would withdraw the claim §2 rule 3 protects, and the real gained changes must still stand.
+    const p = dfjson(intactP, pureP);
+    check("⟨0.33⟩ CONTROL: diff against an ALL-PURE baseline does NOT hedge, and its real changes still stand — that empty baseline is a claim the report is entitled to make",
+          !!p.doc && !("baselineIncomplete" in p.doc) && !("incomplete" in p.doc) && p.doc.changes.length > 0,
+          `${p.r.stdout}`.slice(0, 240));
+  }
+
   fs.rmSync(d, { recursive: true, force: true });
 }
 

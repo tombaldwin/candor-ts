@@ -647,8 +647,14 @@ const TOOLS = {
       // authoritative empty {changes:[]}; the CLI exits 2 on the same miss) — but NOT --root-confined:
       // see resolveBaseline for the out-of-tree-baseline trust argument.
       const b = resolveBaseline(a.baseline);
+      // ⟨0.33⟩ …and the ⟨0.28⟩ manifest on the same terms, BOTH SIDES separately — the SAME
+      // `Q.gainsCompleteness` the sibling `candor_gains` tool below spreads, because `diff` rests on the
+      // identical two-report shape and fails the identical two ways (a short CURRENT `changes`, a soft
+      // BASELINE floor). MEASURED: this tool answered a real 3-function gain over a CURRENT report naming
+      // an unread exclusion class with no caveat at all — the CLI carried the same gap (query.mjs `diff`
+      // case) and is fixed alongside this. No human sees this channel, so the JSON key is the whole fix.
       return { baseline_version: Q.reportVersion(b) ?? "", engine_version: Q.reportVersion(p) ?? "",
-               ...Q.diff(loadReportLoud(p), loadReportLoud(b)) };
+               ...Q.diff(loadReportLoud(p), loadReportLoud(b)), ...Q.gainsCompleteness(p, b) };
     },
   },
   candor_gains: {

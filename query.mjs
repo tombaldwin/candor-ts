@@ -526,8 +526,16 @@ const P = {
     console.log(`candor gains — the surface newly reaches: ${d.gained.join(", ")}`);
     for (const g of d.byFunction) console.log(`  \`${g.fn}\` gained ${g.effect}${g.origin ? `  (${g.origin})` : ""}`);
   },
-  diff: (d) => {
-    if (!d.changes.length) { console.log("candor diff — no effect changes vs the baseline. ✓"); return; }
+  // ⟨0.33⟩ `hedge` mirrors `gains`' one line up: EITHER side's report incomplete withdraws the ✓, because
+  // "no effect changes ✓" IS the prose spelling of `changes: []` and this alarm-adjacent verb licenses
+  // that reassurance only over bytes that could actually see a change either way.
+  diff: (d, hedge) => {
+    if (!d.changes.length) {
+      console.log(hedge
+        ? `candor diff — no effect changes candor COULD SEE vs the baseline ${NOT_A("nothing changed")}.`
+        : "candor diff — no effect changes vs the baseline. ✓");
+      return;
+    }
     console.log(`candor diff — ${d.changes.length} function(s) changed vs the baseline:`);
     for (const c of d.changes) console.log(`  \`${c.fn}\`${c.gained.length ? `  +${c.gained.join(",")}` : ""}${c.lost.length ? `  -${c.lost.join(",")}` : ""}`);
   },
@@ -1518,11 +1526,37 @@ switch (cmd) {
     const versionMismatch = engineV && baseV && engineV !== baseV;
     if (versionMismatch)
       console.error(`candor-ts: ⚠ baseline @${baseV} ≠ engine @${engineV} — some changes may be the engine reclassifying, not your code. Treat an engine swap as baseline-invalidating: review, then regenerate the baseline.`);
-    put(args, { baseline_version: baseV ?? "", engine_version: engineV ?? "", changes }, P.diff);
+    // ⟨0.33⟩ SPEC §2 — THE SAME MUST `gains` (one case up) ALREADY CARRIES, ON A VERB THAT RESTS ON THE
+    // IDENTICAL TWO REPORTS AND HAD NO COMPLETENESS READER AT ALL. `diff` sat one case above
+    // `containment`'s `putAnswer(...)`, untouched since ⟨0.28⟩ named `where`/`callers`/`show`/`map`/
+    // `reachable`/`impact`/`containment`/`gains`/`blindspots` — measured here 2026-08-26 over a CURRENT
+    // report naming one `excluded[].peeked: false` class: `{"changes":[…3 real gains…]}` at exit 1, no
+    // caveat on EITHER channel, from the CLI *and* the MCP `candor_diff` tool (mcp.mjs carried the same
+    // gap — see the fix there).
+    //
+    // `diff` fails in the SAME two directions `gains` does, because it rests on the same pair: an
+    // incomplete CURRENT means a real gained/lost effect is MISSING from `changes` (the false all-clear
+    // this verb's own `changes.some((c) => c.gained.length)` exit exists to catch), while an incomplete
+    // BASELINE means a change that was ALWAYS there can read as newly appeared. `gains` resolved this
+    // exact shape with a PREFIXED spread (`gainsCompletenessFields`), not `absorbCompleteness` (which
+    // `containment <baseline>` uses to fold two manifests into ONE flag for a SINGLE leak set) — reused
+    // verbatim here rather than minting a fourth spelling for what is structurally `gains`' shape again.
+    const dCur = reportCompleteness(curPrefix), dBase = reportCompleteness(basePrefix);
+    const diffDoc = { baseline_version: baseV ?? "", engine_version: engineV ?? "", changes,
+                       ...gainsCompletenessFields(dCur, dBase) };
+    if (wantJsonOut(args)) emit(diffDoc);
+    else {
+      incompleteAnswerNote(dCur, "the changes below are computed only over effects candor read in the CURRENT tree and may be SHORT",
+        "An effect gained or lost in an unread unit of the current tree is not in the list below.");
+      incompleteAnswerNote(dBase, "the BASELINE half of this comparison is itself partial and the floor it sets is soft",
+        "An effect living in an unread unit of the baseline reads as a newly gained or lost change here.");
+      P.diff(diffDoc, mustHedge(dCur) || mustHedge(dBase));
+    }
     // diff DISCLOSES (the posture) — it is not a gate. Its gained-effect exit 1 is a convenience for
     // same-build ratchet use; under a version mismatch that signal is BOGUS (unmasking, not regression),
     // so exit 0 and let the ⚠ inform — never deliver the wave as a CI failure (review §2.1: guards fail
-    // closed, queries disclose).
+    // closed, queries disclose). Verdict-preserving here too: the exit reads the raw `changes`, untouched
+    // by the caveat, exactly as ⟨0.28⟩ ruled for `gains`.
     process.exit(!versionMismatch && changes.some((c) => c.gained.length) ? 1 : 0);
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }

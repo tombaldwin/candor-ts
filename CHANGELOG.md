@@ -34,6 +34,24 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   SUBSET of the producer's, no peeked exclusions at all, and `pure` (an empty-effect-list deny rule)
   correctly refusing rather than comparing equal to an empty set. Conformance PART 69.
 
+- **`diff` carried NO completeness reader at all, on the CLI *and* the MCP `candor_diff` tool.** It sat
+  one case above `containment`'s `putAnswer(...)` and one below `gains`' prefixed spread, both fixed at
+  ⟨0.28⟩/⟨0.32⟩ — the sibling verbs were touched and `diff` was not. MEASURED at HEAD 2026-08-26: a
+  CURRENT report naming one `excluded[].peeked: false` class, diffed against a baseline, answered
+  `{"changes":[…3 real gains…]}` at exit 1 with no caveat on the JSON channel, the human channel, or the
+  MCP tool.
+  `diff` rests on the SAME two reports `gains` does and fails the same two ways — an incomplete CURRENT
+  means a real gained/lost effect can be MISSING from `changes` (the false all-clear this verb's own
+  gained-effect exit exists to catch), an incomplete BASELINE means a change that was always there can
+  read as newly appeared — so the fix reuses `gainsCompletenessFields`/`gainsCompleteness` VERBATIM
+  (`incomplete`/`unanalyzed`/`judgedNothing`/`noManifest` for the CURRENT side, the same keys prefixed
+  `baseline*` for the other) rather than mint a fourth spelling for a fourth shape. The prose arm
+  withdraws "no effect changes vs the baseline ✓" under a hedge, the same way `gains` withdraws its own
+  reassurance; the exit is untouched (a disclosure, not a verdict). `⟨0.33⟩`'s unasked-rules cause cannot
+  fire here — `diff` takes no `--policy`, so its `reportCompleteness` call carries the default empty
+  deny set, structurally a no-op. The LSP has no `diff`-shaped surface to carry the fix to. Byte-identical
+  on an intact pair, on every channel.
+
 - **The README/AGENTS/package.json spec-claim gate reads two spellings it could not see.** The claim
   grammar widened from `spec` + one to FOUR of `[-: "]` to one to EIGHT of `[-: "*)\]]`, which is what
   it takes to reach a version behind an ALIGNED envelope column (`"spec":    "0.32"`) or a markdown link

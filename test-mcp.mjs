@@ -1269,6 +1269,60 @@ export function mid(): void { leaf(); }
          JSON.stringify(doc).slice(0, 200));
   }
 
+  // ── ⟨0.33⟩ `candor_diff` RESTS ON THE SAME TWO REPORTS `candor_gains` DOES AND CARRIED NO
+  // COMPLETENESS READER AT ALL — mcp.mjs's tool spread `Q.diff(...)` alone, one line above the sibling
+  // `candor_gains` tool that already spreads `Q.gainsCompleteness(p, b)`. MEASURED against the pre-fix
+  // server: a CURRENT report naming one `excluded[].peeked: false` class, diffed against a pure baseline,
+  // answered `{"baseline_version":…,"engine_version":…,"changes":[…3 real gains…]}` with no caveat — the
+  // agent is the consumer that cannot ask a follow-up question, and this tool is one of the ones its
+  // description tells to look for the finding, not a flag beside it. Reuses `Q.gainsCompleteness`
+  // VERBATIM, the same helper `candor_gains` already spreads, rather than a new shape for `diff`.
+  {
+    const unreadDiffP = mk("unread-diff", (o) => {
+      o.excluded = [{ class: "not-a-parsed-source", count: 1, peeked: false, reason: "not in this run's parse set" }];
+    });
+    const partialBaseP = mk("part-unan-diff", (o) => { o.unanalyzed = [{ path: "src/gone.ts", reason: "parse error" }]; });
+    const diffCall = async (cur, base) => {
+      const rs = await mcpSession([
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "candor_diff", arguments: { report: cur, baseline: base } } },
+      ]);
+      return JSON.parse(rs.find((r) => r.id === 1).result.content[0].text);
+    };
+    // The UNREAD-CLASS cause, with a REAL gained change still standing beside the caveat — the defect
+    // assertion, on the row NAMES, never "the key exists".
+    const dUnread = await diffCall(unreadDiffP, pureP);
+    ok("⟨0.33⟩ MCP: `candor_diff` over a CURRENT report naming an UNREAD exclusion class carries `incomplete: true` — an agent cannot otherwise tell a complete delta from one computed over code nobody opened",
+       dUnread.incomplete === true && Array.isArray(dUnread.changes) && dUnread.changes.length > 0,
+       JSON.stringify(dUnread).slice(0, 260));
+    ok("⟨0.33⟩ MCP: …and the CHANGES travel beside the caveat, by NAME",
+       dUnread.changes.some((c) => c.fn === "app.leaf" && c.gained?.length > 0),
+       JSON.stringify(dUnread).slice(0, 260));
+    // A + D: BOTH judged-nothing causes on the CURRENT side, mirroring the TOOLS5 matrix above.
+    for (const [cause, pfx, wantUnan] of [["an armed", armedP, true], ["a count-0, NO-`unanalyzed`,", c0P, false]]) {
+      const dj = await diffCall(pfx, P);
+      ok(`⟨0.33⟩ MCP: candor_diff over ${cause} CURRENT report carries \`incomplete: true\` — a changes list out of a report that judged nothing may be missing a real gain`,
+         dj.incomplete === true && Array.isArray(dj.judgedNothing) && dj.judgedNothing[0] === `${pfx}.json`
+           && (wantUnan ? dj.unanalyzed?.length === 1 : !("unanalyzed" in dj)) && !("baselineIncomplete" in dj),
+         JSON.stringify(dj).slice(0, 260));
+    }
+    // The BASELINE half — the prefixed spelling, the SAME shape `candor_gains` already answers with.
+    const dBase = await diffCall(P, partialBaseP);
+    ok("⟨0.33⟩ MCP: candor_diff over a BASELINE that declares `unanalyzed` carries `baselineIncomplete` + `baselineUnanalyzed` — a change that was always there can read as newly appeared",
+       dBase.baselineIncomplete === true && dBase.baselineUnanalyzed?.length === 1
+         && !("incomplete" in dBase) && !("unanalyzed" in dBase) && Array.isArray(dBase.changes),
+       JSON.stringify(dBase).slice(0, 260));
+    // INTACT CONTROL — an agent that already handles the hedge sees no extra key over ordinary bytes.
+    const dIntact = await diffCall(P, P);
+    ok("⟨0.33⟩ MCP CONTROL: candor_diff over two INTACT reports (self-diff) is unhedged and carries no caveat key",
+       !("incomplete" in dIntact) && !("baselineIncomplete" in dIntact) && dIntact.changes.length === 0,
+       JSON.stringify(dIntact).slice(0, 220));
+    // …and the ⟨0.24⟩ mirror control: an all-pure baseline is a purity CLAIM, not a silence.
+    const dPure = await diffCall(P, pureP);
+    ok("⟨0.33⟩ MCP CONTROL: candor_diff against an ALL-PURE baseline does NOT hedge, and its real changes still stand",
+       !("baselineIncomplete" in dPure) && !("incomplete" in dPure) && dPure.changes.length > 0,
+       JSON.stringify(dPure).slice(0, 220));
+  }
+
   // ── ⟨0.28⟩ A ZERO-RULE POLICY ON THE AGENT CHANNEL (SPEC §2). The three policy-relative tools share the
   // CLI's loader and answered relative to a policy that asked nothing. MEASURED against the pre-rung
   // server on this fixture: `candor_whatif` → `{…,"ok":true}`, `candor_fix` →
