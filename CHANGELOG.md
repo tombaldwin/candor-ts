@@ -99,6 +99,15 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   carries both new spellings, so a silent revert to the narrow form fails the control instead of
   quietly checking less.
 
+- **The two `MEASURED at spec 0.32` notes carry the `, informative)` marker.** Both record a measurement
+  taken at a floor that is now past — the census/skip-list divergence in `scan.mjs`, and the class read
+  off the `new` expression rather than the resolved constructor. They are true statements about the past,
+  and from 0.33 onward `release-preflight` [2] read them as a bump that missed two shipped-source
+  literals. The family's marker for a deliberate historical note is `(spec X.Y, informative)`, the same
+  one SPEC.md uses on its replaced-source-file example; applied to both, and to `test.mjs`'s copy of the
+  first note so two spellings of one sentence cannot drift apart. Comment-only — no assertion, no fixture
+  and no emitted value moves.
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (`package.json`); no analyzer change.
