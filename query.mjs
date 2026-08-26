@@ -1956,7 +1956,10 @@ switch (cmd) {
     // consulted BEFORE an edit, where the alternative is the operator guessing. The exit is UNCHANGED:
     // this verb has no `--strict`, §3.2 rules no exit for it, and inventing one is the failure mode the
     // clause it lives beside exists to prevent.
-    const wcomp = reportCompleteness(prefix);
+    // ⟨0.33⟩ this verb's OWN deny/pure rules ride along — see the `fix-gate`/`unverified` sites for the
+    // rule. `pol` is OPTIONAL here (unlike those two), so a bare `whatif` with no `--policy` passes `[]`,
+    // the structural carve-out `reportUnaskedRules` already takes for every no-policy caller.
+    const wcomp = reportCompleteness(prefix, pol?.deny ?? []);
     const wunan = wcomp.unanalyzed;
     if (wunan.length)
       console.error(`candor-ts: whatif is NOT a complete answer — the report declares ${wunan.length} unit(s) candor could not analyze (disclosed under \`unanalyzed\`); \`ok\` is omitted because neither value is a statement the input licenses`);
@@ -1970,7 +1973,19 @@ switch (cmd) {
     // verdict AND the blast radius it qualifies are withheld in favour of the caveat document. The exit
     // is UNCHANGED (0: with no rules, `violations` was empty by construction on this path anyway).
     if (policyFile && policyAskedNothing(pol)) { emitZeroRuleCaveat("whatif", policyFile, wcomp); process.exit(0); }
-    emit(advisoryAnswer(r, wunan, wcomp.judgedNothing, wcomp.unreadable, wcomp.noManifest));
+    // ⟨0.30⟩/⟨0.32⟩/⟨0.33⟩ PART 70 — THE THREE SCOPE CAUSES `whatif` NEVER RECEIVED. `advisoryAnswer` has
+    // carried these three parameters since the `fix-gate`/`unverified` rungs; this call site simply never
+    // passed them, so `whatif` answered `ok` where the gate refuses over the identical bytes — MEASURED,
+    // all three cells RED. `unread` is gated on `pol.deny.length` exactly as the fix-gate/unverified sites
+    // gate it (only a `deny`/`pure` rule's answer depends on code outside the scan's scope; a bare
+    // `whatif` with no policy has no such rule, so `=== true` here rather than a truthy check — a length
+    // that happens to be 0 must NOT read as "gated open").
+    const wUnread = pol?.deny?.length ? (wcomp.unread ?? []) : [];
+    // ⟨0.33⟩ the fourth cause — computed by `reportCompleteness` above (structurally `[]` when `pol` is
+    // absent or `pol.deny` is empty), never re-derived here.
+    const wUnasked = wcomp.unaskedRules ?? [];
+    emit(advisoryAnswer(r, wunan, wcomp.judgedNothing, wcomp.unreadable, wcomp.noManifest,
+                        wcomp.outOfScope ?? [], wUnread, wUnasked));
     process.exit(r.violations.length ? 1 : 0);
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }

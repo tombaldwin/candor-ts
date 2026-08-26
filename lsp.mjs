@@ -664,6 +664,18 @@ function runWhatif(a) {
       + `${zcallers.length} caller(s) would inherit ${a.effect})`);
     return { unevaluated: policyZeroRules(activePolicyPath ?? "(policy)").unevaluated };
   }
+  // PART 70 — this command returned the RAW `r` unconditionally, so the shipped editor experience
+  // (VS Code + JetBrains both bundle this server) certified `ok` over bytes `gate --report` refuses on:
+  // the ⟨0.30⟩/⟨0.32⟩/⟨0.33⟩ scope causes never reached this route at all. Read off the SAME
+  // `reportCompleteness` the CLI whatif and `candor_whatif`/`diagnosticsFor` use, `unread` gated on this
+  // call's OWN `deny`/`pure` rules exactly as those two gate it — so the three channels cannot disagree
+  // about one report. `discloseIncompleteness` is the SAME log+showMessage channel `diagnosticsFor`
+  // already uses for the standing gate squiggles (dedup on the message text), so a report already
+  // disclosed there says nothing new here, and one not yet seen surfaces on the FIRST channel that asks.
+  const wcomp = Q.reportCompleteness(reportPrefix, wpol?.deny ?? []);
+  const wUnread = wpol?.deny?.length ? (wcomp.unread ?? []) : [];
+  const wUnasked = wcomp.unaskedRules ?? [];
+  discloseIncompleteness(wcomp.unanalyzed ?? [], wcomp.outOfScope ?? [], wUnread, wUnasked);
   const callers = r.affected.filter((f) => !r.of.includes(f));   // affected minus the target(s) themselves
   const rules = [...new Set(r.violations.map((v) => v.rule))];
   // ⟨0.24⟩ THE EDITOR IS A CHANNEL THIS VERB ANSWERS ON, so the `conditional` has to reach it or this
@@ -698,7 +710,13 @@ function runWhatif(a) {
     }]);
     publishDiagnostics(a.uri);
   }
-  return r;   // the raw whatif result rides back as the executeCommand result (a thick client can render it)
+  // PART 70 — the executeCommand RESULT is the document a thick client renders, so it takes the SAME
+  // `ok`-withdrawal the CLI and `candor_whatif` apply: `incomplete: true` in its place, `affected`/
+  // `violations` (and the one-liner/diagnostic above, built off the raw `r`) unchanged. A no-op on a
+  // complete report — byte-identical to the pre-fix `return r` — so every fixture without a scope cause
+  // is untouched.
+  return Q.advisoryAnswer(r, wcomp.unanalyzed, wcomp.judgedNothing, wcomp.unreadable, wcomp.noManifest,
+                          wcomp.outOfScope ?? [], wUnread, wUnasked);
 }
 
 // The candor.fix command: the SAME query-core `fix` the CLI (`query.mjs fix`) and MCP (`candor_fix`) run —

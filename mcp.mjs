@@ -345,7 +345,7 @@ const TOOLS = {
     run: (_a, p) => nestWithCaveat(p, "modules", () => Q.map(loadReportLoud(p))),
   },
   candor_whatif: {
-    description: "Hypothetically add `effect` to `fn` and report the blast radius; with `policy`, also the deny-rule violations it would cause. Pre-edit gate check.",
+    description: "Hypothetically add `effect` to `fn` and report the blast radius; with `policy`, also the deny-rule violations it would cause. Pre-edit gate check. ALWAYS CHECK for the presence of `ok`, never just its value: over a report this route cannot fully evaluate, `ok` is ABSENT and `{incomplete:true, ...}` takes its place — `affected`/`violations` still ship (a partial answer beats a refusal; this tool is consulted BEFORE an edit), but neither `true` nor `false` is a claim the input licenses. The causes are the same ones `candor_gate`/`candor_unverified` disclose: `unanalyzed` (candor could not read a file of the target's own code), `outOfScope` (the peek found a denied effect outside the scan's reach), `unread` (a class the scan never opened — gated on this call's OWN `deny`/`pure` rules, since only those depend on code outside the scan's scope), and `unaskedRules` (a class something DID open, but under a narrower deny set than this policy's own).",
     schema: { type: "object", properties: { fn: { type: "string" }, effect: { type: "string" }, policy: { type: "string", description: "path to a CANDOR_POLICY file (optional)" }, ...reportArg }, required: ["fn", "effect"] },
     run: (a, p) => {
       // A GIVEN policy path is always read (confined, fail-closed) — the old `existsSync` guard made a
@@ -359,7 +359,17 @@ const TOOLS = {
       // blast radius it qualifies are withheld for the caveat document (see `zeroRuleCaveat`). A policy
       // that is NOT configured stays untouched: that is the honest way to say "I am not gating".
       if (policyAskedNothing(pol)) return zeroRuleCaveat(a.policy, p);
-      return r;
+      // PART 70 — this tool returned the RAW `r` unconditionally, so the agent-facing surface certified
+      // `ok` over bytes `candor_gate`/`gate --report` refuse on: the ⟨0.30⟩/⟨0.32⟩/⟨0.33⟩ scope causes
+      // never reached it at all (measured RED four ways: outOfScope, unread class, cross-policy, and the
+      // pre-existing `unanalyzed` path this tool DID carry via `r` alone — none of them withdrew `ok`).
+      // Same `Q.advisoryAnswer` the CLI and `candor_unverified` apply, off the SAME `reportCompleteness`
+      // reader, so this channel cannot drift from the other two.
+      const wcomp = Q.reportCompleteness(p, pol?.deny ?? []);
+      const wUnread = pol?.deny?.length ? (wcomp.unread ?? []) : [];
+      const wUnasked = wcomp.unaskedRules ?? [];
+      return Q.advisoryAnswer(r, wcomp.unanalyzed, wcomp.judgedNothing, wcomp.unreadable, wcomp.noManifest,
+                              wcomp.outOfScope ?? [], wUnread, wUnasked);
     },
   },
   candor_fix: {
