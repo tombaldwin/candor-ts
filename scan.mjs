@@ -2545,6 +2545,22 @@ function isOwnPackageDecl(decl) {
   return !!own && (own === pkgName || own === rootOwnerPkg);
 }
 
+// ⟨vein: neither-voice-fired, ATTEMPTED AND REVERTED⟩ `crossesPackageBoundary` answers FALSE for two
+// different reasons that get the same boolean: genuinely OUR OWN package, and `nearestPackageName`
+// finding no package.json at all above the file (an unowned file, neither ours nor a dependency's). The
+// second reading looked like the same hole as the `.d.ts`-shadow cardinal sin one level further out, and
+// a fix was drafted (treat `own === null` as boundary-crossing for disclosure purposes). MEASURED false:
+// candor-ts's OWN suite hits this exact shape legitimately — a single-file scan target (`scan.mjs
+// a.ts`, not the whole package directory) whose sibling import (`./mock`) is outside `projectFiles`
+// (only the given file was walked) and sits in a directory with no `package.json` (a temp fixture dir).
+// That sibling is real local code, not a foreign package, and the draft fix charged it `blind` —
+// converting a correct silent-pure into a fabricated over-disclosure, on `test.mjs`'s own pinned CONTROL
+// row. A single-file scan target has no reliable way to tell "no owner because nobody has ever recorded
+// one" apart from "no owner because this scan's OWN target set stops here" — that distinction needs the
+// scan's notion of its own target boundary, not just a file's package.json ancestry, and is a bigger
+// change than this pass's remit. Left as a filed, un-closed finding rather than shipped: the corpus and
+// this codebase's own tests could not tell it apart from a real project file.
+
 // ⟨scan-boundary, own-`.d.ts`-shadow⟩ npm ships `dist/foo.js` beside `dist/foo.d.ts`, and TypeScript's own
 // module resolution treats the co-located `.d.ts` as the AUTHORITATIVE type source for every IMPORTER of
 // `foo.js` — even one this same scan (`--allow-js`) is analysing as project source. A same-file reference
@@ -3971,29 +3987,22 @@ const dispatchWhy = (qualifiedOwner, member) =>
   qualifiedOwner && member ? `dispatch:${qualifiedOwner}.${member}`
                            : `callback:${qualifiedOwner ?? member ?? "unresolved call"}`;
 
-// Charge `rec` for reaching a resolved EXTERNAL declaration through a DESUGARED site — one that is not a
-// CallExpression, so the (CLASSIFY)/join/ledger arm of the call path never sees it. This is the same
-// decision procedure that arm runs, in the same order: the chained sibling report (the SPEC §2 `hash`
-// join), then the §5.1 package manifest, then the κ-coverage ledger's `invisible`. Nothing is fabricated:
-// a member declared in the ES lib / a project file / an unnameable package resolves to nothing and adds
-// nothing, and a chained report that omits the entry is making its purity claim (SPEC §2 rule 3).
-// `tailOverride` names the dep report's local tail explicitly when the declaration cannot supply it — a
-// CONSTRUCTOR has no `name`, and the producer hashed it as `<Class>.constructor`.
-function chargeExternalDecl(rec, decl, tailOverride) {
-  if (!rec || !decl) return;
-  const mod = declModule(decl);
-  if (!mod || mod.startsWith("<")) return;             // project source / the ES lib — not a package reach
-  const pkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
-  const nameDecl = memberSigOf(decl); // a function-typed property names its member one level up
-  const member = nameDecl.name?.getText?.();
-  // Owner-prefixed first (`Owner.member` — how the dep's own scan hashes a method), bare member as the
-  // fallback (a CJS dist scan hashes a top-level export under its bare name). Identical to the call arm.
-  const owner = nameDecl.parent?.name?.getText?.();
-  const hit = tailOverride ? crossDeps.get(`${pkg}#${tailOverride}`)
-    : member && ((owner ? crossDeps.get(`${pkg}#${owner}.${member}`) : undefined)
-      ?? crossDeps.get(`${pkg}#${member}`));
-  if (hit) { applyDepHit(rec, hit); return; }
-  const file = decl.getSourceFile().fileName;
+// ⟨THE FUNNEL⟩ Every site that reaches a resolved EXTERNAL declaration whose own κ lookup found nothing
+// answers the SAME question — chained sibling report, §5.1 manifest, κ-coverage ledger, or the
+// unanswerable-key disclosure — and it used to answer it up to four times over, independently, in the
+// CallExpression (CLASSIFY) arm, the desugared-declaration arm (coercion/HOF-ref sites, this function),
+// and the tagged-template arm. Two of those copies drifted out of step with each other and a third never
+// grew the unanswerable-key half at all — the exact "two individually-correct checks whose conjunction is
+// silence" shape hit twice already (⟨0.33⟩ `.d.ts`-shadow, ⟨0.33⟩ `--dep-inits`). `disclosureTail` is now
+// the ONE place that ordering lives; every caller reaches it (directly, or through this function) rather
+// than re-deriving the four-conjunct AND. Its contract: given a declaration already established as an
+// external reach (`mod` computed, not project/lib source), it either adds a real effect (the chained
+// dep's own recorded hit, a declared-pure `[]`), discloses (`blind`, `Unknown`), or does nothing ONLY
+// because the reach is legitimately unaccounted-for by this funnel (κ already reviewed it and said pure,
+// or the dependency's own report already answered by omission — SPEC §2 rule 3) — never a fourth,
+// unexamined silent case. Called directly for a resolved external CallExpression too (see the CLASSIFY
+// arm and the tagged-template arm) so the whole family shares one implementation.
+function disclosureTail(rec, decl, pkg, file) {
   const declared = packageManifestEffects(file);
   if (declared !== null) { for (const e of declared) rec.direct.add(e); return; } // [] = declared pure
   const abstraction = unanswerableKey(decl);
@@ -4009,12 +4018,35 @@ function chargeExternalDecl(rec, decl, tailOverride) {
     if (abstraction && incompleteDepPkgs.has(pkg)) discloseUnanswerableKey(rec, pkg, abstraction);
     return;
   }
-  // ⟨scan-boundary, half 1⟩ the UNANSWERABLE key, on the desugared sites too — the CallExpression arm's
-  // twin (see there for the argument). `[1].forEach(job.run)` where `job` is typed as a chained dep's
-  // INTERFACE hands the join a key no report can carry, and a covered package silences the ledger, so the
-  // caller read confidently pure. Same three conjuncts, same reason class.
+  // ⟨scan-boundary, half 1⟩ the UNANSWERABLE key. `[1].forEach(job.run)` where `job` is typed as a chained
+  // dep's INTERFACE hands the join a key no report can carry, and a covered package silences the ledger,
+  // so the caller read confidently pure. Same three conjuncts, same reason class.
   if (abstraction && depCoveredPkgs.has(pkg) && crossesPackageBoundary(file))
     discloseUnanswerableKey(rec, pkg, abstraction);
+}
+// Charge `rec` for reaching a resolved EXTERNAL declaration through a DESUGARED site — one that is not a
+// CallExpression, so the (CLASSIFY)/join/ledger arm of the call path never sees it. This is the same
+// decision procedure that arm runs, in the same order: the chained sibling report (the SPEC §2 `hash`
+// join), then `disclosureTail` (manifest, then the κ-coverage ledger's `invisible`). Nothing is
+// fabricated: a member declared in the ES lib / a project file / an unnameable package resolves to
+// nothing and adds nothing, and a chained report that omits the entry is making its purity claim (SPEC §2
+// rule 3). `tailOverride` names the dep report's local tail explicitly when the declaration cannot supply
+// it — a CONSTRUCTOR has no `name`, and the producer hashed it as `<Class>.constructor`.
+function chargeExternalDecl(rec, decl, tailOverride) {
+  if (!rec || !decl) return;
+  const mod = declModule(decl);
+  if (!mod || mod.startsWith("<")) return;             // project source / the ES lib — not a package reach
+  const pkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
+  const nameDecl = memberSigOf(decl); // a function-typed property names its member one level up
+  const member = nameDecl.name?.getText?.();
+  // Owner-prefixed first (`Owner.member` — how the dep's own scan hashes a method), bare member as the
+  // fallback (a CJS dist scan hashes a top-level export under its bare name). Identical to the call arm.
+  const owner = nameDecl.parent?.name?.getText?.();
+  const hit = tailOverride ? crossDeps.get(`${pkg}#${tailOverride}`)
+    : member && ((owner ? crossDeps.get(`${pkg}#${owner}.${member}`) : undefined)
+      ?? crossDeps.get(`${pkg}#${member}`));
+  if (hit) { applyDepHit(rec, hit); return; }
+  disclosureTail(rec, decl, pkg, decl.getSourceFile().fileName);
 }
 
 // ---- implicit VALUE-COERCION desugaring (the silent-pure holes where the JS coercion protocol calls a
@@ -4870,6 +4902,13 @@ function visitCalls(node) {
                 rec.direct.add("Unknown");
                 rec.why.add(`callback:${recvText.slice(0, 40)}.${m}`); // method on an indeterminate-valued receiver (no resolvable owner TYPE) — canonical `callback:`, not the frontier's `dispatch:OWNER.member`
               }
+              // THE FUNNEL: `d2` resolved to a concrete, non-local declaration that named neither a κ effect
+              // nor a value-holder shape above — a reflective `.call`/`.apply`/`Reflect.apply` onto an
+              // uncurated dependency's exported function (`depFn.call(this, x)`), the by-reference sibling
+              // of the HOF-ref arm's own `chargeExternalDecl(rec, d2)` call. Without this the invoke was
+              // NEITHER edged, NOR κ-classified, NOR disclosed — silent-pure on a call that unquestionably
+              // runs caller-reachable code, the same shape as the two cardinal sins this funnel closes.
+              else if (d2 && !declIsLocal(d2)) chargeExternalDecl(rec, d2);
             }
           }
           // EXPLICIT iterator force: `it.next()` / `it.return()` / `it.throw()` on an OPAQUE iterator
@@ -5488,48 +5527,12 @@ function visitCalls(node) {
             // via @types/lodash was falsely disclosed — kappaKnows saw the unstripped name).
             const pkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
             const file = decl.getSourceFile().fileName;
-            // SPEC §5.1: a package that DECLARES its effects (candorEffects in package.json) is read
-            // at the declared-not-verified tier — its effects are attributed and it is NOT a blind
-            // spot. Otherwise the κ ledger names it (an uncurated dependency the review must read).
-            const declared = packageManifestEffects(file);
-            const abstraction = unanswerableKey(decl);
-            if (declared !== null) {
-              for (const e of declared) rec.direct.add(e); // [] = declared pure: covered, adds nothing
-            } else if (!kappaKnows(pkg) && !depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
-              unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
-              // Per-fn HONESTY: this fn calls into a genuinely-blind package (κ-unknown, not dep-covered).
-              // Recorded per fn, propagated transitively, emitted as `invisible` — so `inferred` is never an
-              // unqualified completeness claim. This branch already IS the global-blind condition, so no
-              // post-filter is needed (κ either knows a package or it doesn't).
-              rec.blind.add(pkg);
-              // ⟨0.21⟩ …and half 1 STILL speaks for a package whose only chained report declares itself
-              // incomplete, which lands here because its coverage was withheld. See the twin in
-              // `chargeExternalDecl`: the ledger hedge must ADD to the Unknown, never replace it, or the
-              // completeness fix silently narrows `deny E Unknown[dispatch]` (standing bar item 0).
-              if (abstraction && incompleteDepPkgs.has(pkg)) discloseUnanswerableKey(rec, pkg, abstraction);
-            } else if (abstraction && depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
-              // ⟨scan-boundary, half 1⟩ THE UNANSWERABLE KEY, candor-spec DEP-RECEIVER-TYPING-DESIGN.md.
-              // A chained lookup that comes back empty has two readings with OPPOSITE evidential weight:
-              //   * KEYED-AND-MISSED — the key names a BODY the dep scanned (`declare class C { m() }`,
-              //     `declare function f()`), and the dep's report omits pure functions, so absence IS its
-              //     answer (SPEC §2 rule 3). Silence is correct; nothing happens here.
-              //   * NO ANSWERABLE KEY — resolution landed on an ABSTRACTION (an interface method/property
-              //     signature, an anonymous type-literal member, an `abstract` member). There is no body
-              //     under that name in the dependency, so its report can NEVER carry the key, whatever the
-              //     implementations do. No question was asked, and silence answers none.
-              // TypeScript reaches this case by a different road than rust: a receiver it genuinely cannot
-              // type is `any`, which already reads `callback:` Unknown. Its unformed key is the receiver
-              // typed to an abstraction the dependency's report has no vocabulary for — `build(): Fetcher`
-              // exported over a `.d.ts` whose only implementation, `Client`, is what the dep actually
-              // hashed. Measured: `go` was absent from the report entirely while the dep's own report read
-              // `depkit#Client.fetch -> ['Fs']`.
-              // THE THIRD CONJUNCT (`depCoveredPkgs.has(pkg)` — the dependency is CHAINED) is the arm
-              // above, and it is load-bearing rather than incidental: for an UNCHAINED package the κ ledger
-              // already discloses `invisible: [pkg]`, so a second voice would be pure false uncertainty. It
-              // is exactly when the package IS covered that the ledger correctly falls silent and that
-              // silence becomes the confident purity claim this rung exists to prevent.
-              discloseUnanswerableKey(rec, pkg, abstraction);
-            }
+            // SPEC §5.1 manifest, then the κ-coverage ledger, then the unanswerable-key disclosure
+            // (candor-spec DEP-RECEIVER-TYPING-DESIGN.md) — THE FUNNEL, see `disclosureTail`. This arm
+            // already ran its own chained-dep lookup above (`inheritedFromDep`, with its constructor/
+            // owner-prefix spelling), so it hands the tail an already-external, already-unmatched `decl`
+            // rather than re-deriving the join.
+            disclosureTail(rec, decl, pkg, file);
           }
         }
       }
@@ -6074,17 +6077,14 @@ function visitCalls(node) {
         // does for an own-package name that never collided with anything.
         const eff = isOwnPackageDecl(decl) ? null : kappa(mod, member);
         if (eff) { rec.direct.add(eff); if (eff === "Unknown") rec.why.add(`reflect:${mod.replace(/^node:/, "")}.${member}`); }
-        else {
-          const file = decl.getSourceFile().fileName;
-          const pkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
-          const declared = packageManifestEffects(file);
-          if (declared !== null) { for (const e of declared) rec.direct.add(e); }
-          else if (!mod.startsWith("<") && !kappaKnows(pkg) && !depCoveredPkgs.has(pkg)
-              && crossesPackageBoundary(file)) {
-            unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
-            rec.blind.add(pkg);
-          }
-        }
+        // THE FUNNEL (see `chargeExternalDecl`/`disclosureTail`): this arm used to hand-roll only the
+        // manifest + blind-ledger half — no chained-dep join, no unanswerable-key disclosure — so a
+        // tagged call into a covered-but-abstract dependency (an interface-typed `sql` tag, say) vanished
+        // exactly like the two cardinal sins this funnel exists to prevent, one arm silently missing two
+        // of the four checks the other arms already had. Routing through the shared function costs nothing
+        // for the cases this arm already got right (declared-pure, an uncurated/uncovered blind package —
+        // both unchanged) and closes the two it never had.
+        else chargeExternalDecl(rec, decl);
       }
     }
   }

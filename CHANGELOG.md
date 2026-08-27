@@ -78,6 +78,31 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   by reproducing byte-identical `pkgName` behaviour with and without `--dep-inits` in a differently-named
   directory.
 
+- **THE FUNNEL: the `.d.ts`-shadow and `--dep-inits` fixes above share one structure — two
+  independently-correct checks each deferring, and the conjunction being silence — and it was the
+  STRUCTURE that was unfixed, not just its two instances.** The external-declaration decision (chained
+  dep hit → §5.1 manifest → κ-coverage ledger → `unanswerableKey` disclosure) was hand-rolled up to three
+  times over: the CallExpression (CLASSIFY) arm, the desugared-declaration arm (`chargeExternalDecl`,
+  coercion/HOF-ref sites), and the tagged-template arm. The first two had already drifted into needing
+  the two fixes above; the third had NEVER grown the chained-dep-hit or `unanswerableKey` halves at all.
+  Extracted the shared tail (manifest → ledger → disclosure) into one function, `disclosureTail`, that
+  `chargeExternalDecl` and the CLASSIFY arm now both call — a pure refactor, proved byte-identical
+  (`cmp`/sha256) across all 26 corpus targets (113 installed `node_modules` packages via 12 real import
+  graphs + all 14 published tarballs) and against the `.d.ts`-shadow and `--dep-inits` regression
+  fixtures, which stay fixed. Routed the tagged-template arm and one more newly-found instance — a
+  reflective `depFn.call(this, x)`/`.apply(...)` onto an uncurated dependency's exported function, which
+  was previously neither edged, κ-classified, nor disclosed — through the same funnel: MEASURED with two
+  constructed fixtures (a dependency's opaque `.call()` invoke; a tagged SQL-style call resolving onto a
+  chained-but-abstract dependency export) that each silently vanished from `functions` before this change
+  and now disclose `invisible`/`Unknown` correctly. Neither shape occurs in the corpus above (both fixes
+  are additive with zero corpus-visible effect there). ATTEMPTED AND REVERTED: a further generalization
+  treating `crossesPackageBoundary`'s "no package.json found at all" reading as boundary-crossing (closing
+  the same hole one level further out) fabricated a blind disclosure on this engine's own pinned CONTROL
+  test — a single-file scan target's local sibling import has no package.json either, and is
+  indistinguishable from a genuinely unowned file by this signal alone; left as a filed, un-closed
+  finding rather than shipped. Full test battery green (1589 tests, mcp/lsp/watch, probe, fuzz,
+  transitive-recall, self-gate, effect-set oracle).
+
 - **The ⟨0.33⟩ absent-`scannedUnder` refusal is now pinned — nothing watched it before.** A report
   carrying a `peeked: true` class and NO `scannedUnder` key is the shape every pre-0.33 report has,
   so it is this rung's most-exercised path in the wild. The behaviour was already correct; the gap
