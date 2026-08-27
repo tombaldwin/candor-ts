@@ -62,6 +62,47 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   report — `query.mjs`'s own documented precedence (SPEC §3.1 `7271c69`) has a firing rule dominate a
   refusal, so the real exit is 1. `discloseIncompleteness` now names whichever is true.
 
+- **⚠ the export-alias fix above was `BinaryExpression`-only; the FOURTH shape sharing its RHS was a
+  different node entirely and stayed silent.** MEASURED: `node_modules/gkit/index.js` has
+  `function _internalImplName() { return fs.writeFileSync(...) }` beside `Object.defineProperty(exports,
+  "thing", { enumerable: true, get: function () { return _internalImplName; } })` — TSC's OWN standard
+  CommonJS emit for `export { x } from './impl'`, and what webpack/rollup's ESM<->CJS interop shims emit
+  too, so this is not an exotic shape but a large fraction of what published packages actually ship.
+  Chained, `deny Fs` read `policy ✓` at exit 0 over the same three-conjunct silence as the fixed shapes.
+  Considered whether a single checker-driven formulation closes the FAMILY rather than the next syntax:
+  `checker.getExportsOfModule` + `getAliasedSymbol` DOES unify `exports.NAME =`/`module.exports.NAME =`/
+  the bracket spelling into one alias-symbol resolution (verified — it already resolves these without any
+  RHS-shape matching), but MEASURED to return zero exports for a whole-object `module.exports = {...}`
+  reassignment and a non-alias symbol pointing at the bare `CallExpression` for `Object.defineProperty`
+  regardless of `get`/`value` — TypeScript's own CommonJS binder does not build a unified export table for
+  either, so a full family-closure is not tractable through the checker alone. FIX enumerates the
+  descriptor form as a fourth candidate site (`Object.defineProperty(exports, "NAME", { get(){ return
+  REF } })` / `{ value: REF }`) and — since the four sites now share one open question, "does this
+  reference resolve to a unit already minted?" — widens what counts as a REF everywhere: not just a bare
+  Identifier but a namespace-member access too (`impl_1.x`, what TSC emits for a CROSS-FILE `export { x }
+  from './impl'`; MEASURED against this repo's own `tsc` output that `checker.getSymbolAtLocation` walks
+  straight through it to the real declaration, identically to a same-file identifier), and adds the
+  bracket spelling `exports['NAME'] = REF` to the existing dot-notation site. All four candidate sites now
+  resolve through the identical `getSymbolAtLocation` + `getAliasedSymbol` call; `unanswerableKey` is
+  untouched, and classes stay excluded for the reason already on record. CONTROLS: a genuinely pure
+  aliased function (`pkit`'s `pureThing`, and a `get(){ return pureFn }` descriptor variant built for this
+  fix) stays silent end-to-end; the three previously-fixed shapes are re-verified byte-identical; a
+  same-file bare-identifier getter, a cross-file `impl_1.x` getter, a `value:` data descriptor, and the
+  bracket spelling all mint the alias correctly; a self-referential class export through the descriptor
+  form mints no spurious second hash. Quantified across the same two corpora (113 `node_modules`
+  packages, 14 npm tarballs): 32 new report entries, every one spot-checked — all `Unknown`, none a
+  fabricated concrete effect (the corpus's descriptor-form re-exports happen to resolve through a
+  co-located `.d.ts`/`.d.cts`, which the pre-existing body-less-declaration invariant already forces to
+  `Unknown` unconditionally, so this shape cannot read silently pure even where it is imprecise); zero
+  existing entries changed. SEPARATELY EXAMINED, NOT FIXED: a DYNAMIC re-export loop
+  (`Object.keys(x).forEach(k => exports[computed(k)] = x[k])`, the shape `tslib`/rollup's `__exportStar`
+  generalizes into when the forwarded name is itself computed) — MEASURED to still read silently pure
+  end-to-end (`deny Fs` exits 0 over a real `fs.writeFileSync`). This is not this fix's shape: the bound
+  name is a runtime string no static per-statement matcher can read, so resolving it would be guessing,
+  not analysis. It belongs to the `reflect:`/dynamic-key DISCLOSURE family (say "an export exists here
+  candor cannot name"), not to alias resolution, and is filed as the fifth "neither voice fired" instance
+  rather than attempted here.
+
 - **⚠ a `.js` entry file's own co-located `.d.ts` shadowed CROSS-FILE calls into it, and the fallback
   was silence — the published npm tarball of a package under-reported against its own source.**
   MEASURED against got@15.1.0: `deny Rand` scanning the git-tag SOURCE (`source/`, `--policy`) exits 1

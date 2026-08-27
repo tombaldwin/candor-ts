@@ -2972,17 +2972,32 @@ const bodylessDecls = new Map(); // qual -> {node, mod, abstract, owner, member}
 const unlistedSeen = new Map();  // the κ-coverage ledger: unlisted npm package -> call-site count
 const nodeName = new WeakMap();  // declaration node -> qualified name
 // ⟨scan-boundary, export-alias⟩ `module.exports = { thing: _internalImplName }` / `exports.thing =
-// _internalImplName` — a RENAMED re-export whose RHS is a bare IDENTIFIER naming an EXISTING declaration,
-// not an inline function. `localName` mints a CJS unit for `module.exports = function(){}` and
-// `exports.foo = function(){}` (the inline-literal shapes), but an identifier reference names no NEW
-// node to hang a unit off — the referenced function already has its own unit, under its OWN name. Without
-// this, the package's report keys the effect under `_internalImplName` only; a consumer whose `.d.ts`
-// types the import as `thing` (the ordinary case: a hand- or tool-written `.d.ts` has no static
-// connection to the `.js` runtime shape at all) joins a key the report never had, reads SILENT-PURE, and
-// a real effect vanishes at the package boundary. Candidates are collected here (during the same walk
-// that mints every unit) and resolved in ONE place — see below — after every source file's units exist,
-// because the referenced declaration may sit in a later file or a later line of the same one.
-const exportAliasCandidates = []; // [{mod, name, ident}] — ident is the Identifier naming the real decl
+// _internalImplName` — a RENAMED re-export whose RHS NAMES an EXISTING declaration rather than being an
+// inline function. `localName` mints a CJS unit for `module.exports = function(){}` and
+// `exports.foo = function(){}` (the inline-literal shapes), but a reference names no NEW node to hang a
+// unit off — the referenced function already has its own unit, under its OWN name. Without this, the
+// package's report keys the effect under `_internalImplName` only; a consumer whose `.d.ts` types the
+// import as `thing` (the ordinary case: a hand- or tool-written `.d.ts` has no static connection to the
+// `.js` runtime shape at all) joins a key the report never had, reads SILENT-PURE, and a real effect
+// vanishes at the package boundary. Candidates are collected here (during the same walk that mints every
+// unit) and resolved in ONE place — see below — after every source file's units exist, because the
+// referenced declaration may sit in a later file or a later line of the same one.
+//
+// FOUR spellings feed this list, not one: a bare BinaryExpression assignment (`exports.thing = impl`,
+// `module.exports.thing = impl`, the bracket variants `exports['thing'] = impl`), the whole-object
+// literal (`module.exports = { thing: impl }`), and `Object.defineProperty(exports, "thing", { get(){
+// return impl } })` — TSC's OWN standard CommonJS emit for `export { x } from './impl'`, and what
+// webpack/rollup's ESM<->CJS interop shims emit too, so it is not an exotic shape but a large fraction of
+// what published packages actually ship. A single-statement enumeration of assignment shapes proved not
+// to be the family boundary: the descriptor form is a structurally different node (a CallExpression, not
+// a BinaryExpression) that carries the SAME "name binds to an existing thing" meaning. What IS shared
+// across every spelling, and is what actually closes the class rather than the next syntax, is `exportAliasRef`
+// below: the checker's own alias resolution (`getSymbolAtLocation` + `getAliasedSymbol`, used identically
+// in the resolution pass beneath) walks through a bare identifier AND a namespace-member access
+// (`impl_1.x`, what TSC emits for a CROSS-FILE re-export's `require()` binding) to the same real
+// declaration — so every collection site here only needs to recognize the SHAPE that carries a reference,
+// not resolve it; resolution is one shared mechanism, checked, not matched.
+const exportAliasCandidates = []; // [{mod, name, ident}] — ident is the reference naming the real decl
 const aliasHashTail = new Map();  // alias qual -> the exported name `unitHash` must use INSTEAD of rec.local
 // ORM table declarations: `@Entity("user")` on a class maps that class to its table — the JVM's
 // read-the-declarations move (TypeORM tables live in decorators, not SQL strings, so the `tables`
@@ -3282,6 +3297,49 @@ function localName(node) {
   }
   return null;
 }
+// A reference the export-alias pass (see `exportAliasCandidates` above) can resolve THROUGH: a bare
+// local identifier (`_internalImplName`, the same-file case) or a namespace-member access (`impl_1.x`,
+// what tsc emits for a CROSS-FILE `export { x } from './impl'` — `impl_1` is the `require()` binding,
+// and `checker.getSymbolAtLocation` walks straight through the member access to the real declaration in
+// the required file, MEASURED: compiling `export { x } from './impl'` with this repo's own tsc and
+// resolving the emitted `impl_1.x` returns `impl.js`'s `FunctionDeclaration` directly). Anything else — a
+// call, a template, a ternary — names no single declaration to alias and is deliberately left alone; the
+// resolution pass's existing `nodeName.has(decl)` gate is the actual safety net (a reference that resolves
+// to something this scan never minted a unit for adds nothing), so widening the accepted SHAPE here can't
+// by itself fabricate an alias.
+const exportAliasRef = (node) => ts.isIdentifier(node) || ts.isPropertyAccessExpression(node);
+// The property name a single-property CJS export assignment's LHS names: `exports.NAME` /
+// `module.exports.NAME` (PropertyAccessExpression) or the bracket spelling `exports['NAME']` /
+// `module.exports['NAME']` (ElementAccessExpression with a string-literal key — a COMPUTED key names no
+// single property and returns null, the same "never guess" rule as everywhere else in this pass).
+function cjsExportPropertyName(lhs) {
+  const baseText = (n) => n.getText().replace(/\s+/g, "");
+  if (ts.isPropertyAccessExpression(lhs)) {
+    const b = baseText(lhs.expression);
+    return (b === "exports" || b === "module.exports") ? lhs.name.text : null;
+  }
+  if (ts.isElementAccessExpression(lhs) && lhs.argumentExpression && ts.isStringLiteralLike(lhs.argumentExpression)) {
+    const b = baseText(lhs.expression);
+    return (b === "exports" || b === "module.exports") ? lhs.argumentExpression.text : null;
+  }
+  return null;
+}
+// The reference an accessor DESCRIPTOR property resolves to: a data descriptor's `value: REF`, or a
+// `get(){ return REF; }` / `get: () => REF` accessor's sole returned expression (checked against
+// `exportAliasRef` at the call site, same as every other candidate). A getter doing anything more than
+// returning one expression is left alone — that is a real computed accessor, not a rename.
+function descriptorAliasRef(descProp) {
+  if (!ts.isPropertyAssignment(descProp) || ts.isComputedPropertyName(descProp.name)) return null;
+  const name = descProp.name.text ?? descProp.name.getText();
+  if (name === "value") return descProp.initializer;
+  if (name !== "get") return null;
+  const fn = descProp.initializer;
+  if (!(ts.isFunctionExpression(fn) || ts.isArrowFunction(fn)) || !fn.body) return null;
+  if (!ts.isBlock(fn.body)) return fn.body; // arrow concise body: () => REF
+  if (fn.body.statements.length !== 1) return null;
+  const s = fn.body.statements[0];
+  return ts.isReturnStatement(s) && s.expression ? s.expression : null;
+}
 // True when `node` is lexically inside a FUNCTION body — so its bare local name can collide with a
 // module-level or sibling-scope unit of the same name (see the qual disambiguation below). A namespace/
 // module block and the source file are NOT function scopes (their members are top-level units).
@@ -3360,19 +3418,38 @@ for (const sf of sources) {
     }
     // CJS EXPORT-ALIAS candidate (see `exportAliasCandidates` above): `module.exports = { thing:
     // _internalImplName }` / `exports.thing = _internalImplName` / `module.exports.thing =
-    // _internalImplName`, where the RHS is a bare Identifier rather than the inline-function shapes
-    // `localName` below already handles. Recorded, not resolved, here — resolution needs every file's
-    // units minted first.
+    // _internalImplName` / the bracket spelling `exports['thing'] = _internalImplName`, where the RHS
+    // is a reference (`exportAliasRef`) rather than the inline-function shapes `localName` below already
+    // handles. Recorded, not resolved, here — resolution needs every file's units minted first.
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
       const lhs = node.left.getText().replace(/\s+/g, "");
       const rhs = node.right;
       if (lhs === "module.exports" && ts.isObjectLiteralExpression(rhs)) {
         for (const p of rhs.properties)
-          if (ts.isPropertyAssignment(p) && !ts.isComputedPropertyName(p.name) && ts.isIdentifier(p.initializer))
+          if (ts.isPropertyAssignment(p) && !ts.isComputedPropertyName(p.name) && exportAliasRef(p.initializer))
             exportAliasCandidates.push({ mod, name: p.name.text ?? p.name.getText(), ident: p.initializer });
       } else {
-        const m = lhs.match(/^(?:module\.)?exports\.([A-Za-z_$][\w$]*)$/);
-        if (m && ts.isIdentifier(rhs)) exportAliasCandidates.push({ mod, name: m[1], ident: rhs });
+        const name = cjsExportPropertyName(node.left);
+        if (name && exportAliasRef(rhs)) exportAliasCandidates.push({ mod, name, ident: rhs });
+      }
+    }
+    // CJS EXPORT-ALIAS candidate, DESCRIPTOR form: `Object.defineProperty(exports, "thing", { get(){
+    // return _internalImplName } })` — TSC's OWN standard CommonJS emit for `export { x } from './impl'`
+    // (verified against this repo's own tsc output), and what webpack/rollup's ESM<->CJS interop shims
+    // emit too. `descriptorAliasRef` pulls the getter's returned expression (or a data descriptor's
+    // `value`); `exportAliasRef` accepts it whether it's a bare identifier (same-file) or a
+    // `require()`-binding member access (cross-file re-export) — the SAME reference shape the
+    // BinaryExpression arm above accepts, resolved by the identical mechanism below.
+    if (ts.isCallExpression(node) && node.expression.getText().replace(/\s+/g, "") === "Object.defineProperty"
+        && node.arguments.length >= 3) {
+      const targetText = node.arguments[0].getText().replace(/\s+/g, "");
+      const keyArg = node.arguments[1], descArg = node.arguments[2];
+      if ((targetText === "exports" || targetText === "module.exports")
+          && ts.isStringLiteralLike(keyArg) && ts.isObjectLiteralExpression(descArg)) {
+        for (const p of descArg.properties) {
+          const ref = descriptorAliasRef(p);
+          if (ref && exportAliasRef(ref)) { exportAliasCandidates.push({ mod, name: keyArg.text, ident: ref }); break; }
+        }
       }
     }
     const n = localName(node);
@@ -3445,9 +3522,12 @@ for (const sf of sources) {
 }
 
 // Resolve the CJS export-alias candidates collected above, now that every source file's units exist.
-// `ident` names a value at its use site; follow it through an import alias (the got/`.d.ts`-shadow fix's
-// own move) to the declaration it actually names, and only act when that declaration is a unit THIS scan
-// already minted (`nodeName.has`) — an identifier that resolves to nothing local, to an ambient/foreign
+// `ident` (an Identifier OR a PropertyAccessExpression — see `exportAliasRef`) names a value at its use
+// site; follow it through an import alias (the got/`.d.ts`-shadow fix's own move) to the declaration it
+// actually names — the SAME `getSymbolAtLocation` + `getAliasedSymbol` move resolves a bare identifier
+// (the same-file case) and a `require()`-binding member access (`impl_1.x`, the cross-file re-export
+// case) identically, with no separate code path — and only act when that declaration is a unit THIS scan
+// already minted (`nodeName.has`) — a reference that resolves to nothing local, to an ambient/foreign
 // declaration, or to more than one candidate declaration (never guess) adds nothing, and the existing
 // disclosure ladder (blind / unanswerableKey) keeps whatever it already said about the miss. A name that
 // collides with an EXISTING, DIFFERENT unit is skipped rather than overwritten — this pass only ADDS a key
