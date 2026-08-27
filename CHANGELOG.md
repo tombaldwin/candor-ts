@@ -49,7 +49,7 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   end-to-end — `analyzed.count` grows to include the alias, `policy ✓` unmoved; unchained scans, and
   named joins where the declared name already matches the implementation, are untouched (the alias qual
   equals the original qual and is skipped). Quantified across 14 published npm tarballs (`corpus2-ts`)
-  and 113 installed `node_modules` packages (`corpus1-ts`): 13 and 82 new report entries respectively,
+  and 113 installed `node_modules` packages (`corpus1-ts`): 13 new report entries in each corpus,
   every one an honest `Unknown` disclosure or a resolved real effect (never a fabrication), spot-checked
   including zod's `v4/mini` reserved-word exports (`exports.null`/`void`/`enum`/`catch`/`instanceof` for
   `_null`/`_void`/`_enum`/`_catch`/`_instanceof`) and get-package-type's `require()`-aggregated
