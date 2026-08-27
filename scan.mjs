@@ -2518,6 +2518,70 @@ function crossesPackageBoundary(file) {
   return !!own && own !== pkgName && own !== rootOwnerPkg;
 }
 
+// ⟨scan-boundary, own-`.d.ts`-shadow⟩ npm ships `dist/foo.js` beside `dist/foo.d.ts`, and TypeScript's own
+// module resolution treats the co-located `.d.ts` as the AUTHORITATIVE type source for every IMPORTER of
+// `foo.js` — even one this same scan (`--allow-js`) is analysing as project source. A same-file reference
+// (`this.method()`, a call inside the file that DECLARES the callee) never crosses a module boundary, so it
+// resolves straight to the `.js` implementation and is unaffected; a CROSS-FILE call — the ordinary case
+// for a helper imported from a sibling module — resolves the checker's signature onto a node IN THE
+// `.d.ts` instead (measured: got's own `calculateRetryDelay({...})`, called from `core/index.ts`'s
+// `_beforeError`, and `new RequestError(...)`/`new TimeoutError(...)` alike). `declModule` is RIGHT to
+// call that `.d.ts` foreign to `projectFiles` (the file walk deliberately excludes every `.d.ts`, ⟨§2⟩) —
+// but nothing downstream of that classification was built for "foreign file that is secretly the scan's
+// own code": `crossesPackageBoundary` is (correctly) false for it, so the cross-package arm's `blind`/
+// `unanswerableKey` disclosures both decline to fire, on file identity they were never wrong about — and
+// the call vanishes. Silent, on the DIRECT-effect gate this package's retry path failed the source arm on.
+//
+// The fix resolves rather than hedges: ask the SIBLING IMPLEMENTATION FILE — same directory, same
+// basename, an extension this scan actually analysed (`projectFiles`, so an `@types/node`-style
+// declaration-only package with no such sibling is untouched by any of this) — for its OWN module symbol
+// directly. That is not a cross-module import lookup (the thing the `.d.ts`-preference rule governs); it
+// is asking a SourceFile already open in this program about its own exports, and the checker answers with
+// the REAL declaration (the arrow function's `VariableDeclaration`, the class itself for a constructor —
+// exactly the nodes `nodeName` already minted units against in pass 1). A callee name that names exactly
+// one export redirects `decl`/`mod` to it, so every existing `<local>` arm downstream (class-CHA fan-out,
+// HOF callback flow, coercion desugars) runs precisely as it would have on an ordinary same-package call —
+// no parallel machinery, no new report shape. A name that matches NOTHING in the sibling (an export
+// `nodeName` never minted a unit for) or matches MORE THAN ONE declaration (never guess, the family's
+// standing rule) still owes a disclosure: `Unknown`, not silence, for the same reason the cross-package
+// arm discloses when it can name an owner but not a body.
+function siblingImplFile(dtsFileName) {
+  const m = dtsFileName.match(/\.d\.([cm]?)ts$/);
+  if (!m) return null;
+  const stem = dtsFileName.slice(0, -m[0].length);
+  const exts = m[1] === "m" ? [".mjs", ".mts"] : m[1] === "c" ? [".cjs", ".cts"]
+    : [".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"];
+  for (const ext of exts) { const cand = stem + ext; if (projectFiles.has(cand)) return cand; }
+  return null;
+}
+// implFile -> Map<exportedLocalName, declaration | undefined>. `undefined` marks a name TWO DIFFERENT
+// declarations in the same file both claim (never happens for ordinary JS/TS top-level bindings, kept as
+// a guard rather than an assumption) — treated identically to "not found" by every caller (`.get` returns
+// the same falsy value either way), so a collision degrades to disclosure, never a guess.
+const siblingModuleNameMap = new Map();
+function siblingImplExports(implFile) {
+  if (siblingModuleNameMap.has(implFile)) return siblingModuleNameMap.get(implFile);
+  const map = new Map();
+  const sf = program.getSourceFile(implFile);
+  const modSym = sf && checker.getSymbolAtLocation(sf);
+  if (modSym) {
+    let exps = [];
+    try { exps = checker.getExportsOfModule(modSym); } catch { exps = []; }
+    for (const ex of exps) {
+      let target = ex;
+      if (target.flags & ts.SymbolFlags.Alias) { try { target = checker.getAliasedSymbol(target); } catch { continue; } }
+      for (const d of target?.declarations ?? []) {
+        if (d.getSourceFile().fileName !== implFile) continue;
+        const nm = d.name?.getText?.();
+        if (!nm) continue;
+        map.set(nm, map.has(nm) && map.get(nm) !== d ? undefined : d);
+      }
+    }
+  }
+  siblingModuleNameMap.set(implFile, map);
+  return map;
+}
+
 // ⟨0.19⟩ The bare-package ROOT of an import specifier: `@scope/pkg/sub` → `@scope/pkg`, `pkg/sub` → `pkg`,
 // a relative/absolute path → null (not a package). Used to match an import against `declaredButUninstalled`.
 function pkgRoot(spec) {
@@ -4543,7 +4607,7 @@ function visitCalls(node) {
     if (owner) {
       const rec = fns.get(owner);
       const sig = checker.getResolvedSignature(node);
-      const decl = sig && sig.declaration;
+      let decl = sig && sig.declaration;
       if (!decl) {
         // `new C()` on a class with an IMPLICIT constructor resolves to no declaration — edge to
         // the class's (synthesized) ctor unit via the class identifier before concluding Unknown.
@@ -4608,7 +4672,27 @@ function visitCalls(node) {
           }
         }
       } else {
-        const mod = declModule(decl);
+        let mod = declModule(decl);
+        // OWN-`.d.ts`-SHADOW redirect (see `siblingImplFile`): a cross-file call the checker typed through
+        // a co-located declaration file this scan's file walk excluded from `projectFiles` on purpose.
+        // Gated on the declaration file actually BEING a `.d.ts` with a SIBLING this scan analysed — an
+        // ordinary external dependency (`@types/node`, an uninstalled package's types) has no such sibling
+        // and this never touches its handling below.
+        if (mod !== "<local>" && ts.isIdentifier(node.expression) && /\.d\.[cm]?ts$/.test(decl.getSourceFile().fileName)) {
+          const implFile = siblingImplFile(decl.getSourceFile().fileName);
+          if (implFile) {
+            const redirected = siblingImplExports(implFile).get(node.expression.text);
+            if (redirected && nodeName.has(redirected)) { decl = redirected; mod = "<local>"; }
+            else {
+              // The sibling exists (this IS our own scanned code) but no single export answers the
+              // callee's name — an ambiguous collision, or a shape `nodeName` never minted a unit for.
+              // The ordinary cross-package arm below stays silent for this exact file (same reasoning
+              // `crossesPackageBoundary` already applies to it), so disclose here or the call vanishes.
+              rec.direct.add("Unknown");
+              rec.why.add(`callback:${node.expression.text.slice(0, 40)}`);
+            }
+          }
+        }
         // A LOCAL function/method passed BY REFERENCE to a NON-LOCAL (opaque) callee — `xs.map(loadFree)`,
         // `arr.forEach(this.m)`, `setTimeout(handler)`, `external(cb)` — may be INVOKED by that callee, so
         // its effects are reachable here. The precise callback-flow below only resolves a LOCAL callee's

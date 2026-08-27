@@ -9,6 +9,45 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 ## Unreleased
 
 ## [0.33.0] — 2026-08-26
+- **⚠ a `.js` entry file's own co-located `.d.ts` shadowed CROSS-FILE calls into it, and the fallback
+  was silence — the published npm tarball of a package under-reported against its own source.**
+  MEASURED against got@15.1.0: `deny Rand` scanning the git-tag SOURCE (`source/`, `--policy`) exits 1
+  with 17 violations, including `core.index.Request._beforeError` (fires on essentially every
+  network-error/retry path) and the package's own public entry point; scanning the IDENTICAL release's
+  COMPILED tarball (`dist/source`, `--allow-js`) at the same `analyzed.count: 334` exits 0, clean.
+  ROOT CAUSE: npm ships `dist/foo.js` beside `dist/foo.d.ts`, and TypeScript's checker types every
+  CROSS-FILE reference to `foo.js` through the co-located `.d.ts` — even when this scan is analysing
+  `foo.js` itself as project source (a same-file reference, `this.method()`, is unaffected; only a call
+  from a SIBLING module goes through the declaration file). `calculateRetryDelay({...})`, called from
+  `core/index.ts`'s `_beforeError` (got's retry-jitter helper, `Math.random()` at
+  `core/calculate-retry-delay.ts:38`), and `new RequestError(...)`/`new TimeoutError(...)` alike,
+  resolved onto a node INSIDE `calculate-retry-delay.d.ts`/`errors.d.ts`. `declModule` was RIGHT to
+  call that `.d.ts` foreign to `projectFiles` (the file walk deliberately excludes every `.d.ts`) — but
+  nothing downstream was built for "foreign file that is secretly the scan's own code":
+  `crossesPackageBoundary` is (correctly) false for it, so the cross-package arm's `blind`/
+  `unanswerableKey` disclosures both declined to fire, on file identity they were never wrong about —
+  and the call vanished, silently, on the exact gate got's own source correctly fails.
+  FIX resolves rather than hedges: a cross-file call whose declaration lands in a `.d.ts` with a SIBLING
+  implementation file this scan already analysed (`projectFiles`) now asks that sibling's OWN module
+  symbol for the export matching the callee's name — not a cross-module import lookup, just a SourceFile
+  already open in this program answering for itself — and redirects onto the real declaration, so every
+  existing local-call arm (class-CHA fan-out, HOF flow, coercion desugars) runs unchanged. An ambiguous
+  or unminted match still discloses `Unknown` rather than dropping. CONTROLS: TS-source scans are
+  byte-identical to pre-fix (`cmp` against the pre-change binary's output over got's own source); a
+  `.js` with no sibling `.d.ts` is byte-identical; an ordinary `@types/node` call (no sibling
+  implementation in `projectFiles`) is byte-identical. Quantified across 14 published
+  npm tarballs + 113 installed `node_modules` packages: 104 functions gained a previously-silent effect
+  (52 an honest `Unknown` disclosure where the call used to vanish entirely, 52 a resolved real effect —
+  spot-checked `date-fns`'s `isToday`/`endOfTomorrow` family (`Clock`, via a shared `constructNow`
+  helper), `rimraf`'s `rimrafWindowsDir` (`Rand`, via `rimraf-move-remove.js`), and got's own retry path
+  against every one confirmed TRUE). Also surfaced, as a side effect rather than this fix's target: a
+  PRE-EXISTING, separate fabrication where a scanned package whose own name collides with a κ-curated
+  network-client name (`got`, `chokidar`) had unresolved same-package constructions charged that
+  package's whole-module effect wholesale onto its own pure internals (got's `isSameOrigin`/
+  `usesUnixSocket`, chokidar's `FSWatcher` construction) — this fix's redirect removes it wherever the
+  redirect resolves, but does not close the class for a case where the redirect still fails; filed as an
+  open follow-on, not claimed closed here. Full test battery green.
+
 - **⚠ `--dep-inits` silently dropped a call it could not join, turning a correctly-flagged blind spot
   into a clean pass — the exact cardinal sin the flag exists to shrink.** MEASURED on published
   0.33.0: `import * as tar from 'tar'; export function run() { return tar.create({file:'out.tar'},
