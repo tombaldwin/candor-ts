@@ -143,14 +143,38 @@ const advisoryUnreadableNote = (verb, unreadable) => {
 // below, for the reason `incompleteAnswerNote` gives: that note asserts `analyzed.count: 0`, which a
 // row-3 report never said, and the repair is a producer that emits a manifest rather than a scan that
 // reaches a conclusion.
-const advisoryNoManifestNote = (verb, files) => {
+//
+// ⟨fix, sibling of 658e3c0 / gateLine⟩ BOTH SENTENCES BELOW HAD THE SAME UNCONDITIONED "exits 0" CLAIM
+// gateLine's third branch has, and unlike that branch's remaining causes (`judgedNothing` ALONE, with
+// no other sibling report under the locator, truly cannot carry a violation — there is nothing to
+// evaluate), a MULTI-REPORT prefix breaks the argument: `reportNoManifestFiles`/`reportJudgedNothingFiles`
+// are PER-FILE lists (a locator with one silent/manifest-less sibling among several still hedges), while
+// the real `gate` route's `judgedNothing` is the loadGateReport UNION across siblings — "judged something
+// as soon as ONE of them has" — and a noManifest file is folded into the SAME union the moment it lists
+// real functions. MEASURED: a prefix with report.a.json (a certain `deny Fs` violation) beside
+// report.b.json (an empty bare-array / `analyzed.count: 0` sibling, either cause) makes `gate --report`
+// exit 1 — the violation in `a` dominates — while `unverified`/`fix-gate --strict` printed "`gate --report`
+// exits 0 … NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU" and exited 0 themselves. `certainViolation` is
+// reused from the caller's ALREADY-LOADED policy — cheaper here than the eleven read-only verbs' discovery
+// hack, since whatif/fix-gate/unverified hold their own `pol`/`fgpol`/`upol` already.
+//
+// `advisoryUnreadableNote` just above is DELIBERATELY NOT changed: a report FILE that failed to PARSE is
+// the real gate's `g.hardFail` refusal, and that one is proven to dominate ABSOLUTELY (see the ruling at
+// the `gate` case's own `if (g.hardFail)` branch, "the precedence ruling does NOT reach this exit") —
+// conditioning it on `certainViolation` would be the flip-the-wording regression the correction to
+// `gateLine` above had to undo for the same cause.
+const advisoryNoManifestNote = (verb, files, certainViolation) => {
   console.error(`candor-ts: ${verb} could NOT fully evaluate — ${files.length} report(s) under this locator carry NO \`analyzed\` manifest at all (SPEC §2 row 3, a pre-⟨0.21⟩ producer), so they make no claim about what was judged and their silence licenses none either:`);
   for (const f of files) console.error(`    ${f}`);
-  console.error("  (`ok` is OMITTED — neither value is a statement this input licenses. `gate --report` exits 0 over these bytes, so this note is the whole of the warning. Re-scan with a current engine so the report carries its manifest.)");
+  console.error(certainViolation
+    ? "  (`ok` is OMITTED — neither value is a statement this input licenses. A certain policy violation ELSEWHERE in this report makes `gate --report` over the same bytes exit 1, not 0 — SPEC §3.1's precedence has a firing rule dominate; this cause is still real and still unjudged, it is just not what the exit code names. Re-scan with a current engine so the report carries its manifest.)"
+    : "  (`ok` is OMITTED — neither value is a statement this input licenses. `gate --report` exits 0 over these bytes, so this note is the whole of the warning. Re-scan with a current engine so the report carries its manifest.)");
 };
-const advisoryJudgedNothingNote = (verb) => {
+const advisoryJudgedNothingNote = (verb, certainViolation) => {
   console.error(`candor-ts: ${verb} could NOT fully evaluate — the report(s) under this locator say they JUDGED NOTHING (⟨0.24⟩ \`analyzed.count\` is 0, absent with no entries, or unreadable), so absence from \`functions\` licenses no purity claim about any unit and there is nothing here to certify`);
-  console.error("  (`ok` is OMITTED — neither value is a statement this input licenses. NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU: `gate --report` exits 0 over a judged-nothing report and `--strict` does not move either, so this note is the whole of the warning. Re-scan the sources you meant to check.)");
+  console.error(certainViolation
+    ? "  (`ok` is OMITTED — neither value is a statement this input licenses. A certain policy violation ELSEWHERE in this report makes `gate --report` over the same bytes exit 1 — SPEC §3.1's precedence has a firing rule dominate, so CI IS RED on that, not on this judged-nothing sibling; `--strict` here does not move either way. Re-scan the sources you meant to check.)"
+    : "  (`ok` is OMITTED — neither value is a statement this input licenses. NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU: `gate --report` exits 0 over a judged-nothing report and `--strict` does not move either, so this note is the whole of the warning. Re-scan the sources you meant to check.)");
 };
 // The §6 effect vocabulary — used to reject a typo'd effect name in `where` (corpus-audit #3). Kept in step
 // with SPEC §6 / the umbrella's list; an unknown name PRESENT in a report (a spec extension) is still allowed.
@@ -200,11 +224,94 @@ const put = (a, data, proseFn) => { if (!proseFn || wantJsonOut(a)) emit(data); 
 // unevaluable on that route — so the exit is a certainty once a policy exists; the gap is that none does
 // here. Checked FIRST, because a report can carry an unread class and unanalyzed units together and this
 // is the sentence naming the cause the other two do not.
-const gateLine = (comp) => (comp.unread?.length && !comp.unanalyzed.length && !comp.unreadable?.length
-  ? "`gate --report` exits 2 over these bytes under any policy it can evaluate (they are all `deny`/`pure`), and this verb holds none — so NOTHING DOWNSTREAM IS FAILING CLOSED ON IT HERE and this note is the whole of the warning."
-  : comp.unanalyzed.length || comp.unreadable?.length
-  ? "`gate --report` exits 2 over these bytes."
-  : "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU — `gate --report` exits 0 over a judged-nothing report (⟨0.24⟩: a disclosure, not an exit code), so this note is the whole of the warning.");
+//
+// ⟨fix, sibling of 658e3c0⟩ THIS SENTENCE HAS THE IDENTICAL DEFECT THE LSP'S `discloseIncompleteness`
+// HAD: it asserted "exits 2" unconditionally, when SPEC §3.1's precedence (violation (1) > refusal (2)
+// > incomplete (2)) makes a CERTAIN violation elsewhere in the SAME report dominate — the real exit is
+// 1, not 2, and "exits 2 over these bytes" is a false, checkable claim in exactly that case. MEASURED:
+// a report naming an unread exclusion class (branch 1 below) or an unanalyzed unit (branch 2, the
+// `comp.unanalyzed` half only — see next paragraph) ALSO carrying a certain `deny Fs`/`deny Exec`
+// violation elsewhere exits 1 over `gate --report`, not 2. `certainViolationOver` below is the cheap,
+// side-effect-free pre-check; see its own comment for why it must discover a policy rather than read
+// one from these arguments (these eleven verbs hold none of their own).
+//
+// `comp.unreadable` (a report FILE under this locator that failed to PARSE — corrupt or mid-write) IS
+// NOT PART OF THIS. MEASURED against the real `gate` verb's own ruling on this exact question (its
+// `g.hardFail` branch, `grefuse`d before any violation is ever evaluated): "the precedence ruling does
+// NOT reach this exit" — a CORRUPTION refusal says the report cannot be read AS A REPORT, which
+// undermines the very premise Lemma 2 runs on, and it dominates ABSOLUTELY, never the other way round.
+// Confirmed: a prefix with one clean sibling carrying a certain `deny Fs` violation beside a SECOND,
+// unparseable sibling still exits 2, unconditionally. Folding `unreadable` into the same
+// certain-violation branch as `unanalyzed` — the first attempt at this fix did exactly that — flips the
+// wording to claim a "1, not 2" dominance that is false whenever `unreadable` fired, the EXACT opposite
+// error the LSP's own fix warns against. So `unreadable` gets its own, ALWAYS-unconditional arm.
+// Shared by BOTH sibling fixes (this file's `gateLine` and the `advisoryNoManifestNote`/
+// `advisoryJudgedNothingNote` pair below `advisoryUnreadableNote`): given an ALREADY-PARSED, ALREADY-
+// resolved policy object (or `null`, for `whatif`'s optional one), does it find a certain violation
+// anywhere in the report at `prefix`? A zero-rule policy or a load/evaluate exception answers `false`
+// rather than throwing — this is a pre-check for WORDING, never a certifying read, so it must never
+// promote an internal error into an over-claim it cannot support.
+function certainViolationFromPolicy(pol, prefix) {
+  if (!pol || policyAskedNothing(pol)) return false;
+  try {
+    const fns = loadReport(prefix);
+    const cg = loadCallgraph(prefix);
+    const wp = wholePolicyUnanswerable(pol, "the advisory route's precedence pre-check");
+    const units = reportUnits(fns);
+    const net = reportNetClasses(fns, { authoritative: true, units });
+    const { withhold } = unanswerableScoped(pol, fns, resolveReasonClasses(fns, cg, units), net, units);
+    return evaluatePolicy(wp.answerable, fns, cg, new Map(), new Set(), net, withhold, units).length > 0;
+  } catch { return false; }
+}
+function certainViolationOver(prefix) {
+  const { policyFile } = resolvePolicy(null, null);
+  if (!policyFile) return false;
+  let text;
+  try { text = fs.readFileSync(policyFile, "utf8"); } catch { return false; }
+  let pol;
+  try {
+    const errs = [];
+    const aliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(policyFile, process.cwd())), errs);
+    pol = parsePolicy(text, aliases);
+    errs.push(...pol.errors);
+    if (fatalPolicyErrors(errs).length) return false;
+  } catch { return false; }
+  return certainViolationFromPolicy(pol, prefix);
+}
+const gateLine = (comp, prefix) => {
+  const dominanceNote = (tail) =>
+    `a certain policy violation ELSEWHERE in this report makes \`gate --report\` over the same bytes exit `
+    + `1 — SPEC §3.1's precedence has a firing rule dominate a refusal, so CI is red on THAT, not on ${tail}. `
+    + `The incompleteness above is still real and still unjudged; it is just not what the exit code names.`;
+  // `unreadable` FIRST and UNCONDITIONALLY (see the comment above `certainViolationOver`): a corrupt
+  // report file refuses absolutely, so this arm never calls the pre-check at all — never mind consults
+  // it — and no wording below it is reachable while `unreadable` is non-empty.
+  if (comp.unreadable?.length) return "`gate --report` exits 2 over these bytes.";
+  const certainViolation = certainViolationOver(prefix) === true;
+  // TIER B — DOMINATED BY LEMMA 2, three causes: `unread`, `unanalyzed`, and `outOfScope`.
+  // ⟨fix, found widening the inventory for this same defect⟩ `outOfScope` used to be ABSENT from every
+  // condition here, so an `outOfScope`-only report (no `unread`, no `unanalyzed`, no `unreadable`) fell
+  // through to the "exits 0 … NOTHING DOWNSTREAM WILL CATCH THIS" tail below — but ⟨0.30⟩ made a
+  // non-empty `outOfScope` its OWN exit-2 INCOMPLETE cause, and MEASURED it is dominated exactly like
+  // `unanalyzed`: a certain violation coexisting with an `outOfScope`-only report exits 1, not 2 (and
+  // `outOfScope` ALONE, with no violation anywhere, exits 2, never the 0 this used to claim). That was
+  // the WORSE of the two possible errors on this cause — "nothing downstream" is false in BOTH of its
+  // sub-cases, not just the dominance one — so `outOfScope` now takes this tier, not the last one.
+  return comp.unread?.length && !comp.unanalyzed.length && !comp.outOfScope?.length
+  ? (certainViolation ? dominanceNote("this incompleteness")
+    : "`gate --report` exits 2 over these bytes under any policy it can evaluate (they are all `deny`/`pure`), and this verb holds none — so NOTHING DOWNSTREAM IS FAILING CLOSED ON IT HERE and this note is the whole of the warning.")
+  : comp.unanalyzed.length || comp.outOfScope?.length
+  ? (certainViolation ? dominanceNote("this")
+    : "`gate --report` exits 2 over these bytes.")
+  // TIER C — `judgedNothing`/`noManifest` ALONE (the only causes left once A and B are ruled out). The
+  // real gate's union-across-siblings semantics make this exit 0 so long as NOTHING under the locator
+  // judged real content; a multi-report locator with one silent/manifest-less sibling beside another
+  // that carries a certain violation breaks that (identical fix to `advisoryNoManifestNote`/
+  // `advisoryJudgedNothingNote` below `advisoryUnreadableNote` — see their shared comment) — the union
+  // has judged SOMETHING, so `gate --report` evaluates it normally and a firing rule exits 1, not 0.
+  : (certainViolation ? dominanceNote("this judged-nothing/no-manifest sibling")
+    : "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU — `gate --report` exits 0 over a judged-nothing report (⟨0.24⟩: a disclosure, not an exit code), so this note is the whole of the warning.");
+};
 
 // The HUMAN half. A no-op when there is nothing to disclose, so an ordinary run stays byte-identical, and
 // printed BEFORE the answer because it qualifies a NON-EMPTY result as much as an empty one: a function in
@@ -217,7 +324,7 @@ const gateLine = (comp) => (comp.unread?.length && !comp.unanalyzed.length && !c
 // loses its withdrawal. Every caller is on the PROSE branch (`putAnswer`'s else-arm, `tour`'s human arm,
 // `gains`' else-arm), so stdout is never carrying a JSON document when this prints — JSON-mode runs take
 // the machine half (`completenessFields`) instead and this function is not called at all.
-const incompleteAnswerNote = (comp, soWhat, tail) => {
+const incompleteAnswerNote = (comp, soWhat, tail, prefix) => {
   if (!mustHedge(comp)) return;
   // Three causes, one sentence each, and only true ones: `unreadable` is a report file whose BYTES could
   // not be parsed — not "declared unanalyzed units" and not "judged nothing", both of which would send
@@ -259,7 +366,7 @@ const incompleteAnswerNote = (comp, soWhat, tail) => {
     console.log(`    ${o.fn ?? "(unnamed)"} — OUTSIDE the producing scan's scope: it performs ${(o.effects ?? []).join(", ")}, and the gate did not judge it`);
   for (const c of comp.unread ?? [])
     console.log(`    ${c} — this exclusion class went UNREAD (\`excluded[].peeked: false\`): its effects are absent because nothing looked, not because there are none. Re-run the producing scan WITH a \`deny\`/\`pure\` policy so the peek reads it (candor-ts <dir> --policy <file>)`);
-  console.log(`    ${tail} ${gateLine(comp)}`);
+  console.log(`    ${tail} ${gateLine(comp, prefix)}`);
 };
 
 // The MACHINE half. Spread LAST so the verb's own pinned key order is untouched (JS objects keep insertion
@@ -280,9 +387,9 @@ const withCompleteness = (data, comp) => ({ ...data, ...completenessFields(comp)
 // half to disagree, which is exactly the mutant (`ec1a441`) that survived a whole suite in candor-rust.
 // `proseFn` receives the hedge flag as its second argument so it can WITHDRAW its reassuring sentence; the
 // note alone is not enough, because "no Unknown sources ✓" IS the prose spelling of the empty JSON.
-const putAnswer = (a, data, proseFn, comp, soWhat, tail) => {
+const putAnswer = (a, data, proseFn, comp, soWhat, tail, prefix) => {
   if (!proseFn || wantJsonOut(a)) { emit(withCompleteness(data, comp)); return data; }
-  incompleteAnswerNote(comp, soWhat, tail);
+  incompleteAnswerNote(comp, soWhat, tail, prefix);
   proseFn(data, mustHedge(comp));
   return data;
 };
@@ -340,12 +447,12 @@ const putAnswer = (a, data, proseFn, comp, soWhat, tail) => {
 // it delegated to `putAnswer`, whose `{ ...data, ...{} }` turned `show`'s ARRAY into `{"0": {…}}` — the
 // pinned top-level array destroyed on the very path this rung promises to leave byte-identical. Caught by
 // the intact-input control before it left the machine. So the healthy arm emits `data` itself.
-const putNestedWithCaveat = (a, key, data, proseFn, comp, soWhat, tail) => {
+const putNestedWithCaveat = (a, key, data, proseFn, comp, soWhat, tail, prefix) => {
   if (!proseFn || wantJsonOut(a)) {
     emit(mustHedge(comp) ? { [key]: data, ...completenessFields(comp) } : data);
     return data;
   }
-  incompleteAnswerNote(comp, soWhat, tail);
+  incompleteAnswerNote(comp, soWhat, tail, prefix);
   proseFn(data, mustHedge(comp));
   return data;
 };
@@ -1333,7 +1440,8 @@ switch (cmd) {
     // under `functions` BESIDE the caveat rather than being replaced by it: `show` certifies nothing.
     putNestedWithCaveat(args, "functions", coreShow(loadReportOrDie(prefix), q), P.show, reportCompleteness(prefix),
       `the function(s) shown below are only those candor could SEE match \`${q}\``,
-      "A function in an unread unit is ABSENT from the report, so it cannot be shown here at all. Re-scan for a complete answer.");
+      "A function in an unread unit is ABSENT from the report, so it cannot be shown here at all. Re-scan for a complete answer.",
+      prefix);
     break;
   }
   case "where": {
@@ -1356,7 +1464,8 @@ switch (cmd) {
     // by measurement. The caveat rides the SAME document (see `putAnswer`); the exit code does not move.
     putAnswer(args, coreWhere(fnsW, eff), P.where, reportCompleteness(prefix),
       `the function(s) named below are only those candor could SEE perform ${eff}`,
-      `A function in an unread unit is ABSENT from the report, so it cannot appear in either list. Re-scan for a complete answer.`);
+      `A function in an unread unit is ABSENT from the report, so it cannot appear in either list. Re-scan for a complete answer.`,
+      prefix);
     break;
   }
   case "callers": {
@@ -1427,7 +1536,7 @@ switch (cmd) {
         // `{"direct": []}`. The sidecar-absence sentence is a DIFFERENT limitation (an effect-only graph)
         // and does not cover a report whose own `excluded` names a class nothing opened.
         putAnswer(args, {}, () => console.log(`candor: no caller of \`${q}\` in the effect-relevant graph (the full call-graph sidecar is absent; re-scan with --out to see pure-only callers).`),
-          reportCompleteness(prefix), CALLERS_SOWHAT, CALLERS_TAIL);
+          reportCompleteness(prefix), CALLERS_SOWHAT, CALLERS_TAIL, prefix);
         break;
       }
       console.error(`candor-ts-query callers: no function matching '${q}' in the call graph`); process.exit(2);
@@ -1440,7 +1549,7 @@ switch (cmd) {
     // collision, and the exit does not move. `show`/`map` OVER-hedged (`putNestedWithCaveat` above, and
     // the descriptive/certifying boundary is stated there); these three UNDER-hedged, which is the
     // direction this family calls the cardinal sin.
-    putAnswer(args, cres, P.callers, reportCompleteness(prefix), CALLERS_SOWHAT, CALLERS_TAIL);
+    putAnswer(args, cres, P.callers, reportCompleteness(prefix), CALLERS_SOWHAT, CALLERS_TAIL, prefix);
     break;
   }
   case "map": {
@@ -1454,7 +1563,8 @@ switch (cmd) {
     // keeps the answer: `map` certifies nothing, so there was never a claim to withhold.
     putNestedWithCaveat(args, "modules", coreMap(loadReportOrDie(prefix)), P.map, reportCompleteness(prefix),
       "the module rows below cover only the source candor read",
-      "A module living wholly in an unread unit is MISSING from this overview, and one that IS listed may be missing functions. Re-scan for a complete map.");
+      "A module living wholly in an unread unit is MISSING from this overview, and one that IS listed may be missing functions. Re-scan for a complete map.",
+      prefix);
     break;
   }
   case "containment": {
@@ -1492,12 +1602,14 @@ switch (cmd) {
       putAnswer(args, r, P.containment,
         absorbCompleteness(reportCompleteness(prefix), reportCompleteness(basePrefix)),
         "the leak set below is a difference over only the code candor read on BOTH sides",
-        "An unread unit of the current tree hides a leak; an unread unit of the baseline manufactures one. Re-scan both before moving the ratchet.");
+        "An unread unit of the current tree hides a leak; an unread unit of the baseline manufactures one. Re-scan both before moving the ratchet.",
+        prefix);
       process.exit(r.leaks.length ? 1 : 0);
     }
     putAnswer(args, coreContainment(loadReportOrDie(prefix)), P.containment, reportCompleteness(prefix),
       "the containment scores below cover only the boundary effects candor could see",
-      "A boundary effect in an unread unit is in no layer's count, so a dispersed effect can score as contained. Re-scan for a complete picture.");
+      "A boundary effect in an unread unit is in no layer's count, so a dispersed effect can score as contained. Re-scan for a complete picture.",
+      prefix);
     break;
   }
   case "diff": {
@@ -1547,9 +1659,9 @@ switch (cmd) {
     if (wantJsonOut(args)) emit(diffDoc);
     else {
       incompleteAnswerNote(dCur, "the changes below are computed only over effects candor read in the CURRENT tree and may be SHORT",
-        "An effect gained or lost in an unread unit of the current tree is not in the list below.");
+        "An effect gained or lost in an unread unit of the current tree is not in the list below.", curPrefix);
       incompleteAnswerNote(dBase, "the BASELINE half of this comparison is itself partial and the floor it sets is soft",
-        "An effect living in an unread unit of the baseline reads as a newly gained or lost change here.");
+        "An effect living in an unread unit of the baseline reads as a newly gained or lost change here.", basePrefix);
       P.diff(diffDoc, mustHedge(dCur) || mustHedge(dBase));
     }
     // diff DISCLOSES (the posture) — it is not a gate. Its gained-effect exit 1 is a convenience for
@@ -1574,7 +1686,8 @@ switch (cmd) {
            effects: Object.fromEntries(Object.entries(byEff).sort()
              .map(([k, v]) => [k, { count: v.length, via: v.sort() }])) }, P.reachable, reportCompleteness(prefix),
       "the runtime effect set below is a union over only the entry points candor could see",
-      "An entry point in an unread unit contributes NOTHING to this union, and neither does any effect it reaches. Re-scan before treating this as the program's runtime surface.");
+      "An entry point in an unread unit contributes NOTHING to this union, and neither does any effect it reaches. Re-scan before treating this as the program's runtime surface.",
+      prefix);
     break;
   }
   case "impact": {
@@ -1641,7 +1754,7 @@ switch (cmd) {
     // above for the measurement and the boundary). `affectedCount: 0` is the strongest claim in this
     // verb's vocabulary, and over a report whose own `excluded` names a class nothing opened it rests on
     // a graph missing whatever lives in that class. Fixed key set, so the caveat spreads in at the root.
-    putAnswer(args, coreImpact(impFns, impCg, q), P.impact, reportCompleteness(prefix), IMPACT_SOWHAT, IMPACT_TAIL);
+    putAnswer(args, coreImpact(impFns, impCg, q), P.impact, reportCompleteness(prefix), IMPACT_SOWHAT, IMPACT_TAIL, prefix);
     break;
   }
   case "blindspots": {
@@ -1659,9 +1772,9 @@ switch (cmd) {
     const bsSoWhat = "the Unknown sources below are only those rooted in a call candor could see";
     const bsTail = "An unread unit contributes no entry at all, so its own Unknowns are not counted here and cannot be. Re-scan before treating this as the blind-spot inventory.";
     if (args.includes("--stats")) {   // ⟨0.20⟩ the reason-class distribution, not the source list
-      putAnswer(args, coreBlindspotsStats(loadReportOrDie(prefix), classFilter), P.blindspotsStats, bsComp, bsSoWhat, bsTail);
+      putAnswer(args, coreBlindspotsStats(loadReportOrDie(prefix), classFilter), P.blindspotsStats, bsComp, bsSoWhat, bsTail, prefix);
     } else {
-      putAnswer(args, coreBlindspots(loadReportOrDie(prefix), loadCallgraph(prefix), classFilter), P.blindspots, bsComp, bsSoWhat, bsTail);
+      putAnswer(args, coreBlindspots(loadReportOrDie(prefix), loadCallgraph(prefix), classFilter), P.blindspots, bsComp, bsSoWhat, bsTail, prefix);
     }
     break;
   }
@@ -1743,7 +1856,8 @@ switch (cmd) {
     }
     incompleteAnswerNote(tourComp,
       "the reaches below are ranked over only the call graph candor could see",
-      "A surprising reach whose path runs through an unread unit is not ranked here at all, and cannot be. Re-scan for the full tour.");
+      "A surprising reach whose path runs through an unread unit is not ranked here at all, and cannot be. Re-scan for the full tour.",
+      prefix);
     if (finds.length === 0) {
       // Effectful-but-nothing-surprising vs genuinely-pure both land here; the honest line is the useful
       // answer (never a manufactured surprise) — mirrors the scan-note fallback + the Rust engine. BUT never
@@ -1822,9 +1936,9 @@ switch (cmd) {
     if (wantJsonOut(args)) emit(gDoc);
     else {
       incompleteAnswerNote(gCur, "the gained set below names only effects candor read in the CURRENT tree and may be SHORT",
-        "An effect introduced in an unread unit of the current tree is not in the list below.");
+        "An effect introduced in an unread unit of the current tree is not in the list below.", curPrefix);
       incompleteAnswerNote(gBase, "the BASELINE half of this comparison is itself partial and the floor it sets is soft",
-        "An effect living in an unread unit of the baseline reads as NEWLY gained here — the existing/new origin split is unreliable until the baseline is re-scanned.");
+        "An effect living in an unread unit of the baseline reads as NEWLY gained here — the existing/new origin split is unreliable until the baseline is re-scanned.", basePrefix);
       P.gains(gDoc, mustHedge(gCur) || mustHedge(gBase));
     }
     // Advisory by default (exit 0 — gains is a diff view); `--strict` fails on ANY gained effect so a
@@ -1918,7 +2032,7 @@ switch (cmd) {
       // The note goes on STDOUT with the answer it qualifies, like every other verb here: a caveat on the
       // other stream is one `2>/dev/null` from gone. `renderPathHuman` takes the hedge flag so its two
       // determined-negative sentences ("does not perform", "not statically traceable") can withdraw.
-      incompleteAnswerNote(pcomp, PATH_SOWHAT, PATH_TAIL);
+      incompleteAnswerNote(pcomp, PATH_SOWHAT, PATH_TAIL, prefix);
       renderPathHuman(fns, cg, fn, eff, mustHedge(pcomp));
     }
     break;
@@ -1966,8 +2080,8 @@ switch (cmd) {
     // ⟨0.28⟩ …and the count-0 cause, which reaches here through a LIVE §2.2 sidecar: the target resolves
     // over the call graph, so this verb answers `ok: true` where the report-only verbs exit 2 on the name.
     // MEASURED exactly so — the pre-edit gate check, green, over a report that judged nothing.
-    if (wcomp.judgedNothing.length) advisoryJudgedNothingNote("whatif");
-    if (wcomp.noManifest.length) advisoryNoManifestNote("whatif", wcomp.noManifest);
+    if (wcomp.judgedNothing.length) advisoryJudgedNothingNote("whatif", certainViolationFromPolicy(pol, prefix));
+    if (wcomp.noManifest.length) advisoryNoManifestNote("whatif", wcomp.noManifest, certainViolationFromPolicy(pol, prefix));
     if (wcomp.unreadable.length) advisoryUnreadableNote("whatif", wcomp.unreadable);
     // ⟨0.28⟩ SPEC §2 — a CONFIGURED policy that parsed to zero rules asked nothing, so the pre-edit
     // verdict AND the blast radius it qualifies are withheld in favour of the caveat document. The exit
@@ -2059,8 +2173,8 @@ switch (cmd) {
     // ⟨0.28⟩ …and the count-0 cause, which reaches the DOCUMENT and the PROSE but deliberately NOT the exit
     // below (see `advisoryAnswer`). Leaving it out would have let this verb print a remedy list beside
     // `ok: true` over a report that judged nothing — the same false all-clear, arriving by omission.
-    if (fgComp.judgedNothing.length) advisoryJudgedNothingNote("fix-gate");
-    if (fgComp.noManifest.length) advisoryNoManifestNote("fix-gate", fgComp.noManifest);
+    if (fgComp.judgedNothing.length) advisoryJudgedNothingNote("fix-gate", certainViolationFromPolicy(fgpol, prefix));
+    if (fgComp.noManifest.length) advisoryNoManifestNote("fix-gate", fgComp.noManifest, certainViolationFromPolicy(fgpol, prefix));
     if (fgComp.unreadable.length) advisoryUnreadableNote("fix-gate", fgComp.unreadable);
     // ⟨0.24⟩ SPEC §3.2 `4fd140c` — and the same posture for a rule the GATE refused: no remedy is computed
     // from evidence the gate declined to read, the refusal is disclosed on both channels, and `--strict`
@@ -2150,8 +2264,8 @@ switch (cmd) {
     if (uUnan.length) advisoryIncompleteNote("unverified", uUnan);
     // ⟨0.28⟩ …and the count-0 cause. MEASURED before this line: `{ok: true, unverified: []}` over a report
     // that judged nothing — this verb certifying a package it never examined. The exit is untouched.
-    if (uComp.judgedNothing.length) advisoryJudgedNothingNote("unverified");
-    if (uComp.noManifest.length) advisoryNoManifestNote("unverified", uComp.noManifest);
+    if (uComp.judgedNothing.length) advisoryJudgedNothingNote("unverified", certainViolationFromPolicy(upol, prefix));
+    if (uComp.noManifest.length) advisoryNoManifestNote("unverified", uComp.noManifest, certainViolationFromPolicy(upol, prefix));
     if (uComp.unreadable.length) advisoryUnreadableNote("unverified", uComp.unreadable);
     // ⟨0.24⟩ SPEC §3.2 `4fd140c` — the function the gate could not judge is NAMED in `unverified` above,
     // with the missing evidence as its reason; this is the human channel for the same fact.

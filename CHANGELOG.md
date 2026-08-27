@@ -10,6 +10,47 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [0.33.0] — 2026-08-26
 
+- **`query.mjs`'s `gateLine()` had the same wrong-checkable-claim defect `658e3c0` fixed in the LSP,
+  and one variant of it was WORSE than the LSP's.** MEASURED (fixtures: an unread exclusion class beside
+  an Exec violation; an unanalyzed file beside an Fs violation): `gateLine()` unconditionally asserted
+  `` `gate --report` exits 2 over these bytes `` — or, for the unread-only cause, "under any policy it can
+  evaluate" — with no check for SPEC §3.1's precedence (violation (1) > refusal (2) > incomplete (2)). A
+  coexisting certain violation makes the real exit 1, not 2, and `gateLine()` feeds `incompleteAnswerNote`,
+  shared by ELEVEN verbs (`where`, `callers`, `show`, `map`, `reachable`, `containment`, `blindspots`,
+  `gains`, `diff`, `tour`, `path`), so every one of them could print the false claim. FIXED with a cheap,
+  side-effect-free `certainViolationOver` pre-check (discovers a policy the same way the gate-family verbs
+  do when `--policy` is absent — CANDOR_POLICY, then `.candor/config` — since these eleven hold none of
+  their own) and conditions the wording on it; the incompleteness-only control (no coexisting violation)
+  is byte-identical.
+  A FIRST ATTEMPT at this fix introduced the exact "opposite error" its own review warns against:
+  folding a corrupt-report-FILE cause (`unreadable`) into the same certain-violation branch as
+  `unanalyzed` claimed a false "1, not 2" dominance, when a CORRUPTION refusal is proven — against the
+  real `gate` verb's own ruling — to dominate ABSOLUTELY, never the other way round. `unreadable` now
+  gets its own always-unconditional arm, checked first, before the pre-check even runs.
+  WIDENING THE INVENTORY (per the corpus brief's rule 9 — an audit's boundary must not be drawn around
+  its own trigger) surfaced two further, confirmed instances of the identical defect, both fixed the same
+  way: `advisoryNoManifestNote` and `advisoryJudgedNothingNote` (used by `whatif`/`fix-gate`/`unverified`)
+  also asserted an unconditioned `` `gate --report` exits 0 `` for a `noManifest`/`judgedNothing` report
+  FILE — true only when nothing else under a multi-report locator judged real content. MEASURED: a
+  prefix with one silent/manifest-less sibling beside another carrying a certain `deny Fs` violation
+  makes `gate --report` exit 1 (the real gate's OWN `judgedNothing` is a single union across siblings —
+  "judged something as soon as ONE has" — so the violating sibling drags the whole locator into ordinary
+  evaluation, unlike the advisory reader's PER-FILE `judgedNothing`/`noManifest` lists),
+  while `unverified --strict`/`fix-gate --strict` printed "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU" and
+  exited 0 themselves. `advisoryUnreadableNote` was checked and left alone — its `unreadable` cause is the
+  same absolute, non-dominated refusal as `gateLine`'s, confirmed against the real gate's own ruling.
+  A THIRD, DIFFERENT bug on the same function was also found and fixed while widening this inventory:
+  `outOfScope` (⟨0.30⟩'s own exit-2 INCOMPLETE cause) had no arm in `gateLine()` at all and fell through
+  to the "exits 0 … NOTHING DOWNSTREAM WILL CATCH THIS" tail meant for `judgedNothing`/`noManifest` — the
+  worse of the two possible wordings on that cause, since an `outOfScope`-only report already exits 2
+  before any violation is considered. MEASURED and moved to the dominated tier beside `unanalyzed`.
+  `mcp.mjs`'s `candor_gate` (already checked before this fix and confirmed clean — it computes fresh per
+  call) and every other live prose site asserting a `gate --report` exit code in `lsp.mjs`/`query-core.mjs`
+  were swept for the same shape; none of the remaining ones carry it (`advisoryUnreadableNote`'s absolute
+  refusal and `zeroRulePolicyWarn`'s zero-rule refusal are both non-dominated by construction — a
+  zero-rule policy has no violation to dominate with). Full battery green: lint, 126 unit tests, 1589
+  behavioral tests, 174 MCP, 101 LSP, 16 watch, probe, fuzz, transitive-recall, self-gate, effect-set
+  oracle (26/26).
 - **The own-`.d.ts`-shadow fix gains its pinned tests.** The fix landed with its evidence in a
   scratchpad; these 76 lines put the defect and its controls in `test.mjs` so a refactor cannot
   silently revert them. Suite: 1589 passed, 0 failed.
