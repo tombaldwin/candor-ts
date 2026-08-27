@@ -3356,6 +3356,43 @@ function localName(node) {
         // hash like pkg#"sign" the consumer's pkg#sign join can never hit (/code-review).
         return markCjs(p.name.text ?? p.name.getText());
     }
+    // ⟨R57⟩ AN ANONYMOUS DECORATOR EXPRESSION mints no unit at all otherwise: `@((_t,_k,_d) => {…})`
+    // (or its `function(){}` twin, or an immediately-invoked anonymous FACTORY `@(fn)(arg)`) has no
+    // named declaration anywhere for `enclosing()`'s Decorator-ancestor guard (below, see its comment)
+    // to land on before it stops the climb dead — so the body's own effects, evaluated directly, hit
+    // NOTHING and vanish silently (found on real code: `deny Fs` read `policy ✓`, zero disclosure, over
+    // a real `fs.readFileSync` in decorator position). A NAMED decorator/factory is already sound
+    // without this: its own FunctionDeclaration mints a unit via the branches above (independent of
+    // this climb), and that unit's own effects report regardless of whether anything calls it — same
+    // reason `@Entity("users")` already worked when `Entity` has a body. This branch closes the ONE
+    // gap that precedent leaves: the function value has NO OTHER declaration to hang a unit on because
+    // it never has a name. Position-keyed (`node.getStart()`), like `defineProperty`'s computed-key
+    // units above — two anonymous decorators in one file must not collide/clobber each other's record.
+    //
+    // Two shapes, both climbed through a `ts.isParenthesizedExpression` wrapper (a decorator arrow
+    // MUST be parenthesized — `@x => y` does not parse as intended — a bare `function(){}` need not
+    // be, both measured against this repo's own `typescript` AST):
+    //   direct:   @((_t,_k,_d) => {…})              — `node` IS the decorator's own expression
+    //   factory:  @(function(_t,_k,_d){…})(arg)      — `node` is the CALLEE of the decorator's call
+    // Deliberately NOT extended to a factory that RETURNS a nested anonymous function (the common
+    // real shape, `@(() => (_t,_k,_d) => {…})()`) — the returned inner closure has no direct/paren
+    // ancestor relationship to the Decorator to detect structurally, so it is left to the EXISTING
+    // "closures fold to the nearest enclosing named unit" rule, which lands it on the factory unit
+    // this branch mints and reports it there (imprecise attribution, not a vanish — verified).
+    {
+      let outer = node;
+      while (ts.isParenthesizedExpression(outer.parent)) outer = outer.parent;
+      const op = outer.parent;
+      const isDirectDecorator = ts.isDecorator(op) && op.expression === outer;
+      let isFactoryCallee = false;
+      if (ts.isCallExpression(op) && op.expression === outer) {
+        let callOuter = op;
+        while (ts.isParenthesizedExpression(callOuter.parent)) callOuter = callOuter.parent;
+        const gp = callOuter.parent;
+        isFactoryCallee = ts.isDecorator(gp) && gp.expression === callOuter;
+      }
+      if (isDirectDecorator || isFactoryCallee) return `<decorator>@${node.getStart()}`;
+    }
   }
   return null;
 }
@@ -3951,8 +3988,16 @@ function enclosing(node) {
     // CallExpression → Decorator → MethodDeclaration/ClassDeclaration/Parameter, so `enclosing` otherwise
     // lands on the decorated unit and FABRICATES the factory's effects onto that method/class/param and
     // every transitive caller (a fabrication — @Entity/@Injectable factories that touch I/O would
-    // poison every decorated handler). Stop at the Decorator: the factory's own effects live in its own
-    // function unit; the application site attributes to nothing (load-time, like a no-arg decorator).
+    // poison every decorated handler). Stop at the Decorator: a NAMED factory's own effects live in its
+    // own function unit (found and reported independently of this climb — this branch never runs for
+    // that case, `localName` mints the anonymous shape a unit BEFORE the climb ever reaches here, R57);
+    // this null is reached only when NOTHING inside the decorator's expression minted a unit of its
+    // own — a raw effect/closure/external call nested directly in a decorator's arguments — and it is
+    // left a DELIBERATE, DISCLOSED-NOWHERE gap rather than folded to `<module>` or a synthetic unit: the
+    // ubiquitous named/external decorator-factory pattern (`@Injectable()`, `@Entity()`, `@Get()`, …)
+    // would otherwise mint a NEW report entry (or a coverage/Unknown disclosure) for every decorated
+    // declaration in any real framework-using corpus — measured, filed, not fixed here (see R57's
+    // CHANGELOG entry's residual note).
     if (ts.isDecorator(p)) return null;
     const n = nodeName.get(p);
     if (n) return n;

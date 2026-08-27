@@ -354,6 +354,59 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   exactly the fabricated charge (a `Db`/`Net` tag) on every affected function while every other
   disclosure (`Unknown`, `Rand`, real `Net` from an actual socket call) is untouched.
 
+- **R57: an ANONYMOUS decorator expression minted no unit at all, so a real effect in its body vanished
+  with ZERO disclosure.** `@((_t, _k, _d) => { fs.readFileSync("/etc/hosts"); }) class Thing {}` —
+  `deny Fs` read `policy ✓` at exit 0, `functions: []`. `enclosing()`'s Decorator-ancestor guard (added to
+  keep a NAMED factory's own effects off the decorated declaration — `@Entity("users")`'s `Entity` is a
+  FunctionDeclaration, minted and reported on ITS OWN, independent of this climb) stops the climb dead the
+  moment it reaches ANY Decorator, with no distinction for the one case that has no other unit to fall
+  back on: an anonymous function used directly AS the decorator. FIXED by minting a unit for exactly that
+  shape in `localName` — before the climb ever reaches the Decorator guard, not by changing the guard —
+  keyed by source position (`<decorator>@<offset>`, mirroring the `defineProperty` computed-key units)
+  since two anonymous decorators in one file must not clobber each other's record. Two spellings covered,
+  both measured against this repo's own `typescript` AST through however many `ParenthesizedExpression`
+  wrappers surround them: the direct form (`@((_t,_k,_d) => {…})` — an arrow decorator MUST be
+  parenthesized, `@x => y` does not parse as intended) and an immediately-invoked anonymous FACTORY
+  (`@(function(_t,_k,_d){…})(arg)`, the callee position). A factory that RETURNS a nested anonymous
+  closure (`@(() => (_t,_k,_d) => {…})()`) is deliberately NOT special-cased — the existing "closures fold
+  to the nearest enclosing named unit" rule already lands it on the newly-minted factory unit and reports
+  it there (verified; an attribution imprecision, not a vanish). MEASURED red→green: the fixture above now
+  reports `<decorator>@29` with `Fs`, `deny Fs` exits 1. OVER-CHARGE CONTROL (must stay unmoved — this
+  behaviour is deliberate and tested, `test.mjs` lines ~2611 and ~5102-5126): a NAMED factory
+  (`@Entity("users")`, `Entity` declared locally with a body performing `Fs`) is BYTE-IDENTICAL before and
+  after (`Entity`'s own unit still carries the charge; no `<decorator>` unit is minted for it; `<module>`
+  still gains nothing from the decorator application, per the existing "load-time, factory owns it" test).
+  Full suite green: lint, 126 unit tests, 1604 behavioral (`node test.mjs --parallel`, 8 new, pinned with
+  their controls), 174 MCP, 101 LSP, 16 watch, fabrication probe (37 functions / 10 builtins), fuzz (25
+  seeds), and the sensitivity battery (8/8) — all unaffected outside the 8 new checks. Quantified across the SAME
+  corpora as the fix above it — 113 installed `node_modules` packages (`corpus1-ts`) and 14 published npm
+  tarballs (`corpus2-ts`): every `functions[]` byte-identical (0 diffs; SHA-256-verified on corpus1's
+  whole-tree scan). Caveat, stated plainly: neither corpus contains any real TypeScript decorator syntax
+  (grepped — the corpus2 hits on `^\s*@\w` are all JSDoc `@default`/`@example` lines), so this is a clean
+  NEGATIVE control (no regression to the general classifier) rather than evidence the fix fires on real
+  code; the positive proof is the hand-built fixture plus method/parameter/multi-decorator variants (all
+  verified, including that two anonymous decorators in one file mint two distinct, non-colliding units).
+  **RESIDUAL, MEASURED AND NOT FIXED (rule 9 widening):** the SAME Decorator-ancestor guard also silently
+  drops (a) a raw effect evaluated directly as a decorator/factory ARGUMENT
+  (`@Named(fs.readFileSync(...).toString())`), (b) an anonymous closure or object-literal method nested
+  inside a decorator's argument data (`@Named({ init(){ fs.readFileSync(...) } })`,
+  `@Named(() => { fs.readFileSync(...) })`), and (c) a call through an EXTERNAL, uncovered-or-bodyless
+  decorator reference (`@extFn("arg")` where `extFn` is `.d.ts`-only or from a package the classifier does
+  not cover) — none of these have any OTHER unit to hang the disclosure on, so they read exactly like R57
+  did: `policy ✓`, `functions: []`, confirmed by direct reproduction of each. NOT fixed here: every general
+  (non-decorator) anonymous-callable shape checked for the same rule-9 inventory — anonymous class
+  expressions, an IIFE in a property initializer, an anonymous callback to an unresolved function, a plain
+  object-literal method, a getter/setter — already folds up to an enclosing named unit with an honest
+  `Unknown` disclosure (never silent), so the vanish is SPECIFIC to the Decorator guard, not a general gap
+  in closure attribution. A blanket fix (attribute anything the guard would otherwise drop to a synthetic
+  per-decorator or `<module>` unit) was evaluated and rejected: `@Injectable()`/`@Entity()`/`@Get()`-style
+  decorators from external packages are `.d.ts`-only from this scan's perspective in essentially all real
+  framework code, so treating "bodyless external reference" as disclosure-worthy would mint a new report
+  entry (or Unknown) for nearly every decorated declaration in any Angular/NestJS/TypeORM-shaped corpus —
+  a corpus byte-identity break far worse than the gap it would close, for a shape this measurement never
+  found actual `Fs`/`Exec`/`Net` payloads behind. Filed rather than forced, same as the family's
+  `net-partner` disclosure attempt.
+
 ## [0.33.0] — 2026-08-26
 - **The ⟨0.33⟩ absent-`scannedUnder` refusal is now pinned — nothing watched it before.** A report
   carrying a `peeked: true` class and NO `scannedUnder` key is the shape every pre-0.33 report has,

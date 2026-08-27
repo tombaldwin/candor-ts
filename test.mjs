@@ -5125,6 +5125,63 @@ export function callsFactory(): void { logged("z"); }`,
         entry(report, "src.d.callsFactory")?.inferred.includes("Exec"), JSON.stringify(entry(report, "src.d.callsFactory")));
 }
 
+// ── R57: an ANONYMOUS decorator expression must NOT vanish silently — it has no named declaration to
+// mint a unit on, so `enclosing()`'s Decorator guard (the block above's control) stopped the climb dead
+// with nothing behind it. `deny Fs` used to read `policy ✓` at exit 0 over a real `fs.readFileSync` in
+// decorator position; a unit is now minted for the anonymous function value itself, keyed by position. ──
+if (blk()) {
+  const d = project({
+    "src/e.ts": `import fs from "node:fs";
+@((_t: any, _k: any, _d: any) => { fs.readFileSync("/etc/hosts"); })
+class Thing {}
+@(function (_t: any) { fs.readFileSync("/etc/hosts2"); })
+class ThingNoParenFn {}
+@(() => (_t: any, _k: any, _d: any) => { fs.readFileSync("/etc/hosts3"); })()
+class ThingFactoryReturnsCloser {}
+export function makesThing(): Thing { return new Thing(); }`,
+  });
+  const { report } = scan(d);
+  const decoratorUnits = report.functions.filter((f) => f.fn.includes("<decorator>"));
+  check("an anonymous direct decorator (`@((t,k,d)=>{…})`) is NOT silent — some unit reports its Fs",
+        decoratorUnits.some((f) => f.inferred.includes("Fs") && f.paths?.includes("/etc/hosts")),
+        JSON.stringify(report.functions));
+  check("its un-parenthesized `function(){}` twin is likewise captured, not silent",
+        decoratorUnits.some((f) => f.inferred.includes("Fs") && f.paths?.includes("/etc/hosts2")),
+        JSON.stringify(report.functions));
+  check("a factory that RETURNS a nested anonymous closure still reports (folds to the factory unit)",
+        decoratorUnits.some((f) => f.inferred.includes("Fs") && f.paths?.includes("/etc/hosts3")),
+        JSON.stringify(report.functions));
+  check("…and none of the three are attributed to the decorated declaration (the R57 sibling's own control)",
+        !entry(report, "src.e.Thing.constructor")?.inferred.length
+          && !entry(report, "src.e.ThingNoParenFn.constructor")?.inferred.length
+          && !entry(report, "src.e.ThingFactoryReturnsCloser.constructor")?.inferred.length,
+        JSON.stringify(report.functions));
+  check("…nor to a caller that merely constructs the decorated class",
+        !entry(report, "src.e.makesThing")?.inferred.length, JSON.stringify(entry(report, "src.e.makesThing")));
+}
+// CONTROL: a NAMED decorator factory with a LOCAL body is BYTE-IDENTICAL to before this fix — its own
+// effects are already reported on its own unit (the mechanism the block above this one pins), and this
+// fix's `localName` addition only matches an anonymous Arrow/FunctionExpression directly in decorator
+// position, which a named reference never is. No `<decorator>` unit should ever appear for this shape.
+if (blk()) {
+  const d = project({
+    "src/ectl.ts": `import fs from "node:fs";
+function Entity(_name: string) { fs.readFileSync("/etc/hosts"); return function (_t: any) {}; }
+@Entity("users")
+class Controlled {}
+export function makesControlled(): Controlled { return new Controlled(); }`,
+  });
+  const { report } = scan(d);
+  check("CONTROL: the named factory's own unit still carries its effect",
+        entry(report, "src.ectl.Entity")?.inferred.includes("Fs"), JSON.stringify(entry(report, "src.ectl.Entity")));
+  check("CONTROL: no `<decorator>` unit is minted for a named factory (R57's fix does not touch this path)",
+        !report.functions.some((f) => f.fn.includes("<decorator>")), JSON.stringify(report.functions));
+  check("CONTROL: still not fabricated onto the decorated class or its caller",
+        !entry(report, "src.ectl.Controlled.constructor")?.inferred.length
+          && !entry(report, "src.ectl.makesControlled")?.inferred.length,
+        JSON.stringify(report.functions));
+}
+
 // a fn-reference passed to a STORE/compare/log sink (not an invoking HOF) must NOT fabricate its effect
 if (blk()) {
   const d = project({
