@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.33.1] — 2026-08-27
+
 - **⚠ the fifth "neither voice fired" instance — a DYNAMIC re-export loop — is disclosed, not resolved,
   closing the family `1d4f648` filed rather than fixed.** `Object.keys(impl).forEach(k => { exports[k] =
   impl[k]; })` binds an export name to a RUNTIME STRING: unlike the four export-alias shapes fixed before
