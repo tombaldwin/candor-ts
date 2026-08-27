@@ -211,6 +211,36 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   document for `ok`/`incomplete`. Falsified against `ae70ce4`'s parent commit on both files (RED on all
   three cause cells, controls unaffected) and restored (GREEN).
 
+- **⚠ closes the follow-on this section's `.d.ts`-shadow entry filed open: a package whose own `name`
+  collides with a whole-module κ rule had its OWN internal calls charged that rule's effect, for every
+  call shape the shadow-redirect didn't reach.** `declModule` walks up to the nearest `package.json`
+  when a declaration's file isn't in `projectFiles` and isn't under `node_modules/` — exactly a
+  package's own `dist/*.js` + `dist/*.d.ts` — and that walk resolves to the SCANNED package's own name.
+  A whole-module κ rule with a `null` member-regex (`got`, `pg`, `fs-extra`, `execa`, `dotenv`,
+  `winston`, `bcrypt`, … one per §1 effect) then matches unconditionally. MEASURED, byte-identical
+  source with only `package.json`'s `name` changed: `super(x)` into a same-package base class,
+  `new ns.Ctor()`, `obj.method()`, and a bare call whose `.js` sibling isn't in `projectFiles` all read
+  `Net`/`Db`/… under the colliding name and pure under a non-colliding one (`mypkg`); `gaxios` (a
+  verb-scoped rule, no `null` member) never fired, isolating the mechanism to the null-member shape.
+  ROOT CAUSE: a package is treated as an external dependency of itself. FIX attacks the root rather
+  than the four shapes: `isOwnPackageDecl(decl)` asks whether the declaring file is OUR OWN package —
+  `nearestPackageName` on the file, excluding anything under `node_modules/` outright so a genuine
+  INSTALLED dependency of the same name is never suppressed — and gates every κ lookup on it (the
+  (CLASSIFY) arm, the `new`-with-inherited-ctor re-key, the reflective `.call`/`.apply` arm, and the
+  external tagged-template arm). `mod` is left exactly as `declModule` computed it; the existing
+  `crossesPackageBoundary`-keyed κ-ledger already treats the file as ours, so refusing κ an answer is
+  sufficient — no new disclosure, no rewritten module string. KEPT the ⟨0.33.0⟩ `.d.ts`-shadow redirect
+  unchanged: it recovers a REAL resolved effect for the bare-identifier-with-sibling shape (the two solve
+  different problems, fabrication vs. resolution), and this guard runs strictly after it, only where it
+  declined or failed. CONTROLS: a genuine `node_modules` dependency (`got`/`glob`/`execa`) is unmoved,
+  including the pathological case of a package literally NAMED `got` that also depends on the real
+  npm `got` (the dependency call still reads `Net`, the self-collision call no longer does); `mypkg`
+  stays pure; the ⟨0.33.0⟩ `.d.ts`-shadow gains (104 functions, e.g. date-fns's `Clock`, rimraf's
+  `Rand`) are byte-identical on the 120-package corpus that measured them, except `got`/`ioredis`
+  themselves — both real published packages whose own name collides with the Net/Db rule — which lose
+  exactly the fabricated charge (a `Db`/`Net` tag) on every affected function while every other
+  disclosure (`Unknown`, `Rand`, real `Net` from an actual socket call) is untouched.
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (`package.json`); no analyzer change.

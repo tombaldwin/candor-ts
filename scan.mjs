@@ -2518,6 +2518,33 @@ function crossesPackageBoundary(file) {
   return !!own && own !== pkgName && own !== rootOwnerPkg;
 }
 
+// ⟨fabrication, own-name-collides-with-κ⟩ Is `decl` OUR OWN scanned package's code, reached through a
+// route that makes it LOOK like an external dependency? `declModule`'s `nearestPackageName` fallback
+// fires exactly when a declaration's file isn't in `projectFiles` and has no `node_modules/` segment —
+// the shape of a package's own co-located `dist/foo.js` + `dist/foo.d.ts` (⟨scan-boundary,
+// own-`.d.ts`-shadow⟩ above). That fallback returns the SCANNED package's own `name`, and if that name
+// collides with a whole-module κ rule that has a `null` member-regex (got/pg/fs-extra/execa/dotenv/
+// winston/bcrypt/… — every effect in §1 has at least one), `kappa(ownName, anything)` matches
+// unconditionally: the package's OWN internal calls get charged its own external effect merely because
+// nobody else installed a package by that name. Measured: `super(x)` into a same-package base class,
+// `new ns.Ctor()`, `obj.method()`, and a bare call whose `.js` sibling isn't in `projectFiles` all
+// resolve `mod` to the scanned package's own name with no redirect to catch it (the `.d.ts`-shadow
+// redirect above only recovers the bare-identifier-with-sibling shape).
+//
+// FILE-based, never name-based: a package that genuinely DEPENDS ON an installed node_modules copy of
+// a same-named package (self-referential publish, `npm link` loops) must still be charged — that file's
+// path always carries a `node_modules/` segment (a different `declModule` branch entirely), so it's
+// excluded outright before the name comparison ever runs.
+//
+// "our own package" mirrors `crossesPackageBoundary`'s own definition of "us" — both `pkgName` and
+// `rootOwnerPkg`, because they can differ (see the comment above).
+function isOwnPackageDecl(decl) {
+  const f = path.resolve(decl.getSourceFile().fileName);
+  if (/node_modules\//.test(f)) return false;
+  const own = nearestPackageName(f);
+  return !!own && (own === pkgName || own === rootOwnerPkg);
+}
+
 // ⟨scan-boundary, own-`.d.ts`-shadow⟩ npm ships `dist/foo.js` beside `dist/foo.d.ts`, and TypeScript's own
 // module resolution treats the co-located `.d.ts` as the AUTHORITATIVE type source for every IMPORTER of
 // `foo.js` — even one this same scan (`--allow-js`) is analysing as project source. A same-file reference
@@ -4826,7 +4853,10 @@ function visitCalls(node) {
               const kMod = d2 && declModule(d2);
               const kMember = d2?.name?.getText?.()
                 ?? (ts.isPropertyAccessExpression(invokedRef) ? invokedRef.name.text : ts.isIdentifier(invokedRef) ? invokedRef.text : null);
-              const kEff = kMod && kMember ? kappa(kMod, kMember) : null;
+              // SELF-NAME GUARD (see `isOwnPackageDecl`): the reflectively-invoked reference may be OUR
+              // OWN package's own function, reached through its own `dist/*.d.ts` — never let κ answer
+              // for it, same reasoning as the (CLASSIFY) arm.
+              const kEff = kMod && kMember && !isOwnPackageDecl(d2) ? kappa(kMod, kMember) : null;
               if (kEff) {
                 rec.direct.add(kEff);
                 if (kEff === "Unknown") rec.why.add(`reflect:${kMod.replace(/^node:/, "")}.${kMember}`);
@@ -5220,9 +5250,26 @@ function visitCalls(node) {
           let kMod = mod;
           if (ctorClassDecl && !kappa(mod, member)) {
             const cm = declModule(ctorClassDecl);
-            if (cm !== mod && kappa(cm, member)) kMod = cm;
+            // The re-key must not LAND us on our own package's name either (`isOwnPackageDecl`,
+            // fabrication vein above): a same-package class with no own constructor, inherited from a
+            // sibling declared in the same `dist/*.d.ts` tree, re-keys onto the scanned package's own
+            // name exactly like the direct case below — never accept that as an external module.
+            if (cm !== mod && !isOwnPackageDecl(ctorClassDecl) && kappa(cm, member)) kMod = cm;
           }
-          let eff = kappa(kMod, member); // (CLASSIFY)
+          // SELF-NAME GUARD (fabrication only, not resolution — see `isOwnPackageDecl`): `decl` may be
+          // OUR OWN scanned package's code reached through its own co-located `dist/*.d.ts`, which
+          // `declModule` resolves to the scanned package's own name — a whole-module κ rule (a `null`
+          // member-regex) then matches unconditionally and charges the package's own internal calls its
+          // own effect. This fires for every call SHAPE the `.d.ts`-shadow redirect above doesn't reach
+          // (`super(x)`, `obj.method()`, `new ns.Ctor()`, a bare call whose `.js` sibling isn't in
+          // `projectFiles`) — refusing to let κ answer is enough to stop the fabrication: `mod`/`kMod`
+          // are left exactly as `declModule` computed them (never rewritten to `"<local>"`), so the
+          // κ-coverage ledger below — already keyed on `crossesPackageBoundary`, which already treats
+          // this exact file as OURS — falls silent precisely as it does for an own-package name that
+          // never happened to collide with anything (no new disclosure, no fabrication). A genuine
+          // node_modules-installed dependency of the same name is untouched: `isOwnPackageDecl` excludes
+          // `node_modules/` outright, before the name is ever compared.
+          let eff = isOwnPackageDecl(decl) ? null : kappa(kMod, member); // (CLASSIFY)
           // process.stdout/stderr/stdin are typed `tty.WriteStream`, which EXTENDS `net.Socket`, so a
           // `.write()`/`.end()` on them resolves to `net.Socket.write` and the whole-module Net rule
           // paints it Net. But a console write to fd 0/1/2 is TTY/console I/O, NOT network — there is no
@@ -6020,7 +6067,12 @@ function visitCalls(node) {
         // nothing — no fabrication.
         const mod = declModule(decl);
         const member = decl.name ? decl.name.getText() : "";
-        const eff = kappa(mod, member);
+        // SELF-NAME GUARD (see `isOwnPackageDecl`): an external-looking tag may be OUR OWN package's
+        // own function, reached through its own `dist/*.d.ts` — never let κ answer for it. `mod` stays
+        // whatever `declModule` computed, so the ledger below (already keyed on
+        // `crossesPackageBoundary`, which already treats this file as ours) falls silent exactly as it
+        // does for an own-package name that never collided with anything.
+        const eff = isOwnPackageDecl(decl) ? null : kappa(mod, member);
         if (eff) { rec.direct.add(eff); if (eff === "Unknown") rec.why.add(`reflect:${mod.replace(/^node:/, "")}.${member}`); }
         else {
           const file = decl.getSourceFile().fileName;
