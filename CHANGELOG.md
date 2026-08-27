@@ -8,8 +8,6 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
-## [0.33.0] — 2026-08-26
-
 - **⚠ the fifth "neither voice fired" instance — a DYNAMIC re-export loop — is disclosed, not resolved,
   closing the family `1d4f648` filed rather than fixed.** `Object.keys(impl).forEach(k => { exports[k] =
   impl[k]; })` binds an export name to a RUNTIME STRING: unlike the four export-alias shapes fixed before
@@ -296,6 +294,65 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   finding rather than shipped. Full test battery green (1589 tests, mcp/lsp/watch, probe, fuzz,
   transitive-recall, self-gate, effect-set oracle).
 
+- **`outOfScope`/`scannedUnder` were OMITTED, not `[]`, over a policy-scanned tree with no exclusions —
+  collapsing "asked and clear" into "never asked".** MEASURED four-way: candor-java and candor-rust both
+  emit `outOfScope: []` and `scannedUnder: {deny: […]}` whenever a policy is configured and honoured,
+  independent of whether anything was excluded; candor-ts emitted neither key unless `excludedFiles.length`
+  was non-zero, so a clean tree under `deny Exec` produced the SAME document a no-policy scan does — a
+  false "nobody asked" over code that really was asked and answered clear. It failed CLOSED (an absent
+  `scannedUnder` reads as the empty deny set, and no report has a `peeked: true` class to trigger the
+  ⟨0.32⟩/⟨0.33⟩ rules), so no verdict certified wrongly, but it was still a false statement about what was
+  asked — the ⟨0.26⟩ partial-manifest collapse this format exists to prevent. `scan.mjs`'s peek trigger no
+  longer requires `excludedFiles.length`; only the subprocess spawn (nothing to gain from peeking an empty
+  set) stays conditioned on it. No policy, or a policy the engine refuses, still leaves both keys ABSENT; a
+  tree WITH exclusions is byte-identical to before (`cmp`-verified).
+
+- **`candor_whatif` (MCP) and `candor.whatif` (LSP) had ZERO tests for the `ok`-withdrawal `ae70ce4`
+  shipped.** That commit fixed `ok`-withdrawal on all three `whatif` surfaces (CLI, MCP, LSP) for the
+  ⟨0.30⟩ `outOfScope`, ⟨0.32⟩ unread-class and ⟨0.33⟩ cross-policy causes in one change and added no
+  coverage — conformance PART 70 pins the CLI only, and before this the CLI had accumulated all four
+  incompleteness causes across four rungs while MCP and LSP carried none of them, not even the original
+  ⟨0.21⟩ `unanalyzed` one. `test-mcp.mjs` and `test-lsp.mjs` now each pin all three later causes (plus
+  both over-charge controls, both polarities) on a synthetic load/top report fixture reproducing PART
+  70's own shape as raw report mutations — `reportCompleteness`/`mustHedge` (query-core.mjs) read the
+  report's own `excluded`/`outOfScope`/`scannedUnder` keys, so a handwritten report exercises the same
+  consumer path a real peek's output would. The LSP block is new territory, not a duplicate of the
+  existing ⟨0.32⟩ LSP block: that one drives `textDocument/didOpen` and reads `diagnosticsFor`'s
+  disclosure; nothing before this drove `workspace/executeCommand candor.whatif` and read its RESULT
+  document for `ok`/`incomplete`. Falsified against `ae70ce4`'s parent commit on both files (RED on all
+  three cause cells, controls unaffected) and restored (GREEN).
+
+- **⚠ closes the follow-on this section's `.d.ts`-shadow entry filed open: a package whose own `name`
+  collides with a whole-module κ rule had its OWN internal calls charged that rule's effect, for every
+  call shape the shadow-redirect didn't reach.** `declModule` walks up to the nearest `package.json`
+  when a declaration's file isn't in `projectFiles` and isn't under `node_modules/` — exactly a
+  package's own `dist/*.js` + `dist/*.d.ts` — and that walk resolves to the SCANNED package's own name.
+  A whole-module κ rule with a `null` member-regex (`got`, `pg`, `fs-extra`, `execa`, `dotenv`,
+  `winston`, `bcrypt`, … one per §1 effect) then matches unconditionally. MEASURED, byte-identical
+  source with only `package.json`'s `name` changed: `super(x)` into a same-package base class,
+  `new ns.Ctor()`, `obj.method()`, and a bare call whose `.js` sibling isn't in `projectFiles` all read
+  `Net`/`Db`/… under the colliding name and pure under a non-colliding one (`mypkg`); `gaxios` (a
+  verb-scoped rule, no `null` member) never fired, isolating the mechanism to the null-member shape.
+  ROOT CAUSE: a package is treated as an external dependency of itself. FIX attacks the root rather
+  than the four shapes: `isOwnPackageDecl(decl)` asks whether the declaring file is OUR OWN package —
+  `nearestPackageName` on the file, excluding anything under `node_modules/` outright so a genuine
+  INSTALLED dependency of the same name is never suppressed — and gates every κ lookup on it (the
+  (CLASSIFY) arm, the `new`-with-inherited-ctor re-key, the reflective `.call`/`.apply` arm, and the
+  external tagged-template arm). `mod` is left exactly as `declModule` computed it; the existing
+  `crossesPackageBoundary`-keyed κ-ledger already treats the file as ours, so refusing κ an answer is
+  sufficient — no new disclosure, no rewritten module string. KEPT the ⟨0.33.0⟩ `.d.ts`-shadow redirect
+  unchanged: it recovers a REAL resolved effect for the bare-identifier-with-sibling shape (the two solve
+  different problems, fabrication vs. resolution), and this guard runs strictly after it, only where it
+  declined or failed. CONTROLS: a genuine `node_modules` dependency (`got`/`glob`/`execa`) is unmoved,
+  including the pathological case of a package literally NAMED `got` that also depends on the real
+  npm `got` (the dependency call still reads `Net`, the self-collision call no longer does); `mypkg`
+  stays pure; the ⟨0.33.0⟩ `.d.ts`-shadow gains (104 functions, e.g. date-fns's `Clock`, rimraf's
+  `Rand`) are byte-identical on the 120-package corpus that measured them, except `got`/`ioredis`
+  themselves — both real published packages whose own name collides with the Net/Db rule — which lose
+  exactly the fabricated charge (a `Db`/`Net` tag) on every affected function while every other
+  disclosure (`Unknown`, `Rand`, real `Net` from an actual socket call) is untouched.
+
+## [0.33.0] — 2026-08-26
 - **The ⟨0.33⟩ absent-`scannedUnder` refusal is now pinned — nothing watched it before.** A report
   carrying a `peeked: true` class and NO `scannedUnder` key is the shape every pre-0.33 report has,
   so it is this rung's most-exercised path in the wild. The behaviour was already correct; the gap
@@ -400,64 +457,6 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   one SPEC.md uses on its replaced-source-file example; applied to both, and to `test.mjs`'s copy of the
   first note so two spellings of one sentence cannot drift apart. Comment-only — no assertion, no fixture
   and no emitted value moves.
-
-- **`outOfScope`/`scannedUnder` were OMITTED, not `[]`, over a policy-scanned tree with no exclusions —
-  collapsing "asked and clear" into "never asked".** MEASURED four-way: candor-java and candor-rust both
-  emit `outOfScope: []` and `scannedUnder: {deny: […]}` whenever a policy is configured and honoured,
-  independent of whether anything was excluded; candor-ts emitted neither key unless `excludedFiles.length`
-  was non-zero, so a clean tree under `deny Exec` produced the SAME document a no-policy scan does — a
-  false "nobody asked" over code that really was asked and answered clear. It failed CLOSED (an absent
-  `scannedUnder` reads as the empty deny set, and no report has a `peeked: true` class to trigger the
-  ⟨0.32⟩/⟨0.33⟩ rules), so no verdict certified wrongly, but it was still a false statement about what was
-  asked — the ⟨0.26⟩ partial-manifest collapse this format exists to prevent. `scan.mjs`'s peek trigger no
-  longer requires `excludedFiles.length`; only the subprocess spawn (nothing to gain from peeking an empty
-  set) stays conditioned on it. No policy, or a policy the engine refuses, still leaves both keys ABSENT; a
-  tree WITH exclusions is byte-identical to before (`cmp`-verified).
-
-- **`candor_whatif` (MCP) and `candor.whatif` (LSP) had ZERO tests for the `ok`-withdrawal `ae70ce4`
-  shipped.** That commit fixed `ok`-withdrawal on all three `whatif` surfaces (CLI, MCP, LSP) for the
-  ⟨0.30⟩ `outOfScope`, ⟨0.32⟩ unread-class and ⟨0.33⟩ cross-policy causes in one change and added no
-  coverage — conformance PART 70 pins the CLI only, and before this the CLI had accumulated all four
-  incompleteness causes across four rungs while MCP and LSP carried none of them, not even the original
-  ⟨0.21⟩ `unanalyzed` one. `test-mcp.mjs` and `test-lsp.mjs` now each pin all three later causes (plus
-  both over-charge controls, both polarities) on a synthetic load/top report fixture reproducing PART
-  70's own shape as raw report mutations — `reportCompleteness`/`mustHedge` (query-core.mjs) read the
-  report's own `excluded`/`outOfScope`/`scannedUnder` keys, so a handwritten report exercises the same
-  consumer path a real peek's output would. The LSP block is new territory, not a duplicate of the
-  existing ⟨0.32⟩ LSP block: that one drives `textDocument/didOpen` and reads `diagnosticsFor`'s
-  disclosure; nothing before this drove `workspace/executeCommand candor.whatif` and read its RESULT
-  document for `ok`/`incomplete`. Falsified against `ae70ce4`'s parent commit on both files (RED on all
-  three cause cells, controls unaffected) and restored (GREEN).
-
-- **⚠ closes the follow-on this section's `.d.ts`-shadow entry filed open: a package whose own `name`
-  collides with a whole-module κ rule had its OWN internal calls charged that rule's effect, for every
-  call shape the shadow-redirect didn't reach.** `declModule` walks up to the nearest `package.json`
-  when a declaration's file isn't in `projectFiles` and isn't under `node_modules/` — exactly a
-  package's own `dist/*.js` + `dist/*.d.ts` — and that walk resolves to the SCANNED package's own name.
-  A whole-module κ rule with a `null` member-regex (`got`, `pg`, `fs-extra`, `execa`, `dotenv`,
-  `winston`, `bcrypt`, … one per §1 effect) then matches unconditionally. MEASURED, byte-identical
-  source with only `package.json`'s `name` changed: `super(x)` into a same-package base class,
-  `new ns.Ctor()`, `obj.method()`, and a bare call whose `.js` sibling isn't in `projectFiles` all read
-  `Net`/`Db`/… under the colliding name and pure under a non-colliding one (`mypkg`); `gaxios` (a
-  verb-scoped rule, no `null` member) never fired, isolating the mechanism to the null-member shape.
-  ROOT CAUSE: a package is treated as an external dependency of itself. FIX attacks the root rather
-  than the four shapes: `isOwnPackageDecl(decl)` asks whether the declaring file is OUR OWN package —
-  `nearestPackageName` on the file, excluding anything under `node_modules/` outright so a genuine
-  INSTALLED dependency of the same name is never suppressed — and gates every κ lookup on it (the
-  (CLASSIFY) arm, the `new`-with-inherited-ctor re-key, the reflective `.call`/`.apply` arm, and the
-  external tagged-template arm). `mod` is left exactly as `declModule` computed it; the existing
-  `crossesPackageBoundary`-keyed κ-ledger already treats the file as ours, so refusing κ an answer is
-  sufficient — no new disclosure, no rewritten module string. KEPT the ⟨0.33.0⟩ `.d.ts`-shadow redirect
-  unchanged: it recovers a REAL resolved effect for the bare-identifier-with-sibling shape (the two solve
-  different problems, fabrication vs. resolution), and this guard runs strictly after it, only where it
-  declined or failed. CONTROLS: a genuine `node_modules` dependency (`got`/`glob`/`execa`) is unmoved,
-  including the pathological case of a package literally NAMED `got` that also depends on the real
-  npm `got` (the dependency call still reads `Net`, the self-collision call no longer does); `mypkg`
-  stays pure; the ⟨0.33.0⟩ `.d.ts`-shadow gains (104 functions, e.g. date-fns's `Clock`, rimraf's
-  `Rand`) are byte-identical on the 120-package corpus that measured them, except `got`/`ioredis`
-  themselves — both real published packages whose own name collides with the Net/Db rule — which lose
-  exactly the fabricated charge (a `Db`/`Net` tag) on every affected function while every other
-  disclosure (`Unknown`, `Rand`, real `Net` from an actual socket call) is untouched.
 
 ## [0.32.1] — 2026-08-25
 
