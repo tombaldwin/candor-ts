@@ -9,6 +9,10 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 ## Unreleased
 
 ## [0.33.0] — 2026-08-26
+
+- **The own-`.d.ts`-shadow fix gains its pinned tests.** The fix landed with its evidence in a
+  scratchpad; these 76 lines put the defect and its controls in `test.mjs` so a refactor cannot
+  silently revert them. Suite: 1589 passed, 0 failed.
 - **⚠ a named ambient `declare function` export whose DECLARED name differs from the dependency's own
   implementation identifier reached total silence — the fourth "neither voice fired" shape, and the most
   common yet.** MEASURED: `node_modules/mkit/index.js` has `function _internalImplName() { return

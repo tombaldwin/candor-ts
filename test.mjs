@@ -13144,6 +13144,82 @@ export function runs(): Buffer { return execSync("ls"); }`,
   }
 }
 
+// ── OWN-`.d.ts`-SHADOW: a same-package CROSS-FILE call must recover its real implementation ────────
+//
+// npm ships `dist/foo.js` beside `dist/foo.d.ts`, and TypeScript types every CROSS-FILE reference to
+// `foo.js` through the co-located `.d.ts` — even one THIS scan (`--allow-js`) is analysing as project
+// source. `declModule` is right to call that `.d.ts` foreign to `projectFiles` (the file walk excludes
+// every `.d.ts` on purpose); `crossesPackageBoundary` is right to call it our own package (not a real
+// external dependency) — but nothing downstream was built for the case those two jointly produce, and
+// the call vanished with no edge and no `Unknown`. MEASURED against got@15.1.0's own published tarball:
+// `deny Rand` on the git-tag SOURCE exits 1 (17 violations, `core.index.Request._beforeError` — fires
+// on essentially every retry path); the IDENTICAL release's COMPILED dist, same `analyzed.count`, exits
+// 0, clean. FALSIFIED: reverting `scan.mjs` to `965a521` (its state immediately before this fix) over
+// the fixture below drops `index.run` from `functions` ENTIRELY — no entry, no `Unknown`, no `calls`,
+// `analyzed.count` unchanged at 4 — restoring the fix brings it back with `inferred: ["Rand"]` and
+// `calls: ["helper.doWork"]`.
+if (blk()) {
+  const d = project({
+    "package.json": `{"name":"shadowkit","version":"1.0.0"}`,
+    "helper.js": `export const doWork = () => Math.random();\n`,
+    "helper.d.ts": `export declare const doWork: () => number;\n`,
+    "index.js": `import { doWork } from './helper.js';
+export function run() { return doWork(); }\n`,
+  });
+  const { report } = scan(d, "--allow-js");
+  check("a cross-file call resolving onto a sibling `.d.ts` recovers the real `.js` implementation, not silence",
+        entry(report, "index.run")?.inferred.includes("Rand"),
+        JSON.stringify(report?.functions));
+  check("…and the edge is real, not a bare direct-effect guess — `calls` names the actual local unit",
+        entry(report, "index.run")?.calls?.includes("helper.doWork"),
+        JSON.stringify(entry(report, "index.run")));
+
+  // CONTROL 1 (over-charge guard, written first): a `.js` with NO sibling `.d.ts` was never broken —
+  // same-file/no-declaration-file resolution always went straight to the real body. Pin it so the new
+  // code's guard (`/\.d\.[cm]?ts$/` on the resolved declaration's file) can never widen to cover this.
+  const dNoDts = project({
+    "package.json": `{"name":"nodtskit","version":"1.0.0"}`,
+    "helper.js": `export const doWork = () => Math.random();\n`,
+    "index.js": `import { doWork } from './helper.js';
+export function run() { return doWork(); }\n`,
+  });
+  const noDts = scan(dNoDts, "--allow-js");
+  check("CONTROL: a `.js` with no sibling `.d.ts` resolves exactly as before (unaffected by this fix)",
+        entry(noDts.report, "index.run")?.inferred.includes("Rand"),
+        JSON.stringify(noDts.report?.functions));
+
+  // CONTROL 2 — the guard's OWN second half: an ordinary `@types/node` call has a `.d.ts` declaration
+  // too, but no sibling `.js` in `projectFiles` (a real dependency ships no implementation this scan
+  // ever opened), so `siblingImplFile` returns null and this fix never engages. This is the control
+  // that matters most — it is what keeps `@types/*`/any uninstalled-package `.d.ts` safe.
+  const dBuiltin = project({
+    "index.js": `import fs from 'node:fs';
+export function run() { return fs.readFileSync('x'); }\n`,
+  });
+  const builtin = scan(dBuiltin, "--allow-js");
+  check("CONTROL: an ordinary node-builtin (`@types/node`) call is untouched — no sibling impl file to redirect to",
+        entry(builtin.report, "index.run")?.inferred.includes("Fs"),
+        JSON.stringify(builtin.report?.functions));
+
+  // CONTROL 3 — TS-SOURCE IS BYTE-LEVEL UNCHANGED. A pure-`.ts` scan never resolves a same-package call
+  // onto a `.d.ts` (TypeScript types it from the `.ts` source directly), so this fix's guard can never
+  // fire here; pinned as a value, not just "no crash", so a future change to the guard's file-extension
+  // test can't silently start diverting TS-source calls through it. Mirrors got's own shape: a `const`
+  // bound to a generic callback-alias type, called across a file boundary.
+  const dTs = project({
+    "helper.ts": `type Returns<T extends (...a: any) => unknown, V> = (...a: Parameters<T>) => V;
+type Fn = (x: number) => number;
+export const doWork: Returns<Fn, number> = (x) => x + Math.random();\n`,
+    "index.ts": `import { doWork } from './helper.js';
+export function run(): number { return doWork(1); }\n`,
+  });
+  const ts = scan(dTs);
+  check("CONTROL: TS-source resolution is unchanged (pinned value, not merely 'unaffected')",
+        entry(ts.report, "helper.doWork")?.inferred?.[0] === "Rand"
+          && JSON.stringify(entry(ts.report, "index.run")?.inferred) === JSON.stringify(["Unknown"]),
+        JSON.stringify(ts.report?.functions));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
