@@ -1883,6 +1883,16 @@ const depChained = () => depReportsRead > 0;
 // serde_json rule the Rust/JVM engines already carry; /code-review found TS missing it). Fed from
 // the envelope's `package` field (works for an all-pure EMPTY report) and from entry hash prefixes.
 const depCoveredPkgs = new Set();
+// ⟨scan-boundary, dynamic re-export⟩ Packages whose OWN report declares a `dynamicReexport` site (see
+// the producer-side `dynamicReexportSites` counter): `Object.keys(impl).forEach(k => exports[k] =
+// impl[k])` and its `Object.defineProperty(exports, k, …)` twin forward names no static matcher can
+// enumerate, so a chained package doing this cannot be trusted the way SPEC §2 rule 3 ordinarily trusts
+// a covered package's silence — the missing name might be exactly one the runtime loop forwards. This is
+// the fifth "neither voice fired" instance (`1d4f648`, filed not fixed): NEVER resolved (minting an alias
+// for a runtime-computed key is a guess), only disclosed, at the one place `disclosureTail` already
+// trusts a covered package's silence. `!stale` guards it below, same discipline as `netClass`/`incomplete`
+// two sections down — an untrusted report's assertions (even an honest-sounding one) are not ours to repeat.
+const dynamicReexportPkgs = new Set();
 // Packages whose ONLY chained report failed the §2.1 version check. Kept OUT of `depCoveredPkgs`, because a
 // report the engine has decided not to trust cannot make a coverage claim on the package's behalf: §2 rule 3
 // turns a report's SILENCE into a purity claim, and §2.1 exists to say this report's assertions are not ours
@@ -2163,6 +2173,12 @@ const corruptDepPkgs = new Set();
       if (corrupt) console.error(`candor-ts: chained dependency report ${f} has ${corruptKeys.length} present-but-unparseable §2 key(s)`
         + ` — granted NO coverage, so calls into it read as INVISIBLE rather than pure (SPEC §2 ⟨0.24⟩): ${corruptKeys.join("; ")}`);
       if (typeof d.package === "string" && d.package) covers.add(d.package);
+      // ⟨scan-boundary, dynamic re-export⟩ a STALE report's OWN assertion of anything, including this
+      // one, is not ours to repeat (§2.1) — a build we do not trust cannot vouch for its own shape either.
+      // Purely ADDITIVE otherwise: it can only widen `disclosureTail`'s Unknown arm, never narrow it, so a
+      // garbled or over-eager value here can never fabricate a purity claim.
+      if (!stale && d.dynamicReexport && typeof d.package === "string" && d.package)
+        dynamicReexportPkgs.add(d.package);
       // NEVER ITERATE AN UNREADABLE VALUE. `d.functions ?? []` walked the CHARACTERS of `functions: "oops"`,
       // and `strs()` is why `inferred: "Fs"` can no longer arrive at the consumer as the effect set
       // `['F','s']` — the `??` idiom only guards null/undefined, and every other wrong type in this format
@@ -2999,6 +3015,52 @@ const nodeName = new WeakMap();  // declaration node -> qualified name
 // not resolve it; resolution is one shared mechanism, checked, not matched.
 const exportAliasCandidates = []; // [{mod, name, ident}] — ident is the reference naming the real decl
 const aliasHashTail = new Map();  // alias qual -> the exported name `unitHash` must use INSTEAD of rec.local
+// ⟨scan-boundary, dynamic re-export⟩ THE FIFTH "neither voice fired" instance (see `dynamicReexportPkgs`
+// at the consumer side; filed, not attempted, at `1d4f648`): `Object.keys(impl).forEach(k => { exports[k]
+// = impl[k]; })` and its `Object.defineProperty(exports, k, …)` twin (tslib/rollup's `__exportStar`
+// generalizes into this when the forwarded name is itself computed) bind an export name to a RUNTIME
+// STRING no static per-statement matcher can read — resolving it would be guessing, not analysis, so
+// unlike `exportAliasCandidates` above this is never resolved into a name. What CAN be established
+// without naming a single one: whether this package performs a dynamic re-export AT ALL. A count, not a
+// boolean, purely for a human reading the report; the consumer-side gate only asks whether it is nonzero.
+let dynamicReexportSites = 0;
+// A WELL-KNOWN SYMBOL key (`Symbol.toStringTag`, `Symbol.iterator`, …) is not a forwarded NAME — it is a
+// fixed, statically-known value the same in every build, and `import { name } from 'pkg'` can never bind
+// to a Symbol-keyed property in the first place (there is no string spelling that reaches it). MEASURED
+// as a false-positive source on the real corpus: `Object.defineProperty(exports, Symbol.toStringTag, {
+// value: "Module" })` is esbuild/Rollup/tsup's own standard ESM-interop stamp, present in a large
+// fraction of published bundled CJS output (`@simple-git/args-pathspec`, `@simple-git/argv-parser`), and
+// carries no forwarding semantics at all — flagging it as a dynamic re-export would mark ordinary bundled
+// packages "dynamic" and disclose Unknown over every one of their calls for no real reason. `Symbol.for(x)`
+// with a non-literal `x` is a genuinely dynamic symbol and is NOT excluded here — only a plain `Symbol.<id>`
+// well-known-symbol access is.
+function isWellKnownSymbolKey(keyArg) {
+  return ts.isPropertyAccessExpression(keyArg) && ts.isIdentifier(keyArg.expression) && keyArg.expression.text === "Symbol";
+}
+// True when `lhs` is `exports[K]` / `module.exports[K]` with K NOT a string literal (and not the
+// well-known-symbol false positive above) — the bracket-alias site above (`cjsExportPropertyName`)
+// already claims the string-literal case (`exports['thing']`, answerable); this claims exactly what that
+// one structurally cannot: a key no static read can name. A non-exports element access (`someObj[k] = v`)
+// is not this pattern and returns false.
+function isDynamicExportsKeyWrite(lhs) {
+  if (!ts.isElementAccessExpression(lhs) || !lhs.argumentExpression) return false;
+  if (ts.isStringLiteralLike(lhs.argumentExpression)) return false;
+  if (isWellKnownSymbolKey(lhs.argumentExpression)) return false;
+  const b = lhs.expression.getText().replace(/\s+/g, "");
+  return b === "exports" || b === "module.exports";
+}
+// The `Object.defineProperty(exports, K, desc)` twin of the above — the descriptor-form alias site
+// (`Object.defineProperty(exports, "thing", {...})`) requires `keyArg` to be a string literal; a
+// non-literal, non-well-known-symbol key targeting `exports`/`module.exports` is the identical
+// dynamic-forwarding shape one call form over.
+function isDynamicExportsDescriptor(call) {
+  if (!ts.isCallExpression(call) || call.expression.getText().replace(/\s+/g, "") !== "Object.defineProperty") return false;
+  if (call.arguments.length < 2) return false;
+  const targetText = call.arguments[0].getText().replace(/\s+/g, "");
+  if (targetText !== "exports" && targetText !== "module.exports") return false;
+  const keyArg = call.arguments[1];
+  return !ts.isStringLiteralLike(keyArg) && !isWellKnownSymbolKey(keyArg);
+}
 // ORM table declarations: `@Entity("user")` on a class maps that class to its table — the JVM's
 // read-the-declarations move (TypeORM tables live in decorators, not SQL strings, so the `tables`
 // surface couldn't fire on the most common TS app shape). LITERAL decorator arg only; a no-arg
@@ -3425,9 +3487,17 @@ for (const sf of sources) {
       const lhs = node.left.getText().replace(/\s+/g, "");
       const rhs = node.right;
       if (lhs === "module.exports" && ts.isObjectLiteralExpression(rhs)) {
-        for (const p of rhs.properties)
+        for (const p of rhs.properties) {
           if (ts.isPropertyAssignment(p) && !ts.isComputedPropertyName(p.name) && exportAliasRef(p.initializer))
             exportAliasCandidates.push({ mod, name: p.name.text ?? p.name.getText(), ident: p.initializer });
+          // ⟨scan-boundary, dynamic re-export⟩ `module.exports = { [k]: impl[k] }` — the same runtime-string
+          // binding as the bracket-write/descriptor forms, one more spelling over: a COMPUTED property name
+          // in the whole-object reassignment itself. A literal-wrapped computed key (`{ ['thing']: fn }`) is
+          // still statically knowable and excluded, same as everywhere else in this pass.
+          else if (ts.isPropertyAssignment(p) && ts.isComputedPropertyName(p.name)
+                   && !ts.isStringLiteralLike(p.name.expression) && !isWellKnownSymbolKey(p.name.expression))
+            dynamicReexportSites += 1;
+        }
       } else {
         const name = cjsExportPropertyName(node.left);
         if (name && exportAliasRef(rhs)) exportAliasCandidates.push({ mod, name, ident: rhs });
@@ -3451,7 +3521,15 @@ for (const sf of sources) {
           if (ref && exportAliasRef(ref)) { exportAliasCandidates.push({ mod, name: keyArg.text, ident: ref }); break; }
         }
       }
+      if (isDynamicExportsDescriptor(node)) dynamicReexportSites += 1;
     }
+    // ⟨scan-boundary, dynamic re-export⟩ `exports[k] = impl[k]` / `module.exports[k] = impl[k]` — the
+    // fifth "neither voice fired" instance. NOT collected into `exportAliasCandidates`: there is no
+    // NAME here to alias, only a runtime string. Counted, so the package-level `dynamicReexport` envelope
+    // field a chained consumer reads is not zero — see `dynamicReexportSites` above for why a count
+    // rather than a bare boolean, and `dynamicReexportPkgs` for what the consumer does with it.
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        && isDynamicExportsKeyWrite(node.left)) dynamicReexportSites += 1;
     const n = localName(node);
     const isCjsExport = _lastCjs; // captured immediately: localName set it for THIS node only
     if (n) {
@@ -4170,6 +4248,21 @@ function disclosureTail(rec, decl, pkg, file) {
   // so the caller read confidently pure. Same three conjuncts, same reason class.
   if (abstraction && depCoveredPkgs.has(pkg) && crossesPackageBoundary(file))
     discloseUnanswerableKey(rec, pkg, abstraction);
+  // ⟨scan-boundary, half 2 — dynamic re-export⟩ THE FIFTH "neither voice fired" instance (`1d4f648`,
+  // filed there rather than fixed). SPEC §2 rule 3 reads a covered package's silence under a key as that
+  // key's purity claim — but a package that ALSO performs a dynamic re-export write somewhere
+  // (`dynamicReexportPkgs`, fed by the producer's `dynamicReexportSites`) forwards names no static
+  // matcher could enumerate, so its silence under THIS particular key is no longer distinguishable from
+  // "forwarded through the runtime loop and never independently examined". Guarded on `!abstraction`
+  // (the arm above already disclosed when there was a real reason) and never resolves a name — minting an
+  // alias for a runtime-computed key would be a guess, exactly what this class exists to refuse. A package
+  // with NO dynamic re-export write is unaffected (`dynamicReexportPkgs` empty), byte-identical to
+  // pre-fix output; a package that dynamically re-exports a genuinely PURE function gains this same
+  // `Unknown`, never a fabricated concrete effect — the honest answer either way.
+  if (!abstraction && depCoveredPkgs.has(pkg) && crossesPackageBoundary(file) && dynamicReexportPkgs.has(pkg)) {
+    rec.direct.add("Unknown");
+    rec.why.add(`reflect:dynamic-reexport:${pkg}`);
+  }
 }
 // Charge `rec` for reaching a resolved EXTERNAL declaration through a DESUGARED site — one that is not a
 // CallExpression, so the (CLASSIFY)/join/ledger arm of the call path never sees it. This is the same
@@ -7311,6 +7404,12 @@ if (partnersUsed.size) {
 // OMITTED when empty — a complete scan stays byte-identical to a pre-rung report — so a MACHINE reading
 // --json sees the incompleteness the stderr warning alone used to hide.
 if (unanalyzedUnits.length) envelope.unanalyzed = unanalyzedUnits.map((u) => ({ path: u.path, reason: u.reason }));
+// ⟨scan-boundary, dynamic re-export⟩ the fifth "neither voice fired" instance's ONLY provenance across
+// the package boundary — see `dynamicReexportSites` for the shapes counted and `dynamicReexportPkgs` for
+// what a chained consumer does with it. OMITTED when zero, the same wire-compatibility rule as every
+// other envelope field on this file: a package with no dynamic re-export write is byte-identical to a
+// pre-this-fix report.
+if (dynamicReexportSites) envelope.dynamicReexport = { count: dynamicReexportSites };
 const cg = {};
 for (const [name, rec] of fns) cg[name] = [...rec.edges].sort();
 // Write ATOMICALLY (temp + rename): a concurrent reader — the MCP server or another `query` while

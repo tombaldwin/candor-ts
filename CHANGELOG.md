@@ -10,6 +10,60 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## [0.33.0] — 2026-08-26
 
+- **⚠ the fifth "neither voice fired" instance — a DYNAMIC re-export loop — is disclosed, not resolved,
+  closing the family `1d4f648` filed rather than fixed.** `Object.keys(impl).forEach(k => { exports[k] =
+  impl[k]; })` binds an export name to a RUNTIME STRING: unlike the four export-alias shapes fixed before
+  it, there is no per-statement match to make — the bound name does not exist until the loop runs, so
+  minting an alias for it would be a guess, not analysis. CONFIRMED that reading by reproducing the exact
+  three-conjunct silence chained (`--dep-inits`): `node_modules/rkit/index.js` copies `{ thing, other }`
+  from an `impl` object onto `exports` via the loop above (`thing` does `fs.writeFileSync`, `other` is
+  pure), `index.d.ts` declares both ambiently; `deny Fs Unknown` on a consumer calling `thing()` read
+  `policy ✓` at exit 0 before this fix — the named join misses (no static assignment ever names `thing`),
+  the covered-package arm correctly declines (SPEC §2 rule 3: a covered report's silence under a key is
+  that key's purity claim), and `unanswerableKey` correctly says a plain ambient function decl is
+  answerable in general. FIXED by disclosure at the one place that trusts a covered package's silence
+  (`disclosureTail`): the producer's own walk now recognizes THREE spellings of "this module performs a
+  dynamic re-export" — `exports[k] = …`/`module.exports[k] = …` (a non-literal element-access key),
+  its `Object.defineProperty(exports, k, …)` descriptor twin (the shape TypeScript's own `__createBinding`
+  helper and date-fns's published `fp.cjs` both use), and the whole-object reassignment's computed-property
+  spelling (`module.exports = { [k]: … }`) — and counts them (`envelope.dynamicReexport.count`, omitted
+  when zero, the same wire-compatibility rule as every other envelope field on this file). NEVER
+  resolves a single name. A chained consumer (`--dep-inits`/`CANDOR_DEPS`/`--workspace` — one loader, so
+  all three inherit the fix at once) reads the count and, only where the existing `unanswerableKey`
+  disclosure is silent AND the package is otherwise covered, discloses `Unknown` with
+  `reflect:dynamic-reexport:<pkg>` — the same `reflect:`/dynamic-key vocabulary `reflect:defineProperty:
+  dynamic-key` already uses for the single-scan runtime-accessor case, reused rather than a new class
+  minted. MEASURED red→green across scan, `gate`, and the live LSP (hover + diagnostics), all reading the
+  same report: before the fix, `deny Fs Unknown` was `policy ✓` at exit 0 and the LSP hover was empty over
+  the real `fs.writeFileSync`; after, the gate fires `[AS-EFF-006]` at exit 1 and the hover/diagnostic both
+  name `reflect:dynamic-reexport:rkit`. OVER-CHARGE CONTROL: the genuinely pure `other` gains the same
+  `Unknown`, never a fabricated `Fs` — disclosure, not a guess at which effect. Quantified across 117
+  installed `node_modules` packages (`corpus1-ts`, including scoped sub-packages) and 14 published npm
+  tarballs (`corpus2-ts`): every package's `functions[]` is BYTE-IDENTICAL to pre-fix output (0 diffs);
+  exactly three packages carry a real dynamic re-export — `@kwsites/file-exists` and `follow-redirects`
+  (the bracket-write form, found in the wild, not synthetic) and date-fns@4.4.0 (736 descriptor-form call
+  sites across its three published CJS barrels — `fp.cjs`, `index.cjs`, `locale.cjs` — each a whole
+  namespace built this way). A FALSE-POSITIVE SOURCE was found and closed before it reached this count:
+  `Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" })` — esbuild/Rollup/tsup's own
+  standard ESM-interop stamp, present in a large fraction of bundled CJS output
+  (`@simple-git/args-pathspec`, `@simple-git/argv-parser` both tripped it)
+  — carries no forwarding semantics at all (a Symbol-keyed property can never be the target of
+  `import { name } from 'pkg'`), so a well-known-symbol key is excluded everywhere this pass looks for a
+  "dynamic" one. Also verified cheaply, per the same commit's note that it was "added" without a check:
+  the bracket-notation alias site `exports['thing'] = REF` DOES resolve correctly (a real `deny Fs`
+  fires chained, exit 1) — it was the string-LITERAL bracket spelling `658e3c0`'s family already covers,
+  not this fix's shape. IS A SIXTH INSTANCE CONSTRUCTIBLE? Checked and answered no, for now: the identical
+  loop written inside a single project (no package boundary — `require('./impl')` with no `.d.ts`) already
+  reads `Unknown[callback:reexp.thing]` today, because an untyped CommonJS `require` result gives the
+  checker nothing to resolve the call ONTO in the first place — the generic unresolved-call disclosure
+  already covers it, independent of this fix. The gap this fix closes is specific to the package
+  boundary, where a `.d.ts` gives the checker a real (if wrong) declaration to call `unanswerableKey`
+  answerable on. Full battery green: lint, 126 unit tests, 1596 behavioral tests (7 new, pinned with
+  their controls), 174 MCP, 101 LSP, 16 watch, probe, fuzz, transitive-recall, self-gate, sensitivity
+  battery (8/8), and the full four-way conformance suite against candor-spec (`conformance/run.sh`,
+  `conformance: OK`, every PART still MATCH) — unaffected, since this rung has no spec clause of its own
+  and no other engine shares this report format; the run is a pure regression check that nothing else moved.
+
 - **`query.mjs`'s `gateLine()` had the same wrong-checkable-claim defect `658e3c0` fixed in the LSP,
   and one variant of it was WORSE than the LSP's.** MEASURED (fixtures: an unread exclusion class beside
   an Exec violation; an unanalyzed file beside an Fs violation): `gateLine()` unconditionally asserted

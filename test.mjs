@@ -13220,6 +13220,106 @@ export function run(): number { return doWork(1); }\n`,
         JSON.stringify(ts.report?.functions));
 }
 
+// ── THE FIFTH "neither voice fired" INSTANCE: a DYNAMIC re-export loop DISCLOSES, never resolves ────
+//
+// `1d4f648` filed this rather than fixing it: `Object.keys(impl).forEach(k => { exports[k] = impl[k]; })`
+// binds an export name to a RUNTIME STRING no static per-statement matcher can read, so — unlike the
+// four export-alias shapes fixed before it — it is never resolved into a name. What CAN be established
+// is that the package performs a dynamic re-export AT ALL; the fix marks every call into it `Unknown`
+// (`reflect:dynamic-reexport:<pkg>`) instead of trusting the covered-package arm's silence (SPEC §2 rule
+// 3), the same three-conjunct silence the first four instances share (named join misses, `depCoveredPkgs`
+// declines, `unanswerableKey` correctly says answerable).
+if (blk()) {
+  const depFiles = {
+    "package.json": `{"name":"rkit","version":"1.0.0","main":"index.js","types":"index.d.ts"}`,
+    "index.d.ts": `export declare function thing(): void;
+export declare function other(): void;\n`,
+    "index.js": `"use strict";
+const fs = require("fs");
+function _thingImpl() { return fs.writeFileSync("/tmp/x", "y"); }
+function _otherImpl() { return 42; }
+const impl = { thing: _thingImpl, other: _otherImpl };
+Object.keys(impl).forEach(function (k) { exports[k] = impl[k]; });\n`,
+  };
+  const depDir = project(depFiles);
+  const { prefix: depPrefix } = scan(depDir, "--allow-js");
+  const depReport = JSON.parse(fs.readFileSync(`${depPrefix}.json`, "utf8"));
+  check("dynamic re-export: the PRODUCER's own report names the pattern, not a fabricated per-name entry",
+        depReport.dynamicReexport?.count === 1 && !depReport.functions.some((e) => e.hash === "rkit#thing"),
+        JSON.stringify(depReport));
+
+  const app = project({
+    "package.json": `{"name":"consumer-app","version":"1.0.0"}`,
+    "src/app.ts": `import { thing, other } from "rkit";
+export function run() { thing(); }
+export function runOther() { other(); }`,
+    "node_modules/rkit/package.json": depFiles["package.json"],
+    "node_modules/rkit/index.d.ts": depFiles["index.d.ts"],
+    "node_modules/rkit/index.js": depFiles["index.js"],
+  });
+  fs.writeFileSync(path.join(app, "deny.policy"), "deny Fs Unknown\n");
+  // BEFORE: total silence — RED. `--dep-inits` chains rkit's own report; a real `fs.writeFileSync`
+  // reachable through `thing()` read `policy ✓` at exit 0 before this fix (measured against `965a521`,
+  // the commit immediately before `1d4f648`'s producer-side alias work this fix builds on).
+  const chained = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--dep-inits",
+                                      "--policy", path.join(app, "deny.policy")], { encoding: "utf8" });
+  check("dynamic re-export: AFTER — the real Fs reachable through the dynamically-forwarded name is caught",
+        chained.status === 1 && /src\.app\.run.*Unknown/.test(chained.stdout),
+        chained.stdout);
+  const crep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  check("…both callers disclose Unknown with the reflect: reason, naming the producer package",
+        entry(crep, "src.app.run")?.unknownWhy?.includes("reflect:dynamic-reexport:rkit")
+        && entry(crep, "src.app.runOther")?.unknownWhy?.includes("reflect:dynamic-reexport:rkit"),
+        JSON.stringify(crep.functions));
+  check("OVER-CHARGE CONTROL: the genuinely PURE re-exported `other` gains Unknown, never a fabricated Fs",
+        !entry(crep, "src.app.runOther")?.inferred.includes("Fs"),
+        JSON.stringify(entry(crep, "src.app.runOther")));
+
+  // CONTROL: a package with NO dynamic re-export write is byte-identical — the envelope field is
+  // additive-only and the disclosureTail arm never fires without it.
+  const cleanDep = project({
+    "package.json": `{"name":"ckit","version":"1.0.0","main":"index.js","types":"index.d.ts"}`,
+    "index.d.ts": `export declare function thing(): void;\n`,
+    "index.js": `"use strict";
+const fs = require("fs");
+exports.thing = function () { return fs.writeFileSync("/tmp/x", "y"); };\n`,
+  });
+  const { report: cleanReport } = scan(cleanDep, "--allow-js");
+  check("CONTROL: an ordinary (non-dynamic) CJS export carries NO `dynamicReexport` key",
+        cleanReport.dynamicReexport === undefined, JSON.stringify(cleanReport.dynamicReexport));
+
+  // CONTROL: the esbuild/Rollup/tsup ESM-interop stamp `Object.defineProperty(exports, Symbol.toStringTag,
+  // { value: "Module" })` is NOT a dynamic re-export — measured as a real false-positive source on
+  // `@simple-git/args-pathspec`'s published bundle before this control existed.
+  const stampDep = project({
+    "package.json": `{"name":"stampkit","version":"1.0.0","main":"index.js","types":"index.d.ts"}`,
+    "index.d.ts": `export declare function thing(): void;\n`,
+    "index.js": `"use strict";
+Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+const fs = require("fs");
+exports.thing = function () { return fs.writeFileSync("/tmp/x", "y"); };\n`,
+  });
+  const { report: stampReport } = scan(stampDep, "--allow-js");
+  check("CONTROL: the Symbol.toStringTag ESM-interop stamp is not mistaken for a dynamic re-export",
+        stampReport.dynamicReexport === undefined, JSON.stringify(stampReport.dynamicReexport));
+
+  // CONTROL: the descriptor-form dynamic re-export (`Object.defineProperty(exports, key, {get(){...}})`,
+  // the shape date-fns's published `fp.cjs` ships at scale) is counted too, not just the bracket write.
+  const descDep = project({
+    "package.json": `{"name":"dkit","version":"1.0.0","main":"index.js","types":"index.d.ts"}`,
+    "index.d.ts": `export declare function thing(): void;\n`,
+    "index.js": `"use strict";
+const fs = require("fs");
+const impl = { thing: function () { return fs.writeFileSync("/tmp/x", "y"); } };
+Object.keys(impl).forEach(function (key) {
+  Object.defineProperty(exports, key, { enumerable: true, get: function () { return impl[key]; } });
+});\n`,
+  });
+  const { report: descReport } = scan(descDep, "--allow-js");
+  check("descriptor-form dynamic re-export is counted the same way as the bracket-write form",
+        descReport.dynamicReexport?.count === 1, JSON.stringify(descReport.dynamicReexport));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
