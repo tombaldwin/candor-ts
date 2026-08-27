@@ -9,6 +9,59 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 ## Unreleased
 
 ## [0.33.0] — 2026-08-26
+- **⚠ a named ambient `declare function` export whose DECLARED name differs from the dependency's own
+  implementation identifier reached total silence — the fourth "neither voice fired" shape, and the most
+  common yet.** MEASURED: `node_modules/mkit/index.js` has `function _internalImplName() { return
+  fs.writeFileSync(...) }; module.exports = { thing: _internalImplName };` beside
+  `index.d.ts`'s `export declare function thing(): void;`; `src/app.ts` does `import { thing } from
+  "mkit"; export function run() { thing(); }` under `deny Fs`. Unchained, this correctly discloses
+  `invisible: ['mkit']`. Chained (`--dep-inits` or `CANDOR_DEPS`) it read `policy ✓` at exit 0 — `gate
+  --report` agreed, and the live LSP published no diagnostic either. ROOT CAUSE: three individually
+  correct checks conjoin into silence. The named join looks up `mkit#thing` (the `.d.ts`'s declared
+  name) in the chained dep's report; the dep's OWN scan hashed the same body under `mkit#_internalImplName`
+  (`unitHash` derives the tail from the producer's LOCAL declaration name, never from any export alias),
+  so the join correctly misses. `depCoveredPkgs.has('mkit')` is true, so the uncurated-blind-package arm
+  correctly declines (SPEC §2 rule 3: a covered report's silence under a key is that key's purity claim).
+  And `unanswerableKey` correctly returns `null` for a plain named ambient `FunctionDeclaration`, because
+  its own invariant says a body could exist under that key in some implementation — which is true in
+  general, just false for THIS declaration, whose only implementation lives under a DIFFERENT name.
+  Considered and rejected: widening `unanswerableKey`'s enumeration (any named-join miss over a chained
+  dep discloses `Unknown`) would flood every function a dep legitimately never exports under that exact
+  spelling; and the §2.2-disagreement idea ("did the report analyse this NAME at all?") is not
+  computable from the wire — `analyzed.digest` is one opaque whole-set FNV-1a fingerprint, not a
+  per-name membership index, so a consumer cannot ask it about `thing` in isolation.
+  FIX resolves at the PRODUCER instead of hedging at the consumer: teach the report-writer to recognize a
+  CJS export-alias — `module.exports = { NAME: identifier }`, `exports.NAME = identifier`, and
+  `module.exports.NAME = identifier`, where the right-hand side is a bare Identifier reference to a
+  declaration this same scan already minted a unit for (resolved through `checker.getSymbolAtLocation`
+  + `getAliasedSymbol`, the same move `5b9cfd5`'s `.d.ts`-shadow redirect uses, so it also threads
+  through a `require()`-based cross-file re-export, e.g. `index.js`'s `module.exports.sync =
+  requiredImpl` aggregating a sibling file's export under a public name) — and mint a SECOND report
+  entry for the SAME unit under the exported name's own hash, sharing every effect-accumulating `Set`
+  with the original so the pass-3 fixpoint computes one answer for both keys. `unitHash` is corrected via
+  a small `aliasHashTail` side-table (the alias shares its rec's `local` field with the original, so
+  `unitHash` needs to know which of the two names it is being asked for). CLASSES ARE EXCLUDED ON
+  PURPOSE: `export class X {}` compiles to a SELF-referential `exports.X = X`, and `X`'s own unit is the
+  synthesized `X.constructor`, not bare `X` — treating the export statement as a rename candidate would
+  mint a spurious SECOND contributor to a hash a `new X()` call already joins correctly (measured against
+  date-fns's `ValueSetter`, caught before it shipped). CONTROLS: a dep report that genuinely lists a
+  function as pure (`pkit`'s `pureThing` alias of a pure `_pureInternal`) stays silent in `functions[]`
+  end-to-end — `analyzed.count` grows to include the alias, `policy ✓` unmoved; unchained scans, and
+  named joins where the declared name already matches the implementation, are untouched (the alias qual
+  equals the original qual and is skipped). Quantified across 14 published npm tarballs (`corpus2-ts`)
+  and 113 installed `node_modules` packages (`corpus1-ts`): 13 and 82 new report entries respectively,
+  every one an honest `Unknown` disclosure or a resolved real effect (never a fabrication), spot-checked
+  including zod's `v4/mini` reserved-word exports (`exports.null`/`void`/`enum`/`catch`/`instanceof` for
+  `_null`/`_void`/`_enum`/`_catch`/`_instanceof`) and get-package-type's `require()`-aggregated
+  `index.js`'s `.sync` re-export of `sync.cjs`'s `getPackageTypeSync`. The three previously-fixed defects
+  (`.d.ts`-shadow, `--dep-inits` call/construct-signature silence, the whole-module-name-collision
+  fabrication) stay fixed, byte-identical against pre-fix output. `gate --report` and the live LSP both
+  follow from the corrected report with no separate fix needed on either route.
+  Separately, lower severity: the LSP's incompleteness disclosure asserted a fixed `gate --report`/CI
+  exit code (2, INCOMPLETE) that is wrong whenever a certain violation ALSO fires elsewhere in the same
+  report — `query.mjs`'s own documented precedence (SPEC §3.1 `7271c69`) has a firing rule dominate a
+  refusal, so the real exit is 1. `discloseIncompleteness` now names whichever is true.
+
 - **⚠ a `.js` entry file's own co-located `.d.ts` shadowed CROSS-FILE calls into it, and the fallback
   was silence — the published npm tarball of a package under-reported against its own source.**
   MEASURED against got@15.1.0: `deny Rand` scanning the git-tag SOURCE (`source/`, `--policy`) exits 1

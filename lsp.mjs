@@ -402,7 +402,14 @@ const zeroRulePolicyWarn = (what) =>
  * same reason ("there is no line to pin it to"); the activity overlay's line-0 diagnostic is not a
  * counter-example, because its record NAMES the edited file and this one names no file in the workspace.
  */
-function discloseIncompleteness(unanalyzed, outOfScope, unread, unaskedRules) {
+// `certainViolation`: SPEC §3.1's precedence (`query.mjs`'s `gate --report`: violation (1) > refusal (2) >
+// incomplete (2)) means a policy violation ELSEWHERE in this same report makes the real exit 1, not the 2
+// this function used to assert unconditionally. Measured: a report with an unread file AND a certain `Fs`
+// violation exits 1 over `gate --report` — the incompleteness is still real and still unjudged, but "exits
+// 2 (INCOMPLETE)" / "CI exits 2 over these bytes" is a wrong, checkable claim in exactly that case. Two
+// fixtures with the identical unread-file cause differ only in whether a violation coexists, and only the
+// violation-free one made this text true.
+function discloseIncompleteness(unanalyzed, outOfScope, unread, unaskedRules, certainViolation) {
   const causes = [];
   // The CLI's order (`unanalyzed` → `outOfScope` → `unread` → `unaskedRules`), so a report tripping two
   // of them reads the same way here as it does in CI. The repairs genuinely differ — a parse to fix, a
@@ -433,15 +440,28 @@ function discloseIncompleteness(unanalyzed, outOfScope, unread, unaskedRules) {
       + `squiggled here — re-run the producing scan under THE SAME policy this editor is applying `
       + `(candor-ts <dir> --policy <file>), not merely under a policy.`);
   if (!causes.length) return;
+  // ⟨lsp-precedence⟩ the exit-code claim is conditional on whether a certain violation ALSO fires: if one
+  // does, Lemma 2 makes it dominate (exit 1), and the incompleteness below is true but not what CI is red
+  // over. See `certainViolation`'s definition above.
+  const exitClaim = certainViolation
+    ? `a certain policy violation ELSEWHERE in this report makes \`gate --report\` over the same bytes exit `
+      + `1 — SPEC §3.1's precedence has a firing rule dominate a refusal, so CI is red on THAT, not on this. `
+      + `The incompleteness below is still real and still unjudged; it is just not what the exit code names`
+    : `\`gate --report\` over the same bytes exits 2 (INCOMPLETE), so the squiggles in this editor are NOT `
+      + `the whole verdict`;
+  const briefClaim = certainViolation
+    ? `candor gate: a certain violation elsewhere in this report already makes CI exit 1 over these bytes — `
+      + `but this report ALSO has unjudged code (see the candor log); fixing the violation alone will not `
+      + `make it complete.`
+    : `candor gate: INCOMPLETE — this report cannot support a green verdict (CI exits 2 over these bytes). `
+      + `See the candor log for what went unjudged and how to fix it.`;
   warnLoudOnce(
-    `candor-lsp: this report cannot support a GREEN gate — \`gate --report\` over the same bytes exits 2 `
-    + `(INCOMPLETE), so the squiggles in this editor are NOT the whole verdict:\n`
+    `candor-lsp: this report cannot support a GREEN gate — ${exitClaim}:\n`
     + causes.map((c) => `    · ${c}`).join("\n")
     + `\n  NO diagnostic can be drawn for any of the above: the code it names is not in the report, so it `
     + `has no line in this editor to sit on. Its ABSENCE from the squiggles is the incompleteness itself, `
     + `not an all-clear.`,
-    `candor gate: INCOMPLETE — this report cannot support a green verdict (CI exits 2 over these bytes). `
-    + `See the candor log for what went unjudged and how to fix it.`);
+    briefClaim);
 }
 
 function diagnosticsFor(docPath) {
@@ -490,8 +510,20 @@ function diagnosticsFor(docPath) {
   // condition is applied HERE, to the value, for the reason the CLI states at its own call site: one
   // list, one condition, so two consumers of it cannot disagree about a run.
   const dcomp = Q.reportCompleteness(reportPrefix, dpol.deny);
+  // Cheap, side-effect-free pre-check for `discloseIncompleteness`'s exit-code wording (see its own
+  // comment): does THIS report already carry a certain violation, over the WHOLE report the way
+  // `gate --report` reads it, not just this one document? A redundant pass over an already-loaded report
+  // — the real one runs again below, where its `dunevaluated`/`violations` are also needed for the
+  // diagnostics themselves and for OTHER `warnOnce` lines whose relative order this must not disturb.
+  const dwp0 = wholePolicyUnanswerable(dpol, "the editor's report route");
+  const dunits0 = reportUnits(fns);
+  const dnet0 = reportNetClasses(fns, { authoritative: true, units: dunits0 });
+  const { withhold: dwithhold0 } = unanswerableScoped(dpol, fns,
+    resolveReasonClasses(fns, Q.loadCallgraph(reportPrefix), dunits0), dnet0, dunits0);
+  const certainViolation = evaluatePolicy(dwp0.answerable, fns, Q.loadCallgraph(reportPrefix),
+    new Map(), new Set(), dnet0, dwithhold0, dunits0).length > 0;
   discloseIncompleteness(dcomp.unanalyzed ?? [], dcomp.outOfScope ?? [],
-                         dpol.deny.length ? (dcomp.unread ?? []) : [], dcomp.unaskedRules ?? []);
+                         dpol.deny.length ? (dcomp.unread ?? []) : [], dcomp.unaskedRules ?? [], certainViolation);
   // ⟨0.24⟩ THE ANSWERABILITY WITHHOLD, which this surface ran WITHOUT — `evaluatePolicy` was called with no
   // `withhold` predicate and the DEFAULT netClass mode, so both directions of the §3.1 harm were live in the
   // editor. Measured against the CLI on one report and one policy: `deny Unknown[reflect]` drew NO squiggle

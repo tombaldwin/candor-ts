@@ -2971,6 +2971,19 @@ const fns = new Map();           // qualified name -> { direct, edges, hosts, ta
 const bodylessDecls = new Map(); // qual -> {node, mod, abstract, owner, member}
 const unlistedSeen = new Map();  // the κ-coverage ledger: unlisted npm package -> call-site count
 const nodeName = new WeakMap();  // declaration node -> qualified name
+// ⟨scan-boundary, export-alias⟩ `module.exports = { thing: _internalImplName }` / `exports.thing =
+// _internalImplName` — a RENAMED re-export whose RHS is a bare IDENTIFIER naming an EXISTING declaration,
+// not an inline function. `localName` mints a CJS unit for `module.exports = function(){}` and
+// `exports.foo = function(){}` (the inline-literal shapes), but an identifier reference names no NEW
+// node to hang a unit off — the referenced function already has its own unit, under its OWN name. Without
+// this, the package's report keys the effect under `_internalImplName` only; a consumer whose `.d.ts`
+// types the import as `thing` (the ordinary case: a hand- or tool-written `.d.ts` has no static
+// connection to the `.js` runtime shape at all) joins a key the report never had, reads SILENT-PURE, and
+// a real effect vanishes at the package boundary. Candidates are collected here (during the same walk
+// that mints every unit) and resolved in ONE place — see below — after every source file's units exist,
+// because the referenced declaration may sit in a later file or a later line of the same one.
+const exportAliasCandidates = []; // [{mod, name, ident}] — ident is the Identifier naming the real decl
+const aliasHashTail = new Map();  // alias qual -> the exported name `unitHash` must use INSTEAD of rec.local
 // ORM table declarations: `@Entity("user")` on a class maps that class to its table — the JVM's
 // read-the-declarations move (TypeORM tables live in decorators, not SQL strings, so the `tables`
 // surface couldn't fire on the most common TS app shape). LITERAL decorator arg only; a no-arg
@@ -3345,6 +3358,23 @@ for (const sf of sources) {
       }
       nodeName.set(node, ctorQual);
     }
+    // CJS EXPORT-ALIAS candidate (see `exportAliasCandidates` above): `module.exports = { thing:
+    // _internalImplName }` / `exports.thing = _internalImplName` / `module.exports.thing =
+    // _internalImplName`, where the RHS is a bare Identifier rather than the inline-function shapes
+    // `localName` below already handles. Recorded, not resolved, here — resolution needs every file's
+    // units minted first.
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      const lhs = node.left.getText().replace(/\s+/g, "");
+      const rhs = node.right;
+      if (lhs === "module.exports" && ts.isObjectLiteralExpression(rhs)) {
+        for (const p of rhs.properties)
+          if (ts.isPropertyAssignment(p) && !ts.isComputedPropertyName(p.name) && ts.isIdentifier(p.initializer))
+            exportAliasCandidates.push({ mod, name: p.name.text ?? p.name.getText(), ident: p.initializer });
+      } else {
+        const m = lhs.match(/^(?:module\.)?exports\.([A-Za-z_$][\w$]*)$/);
+        if (m && ts.isIdentifier(rhs)) exportAliasCandidates.push({ mod, name: m[1], ident: rhs });
+      }
+    }
     const n = localName(node);
     const isCjsExport = _lastCjs; // captured immediately: localName set it for THIS node only
     if (n) {
@@ -3412,6 +3442,43 @@ for (const sf of sources) {
     }
     ts.forEachChild(node, collect);
   })(sf);
+}
+
+// Resolve the CJS export-alias candidates collected above, now that every source file's units exist.
+// `ident` names a value at its use site; follow it through an import alias (the got/`.d.ts`-shadow fix's
+// own move) to the declaration it actually names, and only act when that declaration is a unit THIS scan
+// already minted (`nodeName.has`) — an identifier that resolves to nothing local, to an ambient/foreign
+// declaration, or to more than one candidate declaration (never guess) adds nothing, and the existing
+// disclosure ladder (blind / unanswerableKey) keeps whatever it already said about the miss. A name that
+// collides with an EXISTING, DIFFERENT unit is skipped rather than overwritten — this pass only ADDS a key
+// a real declaration is missing, never reassigns one that already means something else. The alias shares
+// the SAME record as the original (not a copy): every Set it carries (`direct`, `edges`, `hosts`, …) is
+// the identical object, so the pass-3 fixpoint below — driven by iterating `fns` — computes the identical
+// effect closure for both names with no separate bookkeeping, and the ONE place that would otherwise
+// diverge (`unitHash`, keyed off `rec.local`) is corrected via `aliasHashTail` so the alias's report entry
+// carries the ALIAS's own hash, not the original's.
+//
+// CLASSES ARE EXCLUDED ON PURPOSE. `export class Setter {}` compiles to `class Setter {} exports.Setter =
+// Setter;` — a SELF-referential CJS export, not a rename — and the identifier resolves to the
+// ClassDeclaration, whose OWN unit is the SYNTHESIZED CONSTRUCTOR (`nodeName` keys it under
+// `mod.Setter.constructor`, never bare `mod.Setter`; that IS the hash tail an external `new Setter()`
+// already joins via `chargeExternalDecl`'s `tailOverride`). Treating the export statement as a candidate
+// would build `aliasQual = mod.Setter` — DIFFERENT from the ctor's own qual — and mint a SPURIOUS second
+// hash for it. Measured against date-fns's compiled `fp/cdn.js` (a duplicated bundle) and
+// `parse/_lib/Setter.js`: two UNRELATED classes both named `ValueSetter` already share the bare-name hash
+// `date-fns#ValueSetter` (a pre-existing collision this fix must not add a THIRD contributor to), and
+// aliasing the class production would have done exactly that.
+for (const { mod, name, ident } of exportAliasCandidates) {
+  let sym = checker.getSymbolAtLocation(ident);
+  if (sym && sym.flags & ts.SymbolFlags.Alias) { try { sym = checker.getAliasedSymbol(sym); } catch { sym = undefined; } }
+  const decl = (sym?.declarations ?? []).find((d) => nodeName.has(d) && !ts.isClassDeclaration(d));
+  if (!decl) continue;
+  const qual = nodeName.get(decl);
+  const rec = fns.get(qual);
+  const aliasQual = `${mod}.${name}`;
+  if (!rec || aliasQual === qual || fns.has(aliasQual)) continue;
+  fns.set(aliasQual, rec);
+  aliasHashTail.set(aliasQual, name);
 }
 
 // Class-CHA universe (the override half of the Rust engine's local-trait / bounded-CHA move): a
@@ -6588,7 +6655,10 @@ for (const e of netPartnerErrs) console.error(`candor-ts: ${e.why} — ${e.raw}`
 // name this scan has no record of, and empty is OMITTED from the row rather than guessed at.
 const unitHash = (name) => {
   const rec = fns.get(name);
-  return rec ? `${pkgName}#${rec.local}` : "";
+  // An export-alias entry (see `exportAliasCandidates`) SHARES its rec with the original declaration, so
+  // `rec.local` still names the ORIGINAL — `aliasHashTail` carries the alias's own exported name, the tail
+  // its `.d.ts` and a consumer's join actually use.
+  return rec ? `${pkgName}#${aliasHashTail.get(name) ?? rec.local}` : "";
 };
 const functions = [];
 for (const [name, rec] of fns) {
