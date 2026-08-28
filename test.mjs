@@ -9070,9 +9070,17 @@ if (blk()) {
   const w = cli("where", "Fs", "--report", "--json");
   check("⟨0.28⟩ query: `--report --json` is '--report was given no value' (exit 2), never a report named `--json`",
         w.status === 2 && /--report was given no value/.test(w.stderr), w.stderr.slice(0, 200));
+  // ⟨0.34⟩ SUPERSEDES this row's original diagnostic. Before ⟨0.34⟩, `where` silently threaded `--policy`
+  // through parseCanonical like every verb (only DISCARDING the parsed value), so the interesting failure
+  // to pin was the "given no value" misdiagnosis when the next token was flag-shaped. ⟨0.34⟩ made `--policy`
+  // an outright usage error on `where` (BACKLOG "--policy accept-and-drop is THREE engines, not one") —
+  // fired BEFORE parseCanonical ever looks at what follows, the same precedence `gains` already used for
+  // its own "not applicable here" refusal. So `--json` right behind `--policy` no longer matters: the verb
+  // rejects `--policy` outright, and the "given no value" mechanism stays covered by the `gate` row above
+  // (a verb that DOES thread `--policy`, unaffected by this rung).
   const p2 = cli("where", "Fs", "--report", R, "--policy", "--json");
-  check("⟨0.28⟩ query: `--policy --json` on a NON-policy verb is exit 2 — it was consumed-and-DISCARDED at exit 0, a silently different command",
-        p2.status === 2 && /--policy was given no value/.test(p2.stderr), `exit=${p2.status} ${p2.stderr.slice(0, 200)}`);
+  check("⟨0.34⟩ query: `--policy` on a NON-policy verb (`where`) is exit 2 regardless of what follows it — a descriptive query has no policy-relative verdict, so this fires before any value-shape check",
+        p2.status === 2 && /unknown flag '--policy'/.test(p2.stderr) && /`where`/.test(p2.stderr), `exit=${p2.status} ${p2.stderr.slice(0, 200)}`);
   const c = cli("blindspots", "--report", R, "--class", "--json");
   check("⟨0.28⟩ query: `--class --json` is '--class was given no value' (exit 2), never an unknown-class diagnosis of a flag",
         c.status === 2 && /--class was given no value/.test(c.stderr), c.stderr.slice(0, 200));
@@ -9084,6 +9092,51 @@ if (blk()) {
         okGate.status === 0 && okv?.ok === true && Array.isArray(okv?.violations), okGate.stdout.slice(0, 200));
   check("⟨0.28⟩ boundary: a value-shaped `--report <file> --json` still answers (exit 0)",
         cli("where", "Fs", "--report", R, "--json").status === 0);
+}
+
+// ── (e3) ⟨0.34⟩ BACKLOG "`--policy` accept-and-drop is THREE engines, not one" ──────────────────────
+// One row per affected verb: SPEC §3.1's pinned JSON shape for each carries no policy-derived field
+// (checked individually, not assumed — including `blindspots`/`containment`), so `--policy` is now a
+// usage error (exit 2) naming the verb, never a silently-dropped flag. Mirrors candor-java `37c9b10`.
+// The report fixture's CONTENT does not matter here — `DESCRIPTIVE_NO_POLICY` fires before the switch on
+// `cmd`, before any report is even resolved, so a row failing for the wrong reason (a missing/invalid
+// positional) would still show up as a status/message mismatch below, not a false pass.
+if (blk()) {
+  const d = handReport({
+    "r.json": { candor: { version: "handwritten", spec: "0.34" }, package: "app", analyzed: { count: 1, digest: "0" },
+      functions: [{ fn: "app.f", inferred: ["Net"], direct: ["Net"], hosts: ["x.example"], netClass: ["unknown-host"] }] },
+    "ok.pol": "deny Fs\n",
+  });
+  const R = path.join(d, "r.json"), P = path.join(d, "ok.pol");
+  const cli = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), ...a], { encoding: "utf8" });
+  // [verb, verb-positionals, useReportFlag] — `diff` takes two positional LOCATORS instead of --report.
+  const rows = [
+    ["show", ["app.f"], true], ["where", ["Net"], true], ["callers", ["app.f"], true],
+    ["map", [], true], ["containment", [], true], ["reachable", [], true],
+    ["impact", ["app.f"], true], ["blindspots", [], true], ["tour", [], true],
+    ["path", ["app.f", "Net"], true], ["diff", [R, R], false],
+  ];
+  for (const [verb, vargs, useReportFlag] of rows) {
+    const withPolicy = [verb, ...vargs, ...(useReportFlag ? ["--report", R] : []), "--policy", P, "--json"];
+    const r = cli(...withPolicy);
+    check(`⟨0.34⟩ ${verb}: --policy is a usage error (exit 2) naming the verb and the policy-relative alternatives, never a silent drop`,
+          r.status === 2 && r.stderr.includes(`\`${verb}\``) && /no policy-relative verdict/.test(r.stderr)
+            && /gate/.test(r.stderr) && /whatif/.test(r.stderr),
+          `exit=${r.status} ${r.stderr.slice(0, 220)}`);
+    // CONTROL: the identical argv with `--policy <file>` removed must NOT be this usage error — the verb
+    // still runs (whatever its own arity/report checks decide), so the row above is failing on `--policy`
+    // specifically, not on the fixture shape.
+    const withoutPolicy = [verb, ...vargs, ...(useReportFlag ? ["--report", R] : [])];
+    const r2 = cli(...withoutPolicy);
+    check(`⟨0.34⟩ CONTROL: ${verb} without --policy never hits the DESCRIPTIVE_NO_POLICY message (proves the row above keys on --policy, not the fixture)`,
+          !/no policy-relative verdict/.test(r2.stderr), `exit=${r2.status} ${r2.stderr.slice(0, 220)}`);
+  }
+  // `gains` keeps its OWN pre-existing, differently-worded refusal (diff-specific: names `deny <E> gained`
+  // and `--strict`) — confirm the shared eleven-verb message did not silently replace it.
+  const gr = cli("gains", R, R, "--policy", P, "--json");
+  check("⟨0.34⟩ CONTROL: `gains` --policy refusal keeps its OWN message (AS-EFF-005/--strict), not the shared DESCRIPTIVE_NO_POLICY wording",
+        gr.status === 2 && /gains is a diff view/.test(gr.stderr) && !/no policy-relative verdict/.test(gr.stderr),
+        gr.stderr.slice(0, 200));
 }
 
 // ── (f) THE ⟨0.15⟩ COVERAGE ADVISORY rides the verdict, off the ENVELOPE ───────────────────────────

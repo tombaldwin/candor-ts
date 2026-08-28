@@ -8,6 +8,51 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **`--policy` is now a usage error (exit 2) on eleven descriptive/comparative verbs that never honoured
+  it: `show`/`where`/`callers`/`map`/`diff`/`containment`/`reachable`/`path`/`impact`/`blindspots`/`tour`.**
+  BACKLOG "`--policy` accept-and-drop is THREE engines, not one" (candor-java `37c9b10` is the reference
+  fix; this is the ts port). `parseCanonical` accepted `--policy <file>` for every verb — the §3.3.1
+  grammar line requires that — but only STORED it into `policyFile` for a verb invoked with
+  `{policy: true}`; these eleven parsed it and then never read the variable again. Verified at HEAD
+  2026-08-28 against a real scan: every one of them produced BYTE-IDENTICAL output with and without
+  `--policy`, no diagnostic either way — the user passes a policy, gets an answer computed WITHOUT it,
+  and nothing discloses the difference (the [[candor-scan-guards]] config-disclosure class inverted: there
+  a key was reported ignored WHILE honoured; here a flag is accepted WHILE dropped). None of SPEC §3.1's
+  pinned JSON shapes for these eleven carries a policy-derived field (checked each one, not assumed —
+  including `blindspots`/`containment`, which read as though they might and do not), so there is nothing
+  for `--policy` to do here; this is the same shape `gains` already carried and already refused with its
+  own tailored message. One shared check (`DESCRIPTIVE_NO_POLICY` in `query.mjs`, fired before the switch
+  on `cmd`, before any report resolution/loading) applies `gains`' ⟨0.18⟩ rule ("a not-applicable flag is
+  an exit-2 error, never a silent swallow") to its ten siblings, naming `gate`/`whatif`/`fix`/`fix-gate`/
+  `unverified` as the policy-relative alternatives. candor-ts has no `rewire` verb, so java's twelfth
+  member of that set does not exist here. **Controls, falsified against the pre-fix binary**: every verb
+  that already threads `--policy` (`gate`/`whatif`/`fix`/`fix-gate`/`unverified`/`gains`) is byte-identical
+  pre- and post-fix, WITH `--policy` present; every one of the eleven newly-rejecting verbs is
+  byte-identical to the pre-fix binary when `--policy` is ABSENT. `CANDOR_POLICY` (env) and a checked-in
+  `.candor/config` `policy` key stay INERT on all eleven, same as they already were on `gains` — an
+  existing spec-sanctioned gap, not a new inconsistency this fix introduces.
+  **Same surface, MCP**: `candor_show`/`candor_where`/`candor_callers`/`candor_map`/`candor_diff`/
+  `candor_containment`/`candor_reachable`/`candor_path`/`candor_impact`/`candor_blindspots` never declared
+  a `policy` property in their tool schemas and never read `args.policy` — a caller who reasons "the
+  sibling tools (`candor_whatif`/`candor_fix`/`candor_gate`/`candor_unverified`) take `policy`, this one
+  probably does too" hits the identical hazard the CLI had. Measured the same way: `candor_where`/
+  `candor_show` returned byte-identical results with and without a `policy` argument. Also found on this
+  sweep and fixed alongside it: **`candor_gains` had the same gap on this surface** — unlike the CLI's
+  `gains`, which has always refused `--policy`, the MCP tool never did. The `tools/call` dispatcher now
+  refuses any `policy` argument for a tool whose OWN schema does not declare `policy` as a property —
+  derived from each tool's schema rather than a maintained name list, so a future tool that legitimately
+  wants `policy` needs no entry here; it lists `policy` among its own properties and reads it, and the
+  check gets out of its way. **LSP has no equivalent gap**: its only two `workspace/executeCommand`
+  commands (`candor.whatif`, `candor.fix`) take no per-call `policy` argument at all — both resolve the
+  live discovered policy (`CANDOR_POLICY` / `.candor/config`) server-side, the same source the standing
+  diagnostics use, so there is no descriptive-verb command surface on this route to have the bug in the
+  first place. One pre-existing test (`test.mjs`, the ⟨0.28⟩ "given no value" battery) asserted that
+  `where Fs --report R --policy --json` diagnoses "--policy was given no value" — true before this fix,
+  since `where` still threaded `--policy` into shape-checking; superseded now that `where` rejects
+  `--policy` outright before any value is inspected (the same precedence `gains` already used), so the row
+  was updated to assert the new, more specific ⟨0.34⟩ diagnostic. The "given no value" mechanism itself
+  stays covered by the neighbouring `gate` row, unaffected by this rung.
+
 - **⟨0.34⟩ ITEM 1: the ⟨0.33⟩ cross-policy remedy now names its ACTUAL cause — message-only, verdict and
   `--gate-json`/`whatif --json` unchanged.** `gate --report` and the LSP's live diagnostics (which also
   drive `candor.whatif`) name a report whose peek was bounded by a deny set narrower than the policy in

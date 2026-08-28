@@ -839,6 +839,22 @@ function handle(msg) {
       const missing = (t.schema.required || []).filter((k) => args[k] === undefined || args[k] === "");
       if (missing.length)
         return result(id, { content: [{ type: "text", text: `candor: missing required argument(s): ${missing.join(", ")}` }], isError: true });
+      // ⟨0.34⟩ BACKLOG "`--policy` accept-and-drop is THREE engines, not one" — the CLI half of this fix
+      // (query.mjs, DESCRIPTIVE_NO_POLICY) closes a grammar-level promise: `--policy <file>` is a token
+      // the CLI parser accepts for EVERY verb, so silently dropping it on a descriptive one breaks that
+      // promise. This tool surface makes no such blanket promise (each tool's OWN schema is what a caller
+      // reads to learn its inputs) — but `candor_where`/`candor_show`/… never DECLARED a `policy`
+      // property and their `run` never reads `args.policy`, so a caller who reasons "the sibling tools
+      // (`candor_whatif`/`candor_fix`/`candor_gate`/`candor_unverified`) take `policy`, this one probably
+      // does too" gets the identical hazard: a policy is passed, an answer comes back computed WITHOUT
+      // it, and nothing discloses the difference. MEASURED 2026-08-28: `candor_where`/`candor_show` (this
+      // fix's CLI siblings) AND `candor_gains` (which the CLI already protects — `37c9b10`'s pattern —
+      // but this surface never did) all returned BYTE-IDENTICAL results with and without a `policy`
+      // argument. Derived from the SCHEMA rather than a maintained name list, so a future tool needs no
+      // entry here: if it wants `policy` to do something, it lists `policy` among its own properties and
+      // reads `args.policy`, and this check gets out of its way for free.
+      if (args.policy !== undefined && !("policy" in (t.schema.properties || {})))
+        return result(id, { content: [{ type: "text", text: `candor: ${params.name} has no policy-relative verdict — its schema declares no \`policy\` property, and it never reads one; apply a policy to an existing report with \`candor_gate\`, or use \`candor_whatif\`/\`candor_fix\`/\`candor_unverified\` for a policy-relative pre-edit check.` }], isError: true });
       // A log-only tool (candor_activity) needs no report — resolving one would wrongly demand a
       // scan before the gate's own activity can be read.
       const prefix = t.noReport ? null : resolvePrefix(args);

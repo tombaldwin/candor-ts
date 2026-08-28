@@ -1387,6 +1387,33 @@ See https://github.com/tombaldwin/candor`);
 }
 
 const [, , cmd, ...args] = process.argv;
+
+// ⟨0.34⟩ BACKLOG "`--policy` accept-and-drop is THREE engines, not one": `show`/`where`/`callers`/`map`/
+// `diff`/`containment`/`reachable`/`path`/`impact`/`blindspots`/`tour` are purely descriptive — each was
+// checked individually against SPEC §3.1's PINNED JSON shapes and NONE carries a policy-derived field
+// (including `blindspots`/`containment`, which read as though they might). `parseCanonical` (below)
+// accepts `--policy <file>` for EVERY verb — the §3.3.1 grammar line requires that — but only STORES it
+// into `policyFile` for a verb called with `{policy: true}`; these eleven parsed it and then never read
+// the variable again. Verified at HEAD 2026-08-28: every one of them produced BYTE-IDENTICAL output with
+// and without `--policy`, no diagnostic either way — the user passes a policy, gets an answer computed
+// WITHOUT it, and nothing discloses the difference (the [[candor-scan-guards]] config-disclosure class
+// inverted: there a key was reported ignored WHILE honoured; here a flag is accepted WHILE dropped).
+// `gains` (see its own case, below) already carries the identical shape — a report-reading verb with no
+// policy hook — and already rejects `--policy` with its own tailored message; this applies that same
+// ⟨0.18⟩ rule ("a not-applicable flag is an exit-2 error, never a silent swallow") to its ten siblings via
+// ONE shared check, the same move candor-java made for its twelve at `37c9b10` (candor-ts has no `rewire`
+// verb, so java's twelfth member of that set does not exist here to fix). FIRST, before any report
+// resolution/loading — a usage error should not pay for work it discards.
+const DESCRIPTIVE_NO_POLICY = new Set(["show", "where", "callers", "map", "diff", "containment",
+  "reachable", "path", "impact", "blindspots", "tour"]);
+if (DESCRIPTIVE_NO_POLICY.has(cmd) && args.includes("--policy")) {
+  console.error(`candor-ts-query ${cmd}: unknown flag '--policy' — \`${cmd}\` is a descriptive query with `
+    + `no policy-relative verdict (its SPEC §3.1 JSON shape carries no policy-derived field); apply a `
+    + `policy to an existing report with \`candor-ts-query gate --report <locator> --policy <file>\`, or `
+    + `use \`whatif\`/\`fix\`/\`fix-gate\`/\`unverified\` for a policy-relative pre-edit check.`);
+  process.exit(2);
+}
+
 switch (cmd) {
   case "--agents":
   case "agents":
@@ -1900,6 +1927,9 @@ switch (cmd) {
     // which for gains would SILENTLY drop it and exit 0 — a CI author who reaches for `--policy` to gate a
     // supply-chain diff ships a gate that never fires. Reject it loud and point at the real gate. `--strict`
     // (below) fails on ANY gained effect; the effect-SPECIFIC gate is a `deny <E> gained` scan policy.
+    // ⟨0.34⟩ this is the ORIGINAL of the shape `DESCRIPTIVE_NO_POLICY` (above the switch) generalises to
+    // ten siblings — kept as its own check rather than folded in because its message is diff-specific
+    // (names `deny <E> gained` and `--strict`, neither of which applies to a plain report query).
     if (args.includes("--policy")) { console.error("candor-ts-query gains: unknown flag '--policy' — gains is a diff view; to FAIL CI on a newly-gained effect gate at scan time with a `deny <E> gained` policy (AS-EFF-005), or use `--strict` to fail on ANY gain\n  known flags: --json, --strict"); process.exit(2); }
     const { positionals, strict } = parseCanonical(args, { strict: true });
     if (positionals.length < 2) { console.error("usage: candor-ts-query gains <current> <baseline> [--json] [--strict]"); process.exit(2); }

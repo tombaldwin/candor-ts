@@ -1484,6 +1484,52 @@ export function top(): void { load(); }
   fs.rmSync(WI, { recursive: true, force: true });
 }
 
+// ── ⟨0.34⟩ BACKLOG "`--policy` accept-and-drop is THREE engines, not one" — the MCP surface ─────────
+// None of these ten tools' schemas declare a `policy` property and none reads `args.policy`, so a
+// caller passing one (reasoning from the sibling tools that DO take `policy`) got it silently ignored.
+// `candor_gains` is included too: unlike the CLI `gains`, which has ALWAYS refused `--policy`, this MCP
+// tool never did — found on this sweep, fixed alongside it. Uses the fixture report `P` (leaf/mid/handler)
+// already set up above; the CONTENT does not matter, since the dispatcher's schema check fires before
+// any tool's own `run`.
+{
+  const toolArgs = {
+    candor_show: { fn: "leaf" }, candor_where: { effect: "Net" }, candor_callers: { fn: "leaf" },
+    candor_map: {}, candor_containment: {}, candor_reachable: {}, candor_path: { fn: "handler", effect: "Net" },
+    candor_impact: { fn: "leaf" }, candor_blindspots: {}, candor_diff: { baseline: P }, candor_gains: { baseline: P },
+  };
+  const names = Object.keys(toolArgs);
+  const reqs = names.map((name, k) => ({ jsonrpc: "2.0", id: k + 1, method: "tools/call",
+    params: { name, arguments: { ...toolArgs[name], policy: "/nonexistent.pol" } } }));
+  const rs = await mcpSession(reqs);
+  for (const [k, name] of names.entries()) {
+    const r = rs.find((x) => x.id === k + 1);
+    const text = r.result?.content?.[0]?.text ?? "";
+    ok(`⟨0.34⟩ MCP ${name}: an undeclared \`policy\` argument is a tool-level error, never silently ignored`,
+       r.result?.isError === true && text.includes(name) && /no policy-relative verdict/.test(text)
+         && /schema declares no `policy`/.test(text) && !text.includes("/nonexistent.pol"),
+       JSON.stringify(r));
+  }
+  // CONTROL: the identical calls WITHOUT `policy` must answer normally (not this error) — proves the
+  // row above keys on the `policy` argument, not on some other property of the call.
+  const reqs2 = names.map((name, k) => ({ jsonrpc: "2.0", id: k + 1, method: "tools/call",
+    params: { name, arguments: toolArgs[name] } }));
+  const rs2 = await mcpSession(reqs2);
+  for (const [k, name] of names.entries()) {
+    const r = rs2.find((x) => x.id === k + 1);
+    const text = r.result?.content?.[0]?.text ?? "";
+    ok(`⟨0.34⟩ MCP CONTROL: ${name} without \`policy\` never hits the schema-driven refusal`,
+       !/no policy-relative verdict/.test(text), JSON.stringify(r));
+  }
+  // CONTROL: a tool that DOES declare `policy` (candor_whatif) is unaffected by this dispatcher check —
+  // an unreadable/missing policy path still fails the way it always has (its OWN confined-read error),
+  // never the new "no policy-relative verdict" message.
+  const wiUnreadable = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: { name: "candor_whatif", arguments: { fn: "leaf", effect: "Net", policy: "/nonexistent.pol" } } }]);
+  const wiText = wiUnreadable[0].result?.content?.[0]?.text ?? "";
+  ok("⟨0.34⟩ MCP CONTROL: candor_whatif (a tool whose schema DOES declare `policy`) keeps its own unreadable-path error, unaffected by the new dispatcher check",
+     wiUnreadable[0].result?.isError === true && !/no policy-relative verdict/.test(wiText), wiText);
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 // KEEP THE EVIDENCE ON FAILURE. A failing row prints the path to its fixture tree, and the sweep
 // would delete it on the way out — at exactly the moment someone needs to look. scratch.mjs has
