@@ -3977,12 +3977,53 @@ function staticBlockUnit(node) {
   }
   return qual;
 }
+// ⟨R64⟩ The synthesized unit for a raw effect/closure/call embedded DIRECTLY in a decorator's own
+// ARGUMENT DATA (`@Decorate(fs.readFileSync(...))`, `@Factory({ init: () => { fs.readFileSync(...) } })`,
+// `@UsePipes(new ValidationPipe())`) — evaluated at class-DEFINITION time, same as the factory's own
+// call, but with no declaration anywhere for a unit to land on (R57 only mints a unit for the decorator
+// VALUE itself, direct or as a factory's callee; it does not reach into the factory's ARGUMENTS). Keyed
+// by the position of the decorator's OWN call expression (`callNode`, not the effect's own position) —
+// every effect anywhere in ONE decorator's argument list shares ONE unit, mirroring how a factory's own
+// body is one unit no matter how many effects it contains. unitKind "initializer": this runs at
+// class-definition time, the same category as a `static {}` block or a module's top-level statements.
+function decoratorArgUnit(callNode) {
+  const sf = callNode.getSourceFile();
+  const mod = moduleOf(sf);
+  const local = `<decorator-arg>@${callNode.getStart()}`;
+  const qual = `${mod}.${local}`;
+  let rec = fns.get(qual);
+  if (!rec) {
+    rec = { local, direct: new Set(), fsKinds: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
+            cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(),
+            entry: false, unitKind: "initializer",
+            loc: `${path.relative(rootDir, sf.fileName)}:${sf.getLineAndCharacterOfPosition(callNode.getStart()).line + 1}:1`,
+            endLine: sf.getLineAndCharacterOfPosition(callNode.getEnd()).line + 1 };
+    fns.set(qual, rec);
+  }
+  return qual;
+}
 // nearest enclosing analyzed function (closures attribute to it — SEMANTICS §2)
 function enclosing(node) {
-  for (let p = node; p; p = p.parent) {
+  let prev = null;
+  for (let p = node; p; prev = p, p = p.parent) {
     // A `static { … }` block is its own initializer unit (class-definition time), NOT the instance ctor
     // the ClassDeclaration maps to — intercept before the nodeName lookup would fold it into .constructor.
     if (ts.isClassStaticBlockDeclaration(p)) return staticBlockUnit(p);
+    // ⟨R64⟩ `p` is the decorator's OWN call (`@factory(arg)`'s `factory(arg)`) and the child we climbed
+    // FROM (`prev`) is one of its ARGUMENTS — not the callee `factory` itself, and not `p` reached
+    // directly with no intervening child (that is R64 shape 3 / R57's own case: the decorator's own
+    // application, `prev` still null on the first iteration, handled below by the Decorator guard
+    // unchanged). This distinguishes "a raw effect/closure embedded in the argument DATA" (R64 shapes 1
+    // and 2 — fixable: measured on real Angular/NestJS/TypeORM code, an argument almost never contains an
+    // effect, so this rarely mints anything, and when it does the effect is real) from "the decorator
+    // FACTORY ITSELF is external/unresolvable" (R64 shape 3 — NOT fixed: every `@Entity()`/`@Injectable()`/
+    // `@Get()` in real code is exactly this shape, so minting here would be the blanket flood R57's commit
+    // measured and rejected). Mint lazily, keyed to the CALL's position so one decorator's whole argument
+    // list shares one unit.
+    if (prev && (ts.isCallExpression(p) || ts.isNewExpression(p)) && (p.arguments ?? []).includes(prev)
+        && p.parent && ts.isDecorator(p.parent) && p.parent.expression === p) {
+      return decoratorArgUnit(p);
+    }
     // A call/effect lexically inside a DECORATOR (`@factory(arg)`) runs at class-DEFINITION time, NOT in
     // the decorated declaration's body. The parent chain of a decorator's expression is
     // CallExpression → Decorator → MethodDeclaration/ClassDeclaration/Parameter, so `enclosing` otherwise
@@ -3991,13 +4032,12 @@ function enclosing(node) {
     // poison every decorated handler). Stop at the Decorator: a NAMED factory's own effects live in its
     // own function unit (found and reported independently of this climb — this branch never runs for
     // that case, `localName` mints the anonymous shape a unit BEFORE the climb ever reaches here, R57);
-    // this null is reached only when NOTHING inside the decorator's expression minted a unit of its
-    // own — a raw effect/closure/external call nested directly in a decorator's arguments — and it is
-    // left a DELIBERATE, DISCLOSED-NOWHERE gap rather than folded to `<module>` or a synthetic unit: the
-    // ubiquitous named/external decorator-factory pattern (`@Injectable()`, `@Entity()`, `@Get()`, …)
-    // would otherwise mint a NEW report entry (or a coverage/Unknown disclosure) for every decorated
-    // declaration in any real framework-using corpus — measured, filed, not fixed here (see R57's
-    // CHANGELOG entry's residual note).
+    // reaching this with `p` the Decorator itself means the climb went straight from the decorator's own
+    // call/reference with nothing between (R64 shape 3, the arguments-check above already claimed shapes
+    // 1/2) — left a DELIBERATE, DISCLOSED-NOWHERE gap: the ubiquitous external named-factory pattern
+    // (`@Injectable()`, `@Entity()`, `@Get()`, …) would otherwise mint a NEW report entry (or a
+    // coverage/Unknown disclosure) for every decorated declaration in any real framework-using corpus —
+    // measured, filed, not fixed here (R57's CHANGELOG residual note; R64).
     if (ts.isDecorator(p)) return null;
     const n = nodeName.get(p);
     if (n) return n;

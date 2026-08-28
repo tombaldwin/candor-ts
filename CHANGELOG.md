@@ -47,6 +47,50 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   `reportCompleteness` and `loadGateReport` agree on the cause-naming flag over identical bytes (new
   `test-unit.mjs` row, offline).
 
+- **fix: two of R57's own residual shapes closed — a raw effect or closure embedded directly in a
+  decorator's ARGUMENT DATA no longer vanishes; a third stays open, measured rather than guessed.**
+  candor-spec SOUNDNESS.md R64, filed live-reproducing R57's own pinning row the day after `0a5d493`
+  shipped. R57 minted a unit for an ANONYMOUS decorator VALUE (direct, or a factory's callee) but never
+  reached into a factory's ARGUMENTS — so `@Decorate(fs.readFileSync(...))` (a raw effect evaluated
+  directly as the argument) and `@Factory({ init: () => { fs.readFileSync(...) } })` (a closure nested in
+  the argument DATA, not the call chain — the real TypeORM `@Column({ default: () => … })` idiom) climbed
+  straight through the object literal/argument list to `enclosing()`'s Decorator guard with nothing behind
+  them: silent, `functions: []`, `deny Fs` exit 0. A third shape — an EXTERNAL body-less decorator
+  reference (`@ExternalDecorator()` from an unread dependency) — is the same silent gap but is NOT fixed
+  here; see the measurement below.
+  THE FIX: `enclosing()` now tracks the child it climbed FROM at each step (`prev`). When the current node
+  is the decorator's OWN call/new-expression and `prev` is one of ITS ARGUMENTS (not the callee), it mints
+  a `<decorator-arg>@<pos>` unit (keyed to the decorator's own call, `unitKind: "initializer"`, mirroring
+  `staticBlockUnit`/`moduleUnit`) instead of falling through to the Decorator guard — every effect/call
+  anywhere in ONE decorator's argument list shares that one unit. The decorator's OWN top-level application
+  (`prev` still unset — R57's original case, and R64 shape 3) is untouched: the Decorator guard still
+  returns `null` for it, exactly as before.
+  WHY SHAPE 3 STAYS OPEN, MEASURED NOT GUESSED: R57's commit rejected a blanket fix on the argument that it
+  would mint an entry for nearly every decorated declaration in real framework code, but had never actually
+  measured that against decorator-bearing code (its own corpus had none). This fix's shapes 1/2 change
+  targets ONLY argument DATA, so it was measured directly; an experimental blanket variant that ALSO mints
+  for the decorator's own application (simulating the rejected fix) was measured separately, against THREE
+  real corpora with dependencies genuinely installed: byte-identical to the narrow fix on a real NestJS +
+  TypeORM application (`lujakob/nestjs-realworld-example-app`) and on TypeORM's own 513-file functional
+  test suite (`typeorm/typeorm`, `test/functional/{columns,relations,entity-schema,repository,
+  query-builder}`, re-pointed at the real installed package so its decorators actually resolve) — but +42
+  new report rows (52% over the base 80) on a real Angular application (`gothinkster/
+  angular-realworld-example-app`, deps installed): every bare `@Injectable()`/`@Component()`/`@Pipe()`
+  application gained its own `invisible`-only row. Zero fabricated effects in any of the three — the cost
+  is report-row inflation, not wrong verdicts — but on the corpus most likely to be gated in CI, it
+  reproduces exactly the flood R57 measured-by-argument and this fix measured directly. Left open.
+  OVER-CHARGE CONTROL, the narrow (shipped) fix, measured on the SAME three real corpora: zero existing
+  functions' `inferred` changed, zero new `Unknown` entries, on all three. The only real-world hits were on
+  the TypeORM corpus — 3 new `<decorator-arg>` units, all `inferred: []`, disclosing `invisible: ["dedent"]`
+  (a genuine, unmodified `@VirtualColumn({ query: (alias) => sql\`...\` })` closure calling into an unread
+  `dedent` import) — an honest disclosure of a real blind spot, never a fabricated effect. `analyzed.count`
+  moved (+105 on the NestJS+TypeORM app, +548 on the TypeORM corpus, +28 on the Angular app — new units
+  minted and found pure) while `functions.length` (the report surface) did not, on two of the three; the
+  Angular number above is the one exception, and it is the blanket variant's number, not this fix's.
+  Falsified against the pre-fix binary (`9a8a5c7`, before this commit): the three fixtures below all read
+  `functions: []`/`deny Fs` exit 0 pre-fix; shapes 1 and 2 read the disclosed effect/exit 1 post-fix, shape
+  3 is unchanged on both. `node test.mjs --parallel`: 1613 passed, 0 failed (was 1605).
+
 ## [0.33.1] — 2026-08-27
 
 - **⚠ the fifth "neither voice fired" instance — a DYNAMIC re-export loop — is disclosed, not resolved,

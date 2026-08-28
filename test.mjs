@@ -5182,6 +5182,102 @@ export function makesControlled(): Controlled { return new Controlled(); }`,
         JSON.stringify(report.functions));
 }
 
+// ── R64: a raw effect/closure embedded DIRECTLY in a decorator's own ARGUMENT DATA must not vanish —
+// R57 only mints a unit for the decorator VALUE itself (direct, or a factory's callee); it never reaches
+// into the factory's ARGUMENTS, so `@Decorate(fs.readFileSync(...))` and
+// `@Factory({ init: () => { fs.readFileSync(...) } })` climbed straight through the object literal/call
+// argument list to the Decorator guard with nothing behind them — silent, `functions: []`, `deny Fs`
+// exit 0. `enclosing()` now mints a `<decorator-arg>@<pos>` unit keyed to the DECORATOR'S OWN call when
+// the child it climbed FROM is one of that call's ARGUMENTS (not the callee) — shapes 1 and 2 share this
+// exact structural gap; only the decorator's OWN top-level application (shape 3, still open, see below)
+// is untouched. ──
+if (blk()) {
+  const d = project({
+    "src/f.ts": `import * as fs from "node:fs";
+function Decorate(_x: unknown) { return function (_t: any) {}; }
+// shape 1: a raw effect CALL evaluated directly as the decorator's argument — no closure at all.
+@Decorate(fs.readFileSync("/etc/r64-shape1"))
+class RawArg {}
+function Factory(_opts: unknown) { return function (_t: any) {}; }
+// shape 2: a closure NESTED in the factory's argument DATA (an object literal property), not in the
+// factory's call chain — the real-world TypeORM shape (\`@Column({ default: () => {...} })\`).
+@Factory({ init: () => { fs.readFileSync("/etc/r64-shape2"); } })
+class ClosureInArgData {}
+export function makesRawArg(): RawArg { return new RawArg(); }
+export function makesClosureInArgData(): ClosureInArgData { return new ClosureInArgData(); }`,
+  });
+  const { report } = scan(d);
+  const argUnits = report.functions.filter((f) => f.fn.includes("<decorator-arg>"));
+  check("R64 shape 1: a raw effect call AS the decorator argument is not silent — some unit reports its Fs",
+        argUnits.some((f) => f.inferred.includes("Fs") && f.paths?.includes("/etc/r64-shape1")),
+        JSON.stringify(report.functions));
+  check("R64 shape 2: a closure inside the factory's argument DATA is not silent either",
+        argUnits.some((f) => f.inferred.includes("Fs") && f.paths?.includes("/etc/r64-shape2")),
+        JSON.stringify(report.functions));
+  check("R64: `deny Fs` over shape 1/2 now exits non-zero (was exit 0, the cardinal sin)",
+        (() => {
+          const g = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy",
+            (() => { const p = path.join(d, "deny.policy"); fs.writeFileSync(p, "deny Fs\n"); return p; })()],
+            { encoding: "utf8" });
+          return g.status === 1;
+        })(), "");
+  check("R64: neither is attributed to the decorated declaration (fabrication check, R57's sibling control)",
+        !entry(report, "src.f.RawArg.constructor")?.inferred.length
+          && !entry(report, "src.f.ClosureInArgData.constructor")?.inferred.length,
+        JSON.stringify(report.functions));
+  check("R64: …nor to a caller that merely constructs the decorated class",
+        !entry(report, "src.f.makesRawArg")?.inferred.length
+          && !entry(report, "src.f.makesClosureInArgData")?.inferred.length,
+        JSON.stringify(report.functions));
+}
+// CONTROLS — the over-charge check the fix must pass: a decorator whose argument data is genuinely pure
+// (a literal, or a call to a genuinely pure local function) must gain NO fabricated unit/effect. Measured
+// on real code too (see CHANGELOG): across a 513-file TypeORM functional-test corpus and a real NestJS+
+// TypeORM app with dependencies installed, this fix changed zero EXISTING functions' effects and added
+// zero new Unknowns — the only real-world hits were 3 honest `invisible` (never fabricated-effect)
+// disclosures where a TypeORM `@VirtualColumn` closure genuinely called into an unread `dedent` import.
+if (blk()) {
+  const d = project({
+    "src/g.ts": `function Entity(_name: string) { return function (_t: any) {}; }
+function computePureLabel(): string { return "users"; }
+@Entity("users")
+class LiteralArg {}
+@Entity(computePureLabel())
+class PureComputedArg {}
+export function makesLiteralArg(): LiteralArg { return new LiteralArg(); }
+export function makesPureComputedArg(): PureComputedArg { return new PureComputedArg(); }`,
+  });
+  const { report } = scan(d);
+  check("CONTROL: a literal decorator argument mints no `<decorator-arg>` unit at all",
+        !report.functions.some((f) => f.fn.includes("<decorator-arg>")), JSON.stringify(report.functions));
+  check("CONTROL: a genuinely pure CALL as a decorator argument stays pure — no fabricated effect",
+        report.functions.length === 0, JSON.stringify(report.functions));
+}
+// R64 shape 3, MEASURED AND LEFT OPEN: an external body-less decorator reference (`@ExternalDecorator()`
+// from an unread dependency) still vanishes — this pins the KNOWN gap so a future change to this area
+// notices it, rather than an accidental fix landing unexamined. A blanket fix (minting a unit for the
+// decorator's own top-level application too, not just its arguments) was measured against three real
+// corpora with real dependencies installed: byte-identical on a real NestJS+TypeORM app and on TypeORM's
+// own 513-file functional-test suite, but +42 new report rows (52%, all `invisible`-only/zero-effect) on
+// a real Angular app — every bare `@Injectable()`/`@Component()`/`@Pipe()` application gained its own
+// row. Engine-dependent and unpredictable, and on the corpus that matters most (a framework gated in CI)
+// it reproduces the exact flood R57's commit measured and rejected — so this stays unfixed.
+if (blk()) {
+  const d = project({
+    "src/h.ts": `import { ExternalDecorator } from "extlib";
+@ExternalDecorator()
+class Foo {}
+export function makesFoo(): Foo { return new Foo(); }`,
+    "node_modules/extlib/package.json": `{"name":"extlib","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/extlib/index.d.ts": `export declare function ExternalDecorator(): ClassDecorator;`,
+    "node_modules/extlib/index.js": `const fs = require("fs");
+exports.ExternalDecorator = function () { fs.readFileSync("/etc/r64-shape3"); return function (t) {}; };`,
+  });
+  const { report } = scan(d);
+  check("R64 shape 3 (KNOWN OPEN GAP, not fixed here): the external decorator's effect is still silent",
+        report.functions.length === 0, JSON.stringify(report.functions));
+}
+
 // a fn-reference passed to a STORE/compare/log sink (not an invoking HOF) must NOT fabricate its effect
 if (blk()) {
   const d = project({
