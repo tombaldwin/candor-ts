@@ -2621,12 +2621,26 @@ switch (cmd) {
       // SPEC §2 ⟨0.33⟩. The remedy says "the SAME policy", not "a policy": the operator DID scan with a
       // policy, and reading ⟨0.32⟩'s remedy loosely (any policy re-scans it) is what produces this hole,
       // because the peek only ever looked for the PRODUCER's denied effects.
+      //
+      // ⟨0.34⟩ …and TWO SENTENCES for that fourth cause, chosen by `g.unaskedRulesPredates033` — SAME
+      // verdict, SAME exit, ONLY this line's wording moves (`g.unaskedRulesPredates033` never touches
+      // `gincomplete`/`gverdictObj` above). The ⟨0.33⟩ sentence is TRUE of a ≥⟨0.33⟩ producer that
+      // genuinely scanned under a narrower deny set, and MISLEADING of a report that predates ⟨0.33⟩
+      // entirely — such a producer never had a `scannedUnder` key to hold ANY deny set in, so "does not
+      // cover" reads as "chose a different policy" where the truth is "could not yet record one". SPEC
+      // ⟨0.34⟩ explicitly ruled OUT a version floor for the VERDICT (a report's age cannot license
+      // certification — a pre-⟨0.33⟩ producer's peek was still bounded by SOME policy nobody here can
+      // see, so refusing is correct either way), so the version decides ONLY which of these two
+      // already-true sentences to print. The `else` arm is character-for-character the pre-⟨0.34⟩ text —
+      // the control this rung ships with.
       const why = g.unanalyzed.length
         ? `gate NOT certified — the report declares ${g.unanalyzed.length} unit(s) candor could not analyze; a gate cannot be green over unanalyzed code`
         : gscope.length
         ? `gate NOT certified — the report names ${gscope.length} function(s) OUTSIDE the scan's scope performing an effect this policy denies; the gate did not judge them, so the verdict is incomplete rather than a pass`
         : gunread.length
         ? `gate NOT certified — the report says the scan did not READ ${gunread.join(", ")}. Their effects are absent because nothing looked, not because there are none, so the verdict is INCOMPLETE rather than a pass. Re-scan the sources with this policy (candor-ts <dir> --policy <file>) — a scan that was never asked cannot certify what it never opened`
+        : g.unaskedRulesPredates033
+        ? `gate NOT certified — this report was produced before ⟨0.33⟩, when a producing scan did not yet record the deny set its peek ran under (\`scannedUnder\`), so it cannot say whether ${gunasked.length} rule(s) of this policy were ever asked: ${gunasked.join(", ")}. The excluded files it reports as read may have been searched for OTHER effects, or for none at all — there is no way to tell from a report this old — so the verdict is INCOMPLETE rather than a pass. Re-scan with a 0.33+ engine under THE SAME policy this gate is applying (candor-ts <dir> --policy <file> --json <report>) — not merely under a policy`
         : `gate NOT certified — this report's peek was bounded by the deny set its producing scan held, and that set does not cover ${gunasked.length} rule(s) of this policy: ${gunasked.join(", ")}. The excluded files it reports as read were searched for OTHER effects, so an empty finding there is not an answer to this question, and the verdict is INCOMPLETE rather than a pass. Re-run the producing scan under THE SAME policy this gate is applying (candor-ts <dir> --policy <file> --json <report>) — not merely under a policy`;
       console.error(`candor-ts: ${why}`);
       // The INCOMPLETE verdict is a JUDGEMENT, not a refusal: it names what was analyzed and what was not,

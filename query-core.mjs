@@ -206,6 +206,55 @@ export function reportVersion(prefix) {
   return null;
 }
 
+/** ⟨0.34⟩ The candor-spec CONTRACT version an ALREADY-PARSED envelope object DECLARES (`candor.spec`) —
+ *  verbatim, distinct from `reportVersion` above (the engine BUILD id, not the contract it implements).
+ *  Empty string for a legacy v0.1 bare array (no envelope at all) or a v0.2+ envelope with no `spec` key —
+ *  the "absent ⇒ pre-spec-field" reading `parseSpecLadder`/`specPredates` below both commit to.
+ *
+ *  Takes the PARSED document, never re-parses `text` itself: every caller of this (`loadGateReport`'s
+ *  per-file loop, `reportUnaskedRulesDetail`'s) already holds the parsed object for its own per-report
+ *  accounting, and a second parse of the same bytes is exactly how a fact drifts from the one it is being
+ *  compared against — the identical argument `loadGateReport`'s `scannedUnder` handling makes for reading
+ *  `parsed` once rather than re-opening the file. */
+function envelopeSpec(parsed) {
+  const c = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed.candor : undefined;
+  return c && typeof c === "object" && !Array.isArray(c) && typeof c.spec === "string" ? c.spec : "";
+}
+
+/** ⟨0.34⟩ Parse a candor-spec contract version ("0.33", "0.9") as `[major, minor]` FOR ORDERING ONLY — the
+ *  spec ladder is major.minor (SPEC has no patch component; that lives on the engine/crate version instead,
+ *  see `reportVersion`). `null` on anything that does not parse — including the empty string
+ *  `envelopeSpec` returns for a pre-spec-field report, and a value with a stray extra segment ("0.33.1")
+ *  or trailing garbage ("0.").  */
+function parseSpecLadder(spec) {
+  const m = typeof spec === "string" ? /^(\d+)\.(\d+)$/.exec(spec.trim()) : null;
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+
+/**
+ * ⟨0.34⟩ Does `spec` sit STRICTLY BEFORE `floor` on the spec ladder? Compared NUMERICALLY component by
+ * component, never lexicographically — `"0.9"` vs `"0.33"` INVERTS under a plain string compare
+ * (`"0.9" > "0.33"` as strings; `9 < 33`, and the numeric reading is the one the ladder means). Unparseable
+ * input — including the empty string a pre-spec-field report reads as — answers `true`: the same
+ * "absent ⇒ predates" direction every other spec-envelope reader in this file already commits to.
+ *
+ * **MESSAGE-ONLY, NEVER A VERDICT INPUT.** SPEC ⟨0.34⟩ explicitly ruled OUT a version floor for the
+ * VERDICT: a report's age cannot license certification, because a pre-⟨0.33⟩ producer's peek was still
+ * bounded by SOME policy nobody here can see, so refusing is correct either way the age falls. What the
+ * age licenses is naming the actual cause in a REMEDY sentence — "this report predates ⟨0.33⟩, before
+ * producers recorded their deny set" is a true, actionable statement a report that simply scanned under a
+ * narrower or different policy cannot make. Callers must not let this function's answer move `ok`, an
+ * exit code, or any `--gate-json`/`whatif --json` field — only which of two already-true sentences a
+ * human channel prints (`query.mjs`'s `gate --report` stderr, `lsp.mjs`'s `discloseIncompleteness`).
+ */
+export function specPredates(spec, floor) {
+  const f = parseSpecLadder(floor);
+  if (!f) return false;
+  const s = parseSpecLadder(spec);
+  if (!s) return true;
+  return s[0] < f[0] || (s[0] === f[0] && s[1] < f[1]);
+}
+
 /** The report's §2 envelope `package` name — meaningful and locator-independent, so every engine and
  *  every --report form print the same crate in the `tour` header. null when absent/unreadable (the
  *  caller falls back to the prefix basename). Mirrors surface.rs/tour.rs::report_package. */
@@ -554,6 +603,10 @@ export function reportUnanalyzed(prefix) {
  * uncovered.
  */
 export function reportCompleteness(prefix, denyRules = []) {
+  // ⟨0.34⟩ computed ONCE, ahead of the object literal below: `rules` feeds `unaskedRules` and
+  // `predates033` feeds `unaskedRulesPredates033`, off the SAME per-report pass (see
+  // `reportUnaskedRulesDetail`'s doc for why a second pass over the same files is unsafe).
+  const ur = reportUnaskedRulesDetail(prefix, denyRules);
   // `judgedNothing` is the PER-FILE list, not the ANDed boolean the gate asks: the disclosure names
   // WHICH report judged nothing, so a locator with one silent member among several still hedges — the
   // semantics rust and java pin, and a repair the reader can aim (that file, not "somewhere here").
@@ -580,7 +633,11 @@ export function reportCompleteness(prefix, denyRules = []) {
            // STRUCTURAL carve-out for every caller of this function that carries no policy at all (the
            // majority — `show`/`where`/`callers`/`map`/`tour`/… never pass one), so this key is a silent
            // no-op for them rather than a sixth call site to remember the condition at.
-           unaskedRules: reportUnaskedRules(prefix, denyRules),
+           unaskedRules: ur.rules,
+           // ⟨0.34⟩ NAMES THE CAUSE, NEVER MOVES THE VERDICT — see `specPredates`'s doc. Not a NEW wire
+           // key on any answer document: only `query.mjs`'s `gate --report` stderr and `lsp.mjs`'s
+           // `discloseIncompleteness` ever read it, both on the human channel, never in a JSON envelope.
+           unaskedRulesPredates033: ur.predates033,
            ...(() => {
              const o = reportOutOfScope(prefix);
              // A corrupt key rides `unreadable`, which is ALREADY an arm of the strict exit — so the
@@ -730,12 +787,22 @@ export function reportUnread(prefix) {
  * first one's deny set answer for the second one's peeked classes. The per-file `theirs` set is built
  * fresh for every file and never merged across them; only the resulting MISSING RULE STRINGS are unioned
  * (deduplicated, code-point sorted) across a multi-report prefix, exactly as `loadGateReport` does.
+ *
+ * ⟨0.34⟩ ALSO returns `predates033` — SPEC §2 ⟨0.34⟩'s cause-naming flag for the identical set of missing
+ * rules: `true` when every report that contributed one predates ⟨0.33⟩ (`specPredates` against `"0.33"`,
+ * unparseable/absent `candor.spec` reading as predating). A SINGLE ≥⟨0.33⟩ contributor is enough to keep
+ * it `false`, because for THAT report the narrower deny set is real — it could have recorded covering this
+ * caller's rules and did not. Computed in the SAME pass as `rules` rather than a second one over the same
+ * files: a second read of a report already-loaded here is exactly how a fact drifts from the one
+ * `arm`/`loadGateReport`'s own copy compares it against (the same argument `envelopeSpec`'s doc makes).
+ * NAMES THE CAUSE, NEVER MOVES THE VERDICT — see `specPredates`'s own doc for the constraint on callers.
  */
-export function reportUnaskedRules(prefix, denyRules) {
+export function reportUnaskedRulesDetail(prefix, denyRules) {
   const mine = denyRules?.length ? canonicalDenySet(denyRules) : [];
-  if (!mine.length) return [];
+  if (!mine.length) return { rules: [], predates033: false };
   const files = (prefix.endsWith(".json") && fs.existsSync(prefix)) ? [prefix] : reportFilesAt(prefix);
   const out = new Set();
+  let fromCurrentSpec = false;
   for (const f of files) {
     try {
       const d = JSON.parse(fs.readFileSync(f, "utf8"));
@@ -746,10 +813,21 @@ export function reportUnaskedRules(prefix, denyRules) {
       const su = d?.scannedUnder;
       const theirs = (su && typeof su === "object" && !Array.isArray(su) && Array.isArray(su.deny))
         ? new Set(su.deny.filter((x) => typeof x === "string")) : new Set();
-      for (const r of mine) if (!theirs.has(r)) out.add(r);
+      // ⟨0.34⟩ this report's own declared contract version, read from the SAME parse `d` above rather
+      // than a second one — see the field doc for why.
+      const filePredates = specPredates(envelopeSpec(d), "0.33");
+      for (const r of mine) if (!theirs.has(r)) { out.add(r); if (!filePredates) fromCurrentSpec = true; }
     } catch { /* unparseable TEXT is `unreadable`'s business, not this key's */ }
   }
-  return [...out].sort(byCodePoint);
+  const rules = [...out].sort(byCodePoint);
+  return { rules, predates033: rules.length > 0 && !fromCurrentSpec };
+}
+
+/** Back-compat/thin-caller form of `reportUnaskedRulesDetail` above — just the rule names, for anything
+ *  that only ever wanted those (no direct caller in this engine does today; kept because the function was
+ *  already exported and a plain array is a smaller contract than the detail object). */
+export function reportUnaskedRules(prefix, denyRules) {
+  return reportUnaskedRulesDetail(prefix, denyRules).rules;
 }
 
 /**
@@ -948,6 +1026,14 @@ export function loadGateReport(prefix, denyRules = []) {
   // otherwise repeats one missing rule once per sibling. Deduplicated and code-point sorted at the return
   // below, the same collation `unread`'s dedup and the verdict's `zeroMatch` use.
   const unasked = new Set();
+  // ⟨0.34⟩ did ANY report ≥⟨0.33⟩ ALSO fail to cover a rule that ends up in `unasked`? One such report is
+  // enough: for it the gap is real (it could have recorded covering this run's rules and did not), so a
+  // message naming "before ⟨0.33⟩ producers recorded their deny set" would be false of it even if every
+  // OTHER contributing report predates the rung. Mirrors `reportUnaskedRulesDetail`'s `fromCurrentSpec` —
+  // this route is `reportUnaskedRulesDetail`'s independently-coded twin (`gate --report`'s own reader,
+  // never sharing a pass with the advisory verbs' `reportCompleteness`), so the two must be kept computing
+  // the identical predicate rather than drift into two answers for one SPEC §2 ⟨0.34⟩ fact.
+  let unaskedFromCurrentSpec = false;
   let hardFail = false, analyzed = 0;
   // ⟨0.24⟩ did the report handed to the gate judge ANYTHING? Per FILE, then ANDed across the multi-report
   // siblings, because the union of several reports has judged something as soon as ONE of them has — the
@@ -1095,8 +1181,16 @@ export function loadGateReport(prefix, denyRules = []) {
     // producer was never asked about. An absent `fileScannedUnder` reads as the empty set — never a
     // licence — so a pre-⟨0.33⟩ producer's `peeked: true` fails closed here exactly as SPEC §2 ⟨0.33⟩
     // requires. A class the peek never opened at all is `unread`'s gap, not this one's.
-    if (mine.length && filePeeked)
-      for (const r of mine) if (!(fileScannedUnder ?? new Set()).has(r)) unasked.add(r);
+    //
+    // ⟨0.34⟩ …and this file's own declared contract version, read ONCE beside the `scannedUnder` fact it
+    // qualifies (`parsed` is already in hand; a second parse of the same bytes is the drift `envelopeSpec`'s
+    // doc warns against) — feeding `unaskedFromCurrentSpec` so the return below can pick the cause-naming
+    // sentence's wording without moving `unasked` itself.
+    if (mine.length && filePeeked) {
+      const theirs = fileScannedUnder ?? new Set();
+      const filePredates = specPredates(envelopeSpec(parsed), "0.33");
+      for (const r of mine) if (!theirs.has(r)) { unasked.add(r); if (!filePredates) unaskedFromCurrentSpec = true; }
+    }
     // ⟨0.31⟩ the producer's PARTNER PROVENANCE, carried through verbatim and never recomputed — this
     // route has no target to anchor `net-partner` at, and re-classifying through the consumer's own
     // config is the re-derivation §3.1 forbids. A prefix can match several reports (a workspace writes
@@ -1132,6 +1226,11 @@ export function loadGateReport(prefix, denyRules = []) {
            // about; `[]` when `mine` is empty (no deny/pure rule at all) or every peeked class's producer
            // covered them.
            unaskedRules: [...unasked].sort(byCodePoint),
+           // ⟨0.34⟩ NAMES THE CAUSE, NEVER MOVES THE VERDICT (see `specPredates`'s doc): `true` when
+           // `unaskedRules` is non-empty AND every report that contributed to it predates ⟨0.33⟩. `false`
+           // whenever `unasked` is empty, by construction (`unaskedFromCurrentSpec` never gets a chance to
+           // flip when nothing was ever added to it).
+           unaskedRulesPredates033: unasked.size > 0 && !unaskedFromCurrentSpec,
            hardFail: hardFail || corrupt.length > 0, corrupt };
 }
 // The returned graph carries a non-enumerable `partial` flag (the loadReport `hardFail` precedent):

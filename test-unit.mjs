@@ -19,6 +19,7 @@ import {
   containment, loadReport, loadCallgraph, loadHierarchy, callersFrontier, blindspots, blindspotsStats, isReport,
   reportCoverage, gainsCoverage, parseClassFilter, ClassFilterError,
   claimsToHaveJudgedNothing, loadGateReport, reportJudgedNothing, reportUnanalyzed,
+  reportCompleteness, specPredates,
 } from "./query-core.mjs";
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
@@ -1586,6 +1587,78 @@ test("⟨0.24⟩ the prefix readers agree: loadGateReport and reportJudgedNothin
   assert.equal(loadGateReport(path.join(M, "r")).judgedNothing, false);
   fs.writeFileSync(path.join(M, "r.b.scan.json"), JSON.stringify({ ...V, analyzed: { count: 0 }, functions: [] }));
   assert.equal(reportJudgedNothing(path.join(M, "r")), true, "…and nothing has, when none has");
+  fs.rmSync(D, { recursive: true, force: true });
+  fs.rmSync(M, { recursive: true, force: true });
+});
+
+// ── ⟨0.34⟩ THE CROSS-POLICY REMEDY NAMES ITS ACTUAL CAUSE — `specPredates`'s ladder, and the two
+// independently-coded readers (`reportCompleteness`'s `reportUnaskedRulesDetail`, `loadGateReport`'s own
+// copy) agreeing on the cause-naming flag they each compute over the identical bytes. SPEC ⟨0.34⟩: the
+// version licenses a REMEDY's wording, never a verdict — pinned separately by the byte-identical-envelope
+// rows in test.mjs; this file pins the ARITHMETIC and the CROSS-READER agreement, fast and offline.
+test("⟨0.34⟩ specPredates orders the spec ladder NUMERICALLY, not lexicographically, and fails closed on garbage", () => {
+  assert.equal(specPredates("0.32", "0.33"), true);
+  // NOT a lexicographic trap: "0.9" > "0.33" as STRINGS (9 > 3 at the first differing character), but
+  // 9 < 33 on the numeric ladder the spec actually uses — the exact inversion candor-rust's port unit-
+  // tested first.
+  assert.equal(specPredates("0.9", "0.33"), true, "0.9 predates 0.33 numerically, though it sorts AFTER it as a string");
+  assert.equal(specPredates("0.33", "0.33"), false, "equal to the floor is not STRICTLY before it");
+  assert.equal(specPredates("0.34", "0.33"), false);
+  assert.equal(specPredates("1.0", "0.33"), false);
+  assert.equal(specPredates("0.100", "0.33"), false, "100 > 33 numerically, though \"0.100\" < \"0.33\" as a string");
+  // absent/garbage ⇒ predates — the same "absent ⇒ pre-spec-field" direction `ReportMeta`'s own doc (and
+  // `reportVersion` beside it) already commit to for a missing envelope key.
+  assert.equal(specPredates("", "0.33"), true);
+  assert.equal(specPredates(undefined, "0.33"), true);
+  assert.equal(specPredates(null, "0.33"), true);
+  assert.equal(specPredates("not-a-version", "0.33"), true);
+  assert.equal(specPredates("0.", "0.33"), true);
+  assert.equal(specPredates("0.33.1", "0.33"), true, "an extra ladder segment does not parse as major.minor");
+  // an unparseable FLOOR is the caller's bug, not the report's age — never let it read as "everything
+  // predates", which would be the fail-OPEN direction for a MESSAGE-selection predicate whose only job is
+  // choosing between two already-true sentences.
+  assert.equal(specPredates("0.30", "not-a-version"), false);
+});
+
+test("⟨0.34⟩ reportCompleteness and loadGateReport AGREE on unaskedRulesPredates033 — the two independently-coded readers of one SPEC §2 ⟨0.34⟩ fact", () => {
+  const D = scratch("candor-predates033-");
+  const w = (n, doc) => { fs.writeFileSync(path.join(D, `${n}.json`), JSON.stringify(doc)); return path.join(D, n); };
+  const base = { package: "p", analyzed: { count: 1, digest: "0" },
+                 functions: [{ fn: "p.main", inferred: [], direct: [] }],
+                 excluded: [{ class: "build-script", count: 1, peeked: true }], outOfScope: [] };
+  // pre-⟨0.33⟩: no `scannedUnder` at all — the shape every such report is in.
+  const old = w("old", { ...base, candor: { version: "v", spec: "0.30" } });
+  // ⟨0.33⟩+ but a GENUINE narrower deny set — the gap is real, not an artifact of the field's absence.
+  const cur = w("cur", { ...base, candor: { version: "v", spec: "0.33" }, scannedUnder: { deny: ["deny Net"] } });
+  // `denyRules` is a PARSED rule object list (`pol.deny`, as every real caller hands it), never the raw
+  // policy source strings `scannedUnder.deny` carries — `canonicalDenySet`/`ruleUpgrade` read `.effects`.
+  const deny = parsePolicy("deny Exec\n").deny;
+  for (const prefix of [old, cur]) {
+    const c = reportCompleteness(prefix, deny);
+    const g = loadGateReport(prefix, deny);
+    assert.deepEqual(c.unaskedRules, g.unaskedRules, `${prefix}: the two readers must name the SAME missing rule(s)`);
+    assert.equal(c.unaskedRulesPredates033, g.unaskedRulesPredates033,
+      `${prefix}: the two readers must AGREE on whether the gap is old-caused`);
+  }
+  assert.equal(loadGateReport(old, deny).unaskedRulesPredates033, true, "no scannedUnder at all is the pre-⟨0.33⟩ shape");
+  assert.equal(loadGateReport(cur, deny).unaskedRulesPredates033, false, "a real ≥⟨0.33⟩ mismatch is not old-caused");
+  // THE OVER-CHARGE CONTROL: a report with NO gap at all (its `scannedUnder` covers this policy's rule)
+  // must not raise the flag regardless of its own spec — `unasked_rules_predates_033` is `false` whenever
+  // `unasked_rules` is empty, by construction, never a second true/false question about the report's age.
+  const clean = w("clean", { ...base, candor: { version: "v", spec: "0.30" }, scannedUnder: { deny: ["deny Exec"] } });
+  assert.deepEqual(reportCompleteness(clean, deny).unaskedRules, []);
+  assert.equal(reportCompleteness(clean, deny).unaskedRulesPredates033, false);
+  assert.equal(loadGateReport(clean, deny).unaskedRulesPredates033, false);
+  // A SINGLE ≥⟨0.33⟩ contributor among several siblings is enough to keep the flag false — the version
+  // licenses a remedy PER REPORT, never certifies the whole locator's silence because one member is old.
+  const M = scratch("candor-predates033-multi-");
+  fs.writeFileSync(path.join(M, "r.a.scan.json"), JSON.stringify({ ...base, candor: { version: "v", spec: "0.30" } }));
+  fs.writeFileSync(path.join(M, "r.b.scan.json"),
+    JSON.stringify({ ...base, candor: { version: "v", spec: "0.33" }, scannedUnder: { deny: ["deny Net"] } }));
+  const mPrefix = path.join(M, "r");
+  assert.equal(reportCompleteness(mPrefix, deny).unaskedRulesPredates033, false,
+    "one real ≥0.33 contributor keeps the flag false even beside a pre-0.33 sibling");
+  assert.equal(loadGateReport(mPrefix, deny).unaskedRulesPredates033, false);
   fs.rmSync(D, { recursive: true, force: true });
   fs.rmSync(M, { recursive: true, force: true });
 });

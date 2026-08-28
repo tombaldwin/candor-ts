@@ -13173,7 +13173,15 @@ export function runs(): Buffer { return execSync("ls"); }`,
     });
     const d = project({
       "covered/report.p.scan.json": env({ scannedUnder: { deny: ["deny Exec"] } }),
-      "bare/report.p.scan.json": env({}),
+      // ⟨0.34⟩ SPEC BUMPED TO PREDATE 0.33: this row's own prose calls "bare" *"the pre-⟨0.33⟩ shape"* —
+      // a report that never had a `scannedUnder` key to carry ANY deny set in. Left at the shared `env`
+      // base's "0.33" this was the impossible pairing candor-rust's ⟨0.34⟩ port found and fixed in its own
+      // fixtures: a spec that says the producer COULD have written `scannedUnder` beside a report that
+      // did not — no real ≥⟨0.33⟩ engine peeks without recording the set it peeked under, so a fixture in
+      // that shape would have passed the row below "by coincidence" (the ⟨0.33⟩-unchanged wording, right
+      // only because the fixture happened not to distinguish the two causes) rather than for the reason
+      // the row states.
+      "bare/report.p.scan.json": env({ candor: { version: "scan-0.32.0", toolchain: "stable", spec: "0.32" } }),
       "pol.candor": "deny Exec\n",
     });
     const pol = path.join(d, "pol.candor");
@@ -13191,12 +13199,26 @@ export function runs(): Buffer { return execSync("ls"); }`,
     const bareq = gate(path.join(d, "bare", "report"), pol, bgj);
     check("⟨0.33⟩ a peeked class with NO `scannedUnder` key at all REFUSES (exit 2) rather than certifying — an absent key reads as the empty deny set, never a licence; this is the shape every pre-⟨0.33⟩ report is in",
           bareq.status === 2, `exit ${bareq.status}: ${bareq.stdout}${bareq.stderr}`.slice(0, 300));
-    check("⟨0.33⟩ …and the refusal NAMES the unmet rule, so an operator knows what to re-scan under",
-          /does not cover/.test(bareq.stderr) && /deny Exec/.test(bareq.stderr),
+    // ⟨0.34⟩ …and NAMES THE REAL CAUSE now, not "does not cover" — this report predates ⟨0.33⟩ entirely
+    // (spec "0.32"), so it never had a `scannedUnder` key to hold a DIFFERENT deny set in. "does not
+    // cover" would misread as "the operator scanned with a different policy", where the truth is "the
+    // engine that wrote this report could not yet say which policy it scanned under". See the CONTROL two
+    // sections up (⟨0.33⟩ genuine cross-policy mismatch) for the sentence this one must NOT say.
+    check("⟨0.34⟩ …and the refusal NAMES THE REAL CAUSE (pre-⟨0.33⟩, never \"does not cover\") and the unmet rule, so an operator knows what to re-scan under",
+          /before ⟨0\.33⟩/.test(bareq.stderr) && /deny Exec/.test(bareq.stderr) && !/does not cover/.test(bareq.stderr),
           bareq.stderr.slice(0, 400));
     const bd = doc(bgj);
     check("⟨0.33⟩ …and the DOCUMENT agrees with the exit: ok:false, incomplete:true — a machine consumer reads that key, not the exit code",
           bd?.ok === false && bd?.incomplete === true, JSON.stringify(bd).slice(0, 300));
+    // ⟨0.34⟩ MESSAGE-ONLY: the `--gate-json` DOCUMENT for the pre-⟨0.33⟩ cause carries NO key naming
+    // `unaskedRules`/`unread` at all (this route's verdict shape never has — the cause moves only
+    // `incomplete`/`ok`/the exit, exactly as the genuine ≥⟨0.33⟩ mismatch does), so it is byte-identical
+    // to the one that cause produces over the same rule; only the stderr sentence differs. Proven directly
+    // by diffing the two documents in the dedicated ⟨0.34⟩ section below.
+    check("⟨0.34⟩ …and the document carries NO new key — verdict, exit and envelope are unmoved; only the stderr sentence changed",
+          JSON.stringify(Object.keys(bd ?? {}).sort())
+            === JSON.stringify(["analyzed", "incomplete", "ok", "spec", "violations"].sort()),
+          JSON.stringify(Object.keys(bd ?? {}).sort()));
     fs.rmSync(d, { recursive: true, force: true });
   }
 }

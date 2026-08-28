@@ -872,8 +872,13 @@ fs.rmSync(W, { recursive: true, force: true });
   // ⟨0.33⟩ `scannedUnder` carries the SAME rule this fixture is about to be gated under (`p.pol`,
   // `deny Exec`), canonically spelled — the over-charge control is precisely a producer that was ASKED
   // this question and answered clean, not a producer whose question is unrecorded (which SPEC §2 ⟨0.33⟩
-  // reads as the empty set and refuses over).
-  fs.writeFileSync(`${I}/peeked.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: true }],
+  // reads as the empty set and refuses over). SPEC BUMPED TO 0.33 (⟨0.34⟩ hardening): `V.candor.spec` is
+  // "0.32" for the SIBLING fixtures above, which never carry `scannedUnder` and so correctly model a
+  // pre-⟨0.33⟩ producer — but a report that DOES carry `scannedUnder` cannot itself predate the rung that
+  // introduced the key. Left at "0.32" this was the exact impossible pairing candor-rust's ⟨0.34⟩ port
+  // found and fixed in its own fixtures: a spec too old to have written the key it writes.
+  fs.writeFileSync(`${I}/peeked.json`, JSON.stringify({ ...V, candor: { ...V.candor, spec: "0.33" },
+    excluded: [{ class: "test-file", count: 1, peeked: true }],
     outOfScope: [], scannedUnder: { deny: ["deny Exec"] } }));
   fs.writeFileSync(`${I}/derived.json`, JSON.stringify({ ...V, excluded: [{ class: "build-output", count: 2, peeked: false, judgedElsewhere: true }] }));
   fs.writeFileSync(`${I}/p.pol`, "deny Exec\n");
@@ -964,7 +969,10 @@ fs.rmSync(W, { recursive: true, force: true });
     outOfScope: [{ fn: "t.runs", path: "src/x.test.ts", effects: ["Exec"], class: "test-file", reason: "outside" }] }));
   // ⟨0.33⟩ `scannedUnder` carries the SAME rule this fixture is gated under below (`p.pol`, `pure app`),
   // canonically spelled — see the sibling fixture above for why an unrecorded question fails closed here.
-  fs.writeFileSync(`${I}/peeked.json`, JSON.stringify({ ...V, excluded: [{ class: "test-file", count: 1, peeked: true }],
+  // SPEC BUMPED TO 0.33, for the identical reason its sibling fixture in the ⟨0.30⟩/⟨0.32⟩ block above is:
+  // a report carrying `scannedUnder` cannot itself predate the rung that introduced the key.
+  fs.writeFileSync(`${I}/peeked.json`, JSON.stringify({ ...V, candor: { ...V.candor, spec: "0.33" },
+    excluded: [{ class: "test-file", count: 1, peeked: true }],
     outOfScope: [], scannedUnder: { deny: ["pure app"] } }));
   fs.writeFileSync(`${I}/p.pol`, "pure app\n");            // `pure` rides the deny vector — the ⟨0.32⟩ condition
   fs.writeFileSync(`${I}/allow.pol`, "allow Net api.example.com\n");

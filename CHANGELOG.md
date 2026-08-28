@@ -8,6 +8,45 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⟨0.34⟩ ITEM 1: the ⟨0.33⟩ cross-policy remedy now names its ACTUAL cause — message-only, verdict and
+  `--gate-json`/`whatif --json` unchanged.** `gate --report` and the LSP's live diagnostics (which also
+  drive `candor.whatif`) name a report whose peek was bounded by a deny set narrower than the policy in
+  force as *"this report's peek was bounded by the deny set its producing scan held, and that set does not
+  cover N rule(s) of this policy"* — TRUE of a ≥⟨0.33⟩ producer that genuinely scanned under a different
+  deny set, but MISLEADING of a report that predates ⟨0.33⟩ entirely: such a producer never had a
+  `scannedUnder` key to hold ANY deny set in, so "does not cover" reads as "chose a different policy" where
+  the truth is "could not yet record one". Both readers now check the report's own envelope `spec` (new
+  `query-core.mjs` `specPredates`, unparseable/absent treated as predating) and print a second sentence
+  naming the real cause and the remedy ("re-scan with a 0.33+ engine under THE SAME policy") whenever every
+  report that contributed to the cause predates the rung; a SINGLE ≥⟨0.33⟩ contributor keeps the original
+  sentence, because for that report the narrower deny set is real. The version is used ONLY to choose which
+  of two already-true sentences to print — SPEC ⟨0.34⟩ explicitly RULED OUT a version floor for the
+  VERDICT (a report's age cannot license certification: a pre-⟨0.33⟩ producer's peek was still bounded by
+  SOME policy nobody here can see, so refusing is correct either way).
+  Route inventory (mandatory per the corpus brief, swept rather than scoped to the verb touched first):
+  `reportUnaskedRulesDetail` (feeding `reportCompleteness`, hence `whatif`/`fix-gate`/`unverified` and the
+  MCP tools sharing it) and `loadGateReport`'s own copy (feeding `gate --report` and `candor_gate`) are the
+  ONLY two places in this engine that ever compute the cause — confirmed by grep, not assumed — and each
+  now carries the identical spec-driven choice from the identical per-report accounting. Of the two places
+  that turn the cause into PROSE, only `query.mjs`'s `gate --report` stderr and `lsp.mjs`'s
+  `discloseIncompleteness` (shared by the standing diagnostics and `candor.whatif`) ever did; the CLI
+  advisory verbs (`whatif`/`fix-gate`/`unverified`) and every MCP tool disclose this cause as a bare
+  `unaskedRules` array with no accompanying sentence, so there was no prose to reword there. `candor-scan`'s
+  own `--policy` route structurally cannot raise this cause at all (`scannedUnder` always covers its own
+  run's policy by construction, confirmed: it never even references `unaskedRules`), so §3.1 byte-equality
+  between `scan --policy`'s `--gate-json` and `gate --report`'s was never at risk. Two test fixtures (one
+  in `test-mcp.mjs`, duplicated across its two ⟨0.30⟩/⟨0.32⟩/⟨0.33⟩ blocks; one in `test.mjs`'s ⟨0.33⟩
+  no-`scannedUnder` row) paired a spec with a `scannedUnder` shape no real engine at that spec could have
+  produced (a `spec` too old to have written the key it writes, and the mirror — a `spec` new enough to
+  have written the key beside a report that omits it while claiming to model "the shape every pre-⟨0.33⟩
+  report is in") — corrected rather than left to pass by coincidence. Controls (falsified against the
+  pre-change binary first): a ≥⟨0.33⟩ report's message is byte-identical to the pre-⟨0.34⟩ text; a
+  pre-⟨0.33⟩ report's message names the real cause on both the CLI and the LSP log channel and never says
+  "does not cover" (the pre-change binary, confirmed via a hand-built fixture, printed the misleading
+  sentence for it); the `--gate-json` document carries no new key and is identical between the two causes;
+  `reportCompleteness` and `loadGateReport` agree on the cause-naming flag over identical bytes (new
+  `test-unit.mjs` row, offline).
+
 ## [0.33.1] — 2026-08-27
 
 - **⚠ the fifth "neither voice fired" instance — a DYNAMIC re-export loop — is disclosed, not resolved,

@@ -1131,6 +1131,34 @@ export function handler(): void { mid(); }
      /could not analyze/.test(unan.logs) && /src\/broken\.ts/.test(unan.logs)
      && /INCOMPLETE/.test(unan.shows), unan.logs.slice(0, 300));
 
+  // ── ⟨0.34⟩ THE ⟨0.33⟩ CROSS-POLICY CAUSE NAMES ITS ACTUAL CAUSE ON THIS ROUTE TOO — ts's own route
+  // inventory (candor/scratchpad 034-report-trust-design.md) flags this exact surface: the LSP's `whatif`
+  // and standing-diagnostics routes have a measured history of a NEW cause landing on the CLI and never
+  // reaching them. `discloseIncompleteness` is ONE function shared by both, so a defect or a fix here
+  // covers `runWhatif` too; the ⟨0.33⟩ block above already proves the LOG channel carries this cause at
+  // all (`HS`/`scope`, a DIFFERENT cause), so this pins the ⟨0.34⟩ wording split specifically.
+  const HP_OLD = mkH({ excluded: [{ class: "vendor", count: 1, peeked: true, reason: "x" }], outOfScope: [],
+                       // NO `scannedUnder` at all, and a spec that predates ⟨0.33⟩ — the shape every such
+                       // report is in; no real ≥⟨0.33⟩ engine peeks without recording the set it peeked
+                       // under.
+                       candor: { version: "handwritten", spec: "0.30" } });
+  const HP_CUR = mkH({ excluded: [{ class: "vendor", count: 1, peeked: true, reason: "x" }], outOfScope: [],
+                       // A REAL ≥⟨0.33⟩ producer whose deny set genuinely does not cover `deny Exec` —
+                       // the gap here is a fact about a different policy, not about the field's absence.
+                       scannedUnder: { deny: ["deny Net"] },
+                       candor: { version: "handwritten", spec: "0.33" } });
+  const predatesRun = await driveU(HP_OLD, 4);
+  const currentRun = await driveU(HP_CUR, 4);
+  ok("⟨0.34⟩ lsp: a report that PREDATES ⟨0.33⟩ names the REAL cause (the field could not yet be written), never \"does not cover\" — same rule named, same INCOMPLETE claim",
+     /before ⟨0\.33⟩/.test(predatesRun.logs) && /deny Exec/.test(predatesRun.logs)
+     && !/does not cover/.test(predatesRun.logs) && /INCOMPLETE/.test(predatesRun.shows),
+     predatesRun.logs.slice(0, 400));
+  ok("⟨0.34⟩ lsp CONTROL: a genuine ≥⟨0.33⟩ cross-policy mismatch keeps TODAY's sentence — \"does not cover\", never the pre-⟨0.33⟩ wording, because for THIS report the narrower deny set is real",
+     /does not cover/.test(currentRun.logs) && /deny Exec/.test(currentRun.logs)
+     && !/before ⟨0\.33⟩/.test(currentRun.logs) && /INCOMPLETE/.test(currentRun.shows),
+     currentRun.logs.slice(0, 400));
+  for (const dir of [HP_OLD, HP_CUR]) fs.rmSync(dir, { recursive: true, force: true });
+
   // ── DEDUP. warnOnce keys on the message, and the message is a function of the policy and the report,
   // not of the edit — so a save loop does not turn the disclosure into noise the operator switches off.
   {

@@ -409,7 +409,7 @@ const zeroRulePolicyWarn = (what) =>
 // 2 (INCOMPLETE)" / "CI exits 2 over these bytes" is a wrong, checkable claim in exactly that case. Two
 // fixtures with the identical unread-file cause differ only in whether a violation coexists, and only the
 // violation-free one made this text true.
-function discloseIncompleteness(unanalyzed, outOfScope, unread, unaskedRules, certainViolation) {
+function discloseIncompleteness(unanalyzed, outOfScope, unread, unaskedRules, unaskedRulesPredates033, certainViolation) {
   const causes = [];
   // The CLI's order (`unanalyzed` → `outOfScope` → `unread` → `unaskedRules`), so a report tripping two
   // of them reads the same way here as it does in CI. The repairs genuinely differ — a parse to fix, a
@@ -433,12 +433,28 @@ function discloseIncompleteness(unanalyzed, outOfScope, unread, unaskedRules, ce
   // policy's own. Distinct from `unread` above: that is "nothing looked", this is "something looked, for
   // a narrower question than the one this editor is asking now" — the peek is bounded to the PRODUCER's
   // denied effects (⟨0.29⟩), so an empty finding there answers nothing about a rule it was never put.
-  if (unaskedRules?.length)
-    causes.push(`this report's peek was bounded by the deny set its producing scan held, and that set `
-      + `does not cover ${unaskedRules.length} rule(s) of this policy: ${unaskedRules.join(", ")}. The `
-      + `excluded files it reports as read were searched for OTHER effects, so nothing in them can be `
-      + `squiggled here — re-run the producing scan under THE SAME policy this editor is applying `
-      + `(candor-ts <dir> --policy <file>), not merely under a policy.`);
+  //
+  // ⟨0.34⟩ TWO SENTENCES, chosen by `unaskedRulesPredates033` (SAME wire shape either way — this function
+  // only ever writes to the log/showMessage channel, never a document). The ⟨0.33⟩ text is misleading of a
+  // report that predates ⟨0.33⟩ entirely: such a producer never had a `scannedUnder` key to hold ANY deny
+  // set in, so "does not cover" reads as "chose a different policy" where the truth is "could not yet
+  // record one". See `specPredates`'s doc in query-core.mjs for the full argument; the `else` arm here is
+  // character-for-character the pre-⟨0.34⟩ text.
+  if (unaskedRules?.length) {
+    if (unaskedRulesPredates033)
+      causes.push(`this report was produced before ⟨0.33⟩, when a producing scan did not yet record the `
+        + `deny set its peek ran under (\`scannedUnder\`), so it cannot say whether ${unaskedRules.length} `
+        + `rule(s) of this policy were ever asked: ${unaskedRules.join(", ")}. There is no way to tell from `
+        + `a report this old what the excluded files it reports as read were searched for, so nothing in `
+        + `them can be squiggled here — re-scan with a 0.33+ engine under THE SAME policy this editor is `
+        + `applying (candor-ts <dir> --policy <file>), not merely under a policy.`);
+    else
+      causes.push(`this report's peek was bounded by the deny set its producing scan held, and that set `
+        + `does not cover ${unaskedRules.length} rule(s) of this policy: ${unaskedRules.join(", ")}. The `
+        + `excluded files it reports as read were searched for OTHER effects, so nothing in them can be `
+        + `squiggled here — re-run the producing scan under THE SAME policy this editor is applying `
+        + `(candor-ts <dir> --policy <file>), not merely under a policy.`);
+  }
   if (!causes.length) return;
   // ⟨lsp-precedence⟩ the exit-code claim is conditional on whether a certain violation ALSO fires: if one
   // does, Lemma 2 makes it dominate (exit 1), and the incompleteness below is true but not what CI is red
@@ -523,7 +539,8 @@ function diagnosticsFor(docPath) {
   const certainViolation = evaluatePolicy(dwp0.answerable, fns, Q.loadCallgraph(reportPrefix),
     new Map(), new Set(), dnet0, dwithhold0, dunits0).length > 0;
   discloseIncompleteness(dcomp.unanalyzed ?? [], dcomp.outOfScope ?? [],
-                         dpol.deny.length ? (dcomp.unread ?? []) : [], dcomp.unaskedRules ?? [], certainViolation);
+                         dpol.deny.length ? (dcomp.unread ?? []) : [], dcomp.unaskedRules ?? [],
+                         dcomp.unaskedRulesPredates033 ?? false, certainViolation);
   // ⟨0.24⟩ THE ANSWERABILITY WITHHOLD, which this surface ran WITHOUT — `evaluatePolicy` was called with no
   // `withhold` predicate and the DEFAULT netClass mode, so both directions of the §3.1 harm were live in the
   // editor. Measured against the CLI on one report and one policy: `deny Unknown[reflect]` drew NO squiggle
@@ -707,7 +724,8 @@ function runWhatif(a) {
   const wcomp = Q.reportCompleteness(reportPrefix, wpol?.deny ?? []);
   const wUnread = wpol?.deny?.length ? (wcomp.unread ?? []) : [];
   const wUnasked = wcomp.unaskedRules ?? [];
-  discloseIncompleteness(wcomp.unanalyzed ?? [], wcomp.outOfScope ?? [], wUnread, wUnasked);
+  discloseIncompleteness(wcomp.unanalyzed ?? [], wcomp.outOfScope ?? [], wUnread, wUnasked,
+                         wcomp.unaskedRulesPredates033 ?? false);
   const callers = r.affected.filter((f) => !r.of.includes(f));   // affected minus the target(s) themselves
   const rules = [...new Set(r.violations.map((v) => v.rule))];
   // ⟨0.24⟩ THE EDITOR IS A CHANNEL THIS VERB ANSWERS ON, so the `conditional` has to reach it or this
