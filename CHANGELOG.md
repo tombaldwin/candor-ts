@@ -136,6 +136,39 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   `functions: []`/`deny Fs` exit 0 pre-fix; shapes 1 and 2 read the disclosed effect/exit 1 post-fix, shape
   3 is unchanged on both. `node test.mjs --parallel`: 1613 passed, 0 failed (was 1605).
 
+- **R64 shapes 1/2 over-charge measurement widened from 3 corpora to 7 — BACKLOG "A3" reproduced, judgment
+  ACCEPT AS-IS, no code change.** The prior entry's over-charge control ran on three corpora that barely
+  exercise NestJS DI/factory idioms; an adversarial re-review (BACKLOG A3) ran the shipped (narrow) fix
+  against `brocoders/nestjs-boilerplate` (13k stars, deps genuinely `npm install`ed off its checked-in
+  lockfile) and found **22 new `<decorator-arg>` rows on a base of 233 (+9.4%)**. Reproduced exactly here,
+  independently: 22 new rows, 21 carrying `invisible:[…]` (class-transformer's `@Transform`, NestJS's
+  `ConfigModule.forRootAsync`/`PassportStrategy`-style factory wiring), 4 honest `Unknown` disclosures, and
+  **one genuine, previously-silent `Db` effect** — `TypeOrmModule.forRootAsync({ dataSourceFactory: async
+  (o) => new DataSource(o).initialize() })` inside `@Module(...)`'s argument tree, exactly the shape this
+  fix exists to catch (`deny Db` now names it; pre-fix it was invisible even though the policy already
+  failed on other grounds). Zero fabrications; all 233 pre-existing rows byte-identical.
+  WIDENED to three more real corpora, none of them cherry-picked for a clean result:
+  `mikro-orm/nestjs-realworld-example-app` (+7 of 73 — 2 genuine previously-silent `Clock` effects from
+  MikroORM's own canonical `@Property({ onCreate: () => new Date() })` lifecycle-hook idiom),
+  `NarHakobyan/awesome-nest-boilerplate` (+2 of 127), `w3tecch/express-typescript-boilerplate`
+  (routing-controllers + TypeORM, +0 of 100). Also re-verified the ORIGINAL three independently rather than
+  trusting the prior commit's own numbers: `lujakob/nestjs-realworld-example-app` +0/67 and
+  `gothinkster/angular-realworld-example-app` +0/80 both match; `typeorm/typeorm`'s `test/functional` suite
+  +3/7 matches in count, though under a pnpm-managed `node_modules` the disclosed package name reads
+  `.pnpm` rather than `dedent` — a real, separate cosmetic defect in the invisible-package-name path
+  extraction (assumes an npm-flat layout), filed as a residual and NOT fixed here; it is orthogonal to R64
+  and affects `invisible[]`'s label quality generally, not this fix's minting decision.
+  ROW GROWTH IS CORPUS-DEPENDENT (0%–9.6% across the seven) AND TRACKS GENUINE DI/FACTORY DENSITY, NOT A
+  FLOOD: across all seven corpora (~615 analyzed functions total), a decorator-arg unit minted with
+  NEITHER an `invisible` entry NOR an `inferred` effect occurred **zero times** — confirmed further with a
+  targeted control fixture, `@Column({ default: () => 42 })` (a closure with no calls at all), which mints
+  nothing. The narrowing floated when R64 was filed ("only mint when the argument reaches an effect or an
+  unread import") is therefore already this implementation's behaviour, not an available improvement — the
+  existing pure-function emission gate already applies to `<decorator-arg>` units. The rejected blanket
+  variant's own +52%/Angular number (measured in the entry above) is a **different fix** (it also mints on
+  shape 3, the decorator's own bare application) on a different axis and is not a same-mechanism comparison
+  to this fix's 0–9.6%. No code changed by this measurement; shape 3 stays open, unaffected.
+
 ## [0.33.1] — 2026-08-27
 
 - **⚠ the fifth "neither voice fired" instance — a DYNAMIC re-export loop — is disclosed, not resolved,
