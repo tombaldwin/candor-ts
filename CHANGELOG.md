@@ -8,6 +8,75 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **CARDINAL SIN, closed: a peek finding was scope-matched against the WRONG ENTITY.** BACKLOG
+  "FOUR-WAY CARDINAL SIN — a peek finding is scope-matched against the WRONG ENTITY", the ts entry
+  (candor-swift `7378f4f` closed the same class for itself first, for a harder reason — see below). The
+  peek's synthetic tsconfig lists ONLY the excluded files as roots, with no in-scope context at all, so a
+  finding is always named — and SCOPE-TESTED — against the EXCLUDED DECLARATION's own qualified name. A
+  policy scoped to the IN-SCOPE CALLER (`deny Net Runner`) can therefore never match, however denied the
+  effect. MEASURED, pre-fix: an in-scope `RunnerMain` dispatching (via a factory returning the shared
+  `Doer` interface) into an excluded `class EvilDoer implements Doer` performing `fetch(...)` answered
+  `deny Net Runner` at exit 0, `outOfScope: []` — while the identical tree under the UNSCOPED `deny Net`
+  already named `EvilDoer.work` directly. Reproduced IDENTICALLY on a PURE-STRUCTURAL conformer (an object
+  literal typed `: Doer`, no `implements` clause at all): the dispatch MECHANISM turned out irrelevant,
+  because the peek child never attempts dispatch resolution against in-scope code in the first place — it
+  infers an effect on a function in total isolation, and the parent tested scope against that function's
+  own name and nothing else.
+  Fixed by teaching the peek's own excluded-file re-parse a cheap, syntax-level `satisfies` annotation:
+  does this declaration's `implements X` / `: X` name an interface, and if the checker (which sees the
+  WHOLE type graph reachable from the excluded file's own imports, in-scope or not, regardless of which
+  files were named as this run's ROOTS) resolves `X` to a declaration OUTSIDE this run's own file set, name
+  it project-relative (a new internal `--peek-root` flag carries the real project root down to the child).
+  The PARENT then correlates that interface against ones its OWN primary analysis already knows are
+  dispatched into from in-scope code — `localIfaceDispatchCallers`, recorded AT THE CHA RESOLUTION SITE
+  itself (not reconstructed from the flat callgraph afterward, which cannot distinguish a genuine interface
+  dispatch from a caller that merely also happens to call one implementer directly by concrete type — a
+  real false-positive shape this design specifically avoids), plus the existing `dispatch:<Iface>.<member>`
+  honesty disclosure (⟨0.6⟩) for the case CHA could not resolve at all (an object-literal conformer, or a
+  fan-out over `CHA_FANOUT_LIMIT`). A scoped deny rule now fires on a peek finding if EITHER the excluded
+  declaration's own name matches, OR any of those caller names does — attribution is UNCHANGED (still the
+  excluded declaration; ts never loses track of which one, unlike candor-swift's harder multi-file case),
+  only the scope TEST widened. One `evaluatePolicy` call per finding (never batched across findings sharing
+  a caller candidate), so two different excluded declarations that happen to share a dispatch-through
+  caller cannot bleed each other's effects into a shared aggregate.
+  **UNATTRIBUTABLE, DISCLOSE RATHER THAN DROP**: when the excluded declaration's own effects hit something
+  the policy denies regardless of scope, but the checker could not resolve its `implements`/`: X` target AT
+  ALL inside this isolated re-parse (a `paths`/`baseUrl`-mapped import the synthetic tsconfig has no
+  `paths` for is the realistic case, and sits beside the OPEN, unconfirmed conditional-exports resolution
+  divergence this same rung went looking for), the finding is disclosed under a `dispatch-widened` class
+  rather than silently trusted as out of scope — REUSING candor-swift's name for exactly this posture
+  (`7378f4f`: "a wrong-but-visible attribution is recoverable, a silent drop is not") rather than inventing
+  a second one. No SPEC clause covers either engine's use of it yet; PART_054 or a new numbered PART is the
+  natural home once the two engines' shapes are designed together, per the BACKLOG entry's own instruction.
+  **The resolver requires a BARE IDENTIFIER, not a qualified/namespaced reference** (`Doer`, never
+  `SomeNamespace.Type`) — MEASURED on a real package (typestack/class-validator): a totally unrelated test
+  file's `ValidatorJS.IsDecimalOptions` options object (an ambient THIRD-PARTY namespace type from
+  `@types/validator`, unresolvable in this isolated re-parse for the mundane reason that `@types`
+  auto-discovery needs a real `node_modules`) triggered the unattributable branch and disclosed under a
+  policy scoped to an entirely unconnected in-scope function — an over-charge, not a fix, closed by
+  requiring the reference be a plain imported identifier (the shape a project's OWN local interface is
+  always reached through; a qualified namespace access is the signature of an ambient global no
+  project-relative scope was ever written to reach).
+  **Controls, falsified against the pre-fix binary**: both defect variants (nominal `implements`,
+  pure-structural) now exit 2 naming the excluded declaration; the ORIGINAL unscoped control still exits 2
+  with exactly ONE finding, no duplicate from the widened scope test; the finding names the excluded
+  declaration, never the in-scope caller; an excluded conformer reached only through a DIRECT, concrete-type
+  call (no shared-interface dispatch site at all) stays UNMATCHED — isolating the fix's caller-set from the
+  coincidental-shared-target false positive a naive flat-callgraph reconstruction would have produced; the
+  `dispatch-widened` fallback fires on a genuinely unresolvable `implements` target and stays silent on a
+  qualified/namespaced one. **Real-world over-charge check**: candor-ts's own repo, `js-yaml`, and a real
+  clone of typestack/class-validator (15 real `.spec.ts` files, one of which is a real, in-the-wild instance
+  of exactly this bug's shape — a test-file `ValidatorConstraintInterface` conformer dispatched into from
+  in-scope `registerDecorator`) all produce BYTE-IDENTICAL reports and stderr before and after this fix
+  under both broad and `registerDecorator`-scoped policies.
+  Surface inventory: the CLI (`--json`/`--gate-json`/`--policy`) is the sole PRODUCER of `outOfScope`, fixed
+  here directly. MCP (`mcp.mjs`) and LSP (`lsp.mjs`) both read `outOfScope` from an already-written report
+  via `Q.loadReport` — never recompute it — so they inherit the fix from a fresh scan with no code change of
+  their own; `watch.mjs` spawns this same `scan.mjs` binary as a child process, same inheritance.
+  `query.mjs`'s `gate --report`/`fix`/`fix-gate`/`whatif`/`unverified` all treat `outOfScope` as an opaque
+  producer-supplied dominance signal (§3.1 route equality) and never re-derive scope over it, so none of
+  them independently carries this class of bug. Seven new process-level tests in `test.mjs`.
+
 - **`--policy` is now a usage error (exit 2) on eleven descriptive/comparative verbs that never honoured
   it: `show`/`where`/`callers`/`map`/`diff`/`containment`/`reachable`/`path`/`impact`/`blindspots`/`tour`.**
   BACKLOG "`--policy` accept-and-drop is THREE engines, not one" (candor-java `37c9b10` is the reference

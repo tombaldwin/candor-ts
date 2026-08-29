@@ -179,6 +179,10 @@ const argv = process.argv.slice(2);
 // `excluded: [{class:"test-file", peeked:true}]` with `outOfScope: []` under `deny Exec` — the peek
 // reporting that it read the file and found nothing, about a file it refused to open.
 const IS_PEEK = argv.includes("--peek-excluded");
+// ⟨CARDINAL SIN FIX, caller-path scope⟩ set by `--peek-root` below, once argv parsing runs; declared
+// here (not `const` at the parse site) so the whole file can read it after parsing, same posture as
+// every other flag-derived module-scope binding in this file.
+let peekRealRootDir = null;
 // Declared HERE, above the sink guard, because the guard calls `loadCandorConfig` and that reads
 // these: left below, they were in the temporal dead zone, the call threw, and the `catch` around it
 // swallowed the throw — so the config channel the guard exists to enumerate was silently empty and a
@@ -1024,6 +1028,13 @@ for (let i = 0; i < argv.length; i++) {
   // report: the parent parsed THAT as a successful peek of an empty file set. Deliberately absent from
   // the usage string — it is not a way to scan a file list, it is the marker that this run IS a peek.
   else if (a === "--peek-excluded") { /* consumed; behaviour lives in IS_PEEK */ }
+  // ⟨CARDINAL SIN FIX, caller-path scope⟩ INTERNAL — the REAL project root, set only by this file's own
+  // peek spawn alongside `--peek-excluded`. The child's own `rootDir` is a throwaway temp directory (its
+  // synthetic tsconfig lives there), so a heritage/type-annotation identifier this child resolves to a
+  // declaration OUTSIDE its own root file set (e.g. an in-scope interface an excluded conformer
+  // `implements`) has nowhere project-relative to be named FROM without this. Deliberately absent from
+  // the usage string, same posture as `--peek-excluded`.
+  else if (a === "--peek-root") { peekRealRootDir = argv[++i]; }
   else if (a === "--out" || a === "--policy" || a === "--gate-json") {
     const v = argv[i + 1];
     if (v === undefined || v.startsWith("--")) {
@@ -3067,6 +3078,18 @@ function isDynamicExportsDescriptor(call) {
 // `@Entity()` (naming-strategy-dependent) contributes nothing — never a guess.
 const entityTables = new Map();    // ClassDeclaration node -> table name
 const interfaceImpls = new Map();  // InterfaceDeclaration node -> implementing ClassDeclarations (CHA universe)
+// ⟨CARDINAL SIN FIX, caller-path scope⟩ ifaceQual ("mod.Iface") -> Set<callerQual> that GENUINELY
+// dispatched through that interface's own signature and had it resolved by CHA below — populated AT THE
+// RESOLUTION SITE (pass 2's interface-CHA arm), not reconstructed afterward from the flat callgraph.
+// That distinction matters: `rec.edges` records ONLY the resolved TARGET, so a caller that ALSO happens
+// to call the same implementer's method directly, by its CONCRETE type (`pureDoer.work()` where
+// `pureDoer: PureDoer`, no interface involved at all), would land on the exact same edge — inverting
+// `fns`'s edges after the fact cannot tell "reached via this shared interface" from "reached this one
+// implementer directly, coincidentally the same target", and the peek's caller-path widening below
+// needs the FORMER specifically (a caller that dispatches through the interface is a real candidate for
+// ALSO reaching an excluded conformer of that SAME interface; a caller that only ever names one concrete
+// class provably is not). Read by the peek block near the report write.
+const localIfaceDispatchCallers = new Map();
 // The bound on an interface CHA fan-out, shared by the in-scan dispatch site and the `interfaceUnion`
 // entries a chained consumer resolves through. Past it an OPEN hierarchy may have an implementer the scan
 // never saw, so its visible union is an open-world guess and both sites report `Unknown` instead. It is
@@ -5386,6 +5409,16 @@ function visitCalls(node) {
                   }
                   for (const t of targets) rec.edges.add(t);
                   edged = targets.length > 0 && allResolved;
+                  // ⟨CARDINAL SIN FIX, caller-path scope⟩ record the GENUINE dispatch, at the point the
+                  // dispatch happened — `owner` (this call's enclosing fn) really did resolve THROUGH
+                  // `sigDecl.parent`'s own signature, not merely land on one of its implementers by
+                  // coincidence. See the map's own comment above `interfaceImpls` for why this can't be
+                  // reconstructed later from `rec.edges` alone.
+                  if (edged) {
+                    const ifaceQual = `${moduleOf(sigDecl.parent.getSourceFile())}.${namespacePrefixOf(sigDecl.parent)}${sigDecl.parent.name.getText()}`;
+                    if (!localIfaceDispatchCallers.has(ifaceQual)) localIfaceDispatchCallers.set(ifaceQual, new Set());
+                    localIfaceDispatchCallers.get(ifaceQual).add(owner);
+                  }
                 }
               }
               if (!edged) {
@@ -7437,6 +7470,156 @@ const envelope = { candor: { version: ENGINE_VERSION, toolchain: `node-${process
                    // whose absence is overloaded the way `fs`'s was — "does not compute undetermined
                    // locators" vs "computed them and found none". This engine computes it, so it says so.
                    resolves: ["fs", "incomplete"], package: pkgName, functions };
+// ⟨CARDINAL SIN FIX, caller-path scope⟩ THE PEEK CHILD'S OWN "SATISFIES" ANNOTATION — see BACKLOG
+// "FOUR-WAY CARDINAL SIN — a peek finding is scope-matched against the WRONG ENTITY".
+//
+// This run (IS_PEEK) analyses ONLY the files its parent excluded, in total isolation — no in-scope
+// context, unlike candor-swift's `--peek-context` union (candor-swift `7378f4f`). Its own findings are
+// therefore always named for the EXCLUDED declaration itself — ts never loses track of WHICH excluded
+// declaration a finding is (that part was never the bug). The PARENT's scope matcher can only ever test
+// THAT name, so `deny Net Runner` — scoped to an IN-SCOPE CALLER, never to the excluded conformer — can
+// never fire, even when an in-scope `Runner`-named function dispatches through a shared interface
+// straight into this excluded declaration. MEASURED: reproduces identically on a nominal `implements`
+// conformer AND a pure-structural object literal satisfying the same interface with no `implements` at
+// all — the dispatch MECHANISM is irrelevant, because this child never attempts dispatch resolution
+// against in-scope code in the first place; it infers an effect on a function and the parent tests scope
+// against that function's own name and nothing else.
+//
+// The fix is not to give the peek a context union (a real resolution mechanism — a bigger fix than this
+// bug needs, and the one thing this rung is told not to build). It is to tell the PARENT, cheaply, what
+// this SIMPLE SYNTAX already declares: does this excluded declaration claim to satisfy a shared
+// interface at all, and if so, which one? `implements X` on a class, or a `: X` type annotation on an
+// object-literal-initialized `const`, are both cheap, LOCAL, syntactic facts this isolated re-parse can
+// read without needing the parent's project at all — resolving `X` still needs the checker (an import
+// can alias it, `import { Doer as D }`), but the checker sees the WHOLE type graph reachable from this
+// file's own imports, in-scope or not, because `ts.createProgram` follows imports regardless of which
+// files were named as ROOTS (`sources`/`projectFiles` filters WHICH FILES THIS RUN WALKS FOR UNITS, not
+// what the checker can resolve a TYPE REFERENCE to).
+//
+// `--peek-root` (set only by the parent's own spawn, see IS_PEEK) is the REAL project root, so a
+// resolved declaration OUTSIDE this run's own file set can be named the same project-relative, dotted
+// way the parent names everything else (`moduleOf`'s own convention) — the PARENT is who actually
+// correlates this against its own `interfaceImpls`/dispatch universe; this run only ever reports the
+// bare fact "I satisfy interface Q", never a caller, never a verdict.
+if (IS_PEEK && peekRealRootDir) {
+  const byFn = new Map(functions.map((e) => [e.fn, e]));
+  const tagSatisfies = (fn, ifaceQual) => {
+    const e = byFn.get(fn);
+    if (!e) return;
+    e.satisfies = e.satisfies ?? [];
+    if (!e.satisfies.includes(ifaceQual)) e.satisfies.push(ifaceQual);
+  };
+  // UNRESOLVABLE, not merely irrelevant: this run found a `implements X` / `: X` annotation and the
+  // checker could not resolve `X` to anything AT ALL — a path-mapped import this isolated tsconfig has
+  // no `paths`/`baseUrl` for (SPEC candidate: the conditional-exports divergence flagged alongside this
+  // rung), a generic this best-effort reader does not chase, an ambient global. Genuinely unattributable
+  // — the parent must not read silence here as "confirmed no local interface", because it never asked
+  // the real project's tsconfig at all.
+  const tagUnresolved = (fn, rawName) => {
+    const e = byFn.get(fn);
+    if (!e) return;
+    e.unresolvedSatisfies = e.unresolvedSatisfies ?? [];
+    if (rawName && !e.unresolvedSatisfies.includes(rawName)) e.unresolvedSatisfies.push(rawName);
+  };
+  // A declaration reached from OUTSIDE this run's own peeked slice, and outside `node_modules` (a
+  // dependency's own interface is not something a project-relative policy scope could ever be authored
+  // against) is the one case worth naming: a real, in-scope, project-relative interface. One this run's
+  // OWN file declares (`projectFiles.has(f)`) tells the parent nothing it does not already know from the
+  // ordinary (non-widened) peek analysis of that same file, so it is left alone.
+  const qualifyIfaceDecl = (ifaceDecl) => {
+    const f = path.resolve(ifaceDecl.getSourceFile().fileName);
+    if (projectFiles.has(f)) return null;
+    const rel = path.relative(peekRealRootDir, f);
+    if (rel.startsWith("..") || rel.split(path.sep).includes("node_modules")) return null;
+    const stem = rel.replace(/\.[mc]?tsx?$/, "").split(path.sep).join(".");
+    const name = ifaceDecl.name?.getText?.();
+    return name ? `${stem}.${name}` : null;
+  };
+  // `null` = resolves fine, to something that just isn't a local-project interface (node_modules, a
+  // class, a type alias, a lib built-in) — correctly NOT a signal, not a failure. `{ unresolved: true }`
+  // = the checker could not resolve the identifier at all. `{ qual, decl }` = a confidently-named local
+  // interface, `decl` kept so the caller can read its OWN member names.
+  const resolveIface = (identLike) => {
+    if (!identLike) return null;
+    // BARE IDENTIFIERS ONLY — reject a QUALIFIED reference (`ValidatorJS.IsDecimalOptions`,
+    // `SomeNamespace.Type`). MEASURED on a real package (typestack/class-validator): a totally
+    // unrelated test file's `ValidatorJS.IsDecimalOptions` options object (an AMBIENT THIRD-PARTY
+    // namespace from `@types/validator`, unresolvable in this isolated re-parse for the mundane reason
+    // that `@types` auto-discovery needs a real `node_modules`) triggered `unresolvedSatisfies` and,
+    // through it, a `dispatch-widened` disclosure under a policy scoped to an ENTIRELY UNCONNECTED
+    // in-scope function — an over-charge, not a fix. A project's OWN local interface is always reached
+    // through a plain imported identifier (`import { Doer } from …`); the qualified-namespace-access
+    // spelling is the signature of an ambient global a project-relative scope was never written to
+    // reach, resolvable or not, so it is excluded from this mechanism entirely rather than routed
+    // through the unattributable branch.
+    if (!ts.isIdentifier(identLike)) return null;
+    let sym;
+    try { sym = checker.getSymbolAtLocation(identLike); } catch { sym = undefined; }
+    if (!sym) return { unresolved: true, raw: identLike.getText?.() ?? "" };
+    if (sym.flags & ts.SymbolFlags.Alias) {
+      try { sym = checker.getAliasedSymbol(sym); } catch { /* keep the alias symbol itself */ }
+    }
+    // TS's own "could not resolve this alias" marker: a symbol with NO declarations at all (a real
+    // symbol always has at least one). This is what an unresolved import inside this isolated re-parse
+    // (a `paths`/`baseUrl` alias the synthetic tsconfig knows nothing about) looks like — NOT `undefined`,
+    // `getSymbolAtLocation` still returns a symbol for the import BINDING itself, so this check has to sit
+    // after the alias hop, not before it (MEASURED: `@app/doer` under a `paths`-mapped import resolves to
+    // exactly this shape, `escapedName: "unknown"`, zero declarations).
+    if (!sym.declarations || sym.declarations.length === 0) return { unresolved: true, raw: identLike.getText?.() ?? "" };
+    const decl = sym.declarations.find((d) => ts.isInterfaceDeclaration(d));
+    if (!decl) return null;
+    const qual = qualifyIfaceDecl(decl);
+    return qual ? { qual, decl } : null;
+  };
+  for (const sf of sources) {
+    (function walk(node) {
+      // NOMINAL: `class EvilDoer implements Doer`. Tag EvilDoer's OWN method matching each of Doer's
+      // member names — never an inherited one, the same conservatism the primary scan's own CHA-fanout
+      // rule already applies one level over (⟨0.30⟩, "no implementor in sight … honest Unknown").
+      if (ts.isClassDeclaration(node) && node.name) {
+        for (const h of node.heritageClauses ?? []) {
+          if (h.token !== ts.SyntaxKind.ImplementsKeyword) continue;
+          for (const t of h.types) {
+            const r = resolveIface(t.expression);
+            if (!r) continue;
+            // UNRESOLVED: we don't know which of the class's OWN members the (unnamed-to-us) interface
+            // declares, so every one of them is a candidate — `nodeName.get(node)` would tag the
+            // synthesized CONSTRUCTOR unit instead (the class declaration's own mapped qual, ⟨R32⟩'s
+            // ctor-unit convention), which is never the effect-carrying member here.
+            if (r.unresolved) {
+              for (const cm of node.members ?? []) {
+                if (!(ts.isMethodDeclaration(cm) || ts.isPropertyDeclaration(cm))) continue;
+                const q = nodeName.get(cm);
+                if (q) tagUnresolved(q, r.raw);
+              }
+              continue;
+            }
+            for (const m of r.decl.members ?? []) {
+              const mName = m.name?.getText?.();
+              if (!mName) continue;
+              const own = (node.members ?? []).find((cm) =>
+                (ts.isMethodDeclaration(cm) || ts.isPropertyDeclaration(cm)) && cm.name?.getText?.() === mName);
+              const q = own && nodeName.get(own);
+              if (q) tagSatisfies(q, r.qual);
+            }
+          }
+        }
+      }
+      // PURE-STRUCTURAL: `const evilDoer: Doer = { work() { … } }` — no `implements` clause exists for
+      // an object literal, only the variable's own type annotation. Its methods are not separately
+      // named units (a top-level initializer's effects fold into the file's `<module>` unit, `unitKind:
+      // "initializer"` — unrelated to this bug, existing behaviour), so the tag lands on `<module>`.
+      if (ts.isVariableDeclaration(node) && node.type && node.initializer
+          && ts.isObjectLiteralExpression(node.initializer) && ts.isTypeReferenceNode(node.type)) {
+        const r = resolveIface(node.type.typeName);
+        const moduleFn = `${moduleOf(sf)}.<module>`;
+        if (r?.unresolved) tagUnresolved(moduleFn, r.raw);
+        else if (r) tagSatisfies(moduleFn, r.qual);
+      }
+      ts.forEachChild(node, walk);
+    })(sf);
+  }
+}
 // ⟨0.15 staged⟩ the κ-coverage ledger as DATA (COVERAGE-DESIGN.md §1): ONE sorted form (count desc,
 // name asc — exactly the stderr line's order) feeds the envelope field, the stderr receipt below, and
 // the --gate-json advisory, so the three can never tell different stories.
@@ -7622,6 +7805,41 @@ if (policyPath) {
         peekUnread.add(e.cls);   // its class withdraws the completeness claim; the gate stays cautious
       }
     }
+    // ⟨CARDINAL SIN FIX, caller-path scope⟩ `dispatchCallersByIface`: for every LOCAL interface this
+    // run's OWN primary analysis knows about, the set of IN-SCOPE functions that dispatch through it —
+    // resolved (CHA landed on a known implementer; `localIfaceDispatchCallers`, recorded AT THE
+    // RESOLUTION SITE — see its own comment above `interfaceImpls` for why a caller that merely happens
+    // to ALSO call one implementer directly, by concrete type, must not be conflated with one that
+    // genuinely dispatched through the shared interface) OR unresolved (⟨0.6⟩'s own honesty disclosure,
+    // `why` carries `dispatch:<Iface>.<member>` because no implementer was in sight, CHA_FANOUT_LIMIT was
+    // exceeded, or the conformer is an object literal — `interfaceImpls` only ever registers CLASSES,
+    // ⟨0.30⟩'s own comment above). Both channels are read from data this run ALREADY computed for its
+    // primary analysis; nothing here re-resolves a dispatch or builds a context union (candor-swift
+    // `7378f4f`'s heavier fix, deliberately not built here — see the note below `relQual`) — it only asks
+    // "did this run already know a caller reaches this interface at all", which is the caller-path half
+    // of attribution the excluded file cannot answer for itself (below, `--peek-root` / `satisfies`).
+    const dispatchCallersByIface = new Map();
+    {
+      const addCaller = (ifaceQual, callerQual) => {
+        if (!dispatchCallersByIface.has(ifaceQual)) dispatchCallersByIface.set(ifaceQual, new Set());
+        dispatchCallersByIface.get(ifaceQual).add(callerQual);
+      };
+      for (const [ifaceQual, callers] of localIfaceDispatchCallers) {
+        for (const caller of callers) addCaller(ifaceQual, caller);
+      }
+      // The UNRESOLVED half — a `dispatch:<owner>.<member>` reason names a LOCAL interface exactly when
+      // `<owner>` is `moduleOf(...)`-qualified (the interface-CHA emission site, line ~5397); an
+      // EXTERNAL owner uses a different qualifier shape entirely (`discloseUnanswerableKey`'s bare
+      // package name) and a class-override chain is a different map (`classOverrides`, not
+      // `interfaceImpls`) — so this regex can only ever add an entry under a qual `satisfies` could also
+      // produce, never a spurious one a real lookup would hit.
+      for (const [callerQual, rec] of fns) {
+        for (const w of rec.why ?? []) {
+          const m = /^dispatch:(.+)\.([^.]+)$/.exec(w);
+          if (m) addCaller(m[1], callerQual);
+        }
+      }
+    }
     const peekDir = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-peek-"));
     try {
       fs.writeFileSync(path.join(peekDir, "tsconfig.json"), JSON.stringify({
@@ -7630,7 +7848,7 @@ if (policyPath) {
       }));
       const out = execFileSync(process.execPath,
         [fileURLToPath(import.meta.url), path.join(peekDir, "tsconfig.json"), "--json",
-         "--peek-excluded"],
+         "--peek-excluded", "--peek-root", rootDir],
         // ⟨0.29⟩ `timeout` beside `maxBuffer`: the peek re-parses exactly the files this engine has never
         // parsed — vendored trees, generated code, declaration bundles — i.e. the inputs least likely to
         // have been exercised. Without a deadline one pathological file turns into a hung scan and a hung
@@ -7748,17 +7966,49 @@ if (policyPath) {
         const leaf = f.fn.split(".").pop() ?? f.fn;
         return `${stem}.${leaf}`;
       };
-      const peekEntries = (doc.functions ?? []).map((f) => ({ ...f, fn: relQual(f) }));
-      const peekViolations = evaluatePolicy({ ...peekPolicy, allow: [], forbid: [], only: [] },
-                                            peekEntries, {}, new Map(), netPartners, null, null);
-      const deniedByFn = new Map();
-      for (const v of peekViolations) {
-        if (!deniedByFn.has(v.fn)) deniedByFn.set(v.fn, new Set());
-        for (const e of v.effects ?? []) deniedByFn.get(v.fn).add(e);
-      }
+      // ⟨CARDINAL SIN FIX, caller-path scope⟩ CALLER-PATH IDENTITIES, in ADDITION to the excluded
+      // declaration's own name — see BACKLOG "FOUR-WAY CARDINAL SIN — a peek finding is scope-matched
+      // against the WRONG ENTITY" and the fixed-form note below `dispatchCallersByIface` above.
+      //
+      // `deny Net Runner` used to be tested against ONLY `relQual(f)` (the excluded declaration's own
+      // qualified name), which a scope written against the IN-SCOPE CALLER can never match — MEASURED
+      // identically on a nominal `implements` conformer and a pure-structural object-literal conformer
+      // reached via the same interface, exit 0/`outOfScope: []` either way, while the identical code
+      // under an UNSCOPED `deny Net` already named the excluded declaration directly. The dispatch
+      // MECHANISM was never the cause (this child does not attempt dispatch resolution against in-scope
+      // code at all), which is why fixing it here — not in interface/CHA resolution — closes both shapes
+      // at once.
+      //
+      // `f.satisfies` (set by the IS_PEEK-only block above, on THIS SAME run) names the interface(s) `f`
+      // syntactically claims to conform to; `dispatchCallersByIface` (built once, above, from THIS run's
+      // own primary analysis) answers which in-scope callers this run already knows dispatch through
+      // that interface. The union of those callers' names is tested for scope ALONGSIDE the excluded
+      // declaration's own name — attribution is unchanged (still `f`, the excluded declaration; ts never
+      // loses track of which one, unlike candor-swift's harder multi-file case), only the SCOPE TEST
+      // widens.
+      const callerIdentities = (f) => {
+        const out = new Set();
+        for (const ifaceQual of f.satisfies ?? [])
+          for (const c of dispatchCallersByIface.get(ifaceQual) ?? []) out.add(c);
+        return out;
+      };
+      // ONE evaluatePolicy CALL PER FINDING, not one batched call over every identity for every finding:
+      // batching would union violations by fn STRING, and two DIFFERENT excluded declarations sharing
+      // one caller candidate (both dispatch through the same interface) would each inherit the OTHER's
+      // effects once merged into that shared caller's aggregate — a fabrication this shape exists
+      // specifically to avoid. §6.2's "the gate and the disclosure must apply the same rule" is honoured
+      // by calling the SAME function, not by calling it once for everything.
+      const evalHits = (f, identities) => {
+        const entries = identities.map((id) => ({ ...f, fn: id }));
+        const violations = evaluatePolicy({ ...peekPolicy, allow: [], forbid: [], only: [] },
+                                          entries, {}, new Map(), netPartners, null, null);
+        const hits = new Set();
+        for (const v of violations) for (const e of v.effects ?? []) hits.add(e);
+        return hits;
+      };
       for (const f of doc.functions ?? []) {
-        const hits = [...(deniedByFn.get(relQual(f)) ?? [])].sort();
-        if (!hits.length) continue;
+        const own = relQual(f);
+        const hits = [...evalHits(f, [own, ...callerIdentities(f)])].sort();
         // NAME IT FROM THE PROJECT, NOT FROM THE CHILD'S TEMP ROOT. The child's tsconfig lives in a
         // temp directory, so it derives module qualifiers from THAT root and the fn came out as a
         // dotted absolute path — accurate, unreadable, and pointing at a directory that no longer
@@ -7767,14 +8017,47 @@ if (policyPath) {
         const childLoc = (f.loc ?? "").split(":")[0] ?? "";
         const hit = locateExcluded(childLoc);
         const where = hit?.path ?? childLoc;
-        const cls = hit?.cls ?? "excluded";
-        outOfScopeFindings.push({
-          fn: f.fn.split(".").pop() ?? f.fn, path: where, effects: hits, class: cls,
-          reason: `OUTSIDE this scan's scope (${cls}) — the gate did NOT judge it. `
-                + "candor's ANALYSIS of that file reaches this effect; the gate did not judge it, so "
-                + "the verdict is INCOMPLETE rather than a pass. (An analysis result, not a claim about "
-                + "what the code does at runtime — see the release notes' known over-charge.)",
-        });
+        if (hits.length) {
+          const cls = hit?.cls ?? "excluded";
+          outOfScopeFindings.push({
+            fn: f.fn.split(".").pop() ?? f.fn, path: where, effects: hits, class: cls,
+            reason: `OUTSIDE this scan's scope (${cls}) — the gate did NOT judge it. `
+                  + "candor's ANALYSIS of that file reaches this effect; the gate did not judge it, so "
+                  + "the verdict is INCOMPLETE rather than a pass. (An analysis result, not a claim about "
+                  + "what the code does at runtime — see the release notes' known over-charge.)",
+          });
+          continue;
+        }
+        // ⟨dispatch-widened⟩ UNATTRIBUTABLE, DO NOT DROP. `f`'s own syntax (`implements X` / `: X`)
+        // claims it satisfies SOME interface, and this excluded declaration's own effects DO hit
+        // something this policy denies REGARDLESS OF SCOPE (`evalHits` against `own` alone, with every
+        // deny rule's scope cleared — the same evaluatePolicy call, so its `pure`/net-partner semantics
+        // cannot drift from the scoped one above) — but the checker inside this isolated re-parse could
+        // not resolve `X` to anything AT ALL (`f.unresolvedSatisfies`: a path-mapped import this
+        // synthetic tsconfig has no `paths` for, a generic, an ambient global), so this run cannot say
+        // whether an in-scope caller under the active scope dispatches into it. Staying quiet here would
+        // read identically to the confirmed-safe case just above. candor-swift's name for exactly this
+        // posture (`7378f4f`: "a wrong-but-visible attribution is recoverable, a silent drop is not") is
+        // REUSED rather than invented a second time; no SPEC clause covers either engine's use of it yet.
+        if ((f.unresolvedSatisfies ?? []).length) {
+          const unscopedPolicy = { ...peekPolicy, deny: (peekPolicy.deny ?? []).map((r) => ({ ...r, scope: "" })),
+                                    allow: [], forbid: [], only: [] };
+          const unscopedViolations = evaluatePolicy(unscopedPolicy, [{ ...f, fn: own }],
+                                                    {}, new Map(), netPartners, null, null);
+          const unscopedHits = new Set();
+          for (const v of unscopedViolations) for (const e of v.effects ?? []) unscopedHits.add(e);
+          const sortedUnscopedHits = [...unscopedHits].sort();
+          if (sortedUnscopedHits.length) {
+            outOfScopeFindings.push({
+              fn: f.fn.split(".").pop() ?? f.fn, path: where, effects: sortedUnscopedHits, class: "dispatch-widened",
+              reason: "OUTSIDE this scan's scope (dispatch-widened) — this declaration's own `implements`/"
+                    + `type annotation names an interface (${f.unresolvedSatisfies.join(", ")}) this isolated `
+                    + "re-parse could not resolve, so whether an in-scope caller under this policy's scope "
+                    + "dispatches into it cannot be verified. Disclosed rather than silently trusted as out "
+                    + "of reach; the gate did not judge it, so the verdict is INCOMPLETE rather than a pass.",
+            });
+          }
+        }
       }
       outOfScopeFindings.sort((a, b) => (a.path + a.fn).localeCompare(b.path + b.fn));
     } catch {
