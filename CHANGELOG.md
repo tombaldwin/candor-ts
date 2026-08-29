@@ -8,6 +8,49 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **FABRICATION, closed: a shared higher-order function's effects were charged to EVERY caller,
+  not just the one whose callback actually performed them.** BACKLOG "FABRICATION in ts and swift: a
+  shared HOF's effects are charged to EVERY caller", reproduced against all four real engines: a `hof`
+  called from two sites with two different named callbacks (`callerA` passing an `Fs`-performing
+  `sinkA`, `callerB` passing a pure `sinkB`) read `callerA=[Fs] callerB=[Fs]` — candor-java is
+  call-site precise (`[Fs,Unknown]`/`[Unknown]`), candor-rust falls back to the honest `Unknown`/
+  `Unknown`; candor-ts (and candor-swift, tracked separately) unioned every effect ever reached
+  through the shared HOF and handed the whole union to every caller. This is the safe (over-report)
+  direction, not a cardinal sin in the strict sense, but it is a real false positive: `deny Fs
+  callerB` failed on a function that performs no I/O.
+  Mechanism: `scan.mjs`'s callback-flow pass (`callbackArgs`/`paramInvokes`, "the callback_named
+  move") pooled what EVERY call site passed to a parameter-invoking function into one shared bucket
+  keyed only by the callee's name, then attributed the pooled result to the HOF's own record — which
+  every caller inherits identically through the ordinary call-graph edge. Two callers passing
+  different named callbacks could therefore never be told apart.
+  Fixed by keeping the callback-flow record PER CALL SITE (each entry now carries the calling
+  function's own record, not just a target/opaque flag pooled by index). Pass 2b now distinguishes:
+  UNIFORM (every call site agrees, or there is only one — attributed to the HOF's own record exactly
+  as before, so the common single-caller/single-target shape is report-byte-identical) from DIVERGENT
+  (call sites disagree — two different named callbacks, or a mix of named and unresolvable ones): the
+  HOF's shared record is left untouched (it has no single caller-independent truth), and each calling
+  function is edged directly to what IT resolved at ITS OWN call site. A call site whose callback
+  genuinely cannot be resolved (a parameter, a dynamically chosen function, a value from a collection)
+  still surfaces `Unknown` — on that caller alone, never silently pure and never borrowed from, or
+  lent to, a sibling call site (a fabrication-fix that goes silent is measured as far worse than the
+  bug it closes; this one does not).
+  Chose the "clean" per-call-site attribution (Fs only where resolvable, Unknown only where not) over
+  candor-java's own hedge (`effect+Unknown`): candor-ts already resolves the common built-in-HOF case
+  (`arr.forEach(namedFn)`) this way with no hedge, and the DIVERGENT branch above is now consistent
+  with it rather than introducing a second convention for user-defined HOFs.
+  Falsified against the pre-fix binary: `callerB` read `[Fs]` before, is omitted (pure) after;
+  `callerA` reads `[Fs]` both before and after (the under-report guard — the real violation survives);
+  a third caller passing a genuinely dynamic callback reads `Unknown` both before and after, never
+  pure. `fabrication_probe.mjs` did not catch this — it is scoped to whole-module κ-table
+  over-painting on node builtins (`net`/`http`/`fs` member-level pure-vs-effectful splits), a
+  different mechanism from this callback-flow pass, and exercises no user-defined multi-caller HOF
+  shape. Regression-checked on two real npm packages with heavy internal HOF use (lodash, ramda):
+  zero functions lost a real effect, zero gained one, zero silently went pure; lodash's own source
+  contains a live instance of exactly this shape (`_getAllKeys`/`_getAllKeysIn` both call the shared
+  `_baseGetAllKeys` with different named `keysFunc` arguments) and now resolves each caller to its own
+  target instead of pooling both onto `_baseGetAllKeys`'s shared record. `node test.mjs --parallel`:
+  1649 passed, 0 failed (was 1643).
+
 - ⚠ **CARDINAL SIN, closed: a peek finding was scope-matched against the WRONG ENTITY.** BACKLOG
   "FOUR-WAY CARDINAL SIN — a peek finding is scope-matched against the WRONG ENTITY", the ts entry
   (candor-swift `7378f4f` closed the same class for itself first, for a harder reason — see below). The

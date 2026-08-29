@@ -2550,6 +2550,51 @@ export function c(f: () => void): void { invokeOpaque(f); }`,
         entry(report, "src.cb.invokeOpaque")?.unresolved === true);
 }
 
+// ── 7b. a shared HOF called from TWO sites with TWO DIFFERENT named callbacks resolves PER CALL SITE
+// (the four-way fabrication: candor-ts used to union every effect ever reached through a shared HOF
+// and charge the whole union to every caller — proven against java, which is call-site precise, and
+// rust, whose honest fallback is Unknown; a `deny Fs` on the pure caller was a false positive). ──────
+if (blk()) {
+  const d = project({
+    "src/hof.ts": `import * as fsm from "node:fs";
+export function sinkA(): void { fsm.readFileSync("/x"); }
+export function sinkB(): void { /* pure */ }
+function hof(cb: () => void): void { cb(); }
+export function callerA(): void { hof(sinkA); }
+export function callerB(): void { hof(sinkB); }
+export function callerDyn(pick: () => void): void { hof(pick); }`,
+  });
+  const { report } = scan(d);
+  // THE DEFECT CASE — callerB (a PURE callback) must stop carrying sinkA's Fs.
+  check("multi-caller HOF: callerB (pure callback) does NOT inherit the sibling caller's Fs",
+        entry(report, "src.hof.callerB") == null, JSON.stringify(entry(report, "src.hof.callerB")));
+  // THE CONTROL THAT MATTERS MOST — the under-report guard: callerA must STILL carry Fs (fixing the
+  // false positive must not cost the true positive), and hof's own shared record must not silently
+  // swallow the divergence either (no fabricated pure/edge on the HOF itself).
+  check("multi-caller HOF: callerA (the Fs callback) STILL carries Fs — the fix is not a silent drop",
+        entry(report, "src.hof.callerA")?.inferred.includes("Fs")
+        && entry(report, "src.hof.callerA")?.unresolved === false,
+        JSON.stringify(entry(report, "src.hof.callerA")));
+  check("multi-caller HOF: hof itself gains no fabricated Fs from either caller",
+        entry(report, "src.hof.hof") == null, JSON.stringify(entry(report, "src.hof.hof")));
+  // A THIRD caller passing a genuinely unresolvable (dynamic-parameter) callback must surface Unknown
+  // on ITSELF alone — never silently pure, and never borrowed onto the resolvable siblings.
+  check("multi-caller HOF: a genuinely unresolvable callback discloses Unknown on its own caller only",
+        entry(report, "src.hof.callerDyn")?.unresolved === true
+        && entry(report, "src.hof.callerDyn")?.unknownWhy?.includes("callback:param#0"),
+        JSON.stringify(entry(report, "src.hof.callerDyn")));
+  check("multi-caller HOF: callerA/callerB stay resolved even though a sibling caller is opaque",
+        entry(report, "src.hof.callerA")?.unresolved === false
+        && entry(report, "src.hof.callerB") == null,
+        JSON.stringify([entry(report, "src.hof.callerA"), entry(report, "src.hof.callerB")]));
+  // The false-positive gate this bug caused: a pure caller must no longer trip `deny Fs`.
+  const clean = spawnSync(process.execPath, [path.join(HERE, "scan.mjs"), d, "--policy", (() => {
+    const p = path.join(d, ".policy"); fs.writeFileSync(p, "deny Fs hof.callerB\n"); return p;
+  })()], { encoding: "utf8" });
+  check("multi-caller HOF: `deny Fs` on the pure caller now PASSES (was a false positive)",
+        clean.status === 0, `status=${clean.status} ${clean.stdout}${clean.stderr}`);
+}
+
 // ── 8. field initializers attribute to the constructor (the silent-pure hole) ────────────────────
 if (blk()) {
   const d = project({

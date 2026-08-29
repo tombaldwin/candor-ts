@@ -3761,7 +3761,12 @@ for (const { mod, name, ident } of exportAliasCandidates) {
 // resolvable callback target), or an opaque value (an inline closure stays attributed to the
 // passer; a variable/property could be anything). A function that invokes a callback PARAMETER
 // then resolves to the named targets IF every call site passed one — else honest Unknown.
-const callbackArgs = new Map();    // calleeName -> Map(argIndex -> {targets:Set, opaque:boolean})
+const callbackArgs = new Map();    // calleeName -> Map(argIndex -> Array<{callerRec, target:string|null, opaque:boolean}>)
+                                    // ONE ENTRY PER CALL SITE (not pooled by index alone) — pass 2b needs
+                                    // the calling function's own record to attribute a divergent HOF's
+                                    // callback per caller instead of unioning every caller's choice onto
+                                    // the HOF and handing the whole union to everyone (BACKLOG "a shared
+                                    // HOF's effects are charged to EVERY caller").
 const paramInvokes = new Map();    // fnName -> Set(paramIndex) — this fn calls its own parameter
 
 // ── entry points (SPEC §2 `entryPoint`): runtime-invoked roots the framework calls — their
@@ -5342,20 +5347,23 @@ function visitCalls(node) {
                 }
               }
             }
-            // record what each argument position received (callback-flow, see callbackArgs)
+            // record what each argument position received (callback-flow, see callbackArgs) — keyed with
+            // THIS call site's own caller record (`rec`), so a HOF called from two sites with two
+            // different named callbacks can be resolved per site in pass 2b, not pooled into one bucket.
             (node.arguments ?? []).forEach((a, i) => {
               const slot = (callbackArgs.get(targetName) ?? callbackArgs.set(targetName, new Map()).get(targetName));
-              const cell = slot.get(i) ?? { targets: new Set(), opaque: false };
+              const list = slot.get(i) ?? [];
+              let target = null, opaque = false;
               if (ts.isIdentifier(a)) {
-                const t = (() => { const d2 = realDecl(checker.getSymbolAtLocation(a)); return d2 && nodeName.get(d2); })();
-                if (t) cell.targets.add(t);
-                else cell.opaque = true;
-              } else if (ts.isArrowFunction(a) || ts.isFunctionExpression(a)) {
-                cell.opaque = true; // inline closure: body attributed to the PASSER; opaque to the callee
+                const d2 = realDecl(checker.getSymbolAtLocation(a));
+                target = d2 && nodeName.get(d2);
+                if (!target) opaque = true;
               } else {
-                cell.opaque = true;
+                // inline closure (attributed lexically to the PASSER already) or any other opaque shape
+                opaque = true;
               }
-              slot.set(i, cell);
+              list.push({ callerRec: rec, target, opaque });
+              slot.set(i, list);
             });
           } else if (!ts.isArrowFunction(decl) && !ts.isFunctionExpression(decl)) {
             // Resolution landed on a TYPE (a function-type annotation, a method/property signature),
@@ -6451,20 +6459,52 @@ function visitCalls(node) {
 for (const sf of sources) visitCalls(sf);
 
 // ---- pass 2b: callback-flow resolution (the callback_named move) ----------------------------------
-// A fn invoking its parameter i resolves to the named targets IF this project shows call sites and
-// EVERY one passed a named local unit at i. Any opaque arg — or NO visible call site (the fn may be
-// exported; outside callers can pass anything) — keeps the honest Unknown.
+// A fn invoking its parameter i resolves to the named target(s) actually passed. Three shapes:
+//  - NO visible call site (the fn may be exported; outside callers can pass anything) — honest Unknown
+//    on the HOF's own record, as before.
+//  - UNIFORM: every visible call site passes the SAME named local unit at i (this also covers the
+//    common single-call-site case). Attribute it to the HOF's own record exactly as before — every
+//    caller inherits the identical, correct answer through the ordinary call-graph edge, and every
+//    call site that's opaque anywhere with NO resolvable target anywhere keeps the honest Unknown the
+//    same way. Report-identical to the pre-fix behavior for this shape.
+//  - DIVERGENT (the multi-caller HOF fabrication — BACKLOG "a shared HOF's effects are charged to
+//    EVERY caller", the java four-way comparison this fixes against): call sites disagree — two
+//    different named callbacks, or a mix of named and opaque/dynamic ones. A single shared record on
+//    the HOF cannot honestly represent two different call sites' truths, so we do NOT pool them there
+//    — that pooling was the bug: candor-ts unioned every effect ever reached through a shared HOF and
+//    charged the WHOLE union to every caller, so a caller passing a pure callback fabricated the effect
+//    of a sibling caller's callback (a false `deny Fs` violation on the pure caller). Instead we edge
+//    each CALLING function directly to what IT resolved at ITS call site — precise per-call-site
+//    attribution, matching candor-java's call-site-precise posture (the existence proof this is
+//    solvable). A call site that can't be resolved there (a parameter, a dynamically chosen function, a
+//    value pulled from a collection) still surfaces the honest Unknown — on that caller alone, never
+//    silently pure, and never borrowed from — or lent to — a sibling call site.
 for (const [fnName, idxs] of paramInvokes) {
   const rec = fns.get(fnName);
   if (!rec) continue;
   const slots = callbackArgs.get(fnName);
   for (const idx of idxs) {
-    const cell = slots?.get(idx);
-    if (cell && !cell.opaque && cell.targets.size > 0) {
-      for (const t of cell.targets) rec.edges.add(t);
-    } else {
+    const calls = slots?.get(idx);
+    if (!calls || calls.length === 0) {
       rec.direct.add("Unknown");
-      rec.why.add(`callback:param#${idx}`); // an opaque (or externally-callable) callback parameter
+      rec.why.add(`callback:param#${idx}`); // no visible call site — could be anything
+      continue;
+    }
+    const distinct = new Set(calls.filter((c) => !c.opaque && c.target).map((c) => c.target));
+    const anyOpaque = calls.some((c) => c.opaque || !c.target);
+    if (!anyOpaque && distinct.size <= 1) {
+      for (const t of distinct) rec.edges.add(t); // UNIFORM — pre-fix-identical
+    } else if (distinct.size === 0) {
+      // every call site is opaque — genuinely unresolvable everywhere, same posture as "no call site".
+      rec.direct.add("Unknown");
+      rec.why.add(`callback:param#${idx}`);
+    } else {
+      // DIVERGENT — resolve PER CALL SITE, directly onto each caller, bypassing the HOF's shared record
+      // (which stays untouched by this parameter's dispatch: it has no single caller-independent truth).
+      for (const { callerRec, target, opaque } of calls) {
+        if (!opaque && target) callerRec.edges.add(target);
+        else { callerRec.direct.add("Unknown"); callerRec.why.add(`callback:param#${idx}`); }
+      }
     }
   }
 }
