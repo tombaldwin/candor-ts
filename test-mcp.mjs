@@ -310,7 +310,15 @@ const wiReplies = await mcpSession([
 const wiById = Object.fromEntries(wiReplies.map((r) => [r.id, r]));
 const wiText = (id) => wiById[id].result.content[0].text;
 const wiJson = (id) => JSON.parse(wiText(id));
-ok("mcp whatif: a repo-root policy is READ (not refused by the old .candor-dir confinement root) and violates",
+// NOTE ON DISCRIMINATING POWER: this fixture's report prefix (P = `${W}/r`) sits DIRECTLY in W, and W
+// has a `.candor/config` naming `arch.policy`. That means `policyRoot()`'s NEW config-discovered
+// repoRoot AND the OLD default (`dirname(prefix)`) both resolve to the SAME directory (W) — so the row
+// below is true both with and without 7a12017's confinement-root fix and cannot tell one from the other
+// (found by a revert sweep, 2026-08-29: reverting the fix leaves this exact assertion green). It is kept
+// because it is still a real, true regression check for the READ-succeeds/fail-closed/outside-refused
+// shape — just not for the specific root-selection bug its old name claimed to cover. See the
+// `⟨7a12017 discriminator⟩` row below for a fixture that actually separates the two roots.
+ok("mcp whatif: a repo-root policy is read via the checked-in .candor/config root (non-discriminating for the .candor-dir-vs-parent bug — see the discriminator row below) and violates",
    wiById[2].result.isError !== true && wiJson(2).ok === false && wiJson(2).violations.length > 0, wiText(2).slice(0, 160));
 ok("mcp whatif: the same policy passes a non-denied effect (control)",
    wiById[3].result.isError !== true && wiJson(3).ok === true && wiJson(3).violations.length === 0, wiText(3).slice(0, 160));
@@ -320,6 +328,32 @@ ok("mcp whatif: a policy outside the report's repo is refused (confinement)",
    wiById[5].result.isError === true && /must be within/.test(wiText(5)), wiText(5).slice(0, 160));
 ok("mcp whatif: no policy given still answers the blast radius (ok:true, no violations)",
    wiById[6].result.isError !== true && wiJson(6).ok === true && wiJson(6).affected.includes("app.handler"), wiText(6).slice(0, 160));
+
+// ── THE DISCRIMINATING CASE for 7a12017's confinement-root fix ─────────────────────────────────────
+// policyRoot(prefix) has two candidate roots: the OLD one (always `dirname(prefix)`) and the NEW one
+// (the `.candor/config`-discovered repoRoot, else — when the report lives INSIDE a `.candor/` dir with
+// no such config — that dir's PARENT). The row above can't separate them because its report sits
+// directly in W. This fixture puts the report INSIDE `.candor/` with NO `.candor/config`, so the two
+// roots are genuinely different directories: OLD = `.candor/` itself, NEW = its parent (the repo root).
+// A policy at the repo root, sibling to `.candor/`, is inside NEW but outside OLD.
+const PR = scratch("candor-policyroot-");
+fs.mkdirSync(path.join(PR, ".candor"), { recursive: true });
+const prPrefix = path.join(PR, ".candor", "report");
+fs.writeFileSync(`${prPrefix}.json`, JSON.stringify({
+  functions: [{ fn: "pr.mid", inferred: [], direct: [], calls: ["pr.leaf"] },
+              { fn: "pr.leaf", inferred: ["Net"], direct: ["Net"], calls: [] }] }));
+fs.writeFileSync(`${prPrefix}.callgraph.json`, JSON.stringify({ "pr.mid": ["pr.leaf"], "pr.leaf": [] }));
+fs.writeFileSync(path.join(PR, "root.policy"), "deny Net\n"); // repo root, SIBLING of `.candor/` — not inside it
+const prReplies = await mcpSession([
+  { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+  wi(2, { fn: "pr.mid", effect: "Net", report: prPrefix, policy: path.join(PR, "root.policy") }),
+]);
+const prRes = prReplies.find((r) => r.id === 2).result;
+const prText = () => prRes.content[0].text;
+ok("mcp whatif ⟨7a12017 discriminator⟩: a repo-root policy SIBLING of `.candor/` is read when the report lives INSIDE `.candor/` with no checked-in config — the OLD root (dirname(prefix) == `.candor/` itself) refused this exact path; reverting the fix turns this row red",
+   prRes.isError !== true && JSON.parse(prText()).ok === false && JSON.parse(prText()).violations.length > 0,
+   prText().slice(0, 200));
+fs.rmSync(PR, { recursive: true, force: true });
 
 // ── --root lockdown: a report prefix outside the declared workspace is refused — but an out-of-tree
 // BASELINE (diff/gains) is accepted: a prior-release report deliberately kept outside the repo is

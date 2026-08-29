@@ -8,6 +8,42 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **Test coverage gap closed: `7a12017`'s MCP confinement-root fix had a fixture that could not
+  discriminate it from its own absence.** A revert sweep (2026-08-29, `bin/AGENT-CORPUS-BRIEF.md`
+  rule A) found that of `7a12017`'s two defects, only item 1 (`candor_whatif` no-policy silent-eval)
+  was actually protected — reverting item 2 (the confinement root for an explicit caller-supplied
+  `policy` path: `policyRoot()`, which prefers a `.candor/config`-discovered repo root, else the
+  parent of a `.candor/` report directory, else the report's own directory, over the old always-
+  `dirname(prefix)` default) left `test-mcp.mjs` green. Cause: the existing regression row
+  (`wi(2)`/`wi(3)`, "a repo-root policy is READ…") puts its report prefix directly in the fixture
+  workspace `W`, which also has a checked-in `.candor/config` — so the OLD root (`dirname(prefix)`)
+  and the NEW root (`.candor/config`'s discovered `repoRoot`) resolve to the *same* directory, and the
+  row is true under both the fixed and the reverted code. Severity: this bug fails CLOSED (a
+  legitimate repo-root policy is refused, not a violation waved through), so it is the safe
+  over-report direction, not a cardinal sin — but it was still unprotected for seven weeks.
+  Added a discriminating fixture: a report living INSIDE `.candor/` with NO checked-in
+  `.candor/config`, gated by an explicit policy at the repo root (a sibling of `.candor/`, outside
+  it) — a shape where the OLD root (`.candor/` itself) and the NEW root (its parent) are genuinely
+  different directories. Confirmed RED on a revert of item 2 alone (isolated from item 1's fix) and
+  GREEN at HEAD. Renamed/annotated the original non-discriminating row rather than deleting it — it
+  still exercises a true, real behaviour (a checked-in-config-derived root is read, fail-closed on a
+  missing path, refused outside the repo), just not the specific root-selection bug its old name
+  implied it covered.
+  Also found, incidentally: a LATER, unrelated fixture (`4faac08`'s `.candor/config`-alias-resolution
+  test for `candor_gate`) happens to share the exact `.candor/`-nested-report / repo-root-policy shape
+  and DOES fail on the same revert — so the full `test-mcp.mjs` suite was not actually blind to this
+  regression at current HEAD, only the specific row named for it was. Both facts are true at once:
+  the suite-level claim "reverting item 2 leaves the suite green" does not hold at HEAD (a real
+  fixture written for a different feature 19 days later already catches it by accident), while the
+  narrower claim "the row that documents this fix cannot tell it from its absence" does hold and is
+  the one worth fixing, since relying on an unrelated fixture's incidental coverage is not durable.
+  `npm test`'s `&&`-chained stages (`test-lsp.mjs`, `test-watch.mjs`, `fuzz.mjs`) were reported as
+  masked by a pre-existing `test.mjs` failure (`--agents prints the version header…`) on the three
+  most recent ts commits at the time of that sweep; investigated here and NOT reproducible at HEAD
+  (`d5f6c0c`) or at its two most recent ancestors (`8584572`, `0e1f05f`) — a full `npm test` run
+  completes end to end, and the isolated `--agents` header/doc-match check passes for both
+  `scan.mjs` and `query.mjs` at all three SHAs.
+
 - ⚠ **FABRICATION, closed: a shared higher-order function's effects were charged to EVERY caller,
   not just the one whose callback actually performed them.** BACKLOG "FABRICATION in ts and swift: a
   shared HOF's effects are charged to EVERY caller", reproduced against all four real engines: a `hof`
