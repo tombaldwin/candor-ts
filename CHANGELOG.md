@@ -8,6 +8,45 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **Guard-deletion sweep of `mustHedge` (query-core.mjs) — two of its seven OR-clauses were unprotected.**
+  `bin/AGENT-CORPUS-BRIEF.md`'s "attack C" (delete each guard, see if anything notices) run against
+  `mustHedge`'s `c.unanalyzed?.length || c.judgedNothing?.length || c.noManifest?.length ||
+  c.unreadable?.length || c.outOfScope?.length || c.unread?.length || c.unaskedRules?.length` chain —
+  the single chokepoint `where`/`map`/`show`/`blindspots`/`reachable`/`containment`/`tour`/`diff`/`gains`
+  and MCP's `withCompleteness`/`nestWithCaveat` all read to decide whether an answer needs the
+  `incomplete` caveat. Five arms (`unanalyzed`, `judgedNothing`, `noManifest`, `unreadable`, `unread`)
+  are well covered (1–31 assertions go red on deletion, confirmed by direct removal in a throwaway
+  worktree and full re-runs of `test.mjs`/`test-mcp.mjs`/`test-lsp.mjs`). Two were not:
+  - `outOfScope`: deleting `|| c.outOfScope?.length` left `test.mjs` (1649 assertions), `test-mcp.mjs`
+    (198) and `test-lsp.mjs` (103) entirely green. No existing fixture constructs a report carrying
+    `outOfScope` alone (no `unanalyzed`/`unread`/`judgedNothing` riding along) and checks that the
+    plain descriptive verbs still hedge over it — every prior `outOfScope` row exercises either the
+    scan's own emission (`gate --report`, `fix-gate`/`unverified --strict`) or a route that reads the
+    key directly through `advisoryAnswer`, never through `mustHedge`. Closed with a new end-to-end
+    block in `test.mjs` (a single synthetic report, seven verbs) — confirmed RED on the same deletion,
+    GREEN at HEAD.
+  - `unaskedRules`: not merely untested but **unreachable from any current call site**. Every caller
+    that computes `reportCompleteness(prefix, denyRules)` with a non-empty `denyRules`
+    (`whatif`/`fix-gate`/`unverified`, the only three) reads `wcomp.unaskedRules`/`fgComp.unaskedRules`/
+    `uComp.unaskedRules` directly into `advisoryAnswer`'s own parameter — never through `mustHedge` on
+    that same object — so this arm is presently dead code (confirmed: deleting it changes nothing in
+    `test.mjs`/`test-mcp.mjs`/`test-lsp.mjs`; my first pass had wrongly recorded 40+ failures here, a
+    false RED traced to a concurrent `pkill -f "scan.mjs"` from an unrelated agent killing this suite's
+    own spawned child scans mid-run — re-run twice clean after the interference, see `bin/
+    AGENT-CORPUS-BRIEF.md` rule 12 on verifying a measurement rather than trusting the first pass). Not
+    wired into any verb (that would be a gate-semantics change beyond this sweep's scope) — instead
+    pinned at the function level: a new `test-unit.mjs` row calls `mustHedge` directly with each of the
+    seven arms in turn, non-empty and empty, so a future policy-aware descriptive verb that finally
+    routes through `mustHedge` inherits protection instead of being the eighth silently-untested arm.
+    Both new tests prove RED on deletion (verified by direct removal, not by reasoning) and GREEN at
+    HEAD; all seven existing suites (`lint`, `test-unit`, `test.mjs --parallel`, `test-mcp`, `test-lsp`,
+    `test-watch`, `fabrication_probe`, `fuzz`, `ci/self-gate.sh`) stay green with the additions, and
+    `test.mjs`'s runtime is unaffected (8 new fast assertions on an existing fixture).
+  Also spot-checked and found **well-protected** (no fix needed): `scan-core.mjs`'s
+  `nodeCoreUnreviewed` fail-closed floor (flipping its default from `Unknown[native:…]` to
+  reviewed-pure — 10 assertions red) and `netClassesOf`'s `unknown-host` fallback (deleting the
+  masked/hostless carve-out — 7 assertions red).
+
 - **Test coverage gap closed: `7a12017`'s MCP confinement-root fix had a fixture that could not
   discriminate it from its own absence.** A revert sweep (2026-08-29, `bin/AGENT-CORPUS-BRIEF.md`
   rule A) found that of `7a12017`'s two defects, only item 1 (`candor_whatif` no-policy silent-eval)

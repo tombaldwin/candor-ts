@@ -19,7 +19,7 @@ import {
   containment, loadReport, loadCallgraph, loadHierarchy, callersFrontier, blindspots, blindspotsStats, isReport,
   reportCoverage, gainsCoverage, parseClassFilter, ClassFilterError,
   claimsToHaveJudgedNothing, loadGateReport, reportJudgedNothing, reportUnanalyzed,
-  reportCompleteness, specPredates,
+  reportCompleteness, specPredates, mustHedge,
 } from "./query-core.mjs";
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
@@ -1799,4 +1799,35 @@ test("⟨0.28⟩ siblings are sorted: multi-report merge + unanalyzed order surv
     fs.readdirSync = real;
     fs.rmSync(d, { recursive: true, force: true });
   }
+});
+
+// ── mustHedge: EVERY OR-CLAUSE IS ITS OWN ARM, PINNED DIRECTLY ─────────────────────────────────────
+// Guard-deletion sweep (2026-08-30): `mustHedge`'s seven-way OR-chain is the single chokepoint six+
+// descriptive verbs (`where`/`map`/`show`/`blindspots`/`reachable`/`containment`/`tour`, plus MCP's
+// `withCompleteness`/`nestWithCaveat`) call to decide whether an answer needs the `incomplete` caveat.
+// Deleting `|| c.outOfScope?.length` from the OR-chain left test.mjs (1649 assertions), test-mcp.mjs
+// (198) and test-lsp.mjs (103) entirely green — the arm existed in the source and nothing in the suite
+// would have noticed its silent removal (closed by a companion end-to-end row in test.mjs, "the
+// OUTOFSCOPE ARM"). `unaskedRules` is worse: it is not merely untested but UNREACHABLE from any current
+// call site — every caller that computes `reportCompleteness(prefix, denyRules)` (whatif/fix-gate/
+// unverified, the only ones that ever pass a non-empty `denyRules`) reads `wcomp.unaskedRules`/
+// `fgComp.unaskedRules`/`uComp.unaskedRules` directly into `advisoryAnswer`'s own parameter, never
+// through `mustHedge` — so deleting this arm changes nothing anywhere in the engine TODAY. It rides in
+// `mustHedge` because the function's own doc comment says it must (a future policy-aware descriptive
+// verb wired through `mustHedge` should not have to remember to add it), so this pins the CONTRACT
+// rather than a route no code takes yet.
+//
+// A table over all seven arms, not just the two found missing, so the next arm added to this OR-chain
+// inherits a row instead of being the eighth untested one.
+test("mustHedge: EVERY arm of the seven-way OR-chain independently raises the hedge", () => {
+  const ARMS = ["unanalyzed", "judgedNothing", "noManifest", "unreadable", "outOfScope", "unread", "unaskedRules"];
+  for (const arm of ARMS) {
+    assert.equal(mustHedge({ [arm]: ["x"] }), true, `mustHedge must hedge on a non-empty \`${arm}\` alone`);
+    assert.equal(mustHedge({ [arm]: [] }), false,
+      `an EMPTY \`${arm}\` must not hedge — presence of the key is not the trigger, non-emptiness is`);
+  }
+  assert.equal(mustHedge({}), false, "CONTROL: an object naming none of the seven causes must not hedge");
+  assert.equal(mustHedge(null), false,
+    "CONTROL: a null completeness object must not hedge (the `!!(c && …)` guard)");
+  assert.equal(mustHedge(undefined), false, "CONTROL: same, undefined");
 });

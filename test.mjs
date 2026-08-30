@@ -11798,6 +11798,41 @@ if (blk()) {
     }
   }
 
+  // ── ⟨0.32⟩ GUARD-DELETION SWEEP (2026-08-30): THE OUTOFSCOPE ARM OF THE SAME HEDGE ──────────────────
+  // `mustHedge` (query-core.mjs) ORs together SEVEN completeness causes; `unread` just got its own
+  // BOUNDARY CONTROL above, and `unanalyzed`/`judgedNothing`/`noManifest` got theirs earlier in this
+  // block — but no row anywhere in this suite constructs a report carrying `outOfScope` ALONE (no
+  // `unanalyzed`, no unread exclusion class, no judged-nothing) and checks that the plain descriptive
+  // verbs still hedge over it. MEASURED: deleting `|| c.outOfScope?.length` from `mustHedge` left this
+  // suite (1649 assertions), test-mcp.mjs (198) and test-lsp.mjs (103) *entirely green* — the arm existed
+  // in the source and nothing anywhere would have noticed its silent removal. `where`/`blindspots`/
+  // `reachable`/`containment`/`tour` all reach `mustHedge` through the SAME `reportCompleteness(prefix)`
+  // (no policy) as `show`/`map` above, so one report exercises all seven at once.
+  {
+    const outOfScopeOnlyP = state("outofscope-only", (o) => {
+      o.outOfScope = [{ fn: "leaf", path: "src/leaked.ts", effects: ["Exec"], class: "non-library-target",
+                        reason: "OUTSIDE this scan's scope (non-library-target) — the gate did NOT judge it." }];
+    });
+    for (const argv of [["show", "app.leaf"], ["map"], ["where", "Fs"], ["blindspots"],
+                        ["reachable"], ["containment"], ["tour", "3"]]) {
+      const dj = spawnSync("node", [path.join(HERE, "query.mjs"), ...argv, "--report", `${outOfScopeOnlyP}.json`,
+                                    "--json"], { encoding: "utf8" });
+      let ddoc = null; try { ddoc = JSON.parse(dj.stdout); } catch { /* null → fails loudly */ }
+      check(`⟨0.32⟩ \`${argv[0]}\` hedges over an OUTOFSCOPE-ONLY report at exit 0 — the outOfScope arm of mustHedge, alone with no other cause riding along, still raises \`incomplete\``,
+            dj.status === 0 && !!ddoc && ddoc.incomplete === true
+              && !("unanalyzed" in ddoc) && !("judgedNothing" in ddoc),
+            `status=${dj.status} ${dj.stdout}`.slice(0, 240));
+    }
+    // CONTROL: `outOfScope: []` is "asked and clear" (⟨0.33⟩, tested above at scale for the scan's own
+    // emission) — an EMPTY array must not trip the same hedge, or a policy-scanned tree that excluded
+    // nothing would hedge on every descriptive query forever.
+    const outOfScopeEmptyP = state("outofscope-empty", (o) => { o.outOfScope = []; });
+    const cj = spawnSync("node", [path.join(HERE, "query.mjs"), "show", "app.leaf", "--report",
+                                  `${outOfScopeEmptyP}.json`, "--json"], { encoding: "utf8" });
+    check("⟨0.32⟩ CONTROL: `show` over `outOfScope: []` (asked and clear) is UNHEDGED — an empty outOfScope is not a cause",
+          cj.status === 0 && !/incomplete/.test(cj.stdout), `${cj.stdout}`.slice(0, 200));
+  }
+
   // `map`'s top level is a USER NAMESPACE — the one document whose own rows could collide with the keys
   // this rung must add. ⟨0.28⟩ RUNG A DISSOLVES THE COLLISION rather than disclosing it, and ⟨0.32⟩ then
   // ruled HOW: the module namespace NESTS one level down under `modules` and the caveat sits at the root,
