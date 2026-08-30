@@ -777,19 +777,39 @@ function refusalMarkerFor(prefix) {
       return d && d.refused === true && typeof d.prefix === "string" ? d : null;
     } catch { return null; }
   };
+  // The ordinary form first: the refusing run wrote the marker at `<its --out prefix>.refused.json`, and
+  // for a locator that names that same prefix (or a single `<prefix>.json` report, whose `.json` the
+  // caller has already stripped) this is a direct hit.
+  const direct = read(`${prefix}.refused.json`);
+  if (direct) return direct;
+  // …AND THE MULTI-REPORT DIRECT-FILE FORM, which the lookup above CANNOT reach. §3.3.1's direct-file
+  // locator accepts any `.json` name whatever its dot-segments, so `--report <dir>/rep.<crate>.scan.json`
+  // arrives here as the prefix `<dir>/rep.<crate>.scan` — while the refusing scan recorded `<dir>/rep`.
+  //
+  // GUARD-DELETION SWEEP, 2026-08-30: this branch used to be GATED ON `prefix.endsWith(".json")`, a
+  // condition its only caller makes impossible — `locatorToPrefix` strips the trailing `.json` before
+  // `requireReport` is ever called — so it had never executed. Deleting it left the whole suite green
+  // because there was nothing to delete. MEASURED at HEAD: with `rep.refused.json` beside
+  // `rep.mycrate.scan.json`, `where Net --report <dir>/rep` exits 2 naming the refusal and
+  // `where Net --report <dir>/rep.mycrate.scan.json` exits 0 with a clean answer over the same bytes —
+  // the same reports, certified or refused according to which spelling of the locator was used. The
+  // marker carries its own `prefix` for precisely this case (scan.mjs's `writeRefusalMarker` says so).
+  //
+  // MATCHED ON A DOT-SEGMENT BOUNDARY, not a bare `startsWith`: the old (unreachable) form would have let
+  // a `report.refused.json` cover an unrelated `report-old` prefix beside it — an over-refusal invented
+  // by the repair. `<prefix>` itself, or `<prefix>.<anything>`, and nothing else.
   try {
-    if (prefix.endsWith(".json") && fs.existsSync(prefix) && fs.statSync(prefix).isFile()) {
-      const dir = path.dirname(path.resolve(prefix));
-      const me = path.resolve(prefix);
-      for (const n of fs.readdirSync(dir)) {
-        if (!n.endsWith(".refused.json")) continue;
-        const d = read(path.join(dir, n));
-        if (d && me.startsWith(path.resolve(d.prefix))) return d;
-      }
-      return null;
+    const me = path.resolve(prefix);
+    const dir = path.dirname(me);
+    for (const n of fs.readdirSync(dir)) {
+      if (!n.endsWith(".refused.json")) continue;
+      const d = read(path.join(dir, n));
+      if (!d) continue;
+      const p = path.resolve(d.prefix);
+      if (me === p || me.startsWith(p + ".")) return d;
     }
-  } catch { return null; }
-  return read(`${prefix}.refused.json`);
+  } catch { /* an unreadable directory carries no marker — the status quo, never worse */ }
+  return null;
 }
 
 function requireReport(prefix) {

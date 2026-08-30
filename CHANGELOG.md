@@ -8,6 +8,92 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **Guard-deletion sweep, round 2 — `query.mjs`, `query-core.mjs`, `mcp.mjs`, `lsp.mjs` (24 guards
+  deleted and run to a verdict; 9 unprotected, 1 of them a live defect).** Method unchanged from the
+  previous entry (delete/neuter one guard in a throwaway tree, run the FULL battery, and treat a green
+  suite as a lead rather than a conclusion — every green was then reproduced by hand against a pre-fix
+  build before anything was written).
+
+  **One live defect, not merely an untested guard:**
+  - ⚠ **The ⟨0.32⟩ refusal marker was invisible to §3.3.1's direct-file locator, and its guard had never
+    executed once.** `refusalMarkerFor`'s directory-scanning branch was gated on `prefix.endsWith(".json")`
+    — a condition its only caller makes impossible, because `locatorToPrefix` strips the trailing `.json`
+    before `requireReport` ever runs. Deleting the branch left the suite green because there was nothing
+    to delete. MEASURED at HEAD, with `rep.refused.json` beside `rep.<crate>.scan.json` (the multi-report
+    layout the marker carries its own `prefix` FOR, per scan.mjs's `writeRefusalMarker`):
+    `where Net --report <dir>/rep` exits 2 naming the refusal, and `where Net --report
+    <dir>/rep.<crate>.scan.json` — the same bytes, the other spelling §3.3.1 accepts — exited **0 with a
+    clean answer**. A consumer handed the file path certified reports the most recent scan had refused.
+    Fixed by looking the marker up unconditionally in the report's directory when the
+    `<prefix>.refused.json` name misses, matching on a DOT-SEGMENT boundary rather than the old branch's
+    bare `startsWith` (which would have let a `report` marker cover an unrelated `report-old` beside it —
+    an over-refusal invented by the repair, so it has its own control row). Grepping every test file for
+    `refused.json` / `refusalMarker` / the operator sentence returned ZERO rows beforehand: the rung's
+    READ half was untested here in its entirety, not only in the branch that was broken.
+
+  **Eight guards that work and nothing was testing (all now RED on the exact deletion):**
+  - **`writeSinkAtomic`'s `nlink > 1` in-place write** — the OTHER half of the same `resolveSinkArtifact`
+    paragraph the previous round fixed the symlink half of (attack A.2, one round apart). With the branch
+    neutered, temp+rename gives `--gate-json`'s path a fresh inode and the other name for that file keeps
+    the previous run's `{"ok": true}` while the gate fires exit 1.
+  - **The duplicate-`--gate-json` refusal** — flagged-but-not-closed by the previous entry, now closed.
+    Neutered, the run exits 1, writes the firing verdict to the LAST sink only, and leaves the first
+    holding yesterday's green with no way for its reader to tell it lost. Plus the control the dedupe
+    needs: the SAME path named twice is one sink, not a refusal.
+  - **A flag-shaped `--gate-json` value.** Its own comment claims the check stops a "GATELESS-GREEN"; that
+    shape did **not** reproduce (the trailing path becomes an unexpected positional and the run still
+    exits 2). What did, three times: `--gate-json --json` / `--text` / `--policy` swallows the flag as a
+    FILENAME and creates a file literally named `--json` in the CWD holding the verdict, while the machine
+    output the operator asked for is silently dropped. Written up as measured, not as the comment claims.
+  - **`confinedPolicyRead`'s `--root` arm (`mcp.mjs`).** Every existing confinement row drives the
+    REPO-ROOT arm; the workspace arm decided nothing anywhere. It is the arm the repo-root one structurally
+    cannot cover: `policyRoot()` is derived from the CLIENT-CHOSEN `report`, so a `.candor/config`
+    discovered ABOVE `--root` widens the repo root past the served workspace. Deleted, `candor_gate` reads
+    a policy outside the workspace and echoes its parsed rule text back in `violations[].detail` — the
+    arbitrary-file-read channel mcp.mjs's own header names. Its diagnostic is also now its own sentence:
+    the shared one named a directory the path IS inside, a refusal whose stated reason its own evidence
+    contradicts.
+  - **`resolvePrefix`'s `Q.hasReport` existence check (`mcp.mjs`).** Deleted, `candor_where` over a prefix
+    naming no report answers `{"directly":[],"inherited":[]}` at `isError: false` — a typo'd `report`
+    argument becoming a clean bill of health on the surface an agent trusts most. Two fixtures, because
+    the guard's own comment names the second as why it uses `Q.hasReport` and not `existsSync`: a prefix
+    whose only siblings are `.callgraph.json` / `.calibrated.json` / `.encountered-*`.
+  - **`reportUnread`'s `e.peeked !== true` and `reportOutOfScope`'s present-but-not-a-list arm
+    (`query-core.mjs`).** The ADVISORY readers, deliberately lenient where `loadGateReport` is strict —
+    and both guards exist to keep that leniency on the pessimistic side. Weakened to `!e.peeked`, a
+    `"peeked": "no"` (TRUTHY in this language, as the reader's own comment says) turns
+    `unverified --strict`'s `{unverified:[], incomplete:true, unread:["dep-foo"]}` exit 2 into
+    `{"ok":true,"unverified":[]}` exit 0 — over bytes `gate --report` refuses. Same inversion of the
+    ⟨0.24⟩ advisory-never-more-certain-than-the-gate relation for a non-list `outOfScope`.
+  - **`loadGateReport`'s `outOfScope` ELEMENT shape and its `scannedUnder` shape (`query-core.mjs`).**
+    A.2 again: the strict-read block above them pins all three arms of `excluded`, the key the ⟨0.32⟩ bug
+    report was about, and nothing reached the two siblings in the same loop applying the identical rule.
+    Neutered, `{"outOfScope":[{"fn":"dep.sendsNet"}]}` and `{"scannedUnder":"deny Net"}` each turn a
+    refusal into `{"ok": true, "violations": []}` at exit 0.
+
+  **Judged, not written up as gaps.** `mcp.mjs`'s `loadReportLoud` carried a `partialIsFatal` option whose
+  comment said "`candor_gate` passes it" — **no caller ever did**; `candor_gate` reaches the same rule
+  through its own `g.hardFail` throw off `Q.loadGateReport`. A dead knob documented as load-bearing;
+  removed, with the comment rewritten to point at where the rule actually lives (behaviour byte-identical,
+  verified by hand on a half-corrupt multi-report prefix). And `gate --report`'s
+  `gunread = gpol.deny.length ? g.unread : []` carve-out is UNOBSERVABLE on this route: every zero-deny
+  policy (`allow`/`forbid`/`only`, or none at all) refuses before the incompleteness arm can matter —
+  measured byte-identical on all three, so a row asserting it would assert nothing. Dead weight, like the
+  redundant single-sink block the previous round found, not a hole.
+
+  **Honest denominator: 24 guards deleted and run to a verdict this pass**, on top of the previous round's
+  2. The exit-code precedence chain — the previous entry's own hand-off — was guard-deleted this time and
+  is well covered: `g.hardFail`, the zero-rule refusal, the `gunevaluated` refusal, `loadReportOrDie`,
+  lsp's `hardFailDetail`, lsp's `wholePolicyUnanswerable`, `normFns`' per-entry corrupt keys and the
+  `excluded` strict read all went RED. **NOT reached: `policy.mjs` entirely, `scan.mjs` (~66 of its ~75
+  candidates still stand from the previous round), `lsp.mjs` beyond two guards, `watch.mjs`, `verify*.mjs`,
+  and roughly 55 remaining `query.mjs` candidates.** The refusal-marker defect was not translated to the
+  other three engines (attack F) — candor-ts is this agent's only repo; the question to ask them is *"does
+  your refusal-marker lookup see §3.3.1's direct-file locator for a MULTI-report prefix?"*.
+  Verified with the full `npm test` battery (1702 + 204 + 117 + 16 rows, probe and fuzzer), `ci/self-gate.sh`
+  and `npm run test:transitive-recall` green at HEAD; every new assertion confirmed RED on its exact
+  deletion in a throwaway tree, one mutation live at a time.
+
 - **Guard-deletion sweep of `query.mjs` — sink-collision guards (2 of ~80 candidates examined, both
   unprotected).** Continuing the previous sweep's own hand-off ("`query.mjs`'s ~80 are untouched"),
   scoped by the brief to exit-code precedence first, then sink-collision, then policy parsing.

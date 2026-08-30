@@ -10037,6 +10037,245 @@ if (blk()) {
         afterCanonical?.violations?.length === 1, JSON.stringify(afterCanonical)?.slice(0, 200));
 }
 
+// ── ⟨0.28⟩ …AND THE OTHER HALF OF THE SAME RULING: A MULTIPLY-LINKED SINK IS WRITTEN IN PLACE
+// (`writeSinkAtomic`'s `nlink > 1` branch) — GUARD-DELETION SWEEP finding (2026-08-30).
+//
+// This is the sibling the round above was NOT handed (brief attack A.2). `resolveSinkArtifact`'s own
+// comment states TWO harms in one paragraph — a symlink REPLACED rather than followed, and "rename gives
+// the destination a NEW inode, so a multiply-linked target strands its other name with the previous
+// document". The symlink half got a row last pass; the HARD-LINK half had none, on either engine route.
+// Raising the `nlink` threshold so the branch never fires (temp+rename always) left the full suite green.
+//
+// The repro, run by hand first: two names for one inode, both holding a previous run's `{"ok": true}`;
+// gate a report that VIOLATES. At HEAD both names carry the firing verdict. With the branch neutered the
+// rename gives `--gate-json`'s path a fresh inode and the OTHER name — the one an operator wired into a
+// dashboard or a second job — keeps yesterday's green, with nothing on either channel saying so.
+if (blk()) {
+  const d = handReport({
+    "r.json": { candor: { version: "handwritten", spec: "0.28" }, package: "app",
+                analyzed: { count: 1, digest: "0" },
+                functions: [{ fn: "app.writes", inferred: ["Fs"], direct: ["Fs"] }] },
+    "p.pol": "deny Fs\n",
+  });
+  const sink = path.join(d, "verdict.json");
+  const alias = path.join(d, "published.json");
+  fs.writeFileSync(sink, '{"ok":true,"stale":"yesterday"}');
+  fs.linkSync(sink, alias);
+  const r = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"), "--gate-json", sink);
+  check("⟨0.28⟩ query.mjs --gate-json sink: a HARD-LINKED sink still fires the real verdict (exit 1)",
+        r.status === 1, `exit=${r.status} ${r.stderr.slice(0, 200)}`);
+  const readDoc = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } };
+  check("⟨0.28⟩ …and the OTHER NAME for that inode carries the SAME firing verdict — a temp+rename would strand it holding the previous run's green",
+        readDoc(alias)?.violations?.length === 1 && readDoc(alias)?.ok === false, JSON.stringify(readDoc(alias))?.slice(0, 200));
+  check("⟨0.28⟩ …the two names are still ONE artifact afterwards (the link is preserved, not severed by a fresh inode)",
+        fs.statSync(sink).ino === fs.statSync(alias).ino && fs.statSync(sink).nlink === 2,
+        `ino ${fs.statSync(sink).ino} vs ${fs.statSync(alias).ino}, nlink ${fs.statSync(sink).nlink}`);
+}
+
+// ── ⟨0.28⟩ A RUN PUBLISHES ONE VERDICT TO ONE SINK — `--gate-json` GIVEN TWICE IS A REFUSAL, AND EVERY
+// NAMED SINK RECEIVES IT (query.mjs's `namedSinks.length > 1` block) — GUARD-DELETION SWEEP finding
+// (2026-08-30). The block's own comment records the measurement it was written from ("this verb kept
+// last-wins and a gate that FIRED left the first named sink holding a previous run's `{\"ok\": true}`"),
+// and grepping this suite for `--gate-json` twice on ONE gateCli call turned up nothing — the rung
+// shipped on scan.mjs with rows, and query.mjs's copy of it had none.
+//
+// Raising the threshold so the block never fires left the full suite green. By hand: two sinks each
+// pre-seeded with a stale green, a report that VIOLATES — HEAD exits 2 and writes the refusal to BOTH;
+// with the block gone the run exits 1, writes the firing verdict to the LAST sink only, and leaves the
+// first holding `{"ok": true}` with no way for its reader to tell it lost.
+if (blk()) {
+  const d = handReport({
+    "r.json": { candor: { version: "handwritten", spec: "0.28" }, package: "app",
+                analyzed: { count: 1, digest: "0" },
+                functions: [{ fn: "app.writes", inferred: ["Fs"], direct: ["Fs"] }] },
+    "p.pol": "deny Fs\n",
+  });
+  const stale = '{"ok":true,"stale":"yesterday"}';
+  const a = path.join(d, "A.json"), b = path.join(d, "B.json");
+  fs.writeFileSync(a, stale); fs.writeFileSync(b, stale);
+  const r = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"),
+                    "--gate-json", a, "--gate-json", b);
+  check("⟨0.28⟩ `gate --report` with TWO --gate-json sinks is refused (exit 2) — a run publishes one verdict, and the loser's reader cannot tell it lost",
+        r.status === 2 && /--gate-json given more than once/.test(r.stderr), `exit=${r.status} ${r.stderr.slice(0, 200)}`);
+  check("⟨0.28⟩ …and BOTH sinks carry the refusal document — neither is left holding the previous run's green",
+        isRefusal(fs.readFileSync(a, "utf8")) && isRefusal(fs.readFileSync(b, "utf8")),
+        `A=${fs.readFileSync(a, "utf8").slice(0, 80)} B=${fs.readFileSync(b, "utf8").slice(0, 80)}`);
+  // NEGATIVE CONTROL: the SAME path named twice is ONE sink, not two — the dedupe above must not have
+  // turned an idempotent repeat (a wrapper that appends the flag its caller already passed) into a refusal.
+  const c = path.join(d, "C.json");
+  const r2 = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"),
+                     "--gate-json", c, "--gate-json", c);
+  const doc = (() => { try { return JSON.parse(fs.readFileSync(c, "utf8")); } catch { return null; } })();
+  check("⟨0.28⟩ …CONTROL: the SAME sink named twice is ONE sink — the real verdict still lands (exit 1), never a refusal",
+        r2.status === 1 && doc?.violations?.length === 1, `exit=${r2.status} ${JSON.stringify(doc)?.slice(0, 120)}`);
+}
+
+// ── A FLAG-SHAPED `--gate-json` VALUE IS A USAGE ERROR, NOT A FILENAME (query.mjs's gate flag loop) —
+// GUARD-DELETION SWEEP finding (2026-08-30). Dropping the `startsWith("-")` half of the check left the
+// full suite green: every `--gate-json` row in this file passes a real path.
+//
+// WHAT WAS MEASURED, stated exactly, because the guard's own comment claims MORE than this. It says the
+// check stops `--gate-json --policy p` running "GATELESS-GREEN — the one shape a wrapper never notices",
+// and that shape did NOT reproduce: with the check gone, `--policy` is eaten as the sink and the trailing
+// path becomes an unexpected positional, so the run still exits 2. What DID reproduce, twice:
+//   `gate … --policy <p> --gate-json --json` → exit 1, and a FILE LITERALLY NAMED `--json` created in the
+//   process's CWD holding the verdict, while the `--json` the operator asked for is gone — machine output
+//   requested, human text delivered, and the document parked at a path nothing will ever read. `--text`
+//   behaves the same. A stray write into the operator's tree named after their own flag.
+// So the guard is real and unprotected; the sentence above it overstates its worst case, which is exactly
+// the kind of claim that stops a thing being measured (brief attack K).
+if (blk()) {
+  const d = handReport({
+    "r.json": { candor: { version: "handwritten", spec: "0.28" }, package: "app",
+                analyzed: { count: 1, digest: "0" },
+                functions: [{ fn: "app.writes", inferred: ["Fs"], direct: ["Fs"] }] },
+    "p.pol": "deny Fs\n",
+  });
+  // RUN FROM THE FIXTURE DIR, not the repo: the whole point is that the swallowed flag becomes a
+  // filename in the CWD, and this row must be able to look for it without dirtying the tree.
+  const at = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), "gate", ...a],
+                                 { encoding: "utf8", cwd: d });
+  for (const swallowed of ["--json", "--text", "--policy"]) {
+    const r = at("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"), "--gate-json", swallowed);
+    check(`⟨0.27⟩ \`--gate-json ${swallowed}\`: a FLAG-SHAPED value is a usage error (exit 2), never a path — the sink is the one argument a wrapper cannot check for itself`,
+          r.status === 2 && /--gate-json requires a value/.test(r.stderr), `exit=${r.status} ${r.stderr.slice(0, 160)}`);
+    check(`⟨0.27⟩ …and NO file named \`${swallowed}\` is created in the CWD — the refusal fires before the sink is armed, so the operator's own flag never becomes a stray artifact`,
+          !fs.existsSync(path.join(d, swallowed)), `${swallowed} exists`);
+  }
+  // CONTROL: `-` is stdout, not a flag, and a path genuinely spelled like a flag is reachable as `./-x`.
+  const dash = at("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"), "--gate-json", "-");
+  check("⟨0.27⟩ CONTROL: a bare `-` is still the stdout sink, not a flag — the real verdict streams at exit 1",
+        dash.status === 1 && (() => { try { return JSON.parse(dash.stdout).violations.length === 1; } catch { return false; } })(),
+        `exit=${dash.status} ${dash.stdout.slice(0, 160)}`);
+}
+
+// ── ⟨0.32⟩ THE REFUSAL MARKER (SPEC §3.3.1) IS FOUND FOR ALL THREE LOCATOR FORMS — GUARD-DELETION
+// SWEEP finding (2026-08-30), and the only one of this pass that was a live DEFECT rather than an
+// unprotected guard.
+//
+// `refusalMarkerFor`'s direct-file branch was gated on `prefix.endsWith(".json")` — a condition its ONLY
+// caller makes impossible, because `locatorToPrefix` strips the trailing `.json` before `requireReport`
+// runs. So the branch had never executed once, and deleting it left the whole suite green: there was
+// nothing to delete. Grepping every test file in this repo for `refused.json` / `refusalMarker` / the
+// operator sentence returned ZERO rows before this block — the ⟨0.32⟩ rung's READ half was untested here
+// in its entirety, not merely in the branch that was broken.
+//
+// The defect it hid: `<dir>/rep.refused.json` beside `<dir>/rep.<crate>.scan.json` (the multi-report
+// layout — a workspace writing one report per member, and the form the marker carries its own `prefix`
+// FOR, per scan.mjs's `writeRefusalMarker`). `where Net --report <dir>/rep` exited 2 naming the refusal;
+// `where Net --report <dir>/rep.<crate>.scan.json` — the SAME bytes, the other spelling §3.3.1 accepts —
+// exited 0 with a clean answer. A consumer handed the file path certified reports the most recent scan
+// had refused.
+if (blk()) {
+  const d = scratch("candor-refusalmarker-");
+  const q = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), ...a], { encoding: "utf8" });
+  const report = { candor: { version: "handwritten", spec: "0.32" }, package: "app",
+                   analyzed: { count: 1, digest: "0" },
+                   functions: [{ fn: "app.f", inferred: ["Net"], direct: ["Net"], calls: [] }] };
+  const marker = (prefix) => JSON.stringify({ candor: { spec: "0.32" }, refused: true, prefix,
+                                              target: "src", reason: "the policy was unreadable" });
+  // The MULTI-REPORT layout: reports at `<prefix>.<crate>.scan.json`, the marker at `<prefix>.refused.json`.
+  fs.writeFileSync(path.join(d, "rep.mycrate.scan.json"), JSON.stringify(report));
+  fs.writeFileSync(path.join(d, "rep.refused.json"), marker(path.join(d, "rep")));
+  const byPrefix = q("where", "Net", "--report", path.join(d, "rep"));
+  check("⟨0.32⟩ refusal marker: the PREFIX locator form refuses (exit 2) rather than answering from reports the last scan refused",
+        byPrefix.status === 2 && /the most recent scan over .* REFUSED/.test(byPrefix.stderr),
+        `exit=${byPrefix.status} ${byPrefix.stderr.slice(0, 160)}`);
+  const byFile = q("where", "Net", "--report", path.join(d, "rep.mycrate.scan.json"));
+  check("⟨0.32⟩ refusal marker: …and so does §3.3.1's DIRECT-FILE form of the same reports — a dot-segmented `.scan.json` name whose prefix the filename cannot yield (before the fix: exit 0, a clean `directly:[app.f]` over refused bytes)",
+        byFile.status === 2 && /the most recent scan over .* REFUSED/.test(byFile.stderr),
+        `exit=${byFile.status} ${byFile.stdout.slice(0, 120)}${byFile.stderr.slice(0, 160)}`);
+  // The SINGLE-report spelling, which the `<prefix>.refused.json` lookup already covered — kept so a
+  // repair to the branch above cannot quietly cost the form that worked.
+  fs.writeFileSync(path.join(d, "solo.json"), JSON.stringify(report));
+  fs.writeFileSync(path.join(d, "solo.refused.json"), marker(path.join(d, "solo")));
+  const solo = q("where", "Net", "--report", path.join(d, "solo.json"));
+  check("⟨0.32⟩ refusal marker: …and the SINGLE-report `<prefix>.json` form, whose stripped prefix hits the marker name directly",
+        solo.status === 2, `exit=${solo.status} ${solo.stderr.slice(0, 160)}`);
+  // OVER-REFUSAL CONTROL, for the direction the repair could have failed in. The old (unreachable) branch
+  // matched a bare `startsWith`, which would have let a `report` marker cover an unrelated `report-old`
+  // beside it — a refusal invented by the fix. The match is on a DOT-SEGMENT boundary, so it does not.
+  const c = path.join(d, "ctl");
+  fs.mkdirSync(c, { recursive: true });
+  fs.writeFileSync(path.join(c, "report-old.json"), JSON.stringify(report));
+  fs.writeFileSync(path.join(c, "report.json"), JSON.stringify(report));
+  fs.writeFileSync(path.join(c, "report.refused.json"), marker(path.join(c, "report")));
+  const unrelated = q("where", "Net", "--report", path.join(c, "report-old.json"));
+  check("⟨0.32⟩ refusal marker CONTROL: a `report` marker does NOT cover the unrelated `report-old` beside it — the match is on a dot-segment boundary, not a bare string prefix",
+        unrelated.status === 0 && /app\.f/.test(unrelated.stdout), `exit=${unrelated.status} ${unrelated.stderr.slice(0, 160)}`);
+  const own = q("where", "Net", "--report", path.join(c, "report.json"));
+  check("⟨0.32⟩ refusal marker CONTROL: …while the marker's OWN prefix still refuses (the control above is not the guard going quiet)",
+        own.status === 2, `exit=${own.status}`);
+  // CLEAN CONTROL: the identical multi-report layout with NO marker still answers, so the directory scan
+  // the fix adds cannot be refusing on the layout itself.
+  const cl = path.join(d, "clean");
+  fs.mkdirSync(cl, { recursive: true });
+  fs.writeFileSync(path.join(cl, "rep.mycrate.scan.json"), JSON.stringify(report));
+  const clean = q("where", "Net", "--report", path.join(cl, "rep.mycrate.scan.json"));
+  check("⟨0.32⟩ refusal marker CONTROL: the same multi-report layout with NO marker answers normally (exit 0)",
+        clean.status === 0 && /app\.f/.test(clean.stdout), `exit=${clean.status} ${clean.stderr.slice(0, 160)}`);
+}
+
+// ── THE ADVISORY READERS' LENIENCY MUST NEVER RUN IN THE FAIL-OPEN DIRECTION (query-core's
+// `reportUnread` / `reportOutOfScope`) — GUARD-DELETION SWEEP finding (2026-08-30).
+//
+// These two readers are deliberately LENIENT where `loadGateReport` is STRICT: a malformed §2 key is the
+// GATE's refusal to make, and these feed the advisory verbs' disclosure. But leniency has a direction,
+// and both guards exist to keep it on the pessimistic side. Both were unprotected: `e.peeked !== true`
+// weakened to `!e.peeked`, and `outOfScope`'s present-but-not-a-list arm neutered, each left the full
+// suite green.
+//
+// Measured by hand, on `unverified --strict`, which is the verb an operator runs to ask "is this report
+// actually clean, or merely unexamined":
+//   `"peeked": "no"`  → HEAD `{unverified:[], incomplete:true, unread:["dep-foo"]}` exit 2;
+//                        weakened `{ok:true, unverified:[]}` exit 0.
+//   `"outOfScope": {…}` (an object, not a list) → HEAD `{unverified:[], incomplete:true}` exit 2;
+//                        neutered `{ok:true, unverified:[]}` exit 0.
+// In BOTH cases `gate --report` over the same bytes exits 2. An `ok: true` from the advisory verb there
+// is the ⟨0.24⟩ relation inverted — an advisory answer MORE certain than the gate's, on the surface an
+// agent consults BEFORE it edits. The `peeked` arm is the JS-truthiness trap the reader's own comment
+// names ("`\"peeked\": \"no\"` is TRUTHY"), which is exactly the kind of claim-of-correctness that stops
+// a thing being measured.
+if (blk()) {
+  const q = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), ...a], { encoding: "utf8" });
+  const base = { candor: { version: "handwritten", spec: "0.32" }, package: "app",
+                 analyzed: { count: 1, digest: "0" },
+                 functions: [{ fn: "app.f", inferred: [], direct: [], calls: [] }] };
+  const probe = (name, extraKeys, expectUnread) => {
+    const d = handReport({ "r.json": { ...base, ...extraKeys }, "p.pol": "deny Net\n" });
+    const rep = path.join(d, "r.json"), pol = path.join(d, "p.pol");
+    const u = q("unverified", "--report", rep, "--policy", pol, "--strict", "--json");
+    let doc = null; try { doc = JSON.parse(u.stdout); } catch { /* the assertion reports it */ }
+    check(`${name}: \`unverified --strict\` HEDGES (incomplete, exit 2) — never \`ok:true\` over a key it could not read`,
+          u.status === 2 && doc?.incomplete === true && !("ok" in (doc ?? {})),
+          `exit=${u.status} ${u.stdout.slice(0, 160)}`);
+    if (expectUnread)
+      check(`${name}: …and NAMES the class as unread, so the operator learns what to re-scan`,
+            (doc?.unread ?? []).includes("dep-foo"), JSON.stringify(doc)?.slice(0, 160));
+    // THE RELATION: the gate over the SAME bytes must be at least as pessimistic. If this ever answers 0
+    // or 1 the row above is asserting the wrong side of the comparison, not merely a weaker claim.
+    const g = gateCli("--report", rep, "--policy", pol, "--json");
+    check(`${name}: …and \`gate --report\` over the same bytes is exit 2 too (an advisory verb is never MORE certain than the gate)`,
+          g.status === 2, `exit=${g.status} ${g.stdout.slice(0, 160)}`);
+  };
+  probe("⟨0.32⟩ a non-boolean `excluded[].peeked` (`\"no\"` — TRUTHY in this language)",
+        { excluded: [{ class: "dep-foo", count: 1, peeked: "no", reason: "not scanned" }] }, true);
+  probe("⟨0.30⟩ an `outOfScope` that is PRESENT and is not a list",
+        { outOfScope: { fn: "dep.sendsNet", effects: ["Net"] } }, false);
+  // CONTROL, for the direction these guards could over-charge in: the SAME report shapes, well-formed and
+  // saying nothing was missed, still certify. A guard that hedged on every report would pass both rows
+  // above while deleting the verb.
+  {
+    const d = handReport({ "r.json": { ...base, excluded: [{ class: "dep-foo", count: 1, peeked: true, reason: "read" }],
+                                       scannedUnder: { deny: ["deny Net"] }, outOfScope: [] },
+                           "p.pol": "deny Net\n" });
+    const u = q("unverified", "--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"), "--strict", "--json");
+    let doc = null; try { doc = JSON.parse(u.stdout); } catch { /* reported below */ }
+    check("CONTROL: a WELL-FORMED `peeked: true` / `outOfScope: []` report still certifies (exit 0, `ok:true`) — the two guards refuse a malformed key, not every report",
+          u.status === 0 && doc?.ok === true, `exit=${u.status} ${u.stdout.slice(0, 200)}`);
+  }
+}
+
 // ── ⟨0.24⟩ PRECEDENCE BINDS THE VERDICT, NOT THE POLICY GATE (SPEC §3.1 `4c79958`) ─────────────────
 // A CERTAIN baseline regression was DELETED from the machine channel by an unrelated policy refusal, in
 // all four engines. Measured — a pure function gains an `Fs` call, scanned against a frozen baseline:
@@ -13506,6 +13745,60 @@ module.exports = { add };`;
               && !("violations" in (doc(gj) ?? {})),
             `exit ${q.status}: ${q.stderr}`.slice(0, 300));
     }
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // ── 3b. …AND THE TWO SIBLING KEYS READ BY THE SAME RULE IN THE SAME LOOP — GUARD-DELETION SWEEP
+  // finding (2026-08-30), and a textbook case of the brief's attack A.2: block 3 above pins all three
+  // arms of `excluded`'s strict read because `excluded` is the key the ⟨0.32⟩ bug report was about.
+  // `loadGateReport` applies the identical rule ("a present-but-unparseable verdict-bearing §2 key
+  // IMPEACHES THE DOCUMENT, never coerced to its safe-LOOKING empty value") to `outOfScope`'s ELEMENT
+  // shape and to `scannedUnder`, and neither had a row. Neutering either left the full suite green.
+  //
+  // MEASURED at HEAD, `deny Net` over a one-function report:
+  //   `"outOfScope": [{"fn": "dep.sendsNet"}]` (an element with no `effects`) — HEAD exit 2 refused;
+  //      neutered, the element is silently dropped and the gate answers `{"ok": true, "violations": []}`
+  //      at exit 0 over a report whose peek recorded a finding it could not express.
+  //   `"scannedUnder": "deny Net"` (a string, not `{deny: […]}`) — HEAD exit 2 refused; neutered,
+  //      `ok: true` at exit 0.
+  // `outOfScope`'s present-but-not-a-LIST arm is already pinned by a review-found row elsewhere; these
+  // are the two arms beside it that nothing reached.
+  {
+    const env = (extra) => JSON.stringify({
+      candor: { version: "scan-0.33.0", toolchain: "stable", spec: "0.33" }, package: "p",
+      analyzed: { count: 1, digest: "0000000000000000" },
+      functions: [{ fn: "p.main", loc: "src/main.ts:1:1", inferred: [], direct: [], hash: "p#main" }],
+      ...extra,
+    });
+    const d = project({
+      "oosel/report.p.scan.json": env({ outOfScope: [{ fn: "dep.sendsNet" }] }),
+      "sustr/report.p.scan.json": env({ scannedUnder: "deny Exec" }),
+      "sudeny/report.p.scan.json": env({ scannedUnder: { deny: [7] } }),
+      // The over-charge controls, written beside the rung: the WELL-FORMED spellings of both keys, and
+      // the ABSENT `scannedUnder` every pre-⟨0.33⟩ producer wrote, must all still certify. A strict read
+      // that refused these would pass every row above while deleting the verb for real reports.
+      "okoos/report.p.scan.json": env({ outOfScope: [], scannedUnder: { deny: ["deny Exec"] } }),
+      "absentsu/report.p.scan.json": env({ outOfScope: [] }),
+      "pol.candor": "deny Exec\n",
+    });
+    const pol = path.join(d, "pol.candor");
+    for (const [dir, key, what] of [
+      ["oosel", "outOfScope", "an `outOfScope` ELEMENT carrying no `effects`"],
+      ["sustr", "scannedUnder", "a `scannedUnder` that is a STRING, not `{deny: […]}`"],
+      ["sudeny", "scannedUnder", "a `scannedUnder.deny` holding a non-string"]]) {
+      const gj = path.join(d, `${dir}.gate.json`);
+      const q = gate(path.join(d, dir, "report"), pol, gj);
+      check(`⟨0.32⟩/⟨0.33⟩ STRICT: ${what} REFUSES and names the key (exit 2), never a coerced green`,
+            q.status === 2 && new RegExp("`" + key + "`").test(q.stderr) && doc(gj)?.refused === true
+              && !("violations" in (doc(gj) ?? {})),
+            `exit ${q.status}: ${q.stderr}`.slice(0, 300));
+    }
+    check("⟨0.33⟩ CONTROL: the WELL-FORMED `outOfScope: []` + `scannedUnder: {deny:[…]}` pair still certifies (exit 0)",
+          gate(path.join(d, "okoos", "report"), pol).status === 0,
+          `exit ${gate(path.join(d, "okoos", "report"), pol).status}`);
+    check("⟨0.33⟩ CONTROL: an ABSENT `scannedUnder` beside a report that peeked NOTHING still certifies — the strict read must not refuse every pre-⟨0.33⟩ report (exit 0)",
+          gate(path.join(d, "absentsu", "report"), pol).status === 0,
+          `exit ${gate(path.join(d, "absentsu", "report"), pol).status}`);
     fs.rmSync(d, { recursive: true, force: true });
   }
 

@@ -385,6 +385,94 @@ ok("mcp --root: a MISSING baseline stays a loud, informative error (existence ch
    rootById[6].result.content[0].text.slice(0, 160));
 fs.rmSync(OUTSIDE, { recursive: true, force: true });
 
+// ── --root ALSO BOUNDS THE POLICY READ, AND THAT ARM IS THE ONE THE REPO-ROOT ARM CANNOT COVER
+// (`confinedPolicyRead`'s second disjunct) — GUARD-DELETION SWEEP finding (2026-08-30).
+//
+// Deleting `|| (WORKSPACE_ROOT && !within(abs, WORKSPACE_ROOT))` left the whole suite green: every
+// existing confinement row above drives the REPO-ROOT arm, and the fixtures they use have a repo root at
+// or inside `--root`, so the workspace arm never decided anything. That is the file's own stated threat
+// model going untested — mcp.mjs's header says the confinement is "only RELATIVE" without it, because
+// `policyRoot()` is DERIVED FROM THE CLIENT-CHOSEN `report` argument.
+//
+// The fixture makes the two roots genuinely different, which is the whole point: a `.candor/config` sits
+// ABOVE the served workspace, so the report's discovered repoRoot is the OUTER directory and a policy
+// there is INSIDE the repo root and OUTSIDE `--root`. The parsed rule text comes back in
+// `violations[].detail`, so this is the arbitrary-file-read channel the header names, not just a
+// bookkeeping difference: with the arm gone, `deny Net app` read from outside the workspace is echoed
+// verbatim to the agent.
+{
+  const OUT = scratch("candor-rootpol-");
+  fs.mkdirSync(path.join(OUT, ".candor"), { recursive: true });
+  fs.writeFileSync(path.join(OUT, ".candor", "config"), "policy = inside.pol\n");
+  const WS = path.join(OUT, "ws");
+  fs.mkdirSync(WS, { recursive: true });
+  // OUTSIDE the workspace, INSIDE the config-discovered repo root — the gap between the two bounds.
+  fs.writeFileSync(path.join(OUT, "escaped.pol"), "deny Net app\n");
+  // INSIDE both — the control: the arm must not have closed the ordinary in-workspace policy read.
+  fs.writeFileSync(path.join(WS, "inside.pol"), "deny Net app\n");
+  const rp = path.join(WS, "r");
+  fs.writeFileSync(`${rp}.json`, JSON.stringify({
+    functions: [{ fn: "app.leaf", inferred: ["Net"], direct: ["Net"], calls: [] }] }));
+  fs.writeFileSync(`${rp}.callgraph.json`, JSON.stringify({ "app.leaf": [] }));
+  const g = (id, args) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "candor_gate", arguments: args } });
+  const pr = await mcpSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    g(2, { report: rp, policy: path.join(OUT, "escaped.pol") }),
+    g(3, { report: rp, policy: path.join(WS, "inside.pol") }),
+  ], ["--root", WS], { CANDOR_REPORT: rp });
+  const by = Object.fromEntries(pr.map((r) => [r.id, r]));
+  const txt = (id) => by[id].result.content[0].text;
+  ok("mcp --root: a policy OUTSIDE the workspace but INSIDE the report's config-discovered repo root is REFUSED (the workspace arm, which the repo-root arm cannot reach)",
+     by[2].result.isError === true && /outside the served workspace/.test(txt(2)), txt(2).slice(0, 240));
+  ok("mcp --root: …and NOTHING of that file's contents comes back — the parsed rule text would ride `violations[].detail` (the arbitrary-file-read channel the confinement exists for)",
+     !/deny Net app/.test(txt(2)) && !/AS-EFF/.test(txt(2)), txt(2).slice(0, 240));
+  ok("mcp --root: …CONTROL: the byte-identical policy INSIDE the workspace still reads and gates for real (the arm refuses an escape, not every policy)",
+     by[3].result.isError !== true && JSON.parse(txt(3)).ok === false
+       && JSON.parse(txt(3)).violations.length === 1, txt(3).slice(0, 240));
+  fs.rmSync(OUT, { recursive: true, force: true });
+}
+
+// ── `resolvePrefix`'s EXISTENCE CHECK — a prefix that names no report is a LOUD tool error, never an
+// authoritative empty answer (GUARD-DELETION SWEEP finding, 2026-08-30). Neutering `Q.hasReport(p)` left
+// the whole suite green: every MCP row above hands the tools a prefix that DOES resolve, so the guard
+// decided nothing anywhere.
+//
+// Measured with it gone: `candor_where` over a prefix with no report files answered
+// `{"effect":"Net","directly":[],"inherited":[]}` with `isError` FALSE — Q.loadReport tolerates and
+// returns `[]`, and `[]` from a query verb is indistinguishable from "this project performs no Net". A
+// typo'd `report` argument from the agent becomes a clean bill of health, on the surface an agent trusts
+// most. This is the §4 cardinal sin, and the CLI's twin (`requireReport`'s `hasReport` exit 2) is the
+// rule this guard mirrors.
+//
+// TWO fixtures, because the guard's own comment names the second as the reason it uses `Q.hasReport`
+// rather than a bare `existsSync`: a directory whose ONLY siblings at that prefix are non-report files
+// (`.callgraph.json`, `.calibrated.json`, `.encountered-*`) LOOKS populated and loads zero functions.
+{
+  const NR = scratch("candor-noreport-");
+  fs.mkdirSync(path.join(NR, "sib"), { recursive: true });
+  // sidecars and calibration files ONLY — `isReport` rejects every one of them
+  fs.writeFileSync(path.join(NR, "sib", "r.callgraph.json"), JSON.stringify({ "app.leaf": [] }));
+  fs.writeFileSync(path.join(NR, "sib", "r.calibrated.json"), JSON.stringify({}));
+  fs.writeFileSync(path.join(NR, "sib", "r.encountered-net.json"), JSON.stringify([]));
+  const w = (id, report) => ({ jsonrpc: "2.0", id, method: "tools/call",
+                               params: { name: "candor_where", arguments: { effect: "Net", report } } });
+  const nr = await mcpSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    w(2, path.join(NR, "nothing-here")),
+    w(3, path.join(NR, "sib", "r")),
+    w(4, P),                                  // control: the real fixture report still serves
+  ]);
+  const nb = Object.fromEntries(nr.map((r) => [r.id, r]));
+  const ntxt = (id) => nb[id].result.content[0].text;
+  ok("mcp resolvePrefix: a prefix naming NO report is a loud tool error — never `{directly:[],inherited:[]}` at isError:false (the authoritative-empty all-clear)",
+     nb[2].result.isError === true && /no report at .*run a candor scan first/.test(ntxt(2)), ntxt(2).slice(0, 200));
+  ok("mcp resolvePrefix: …and so is a prefix whose ONLY siblings are sidecars/calibration files — the check is `Q.hasReport` (the loader's own predicate), not a bare existence test, exactly so this shape cannot pass",
+     nb[3].result.isError === true && /no report at .*run a candor scan first/.test(ntxt(3)), ntxt(3).slice(0, 200));
+  ok("mcp resolvePrefix CONTROL: a prefix that DOES name a report still serves (the guard refuses an absence, not every prefix)",
+     nb[4].result.isError !== true && JSON.parse(ntxt(4)).directly.includes("app.leaf"), ntxt(4).slice(0, 200));
+  fs.rmSync(NR, { recursive: true, force: true });
+}
+
 // ── ⟨0.15 staged⟩ candor_gains coverage parity: the MCP tool spreads the SAME gainsCoverage the CLI
 // verb does (one code path, the parity rule) — the current envelope's ledger + the name-level delta
 // ride along; a coverage-free comparison carries neither key (the pre-0.15 result, byte-identical).
