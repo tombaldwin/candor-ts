@@ -1268,6 +1268,159 @@ export function handler(): void { mid(); }
   for (const dir of [scopeW, unreadW, crossW, ctlW]) fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ── THE LSP FAIL-OPEN: A REPORT FOUND BUT UNREADABLE (hardFail) ──────────────────────────────────────
+// `Q.loadReport` tags its result with the non-enumerable `hardFail` the CLI's `loadReportOrDie` (exit 2)
+// and the MCP `loadReportLoud` (throw) both consult — until now, `diagnosticsFor`/`hoverAt`/`codeLenses`
+// called `Q.loadReport` bare, so a corrupt/truncated/unreadable report degraded to an empty `functions`
+// array and read as "no effects": diagnostics published `[]` (clean file, no squiggles), hover answered
+// `null` (nothing to show), codeLens answered `[]` (nothing effectful) — the exact "clean file, no
+// squiggles" fail-open a guard sweep found, on the one surface a developer watches continuously.
+//
+// FULL (every report file at the prefix unreadable) vs PARTIAL (a multi-report prefix with one corrupt
+// sibling among healthy ones) get DIFFERENT treatment, deliberately, mirroring the CLI/MCP split:
+// `diagnosticsFor` is the live GATE (squiggles ARE its whole verdict), so it refuses ANY ordinary
+// squiggle on EITHER kind — `candor_gate`'s own `partialIsFatal:true` bar. `hoverAt`/`codeLenses` are
+// read-only per-function surfaces (`Q.show`/`Q.map`'s LSP analogue), so they only show the failure
+// marker in place of an answer on FULL failure; a PARTIAL one still answers from whatever loaded, same
+// as MCP's default (non-`candor_gate`) tools.
+{
+  const NET_TS = `import http from "node:http";
+export function leaf(): void { http.get("http://x"); }
+export function mid(): void { leaf(); }
+export function handler(): void { mid(); }
+`;
+  const mkFull = (corrupt) => {
+    const U = scratch("candor-lsp-hardfail-full-");
+    fs.mkdirSync(path.join(U, "src"), { recursive: true });
+    fs.writeFileSync(path.join(U, "src", "app.ts"), NET_TS);
+    fs.mkdirSync(path.join(U, ".candor"), { recursive: true });
+    execFileSync("node", [path.join(HERE, "scan.mjs"), path.join(U, "src"), "--out", path.join(U, ".candor", "report")], { stdio: "ignore" });
+    fs.writeFileSync(path.join(U, "arch.policy"), "deny Net\n");
+    fs.writeFileSync(path.join(U, ".candor", "config"), "policy arch.policy\n");
+    corrupt(path.join(U, ".candor", "report.json"));
+    return U;
+  };
+  const driveH = (U, extra, n) => {
+    const uri = pathToFileURL(path.join(U, "src", "app.ts")).href;
+    return lspSession([
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(U).href } },
+      { jsonrpc: "2.0", method: "initialized", params: {} },
+      { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "typescript", version: 1, text: "" } } },
+      ...extra(uri),
+      { jsonrpc: "2.0", id: 99, method: "shutdown" },
+    ], n, {}, 8000);
+  };
+
+  // ── FULL failure: a single `report.json`, garbage bytes ──────────────────────────────────────────
+  const Ufull = mkFull((f) => fs.writeFileSync(f, "{ not: valid json ][[["));
+  const { inbound: fullIn } = await driveH(Ufull,
+    (uri) => [
+      { jsonrpc: "2.0", id: 2, method: "textDocument/codeLens", params: { textDocument: { uri } } },
+      { jsonrpc: "2.0", id: 5, method: "textDocument/hover", params: { textDocument: { uri }, position: { line: 1, character: 4 } } },
+    ], 7);   // init + log + show + diagnostics + lens + hover + shutdown
+  const fullDiag = fullIn.find((r) => r.method === "textDocument/publishDiagnostics")?.params?.diagnostics ?? [];
+  ok("hardFail FULL: diagnostics carry ONLY the report-unreadable marker at line 0 — NOT the AS-EFF-006 violation a healthy report would draw for `leaf`",
+     fullDiag.length === 1 && fullDiag[0].code === "report-unreadable" && fullDiag[0].severity === 2
+     && fullDiag[0].range.start.line === 0 && /UNVERIFIED, not clean/.test(fullDiag[0].message),
+     JSON.stringify(fullDiag));
+  const fullLog = fullIn.find((r) => r.method === "window/logMessage");
+  ok("hardFail FULL: window/logMessage names it (every report failed to load, corrupt or mid-write)",
+     fullLog && /every report found.*failed to load \(corrupt or mid-write\)/.test(fullLog.params?.message ?? ""),
+     JSON.stringify(fullLog)?.slice(0, 200));
+  const fullShow = fullIn.find((r) => r.method === "window/showMessage");
+  ok("hardFail FULL: window/showMessage RIDES WITH the log (the same two-channel rule ⟨0.32⟩ uses for a gate that cannot be green)",
+     fullShow && fullShow.params.type === 2 && /could not be read/.test(fullShow.params.message),
+     JSON.stringify(fullShow));
+  const fullLens = fullIn.find((r) => r.id === 2)?.result ?? [];
+  ok("hardFail FULL: codeLens shows the unreadable-report marker lens, NOT the 3 effect lenses a healthy report draws",
+     fullLens.length === 1 && /report unreadable/.test(fullLens[0]?.command?.title ?? ""), JSON.stringify(fullLens));
+  const fullHover = fullIn.find((r) => r.id === 5)?.result;
+  ok("hardFail FULL: hover answers a VISIBLE marker (not null, not the normal 'performed directly here' provenance)",
+     fullHover && /could not be read/.test(fullHover.contents?.value ?? "") && !/performed directly here/.test(fullHover.contents?.value ?? ""),
+     JSON.stringify(fullHover));
+  fs.rmSync(Ufull, { recursive: true, force: true });
+
+  // ── FULL failure, second cause: an unreadable (not just unparseable) file — chmod 0 ───────────────
+  // A DIFFERENT throw site inside loadOneReport's try (fs.readFileSync EACCES vs JSON.parse) — proves
+  // the marker fires on BOTH causes `hardFail` is tagged for, not just a JSON syntax error.
+  if (process.platform !== "win32") {   // chmod semantics don't apply on win32
+    const Uperm = mkFull((f) => fs.chmodSync(f, 0o000));
+    const { inbound: permIn } = await driveH(Uperm, () => [], 4);   // init + log + show + diagnostics
+    const permDiag = permIn.find((r) => r.method === "textDocument/publishDiagnostics")?.params?.diagnostics ?? [];
+    ok("hardFail FULL (permission-denied, not just malformed JSON): same marker, same channels",
+       permDiag.length === 1 && permDiag[0].code === "report-unreadable"
+       && permIn.some((r) => r.method === "window/logMessage") && permIn.some((r) => r.method === "window/showMessage"),
+       JSON.stringify(permDiag));
+    fs.chmodSync(path.join(Uperm, ".candor", "report.json"), 0o644);   // restore so cleanup can unlink it
+    fs.rmSync(Uperm, { recursive: true, force: true });
+  }
+
+  // ── PARTIAL failure: a multi-report (Rust/workspace-form) prefix, one sibling corrupt ─────────────
+  // `reportJudgedNothing` ANDs `analyzed.count<=0` across every sibling, so ONE healthy sibling with
+  // real entries makes it return FALSE and — pre-fix — the corrupt sibling's failure got NO disclosure
+  // of any kind (not even the quiet judged-nothing logMessage). The healthy sibling's own function
+  // (`good.pure`) is read-only-tolerated: hover/codeLens answer normally for IT, because the CLI/MCP
+  // precedent for read-only surfaces stays tolerant of a partial load — only the GATE (diagnostics)
+  // refuses outright, since a violation could live in exactly the signature that failed to load.
+  const Upartial = scratch("candor-lsp-hardfail-partial-");
+  fs.mkdirSync(path.join(Upartial, "src"), { recursive: true });
+  fs.writeFileSync(path.join(Upartial, "src", "good.ts"), "export function pure(): void {}\n");
+  fs.mkdirSync(path.join(Upartial, ".candor"), { recursive: true });
+  const prefix = path.join(Upartial, ".candor", "report");
+  fs.writeFileSync(`${prefix}.good.scan.json`, JSON.stringify({
+    candor: { version: "handwritten", spec: "0.34" }, package: "good", analyzed: { count: 1, digest: "0" },
+    functions: [{ fn: "good.pure", loc: "good.ts:1:1", inferred: [], direct: [] }],
+  }));
+  fs.writeFileSync(`${prefix}.bad.scan.json`, "{ garbage not json [[[");
+  fs.writeFileSync(path.join(Upartial, "arch.policy"), "deny Net\n");
+  fs.writeFileSync(path.join(Upartial, ".candor", "config"), "policy arch.policy\n");
+  const goodUri = pathToFileURL(path.join(Upartial, "src", "good.ts")).href;
+  const { inbound: partIn } = await lspSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(Upartial).href, initializationOptions: { report: prefix } } },
+    { jsonrpc: "2.0", method: "initialized", params: {} },
+    { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: goodUri, languageId: "typescript", version: 1, text: "" } } },
+    { jsonrpc: "2.0", id: 2, method: "textDocument/codeLens", params: { textDocument: { uri: goodUri } } },
+    { jsonrpc: "2.0", id: 5, method: "textDocument/hover", params: { textDocument: { uri: goodUri }, position: { line: 0, character: 4 } } },
+    { jsonrpc: "2.0", id: 99, method: "shutdown" },
+  ], 7, {}, 8000);   // init + log + show + diagnostics + lens + hover + shutdown
+  const partDiag = partIn.find((r) => r.method === "textDocument/publishDiagnostics")?.params?.diagnostics ?? [];
+  ok("hardFail PARTIAL: diagnostics STILL refuse to certify — the marker fires even over the document whose OWN function loaded fine (the gate takes the strict `partialIsFatal` bar)",
+     partDiag.length === 1 && partDiag[0].code === "report-unreadable", JSON.stringify(partDiag));
+  const partLog = partIn.find((r) => r.method === "window/logMessage");
+  ok("hardFail PARTIAL: the log/show wording is the PARTIAL variant (\"alongside sibling report(s) that did\"), distinct from the FULL wording",
+     partLog && /alongside sibling report\(s\) that did/.test(partLog.params?.message ?? "")
+     && !/^candor-lsp: every report found/.test(partLog.params?.message ?? ""), JSON.stringify(partLog)?.slice(0, 200));
+  const partLens = partIn.find((r) => r.id === 2)?.result ?? [];
+  ok("hardFail PARTIAL: codeLens is TOLERANT (read-only surface) — it still lenses `good.pure` from the sibling that DID load, not the failure marker",
+     partLens.length === 1 && /pure/.test(partLens[0]?.command?.title ?? "") && !/unreadable/.test(partLens[0]?.command?.title ?? ""),
+     JSON.stringify(partLens));
+  const partHover = partIn.find((r) => r.id === 5)?.result;
+  ok("hardFail PARTIAL: hover is likewise TOLERANT — it answers from the healthy sibling, not the failure marker",
+     partHover && /good\.pure/.test(partHover.contents?.value ?? "") && !/could not be read/.test(partHover.contents?.value ?? ""),
+     JSON.stringify(partHover));
+  fs.rmSync(Upartial, { recursive: true, force: true });
+
+  // ── CONTROL: a healthy report gets none of this — no marker, no extra log/show, normal answers ───
+  const Uctl = mkFull(() => {});   // no corruption
+  const { inbound: ctlIn } = await driveH(Uctl,
+    (uri) => [
+      { jsonrpc: "2.0", id: 2, method: "textDocument/codeLens", params: { textDocument: { uri } } },
+      { jsonrpc: "2.0", id: 5, method: "textDocument/hover", params: { textDocument: { uri }, position: { line: 1, character: 4 } } },
+    ], 5);   // init + diagnostics + lens + hover + shutdown (NO log, NO show)
+  ok("hardFail CONTROL: a healthy report produces NO report-unreadable marker anywhere, and NO log/showMessage",
+     !ctlIn.some((r) => r.method === "window/logMessage") && !ctlIn.some((r) => r.method === "window/showMessage")
+     && !(ctlIn.find((r) => r.method === "textDocument/publishDiagnostics")?.params?.diagnostics ?? []).some((d) => d.code === "report-unreadable"),
+     JSON.stringify(ctlIn.map((r) => r.method ?? r.id)));
+  const ctlDiag = ctlIn.find((r) => r.method === "textDocument/publishDiagnostics")?.params?.diagnostics ?? [];
+  ok("hardFail CONTROL: …and the ORDINARY AS-EFF-006 violation still fires (the refusal did not eat the real gate)",
+     ctlDiag.some((d) => d.code === "AS-EFF-006"), JSON.stringify(ctlDiag));
+  const ctlLens = ctlIn.find((r) => r.id === 2)?.result ?? [];
+  ok("hardFail CONTROL: …and codeLens still shows all 3 effectful fns", ctlLens.length === 3, JSON.stringify(ctlLens));
+  const ctlHover = ctlIn.find((r) => r.id === 5)?.result;
+  ok("hardFail CONTROL: …and hover still shows normal provenance", /performed directly here/.test(ctlHover?.contents?.value ?? ""), JSON.stringify(ctlHover));
+  fs.rmSync(Uctl, { recursive: true, force: true });
+}
+
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);
 // KEEP THE EVIDENCE ON FAILURE. A failing row prints the path to its fixture tree, and the sweep
 // would delete it on the way out — at exactly the moment someone needs to look. scratch.mjs has

@@ -8,6 +8,48 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **LSP fail-open closed: a corrupt/unreadable report degraded to "clean file, no squiggles" in the
+  editor.** A guard sweep found `lsp.mjs`'s `diagnosticsFor`, `hoverAt` and `codeLenses` calling
+  `Q.loadReport` directly, with none of the `hardFail` handling the CLI's `loadReportOrDie` (exit 2)
+  and the MCP `loadReportLoud` (throw) both apply. Reproduced: a `.candor/report.json` with garbage
+  bytes, or `chmod 000`, over a real scanned project with `deny Net` — `Q.loadReport` returns `[]`
+  tagged `hardFail`, and pre-fix, all three surfaces read the empty array as "no effects": diagnostics
+  published `[]` (no AS-EFF-006 squiggle for a function that genuinely performs Net), codeLens answered
+  `[]`, hover answered `null`. A second shape is quieter still: a multi-report (Rust/workspace-form)
+  prefix with ONE corrupt sibling among healthy ones got NO disclosure of any kind, not even the
+  existing (quiet) `reportJudgedNothing` logMessage — that predicate ANDs `analyzed.count<=0` across
+  every sibling, so one healthy sibling with real entries makes it return `false` and the corrupt
+  sibling's absence is never named.
+  Checked intent first, per the family rule (an audit that assumes either direction is a guess): `git
+  log` on the three functions turns up zero mentions of `hardFail`/corrupt-report handling, and the
+  prior "five routes, not four" rung (`4bcbcb8`) already establishes that this file's silence on a
+  report-quality cause is a bug pattern, not a design choice — it fixed the identical shape for the
+  ⟨0.21⟩/⟨0.30⟩/⟨0.32⟩ scope causes and left `hardFail` as the one cause `reportCompleteness` does not
+  carry. No comment or SPEC clause argues for fail-open here; the absence of a justification is itself
+  the finding.
+  Ruling: fail-open was not intentional, and the middle path applies — never crash the session (LSP has
+  no exit code and killing the connection would cost every OTHER open file for a fault a re-scan clears
+  in seconds), but never let "the engine declined to answer" render as "the engine answered clean"
+  either. Implemented with the CLI/MCP FULL-vs-PARTIAL split carried onto the editor's two kinds of
+  surface: `diagnosticsFor` (the live GATE — squiggles ARE its whole verdict) takes the strict
+  `candor_gate`/`partialIsFatal:true` bar on EITHER kind of `hardFail` and refuses to draw any ordinary
+  squiggle, publishing a `report-unreadable` diagnostic at line 0 of every open document instead (there
+  is no "innocent file" to misattribute it to, unlike the ⟨0.30⟩/⟨0.32⟩ scope causes: a report that
+  cannot be read says nothing about ANY function in ANY document). `hoverAt`/`codeLenses` are read-only
+  per-function surfaces (the LSP analogue of `Q.show`/`Q.map`), so they keep MCP's looser bar: only a
+  FULL failure (every report file at the prefix unreadable) gets a visible marker in place of the
+  answer (hover text / a single lens); a PARTIAL failure (some siblings loaded) still answers from
+  whatever loaded, matching the read-only MCP tools' own tolerance. All three call `warnLoudOnce`
+  (window/logMessage + window/showMessage) once per cause, mirroring the two-channel rule ⟨0.32⟩'s rung
+  already uses for a gate that cannot be green.
+  Controls: over-charge control — a healthy report's full LSP output (diagnostics + codeLens + 2×
+  hover) is byte-identical before and after, verified by diffing the pre-fix and post-fix servers over
+  the same fixture. 15 new `test-lsp.mjs` rows (FULL via malformed JSON, FULL via `chmod 000`, PARTIAL
+  via a corrupt multi-report sibling, and the healthy CONTROL), all RED on revert of `lsp.mjs` alone
+  and GREEN at HEAD. `npm run lint`, `test-unit.mjs` (129), `test.mjs --parallel` (1657, 8 shards),
+  `test-mcp.mjs` (198), `test-lsp.mjs` (117, +15), `test-watch.mjs` (16), `fabrication_probe.mjs`,
+  `fuzz.mjs` (25 seeds) and `ci/self-gate.sh` all green individually.
+
 - **Guard-deletion sweep of `mustHedge` (query-core.mjs) — two of its seven OR-clauses were unprotected.**
   `bin/AGENT-CORPUS-BRIEF.md`'s "attack C" (delete each guard, see if anything notices) run against
   `mustHedge`'s `c.unanalyzed?.length || c.judgedNothing?.length || c.noManifest?.length ||

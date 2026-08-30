@@ -209,6 +209,62 @@ function entriesInDoc(docPath, fns = null) {
   return out;
 }
 
+/**
+ * A report FILE FOUND but UNREADABLE (corrupt, mid-write, or a permissions error) — `Q.loadReport` tags
+ * its result with the non-enumerable `hardFail` the CLI's `loadReportOrDie` and the MCP `loadReportLoud`
+ * both consult, but until now nothing in this file read it: `diagnosticsFor`, `hoverAt` and `codeLenses`
+ * called `Q.loadReport` bare, so a corrupt report degraded to an EMPTY `functions` array and every one of
+ * the three read that as "no effects" — the live gate published `[]` (clean), hover answered `null`
+ * (nothing to show), codeLens answered `[]` (nothing effectful) — on the ONE surface a developer watches
+ * continuously (`integrations/vscode` and the JetBrains plugin both bundle this exact server). The CLI
+ * exits 2 over exactly this ("refusing to report an empty (all-clear) answer over a corrupt report"); the
+ * MCP tools throw. This server has neither an exit code nor a safe throw-and-crash option — killing the
+ * connection over one bad report would cost the developer every OTHER file and language feature the
+ * editor provides, for a fault a re-scan clears in seconds. So: never silent, never fatal — the invariant
+ * this closes is "the engine declined to answer must never be presentable as the engine answered clean",
+ * not "an unreadable report must end the session".
+ *
+ * FULL vs PARTIAL, the CLI/MCP distinction carried here because the repair text and the right amount of
+ * caution differ: `fns.length === 0` is every report file at the prefix failing (a single corrupt
+ * `<prefix>.json`, or a multi-report prefix whose every sibling is unreadable) — nothing loaded, not even
+ * a partial claim. `fns.length > 0` with `hardFail` still set is the multi-report (Rust/workspace) form
+ * with ONE corrupt sibling among healthy ones — MEASURED to be the quieter failure: `reportJudgedNothing`
+ * ANDs `analyzed.count<=0` across every sibling, so ONE healthy sibling with real entries makes it return
+ * FALSE and the corrupt sibling's absence gets no disclosure of ANY kind (repro: a `.good.scan.json`
+ * sibling with one pure fn beside a `.bad.scan.json` garbage sibling — diagnostics/log/show all silent).
+ *
+ * `full` decides what each caller does with it: `diagnosticsFor` (the live GATE — squiggles ARE this
+ * surface's whole verdict, per `discloseIncompleteness`'s own framing) refuses to draw ANY ordinary
+ * squiggle on either kind of hardFail, mirroring `candor_gate`'s `loadReportLoud(p,
+ * {partialIsFatal:true})` — a partial signature makes a green verdict meaningless FOR THE SAME REASON on
+ * both routes: the effects that failed to load are exactly the ones a violation would come from.
+ * `hoverAt`/`codeLenses` are read-only per-function/per-line surfaces, the LSP analogue of `Q.show`/
+ * `Q.map` — MCP keeps THOSE tolerant of a partial load (`loadReportLoud(p)` default, `partialIsFatal`
+ * false) because a partial answer is a smaller claim than a green gate, and the same argument holds here:
+ * only a FULL failure gets the visible marker in place of the answer; a partial one still returns
+ * whatever loaded, `warnLoudOnce` having already said the signature may be incomplete.
+ */
+function hardFailDetail(fns, prefix) {
+  if (!fns.hardFail) return null;
+  const full = fns.length === 0;
+  const log = full
+    ? `candor-lsp: every report found at \`${prefix}\` failed to load (corrupt or mid-write) — refusing `
+      + `to treat the empty result as an all-clear. Every file's effects are UNVERIFIED, not clean — `
+      + `re-run the scan (candor-ts <src> --out ${prefix}).`
+    : `candor-lsp: a report found at \`${prefix}\` failed to load alongside sibling report(s) that did — `
+      + `a partial signature makes any verdict meaningless (the effects that failed to load are exactly `
+      + `the ones a violation would come from). Diagnostics/hover/lenses drawn from the reports that DID `
+      + `load may be missing functions that live in the one that didn't — re-run the scan `
+      + `(candor-ts <src> --out ${prefix}).`;
+  const brief = full
+    ? `candor: the report could not be read — effects are UNVERIFIED, not clean (see the candor log)`
+    : `candor: part of the report could not be read — some effects may be missing (see the candor log)`;
+  const doc = full
+    ? "candor: the report could not be read (corrupt or mid-write) — effects here are UNVERIFIED, not clean. Re-run the scan."
+    : "candor: part of the report could not be read (corrupt or mid-write) — some effects across this project may be missing. Re-run the scan.";
+  return { full, log, brief, doc };
+}
+
 // The transitive-caller COUNT for an exact fn name over an already-inverted graph. The lenses used
 // Q.callers per entry, and every callers() call rebuilt reverseGraph from scratch — a 50-fn document
 // over a JVM-scale callgraph did 50 full graph inversions PER codeLens request (review find). One
@@ -225,7 +281,18 @@ function transitiveCallerCount(rev, fn) {
 
 // ---- CodeLens ---------------------------------------------------------------------------------------
 function codeLenses(docPath) {
-  const found = entriesInDoc(docPath);
+  if (!hasReport(reportPrefix)) return [];
+  const fns = Q.loadReport(reportPrefix);          // ONE load per request — see hardFailDetail
+  const hf = hardFailDetail(fns, reportPrefix);
+  if (hf) {
+    warnLoudOnce(hf.log, hf.brief);
+    if (hf.full) return [{
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+      command: { title: `⚠ candor: report unreadable — re-run the scan`, command: "" },
+    }];
+    // partial: fall through and lens whatever DID load, per hardFailDetail's read-only tolerance
+  }
+  const found = entriesInDoc(docPath, fns);
   if (found === null) return [];
   let rev = null;
   try { rev = Q.reverseGraph(Q.loadCallgraph(reportPrefix)); } catch { /* no callgraph — effects-only lens */ }
@@ -254,6 +321,15 @@ function enclosingEntry(docPath, line, fns = null) {
 function hoverAt(docPath, line) {
   if (!hasReport(reportPrefix)) return null;
   const fns = Q.loadReport(reportPrefix);          // ONE load per request (enclosingEntry reuses it)
+  const hf = hardFailDetail(fns, reportPrefix);
+  if (hf) {
+    warnLoudOnce(hf.log, hf.brief);
+    if (hf.full) return {
+      contents: { kind: "markdown", value: `**${hf.doc}**` },
+      range: { start: { line, character: 0 }, end: { line, character: 200 } },
+    };
+    // partial: fall through and hover whatever DID load, per hardFailDetail's read-only tolerance
+  }
   const at = enclosingEntry(docPath, line, fns);
   if (!at) return null;
   const { entry } = at;
@@ -484,6 +560,23 @@ function diagnosticsFor(docPath) {
   const text = activePolicy();
   if (text === null || !hasReport(reportPrefix)) return [];
   const fns = Q.loadReport(reportPrefix);
+  // A report FOUND but UNREADABLE (hardFail — see hardFailDetail): this is the live GATE, so it takes
+  // the STRICT `candor_gate`/`partialIsFatal:true` bar on EITHER kind of hardFail, full or partial — a
+  // partial signature makes a green verdict meaningless for the identical reason on both routes (the
+  // effects that failed to load are exactly the ones a violation would come from). Refuses to draw ANY
+  // ordinary squiggle from fns that may be missing exactly the function a rule would have fired on; the
+  // marker diagnostic below is drawn INSTEAD, on every open document, because the corruption is a fact
+  // about the REPORT and not about any one file — there is no "innocent file" to misattribute it to the
+  // way the ⟨0.30⟩/⟨0.32⟩ scope causes below have one, since a report that cannot be read says nothing
+  // about ANY function in ANY document, this one included.
+  const hf = hardFailDetail(fns, reportPrefix);
+  if (hf) {
+    warnLoudOnce(hf.log, hf.brief);
+    return [{
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+      severity: 2, source: "candor", code: "report-unreadable", message: hf.doc,
+    }];
+  }
   // ⟨0.24⟩ A report that JUDGED NOTHING is not a clean bill of health, and this surface is where that is
   // hardest to notice: the live gate's whole vocabulary is squiggles, and a report with `analyzed.count: 0`
   // has no entries, so it produces none — an empty editor reads as "the gate is green" when the truth is
