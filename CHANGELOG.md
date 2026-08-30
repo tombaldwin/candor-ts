@@ -8,6 +8,52 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **Guard-deletion sweep of `scan.mjs`'s silent-vs-disclosed boundary — masking, dispatch-fanout, and
+  dep-chain-join guards.** Continuing `bin/AGENT-CORPUS-BRIEF.md`'s attack C (delete each guard, see if
+  anything notices): 9 candidates in the four named categories (masking guards, dispatch-fanout bounds,
+  alias truncation, dep-chain joins), out of ~75 enumerated for this file — `query.mjs`'s ~80 remain
+  entirely unexamined. 6 of the 9 are well-protected (1–4 assertions red on deletion, confirmed by direct
+  removal and a full `test.mjs --parallel` re-run each time): the alias-truncation fail-closed bound
+  (`ALIAS_HOPS`), the published-`.d.ts` union emitter's own fan-out bound and its `truncated`/census-cap
+  guards (three separate lines), and the Exec/Fs masking guards (a runtime program head / runtime path
+  leaves the surface `incomplete`). Two were not:
+  - **The IN-SCAN interface-dispatch fan-out bound had zero coverage**, unlike its twin at the published-
+    typings union emitter (which has fixtures at both edges of the bound already). Deleting `&&
+    impls.length <= CHA_FANOUT_LIMIT` from the in-scan guard (the `store.save()`-through-a-parameter
+    resolution) left the FULL 1657-assertion suite green: a caller through a 13-implementer interface
+    silently inherited the union of all 13 bodies' effects (Fs included) instead of failing closed to
+    `Unknown[dispatch:…]` — the identical fabrication vector the union side's own fixtures already guard,
+    one call site over (rxjs's real `Operator` interface has 70 implementers). Closed with a new
+    `test.mjs` block mirroring the union side's own "at the bound / past the bound / past the bound with
+    all-pure implementers" trio, plus both gate directions. Confirmed RED on the exact deletion (2 of the
+    4 new assertions fail) and GREEN at HEAD.
+  - **The Db masking guard's own documented purpose — a benign SIBLING call masking an invisible one in
+    the SAME function — had zero coverage.** The existing `⟨0.29⟩` fixture for this guard's neighbourhod
+    (the params-position fix) uses a function with ONE Db call that captures no table at all, which fires
+    AS-EFF-008 through policy.mjs's OTHER disjunct (`reached.length === 0`) regardless of whether this
+    guard's `incomplete` flag is set — so it never actually exercised the guard being tested. Reproduced
+    directly: a function with two `db.query(...)` calls, one literal (captures `ok_table`) and one fully
+    runtime, under `allow Db ok_table` — deleting the guard changed the scan-time gate's own exit code
+    from 1 (AS-EFF-008, correctly refusing to certify) to 0 (`policy ✓`, a false certification of a
+    function that also runs an arbitrary query). Closed with a new `test.mjs` fixture asserting the
+    over-charge control (the benign table is still captured) alongside the fail-closed one (the sibling
+    call still marks the surface incomplete, and the gate still refuses). Confirmed RED on the exact
+    deletion and GREEN at HEAD.
+  Also investigated and downgraded from suspected defect to non-issue: the dep-chain join's `netClass
+  unknown-host -> cell.netIncomplete` line (scan.mjs) also showed a fully green suite on deletion, but a
+  direct reproduction (a producer publishing a masked/hostless Net surface, chained via `CANDOR_DEPS`)
+  showed the consumer's `netClass`/`incomplete` output BYTE-IDENTICAL with the line deleted — it is
+  redundant with the separate `cell.incomplete` set join two lines above it (which already carries `"Net"`
+  from the producer's own `entry.incomplete`), not a silent gap. Filed as a possible dead-code
+  simplification, not a soundness finding — out of scope for this sweep to act on further.
+  All three new/confirmed-covered candidates verified with `test.mjs --parallel` (full suite, both before
+  the addition — at pre-fix baseline — and after); the two closed gaps each add assertions that are RED on
+  the specific line's deletion and GREEN at HEAD, verified by direct removal in the working tree (not by
+  reasoning) and reverted via `git checkout` between candidates so no two mutations were ever live at once.
+  **Honest denominator: 9 of ~75 scan.mjs candidates in the four named categories; `query.mjs`'s ~80 are
+  untouched.** The remaining scan.mjs candidates in these categories, and all of query.mjs (exit-code
+  precedence, sink-collision, policy parsing), are unexamined and should be the next pass's starting point.
+
 - **LSP fail-open closed: a corrupt/unreadable report degraded to "clean file, no squiggles" in the
   editor.** A guard sweep found `lsp.mjs`'s `diagnosticsFor`, `hoverAt` and `codeLenses` calling
   `Q.loadReport` directly, with none of the `hardFail` handling the CLI's `loadReportOrDie` (exit 2)

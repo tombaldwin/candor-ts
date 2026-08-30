@@ -2333,6 +2333,41 @@ export function okLit(p: string): void { db.query("SELECT * FROM ok_table WHERE 
   check("⟨0.29⟩ Db CONTROL: a literal SQL at argument 0 still yields its table",
         tables("src.q.okLit") === "ok_table", tables("src.q.okLit"));
 }
+// ── THE SIBLING-MASKING SHAPE the guard above's own comment names, exercised for the first time ─────
+// "a benign sibling query's literal table must not mask it" (scan.mjs, the `rec.tables.size === before`
+// guard right after the params-position fix above) has no fixture: guard-deletion sweep (2026-08-30,
+// `bin/AGENT-CORPUS-BRIEF.md` rule C) deleted it and the FULL 1657-assertion suite stayed green,
+// including the params-position fixture just above — that one's `paramsLit` makes NO table at all
+// (`reached.length === 0` alone already fires AS-EFF-008 through policy.mjs's OTHER disjunct), so it
+// never actually exercises this specific guard. The guard's own documented purpose is TWO Db calls in
+// ONE function: a benign literal query captures a real table, then a second, fully-runtime query in the
+// SAME function reaches an invisible one — `rec.tables` is non-empty (the benign table), so
+// `reached.length === 0` no longer fires, and only the deleted guard's `incomplete` flag stands between
+// `allow Db <benign_table>` and a false certification of a function that ALSO runs an arbitrary query.
+if (blk()) {
+  const d = project({
+    "node_modules/pg/package.json": `{"name":"pg","version":"8.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/pg/index.d.ts": `export declare class Client { query(text: string, values?: any): Promise<any>; }`,
+    "node_modules/pg/index.js": `exports.Client = class Client { query(){} };`,
+    "src/q.ts": `import { Client } from "pg";
+const db = new Client();
+export function mixed(userSql: string): void {
+  db.query("SELECT * FROM ok_table WHERE x=1");
+  db.query(userSql);
+}`,
+    "pol.mixed": "allow Db ok_table\n",
+  });
+  const rep = scan(d).report;
+  const mixed = entry(rep, "src.q.mixed");
+  check("masking (Db, sibling shape): the benign call's table is STILL captured (the over-charge control)",
+        mixed?.tables?.includes("ok_table"), JSON.stringify(mixed));
+  check("masking (Db, sibling shape): a SECOND, fully-runtime call in the SAME function marks the surface incomplete",
+        mixed?.incomplete?.includes("Db"), JSON.stringify(mixed));
+  const g = scan(d, "--policy", path.join(d, "pol.mixed"));
+  check("masking (Db, sibling shape): `allow Db ok_table` does NOT certify — the runtime sibling call fails closed (AS-EFF-008, exit 1)",
+        g.r.status === 1 && g.r.stdout.includes("[AS-EFF-008]") && g.r.stdout.includes("src.q.mixed"),
+        `exit=${g.r.status} ` + g.r.stdout);
+}
 if (blk()) {
   // ⟨0.29⟩ A USE-VERB NAMES NO PROGRAM. `child.send(msg)` is IPC to an ALREADY-spawned child: its
   // argument 0 is a MESSAGE, not argv[0]. `EXEC_USE_VERBS` says exactly that and was consulted for the
@@ -4849,6 +4884,58 @@ export function orphan(k: Sink): void { k.flush(); }`,
         entry(report, "src.app.orphan")?.inferred.includes("Unknown")
         && entry(report, "src.app.orphan")?.unknownWhy?.some((w) => /^dispatch:.*\.Sink\.flush$/.test(w)),
         JSON.stringify(entry(report, "src.app.orphan")));
+}
+
+// ── THE IN-SCAN FAN-OUT BOUND — a SEPARATE call site from the published-typings union's own ─────────
+// `CHA_FANOUT_LIMIT` gates TWO sites that resolve the same shape of question: the in-scan interface
+// dispatch just above (`store.save()` through a parameter typed `Store`) and the published-`.d.ts`
+// union emitter (its own fixtures live beside `typingsInterfaceImpls`, "THE FAN-OUT BOUND" below,
+// `chanLib`). Guard-deletion sweep (2026-08-30, `bin/AGENT-CORPUS-BRIEF.md` rule C): the union side has
+// fixtures at both edges of the bound; the IN-SCAN site had none. Deleting `&& impls.length <=
+// CHA_FANOUT_LIMIT` from the in-scan guard (scan.mjs, the `if ((ts.isMethodSignature… ` block) left the
+// FULL 1657-assertion suite green — a caller through a 13-implementer interface would silently inherit
+// the union of all 13 bodies' effects (one of which performs Fs) instead of failing closed to
+// `Unknown[dispatch:…]`, the identical fabrication vector the union's own fixtures already guard one
+// call site over (rxjs's real `Operator` interface has 70 implementers).
+if (blk()) {
+  const chanSrc = (n, lastEffectful) => {
+    const cls = [];
+    for (let i = 0; i < n; i++) {
+      const body = (lastEffectful && i === n - 1) ? `fsm.writeFileSync("/data/x", "x");` : "";
+      cls.push(`export class C${i} implements Chan { go(): void { ${body} } }`);
+    }
+    return `import * as fsm from "node:fs";
+export interface Chan { go(): void; }
+${cls.join("\n")}
+export function handle(c: Chan): void { c.go(); }`;
+  };
+  const build = (n, lastEffectful) => project({ "src/a.ts": chanSrc(n, lastEffectful) });
+  // THE SECOND FIXTURES FIRST (the item-0 trap): a bound written wider than intended, or deleted
+  // outright, is invisible to a fixture that only shows narrowing — this pair is taken from the same
+  // argument the union's own "AT the bound" control makes.
+  const atBound = entry(scan(build(12, true)).report, "src.a.handle");
+  check("in-scan dispatch AT the fan-out bound (12) still resolves precisely (no smear, no Unknown)",
+        atBound?.inferred.includes("Fs") && !atBound?.inferred.includes("Unknown"), JSON.stringify(atBound));
+  const pastBound = entry(scan(build(13, true)).report, "src.a.handle");
+  check("in-scan dispatch PAST the fan-out bound (13) fails closed to Unknown, NOT the 13-way smear",
+        pastBound?.inferred.join() === "Unknown", JSON.stringify(pastBound));
+  check("…and the refusal carries its dispatch reason so `deny Unknown[dispatch]` still bites",
+        pastBound?.unknownWhy?.some((w) => /^dispatch:.*\.Chan\.go$/.test(w)), JSON.stringify(pastBound?.unknownWhy));
+  // The other second fixture: past the bound, disclosure fires even when every VISIBLE implementer is
+  // pure — an absent entry is a purity claim (SPEC §2 rule 3), and twelve pure implementers do not make
+  // the thirteenth pure. Silence here would be the cardinal sin wearing a precision fix.
+  const pastBoundPure = entry(scan(build(13, false)).report, "src.a.handle");
+  check("…and a past-bound interface whose visible implementers are ALL pure still discloses Unknown, not silence",
+        pastBoundPure?.inferred.join() === "Unknown", JSON.stringify(pastBoundPure));
+  const gate = (n, lastEffectful, rule) => {
+    const dd = build(n, lastEffectful);
+    fs.writeFileSync(path.join(dd, "g.pol"), `${rule}\n`);
+    return scan(dd, "--policy", path.join(dd, "g.pol")).r.status;
+  };
+  check("in-scan fan-out gate: `deny Unknown[dispatch]` fires PAST the bound (exit 1)",
+        gate(13, true, "deny Unknown[dispatch,unresolved] src.a.handle") === 1);
+  check("in-scan fan-out gate: …and does NOT fire AT the bound, where the dispatch resolved precisely (exit 0)",
+        gate(12, true, "deny Unknown[dispatch,unresolved] src.a.handle") === 0);
 }
 
 // ── SPEC §4's dividing line: `dispatch:` needs an OWNER TYPE **and** a MEMBER ─────────────────────
