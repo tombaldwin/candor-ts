@@ -235,16 +235,57 @@ function entriesInDoc(docPath, fns = null) {
  *
  * `full` decides what each caller does with it: `diagnosticsFor` (the live GATE — squiggles ARE this
  * surface's whole verdict, per `discloseIncompleteness`'s own framing) refuses to draw ANY ordinary
- * squiggle on either kind of hardFail, mirroring `candor_gate`'s `loadReportLoud(p,
- * {partialIsFatal:true})` — a partial signature makes a green verdict meaningless FOR THE SAME REASON on
- * both routes: the effects that failed to load are exactly the ones a violation would come from.
- * `hoverAt`/`codeLenses` are read-only per-function/per-line surfaces, the LSP analogue of `Q.show`/
- * `Q.map` — MCP keeps THOSE tolerant of a partial load (`loadReportLoud(p)` default, `partialIsFatal`
- * false) because a partial answer is a smaller claim than a green gate, and the same argument holds here:
+ * squiggle on either kind of hardFail, mirroring `candor_gate`, which takes the strict bar at its OWN
+ * `g.hardFail` throw off `Q.loadGateReport` — the same reader `gate --report` uses. A partial signature
+ * makes a green verdict meaningless FOR THE SAME REASON on all three routes: the effects that failed to
+ * load are exactly the ones a violation would come from. `hoverAt`/`codeLenses` are read-only
+ * per-function/per-line surfaces, the LSP analogue of `Q.show`/`Q.map` — MCP keeps THOSE tolerant of a
+ * partial load (plain `loadReportLoud`, whose bar is "NOTHING parsed") because a partial answer is a
+ * smaller claim than a green gate, and the same argument holds here:
+ *
+ * NAMED FOR A MECHANISM THAT EXISTS, since 2026-08-30 (panel finding 22). This paragraph, the one at
+ * `diagnosticsFor` and two lines in test-lsp.mjs — one of them an assertion NAME — all cited a
+ * `partialIsFatal:true` argument to `loadReportLoud`. NO CALLER EVER PASSED IT; it was a dead knob, and
+ * `ee82d38` deleted it hours after those comments were written, leaving five citations of a mechanism
+ * with no code. The BEHAVIOUR they describe was and is real — `candor_gate` does take the strict bar —
+ * so this is not a defect, it is the failure mode where an explanation goes on reading as considered
+ * after the thing it explains is gone, and the next reader checks the wrong function for the guarantee.
  * only a FULL failure gets the visible marker in place of the answer; a partial one still returns
  * whatever loaded, `warnLoudOnce` having already said the signature may be incomplete.
  */
+/** ⟨0.32⟩ SPEC §3.3.1 — THE REFUSAL MARKER, ON THE EDITOR ROUTE. The reader and the sentence come from
+ *  query-core (`Q.refusalMarkerFor` / `Q.refusalSentence`), the same two the CLI's `requireReport` and the
+ *  MCP `resolvePrefix` use, so all three routes make the SAME claim about the same bytes. It reached only
+ *  the CLI until 2026-08-30 (panel finding 3): over one directory with unchanged bytes, `gate --report`
+ *  exited 2 naming the refusal while this server drew its ordinary squiggles and `candor_gate` returned
+ *  `{"ok":true,"violations":[]}`. This surface is where that costs the most — a developer reads the ABSENCE
+ *  of a squiggle as "clean" continuously, and a refused scan means nobody checked.
+ *
+ *  It is folded into `hardFailDetail` rather than added beside it because a refusal and an unreadable
+ *  report are the same instruction to this file — "do not present this as an answer" — and its three
+ *  callers (diagnostics, hover, lenses) already implement exactly that for `full`. A fourth predicate
+ *  would have been a fourth thing to remember at each call site, which is the shape of the finding above. */
+function refusalDetail(prefix) {
+  const m = Q.refusalMarkerFor(prefix);
+  if (!m) return null;
+  return {
+    full: true,
+    log: `candor-lsp: ${Q.refusalSentence(m)} No diagnostics, hovers or lenses are drawn from these `
+       + `reports — their ABSENCE here is the refusal, not an all-clear.`,
+    brief: `candor: the last scan REFUSED — these reports are stale and UNVERIFIED (see the candor log)`,
+    doc: `candor: the last scan over this project REFUSED (${m.reason}) — the effects shown here are from `
+       + `an earlier run and are UNVERIFIED, not clean. Re-scan.`,
+    // The marker a refusal shows is NOT the unreadable-report one: these bytes parse perfectly, and an
+    // operator told "report unreadable" goes looking for a corrupt file that isn't there. A refusal's own
+    // words, and its own diagnostic `code`, so a client filtering or counting them can tell the two apart.
+    lens: "⚠ candor: the last scan REFUSED — these effects are stale, re-scan",
+    code: "report-refused",
+  };
+}
+
 function hardFailDetail(fns, prefix) {
+  const refused = refusalDetail(prefix);
+  if (refused) return refused;
   if (!fns.hardFail) return null;
   const full = fns.length === 0;
   const log = full
@@ -262,7 +303,7 @@ function hardFailDetail(fns, prefix) {
   const doc = full
     ? "candor: the report could not be read (corrupt or mid-write) — effects here are UNVERIFIED, not clean. Re-run the scan."
     : "candor: part of the report could not be read (corrupt or mid-write) — some effects across this project may be missing. Re-run the scan.";
-  return { full, log, brief, doc };
+  return { full, log, brief, doc, lens: "⚠ candor: report unreadable — re-run the scan", code: "report-unreadable" };
 }
 
 // The transitive-caller COUNT for an exact fn name over an already-inverted graph. The lenses used
@@ -288,7 +329,7 @@ function codeLenses(docPath) {
     warnLoudOnce(hf.log, hf.brief);
     if (hf.full) return [{
       range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
-      command: { title: `⚠ candor: report unreadable — re-run the scan`, command: "" },
+      command: { title: hf.lens, command: "" },
     }];
     // partial: fall through and lens whatever DID load, per hardFailDetail's read-only tolerance
   }
@@ -561,7 +602,7 @@ function diagnosticsFor(docPath) {
   if (text === null || !hasReport(reportPrefix)) return [];
   const fns = Q.loadReport(reportPrefix);
   // A report FOUND but UNREADABLE (hardFail — see hardFailDetail): this is the live GATE, so it takes
-  // the STRICT `candor_gate`/`partialIsFatal:true` bar on EITHER kind of hardFail, full or partial — a
+  // the STRICT `candor_gate` bar (its `g.hardFail` throw off `Q.loadGateReport`) on EITHER kind, full or partial — a
   // partial signature makes a green verdict meaningless for the identical reason on both routes (the
   // effects that failed to load are exactly the ones a violation would come from). Refuses to draw ANY
   // ordinary squiggle from fns that may be missing exactly the function a rule would have fired on; the
@@ -574,7 +615,7 @@ function diagnosticsFor(docPath) {
     warnLoudOnce(hf.log, hf.brief);
     return [{
       range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
-      severity: 2, source: "candor", code: "report-unreadable", message: hf.doc,
+      severity: 2, source: "candor", code: hf.code, message: hf.doc,
     }];
   }
   // ⟨0.24⟩ A report that JUDGED NOTHING is not a clean bill of health, and this surface is where that is
@@ -783,6 +824,19 @@ function runWhatif(a) {
     logMessage(`candor-lsp: ${WHATIF_COMMAND} called with malformed arguments (expected [{ fn, effect, uri?, line? }]) — ignored`);
     return null;
   }
+  // ⟨0.32⟩ DID THE LAST SCAN REFUSE? The three passive surfaces get this through `hardFailDetail`;
+  // these two COMMAND endpoints resolve the report themselves and gate only on `hasReport`, so the rule
+  // has to be said here too or the executeCommand route is the one that still certifies refused bytes —
+  // which is the finding this closes, one route over. `showMessage(2, …)` is this surface's refusal
+  // envelope (the CLI's exit 2, the MCP tool's isError), and the sentence is query-core's.
+  {
+    const rm = Q.refusalMarkerFor(reportPrefix);
+    if (rm) {
+      warnLoudOnce(`candor-lsp: ${Q.refusalSentence(rm)}`, `candor: the last scan REFUSED — no pre-edit verdict over stale, UNVERIFIED reports`);
+      showMessage(2, `candor: the last scan over this project REFUSED (${rm.reason}) — no pre-edit verdict is computed from reports it would not certify. Re-scan.`);
+      return null;
+    }
+  }
   if (!hasReport(reportPrefix)) {
     showMessage(2, "candor: no report found — scan first (candor-ts <dir> --out .candor/report)");
     return null;
@@ -869,6 +923,19 @@ function runFix(a) {
   if (!a || typeof a !== "object" || typeof a.fn !== "string" || typeof a.effect !== "string") {
     logMessage(`candor-lsp: ${FIX_COMMAND} called with malformed arguments (expected [{ fn, effect, uri?, line? }]) — ignored`);
     return null;
+  }
+  // ⟨0.32⟩ DID THE LAST SCAN REFUSE? The three passive surfaces get this through `hardFailDetail`;
+  // these two COMMAND endpoints resolve the report themselves and gate only on `hasReport`, so the rule
+  // has to be said here too or the executeCommand route is the one that still certifies refused bytes —
+  // which is the finding this closes, one route over. `showMessage(2, …)` is this surface's refusal
+  // envelope (the CLI's exit 2, the MCP tool's isError), and the sentence is query-core's.
+  {
+    const rm = Q.refusalMarkerFor(reportPrefix);
+    if (rm) {
+      warnLoudOnce(`candor-lsp: ${Q.refusalSentence(rm)}`, `candor: the last scan REFUSED — no boundary fix over stale, UNVERIFIED reports`);
+      showMessage(2, `candor: the last scan over this project REFUSED (${rm.reason}) — no boundary fix is computed from reports it would not certify. Re-scan.`);
+      return null;
+    }
   }
   if (!hasReport(reportPrefix)) {
     showMessage(2, "candor: no report found — scan first (candor-ts <dir> --out .candor/report)");

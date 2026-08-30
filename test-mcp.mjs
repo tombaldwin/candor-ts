@@ -6,7 +6,7 @@
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as Q from "./query-core.mjs";
@@ -1650,6 +1650,95 @@ export function top(): void { load(); }
   const wiText = wiUnreadable[0].result?.content?.[0]?.text ?? "";
   ok("⟨0.34⟩ MCP CONTROL: candor_whatif (a tool whose schema DOES declare `policy`) keeps its own unreadable-path error, unaffected by the new dispatcher check",
      wiUnreadable[0].result?.isError === true && !/no policy-relative verdict/.test(wiText), wiText);
+}
+
+// ── ⟨0.32⟩ SPEC §3.3.1/§3.1 — A REFUSED SCAN'S REPORTS ARE REFUSED ON *THIS* ROUTE TOO. Review panel
+// finding 3 (2026-08-30), PRE-EXISTING and SEVERE: the refusal marker was read only by query.mjs's
+// `requireReport`, so over ONE directory and UNCHANGED BYTES the CLI exited 2 naming the refusal while
+// `candor_gate` answered `{"ok":true,"violations":[]}`, `candor_unverified` `{"ok":true,"unverified":[]}`
+// and `candor_where` a clean effect surface. MEASURED pre-fix, exactly those documents.
+//
+// THE ASSERTIONS ARE ON THE DOCUMENT, NOT ON A STATUS. This surface has no exit code at all, and the two
+// prior fixes of this shape in this family passed suite, conformance AND CI because every gate checked an
+// exit and none checked the bytes. So: the tool RESULT is what is read, and the refusal must be IN it.
+//
+// The fixture is the DEFAULT-prefix case on purpose. A refusing run given `--out <p>` also leaves `<p>.json`
+// ARMED (the ⟨0.28⟩ stub), which every route already reads as incomplete — the marker is not the only
+// witness there, so that fixture cannot show this defect. With no `--out` the reports are left exactly as
+// the previous good run wrote them, byte for byte, and the marker beside them is the whole of the evidence.
+{
+  const R = scratch("candor-refused-");
+  fs.mkdirSync(`${R}/src`);
+  fs.writeFileSync(`${R}/src/app.ts`, `import * as http from "node:http";
+export function leaf(): void { http.get("http://x"); }
+export function handler(): void { leaf(); }
+`);
+  fs.writeFileSync(`${R}/src/p.pol`, "deny Fs\n");
+  const scan = (...a) => spawnSync("node", [`${HERE}/scan.mjs`, `${R}/src`, ...a], { encoding: "utf8" });
+  scan();                                     // a COMPLETING run: reports at the default `<target>/.candor/report`
+  const RP = `${R}/src/.candor/report`;
+  const before = fs.readFileSync(`${RP}.json`, "utf8");
+  const refused = scan("--zzz-not-a-flag");   // …then one that REFUSES during argv parsing
+  ok("⟨0.32⟩ fixture: the refusing scan exits 2 and writes the marker beside the reports",
+     refused.status === 2 && fs.existsSync(`${RP}.refused.json`), `exit=${refused.status}`);
+  ok("⟨0.32⟩ fixture: …and leaves the earlier run's report BYTE-IDENTICAL — the marker is the only witness, which is why a route that ignores it answers clean",
+     fs.readFileSync(`${RP}.json`, "utf8") === before);
+
+  const call = (name, args = {}) => ({ jsonrpc: "2.0", id: 0, method: "tools/call", params: { name, arguments: args } });
+  const TOOLS = [["candor_gate", { policy: `${R}/src/p.pol` }], ["candor_where", { effect: "Net" }],
+                 ["candor_unverified", { policy: `${R}/src/p.pol` }], ["candor_map", {}]];
+  const reqs = TOOLS.map(([n, a], k) => ({ ...call(n, a), id: k + 1 }));
+  const rs = await mcpSession(reqs, [], { CANDOR_REPORT: RP });
+  for (const [k, [name]] of TOOLS.entries()) {
+    const r = rs.find((x) => x.id === k + 1);
+    const text = r?.result?.content?.[0]?.text ?? "";
+    ok(`⟨0.32⟩ MCP ${name} over a REFUSED report set: the DOCUMENT is the refusal, not a verdict — isError, no ok/violations key anywhere in it`,
+       r?.result?.isError === true && !/"ok"\s*:/.test(text) && !/"violations"\s*:/.test(text), JSON.stringify(r)?.slice(0, 300));
+    ok(`⟨0.32⟩ …and ${name} says WHAT THE CLI SAYS — the same query-core sentence, so the two routes make one claim about one report`,
+       /REFUSED — these reports are from an earlier run and this verb will not certify them\. Cause: unknown flag --zzz-not-a-flag\./.test(text)
+         && /a completing run clears the marker\./.test(text), text.slice(0, 240));
+  }
+  // ROUTE EQUALITY, MEASURED RATHER THAN ASSERTED TWICE: the CLI's stderr over the same prefix must
+  // CONTAIN the MCP text. Two hand-written expectations drift; a comparison cannot.
+  const cli = spawnSync("node", [`${HERE}/query.mjs`, "gate", "--report", RP, "--policy", `${R}/src/p.pol`], { encoding: "utf8" });
+  const mcpText = rs.find((x) => x.id === 1).result.content[0].text;
+  ok("⟨0.32⟩ ROUTE EQUALITY: `gate --report` exits 2 with the SAME sentence `candor_gate` returns — the envelope differs (exit code vs isError), the claim does not",
+     cli.status === 2 && cli.stderr.includes(mcpText.replace(/^candor: /, "")), `exit=${cli.status} ${cli.stderr.slice(0, 200)} || ${mcpText.slice(0, 200)}`);
+
+  // THE OVER-CHARGE CONTROL, and it is the deliverable: a marker that refused everything forever would
+  // pass every row above while deleting the product. A COMPLETING re-scan clears the marker, and the same
+  // four tools must go back to answering — including `candor_gate` returning a real `ok`.
+  const again = scan();
+  ok("⟨0.32⟩ CONTROL: a completing re-scan exits 0 and removes the marker", again.status === 0 && !fs.existsSync(`${RP}.refused.json`), `exit=${again.status}`);
+  const rs2 = await mcpSession(reqs, [], { CANDOR_REPORT: RP });
+  for (const [k, [name]] of TOOLS.entries()) {
+    const r = rs2.find((x) => x.id === k + 1);
+    const text = r?.result?.content?.[0]?.text ?? "";
+    ok(`⟨0.32⟩ CONTROL: ${name} answers normally once the marker is gone — no residual refusal`,
+       r?.result?.isError !== true && !/REFUSED/.test(text), JSON.stringify(r)?.slice(0, 200));
+  }
+  const gateDoc = JSON.parse(rs2.find((x) => x.id === 1).result.content[0].text);
+  ok("⟨0.32⟩ CONTROL: …and candor_gate's document is a real verdict again (`ok` present, deny Fs does not fire on a Net-only project)",
+     gateDoc.ok === true && eq(gateDoc.violations, []), JSON.stringify(gateDoc).slice(0, 200));
+  // THE ORDER OF THE TWO REFUSALS, pinned because it is invisible in every fixture where reports exist:
+  // a project whose FIRST scan refused has the marker and NO reports. Existence-first answered `no report
+  // … run a candor scan first` — telling the operator to do the thing they just did, with the recorded
+  // cause one file away. `requireReport` has always asked the marker first; this route now does too.
+  {
+    const F = scratch("candor-firstrefuse-");
+    fs.mkdirSync(`${F}/src`);
+    fs.writeFileSync(`${F}/src/app.ts`, "export function f(): void {}\n");
+    const only = spawnSync("node", [`${HERE}/scan.mjs`, `${F}/src`, "--zzz-not-a-flag"], { encoding: "utf8" });
+    const FP = `${F}/src/.candor/report`;
+    ok("⟨0.32⟩ fixture: a FIRST scan that refuses leaves the marker and NO report at the prefix",
+       only.status === 2 && fs.existsSync(`${FP}.refused.json`) && !fs.existsSync(`${FP}.json`), `exit=${only.status}`);
+    const fr = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "candor_where", arguments: { effect: "Net" } } }], [], { CANDOR_REPORT: FP });
+    const ftext = fr[0]?.result?.content?.[0]?.text ?? "";
+    ok("⟨0.32⟩ MCP asks the marker BEFORE existence — a first-scan refusal is reported as a REFUSAL, not as `run a candor scan first`",
+       fr[0]?.result?.isError === true && /REFUSED/.test(ftext) && !/run a candor scan first/.test(ftext), ftext.slice(0, 200));
+    fs.rmSync(F, { recursive: true, force: true });
+  }
+  fs.rmSync(R, { recursive: true, force: true });
 }
 
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);

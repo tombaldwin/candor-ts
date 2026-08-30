@@ -14,7 +14,7 @@
  * Hermetic: scans a throwaway project with the local scan.mjs, then drives lsp.mjs over LSP stdio
  * (Content-Length framing — deliberately NOT the MCP newline framing).
  */
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1279,7 +1279,10 @@ export function handler(): void { mid(); }
 // FULL (every report file at the prefix unreadable) vs PARTIAL (a multi-report prefix with one corrupt
 // sibling among healthy ones) get DIFFERENT treatment, deliberately, mirroring the CLI/MCP split:
 // `diagnosticsFor` is the live GATE (squiggles ARE its whole verdict), so it refuses ANY ordinary
-// squiggle on EITHER kind — `candor_gate`'s own `partialIsFatal:true` bar. `hoverAt`/`codeLenses` are
+// squiggle on EITHER kind — the same strict bar `candor_gate` takes at its `g.hardFail` throw off
+// `Q.loadGateReport` (the citation here read `partialIsFatal:true` until 2026-08-30; that argument was a
+// dead knob no caller ever passed, deleted by ee82d38 — panel finding 22. The behaviour is unchanged; the
+// name was of something that no longer existed). `hoverAt`/`codeLenses` are
 // read-only per-function surfaces (`Q.show`/`Q.map`'s LSP analogue), so they only show the failure
 // marker in place of an answer on FULL failure; a PARTIAL one still answers from whatever loaded, same
 // as MCP's default (non-`candor_gate`) tools.
@@ -1384,7 +1387,7 @@ export function handler(): void { mid(); }
     { jsonrpc: "2.0", id: 99, method: "shutdown" },
   ], 7, {}, 8000);   // init + log + show + diagnostics + lens + hover + shutdown
   const partDiag = partIn.find((r) => r.method === "textDocument/publishDiagnostics")?.params?.diagnostics ?? [];
-  ok("hardFail PARTIAL: diagnostics STILL refuse to certify — the marker fires even over the document whose OWN function loaded fine (the gate takes the strict `partialIsFatal` bar)",
+  ok("hardFail PARTIAL: diagnostics STILL refuse to certify — the marker fires even over the document whose OWN function loaded fine (this surface is the live GATE, so ANY unloaded sibling forbids a green verdict)",
      partDiag.length === 1 && partDiag[0].code === "report-unreadable", JSON.stringify(partDiag));
   const partLog = partIn.find((r) => r.method === "window/logMessage");
   ok("hardFail PARTIAL: the log/show wording is the PARTIAL variant (\"alongside sibling report(s) that did\"), distinct from the FULL wording",
@@ -1419,6 +1422,109 @@ export function handler(): void { mid(); }
   const ctlHover = ctlIn.find((r) => r.id === 5)?.result;
   ok("hardFail CONTROL: …and hover still shows normal provenance", /performed directly here/.test(ctlHover?.contents?.value ?? ""), JSON.stringify(ctlHover));
   fs.rmSync(Uctl, { recursive: true, force: true });
+}
+
+// ── ⟨0.32⟩ SPEC §3.3.1/§3.1 — A REFUSED SCAN'S REPORTS ARE REFUSED IN THE EDITOR TOO ─────────────────
+// Review panel finding 3 (2026-08-30), PRE-EXISTING: the refusal marker was read only by query.mjs's
+// `requireReport`, so `gate --report` exited 2 naming the refusal while THIS server — the one VS Code and
+// the JetBrains plugin both bundle — went on drawing its ordinary squiggles, lenses and pre-edit verdicts
+// from reports CI would not certify. MEASURED pre-fix on the exact fixture below: diagnostics `[]`, two
+// effect lenses, and `candor.whatif` answering `{"violations":[{"rule":"deny Fs"}],"ok":false}` — a
+// confident pre-edit verdict computed from a report set nothing had checked.
+//
+// It is the WORST of the three routes for this defect, and that is not rhetoric: the CLI has an exit code
+// and MCP has `isError`, but here a developer reads the ABSENCE of a squiggle as "clean", continuously,
+// with no envelope to inspect. So the assertions are on the PUBLISHED DOCUMENTS — the diagnostic array,
+// the lens array, the command result — never on a status.
+//
+// THE FIXTURE IS THE DEFAULT-PREFIX CASE, deliberately. A refusing run given `--out <p>` also leaves
+// `<p>.json` ARMED (the ⟨0.28⟩ stub), which this file's ⟨0.24⟩ judged-nothing path ALREADY catches — so
+// that fixture cannot show this defect and a row built on it would pass on the pre-fix build. With no
+// `--out`, the previous good run's reports are left byte-identical and the marker is the only witness.
+{
+  const NET2 = `import * as http from "node:http";
+export function leaf(): void { http.get("http://x"); }
+export function handler(): void { leaf(); }
+`;
+  const mkRefused = () => {
+    const U = scratch("candor-lsp-refused-");
+    const src = path.join(U, "src");
+    fs.mkdirSync(src, { recursive: true });
+    fs.writeFileSync(path.join(src, "app.ts"), NET2);
+    const scan = (...a) => spawnSync("node", [path.join(HERE, "scan.mjs"), src, ...a], { encoding: "utf8" });
+    const good = scan();                                   // reports at src/.candor/report — the DEFAULT prefix
+    fs.writeFileSync(path.join(src, "arch.policy"), "deny Net\n");
+    fs.writeFileSync(path.join(src, ".candor", "config"), "policy arch.policy\n");
+    return { U, src, good, scan, prefix: path.join(src, ".candor", "report") };
+  };
+  const driveR = (src, n) => {
+    const uri = pathToFileURL(path.join(src, "app.ts")).href;
+    return lspSession([
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(src).href } },
+      { jsonrpc: "2.0", method: "initialized", params: {} },
+      { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "typescript", version: 1, text: "" } } },
+      { jsonrpc: "2.0", id: 2, method: "textDocument/codeLens", params: { textDocument: { uri } } },
+      { jsonrpc: "2.0", id: 5, method: "textDocument/hover", params: { textDocument: { uri }, position: { line: 1, character: 4 } } },
+      { jsonrpc: "2.0", id: 6, method: "workspace/executeCommand", params: { command: "candor.whatif", arguments: [{ fn: "app.handler", effect: "Fs", uri, line: 2 }] } },
+      { jsonrpc: "2.0", id: 99, method: "shutdown" },
+    ], n, {}, 12000);
+  };
+
+  const R = mkRefused();
+  const bytesBefore = fs.readFileSync(`${R.prefix}.json`, "utf8");
+  const refusing = R.scan("--zzz-not-a-flag");
+  ok("⟨0.32⟩ LSP fixture: the refusing scan exits 2, writes the marker, and leaves the earlier report BYTE-IDENTICAL (the marker is the only witness)",
+     R.good.status === 0 && refusing.status === 2 && fs.existsSync(`${R.prefix}.refused.json`)
+     && fs.readFileSync(`${R.prefix}.json`, "utf8") === bytesBefore,
+     `good=${R.good.status} refuse=${refusing.status}`);
+
+  const { inbound: refIn } = await driveR(R.src, 9);   // init + (log+show)×2 + diag + lens + hover + whatif-show + shutdown
+  const refDiag = refIn.find((r) => r.method === "textDocument/publishDiagnostics")?.params?.diagnostics ?? [];
+  ok("⟨0.32⟩ LSP over a REFUSED report set: diagnostics carry ONLY the `report-refused` marker — not the AS-EFF-006 squiggles this policy draws over the same bytes when nothing refused",
+     refDiag.length === 1 && refDiag[0].code === "report-refused" && refDiag[0].severity === 2
+     && /REFUSED/.test(refDiag[0].message) && /UNVERIFIED, not clean/.test(refDiag[0].message)
+     && !refDiag.some((d) => d.code === "AS-EFF-006"), JSON.stringify(refDiag));
+  ok("⟨0.32⟩ …and the marker NAMES THE CAUSE the refusing run recorded, not a generic 'stale' — an operator who cannot see the cause cannot clear it",
+     /unknown flag --zzz-not-a-flag/.test(refDiag[0]?.message ?? ""), JSON.stringify(refDiag));
+  ok("⟨0.32⟩ …and it is NOT the `report-unreadable` code: these bytes parse perfectly, and an operator told the report is corrupt goes looking for a file that isn't broken",
+     !refDiag.some((d) => d.code === "report-unreadable"), JSON.stringify(refDiag));
+  const refLog = refIn.find((r) => r.method === "window/logMessage");
+  ok("⟨0.32⟩ …window/logMessage carries the SAME query-core sentence the CLI prints on stderr (one claim, three envelopes)",
+     /REFUSED — these reports are from an earlier run and this verb will not certify them\./.test(refLog?.params?.message ?? ""),
+     JSON.stringify(refLog)?.slice(0, 220));
+  const refLens = refIn.find((r) => r.id === 2)?.result ?? [];
+  ok("⟨0.32⟩ …codeLens shows the refusal lens INSTEAD of the 2 effect lenses a certified report draws here",
+     refLens.length === 1 && /the last scan REFUSED/.test(refLens[0]?.command?.title ?? ""), JSON.stringify(refLens));
+  const refHover = refIn.find((r) => r.id === 5)?.result;
+  ok("⟨0.32⟩ …hover answers the marker, not the normal provenance",
+     /REFUSED/.test(refHover?.contents?.value ?? "") && !/performed directly here/.test(refHover?.contents?.value ?? ""),
+     JSON.stringify(refHover)?.slice(0, 220));
+  const refWhatif = refIn.find((r) => r.id === 6)?.result;
+  ok("⟨0.32⟩ …and `candor.whatif` — an executeCommand endpoint that resolves the report ITSELF, one route over from the three above — computes NO pre-edit verdict: null result, no `ok`, no `violations`",
+     refWhatif === null && !JSON.stringify(refIn.find((r) => r.id === 6) ?? {}).includes('"violations"'),
+     JSON.stringify(refIn.find((r) => r.id === 6))?.slice(0, 220));
+  ok("⟨0.32⟩ …and it SAYS SO on the message channel — a command that silently returns null is indistinguishable from a command that found nothing to say",
+     refIn.some((r) => r.method === "window/showMessage" && /REFUSED/.test(r.params?.message ?? "")
+                    && /no pre-edit verdict/.test(r.params?.message ?? "")),
+     JSON.stringify(refIn.filter((r) => r.method === "window/showMessage").map((r) => r.params.message)).slice(0, 300));
+  fs.rmSync(R.U, { recursive: true, force: true });
+
+  // ── THE OVER-CHARGE CONTROL, and it is the deliverable. A refusal that fired over every report would
+  // pass all eight rows above while deleting the live gate — the surface this whole engine exists to feed.
+  // Same fixture, same policy, same driver; the ONLY difference is that no run refused.
+  const C = mkRefused();
+  const { inbound: ctlIn2 } = await driveR(C.src, 6);   // init + diag + lens + hover + whatif-show + shutdown
+  const ctlDiag2 = ctlIn2.find((r) => r.method === "textDocument/publishDiagnostics")?.params?.diagnostics ?? [];
+  ok("⟨0.32⟩ CONTROL: with NO marker the live gate still fires for real — the AS-EFF-006 squiggles are drawn and no refusal marker appears",
+     ctlDiag2.length === 2 && ctlDiag2.every((d) => d.code === "AS-EFF-006")
+     && !ctlDiag2.some((d) => d.code === "report-refused"), JSON.stringify(ctlDiag2).slice(0, 300));
+  const ctlLens2 = ctlIn2.find((r) => r.id === 2)?.result ?? [];
+  ok("⟨0.32⟩ CONTROL: …codeLens still renders the effect lenses", ctlLens2.length === 2
+     && ctlLens2.every((l) => /⚡/.test(l.command?.title ?? "")), JSON.stringify(ctlLens2).slice(0, 240));
+  const ctlWhatif2 = ctlIn2.find((r) => r.id === 6)?.result;
+  ok("⟨0.32⟩ CONTROL: …and `candor.whatif` still answers with a real pre-edit verdict",
+     ctlWhatif2 !== null && Array.isArray(ctlWhatif2?.affected), JSON.stringify(ctlWhatif2)?.slice(0, 240));
+  fs.rmSync(C.U, { recursive: true, force: true });
 }
 
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);

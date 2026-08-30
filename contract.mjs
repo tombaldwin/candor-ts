@@ -113,3 +113,57 @@ export function writeStdoutSync(out, what = "output", fd = 1, budgetMs = 5000) {
   }
   return true;
 }
+
+// ── SPEC §3.3.1 ⟨0.28⟩ THE SINK WRITER, AND THE ONE SHAPE THAT IS NEVER A SINK ────────────────────
+//
+// ONE IMPLEMENTATION, for the same reason `printAgents` and `writeStdoutSync` live here: scan.mjs and
+// query.mjs are two entry points that must not import from each other, and until 2026-08-30 each
+// carried its own byte-identical copy of these two functions plus its own spelling of the
+// `.candor/config` shape check. That duplication is not theoretical drift — it is the measured
+// SIBLING-ROUTE pattern: three guard-deletion findings were closed on query.mjs's copies on
+// 2026-08-30, and scan.mjs's copies were still unprotected hours later (neutering all three left the
+// full 1702-row battery green, while three hand repros destroyed a `.candor/config`, severed a symlink
+// and stranded a hard-linked sink). Both routes now have watched-RED rows; keeping ONE implementation
+// is what stops the third route from starting out with none.
+//
+// RESOLVE THE SINK TO ITS FINAL ARTIFACT BEFORE WRITING, and preserve the operator's layout.
+// `renameSync` REPLACES a symlink rather than following it, so an `artifacts/verdict.json` linked into a
+// shared directory kept a previous run's `{"ok": true}` while this run's document landed on the link — a
+// stale green with a single `--gate-json` and no operator mistake. And rename gives the destination a NEW
+// inode, so a multiply-linked target strands its other name with the previous document; there the write
+// goes in place, trading the atomicity window for not publishing a stale verdict at a name the operator
+// wired up. SPEC §3.3.1 states identity about ARTIFACTS; this family had it in the comparison only.
+export function resolveSinkArtifact(p) {
+  let cur = p;
+  for (let i = 0; i < 32; i++) {
+    let st;
+    try { st = fs.lstatSync(cur); } catch { return cur; }
+    if (!st.isSymbolicLink()) return cur;
+    let t;
+    try { t = fs.readlinkSync(cur); } catch { return cur; }
+    cur = path.isAbsolute(t) ? t : path.join(path.dirname(cur), t);
+  }
+  return cur;
+}
+
+export function writeSinkAtomic(p, text) {
+  const target = resolveSinkArtifact(p);
+  try {
+    if (fs.statSync(target).nlink > 1) { fs.writeFileSync(target, text); return; }
+  } catch { /* not there yet — the ordinary temp+rename path is right */ }
+  const tmp = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, text);
+  fs.renameSync(tmp, target);
+}
+
+/** `.candor/config` is never a verdict sink, wherever it is — the SHAPE, not a discovered path.
+ *  The per-input collision checks can only name inputs a run was TOLD about; the config is DISCOVERED
+ *  by walking up from the target, so by the time its path is known the arming has already destroyed it.
+ *  A check on the shape needs no discovery, so it runs before the first write and covers a config found
+ *  anywhere up the tree. The PREDICATE is shared; each route keeps its own diagnostic and its own
+ *  refusal plumbing (scan.mjs also feeds the ⟨0.28⟩ report stream through `refuseEarly`). */
+export function isCandorConfigSink(p) {
+  if (!p || p === "-") return false;
+  const abs = path.resolve(p);
+  return path.basename(abs) === "config" && path.basename(path.dirname(abs)) === ".candor";
+}

@@ -28,8 +28,8 @@ import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, d
          policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules,
          fatalPolicyErrors, refusalVerdict, sortViolations,
          unanswerableScoped, wholePolicyUnanswerable, reportUnits } from "./policy.mjs";
-import { hasReport } from "./query-core.mjs";
-import { printAgents, writeStdoutSync } from "./contract.mjs";
+import { hasReport, refusalMarkerFor, refusalSentence } from "./query-core.mjs";
+import { printAgents, writeStdoutSync, writeSinkAtomic, isCandorConfigSink } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
 import { isTestPath } from "./scan-core.mjs";
 // ONE source of truth for loading + name-matching — query.mjs kept DRIFTED local copies that didn't
@@ -760,65 +760,16 @@ function discoverReportPrefix() {
 // A null prefix (no --report AND nothing discovered) is a LOUD exit-2 failure — never a silent empty
 // answer. A resolved prefix that names NO report files is likewise loud (hasReport). One helper so every
 // verb's no-report path is identical to the Rust engine's (report_or_discover + the no-files check).
-// ⟨0.32⟩ SPEC §3.3.1 — did the most recent attempt over these reports REFUSE?
-//
-// A consumer cannot work this out for itself. The hazard is an EVENT — a refusal that happened AFTER
-// these bytes were written — witnessed only by the run that refused; no function of the report and the
-// tree recovers it. So the refusing run writes a marker beside the reports and this reads it.
-//
-// Resolved for all three §3.3.1 locator forms. The DIRECT-FILE case is why the marker carries its own
-// `prefix`: that form accepts any `.json` name whatever its dot-segments, so the prefix cannot come from
-// the filename — the marker is found by scanning the file's directory and asking which recorded prefix
-// covers it.
-function refusalMarkerFor(prefix) {
-  const read = (f) => {
-    try {
-      const d = JSON.parse(fs.readFileSync(f, "utf8"));
-      return d && d.refused === true && typeof d.prefix === "string" ? d : null;
-    } catch { return null; }
-  };
-  // The ordinary form first: the refusing run wrote the marker at `<its --out prefix>.refused.json`, and
-  // for a locator that names that same prefix (or a single `<prefix>.json` report, whose `.json` the
-  // caller has already stripped) this is a direct hit.
-  const direct = read(`${prefix}.refused.json`);
-  if (direct) return direct;
-  // …AND THE MULTI-REPORT DIRECT-FILE FORM, which the lookup above CANNOT reach. §3.3.1's direct-file
-  // locator accepts any `.json` name whatever its dot-segments, so `--report <dir>/rep.<crate>.scan.json`
-  // arrives here as the prefix `<dir>/rep.<crate>.scan` — while the refusing scan recorded `<dir>/rep`.
-  //
-  // GUARD-DELETION SWEEP, 2026-08-30: this branch used to be GATED ON `prefix.endsWith(".json")`, a
-  // condition its only caller makes impossible — `locatorToPrefix` strips the trailing `.json` before
-  // `requireReport` is ever called — so it had never executed. Deleting it left the whole suite green
-  // because there was nothing to delete. MEASURED at HEAD: with `rep.refused.json` beside
-  // `rep.mycrate.scan.json`, `where Net --report <dir>/rep` exits 2 naming the refusal and
-  // `where Net --report <dir>/rep.mycrate.scan.json` exits 0 with a clean answer over the same bytes —
-  // the same reports, certified or refused according to which spelling of the locator was used. The
-  // marker carries its own `prefix` for precisely this case (scan.mjs's `writeRefusalMarker` says so).
-  //
-  // MATCHED ON A DOT-SEGMENT BOUNDARY, not a bare `startsWith`: the old (unreachable) form would have let
-  // a `report.refused.json` cover an unrelated `report-old` prefix beside it — an over-refusal invented
-  // by the repair. `<prefix>` itself, or `<prefix>.<anything>`, and nothing else.
-  try {
-    const me = path.resolve(prefix);
-    const dir = path.dirname(me);
-    for (const n of fs.readdirSync(dir)) {
-      if (!n.endsWith(".refused.json")) continue;
-      const d = read(path.join(dir, n));
-      if (!d) continue;
-      const p = path.resolve(d.prefix);
-      if (me === p || me.startsWith(p + ".")) return d;
-    }
-  } catch { /* an unreadable directory carries no marker — the status quo, never worse */ }
-  return null;
-}
-
+// ⟨0.32⟩ SPEC §3.3.1 — did the most recent attempt over these reports REFUSE? `refusalMarkerFor` and the
+// sentence it produces are IMPORTED from query-core.mjs (the module every report route shares). They lived
+// here until 2026-08-30, which made the whole rule CLI-ONLY: over one directory, unchanged bytes, this verb
+// exited 2 naming the refusal while MCP `candor_gate` answered `{"ok":true,"violations":[]}` — the panel's
+// finding 3, a §3.1 route divergence in the silent direction. The reader is documented where it now lives.
 function requireReport(prefix) {
   if (prefix !== null) {
     const m = refusalMarkerFor(prefix);
     if (m) {
-      console.error(`candor-ts: the most recent scan over '${m.prefix}' REFUSED — these reports are from `
-                  + `an earlier run and this verb will not certify them. Cause: ${m.reason}. `
-                  + `Re-scan ${m.target || "the target"}; a completing run clears the marker.`);
+      console.error(`candor-ts: ${refusalSentence(m)}`);
       process.exit(2);
     }
   }
@@ -1044,46 +995,23 @@ function refuseGateJsonOverInput(gate, other, flag) {
   process.exit(2);
 }
 
-/** `.candor/config` is never a verdict sink, wherever it is. */
+/** `.candor/config` is never a verdict sink, wherever it is. The SHAPE predicate is
+ *  `isCandorConfigSink` (contract.mjs), shared with scan.mjs's two call sites; the diagnostic below
+ *  stays this route's own, because the two entry points name themselves differently and scan.mjs
+ *  additionally owes the ⟨0.28⟩ report stream a refusal through `refuseEarly`. */
 function refuseGateJsonAtConfig(gate) {
-  if (!gate || gate === "-") return;
-  const abs = path.resolve(gate);
-  if (path.basename(abs) !== "config" || path.basename(path.dirname(abs)) !== ".candor") return;
+  if (!isCandorConfigSink(gate)) return;
   console.error(`candor-ts-query: --gate-json ${gate} is a .candor/config — refusing (exit 2). This would `
     + `destroy the config that configures this run. Nothing was written; give the verdict its own path.`);
   process.exit(2);
 }
 
 /** Write the fail-closed refusal every later exit inherits unless a real verdict replaces it. */
-// ⟨0.28⟩ RESOLVE THE SINK TO ITS FINAL ARTIFACT BEFORE WRITING, and preserve the operator's layout.
-// `renameSync` REPLACES a symlink rather than following it, so an `artifacts/verdict.json` linked into a
-// shared directory kept a previous run's `{"ok": true}` while this run's document landed on the link — a
-// stale green with a single `--gate-json` and no operator mistake. And rename gives the destination a NEW
-// inode, so a multiply-linked target strands its other name with the previous document; there the write
-// goes in place, trading the atomicity window for not publishing a stale verdict at a name the operator
-// wired up. SPEC §3.3.1 states identity about ARTIFACTS; this family had it in the comparison only.
-function resolveSinkArtifact(p) {
-  let cur = p;
-  for (let i = 0; i < 32; i++) {
-    let st;
-    try { st = fs.lstatSync(cur); } catch { return cur; }
-    if (!st.isSymbolicLink()) return cur;
-    let t;
-    try { t = fs.readlinkSync(cur); } catch { return cur; }
-    cur = path.isAbsolute(t) ? t : path.join(path.dirname(cur), t);
-  }
-  return cur;
-}
-
-function writeSinkAtomic(p, text) {
-  const target = resolveSinkArtifact(p);
-  try {
-    if (fs.statSync(target).nlink > 1) { fs.writeFileSync(target, text); return; }
-  } catch { /* not there yet — the ordinary temp+rename path is right */ }
-  const tmp = `${target}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, text);
-  fs.renameSync(tmp, target);
-}
+// ⟨0.28⟩ THE SINK WRITER — `writeSinkAtomic`, IMPORTED from contract.mjs. It used to be a byte-identical
+// copy of scan.mjs's (`diff`ed, line for line), and that duplication was measured, not theoretical:
+// three guard-deletion findings were closed on THIS file's copies on 2026-08-30 and scan.mjs's copies
+// were still unprotected hours later. The ⟨0.28⟩ symlink / hard-link ruling and the sibling-route
+// measurement that consolidated the two are documented at the shared implementation.
 
 function armQueryGateJson(p) {
   try {

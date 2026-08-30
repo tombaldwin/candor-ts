@@ -10072,6 +10072,145 @@ if (blk()) {
         `ino ${fs.statSync(sink).ino} vs ${fs.statSync(alias).ino}, nlink ${fs.statSync(sink).nlink}`);
 }
 
+// ── ⟨0.28⟩ THE SAME THREE SINK GUARDS, ON THE **SCAN** ROUTE (scan.mjs) — SIBLING-ROUTE finding,
+// 2026-08-30. The two blocks above and their `nlink` sibling closed `.candor/config`, symlink-follow and
+// multiply-linked-in-place on `query.mjs`'s `gate --report` sink. scan.mjs carries its OWN copies of all
+// three (its own inline `.candor/config` shape check at BOTH call sites, and byte-identical
+// `resolveSinkArtifact` / `writeSinkAtomic` — `diff`ed, identical line for line), because the two entry
+// points do not import from one another. **Neutering all three scan.mjs copies at once left the full
+// 1702-row battery GREEN**, so every row here was written against a measured hole, not from reading.
+//
+// Reproduced by hand against the neutered build, one repro per guard, all three on the SCAN command line:
+//   (1) `--gate-json <d>/.candor/config` overwrote the config with the verdict, at EXIT 1;
+//   (2) `--gate-json <symlink>` replaced the LINK with a regular file and left the canonical target it
+//       pointed at holding `{"ok":true,"stale":"yesterday"}` — a stale green under the other name;
+//   (3) `--gate-json <hard link>` gave the named path a fresh inode (nlink 2 → 1 + 1) and stranded the
+//       operator's second name on yesterday's green.
+// At HEAD all three are refused or written through, which is what these rows now pin.
+//
+// The scan route is not a copy of the query route's SHAPE: the config guard here also feeds `refuseEarly`
+// (the ⟨0.28⟩ report stream), and the sink lives on a command line that also carries `--out` and a real
+// source walk. So these drive `scan.mjs` directly rather than reusing `gateCli`.
+const scanCli = (target, ...a) => spawnSync("node", [path.join(HERE, "scan.mjs"), target, ...a], { encoding: "utf8" });
+const scanFixture = () => project({
+  "src/a.ts": `import * as fsm from "node:fs";\nexport function writes(): void { fsm.writeFileSync("/tmp/candor-ts-sink-row", "y"); }\n`,
+  "p.pol": "deny Fs\n",
+});
+const sinkDoc = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } };
+
+// (1) `.candor/config` is never a verdict sink — scan.mjs's SINGLE-SINK call site.
+// Isolated the same way the query row is: the config sits in a sibling directory the scan target never
+// walks up through, so it is not DISCOVERED and names no policy in play — only the basename shape check
+// can be what refuses it.
+if (blk()) {
+  const d = scanFixture();
+  const cfgDir = path.join(d, "elsewhere", ".candor");
+  fs.mkdirSync(cfgDir, { recursive: true });
+  const cfgPath = path.join(cfgDir, "config");
+  const cfgBefore = "policy = nowhere.pol\n";
+  fs.writeFileSync(cfgPath, cfgBefore);
+  const r = scanCli(path.join(d, "src"), "--out", path.join(d, "o", "r"), "--policy", path.join(d, "p.pol"),
+                    "--gate-json", cfgPath);
+  check("⟨0.28⟩ scan --gate-json naming a `.candor/config` is refused (exit 2) — the SCAN route's own copy of the guard",
+        r.status === 2 && /is a \.candor\/config/.test(r.stderr), `exit=${r.status} ${r.stderr.slice(0, 200)}`);
+  check("⟨0.28⟩ …and the config is left BYTE-IDENTICAL — the sink is armed before the config is read, so the guard must fire before the first write",
+        fs.readFileSync(cfgPath, "utf8") === cfgBefore, fs.readFileSync(cfgPath, "utf8").slice(0, 120));
+  // NEGATIVE CONTROL (the over-charge direction): the identical scan sunk at an ORDINARY path still
+  // gates for real. A guard that started refusing every scan run near a `.candor` tree would pass the
+  // two rows above while deleting the feature.
+  const okOut = path.join(d, "ok.json");
+  const ok = scanCli(path.join(d, "src"), "--out", path.join(d, "o2", "r"), "--policy", path.join(d, "p.pol"),
+                     "--gate-json", okOut);
+  check("⟨0.28⟩ …CONTROL: the identical scan sunk at an ORDINARY path still gates for real (exit 1, the violation written)",
+        ok.status === 1 && (sinkDoc(okOut)?.violations ?? []).length === 1, `exit=${ok.status} ${JSON.stringify(sinkDoc(okOut))?.slice(0, 160)}`);
+}
+
+// (1b) …AND scan.mjs's SECOND call site — the duplicate-sink loop, which repeats the shape check for
+// every named `--gate-json`. Two call sites of one rule is exactly how the ⟨0.28⟩ rung has paid before
+// ("this rung has paid six times for one rule with two spellings", scan.mjs's own comment), so the row
+// that covers only the first one leaves the other spelling open.
+if (blk()) {
+  const d = scanFixture();
+  const cfgDir = path.join(d, "elsewhere", ".candor");
+  fs.mkdirSync(cfgDir, { recursive: true });
+  const cfgPath = path.join(cfgDir, "config");
+  const cfgBefore = "policy = nowhere.pol\n";
+  fs.writeFileSync(cfgPath, cfgBefore);
+  const innocent = path.join(d, "innocent.json");
+  fs.writeFileSync(innocent, '{"ok":true,"stale":"yesterday"}\n');
+  const r = scanCli(path.join(d, "src"), "--out", path.join(d, "o", "r"), "--policy", path.join(d, "p.pol"),
+                    "--gate-json", innocent, "--gate-json", cfgPath);
+  check("⟨0.28⟩ scan --gate-json: a `.candor/config` named as the SECOND of two sinks is caught by the duplicate loop's own copy of the check (exit 2)",
+        r.status === 2 && /is a \.candor\/config — refusing \(exit 2\)\. Nothing was written there\./.test(r.stderr),
+        `exit=${r.status} ${r.stderr.slice(0, 240)}`);
+  check("⟨0.28⟩ …the config is still BYTE-IDENTICAL — the path exemption is scoped to the offending path",
+        fs.readFileSync(cfgPath, "utf8") === cfgBefore, fs.readFileSync(cfgPath, "utf8").slice(0, 120));
+  check("⟨0.28⟩ …and the INNOCENT sibling sink still receives the duplicate-sink refusal, not the stale green it held",
+        sinkDoc(innocent)?.refused === true && sinkDoc(innocent)?.ok === false,
+        JSON.stringify(sinkDoc(innocent))?.slice(0, 200));
+}
+
+// (2) scan.mjs's `resolveSinkArtifact` — the ⟨0.28⟩ symlink ruling on the SCAN route's verdict sink.
+if (blk()) {
+  const d = scanFixture();
+  fs.mkdirSync(path.join(d, "shared"));
+  const canonical = path.join(d, "shared", "verdict.json");
+  fs.writeFileSync(canonical, '{"ok":true,"stale":"yesterday"}');
+  const link = path.join(d, "link.json");
+  fs.symlinkSync(canonical, link);
+  const r = scanCli(path.join(d, "src"), "--out", path.join(d, "o", "r"), "--policy", path.join(d, "p.pol"),
+                    "--gate-json", link);
+  check("⟨0.28⟩ scan --gate-json sink: writing through a SYMLINK still fires the real verdict (exit 1)",
+        r.status === 1, `exit=${r.status} ${r.stderr.slice(0, 200)}`);
+  check("⟨0.28⟩ …the LINK is still a symlink at its old path — a resolve-then-rename severs it into a regular file",
+        fs.lstatSync(link).isSymbolicLink(), "the link is gone or is now a regular file");
+  check("⟨0.28⟩ …and the CANONICAL target carries the new verdict; the shared copy is replaced, not stranded under a severed link",
+        sinkDoc(canonical)?.violations?.length === 1 && sinkDoc(canonical)?.ok === false,
+        JSON.stringify(sinkDoc(canonical))?.slice(0, 200));
+}
+
+// (2b) …and the SAME helper on the scan route's OTHER sink — the `--out` REPORT set. `writeAtomic` is
+// `writeSinkAtomic` under another name (scan.mjs's own one-line alias), so a symlinked `<prefix>.json`
+// is the report-shaped spelling of the verdict-shaped hole above. This is the sink the boundary would
+// have missed by stopping at `--gate-json`: an operator publishing one canonical report into a shared
+// artifacts directory, and it had no row on either engine route.
+if (blk()) {
+  const d = scanFixture();
+  fs.mkdirSync(path.join(d, "shared"));
+  fs.mkdirSync(path.join(d, "pfx"));
+  const canonical = path.join(d, "shared", "report.json");
+  fs.writeFileSync(canonical, '{"canonical":"yesterday"}');
+  const link = path.join(d, "pfx", "r.json");
+  fs.symlinkSync(canonical, link);
+  const r = scanCli(path.join(d, "src"), "--out", path.join(d, "pfx", "r"));
+  check("⟨0.28⟩ scan --out: a symlinked `<prefix>.json` report still completes (exit 0)", r.status === 0,
+        `exit=${r.status} ${r.stderr.slice(0, 200)}`);
+  check("⟨0.28⟩ …the operator's LINK survives as a link — the report set goes through the same `writeSinkAtomic`",
+        fs.lstatSync(link).isSymbolicLink(), "the link is gone or is now a regular file");
+  check("⟨0.28⟩ …and the CANONICAL target holds THIS run's report, not the previous contents",
+        sinkDoc(canonical)?.functions?.some((e) => e.fn.endsWith("a.writes")) === true,
+        JSON.stringify(sinkDoc(canonical))?.slice(0, 160));
+}
+
+// (3) scan.mjs's `writeSinkAtomic` `nlink > 1` in-place write — the hard-link half, SCAN route.
+if (blk()) {
+  const d = scanFixture();
+  const sink = path.join(d, "verdict.json");
+  const alias = path.join(d, "published.json");
+  fs.writeFileSync(sink, '{"ok":true,"stale":"yesterday"}');
+  fs.linkSync(sink, alias);
+  const r = scanCli(path.join(d, "src"), "--out", path.join(d, "o", "r"), "--policy", path.join(d, "p.pol"),
+                    "--gate-json", sink);
+  check("⟨0.28⟩ scan --gate-json sink: a HARD-LINKED sink still fires the real verdict (exit 1)",
+        r.status === 1, `exit=${r.status} ${r.stderr.slice(0, 200)}`);
+  check("⟨0.28⟩ …and the OTHER NAME for that inode carries the SAME firing verdict — a temp+rename strands it holding the previous run's green",
+        sinkDoc(alias)?.violations?.length === 1 && sinkDoc(alias)?.ok === false,
+        JSON.stringify(sinkDoc(alias))?.slice(0, 200));
+  check("⟨0.28⟩ …the two names are still ONE artifact afterwards (the link is preserved, not severed by a fresh inode)",
+        fs.statSync(sink).ino === fs.statSync(alias).ino && fs.statSync(sink).nlink === 2,
+        `ino ${fs.statSync(sink).ino} vs ${fs.statSync(alias).ino}, nlink ${fs.statSync(sink).nlink}`);
+}
+
 // ── ⟨0.28⟩ A RUN PUBLISHES ONE VERDICT TO ONE SINK — `--gate-json` GIVEN TWICE IS A REFUSAL, AND EVERY
 // NAMED SINK RECEIVES IT (query.mjs's `namedSinks.length > 1` block) — GUARD-DELETION SWEEP finding
 // (2026-08-30). The block's own comment records the measurement it was written from ("this verb kept

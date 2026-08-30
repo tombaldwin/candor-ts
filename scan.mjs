@@ -32,7 +32,7 @@ import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNe
          reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules, fatalPolicyErrors, refusalVerdict, sortViolations,
          netClassResolver, resolveReasonClasses } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade, canonicalDenySet, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
-import { printAgents, writeStdoutSync } from "./contract.mjs";
+import { printAgents, writeStdoutSync, writeSinkAtomic, resolveSinkArtifact, isCandorConfigSink } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadEffects, hostLiteral,
          tablesInSql, modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf,
          partnerFor } from "./scan-core.mjs";
@@ -860,19 +860,18 @@ const disarmUnwrittenOutReports = () => {
     refuseEarly(`--gate-json ${gate} is a source file under the scan target ${preTarget}`);
     process.exit(2);
   }
-  // `.candor/config` is never a verdict sink, wherever it is. The per-input checks above can only name
-  // inputs the run was TOLD about; the config is DISCOVERED by walking up from the target, so by the
-  // time its path is known the arming has already destroyed it. A check on the SHAPE needs no
-  // discovery, so it runs before the first write and covers a config found anywhere up the tree.
-  if (gate && singleSink && gate !== "-") {
-    const abs = path.resolve(gate);
-    if (path.basename(abs) === "config" && path.basename(path.dirname(abs)) === ".candor") {
-      console.error(`candor-ts: --gate-json ${gate} is a .candor/config — refusing (exit 2). The verdict `
-        + `is armed before the config is read, so this would destroy the config that configures this `
-        + `run. Nothing was written; give the verdict its own path.`);
-      refuseEarly(`--gate-json ${gate} is a .candor/config`);   // ⟨0.28⟩ report stream too
-      process.exit(2);
-    }
+  // `.candor/config` is never a verdict sink, wherever it is — the SHAPE predicate `isCandorConfigSink`
+  // (contract.mjs), shared with query.mjs's `gate --report` sink; the diagnostic and the `refuseEarly`
+  // report-stream leg stay this route's own. The per-input checks above can only name inputs the run was
+  // TOLD about; the config is DISCOVERED by walking up from the target, so by the time its path is known
+  // the arming has already destroyed it. A check on the SHAPE needs no discovery, so it runs before the
+  // first write and covers a config found anywhere up the tree.
+  if (gate && singleSink && isCandorConfigSink(gate)) {
+    console.error(`candor-ts: --gate-json ${gate} is a .candor/config — refusing (exit 2). The verdict `
+      + `is armed before the config is read, so this would destroy the config that configures this `
+      + `run. Nothing was written; give the verdict its own path.`);
+    refuseEarly(`--gate-json ${gate} is a .candor/config`);   // ⟨0.28⟩ report stream too
+    process.exit(2);
   }
   if (gate && singleSink && sameArtifact(gate, process.env.CANDOR_CONFIG)) {
     console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as CANDOR_CONFIG — refusing (exit 2).`);
@@ -908,12 +907,11 @@ const disarmUnwrittenOutReports = () => {
           bad = true;
         }
       }
-      if (g !== "-") {
-        const abs = path.resolve(g);
-        if (path.basename(abs) === "config" && path.basename(path.dirname(abs)) === ".candor") {
-          console.error(`candor-ts: --gate-json ${g} is a .candor/config — refusing (exit 2). Nothing was written there.`);
-          bad = true;
-        }
+      // …and the SAME shared predicate on the duplicate route (`isCandorConfigSink`, contract.mjs). Two
+      // call sites of one rule is how this rung has paid before; they now read the same function.
+      if (isCandorConfigSink(g)) {
+        console.error(`candor-ts: --gate-json ${g} is a .candor/config — refusing (exit 2). Nothing was written there.`);
+        bad = true;
       }
       if (sameArtifact(g, process.env.CANDOR_CONFIG)) {
         console.error(`candor-ts: --gate-json ${g} names the SAME FILE as CANDOR_CONFIG — refusing (exit 2).`);
@@ -1279,38 +1277,12 @@ function loadCandorConfig(targetPath, { lenient = false } = {}) {
 // about the code.
 //
 // A `function` declaration, not a `const`: it is CALLED from the pre-pass above the arg loop, and only a
-// hoisted declaration can be. The write is inlined rather than calling `writeAtomic` for the same reason
-// in reverse — that helper is a `const` declared ~4700 lines below, so calling it would be a
-// temporal-dead-zone throw.
-// ⟨0.28⟩ RESOLVE THE SINK TO ITS FINAL ARTIFACT BEFORE WRITING, and preserve the operator's layout.
-// `renameSync` REPLACES a symlink rather than following it, so an `artifacts/verdict.json` linked into a
-// shared directory kept a previous run's `{"ok": true}` while this run's document landed on the link — a
-// stale green with a single `--gate-json` and no operator mistake. And rename gives the destination a NEW
-// inode, so a multiply-linked target strands its other name with the previous document; there the write
-// goes in place, trading the atomicity window for not publishing a stale verdict at a name the operator
-// wired up. SPEC §3.3.1 states identity about ARTIFACTS; this family had it in the comparison only.
-function resolveSinkArtifact(p) {
-  let cur = p;
-  for (let i = 0; i < 32; i++) {
-    let st;
-    try { st = fs.lstatSync(cur); } catch { return cur; }
-    if (!st.isSymbolicLink()) return cur;
-    let t;
-    try { t = fs.readlinkSync(cur); } catch { return cur; }
-    cur = path.isAbsolute(t) ? t : path.join(path.dirname(cur), t);
-  }
-  return cur;
-}
-
-function writeSinkAtomic(p, text) {
-  const target = resolveSinkArtifact(p);
-  try {
-    if (fs.statSync(target).nlink > 1) { fs.writeFileSync(target, text); return; }
-  } catch { /* not there yet — the ordinary temp+rename path is right */ }
-  const tmp = `${target}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, text);
-  fs.renameSync(tmp, target);
-}
+// hoisted declaration can be. It cannot call `writeAtomic` for the same reason in reverse — that helper
+// is a `const` declared ~4700 lines below, so calling it would be a temporal-dead-zone throw. The sink
+// WRITER it needs is `writeSinkAtomic`, IMPORTED from contract.mjs (an import binding is initialised
+// before this module's body runs, so the pre-pass can call it) — one implementation shared with
+// query.mjs rather than the byte-identical copy that used to sit here. See contract.mjs for the ⟨0.28⟩
+// symlink / hard-link ruling it implements and the sibling-route measurement that consolidated it.
 
 function armGateJsonFailClosed(p) {
   armedGateSink = p;   // ⟨0.31⟩ this path is now ours to replace if the run refuses

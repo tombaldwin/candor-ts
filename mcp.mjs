@@ -48,6 +48,26 @@ function resolvePrefix(args) {
   if (!p) throw new Error("no report prefix: pass `report`, set $CANDOR_REPORT, or give one as the CLI arg");
   if (WORKSPACE_ROOT && !within(nodePath.resolve(p), WORKSPACE_ROOT))
     throw new Error(`report prefix \`${clip(p)}\` is outside the served workspace (--root ${WORKSPACE_ROOT}) — refusing`);
+  // ⟨0.32⟩ SPEC §3.3.1 — DID THE MOST RECENT SCAN OVER THESE BYTES REFUSE? This is the CLI's
+  // `requireReport` check on the agent route, reading the SAME marker through the SAME query-core helper
+  // and saying the SAME sentence. It was CLI-only until 2026-08-30 (panel finding 3): over one directory
+  // and unchanged bytes, `gate --report`/`where` exited 2 naming the refusal while `candor_gate` returned
+  // `{"ok":true,"violations":[]}`, `candor_unverified` `{"ok":true,"unverified":[]}` and `candor_where` a
+  // clean effect surface — the CI route refusing and the route an agent actually asks certifying, which is
+  // the divergence §3.1 exists to forbid, in the silent direction, on the surface with no exit code to read.
+  //
+  // IT SITS AT THE PREFIX, NOT IN A VERB: every report-reading tool resolves through here (and so does
+  // `resources/read`), so this cannot be the route that has the rule while its sibling does not — the
+  // failure mode this very finding is. The ENVELOPE is this surface's own: a thrown error becomes the
+  // `isError` tool result every other refusal here uses, the agent-transport spelling of the CLI's exit 2.
+  //
+  // BEFORE the existence check, which is the order `requireReport` uses and the order MATTERS: a project
+  // whose FIRST scan refused has the marker and NO reports, and existence-first answered `no report at
+  // \`…\` — run a candor scan first` — advice to do the thing the operator just did, with the recorded
+  // cause of the refusal sitting unread one file away. Neither order is a false all-clear; only one tells
+  // the truth about which of the two situations this is.
+  const m = Q.refusalMarkerFor(p);
+  if (m) throw new Error(Q.refusalSentence(m));
   if (!Q.hasReport(p)) throw new Error(`no report at \`${p}\` (.json or .<crate>.scan.json) — run a candor scan first`);
   return p;
 }

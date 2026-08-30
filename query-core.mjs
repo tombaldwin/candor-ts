@@ -59,6 +59,75 @@ export function hasReport(p) {
       f.startsWith(base + ".") && f.endsWith(".json") && isReport(f));
   } catch { return false; }
 }
+// ⟨0.32⟩ SPEC §3.3.1 — DID THE MOST RECENT ATTEMPT OVER THESE REPORTS REFUSE?
+//
+// A consumer cannot work this out for itself. The hazard is an EVENT — a refusal that happened AFTER
+// these bytes were written — witnessed only by the run that refused; no function of the report and the
+// tree recovers it. So the refusing run writes a marker beside the reports and this reads it.
+//
+// Resolved for all three §3.3.1 locator forms. The DIRECT-FILE case is why the marker carries its own
+// `prefix`: that form accepts any `.json` name whatever its dot-segments, so the prefix cannot come from
+// the filename — the marker is found by scanning the file's directory and asking which recorded prefix
+// covers it.
+//
+// IT LIVES HERE, in the module every report route shares, because until 2026-08-30 it lived in query.mjs
+// and was therefore CLI-ONLY — a §3.1 route divergence in the silent direction, and the panel's finding 3.
+// MEASURED over one directory, same bytes: `gate --report` and `where` exited 2 naming the refusal while
+// MCP `candor_gate` returned `{"ok":true,"violations":[]}`, `candor_unverified` `{"ok":true,
+// "unverified":[]}` and `candor_where` a clean surface — the agent-facing routes certifying reports the
+// CLI refuses. A rule that only one entry point can see is not a rule; §3.1 binds the ANSWER, not the
+// command line that asked for it.
+export function refusalMarkerFor(prefix) {
+  const read = (f) => {
+    try {
+      const d = JSON.parse(fs.readFileSync(f, "utf8"));
+      return d && d.refused === true && typeof d.prefix === "string" ? d : null;
+    } catch { return null; }
+  };
+  // The ordinary form first: the refusing run wrote the marker at `<its --out prefix>.refused.json`, and
+  // for a locator that names that same prefix (or a single `<prefix>.json` report, whose `.json` the
+  // caller has already stripped) this is a direct hit.
+  const direct = read(`${prefix}.refused.json`);
+  if (direct) return direct;
+  // …AND THE MULTI-REPORT DIRECT-FILE FORM, which the lookup above CANNOT reach. §3.3.1's direct-file
+  // locator accepts any `.json` name whatever its dot-segments, so `--report <dir>/rep.<crate>.scan.json`
+  // arrives here as the prefix `<dir>/rep.<crate>.scan` — while the refusing scan recorded `<dir>/rep`.
+  //
+  // GUARD-DELETION SWEEP, 2026-08-30: this branch used to be GATED ON `prefix.endsWith(".json")`, a
+  // condition its only caller makes impossible — `locatorToPrefix` strips the trailing `.json` before
+  // `requireReport` is ever called — so it had never executed. Deleting it left the whole suite green
+  // because there was nothing to delete. MEASURED at HEAD: with `rep.refused.json` beside
+  // `rep.mycrate.scan.json`, `where Net --report <dir>/rep` exits 2 naming the refusal and
+  // `where Net --report <dir>/rep.mycrate.scan.json` exits 0 with a clean answer over the same bytes —
+  // the same reports, certified or refused according to which spelling of the locator was used. The
+  // marker carries its own `prefix` for precisely this case (scan.mjs's `writeRefusalMarker` says so).
+  //
+  // MATCHED ON A DOT-SEGMENT BOUNDARY, not a bare `startsWith`: the old (unreachable) form would have let
+  // a `report.refused.json` cover an unrelated `report-old` prefix beside it — an over-refusal invented
+  // by the repair. `<prefix>` itself, or `<prefix>.<anything>`, and nothing else.
+  try {
+    const me = nodePath.resolve(prefix);
+    const dir = nodePath.dirname(me);
+    for (const n of fs.readdirSync(dir)) {
+      if (!n.endsWith(".refused.json")) continue;
+      const d = read(nodePath.join(dir, n));
+      if (!d) continue;
+      const p = nodePath.resolve(d.prefix);
+      if (me === p || me.startsWith(p + ".")) return d;
+    }
+  } catch { /* an unreadable directory carries no marker — the status quo, never worse */ }
+  return null;
+}
+
+/** The ONE sentence every route says about a refused report set, so the CLI's exit-2 stderr, the MCP
+ *  tool error and the LSP's editor warning are the SAME claim in the same words (§3.1 route equality:
+ *  the routes may differ in ENVELOPE — an exit code, an `isError`, a warning — never in the answer).
+ *  Each route prepends its own name, the way `isCandorConfigSink`'s callers keep their own diagnostics. */
+export const refusalSentence = (m) =>
+  `the most recent scan over '${m.prefix}' REFUSED — these reports are from an earlier run and this `
+  + `verb will not certify them. Cause: ${m.reason}. Re-scan ${m.target || "the target"}; a completing `
+  + `run clears the marker.`;
+
 // The report FILE(S) a prefix names: the exact `<prefix>.json`, else its multi-report siblings. ONE copy,
 // because the loaders and the ⟨0.24⟩ judged-nothing check must read the same file set — a helper reading a
 // narrower one would answer about a report the gate never gated.
