@@ -8,6 +8,58 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **Guard-deletion sweep of `query.mjs` — sink-collision guards (2 of ~80 candidates examined, both
+  unprotected).** Continuing the previous sweep's own hand-off ("`query.mjs`'s ~80 are untouched"),
+  scoped by the brief to exit-code precedence first, then sink-collision, then policy parsing.
+  Read the whole exit-code precedence chain in the `gate` case closely (⟨0.24⟩ violation-dominates-
+  refusal, ⟨0.30⟩/⟨0.32⟩/⟨0.33⟩'s incompleteness causes) and found it heavily guarded by EXISTING tests —
+  hardFail-dominates-a-firing-rule, a certain violation dominating a whole-policy refusal (both on the
+  exit code and in the document), and an in-scope violation dominating the `unread`-class cause all have
+  dedicated rows already. Did not guard-delete any node of that chain directly (see report); it is the
+  most examined part of this file and the most likely reason the two real gaps below turned up in
+  sink-collision instead.
+  `resolveGateReportVerb`'s `--gate-json` sink-collision machinery has TWO independent implementations of
+  every check: a single-value block keyed on `preScanGateArgs`'s last-seen `--gate-json`, then a
+  `namedSinks` loop that repeats every check (plus `CANDOR_CONFIG`, which the single-value block omits
+  entirely) for every distinct `--gate-json` in argv, including the sole one. Two guards examined:
+  - **`refuseGateJsonAtConfig` (`.candor/config` is never a verdict sink) had ZERO test coverage on
+    EITHER of its two call sites, and zero on scan.mjs's separate, identically-named copy either** —
+    grepping the whole suite for its message found nothing anywhere. Neutering both call sites left the
+    full 1666-row suite green; a manual repro then had `gate --gate-json <dir>/.candor/config` overwrite
+    the file that configures the run, at EXIT 1 (a "successful" gate reporting its violation over the
+    wreckage). Closed with a new `test.mjs` block: the refusal fires (exit 2, config byte-identical), plus
+    a negative control that the same report/policy sunk at an ordinary path still gates for real. Confirmed
+    RED on deleting both call sites and GREEN at HEAD.
+  - **`resolveSinkArtifact`'s symlink-following (the ⟨0.28⟩ "a symlinked sidecar is left alone" ruling)
+    has a test for scan.mjs's report/sidecar writes but none for query.mjs's OWN, separate `--gate-json`
+    sink** — this file's own comment says the two engines don't share this code ("must not import from
+    this file"), and the fix for one route's symlink handling was never asked of its sibling (the A.2
+    pattern). Neutering `resolveSinkArtifact` to `return p` (skip the symlink-follow loop) left the suite
+    green; a manual repro then had `fs.renameSync` replace a `--gate-json` SYMLINK with a regular file
+    holding the new verdict, stranding the canonical shared target it pointed at with yesterday's stale
+    content. Closed with a new `test.mjs` block asserting the link survives as a link and the canonical
+    target (not the link path) carries the new verdict. Confirmed RED (2 of 3 new assertions fail) on the
+    deletion and GREEN at HEAD.
+  Judged, not written up as gaps: the single-value collision-check block (`--policy`/`--report`/expanded-
+  report-files/`CANDOR_POLICY`/config-declared-policy, ~6 call sites) is provably redundant with the
+  `namedSinks` loop that runs immediately after it — neutering all six calls (keeping the `expandedInputs`
+  computation the loop needs) left the full suite green AND left every hand-reproduced collision
+  (`--policy`, `--report`, `CANDOR_POLICY`) still refused, byte-for-byte the same message, because the
+  loop performs a strict superset of the same checks for every named sink including the sole one. Not
+  fixed or tested further — it is dead-weight defense-in-depth, not a gap, and deleting the redundant
+  block is a simplification left for a cleanup pass, not this one.
+  Also spot-checked, not guard-deleted (see report for the reasoning): `resolveGateReportVerb`'s "given
+  more than once" duplicate-`--gate-json` refusal appears to have no dedicated test on the `query.mjs`
+  route either (only scan.mjs's `--out`/`--gate-json` duplicate rows exist) — flagged, not closed.
+  **Honest denominator: 2 of ~80 query.mjs candidates guard-deleted and run to a verdict; both were
+  unprotected and are now fixed. The exit-code precedence chain (this sweep's first priority) was read in
+  full but not itself guard-deleted; policy parsing is untouched. ~78 of ~80 remain for the next pass,
+  starting with the precedence chain's own line-by-line deletion and the flagged duplicate-sink row.**
+  All rows verified with the full suite (`test.mjs --parallel`, `test-mcp.mjs`, `test-lsp.mjs`,
+  `node --test test-unit.mjs`) green at HEAD; each fix's regression assertions confirmed RED on the exact
+  deletion in a throwaway worktree, reverted before the next candidate so no two mutations were ever live
+  at once.
+
 - **Guard-deletion sweep of `scan.mjs`'s silent-vs-disclosed boundary — masking, dispatch-fanout, and
   dep-chain-join guards.** Continuing `bin/AGENT-CORPUS-BRIEF.md`'s attack C (delete each guard, see if
   anything notices): 9 candidates in the four named categories (masking guards, dispatch-fanout bounds,

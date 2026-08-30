@@ -9966,6 +9966,77 @@ if (blk()) {
   }
 }
 
+// ── ⟨0.28⟩ `.candor/config` IS NEVER A VERDICT SINK ON `gate --report` EITHER (refuseGateJsonAtConfig,
+// query.mjs) — GUARD-DELETION SWEEP finding (2026-08-30). This route carries its OWN copy of the guard,
+// independent of scan.mjs's identically-named one one file over (this file's own comment above
+// `preScanGateArgs`: "The scan entry point has its own copies (scan.mjs) because it must not import
+// from this file"), and grepping this suite for the guard's message turned up ZERO rows on EITHER route
+// before this one. Neutering both call sites (the single-sink check and its namedSinks-loop twin) left
+// the full 1666-row suite green; a manual repro then overwrote a `.candor/config` at EXIT 1 — a
+// "successful" gate reporting its violation over the very file that configured the run.
+//
+// Isolated from the input-collision guards beside it: this config names no policy/report in play and is
+// never DISCOVERED from the run's CWD (a different directory), so only the basename-based
+// `.candor/config` check can be what refuses it.
+if (blk()) {
+  const d = handReport({
+    "r.json": { candor: { version: "handwritten", spec: "0.28" }, package: "app",
+                analyzed: { count: 1, digest: "0" },
+                functions: [{ fn: "app.writes", inferred: ["Fs"], direct: ["Fs"] }] },
+    "p.pol": "deny Fs\n",
+  });
+  const readDoc = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } };
+  const cfgDir = path.join(d, "unrelated", ".candor");
+  fs.mkdirSync(cfgDir, { recursive: true });
+  const cfgPath = path.join(cfgDir, "config");
+  const cfgBefore = "policy = nowhere.pol\n";
+  fs.writeFileSync(cfgPath, cfgBefore);
+  const r = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"), "--gate-json", cfgPath);
+  check("⟨0.28⟩ a --gate-json naming a `.candor/config` is refused (exit 2) — it configures A run, never a place to write one's verdict",
+        r.status === 2 && /is a \.candor\/config/.test(r.stderr), `exit=${r.status} ${r.stderr.slice(0, 200)}`);
+  check("⟨0.28⟩ …and the config is left BYTE-IDENTICAL — the guard fires before the write, not a failed write recovered after",
+        fs.readFileSync(cfgPath, "utf8") === cfgBefore, fs.readFileSync(cfgPath, "utf8"));
+  // NEGATIVE CONTROL: the identical report/policy, sunk at an ORDINARY path, still gates for real — the
+  // guard above must not have started refusing every gate that happens to run near a `.candor` tree.
+  const okOut = path.join(d, "ok.json");
+  const ok = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"), "--gate-json", okOut);
+  check("⟨0.28⟩ …CONTROL: the identical report/policy sunk at an ORDINARY path still gates for real (exit 1, the violation written)",
+        ok.status === 1 && (readDoc(okOut)?.violations ?? []).length === 1, `exit=${ok.status}`);
+}
+
+// ── ⟨0.28⟩ THE SAME SYMLINK RULING (see "A SYMLINKED SIDECAR IS LEFT ALONE" below), ON QUERY.MJS'S OWN
+// --gate-json SINK (resolveSinkArtifact / writeSinkAtomic) — GUARD-DELETION SWEEP finding (2026-08-30).
+// This is a SEPARATE implementation from scan.mjs's report-sink arming, per this file's own comment
+// noted above, and grepping this whole suite for "symlink" beside "gate-json"/"gateCli" turned up nothing:
+// the shared-artifact CI layout (many verdict paths, one canonical file symlinked in) was only ever
+// exercised for the SCAN's report/sidecar writes, never for the QUERY route's verdict sink.
+//
+// Neutering `resolveSinkArtifact` (`return p` unconditionally, skipping the symlink-follow loop) left the
+// full suite green; a manual repro then had `fs.renameSync` replace the LINK itself with a regular file
+// holding the new verdict, stranding the canonical target it used to point at with YESTERDAY'S content —
+// exactly the stale-green artifact `resolveSinkArtifact`'s own comment describes.
+if (blk()) {
+  const d = handReport({
+    "r.json": { candor: { version: "handwritten", spec: "0.28" }, package: "app",
+                analyzed: { count: 1, digest: "0" },
+                functions: [{ fn: "app.writes", inferred: ["Fs"], direct: ["Fs"] }] },
+    "p.pol": "deny Fs\n",
+  });
+  fs.mkdirSync(path.join(d, "shared"));
+  const canonical = path.join(d, "shared", "verdict.json");
+  fs.writeFileSync(canonical, '{"ok":true,"stale":"yesterday"}');
+  const link = path.join(d, "link.json");
+  fs.symlinkSync(canonical, link);
+  const r = gateCli("--report", path.join(d, "r.json"), "--policy", path.join(d, "p.pol"), "--gate-json", link);
+  check("⟨0.28⟩ query.mjs --gate-json sink: writing through a SYMLINK still fires the real verdict (exit 1)",
+        r.status === 1, `exit=${r.status} ${r.stderr.slice(0, 200)}`);
+  check("⟨0.28⟩ …the LINK is still a symlink at its old path — a resolve-then-rename would sever it into a regular file",
+        fs.lstatSync(link).isSymbolicLink(), "the link is gone or is now a regular file");
+  const afterCanonical = (() => { try { return JSON.parse(fs.readFileSync(canonical, "utf8")); } catch { return null; } })();
+  check("⟨0.28⟩ …and the CANONICAL target — not the link path — carries the new verdict; the stale copy is replaced, not stranded under a severed link",
+        afterCanonical?.violations?.length === 1, JSON.stringify(afterCanonical)?.slice(0, 200));
+}
+
 // ── ⟨0.24⟩ PRECEDENCE BINDS THE VERDICT, NOT THE POLICY GATE (SPEC §3.1 `4c79958`) ─────────────────
 // A CERTAIN baseline regression was DELETED from the machine channel by an unrelated policy refusal, in
 // all four engines. Measured — a pure function gains an `Fs` call, scanned against a frozen baseline:
