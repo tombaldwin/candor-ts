@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.34.0] — 2026-08-31
+
 - **UPGRADING FROM 0.33.1 — re-baselining is not review.** ⟨0.34⟩ is NON-ADDITIVE and this wave
   corrects the classifier in BOTH directions. After regenerating a baseline, **diff it against the
   old one**: effects this release REMOVES will never trip any gate, because `gains` and the baseline
