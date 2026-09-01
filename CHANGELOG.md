@@ -8,6 +8,35 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ FIX (SOUNDNESS R91) — `--allow-js` no longer discards the whole tsconfig, only widens the file
+  set it admits.** `--allow-js` used to bypass `tsconfig.json` entirely the moment it was passed
+  (`fs.existsSync(tsconfig) && !allowJs`), throwing away every compiler option — `paths`, `baseUrl`,
+  `strict` — along with `include`. MEASURED, flag varied alone, on a pure-`.ts` fixture with a
+  `@lib/*` path alias and zero `.js` files (so the flag bought nothing and only cost): a scoped
+  `deny Fs src.index` went exit 1 → exit 0, because the alias-resolved call read `Unknown` (disclosed)
+  instead of the real `Fs` edge once `paths` was dropped. NOT a cardinal sin — the degradation was
+  disclosed and the documented `deny Unknown <scope>` knob was the correct remedy — but a natural
+  scoped policy flipped FAIL→PASS on a flag whose own docs give no hint it discards the tsconfig, and
+  path aliases are standard in Next.js/Nx/most monorepos.
+  Fixed by asking the TypeScript API itself to widen the file set (never hand-rolling a second
+  discovery pass that could disagree with the program `ts.createProgram` actually builds):
+  `admitJsInConfig` sets `compilerOptions.allowJs` before `ts.parseJsonConfigFileContent` runs, so
+  `paths`/`baseUrl`/every other option ride through unchanged. Two narrower gaps handled explicitly —
+  a `files`-only config with no `include` at all never directory-walks even with `allowJs` (execa's
+  real tsconfig at the time `--allow-js` was introduced, `{"files": ["index.d.ts"]}`, verified against
+  the published tsconfig.json at that date — the shape the flag exists to unblock), so `include:
+  ["**/*"]` is synthesized only for that exact shape; an explicit `include` naming only a TS extension
+  (`src/**/*.ts`) does not admit `.js` through TypeScript's own extension-widening, so each such
+  pattern gets its `.js`-family sibling added alongside it (the literal "TS-only tsconfig include" the
+  commit that introduced the flag, `b68864d`, named as its target).
+  Corpus A/B (hono, zod, axios, `node_modules` installed): zero determined-effect (Fs/Net/Exec/Env/
+  Clock/Rand/Clipboard) regressions in any package's own library code. Every removed row audited in
+  full traces to one of two sound mechanisms — a call that used to misresolve to `Unknown` now
+  resolving through the CORRECT per-project `paths`/`baseUrl` (hono, callgraph-verified), or a file
+  now correctly OUT of scope because the real tsconfig's own `exclude` (zod's `packages/docs`,
+  `vitest.root.mjs`) or TypeScript's own dot-directory skip (`.claude/`, `.configs/`, `docs/.
+  vitepress/`) says so — never a real effect silently vanishing from in-scope library source.
+
 - **⚠ CARDINAL-SIN FIX — a structural interface implementor completes the candidate set instead of
   vanishing (SPEC §4 ⟨0.35⟩, PART 87).** MEASURED on the published 0.34.0 artifact: a closure stored
   in a `let` and dispatched later through a local interface's own signature (`held.go()`) read honest

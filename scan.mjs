@@ -1349,9 +1349,39 @@ function withNodeTypes(options) {
   return { ...options, types: [...new Set([...t, "node"])] };
 }
 
-function fromTsconfig(cfgPath, baseDir) {
+// R91: widen the FILE SET `--allow-js` admits from a tsconfig WITHOUT discarding the tsconfig's other
+// compiler options (`paths`, `baseUrl`, `strict`, ...) — the bug this replaces bypassed the whole config
+// the moment the flag was passed, silently losing path-alias resolution for every project that has one.
+// `admitJs` asks the TypeScript API itself to widen (rule G: ask the authority, never reimplement) rather
+// than hand-rolling a second file-discovery pass that could disagree with the program `ts.createProgram`
+// actually builds.
+function admitJsInConfig(rawConfig) {
+  const cfg = { ...rawConfig, compilerOptions: { ...(rawConfig.compilerOptions ?? {}), allowJs: true } };
+  if (cfg.include === undefined) {
+    // A `files`-only config (no `include` at all) NEVER directory-walks, `allowJs` or not — TypeScript's
+    // own "default to **/*" rule only fires when BOTH `files` and `include` are absent. This is execa's
+    // actual tsconfig at the moment `--allow-js` was introduced (`{"files": ["index.d.ts"]}`, verified
+    // against the real published tsconfig.json at that date) — the tree the flag exists to unblock, where
+    // the config names only a hand-written `.d.ts` and none of the real `.js` implementation. Recover
+    // exactly that shape, and no other.
+    if (cfg.files !== undefined) cfg.include = ["**/*"];
+  } else {
+    // An include pattern that names a TS extension explicitly (`src/**/*.ts`) does not admit `.js`
+    // regardless of `allowJs` — only an extension-LESS pattern (`src`, `src/**/*`, the common template)
+    // widens automatically once `allowJs` is true. Add each such pattern's `.js`-family sibling alongside
+    // it; this is the literal "TS-only tsconfig include" the commit that introduced `--allow-js`
+    // (b68864d) named as its target. An extension-less pattern maps to itself and contributes nothing.
+    const jsSibling = (p) => p.replace(/\.mts$/, ".mjs").replace(/\.cts$/, ".cjs")
+      .replace(/\.tsx$/, ".jsx").replace(/(?<!\.[mc])\.ts$/, ".js");
+    const extra = cfg.include.map(jsSibling).filter((p, i) => p !== cfg.include[i] && !cfg.include.includes(p));
+    if (extra.length) cfg.include = [...cfg.include, ...extra];
+  }
+  return cfg;
+}
+function fromTsconfig(cfgPath, baseDir, admitJs = false) {
   const cfg = ts.readConfigFile(cfgPath, ts.sys.readFile);
-  const parsed = ts.parseJsonConfigFileContent(cfg.config ?? {}, ts.sys, baseDir);
+  const rawConfig = admitJs ? admitJsInConfig(cfg.config ?? {}) : (cfg.config ?? {});
+  const parsed = ts.parseJsonConfigFileContent(rawConfig, ts.sys, baseDir);
   compilerOptions = withNodeTypes(parsed.options);
   let names = parsed.fileNames;
   // SOLUTION-STYLE configs (`files: [], references: [...]` — hono, most monorepo roots) list no
@@ -1363,7 +1393,8 @@ function fromTsconfig(cfgPath, baseDir) {
       const refPath = ts.resolveProjectReferencePath(ref);
       if (!fs.existsSync(refPath) || isTestPath(path.relative(baseDir, refPath))) continue;
       const sub = ts.readConfigFile(refPath, ts.sys.readFile);
-      const subParsed = ts.parseJsonConfigFileContent(sub.config ?? {}, ts.sys, path.dirname(refPath));
+      const subRawConfig = admitJs ? admitJsInConfig(sub.config ?? {}) : (sub.config ?? {});
+      const subParsed = ts.parseJsonConfigFileContent(subRawConfig, ts.sys, path.dirname(refPath));
       if (names.length === 0) compilerOptions = withNodeTypes(subParsed.options);
       names = names.concat(subParsed.fileNames);
     }
@@ -1394,7 +1425,7 @@ const admitsAsSource = (name) =>
 if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
   rootDir = path.dirname(path.resolve(target));
   usedTsconfig = path.resolve(target);
-  fileNames = fromTsconfig(path.resolve(target), rootDir);
+  fileNames = fromTsconfig(path.resolve(target), rootDir, allowJs);
 } else if (stat.isFile()) {
   rootDir = path.dirname(path.resolve(target));
   // ⟨0.31⟩ A SINGLE-FILE TARGET IS ADMITTED BY THE SAME RULE AS A FILE INSIDE A DIRECTORY, and this
@@ -1413,9 +1444,13 @@ if (stat.isFile() && /tsconfig.*\.json$/.test(path.basename(target))) {
 } else {
   rootDir = path.resolve(target);
   const tsconfig = path.join(rootDir, "tsconfig.json");
-  if (fs.existsSync(tsconfig) && !allowJs) {
+  // R91: a tsconfig is used WHENEVER one exists, `--allow-js` or not — the flag used to take the `else`
+  // branch unconditionally, discarding `paths`/`baseUrl`/every other compiler option along with `include`.
+  // `fromTsconfig`'s own `admitJs` parameter (below) is what widens the file set now; this condition no
+  // longer decides between "read the tsconfig" and "ignore it".
+  if (fs.existsSync(tsconfig)) {
     usedTsconfig = tsconfig;
-    fileNames = fromTsconfig(tsconfig, rootDir);
+    fileNames = fromTsconfig(tsconfig, rootDir, allowJs);
   } else {
     fileNames = [];
     (function walk(d) {

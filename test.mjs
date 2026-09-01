@@ -14543,6 +14543,130 @@ export const messyStore: Store = { save(): void { fs.writeFileSync("/tmp/x", "y"
         JSON.stringify(report.functions.map((e) => [e.hash, e.inferred, e.interfaceUnion])));
 }
 
+// ── R91: `--allow-js` widens the FILE SET, it no longer discards the tsconfig's OTHER compiler options ──
+//
+// The old code took `--allow-js` as a signal to bypass `tsconfig.json` entirely (`fs.existsSync(tsconfig)
+// && !allowJs`), throwing away `paths`, `baseUrl`, `strict` and everything else the config set — not just
+// widening `include` to admit `.js`. A scoped policy on a project with a `@lib/*` path alias flipped
+// FAIL→PASS: the alias-resolved call read `Unknown` (disclosed) instead of the real `Fs` edge, so
+// `deny Fs src.index` went exit 1 → exit 0. Traced to `b68864d` (2026-06-11), whose message scopes the
+// intent to an execa-shaped case (a tsconfig that names no real `.js` source at all) but discarded the
+// whole config as an unexamined side effect.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: {
+        target: "ES2020", module: "commonjs", strict: false,
+        baseUrl: ".", rootDir: "src",
+        paths: { "@lib/*": ["src/lib/*"] },
+      },
+    }),
+    "src/index.ts": `import { writeIt } from "@lib/writer";
+export function callViaAlias(v: string) {
+  writeIt(v);
+}
+`,
+    "src/lib/writer.ts": `import * as fs from "fs";
+export function writeIt(v: string) {
+  fs.writeFileSync("/tmp/candor-r91-poc.txt", v);
+}
+`,
+    "scoped.policy": "deny Fs src.index\n",
+  });
+  const noFlag = scan(d, "--policy", path.join(d, "scoped.policy"));
+  check("R91 CONTROL: without --allow-js, the path-alias call resolves to Fs and the scoped gate fires (exit 1) — the byte-identical-without-the-flag baseline",
+        noFlag.r.status === 1, `status=${noFlag.r.status} ${noFlag.r.stderr}`);
+  const withFlag = scan(d, "--allow-js", "--policy", path.join(d, "scoped.policy"));
+  check("R91 FIX: WITH --allow-js, `paths`/`baseUrl` are still honoured — the SAME alias resolves to Fs, not Unknown, and the scoped gate returns to exit 1",
+        withFlag.r.status === 1, `status=${withFlag.r.status} ${withFlag.r.stderr}`);
+  check("R91 FIX: …and the report shows the resolved `Fs` edge, not a disclosed `Unknown` standing in for it",
+        entry(withFlag.report, "src.index.callViaAlias")?.inferred.includes("Fs")
+          && !entry(withFlag.report, "src.index.callViaAlias")?.inferred.includes("Unknown"),
+        JSON.stringify(withFlag.report?.functions));
+
+  // CONTROL: an UNSCOPED `deny Fs` was never broken by R91 (the callee itself is reported directly,
+  // scope-independent) — pin it so a future change to the scoped path cannot regress this one instead.
+  fs.writeFileSync(path.join(d, "unscoped.policy"), "deny Fs\n");
+  const unscopedReal = scan(d, "--allow-js", "--policy", path.join(d, "unscoped.policy"));
+  check("R91 CONTROL: an UNSCOPED `deny Fs` still fires with --allow-js (unaffected either way)",
+        unscopedReal.r.status === 1, `status=${unscopedReal.r.status}`);
+}
+
+// CONTROL 2 — the flag must still do its ORIGINAL job. execa's real tsconfig at the time `--allow-js` was
+// written (2026-06-11, verified against the published tsconfig.json at that date) is `{"files":
+// ["index.d.ts"]}` — no `include` at all. TypeScript's own default-to-`**/*` rule only fires when BOTH
+// `files` and `include` are absent, so a `files`-only config NEVER directory-walks, `allowJs` or not: the
+// tsconfig names a hand-written `.d.ts` and nothing else, and every real `.js` implementation file is
+// invisible to it. This is the shape the flag exists to unblock. Built from the commit's own description,
+// not guessed — this IS the recorded past failure.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { module: "nodenext", moduleResolution: "nodenext", target: "ES2022", strict: true },
+      files: ["index.d.ts"],
+    }),
+    "index.d.ts": `export declare function run(): void;\n`,
+    "index.js": `import fs from "node:fs";
+export function run() { fs.readFileSync("/x"); }
+`,
+    "deny.policy": "deny Fs\n",
+  });
+  const noFlag = scan(d, "--policy", path.join(d, "deny.policy"));
+  check("CONTROL 2 baseline: WITHOUT --allow-js, a `files`-only tsconfig never sees index.js — the gate is INCOMPLETE (exit 2), not a clean pass",
+        noFlag.r.status === 2, `status=${noFlag.r.status} ${noFlag.r.stderr.slice(0, 200)}`);
+  const withFlag = scan(d, "--allow-js", "--policy", path.join(d, "deny.policy"));
+  check("CONTROL 2 (the flag's ORIGINAL job, execa-shaped): WITH --allow-js, index.js is now admitted and analyzed — `deny Fs` fires for real (exit 1), not silently skipped",
+        withFlag.r.status === 1, `status=${withFlag.r.status} ${withFlag.r.stderr.slice(0, 200)}`);
+  check("CONTROL 2: …and the resolved function shows the real Fs effect, not an absence",
+        entry(withFlag.report, "index.run")?.inferred.includes("Fs"),
+        JSON.stringify(withFlag.report?.functions));
+}
+
+// CONTROL 3 — an EXPLICIT `include` that names only a TS extension (`src/**/*.ts`) does not admit `.js`
+// through TypeScript's own extension-widening (only an extension-LESS pattern like `src/**/*` does); this
+// is the literal "TS-only tsconfig include" the b68864d commit message named, distinct from CONTROL 2's
+// verified `files`-only shape. Each such pattern gets its `.js`-family sibling added alongside it.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { module: "commonjs", target: "ES2020", strict: false },
+      include: ["src/**/*.ts"],
+    }),
+    "src/a.ts": `export function tsFn() { return 1; }\n`,
+    "src/b.js": `import fs from "node:fs";
+export function jsFn() { fs.readFileSync("/x"); }
+`,
+    "deny.policy": "deny Fs\n",
+  });
+  const noFlag = scan(d, "--policy", path.join(d, "deny.policy"));
+  check("CONTROL 3 baseline: an explicit `.ts`-only `include` never sees b.js without the flag (exit 2, incomplete)",
+        noFlag.r.status === 2, `status=${noFlag.r.status}`);
+  const withFlag = scan(d, "--allow-js", "--policy", path.join(d, "deny.policy"));
+  check("CONTROL 3: WITH --allow-js, a `.ts`-only `include` pattern gets its `.js` sibling and b.js is now analyzed (exit 1)",
+        withFlag.r.status === 1, `status=${withFlag.r.status}`);
+  check("CONTROL 3: …a.ts is UNAFFECTED (still analyzed, still pure) — the widening only ADDS, it does not narrow",
+        entry(withFlag.report, "src.a.tsFn") === undefined || !(entry(withFlag.report, "src.a.tsFn")?.inferred?.length > 0),
+        JSON.stringify(withFlag.report?.functions));
+}
+
+// CONTROL 4 — a project with NO tsconfig at all is untouched by any of this (same walk-based path as
+// always), with and without the flag.
+if (blk()) {
+  const dNoCfg = project({
+    "index.js": `import fs from "node:fs";
+export function run() { fs.readFileSync("/x"); }
+`,
+  });
+  const noFlag = scan(dNoCfg);
+  // no policy given — just confirm the flagless walk still ignores .js (no tsconfig, no --allow-js).
+  check("CONTROL 4: no tsconfig, no --allow-js — plain-JS project reports nothing (still ignored, unaffected by this fix)",
+        (noFlag.report?.functions ?? []).length === 0, JSON.stringify(noFlag.report));
+  const withFlag = scan(dNoCfg, "--allow-js");
+  check("CONTROL 4: no tsconfig, WITH --allow-js — the raw walk still admits .js exactly as before (unaffected by this fix)",
+        entry(withFlag.report, "index.run")?.inferred.includes("Fs"),
+        JSON.stringify(withFlag.report?.functions));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
