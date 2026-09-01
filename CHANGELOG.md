@@ -36,6 +36,46 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   precise closure unit — net +19 and +8 rows respectively, zero fabrication, zero under-report; axios,
   chalk, got and zx (no structural-implementor pattern present) were byte-identical before and after.
 
+- **⚠ CARDINAL-SIN FIX — PART 87 hardening: two regressions the structural-implementor fix above
+  introduced, neither caught by any test it shipped with (the commit touched only CHANGELOG.md and
+  scan.mjs).** An adversarial review found both, executed to ground truth, both regressions against
+  `HEAD~1` of 7ecda11.
+  **(1)** The "generic identity wrapper" climb accepted a `wrap<T>(x: T): T` SIGNATURE as proof the
+  function returns its argument unchanged. It is not: TypeScript certifies type compatibility, never
+  value identity. MEASURED: a `wrap<T>(x: T): T { return makeReal() as unknown as T }` that discards its
+  argument and returns a different, effectful object type-checked against the exact same signature, and
+  the climb picked the discarded pure argument as the interface's sole implementor — the calling
+  function vanished from `functions[]` over code that provably writes to disk. TIGHTENED, not deleted:
+  `isProvenIdentityReturn` additionally requires the wrapper's ENTIRE body to be exactly `return x;` (or
+  an arrow's concise `x`), with the returned identifier resolved by the checker to the SAME parameter
+  symbol — a proof read from the actual source, matching the family's denylist-over-allowlist rule the
+  same way `Object.assign`'s climb already does (a real language guarantee, not a guessed shape).
+  **(2)** `coercionChaClasses`'s consumer `localClassMember` read only `cur.members` (nominal-class
+  shape), so a STRUCTURAL implementor registered by the fix above — `.properties`, not `.members` — was
+  silently invisible to it: not a crash (which is why the original commit's audit boundary read
+  "already degrades gracefully" without a test behind it), just nothing ever found. MEASURED: an
+  interface implemented ONLY structurally, with an effectful `toString`, coerced via a template literal
+  — the `toString` is correctly minted as its own unit (no longer folded into whatever textually
+  contained it) but nothing ever edged to it, so both the coercing function and `<module>` vanished from
+  `functions[]` PURE. Fixed by mirroring the general interface-CHA dispatch site's own shape check
+  (`cls.members ?? cls.properties ?? []`) rather than inventing a second rule.
+  A third, related gap found auditing every consumer of `interfaceImpls` (not part of either regression
+  report, but the same class): the `CANDOR_WORKSPACE_CHAIN` prototype's union emitter keyed implementors
+  by `c.name?.text`, silently dropping any structural implementor (no `.name` at all) from the list its
+  effects are unioned over — a pure named implementor beside an effectful structural one could publish
+  the union as "pure across all impls," and an interface implemented ONLY structurally could skip the
+  union entirely before its own `CHA_FANOUT_LIMIT` widening was ever reached. Fixed by tracking whether
+  any implementor was dropped and forcing the same honest-Unknown widening the fan-out limit already
+  applies — never a narrower claim than the evidence supports. Gated behind the opt-in env var; default
+  scans are unaffected by construction.
+  Over-charge controls, both directions: a PROVEN identity wrapper (`return x;`) over a genuinely pure
+  implementor resolves fully pure (no fabricated effect, no blanket Unknown hedge) and over a genuinely
+  effectful one still resolves the real effect, not a hedge; a structural implementor with a genuinely
+  pure `toString` gains nothing. Re-run against hono and zod WITH `node_modules` installed (the stronger
+  test — the original A/B ran with dependencies absent, which forces most external dispatch to Unknown):
+  BYTE-IDENTICAL to the unfixed HEAD's reports, and axios likewise — the +19/+8 real-corpus value from
+  the fix above is preserved unchanged.
+
 ## [0.34.0] — 2026-08-31
 
 - **UPGRADING FROM 0.33.1 — re-baselining is not review.** ⟨0.34⟩ is NON-ADDITIVE and this wave

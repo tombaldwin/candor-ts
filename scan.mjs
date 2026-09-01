@@ -3842,18 +3842,47 @@ function unwrapBind(node, depth = 0) {
 // MEASURED on the published 0.34.0 artifact (PART 87): the calling function VANISHED from `functions[]`
 // entirely — no effects, no Unknown, no disclosure.
 //
-// This pass registers every LOCALLY VISIBLE structural implementor into the SAME `interfaceImpls` map
-// (mixed with nominal classes; the two other consumers of that map — `coercionChaClasses` and the
-// workspace-chain union's `c.name?.text` — already degrade gracefully on a non-class entry, verified
-// below). Detection is via the CHECKER'S OWN contextual typing, not a hand-rolled shape matcher:
+// This pass registers every LOCALLY VISIBLE structural implementor into the SAME `interfaceImpls` map,
+// mixed with nominal classes. That claim needs a name for every consumer, not an assertion: the ordinary
+// interface-CHA dispatch site (`cls.members ?? cls.properties ?? []`) DOES handle a structural entry —
+// it was written that way in this same commit. Two others did not, both corrected 2026-09-01 after this
+// commit shipped and both MEASURED, not assumed clean the way this paragraph used to read:
+// `coercionChaClasses`'s consumer `localClassMember` read only `cur.members`, so a structural
+// implementor's coercion member (e.g. an object-literal `toString`) was silently invisible — see its own
+// comment for the fixture that reproduced it — and the workspace-chain union's `c.name?.text` silently
+// drops any implementor with no `.name` (every structural one), which could publish "pure across all
+// impls" when an unnamed implementor was not — see the `hadUnnamed` comment below for the fix. Detection
+// is via the CHECKER'S OWN contextual typing, not a hand-rolled shape matcher:
 // whatever a structurally-typed value flows INTO — a plain reassignment, an array-literal element, a
 // Map-literal tuple, a call argument — `checker.getContextualType` already resolves against that slot's
 // declared type, union-decomposed the same way the nominal branch decomposes a heritage clause. Two
 // shapes defeat plain contextual typing on the value itself and are climbed explicitly: `Object.assign`
-// (a well-known global whose own CALL keeps the real contextual type; its arguments read an anonymous
-// `__object`) and a single-type-parameter IDENTITY wrapper (`function wrap<T>(x: T): T { return x }`,
-// PROVEN — not guessed — from the wrapper's own declared parameter and return type both spelling the
-// SAME bare type-parameter name, so the climb cannot mismatch an unrelated generic).
+// — a well-known global whose own CALL keeps the real contextual type; its arguments read an anonymous
+// `__object`. `Object.assign`'s climb is sound because the LANGUAGE, not a type match, guarantees it: a
+// value passed to it really does end up on the object the expression evaluates to, whether it is the
+// mutated target or a source whose own enumerable properties are copied across by reference.
+//
+// A single-type-parameter `T -> T` "identity wrapper" (`function wrap<T>(x: T): T { … }`) was climbed
+// here too, originally on the theory that a signature spelling the SAME bare type-parameter name on both
+// sides PROVES the function returns its argument unchanged. It does not: TypeScript's structural type
+// system certifies that `wrap`'s return type is ASSIGNABLE to its parameter type, never that the
+// returned VALUE is the same value — a memoizing cache, a logging decorator, or a wrapper that fabricates
+// a fresh object of a compatible shape all type-check against `T -> T` while doing something else
+// entirely at runtime. MEASURED, 2026-09-01 (PART 87 hardening): a `wrap<T>(x: T): T { return makeReal()
+// as unknown as T }` that discards its argument and returns a genuinely different, effectful object
+// type-checked against this exact signature, and the SIGNATURE-ONLY climb picked the discarded PURE
+// argument as the interface's sole implementor — the calling function vanished from `functions[]`
+// entirely over code that provably writes to disk (candor-attack1 fixture).
+//
+// TIGHTENED rather than deleted: `isProvenIdentityReturn` (below `registerStructuralImpl`) additionally
+// requires the wrapper's ENTIRE body to be exactly `return x;` (or an arrow's concise `x`), with the
+// returned identifier resolved by the CHECKER to the SAME parameter symbol — a real proof read from
+// source, not a second guess wearing the first one's clothes. `return makeReal() as unknown as T` has a
+// body of one statement too, but that statement is not `return x;`, so it fails the proof and the climb
+// does not fire — the dispatch has no implementor to see and reads honest `Unknown[dispatch:…]`, exactly
+// as it did before PART 87. A genuine `return x;` wrapper still climbs and still resolves precisely; the
+// family's denylist-over-allowlist rule is satisfied because the narrowing case is now proven by the
+// actual code, exactly as `Object.assign`'s is proven by the language, never guessed from a shape.
 //
 // Every registered structural implementor's member is EITHER resolved (a real unit's effects reach the
 // dispatch — the disjunction's path (a), the candidate set is COMPLETED) or left unresolved (`nodeName`
@@ -3895,11 +3924,39 @@ function registerStructuralImpl(ifaceDecl, implNode, seen = new Set()) {
     }
   }
 }
-// Climb through a well-known-global `Object.assign` call, or a single-type-parameter IDENTITY wrapper
-// proven by its own declared signature, to the CONTEXTUAL TYPE of the position the merged/wrapped value
-// actually lands in. Plain `getContextualType` on the argument itself resolves to an anonymous inferred
-// shape (`__object`) for both — MEASURED (see the probe this fix was built from) — not the interface the
-// caller is really assigning into. Bounded depth guards a pathological chain of wrappers.
+// Is `param -> body` a PROVEN identity return — the function's ENTIRE body is exactly `return <param>;`
+// (block form) or exactly `<param>` (arrow concise-body form), with no destructuring, no default, no
+// rest, no cast, no conditional, nothing at all between the parameter and the value returned — and the
+// returned identifier resolves via the CHECKER to the SAME parameter symbol, not merely the same name (a
+// shadowing `x` in a nested scope would share the name and not the symbol). This is read from the
+// function's own source, not inferred from its declared type: a `T -> T` signature only proves the
+// return value is ASSIGNABLE to the parameter's type, never that it IS the parameter's value — see the
+// long comment above `registerStructuralImpl` for the fixture that proved the signature-only version
+// wrong. A body this narrow cannot do so: there is no statement left for it to construct a different,
+// merely type-compatible object in.
+function isProvenIdentityReturn(decl, paramIdx) {
+  const param = decl.parameters?.[paramIdx];
+  if (!param || !ts.isIdentifier(param.name) || param.initializer || param.dotDotDotToken || param.questionToken)
+    return false;
+  const sameParam = (expr) => {
+    if (!expr || !ts.isIdentifier(expr) || expr.text !== param.name.text) return false;
+    let sym; try { sym = checker.getSymbolAtLocation(expr); } catch { sym = undefined; }
+    let psym; try { psym = checker.getSymbolAtLocation(param.name); } catch { psym = undefined; }
+    return !!sym && !!psym && sym === psym;
+  };
+  const body = decl.body;
+  if (!body) return false;
+  if (ts.isBlock(body))
+    return body.statements.length === 1 && ts.isReturnStatement(body.statements[0])
+      && sameParam(body.statements[0].expression);
+  return sameParam(body); // arrow concise body: `(x) => x`
+}
+// Climb through a well-known-global `Object.assign` call, or a single-type-parameter `T -> T` wrapper
+// whose body is a PROVEN identity return (see `isProvenIdentityReturn`), to the CONTEXTUAL TYPE of the
+// position the merged/wrapped value actually lands in. Plain `getContextualType` on the argument itself
+// resolves to an anonymous inferred shape (`__object`) — MEASURED (see the probe this fix was built
+// from) — not the interface the caller is really assigning into. Bounded depth guards a pathological
+// chain of calls.
 function contextualInterfaceDeclsFor(node, depth = 0) {
   let ct; try { ct = checker.getContextualType(node); } catch { ct = undefined; }
   const direct = localInterfaceDeclsOfType(ct);
@@ -3913,7 +3970,8 @@ function contextualInterfaceDeclsFor(node, depth = 0) {
   if (decl && decl.typeParameters?.length === 1) {
     const tpName = decl.typeParameters[0].name.getText();
     const idx = p.arguments.indexOf(node);
-    if (decl.type?.getText() === tpName && decl.parameters?.[idx]?.type?.getText() === tpName)
+    if (decl.type?.getText() === tpName && decl.parameters?.[idx]?.type?.getText() === tpName
+        && isProvenIdentityReturn(decl, idx))
       return contextualInterfaceDeclsFor(p, depth + 1);
   }
   return direct;
@@ -4570,10 +4628,28 @@ function isCoercionMemberDecl(m) {
     || ts.isPropertyDeclaration(m) || ts.isPropertyAssignment(m)
     || ts.isFunctionDeclaration(m) || ts.isFunctionExpression(m) || ts.isArrowFunction(m));
 }
-// Find member `name` declared on LOCAL class `cls` or the nearest local ancestor that declares it.
+// Find member `name` declared on LOCAL class/structural-implementor `cls` or the nearest local ancestor
+// that declares it. `cls` comes from `coercionChaClasses`, which (since PART 87) reads the SAME
+// `interfaceImpls` registry the ordinary interface-CHA dispatch site reads — and that registry now holds
+// structural implementors (`ObjectLiteralExpression`, `.properties`) alongside nominal classes
+// (`ClassDeclaration`/`ClassExpression`, `.members`), never guaranteed to be one shape.
+//
+// ⟨CARDINAL SIN FIX, coercion-CHA structural gap⟩ this used to read only `cur.members`, so a structural
+// implementor's `.properties` was invisible: `(undefined ?? []).find(...)` always empty, never a match,
+// never a crash — "degrades gracefully" in the sense of not throwing, but it silently dropped every
+// coercion member a structural implementor declared. MEASURED (candor-attack2, 2026-09-01): an interface
+// implemented ONLY structurally, with an effectful `toString`, coerced via a template literal — PRE-PART-
+// 87 this correctly charged `<module>` with Fs (the un-minted object-literal body was walked inline, as
+// part of whatever textually contained it); POST-PART-87 the SAME `toString` is extracted into its own
+// addressable unit by `mintStructuralMembers` (correct — it is no longer folded into an enclosing scope's
+// direct effects) but this function could never find it to edge to it, so the extraction cost the
+// disclosure it used to get for free and `<module>`/`stringify` both vanished from `functions[]` PURE.
+// The general interface-CHA dispatch site already has the fix's own shape for this (`cls.members ??
+// cls.properties ?? []`, its own PART 87 comment) — this mirrors it rather than inventing a second rule.
 function localClassMember(cls, name) {
   for (let cur = cls, guard = 0; cur && guard++ < 64; cur = localBaseClassOf(cur)) {
-    const m = (cur.members ?? []).find((x) => x.name?.getText?.() === name && isCoercionMemberDecl(x));
+    const memberNodes = cur.members ?? cur.properties ?? [];
+    const m = memberNodes.find((x) => x.name?.getText?.() === name && isCoercionMemberDecl(x));
     if (m && declIsLocal(m)) return m;
   }
   return null;
@@ -7426,9 +7502,22 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
   // the candor-scan `lt.count > 1` / candor-swift ownersByTail guards.
   // The union arms, normalised to [InterfaceDeclaration, implementing class NAMES]: the in-scan CHA
   // universe, plus the same relation read out of a PUBLISHED package's own typings (see below).
+  //
+  // ⟨CARDINAL SIN FIX audit, PART 87 follow-up, 2026-09-01⟩ `interfaceImpls` (since PART 87) also holds
+  // STRUCTURAL implementors — an ObjectLiteralExpression/ClassExpression/bound-ref target has no `.name`
+  // at all, so `.filter(Boolean)` drops it here. This union is fundamentally NAME-keyed (a cross-package
+  // consumer resolves `pkg#Iface.member` against a class NAME in the dependency's own source, and
+  // `localEffs` below is keyed `${className}.${member}` — an anonymous implementor's effects have no
+  // name to be looked up under even if kept in the array). Rather than silently union only the implementors
+  // that happen to have a name — which reads "pure across all impls" when a dropped, unnamed one might
+  // not be — record whether any implementor was dropped, so the emission loop below can force the SAME
+  // honest-Unknown widening it already applies when CHA_FANOUT_LIMIT is exceeded, instead of a narrower
+  // claim than the evidence supports.
   const unionArms = [];
-  for (const [ifaceDecl, implClasses] of interfaceImpls)
-    unionArms.push([ifaceDecl, implClasses.map((c) => c.name?.text).filter(Boolean)]);
+  for (const [ifaceDecl, implClasses] of interfaceImpls) {
+    const names = implClasses.map((c) => c.name?.text).filter(Boolean);
+    unionArms.push([ifaceDecl, names, names.length < implClasses.length]);
+  }
   const inScanClassesByName = new Map(); // iface NAME -> every class the in-scan arms register under it
   for (const [d, cls] of unionArms) {
     const n = d.name?.text;
@@ -7492,9 +7581,15 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
     const n = ifaceDecl.name?.text;
     if (n) ifaceNameCounts.set(n, (ifaceNameCounts.get(n) ?? 0) + 1);
   }
-  for (const [ifaceDecl, implClasses] of unionArms) {
+  for (const [ifaceDecl, implClasses, hadUnnamed] of unionArms) {
     const ifaceName = ifaceDecl.name?.text;
-    if (!ifaceName || !implClasses.length) continue;
+    // ⟨CARDINAL SIN FIX, structural-implementor gap⟩ `!implClasses.length` used to skip the arm outright
+    // — correct when there are genuinely zero implementors, but an interface implemented ONLY
+    // structurally (every implementor unnamed, `implClasses` empty, `hadUnnamed` true) would silently
+    // publish NO union entry at all, which is a purity claim (SPEC §2 rule 3) this evidence does not
+    // support. `hadUnnamed` keeps the arm alive for that case so the `broad` forcing below can widen it
+    // to Unknown instead of the arm vanishing before `broad` is ever computed.
+    if (!ifaceName || (!implClasses.length && !hadUnnamed)) continue;
     // Never guess which `I` a name means: two declarations of it, or a census that cannot prove there is
     // only one, are the same evidential position and take the same answer.
     if (ifaceNameCounts.get(ifaceName) > 1 || typings.truncated) continue;
@@ -7513,7 +7608,9 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
     // key. What silence would cost is this report's own honesty — the producer's `deny E
     // Unknown[dispatch]`, any consumer without half 1's conjuncts, and the entry that is read as data
     // rather than joined. The named tests that fail on that mutation are the producer-side three.
-    const broad = implClasses.length > CHA_FANOUT_LIMIT;
+    // `hadUnnamed` widens the same way: a structural implementor this union cannot name is exactly as
+    // unaccountable as the (CHA_FANOUT_LIMIT + 1)th named one.
+    const broad = implClasses.length > CHA_FANOUT_LIMIT || hadUnnamed;
 
     for (const member of ifaceDecl.members ?? []) {
       // Both spellings of an interface method (see the in-scan site): `run(): void` and

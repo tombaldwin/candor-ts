@@ -14378,6 +14378,171 @@ Object.keys(impl).forEach(function (key) {
         descReport.dynamicReexport?.count === 1, JSON.stringify(descReport.dynamicReexport));
 }
 
+// ── PART 87 HARDENING, 2026-09-01: two regressions the ⟨0.35⟩ CHA-completeness fix introduced,          ──
+// ── found by an adversarial review of 7ecda11 (candor-attack1/candor-attack2 fixtures) and NOT covered  ──
+// ── by any test the fix itself shipped with — the commit that added `interfaceImpls` structural
+// registration touched only CHANGELOG.md and scan.mjs, zero test files. Both regressions are MEASURED
+// against `HEAD~1` of that commit: clean before, silent after. See scan.mjs's own comments above
+// `registerStructuralImpl`, `isProvenIdentityReturn` and `localClassMember` for the mechanisms.
+
+// 1. The "generic identity wrapper" heuristic: a `T -> T` SIGNATURE only proves assignability, never
+// that the function returns its argument unchanged. A wrapper that type-checks against that shape but
+// actually discards its argument and returns a different, effectful object used to be picked as the
+// interface's SOLE implementor by signature alone — the calling function vanished from `functions[]`.
+if (blk()) {
+  const d = project({
+    "src/app.ts": `import fs from "fs";
+export interface Task { go(): void; }
+// makeReal() must NOT be annotated ": Task" here — that would give the object literal it returns a
+// SECOND, legitimate contextual-typing route into the Task candidate set (the return position of a
+// function declared to return Task), independent of the wrap<T> climb this test isolates, and the
+// dispatch would then correctly resolve through THAT route regardless of what wrap<T> proves. The whole
+// point of this fixture is that makeReal()'s return value is Task-shaped only at RUNTIME, never in the
+// source's own type annotations.
+function makeReal() {
+  return { go(): void { fs.writeFileSync("/tmp/x", "y"); } };
+}
+function wrap<T>(x: T): T {
+  return makeReal() as unknown as T;
+}
+export function callThroughInterface(t: Task): void { t.go(); }
+const decoy: Task = wrap({ go(): void { /* pure bait */ } });
+callThroughInterface(decoy);
+`,
+  });
+  const { report } = scan(d);
+  const call = entry(report, "src.app.callThroughInterface");
+  check("⟨CARDINAL SIN FIX, PART 87 hardening⟩ a signature-only `T -> T` wrapper that DISCARDS its argument does not fabricate identity: the dispatch stays disclosed, not vanished",
+        call !== undefined && call.inferred.includes("Unknown") && call.unresolved === true
+        && (call.unknownWhy ?? []).some((w) => w.startsWith("dispatch:")),
+        JSON.stringify(call));
+}
+
+// 2. OVER-CHARGE CONTROL, both directions: a wrapper whose ENTIRE body is `return x;` really is proven
+// identity (read from source, not guessed from the signature) and must resolve PRECISELY — a pure
+// implementor stays pure (no fabricated effect, no blanket Unknown hedge either), and an effectful one
+// is still charged correctly, proving the climb is doing real work rather than merely declining to fire.
+if (blk()) {
+  const pureD = project({
+    "src/app.ts": `export interface Task { go(): void; }
+function idWrap<T>(x: T): T { return x; }
+export function callThroughInterface(t: Task): void { t.go(); }
+const pureVal: Task = idWrap({ go(): void { /* pure */ } });
+callThroughInterface(pureVal);
+`,
+  });
+  const { report: pureReport } = scan(pureD);
+  check("OVER-CHARGE CONTROL: a PROVEN identity wrapper (`return x;`) over a genuinely pure implementor resolves fully pure — no fabricated effect, no blanket Unknown hedge",
+        entry(pureReport, "src.app.callThroughInterface") === undefined,
+        JSON.stringify(pureReport.functions.map((e) => e.fn)));
+
+  const effD = project({
+    "src/app.ts": `import fs from "fs";
+export interface Task { go(): void; }
+function idWrap<T>(x: T): T { return x; }
+export function callThroughInterface(t: Task): void { t.go(); }
+const effVal: Task = idWrap({ go(): void { fs.writeFileSync("/tmp/x", "y"); } });
+callThroughInterface(effVal);
+`,
+  });
+  const { report: effReport } = scan(effD);
+  check("PRECISION CONTROL: the SAME proven identity wrapper over a genuinely effectful implementor still resolves the real effect (Fs), not a hedge",
+        entry(effReport, "src.app.callThroughInterface")?.inferred.join() === "Fs",
+        JSON.stringify(entry(effReport, "src.app.callThroughInterface")));
+}
+
+// 3. `coercionChaClasses` (since PART 87) reads the SAME `interfaceImpls` registry the structural pass
+// populates, so its consumer `localClassMember` can be handed a STRUCTURAL implementor
+// (`ObjectLiteralExpression`, `.properties`) as readily as a nominal class (`.members`). It read only
+// `.members` — silently finding nothing for a structural implementor's coercion member (not crashing,
+// which is why PART 87's own AUDIT BOUNDARY comment read "already degrades gracefully" without a test
+// behind it). The toString is minted as its own unit (correct), but nothing edged to it: `stringify`
+// and `<module>` both vanished from `functions[]` PURE over a `toString` that provably writes to disk.
+if (blk()) {
+  const d = project({
+    "src/app.ts": `import fs from "fs";
+export interface Entry { state(): string; }
+const e: Entry = {
+  state(): string { return "ok"; },
+  toString(): string { fs.writeFileSync("/tmp/x", "y"); return "e"; },
+};
+export function stringify(x: Entry): string { return \`\${x}\`; }
+stringify(e);
+`,
+  });
+  const { report } = scan(d);
+  check("⟨CARDINAL SIN FIX, PART 87 hardening⟩ a structural implementor's effectful coercion member (toString) reaches the caller, not silently absorbed as pure",
+        entry(report, "src.app.stringify")?.inferred.includes("Fs")
+        || entry(report, "src.app.<module>")?.inferred.includes("Fs"),
+        JSON.stringify(report.functions.map((e) => [e.fn, e.inferred])));
+}
+
+// 4. OVER-CHARGE CONTROL for #3: the identical shape with a genuinely PURE toString must not gain an
+// effect now that the coercion path can see `.properties`.
+if (blk()) {
+  const d = project({
+    "src/app.ts": `export interface Entry { state(): string; }
+const e: Entry = {
+  state(): string { return "ok"; },
+  toString(): string { return "e"; },
+};
+export function stringify(x: Entry): string { return \`\${x}\`; }
+stringify(e);
+`,
+  });
+  const { report } = scan(d);
+  check("OVER-CHARGE CONTROL: a structural implementor's PURE toString does not fabricate an effect once the coercion path can see `.properties`",
+        !report.functions.some((e) => (e.inferred ?? []).length > 0),
+        JSON.stringify(report.functions.map((e) => [e.fn, e.inferred])));
+}
+
+// 5. The workspace-chain union's `implClasses.map((c) => c.name?.text).filter(Boolean)` silently drops
+// any STRUCTURAL implementor (no `.name` at all) from the NAMED list this feature unions effects over —
+// found auditing every consumer of `interfaceImpls`, not assigned by the original bug report. A pure
+// NAMED implementor beside an effectful STRUCTURAL one used to publish the union as "pure across all
+// impls", the named implementor's silence hiding the unnamed one's effect. `hadUnnamed` forces the same
+// honest-Unknown widening CHA_FANOUT_LIMIT already applies, rather than a narrower claim than the
+// evidence supports.
+if (blk()) {
+  const CHAIN = { ...process.env, CANDOR_WORKSPACE_CHAIN: "1" };
+  const d = project({
+    "package.json": `{"name":"mixkit"}`,
+    "src/app.ts": `import fs from "fs";
+export interface Store { save(): void; }
+export class QuietStore implements Store { save(): void { /* pure */ } }
+export const messyStore: Store = { save(): void { fs.writeFileSync("/tmp/x", "y"); } };
+`,
+  });
+  fs.rmSync(path.join(d, ".candor", "report.json"), { force: true });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8", env: CHAIN });
+  const report = JSON.parse(fs.readFileSync(path.join(d, ".candor", "report.json"), "utf8"));
+  const union = report.functions.find((e) => e.hash === "mixkit#Store.save");
+  check("⟨CARDINAL SIN FIX⟩ a pure NAMED implementor beside an effectful STRUCTURAL one publishes Unknown, not a silent pure/absent union",
+        union !== undefined && union.interfaceUnion === true && union.inferred.includes("Unknown"),
+        JSON.stringify(report.functions.map((e) => [e.hash, e.inferred, e.interfaceUnion])));
+}
+
+// 6. The same gap's OTHER half: an interface implemented ONLY structurally has an EMPTY named list
+// (`implClasses.length === 0`), which used to skip the arm entirely BEFORE `broad` was ever computed —
+// no union entry at all, an absence that SPEC §2 rule 3 reads as a purity claim.
+if (blk()) {
+  const CHAIN = { ...process.env, CANDOR_WORKSPACE_CHAIN: "1" };
+  const d = project({
+    "package.json": `{"name":"structkit"}`,
+    "src/app.ts": `import fs from "fs";
+export interface Store { save(): void; }
+export const messyStore: Store = { save(): void { fs.writeFileSync("/tmp/x", "y"); } };
+`,
+  });
+  fs.rmSync(path.join(d, ".candor", "report.json"), { force: true });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8", env: CHAIN });
+  const report = JSON.parse(fs.readFileSync(path.join(d, ".candor", "report.json"), "utf8"));
+  const union = report.functions.find((e) => e.hash === "structkit#Store.save");
+  check("⟨CARDINAL SIN FIX⟩ an interface implemented ONLY structurally still publishes a union entry (Unknown), instead of vanishing before `broad` is computed",
+        union !== undefined && union.interfaceUnion === true && union.inferred.includes("Unknown"),
+        JSON.stringify(report.functions.map((e) => [e.hash, e.inferred, e.interfaceUnion])));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
