@@ -8,6 +8,44 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL-SIN FIX (SOUNDNESS R93) — `process` reached through a LOCAL BINDING of `globalThis`/
+  `global` (destructured or plain) loses its `Env` effect entirely.** `'NO_COLOR' in process.env` was
+  correctly charged `Env`; the identical read through `const { process } = globalThis as any;
+  process?.env` was **absent from `functions[]` entirely** — not `Unknown`, not a hedge, simply gone.
+  Real-world instance: hono's `utils/color.ts` `getColorEnabled` reads `NO_COLOR` exactly this way.
+  Mechanism, MEASURED not assumed: `identIsGlobalProcess`'s bare-identifier branch treats "has a
+  declaration inside a project file" as proof of a project-local `process` shadow — correct for an
+  actual shadow, but a destructured/reassigned local that merely HOLDS the global object also has its
+  own declaration in the project file, so a genuine alias was indistinguishable from a shadow. A 9-way
+  matrix (cast vs no cast × optional-chaining vs not × destructure vs plain reassignment × same-name vs
+  renamed × `global` vs `globalThis`), each arm ground-truthed with a runtime `Proxy` `has`-trap on
+  `process.env`: **all nine genuinely touch `process.env` and all nine read ABSENT before the fix** —
+  the cast and the optional-chaining were both red herrings; the cause is any local declaration at all,
+  independent of name.
+  Fixed with a `processAliasSymbols` pre-pass (mirroring the existing `process.env`-alias mechanism)
+  that resolves a local's initializer back to the ambient `process` object — `= globalThis.process`,
+  `= global.process`, bare `= process`, or an object-destructure that picks `process` by property name
+  off an ambient `globalThis`/`global` root — so `identIsGlobalProcess` has one authority for "is this
+  the process host" instead of two that could drift.
+  Controls: the original `direct` spelling is byte-for-byte unchanged; destructuring a NON-host local
+  (`const { foo } = bag; foo.bar()`) and a function that merely mentions `globalThis` both still gain
+  nothing; destructuring `process` off a project-local SHADOW object (not `globalThis`) still gains
+  nothing. All 9 positive fixtures are revert-invariant (fail red without the fix); all 3 guards pass
+  in both states by design.
+  Corpus A/B, hono/zod/axios with `node_modules` installed, full audit of every diff (not a sample):
+  **hono ADDED 1 (`utils.color.getColorEnabled` → `Env`) CHANGED 1 (`getColorEnabledAsync`'s inferred
+  set gains `Env` transitively through the call) REMOVED 0**; **zod ADDED 0 CHANGED 0 REMOVED 0**;
+  **axios ADDED 0 CHANGED 0 REMOVED 0**. Zero removals anywhere, so no over-charge audit was needed.
+  **A related, NOT-yet-fixed gap found while widening this question to other host globals per the
+  brief's translate-the-question step:** `const { fetch } = globalThis; fetch(url)` (no cast) *also*
+  reads ABSENT — same shape, a different code path (the bare-global `fetch` classifier's own "ambient
+  global, unless project declares own" check, not `identIsGlobalProcess`), confirmed via
+  `checker.getResolvedSignature` resolving the destructured call straight to `lib.dom.d.ts`'s ambient
+  `fetch` declaration while the classifier that would charge `Net` never fires for it. `crypto` does
+  NOT share this hole (its verb table is type-keyed, not identity-keyed, so it survives destructuring
+  and only degrades to a safe `Unknown` under an `any` cast). Filed as SOUNDNESS follow-up, not fixed
+  in this change — reported rather than folded in, to keep this fix's controls legible.
+
 - **⚠ FIX (SOUNDNESS R91) — `--allow-js` no longer discards the whole tsconfig, only widens the file
   set it admits.** `--allow-js` used to bypass `tsconfig.json` entirely the moment it was passed
   (`fs.existsSync(tsconfig) && !allowJs`), throwing away every compiler option — `paths`, `baseUrl`,

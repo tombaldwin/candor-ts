@@ -6419,6 +6419,56 @@ export function unrelated(o: { process: { env: Record<string,string> } }) { retu
         JSON.stringify([entry(report, "src.neg.shadowed"), entry(report, "src.neg.unrelated")]));
 }
 
+// ── R93: `process` reached through a LOCAL BINDING of `globalThis`/`global` — destructured
+// (`const { process } = globalThis as any`) or plain (`const p = globalThis.process`) — is the SAME
+// object as the two shapes above, and must resolve to Env exactly as they do. It didn't: the bound local
+// has its OWN declaration inside the project file, which `identIsGlobalProcess`'s ambient-global test
+// (rightly) uses to detect a PROJECT SHADOW, so a genuine alias of the global object was indistinguishable
+// from one — `functions[]` omitted the caller entirely (not Unknown, not a hedge; ABSENT). Real-world
+// shape: hono's `getColorEnabled` reads `NO_COLOR` this way. Runtime-proven (a `Proxy` `has` trap on
+// `process.env`) that every positive fixture below genuinely touches it; every negative genuinely does not.
+if (blk()) {
+  const d = project({
+    "src/g.ts": `export function destructureCastOptional() { const { process } = globalThis as any; return 'NO_COLOR' in process?.env; }
+export function destructureNoCast() { const { process } = globalThis; return 'NO_COLOR' in process.env; }
+export function destructureRenamed() { const { process: p } = globalThis as any; return 'NO_COLOR' in p.env; }
+export function propAccessRenamed() { const p = globalThis.process; return 'NO_COLOR' in p.env; }
+export function propAccessSameName() { const process = globalThis.process; return 'NO_COLOR' in process.env; }
+export function propAccessCastRenamed() { const p = (globalThis as any).process; return 'NO_COLOR' in p?.env; }
+export function viaGlobalNotGlobalThis() { const { process } = global; return 'NO_COLOR' in process.env; }`,
+    "src/neg.ts": `type Bag = { foo: { bar(): void } };
+export function destructureNonHost(bag: Bag) { const { foo } = bag; foo.bar(); }
+export function pureMentionsGlobalThis() { const g = globalThis; return g ? 42 : 0; }
+const shadowGlobal = { process: { env: { HOME: '/x' } } };
+export function destructureShadow() { const { process } = shadowGlobal; return 'NO_COLOR' in process.env; }`,
+  });
+  const { report } = scan(d);
+  const isEnv = (fn) => (entry(report, fn)?.inferred ?? []).includes("Env");
+  check("`const { process } = globalThis as any; process?.env` → Env (R93)",
+        isEnv("src.g.destructureCastOptional"), JSON.stringify(entry(report, "src.g.destructureCastOptional")));
+  check("`const { process } = globalThis; process.env` (no cast) → Env",
+        isEnv("src.g.destructureNoCast"), JSON.stringify(entry(report, "src.g.destructureNoCast")));
+  check("`const { process: p } = globalThis as any; p.env` (renamed destructure) → Env",
+        isEnv("src.g.destructureRenamed"), JSON.stringify(entry(report, "src.g.destructureRenamed")));
+  check("`const p = globalThis.process; p.env` (non-destructuring, renamed) → Env",
+        isEnv("src.g.propAccessRenamed"), JSON.stringify(entry(report, "src.g.propAccessRenamed")));
+  check("`const process = globalThis.process; process.env` (non-destructuring, same name) → Env",
+        isEnv("src.g.propAccessSameName"), JSON.stringify(entry(report, "src.g.propAccessSameName")));
+  check("`const p = (globalThis as any).process; p?.env` → Env",
+        isEnv("src.g.propAccessCastRenamed"), JSON.stringify(entry(report, "src.g.propAccessCastRenamed")));
+  check("`const { process } = global; process.env` (`global`, not `globalThis`) → Env",
+        isEnv("src.g.viaGlobalNotGlobalThis"), JSON.stringify(entry(report, "src.g.viaGlobalNotGlobalThis")));
+  check("GUARD: destructuring a NON-host local does not fabricate an effect",
+        entry(report, "src.neg.destructureNonHost")?.direct?.includes("Env") !== true
+          && entry(report, "src.neg.destructureNonHost")?.direct?.includes("Fs") !== true,
+        JSON.stringify(entry(report, "src.neg.destructureNonHost")));
+  check("GUARD: a pure function merely mentioning `globalThis` gains nothing",
+        entry(report, "src.neg.pureMentionsGlobalThis") == null,
+        JSON.stringify(entry(report, "src.neg.pureMentionsGlobalThis")));
+  check("GUARD: destructuring `process` off a project-local SHADOW object does not fabricate Env",
+        !isEnv("src.neg.destructureShadow"), JSON.stringify(entry(report, "src.neg.destructureShadow")));
+}
+
 // ── the SAME globalThis.process gap for the process.* global CALLS: `globalThis.process.hrtime()` → Clock,
 // `global.process.send()` → Ipc (a project `const process` shadow stays pure). ───────────────────────────────
 if (blk()) {

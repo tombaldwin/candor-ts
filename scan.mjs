@@ -5121,6 +5121,15 @@ const declImportsNodeProcess = (decl) => {
   const text = spec && ts.isStringLiteral(spec) ? spec.text : null;
   return text === "node:process" || text === "process";
 };
+// R93: a local SYMBOL that merely HOLDS the global process object — `const p = globalThis.process`,
+// `const { process } = globalThis as any` — was indistinguishable from a project-local `process` shadow,
+// because both have their OWN declaration inside a project file, and that was the entire test below for
+// "is this the ambient global". Reaching the object through a variable does not change its identity;
+// `identIsGlobalProcess` must not treat it as if it did. `processAliasSymbols` is the single authority
+// both the bare-identifier check below AND the `{env} = process` destructure detection already
+// downstream consult — the fix in one place, per brief §F1 item 3 ("make the two paths share one
+// authority", not patch the losing copy). Populated by the pre-pass immediately below.
+const processAliasSymbols = new Set();
 const identIsGlobalProcess = (id) => {
   if (!id) return false;
   // `globalThis.process` / `global.process` — the SAME process object reached off the global (isomorphic code:
@@ -5134,11 +5143,60 @@ const identIsGlobalProcess = (id) => {
       return !gd.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)));
     }
   }
-  if (!ts.isIdentifier(id) || id.text !== "process") return false;
-  const decls = checker.getSymbolAtLocation(id)?.declarations ?? [];
-  if (decls.some(declImportsNodeProcess)) return true;                       // `import process from 'node:process'`
-  return !decls.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName))); // else the ambient global
+  if (!ts.isIdentifier(id)) return false;
+  if (id.text === "process") {
+    const decls = checker.getSymbolAtLocation(id)?.declarations ?? [];
+    if (decls.some(declImportsNodeProcess)) return true;                       // `import process from 'node:process'`
+    if (!decls.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)))) return true; // ambient global
+  }
+  // A local binding under ANY name (`p`, `process`, whatever) whose sole initializer is confirmed —
+  // by the pre-pass below — to be the global process object itself.
+  const sym = checker.getSymbolAtLocation(id);
+  return !!sym && processAliasSymbols.has(sym);
 };
+// Pre-pass: a variable is a process alias iff EITHER (a) a plain identifier bound `= globalThis.process`
+// / `= global.process` / `= process` (bare, ambient — casts/parens/`!` unwrapped), or (b) an object
+// destructure that picks `process` (by property name, any local alias — `{ process }` or
+// `{ process: p }`) directly off an ambient `globalThis`/`global` root. No reassignment-clearing here
+// (unlike envAliasSymbols): a `let` rebound to something else is a narrowing this pass does not attempt,
+// so it is conservative in the SAFE direction only if downstream never mutates a `const`-only signal —
+// callers only ever declare these `const` in practice; a `let` reassigned away still resolves any READ
+// before the reassignment correctly and any read after it would need flow-sensitivity this class of
+// alias-set does not have anywhere else in this file either (see envAliasSymbols for the same posture).
+{
+  const isGlobalProcessInitializer = (expr) => {
+    if (!expr) return false;
+    let e = expr;
+    while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e)) e = e.expression;
+    return identIsGlobalProcess(e); // handles `globalThis.process` / `global.process` / bare ambient `process`
+  };
+  const collectProcessAliases = (node) => {
+    if (ts.isVariableDeclaration(node) && node.name && ts.isIdentifier(node.name) && node.initializer) {
+      if (isGlobalProcessInitializer(node.initializer)) {
+        const sym = checker.getSymbolAtLocation(node.name);
+        if (sym) processAliasSymbols.add(sym);
+      }
+    } else if (ts.isVariableDeclaration(node) && node.name && ts.isObjectBindingPattern(node.name) && node.initializer) {
+      let root = node.initializer;
+      while (ts.isParenthesizedExpression(root) || ts.isAsExpression(root) || ts.isNonNullExpression(root)) root = root.expression;
+      if (ts.isIdentifier(root) && (root.text === "globalThis" || root.text === "global")) {
+        const gd = checker.getSymbolAtLocation(root)?.declarations ?? [];
+        if (!gd.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)))) {
+          for (const el of node.name.elements) {
+            const propName = el.propertyName ? (ts.isIdentifier(el.propertyName) ? el.propertyName.text : null)
+                                             : (ts.isIdentifier(el.name) ? el.name.text : null);
+            if (propName === "process" && ts.isIdentifier(el.name)) {
+              const sym = checker.getSymbolAtLocation(el.name);
+              if (sym) processAliasSymbols.add(sym);
+            }
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, collectProcessAliases);
+  };
+  for (const sf of sources) collectProcessAliases(sf);
+}
 // `process.env` as an expression (PropertyAccess `process.env` where `process` is the global).
 const isProcessEnvExpr = (expr) =>
   expr && ts.isPropertyAccessExpression(expr) && expr.name.text === "env" && identIsGlobalProcess(expr.expression);
