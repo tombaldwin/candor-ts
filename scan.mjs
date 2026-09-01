@@ -3831,6 +3831,182 @@ function unwrapBind(node, depth = 0) {
   return { ref: (ts.isIdentifier(recv) || ts.isPropertyAccessExpression(recv)) ? recv : null };
 }
 
+// ⟨0.35, PART 87 fix⟩ STRUCTURAL / SYNTHESISED INTERFACE IMPLEMENTORS — the candidate-set-completion
+// half of "A NON-EMPTY CANDIDATE SET IS NOT A COMPLETE ONE" (SPEC ⟨0.35⟩). `interfaceImpls` above only
+// ever registers a NOMINAL `class X implements Y`. The dispatch site below (the interface-CHA fanout)
+// reads `interfaceImpls.get(iface)` as though it were the WHOLE candidate set: once it is non-empty it
+// requires every entry's member to resolve and, if so, calls the dispatch COMPLETE and suppresses
+// Unknown. A value actually produced by a STRUCTURAL conformer — an object literal, a class EXPRESSION,
+// a bound method reference, `Object.assign`'s result — was invisible to that registry, so adding one
+// unrelated NOMINAL implementor flipped `allResolved` true over a candidate set that was never complete.
+// MEASURED on the published 0.34.0 artifact (PART 87): the calling function VANISHED from `functions[]`
+// entirely — no effects, no Unknown, no disclosure.
+//
+// This pass registers every LOCALLY VISIBLE structural implementor into the SAME `interfaceImpls` map
+// (mixed with nominal classes; the two other consumers of that map — `coercionChaClasses` and the
+// workspace-chain union's `c.name?.text` — already degrade gracefully on a non-class entry, verified
+// below). Detection is via the CHECKER'S OWN contextual typing, not a hand-rolled shape matcher:
+// whatever a structurally-typed value flows INTO — a plain reassignment, an array-literal element, a
+// Map-literal tuple, a call argument — `checker.getContextualType` already resolves against that slot's
+// declared type, union-decomposed the same way the nominal branch decomposes a heritage clause. Two
+// shapes defeat plain contextual typing on the value itself and are climbed explicitly: `Object.assign`
+// (a well-known global whose own CALL keeps the real contextual type; its arguments read an anonymous
+// `__object`) and a single-type-parameter IDENTITY wrapper (`function wrap<T>(x: T): T { return x }`,
+// PROVEN — not guessed — from the wrapper's own declared parameter and return type both spelling the
+// SAME bare type-parameter name, so the climb cannot mismatch an unrelated generic).
+//
+// Every registered structural implementor's member is EITHER resolved (a real unit's effects reach the
+// dispatch — the disjunction's path (a), the candidate set is COMPLETED) or left unresolved (`nodeName`
+// has no entry for it — a `.bind()`/reference chain that cannot be pinned, a call result, a getter). The
+// SAME `allResolved` gate the nominal fanout already enforces turns an unresolved structural member into
+// a forced Unknown, disclosed rather than silent — path (b), for free, from one shared completeness
+// check. Local-only, mirroring the nominal branch's own bound: a structural value arriving from outside
+// this scan's own source tree (an argument passed by an external caller, a dependency's own callback)
+// is no more visible here than an external nominal implementor already was.
+function localInterfaceDeclsOfType(t) {
+  const out = [];
+  const consider = (ct) => {
+    const sym = ct?.getSymbol?.() ?? ct?.symbol;
+    for (const d of sym?.declarations ?? []) {
+      if (ts.isInterfaceDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName)) && !out.includes(d))
+        out.push(d);
+    }
+  };
+  if (!t) return out;
+  if (t.isUnion?.()) { for (const ct of t.types) consider(ct); } else consider(t);
+  return out;
+}
+function registerStructuralImpl(ifaceDecl, implNode, seen = new Set()) {
+  if (seen.has(ifaceDecl)) return;
+  seen.add(ifaceDecl);
+  if (!interfaceImpls.has(ifaceDecl)) interfaceImpls.set(ifaceDecl, []);
+  const arr = interfaceImpls.get(ifaceDecl);
+  if (!arr.includes(implNode)) arr.push(implNode);
+  // Climb super-interfaces too — the same reason the nominal branch does: a dispatch through `Sup`'s own
+  // signature must also see an implementor that only satisfies `Sub extends Sup` structurally.
+  for (const eh of ifaceDecl.heritageClauses ?? []) {
+    if (eh.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    for (const st of eh.types) {
+      let sym; try { sym = checker.getSymbolAtLocation(st.expression); } catch { sym = undefined; }
+      const tgt = sym && sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
+      for (const d of tgt?.declarations ?? [])
+        if (ts.isInterfaceDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName)))
+          registerStructuralImpl(d, implNode, seen);
+    }
+  }
+}
+// Climb through a well-known-global `Object.assign` call, or a single-type-parameter IDENTITY wrapper
+// proven by its own declared signature, to the CONTEXTUAL TYPE of the position the merged/wrapped value
+// actually lands in. Plain `getContextualType` on the argument itself resolves to an anonymous inferred
+// shape (`__object`) for both — MEASURED (see the probe this fix was built from) — not the interface the
+// caller is really assigning into. Bounded depth guards a pathological chain of wrappers.
+function contextualInterfaceDeclsFor(node, depth = 0) {
+  let ct; try { ct = checker.getContextualType(node); } catch { ct = undefined; }
+  const direct = localInterfaceDeclsOfType(ct);
+  if (direct.length || depth >= 4) return direct;
+  const p = node.parent;
+  if (!p || !ts.isCallExpression(p) || !(p.arguments ?? []).includes(node)) return direct;
+  const calleeText = p.expression.getText().replace(/\s+/g, "");
+  if (calleeText === "Object.assign") return contextualInterfaceDeclsFor(p, depth + 1);
+  let sig; try { sig = checker.getResolvedSignature(p); } catch { sig = undefined; }
+  const decl = sig?.getDeclaration?.();
+  if (decl && decl.typeParameters?.length === 1) {
+    const tpName = decl.typeParameters[0].name.getText();
+    const idx = p.arguments.indexOf(node);
+    if (decl.type?.getText() === tpName && decl.parameters?.[idx]?.type?.getText() === tpName)
+      return contextualInterfaceDeclsFor(p, depth + 1);
+  }
+  return direct;
+}
+// Mint (or ALIAS to an existing unit) every member of a structural implementor `container`
+// (ObjectLiteralExpression's `.properties` or a ClassExpression's `.members` — both walked generically,
+// same shape as the nominal branch's own `cls.members`). Position-keyed, like `decoratorArgUnit` /
+// `staticBlockUnit` above — two structural implementors in one file must not collide.
+function mintStructuralMembers(container) {
+  const sf = container.getSourceFile();
+  const mod = moduleOf(sf);
+  const members = container.properties ?? container.members ?? [];
+  for (const prop of members) {
+    if (nodeName.has(prop)) continue; // already minted/aliased (shared members across two matched interfaces)
+    const name = prop.name?.getText?.();
+    if (!name || ts.isComputedPropertyName(prop.name)) continue; // computed key — never guess
+    // Method shorthand (object literal `go(){…}` OR class-expression `go(){…}`) — a real body, own unit.
+    if (ts.isMethodDeclaration(prop) && prop.body) {
+      mintPositionalStructuralUnit(mod, sf, prop, name);
+      continue;
+    }
+    // `go: <expr>` (PropertyAssignment) / `go = <expr>` (class-expression field).
+    const init = (ts.isPropertyAssignment(prop) || ts.isPropertyDeclaration(prop)) ? prop.initializer : null;
+    if (!init) continue; // a body-less abstract/declare member — nothing to mint, nothing to alias
+    if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
+      mintPositionalStructuralUnit(mod, sf, prop, name);
+      continue;
+    }
+    // `go: other.method.bind(other)` / `go: other.method` — this is the SAME reflective-invoke reference
+    // shape the HOF-ref arm already resolves; reuse it rather than inventing a second unit for a function
+    // that already has one. A `.bind()` whose receiver can't be pinned, or any other expression (a call
+    // result, a conditional, an opaque holder), is left UNRESOLVED — `nodeName.has(prop)` stays false, so
+    // the dispatch site's `allResolved` gate reads this implementor as incomplete and forces Unknown: the
+    // disjunction's (b) arm, never silence.
+    const bound = unwrapBind(init);
+    const ref = bound ? bound.ref : ((ts.isIdentifier(init) || ts.isPropertyAccessExpression(init)) ? init : null);
+    if (ref) {
+      const d = realDecl(checker.getSymbolAtLocation(ref));
+      const target = (d && nodeName.get(d)) || resolveFnRefUnit(ref);
+      if (target) nodeName.set(prop, target);
+    }
+  }
+}
+function mintPositionalStructuralUnit(mod, sf, prop, name) {
+  const qual = `${mod}.<structural>@${prop.getStart()}.${name}`;
+  if (!fns.has(qual)) {
+    const { line, character } = sf.getLineAndCharacterOfPosition(prop.getStart());
+    fns.set(qual, { local: `<structural>.${name}`, direct: new Set(), fsKinds: new Set(), edges: new Set(),
+                    hosts: new Set(), tables: new Set(), cmds: new Set(), paths: new Set(), blind: new Set(),
+                    incomplete: new Set(), why: new Set(), entry: false,
+                    loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}`,
+                    endLine: sf.getLineAndCharacterOfPosition(prop.getEnd()).line + 1 });
+  }
+  nodeName.set(prop, qual);
+}
+for (const sf of sources) {
+  (function walkStructural(node) {
+    // An EMPTY object literal (`Object.assign({}, source)`'s target arg is the common real-world
+    // shape) has no property to ever complete a dispatch with, and registering it as a candidate only
+    // forces needless conservatism (every OTHER implementor resolving, this one never can, so the
+    // dispatch falls back to disclosed-Unknown for no reason). Skip it: nothing is lost, since it can
+    // never structurally satisfy an interface with any member on its own.
+    if (ts.isObjectLiteralExpression(node) && node.properties.length > 0) {
+      const decls = contextualInterfaceDeclsFor(node);
+      if (decls.length) {
+        for (const d of decls) registerStructuralImpl(d, node);
+        mintStructuralMembers(node);
+      }
+    } else if (ts.isClassExpression(node)) {
+      // Explicit `implements` on an anonymous/named class EXPRESSION — the nominal branch above only
+      // ever visits `ts.isClassDeclaration`, so `held = new (class implements Task { go(){…} })()`
+      // registered nowhere at all (not even as a candidate, unlike the object-literal shape) and its
+      // methods were never minted units either (`localName`'s method branch requires a ClassDeclaration
+      // parent). Reuse the SAME climb/registration and member-minting as the object-literal shape.
+      let registeredAny = false;
+      for (const h of node.heritageClauses ?? []) {
+        if (h.token !== ts.SyntaxKind.ImplementsKeyword) continue;
+        for (const t of h.types) {
+          let sym; try { sym = checker.getSymbolAtLocation(t.expression); } catch { sym = undefined; }
+          const tgt = sym && sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
+          for (const d of tgt?.declarations ?? [])
+            if (ts.isInterfaceDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName))) {
+              registerStructuralImpl(d, node);
+              registeredAny = true;
+            }
+        }
+      }
+      if (registeredAny) mintStructuralMembers(node);
+    }
+    ts.forEachChild(node, walkStructural);
+  })(sf);
+}
+
 // Accessor resolution (the silent-pure-accessor fix): a property READ (`x.raw`) or property
 // ASSIGNMENT target (`x.path = v`) may resolve to a getter/setter whose body performs effects. We
 // resolve the property-name symbol to its declarations and look for an accessor of the matching
@@ -5381,8 +5557,15 @@ function visitCalls(node) {
                   let allResolved = true;
                   const targets = [];
                   for (const cls of impls) {
-                    const m = (cls.members ?? []).find((x) =>
-                      (ts.isMethodDeclaration(x) || ts.isPropertyDeclaration(x)) && x.name?.getText?.() === member);
+                    // ⟨0.35, PART 87 fix⟩ `cls` may be a ClassDeclaration/ClassExpression (`.members`) OR
+                    // a structural implementor — an ObjectLiteralExpression (`.properties`) registered by
+                    // the structural-implementor pass above. A PropertyAssignment (`go: () => …`) is the
+                    // object-literal spelling `ts.isMethodDeclaration`/`ts.isPropertyDeclaration` alone
+                    // don't match; accepted here alongside them.
+                    const memberNodes = cls.members ?? cls.properties ?? [];
+                    const m = memberNodes.find((x) =>
+                      (ts.isMethodDeclaration(x) || ts.isPropertyDeclaration(x) || ts.isPropertyAssignment(x))
+                      && x.name?.getText?.() === member);
                     const t = m && nodeName.get(m);
                     if (t) targets.push(t);
                     else allResolved = false;

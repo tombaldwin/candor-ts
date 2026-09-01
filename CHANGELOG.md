@@ -8,6 +8,34 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL-SIN FIX — a structural interface implementor completes the candidate set instead of
+  vanishing (SPEC §4 ⟨0.35⟩, PART 87).** MEASURED on the published 0.34.0 artifact: a closure stored
+  in a `let` and dispatched later through a local interface's own signature (`held.go()`) read honest
+  `Unknown, unresolved:true` with ZERO declared implementors — and VANISHED from `functions[]`
+  entirely (no effects, no Unknown, no disclosure) the moment ONE unrelated, pure, NOMINAL implementor
+  was added elsewhere, because the interface-CHA fanout treated its own nominal-only registry as the
+  whole candidate set. ts's own trigger was a METHOD-BEARING OBJECT LITERAL (structural typing makes
+  it a conformer with no `implements` clause at all), not the nominal `implements` shape a class-only
+  fix would have covered.
+  Fixed by registering every LOCALLY VISIBLE structural implementor — an object literal, a class
+  EXPRESSION, a bound method reference (`w.write.bind(w)`), `Object.assign`'s result, a single-type-
+  parameter identity-generic wrapper (`wrap<T>(x:T):T`) — into the same candidate set the nominal
+  branch already uses, via the checker's own contextual typing rather than a hand-rolled shape
+  matcher. Per the spec's disjunction: where the implementor's body is visible (the overwhelming
+  common case, since ts reads source), the candidate set is COMPLETED and the caller's real effects
+  flow (path a, strictly more precise than a hedge); where a member can't be pinned (an opaque
+  `.bind()` receiver, a call result), the existing `allResolved` gate forces `Unknown` instead of
+  silence (path b) — one shared completeness check, no new hedge machinery.
+  A side effect, also measured and correct: a closure previously attributed lexically to whatever
+  function CONSTRUCTED it (over-charging that constructor) now gets its own unit, so a "wiring"
+  function that only builds and stores the value — never calls it — is no longer credited with
+  effects it does not perform at that point. Confirmed on real code: hono's own router-benchmark
+  harness (10 structural `RouterInterface` implementors, one real `.match()` dispatch site in
+  `bench.mts`) and zod's `ZodObject.extend/merge/setKey/strict` (each returning an object carrying a
+  deferred `shape`/`errorMap` closure) both moved rows from an over-charged wiring function to the
+  precise closure unit — net +19 and +8 rows respectively, zero fabrication, zero under-report; axios,
+  chalk, got and zx (no structural-implementor pattern present) were byte-identical before and after.
+
 ## [0.34.0] — 2026-08-31
 
 - **UPGRADING FROM 0.33.1 — re-baselining is not review.** ⟨0.34⟩ is NON-ADDITIVE and this wave
