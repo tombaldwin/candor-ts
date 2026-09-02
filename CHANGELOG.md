@@ -8,6 +8,47 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ FABRICATION FIX (SOUNDNESS R115) — `{...instance}`, `Object.assign(t, instance)` and
+  `const {...rest} = instance` charged a class PROTOTYPE getter that never runs, and it failed a gate.**
+  `enumerateGetters`'s own comment stated the rule — *"copying an object's **own enumerable** props
+  INVOKES each source getter"* — and the body did not apply it: `type.getProperties()` returns the
+  inherited prototype surface, and a class accessor is on the prototype and non-enumerable.
+
+      export class Session { id = 1; get token(){ return fs.readFileSync("/etc/token","utf8"); } }
+      export function clone(s: Session) { return { ...s }; }
+
+      before  src.app.clone ['Fs']   `deny Fs src.app` → exit 1, [AS-EFF-006]
+      after   src.app.clone absent   `deny Fs src.app` → exit 0
+      executed  {"copied":{"id":1},"readFileSync_calls":0}
+
+  Ground truth is EXECUTED under node 22.12.0, counting invocations of a bumping getter:
+  `{...classInstance}` 0, `Object.assign({},c)` 0, `const {...r}=c` 0, `{...subclassInstance}` 0,
+  `{...ClassWithStaticGetter}` 0, `{...Object.create(protoWithGetter)}` 0 — against `{...objectLiteral}`
+  1, `const {tok}=c` 1, `c.tok` 1. **`JSON.stringify(c)` and `Object.entries(c)` staying pure is CORRECT**
+  (0 invocations, measured) and is not touched.
+
+  **Narrowed as a DENYLIST**: the exclusion fires only when *every* get-declaration for the property
+  symbol sits directly in a `class` body (`ClassDeclaration`/`ClassExpression`), which is provably
+  prototype-installed. An interface or type-literal `get token(): string` stays charged, because the
+  runtime object may be an object literal whose getter is own+enumerable. `every`, not `find`: a union
+  `Session | { get token(): string }` keeps its charge on the strength of the literal arm.
+
+  **The hole this opens is stated, and half of it is closed.** TypeScript is structural, so a value
+  whose static type is a class can be an object literal with an own enumerable getter — executed, that
+  getter fires. Where the spread source is a plain binding whose initializer is an object literal, that
+  literal's accessors are now enumerated directly (a widening — it can hide nothing). Where it arrives
+  through a PARAMETER there is no initializer to read, and that residual is pinned by a fixture
+  asserting today's wrong answer on purpose. Before this fix that spelling was charged only by
+  coincidence: the class getter's effects stood in for the literal's.
+
+  A/B, 25 real TypeScript repositories (20,777 common rows), keyed WIDE on every field:
+  `ADDED 0  REMOVED 1  CHANGED 6 (wide) / 0 (inferred)`, 290 hits on the changed branch (got 272,
+  nest 17, typeorm 1) — the corpus reaches it, so this is not safety-only. The single removal
+  (`got`'s `Options.toJSON`, `{...this.#internals}`) was ground-truthed FROM SOURCE, not from candor's
+  own report: `#internals` is `Except<Options, …>`, a mapped type whose property symbols carry the
+  CLASS getters' declarations, while the runtime object is a plain literal built by `cloneInternals` —
+  so 48 getter edges were fabrications and the function really is pure.
+
 - **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R111) — `performance.mark()`, `performance.measure()` and
   `performance.eventLoopUtilization()` read the clock and were silently pure under BOTH `lib`
   configurations.** Not a divergence like R109/R110 — a member-coverage gap, and it hid *because* the

@@ -4302,11 +4302,76 @@ function recordAccessorHit(owner, hit, label) {
 // invisible to the property-access arm (no PropertyAccess node per key). Edge `owner` to every LOCAL
 // getter on the source type. A rest/spread can't name one key, so ALL getters are enumerated (sound
 // over-approximation); a plain prop resolves to no accessor and adds nothing (no fabrication).
-function enumerateGetters(owner, type) {
-  if (!owner || !type || !type.getProperties) return;
-  for (const p of type.getProperties()) {
-    const hit = accessorFromSym(p, "get");
-    if (hit) recordAccessorHit(owner, hit, p.getName());
+//
+// R115 — AND "OWN ENUMERABLE" IS THE HALF THE BODY DID NOT APPLY, so this fabricated on every class.
+// `type.getProperties()` returns the INHERITED prototype surface, and a `class C { get token() {…} }`
+// accessor is installed on `C.prototype` and NON-enumerable — so spread/assign/rest never copy it and
+// never call it. EXECUTED, node 22.12.0, counting getter invocations:
+//
+//     {...c}  0     Object.assign({},c)  0     const {...r}=c  0     {...new Sub()}  0   (Sub extends Base)
+//     {...objectLiteral}  1     const {tok}=c  1     c.tok  1     {...Object.create(protoWithGetter)}  0
+//
+//     export class Session { id = 1; get token(){ return fs.readFileSync("/etc/token","utf8"); } }
+//     export function clone(s: Session) { return { ...s }; }
+//
+//     before:  src.a.clone ['Fs']   `deny Fs` -> exit 1     executed: {"copied":{"id":1},"calls":0}
+//     after:   src.a.clone absent   `deny Fs` -> exit 0
+//
+// A FALSE POSITIVE, not a miss — it fails a gate on a function that performs nothing, and the whole
+// value of a `deny` gate is that a red one means something.
+//
+// NARROWED AS A DENYLIST, per the family rule: the exclusion fires ONLY for an accessor whose every
+// get-declaration sits directly in a `class` body (ClassDeclaration/ClassExpression), which is provably
+// prototype-installed. An INTERFACE or TYPE-LITERAL `get token(): string` stays charged, because the
+// runtime object behind that type may be an object literal, whose getter IS own+enumerable and DOES
+// fire. `every`, not `find`: a union/intersection property symbol carries declarations from each
+// constituent, and `Session | { get token(): string }` must stay charged on the strength of its
+// object-literal arm (measured — `src.b.cloneUnion` keeps `Fs`).
+//
+// `JSON.stringify(c)` and `Object.entries(c)` STAYING PURE IS CORRECT and is not this fix: both read
+// own enumerable props too (executed: 0 invocations on a class instance), and neither is enumerated
+// here in the first place.
+//
+// THE HOLE THIS OPENS IS REAL, MEASURED, AND HALF-CLOSED BELOW, not asserted away. TypeScript is
+// STRUCTURAL, so a value whose static type is a class can be an object literal with an OWN enumerable
+// getter — executed, `{...structural}` invokes it once:
+//
+//     export const structural: Session = { id: 1, get token(){ return fs.readFileSync("/etc/s","utf8"); } };
+//
+// The `srcExpr` arm below resolves the spread source through its BINDING to an object-literal
+// initializer and enumerates THAT literal's accessors, so this spelling stays charged. It is a
+// widening — it can only add — so it cannot itself hide anything. What it does NOT reach is a
+// structural literal arriving through a PARAMETER or a call return, which has no initializer to read;
+// that residual is pinned by its own fixture asserting today's (wrong) answer, so it cannot move by
+// accident. Before this fix that spelling was charged only by COINCIDENCE — the class accessor's
+// effects were reported in place of the literal's, which is the right verdict off the wrong evidence.
+function classBodiedGetter(sym) {
+  const decls = (sym?.declarations ?? []).filter((d) => ts.isGetAccessorDeclaration(d));
+  return decls.length > 0 && decls.every((d) => ts.isClassDeclaration(d.parent) || ts.isClassExpression(d.parent));
+}
+function enumerateGetters(owner, type, srcExpr) {
+  if (!owner) return;
+  if (type && type.getProperties) {
+    for (const p of type.getProperties()) {
+      if (classBodiedGetter(p)) continue; // prototype + non-enumerable → not copied by a spread
+      const hit = accessorFromSym(p, "get");
+      if (hit) recordAccessorHit(owner, hit, p.getName());
+    }
+  }
+  // The structural arm: `const o: SomeClass = { get k(){…} }` — the BINDING's initializer is an object
+  // literal, so its accessors are own+enumerable and the copy DOES invoke them, whatever the annotation
+  // says. Follows a plain binding only (one hop, no calls, no conditionals); adds, never removes.
+  if (!srcExpr || !ts.isIdentifier(srcExpr)) return;
+  const sym0 = checker.getSymbolAtLocation(srcExpr);
+  if (!sym0) return;
+  for (const d of sym0.declarations ?? []) {
+    if (!ts.isVariableDeclaration(d) || !d.initializer) continue;
+    if (!ts.isObjectLiteralExpression(d.initializer)) continue;
+    for (const pr of d.initializer.properties) {
+      if (!ts.isGetAccessorDeclaration(pr)) continue;
+      const nm = pr.name?.getText?.() ?? "?";
+      recordAccessorHit(owner, { decl: pr, local: projectFiles.has(path.resolve(pr.getSourceFile().fileName)) }, nm);
+    }
   }
 }
 
@@ -6791,7 +6856,7 @@ function visitCalls(node) {
     if (callee.getText().replace(/\s+/g, "") === "Object.assign") {
       const owner = enclosing(node);
       for (const src of (node.arguments ?? []).slice(1)) {
-        enumerateGetters(owner, checker.getTypeAtLocation(src));
+        enumerateGetters(owner, checker.getTypeAtLocation(src), src);
       }
     }
   }
@@ -6864,7 +6929,7 @@ function visitCalls(node) {
     if (owner) {
       const recvType = checker.getTypeAtLocation(node.initializer);
       for (const el of node.name.elements) {
-        if (el.dotDotDotToken) { enumerateGetters(owner, recvType); continue; } // `...rest` copies every
+        if (el.dotDotDotToken) { enumerateGetters(owner, recvType, node.initializer); continue; } // `...rest` copies every
         // remaining prop → invokes every (remaining) getter; enumerate all (the bound ones double-handle).
         const key = el.propertyName ?? el.name; // `{prop}` shorthand, or `{prop: alias}`
         const keyName = ts.isIdentifier(key) ? key.text
@@ -6887,7 +6952,7 @@ function visitCalls(node) {
       iterExpr = node.expression; // {...bag} — object spread is NOT iteration (copies own enumerable
       // props, no [Symbol.iterator]); wellKnownSymbolMember finds none and edges nothing for iteration.
       // But the copy DOES invoke each source getter — enumerate them (the silent-pure object-spread hole).
-      enumerateGetters(enclosing(node), checker.getTypeAtLocation(node.expression));
+      enumerateGetters(enclosing(node), checker.getTypeAtLocation(node.expression), node.expression);
     }
     else if (ts.isVariableDeclaration(node) && ts.isArrayBindingPattern(node.name) && node.initializer)
       iterExpr = node.initializer; // const [a] = bag

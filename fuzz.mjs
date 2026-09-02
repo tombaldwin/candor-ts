@@ -160,8 +160,16 @@ function genProject(seed) {
       case "obj_spread":
         // the object-SPREAD-getter hole: `{ ...o }` copies own enumerable props, INVOKING each getter,
         // but spread was treated as iteration (no [Symbol.iterator]) so the getter body went silent-pure.
-        bodies[i] = `class Sp${i} { get v(): number { ${callExpr(callee)}; return 1; } }\n` +
-                    `export function ${me}(o: Sp${i}): object { return { ...o }; }`;
+        //
+        // R115 — THIS GENERATOR USED TO EMIT A **CLASS** AND THE SEED WAS ASSERTING A FABRICATION.
+        // `class Sp${i} { get v(){…} }` puts the accessor on `Sp${i}.prototype`, where it is
+        // NON-enumerable, so `{ ...o }` never copies it and never calls it — EXECUTED on the generated
+        // program itself: 0 invocations, `copied: {}`. Three instruments encoded the same wrong premise
+        // (the implementation, a unit test, and this generator), which is why nothing contradicted it.
+        // The source is now an object LITERAL, whose getter IS own+enumerable and executed 1, so the
+        // seed keeps its teeth against the real hole instead of pinning the fabrication.
+        bodies[i] = `const sp${i} = { get v(): number { ${callExpr(callee)}; return 1; } };\n` +
+                    `export function ${me}(): object { return { ...sp${i} }; }`;
         break;
       case "elem_getter_access":
         // the ELEMENT-ACCESS twin of getter_access: a getter reached via `g["val"]` rather than `g.val`.

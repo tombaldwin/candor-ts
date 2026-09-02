@@ -7417,11 +7417,18 @@ export function viaLogger(l: Logger) { l.write("x"); }`,
   check("a non-stream class with a write() method gets NO _write edge", !inf("src.s.viaLogger").includes("Fs"), JSON.stringify(inf("src.s.viaLogger")));
 }
 
-// ── Object.assign getter enumeration: copying a source's props invokes its getters ─────────────────
+// ── Object.assign getter enumeration: copying a source's OWN ENUMERABLE props invokes its getters ──
 // `Object.assign(t, src)` reads every own enumerable prop of src — an effectful getter RUNS (the
-// object-spread twin). Both recordAccessorHit branches pinned: a CLASS-typed source's getter is a
-// minted unit → the copier inherits the precise effect; an object-LITERAL getter (no minted unit)
-// falls to the disclosed-Unknown branch — never silent-pure either way. Plain data stays pure.
+// object-spread twin). An object-LITERAL getter (no minted unit) falls to the disclosed-Unknown
+// branch — never silent-pure. Plain data stays pure.
+//
+// THE CLASS ROW BELOW ASSERTED THE OPPOSITE UNTIL R115, AND IT WAS WRONG. The assertion is INVERTED
+// here rather than the block deleted: the fixture text is untouched and only the expectation moved, so
+// the correction reads in the diff next to its reason. `Vault`'s `get tok()` lives on `Vault.prototype`
+// and is NON-enumerable, so `Object.assign({}, v)` never copies it and never calls it — EXECUTED, 0
+// invocations of a bumping getter, against 1 for the object-literal row two lines down. "Own
+// enumerable" is this block's own first sentence, and the implementation and this test failed to apply
+// it in the same way for as long as they agreed with each other.
 if (blk()) {
   const d = project({
     "src/g.ts": `import { execSync } from "node:child_process";
@@ -7433,8 +7440,8 @@ export function copyLit(): object { return Object.assign({}, secretive); }
 export function copyPlain(): object { return Object.assign({}, plain); }`,
   });
   const { report } = scan(d);
-  check("Object.assign enumerates a class source's getters: the copier inherits the precise Exec",
-        entry(report, "src.g.copyClass")?.inferred.includes("Exec"), JSON.stringify(entry(report, "src.g.copyClass")));
+  check("R115 (assertion FLIPPED, fixture unchanged): Object.assign over a CLASS source charges nothing — the getter is on the prototype and non-enumerable, so it is not copied and not called (executed: 0). This row asserted `Exec` before, and a passing test asserting a fabrication is how the fabrication survived",
+        entry(report, "src.g.copyClass") === undefined, JSON.stringify(entry(report, "src.g.copyClass")));
   const lit = entry(report, "src.g.copyLit");
   check("Object.assign over an object-literal getter: disclosed (Exec or Unknown+reflect:accessor), never silent",
         lit !== undefined && (lit.inferred.includes("Exec")
@@ -15649,6 +15656,188 @@ module.exports.Ctor = Ctor; module.exports.callH2 = callH2;
         ["src.lib.Ctor.fire", "src.lib.fire", "src.lib.callH2"]
           .every((fn) => entry(report, fn)?.inferred?.includes("Fs")),
         JSON.stringify(report?.functions?.map((f) => [f.fn, f.inferred])));
+}
+
+// ── R115: `{...instance}` CHARGED A CLASS PROTOTYPE GETTER THAT NEVER RUNS ────────────────────────
+//
+// A FABRICATION, and the only row of the R109–R115 vein that makes candor FAIL A GATE on code that
+// performs nothing. `enumerateGetters`'s own comment stated the rule — *"copying an object's own
+// enumerable props INVOKES each source getter"* — and its body did not apply it: `type.getProperties()`
+// returns the INHERITED prototype surface, and a class accessor is on the prototype and non-enumerable.
+//
+// GROUND TRUTH IS EXECUTED, node 22.12.0, counting invocations of a bumping getter — not read off a
+// signature and not inferred from the other direction:
+//
+//     {...classInstance}                    0      {...objectLiteral}                        1
+//     Object.assign({}, classInstance)      0      Object.assign({}, objectLiteral)          1
+//     const {...r} = classInstance          0      const {...r} = objectLiteral              1
+//     JSON.stringify(classInstance)         0      {...definePropertyEnumerable}             1
+//     Object.entries(classInstance)         0      {...definePropertyNonEnumerable}          0
+//     {...subclassInstance}                 0      {...Object.create(protoWithGetter)}       0
+//     {...ClassWithStaticGetter}            0      const {tok} = classInstance               1
+//                                                  classInstance.tok                         1
+//
+// On 8c7484e, `tsc`-clean and isolated:
+//     export class Session { id = 1; get token(){ return fs.readFileSync("/etc/token","utf8"); } }
+//     export function clone(s: Session) { return { ...s }; }
+//   candor    src.a.clone ['Fs'],  `deny Fs src.app` -> exit 1, [AS-EFF-006]
+//   executed  {"copied":{"id":1},"readFileSync_calls":0}
+//
+// THE `JSON.stringify` / `Object.entries` PURITY IS CORRECT AND IS NOT TOUCHED (rows below): they read
+// own enumerable props too, and measured 0 on a class instance. The mechanism was wrong only in the
+// direction it fired.
+if (blk()) {
+  const nodeTsconfig = JSON.stringify({
+    compilerOptions: {
+      target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: true,
+      types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")],
+    },
+    include: ["src"],
+  });
+  const d = project({
+    "tsconfig.json": nodeTsconfig,
+    // THE FABRICATION, every shape that reaches `enumerateGetters` — spread, `Object.assign` source,
+    // and a rest binding — plus the INHERITED and CLASS-EXPRESSION and STATIC spellings, which the row
+    // as filed did not name and which are the same fact one declaration over (§A.2).
+    "src/fab.ts": `import * as fs from "node:fs";
+export class Session { id = 1; get token(): string { return fs.readFileSync("/etc/token", "utf8"); } }
+export function clone(s: Session) { return { ...s }; }
+export function assign(s: Session) { return Object.assign({}, s); }
+export function rest(s: Session) { const { ...r } = s; return r; }
+export class Base { get token(): string { return fs.readFileSync("/etc/token", "utf8"); } }
+export class Sub extends Base { id = 2; }
+export function cloneSub(s: Sub) { return { ...s }; }
+export class WithStatic { static get secret(): string { return fs.readFileSync("/etc/x", "utf8"); } }
+export function cloneCtor() { return { ...WithStatic }; }
+export const CE = class { get token(): string { return fs.readFileSync("/etc/ce", "utf8"); } };
+export function cloneCE(x: InstanceType<typeof CE>) { return { ...x }; }
+export abstract class Abs { abstract get token(): string; }
+export function cloneAbs(a: Abs) { return { ...a }; }`,
+    // THE PRECISION CONTROL, AND IT IS THE WHOLE POINT OF THE ROW. A fix that stopped enumerating
+    // getters altogether would pass every row above and destroy the mechanism. These four MUST stay
+    // charged, and each is a different reason:
+    //   named read / named destructure  — a PROTOTYPE getter IS invoked by name (executed: 1)
+    //   object literal                  — own + enumerable, so the copy DOES call it (executed: 1)
+    //   interface / type-literal getter — the runtime object may be a literal; charging is the sound
+    //                                     over-approximation the denylist narrowing deliberately keeps
+    "src/keep.ts": `import * as fs from "node:fs";
+import { Session } from "./fab";
+export function named(s: Session) { const { token } = s; return token; }
+export function dot(s: Session) { return s.token; }
+export const lit = { id: 1, get token(): string { return fs.readFileSync("/etc/lit", "utf8"); } };
+export function cloneLit() { return { ...lit }; }
+export interface WithGetter { get token(): string; }
+export function cloneIface(o: WithGetter) { return { ...o }; }
+export function cloneTypeLit(o: { get token(): string }) { return { ...o }; }
+export type Either = Session | { get token(): string };
+export function cloneUnion(e: Either) { return { ...e }; }`,
+    // THE STRUCTURAL ARM. TypeScript is structural, so a value whose static type is a CLASS can be an
+    // object literal whose getter is own + enumerable and DOES fire (executed: 1). This is the hole the
+    // narrowing opens, and `cloneStructural` is the half that is closed — the binding's initializer is
+    // read directly. `cloneStructuralParam` is the half that is NOT: it is a PINNED GAP asserting
+    // today's wrong answer on purpose, in R110's idiom, so it cannot move by accident.
+    "src/structural.ts": `import * as fs from "node:fs";
+import { Session } from "./fab";
+export const structural: Session = { id: 1, get token(): string { return fs.readFileSync("/etc/s", "utf8"); } };
+export function cloneStructural() { return { ...structural }; }
+export function cloneStructuralParam(s: Session) { return { ...s }; }`,
+    // OVER-CHARGE CONTROL: the two whole-object reads that were ALREADY correct, plus ordinary code in
+    // the same scan so a broken run cannot pass this block by reporting nothing at all.
+    "src/pure.ts": `import { Session } from "./fab";
+import * as path from "node:path";
+export function pStringify(s: Session) { return JSON.stringify(s); }
+export function pEntries(s: Session) { return Object.entries(s); }
+export function pKeys(s: Session) { return Object.keys(s); }
+export function pJoin(a: string, b: string) { return path.join(a, b); }`,
+  });
+  {
+    const tsc = spawnSync("node", [path.join(HERE, "node_modules", "typescript", "bin", "tsc"),
+                                   "-p", path.join(d, "tsconfig.json"), "--noEmit"], { encoding: "utf8" });
+    check("R115 §E3: the fixture tree COMPILES (`tsc --noEmit` exit 0) — most of this block is ABSENCE assertions, and absence over a program that does not exist is what a broken engine also produces",
+          tsc.status === 0, `exit ${tsc.status}: ${(tsc.stdout || "") + (tsc.stderr || "")}`.slice(0, 600));
+  }
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+
+  for (const [fn, what] of [
+    ["src.fab.clone", "`{...s}` — the fabrication exactly as filed; executed, 0 getter invocations"],
+    ["src.fab.assign", "`Object.assign({}, s)` — the same copy through the `Object.assign` source arm"],
+    ["src.fab.rest", "`const {...r} = s` — and through the rest-binding arm; all three call `enumerateGetters`"],
+    ["src.fab.cloneSub", "an INHERITED base-class getter — `Sub extends Base`, still prototype, still 0 (the sibling the row as filed did not name)"],
+    ["src.fab.cloneCtor", "`{...WithStatic}` — a STATIC accessor is own on the constructor but NON-enumerable (descriptor printed: enumerable false), executed 0"],
+    ["src.fab.cloneCE", "a CLASS EXPRESSION's accessor — `ts.isClassExpression`, the second half of the narrowing predicate"],
+    ["src.fab.cloneAbs", "an ABSTRACT accessor — the concrete override lands on the subclass prototype, executed 0"],
+  ]) {
+    check(`R115: charges nothing — ${what} (${fn})`, eff(fn) === undefined,
+          JSON.stringify(eff(fn) ?? null));
+  }
+
+  // THE PRECISION CONTROLS. Absence is also what a broken engine produces (§E3), so the rows above are
+  // evidence only because these — in the SAME tree, the SAME scan — are present and charged.
+  check("R115 PRECISION CONTROL: a NAMED destructure `const {token} = s` stays charged — executed, a prototype getter IS invoked by name (1). It resolves through `accessorFromSym` at the named-key arm, which this fix does not touch, and that is the difference the whole narrowing turns on",
+        has("src.keep.named", "Fs"), JSON.stringify(eff("src.keep.named")));
+  check("R115 PRECISION CONTROL: a named property read `s.token` stays charged — the `accessorAt` arm, also untouched",
+        has("src.keep.dot", "Fs"), JSON.stringify(eff("src.keep.dot")));
+  check("R115 PRECISION CONTROL: `{...objectLiteral}` stays charged — an object-literal getter is OWN and ENUMERABLE (descriptor printed: enumerable true) and executed 1. This is the case `enumerateGetters` was written for, and a fix that lost it would have deleted the mechanism while passing every fabrication row above",
+        (eff("src.keep.cloneLit")?.inferred ?? []).length > 0, JSON.stringify(eff("src.keep.cloneLit")));
+  for (const [fn, what] of [
+    ["src.keep.cloneIface", "an INTERFACE `get token(): string`"],
+    ["src.keep.cloneTypeLit", "a TYPE-LITERAL `get token(): string`"],
+  ]) {
+    check(`R115 PRECISION CONTROL: ${what} stays charged — the runtime object behind that type may be an object literal, so the exclusion is a DENYLIST of one provable shape (a class body) and never an allowlist (${fn})`,
+          (eff(fn)?.inferred ?? []).length > 0, JSON.stringify(eff(fn)));
+  }
+  check("R115 PRECISION CONTROL: a UNION `Session | { get token(): string }` stays charged — the predicate is `every` over the symbol's get-declarations, not `find`, so one object-literal arm is enough to keep the charge. `find` would have read the class declaration first and dropped it",
+        has("src.keep.cloneUnion", "Fs"), JSON.stringify(eff("src.keep.cloneUnion")));
+
+  // THE STRUCTURAL ARM — the hole this fix opens, half closed and half pinned, said out loud.
+  // ASSERTED ON THE REASON, NOT ON "SOMETHING WAS CHARGED", and that distinction is the whole value of
+  // the row: the PRE-FIX engine also charged this function — with `Fs`, from the CLASS getter it should
+  // never have enumerated. Right verdict, wrong evidence. Post-fix the charge comes from the LITERAL's
+  // accessor and reads `Unknown[reflect:accessor:token]`, so this check discriminates the structural arm
+  // from the fabrication that used to stand in for it. A truthiness assertion here would have been
+  // revert-invariant and would have measured nothing (it was, in the first draft; the revert test is
+  // what caught it).
+  check("R115 STRUCTURAL: `const structural: Session = { get token(){…} }` then `{...structural}` is charged FROM THE LITERAL — `Unknown[reflect:accessor:token]`, not the class getter's `Fs`. TypeScript is STRUCTURAL, the literal's getter is own+enumerable and executed 1, and the class-shaped ANNOTATION is not evidence about the runtime object. A widening, so it can hide nothing",
+        (eff("src.structural.cloneStructural")?.inferred ?? []).includes("Unknown")
+          && (eff("src.structural.cloneStructural")?.unknownWhy ?? []).some((w) => w.startsWith("reflect:accessor:")),
+        JSON.stringify(eff("src.structural.cloneStructural")));
+  check("R115 PINNED GAP (asserts TODAY'S WRONG ANSWER on purpose, R110's idiom): a structural literal arriving through a PARAMETER has no initializer to read, so `{...s}` over one reads PURE. Executed, that program invokes the getter once. Pinned rather than hidden so closing it shows up as an expectation that changed. Before this fix the spelling was charged only by COINCIDENCE — the CLASS getter's effects stood in for the literal's",
+        eff("src.structural.cloneStructuralParam") === undefined,
+        JSON.stringify(eff("src.structural.cloneStructuralParam")));
+
+  // OVER-CHARGE CONTROL for the direction this fix did NOT intend.
+  for (const [fn, what] of [
+    ["src.pure.pStringify", "`JSON.stringify(s)` was ALREADY pure and stays pure — executed 0, and it is not enumerated here at all"],
+    ["src.pure.pEntries", "`Object.entries(s)` likewise — the row is explicit that this purity is CORRECT, not a gap to close"],
+    ["src.pure.pKeys", "`Object.keys(s)` likewise"],
+    ["src.pure.pJoin", "and ordinary `path.join` in the same scan, so a run that reported nothing at all could not pass this block"],
+  ]) {
+    check(`R115 OVER-CHARGE CONTROL: ${what} (${fn})`, eff(fn) === undefined, JSON.stringify(eff(fn) ?? null));
+  }
+
+  // THE GATE, on its own two-module tree with a SCOPED deny, so the exit code is about the CALLER and
+  // not about the getter. A blanket `deny Fs` fires either way — the getter genuinely performs Fs when
+  // invoked — which would have made a single-module gate row measure nothing.
+  {
+    const g = project({
+      "tsconfig.json": nodeTsconfig,
+      "src/lib.ts": `import * as fs from "node:fs";
+export class Session { id = 1; get token(): string { return fs.readFileSync("/etc/token", "utf8"); } }`,
+      "src/app.ts": `import { Session } from "./lib";
+export function clone(s: Session) { return { ...s }; }`,
+      "app.pol": "deny Fs src.app\n",
+      "lib.pol": "deny Fs src.lib\n",
+    });
+    const ex = (p) => scan(g, "--policy", path.join(g, p)).r.status;
+    check("R115 GATE: `deny Fs src.app` exits 0 — it answered exit 1 with `[AS-EFF-006] src.app.clone performs { Fs }` before, over a function whose executed run makes 0 filesystem calls",
+          ex("app.pol") === 0, `exit ${ex("app.pol")}`);
+    check("R115 GATE CONTROL (revert-invariant by design): `deny Fs src.lib` still exits 1 — the GETTER really does read the file when invoked, and a fix that silenced that would look identical on the row above",
+          ex("lib.pol") === 1, `exit ${ex("lib.pol")}`);
+    fs.rmSync(g, { recursive: true, force: true });
+  }
+  fs.rmSync(d, { recursive: true, force: true });
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
