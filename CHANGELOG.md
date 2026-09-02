@@ -8,6 +8,76 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ DISCLOSURE FIX + SILENT-UNDER-REPORT FIX (SOUNDNESS R137) — a κ rule that classifies SOME of a
+  package's members silenced the coverage answer for ALL of them.** `kappaKnows` asked a
+  PACKAGE-granular question (`KAPPA_RULES.some(([mre]) => mre.test(moduleName))`, the member regex
+  never consulted) and it is the gate on the κ-coverage ledger, so the moment any rule named a
+  package every OTHER member of that package stopped being disclosed. Adding two MEMBER-PRECISE
+  `undici-types` rules for R130 flipped it and switched the ledger off for the rest of that package's
+  surface. Measured over a 21-file `tsc`-clean fixture, keyed WIDE:
+
+      5 rows moved from `invisible:["undici-types"]` to ENTIRELY ABSENT — FormData.append,
+        FormData.getAll, WebSocket.add/removeEventListener, EventSource.addEventListener — with no
+        `Unknown` and no `invisible`, which under SPEC §2 rule 3 is a POSITIVE PURITY CLAIM
+      11 rows lost `invisible` and kept `Unknown`
+      `coverage: {uncovered:[{name:"undici-types",calls:16}]}` DISAPPEARED, with its stderr advisory
+        — a CONSUMED verdict surface (`gate --report`, `gains`, `coverageDelta`)
+
+  **The undici-types instance is a lost DISCLOSURE, not a lost effect**, and that is said plainly:
+  executed against a real 127.0.0.1 listener, all five of those members perform nothing (0 requests
+  each; the same listener counted 1 for the `new WebSocket(…)` ctor beside them). **One hop past the
+  trigger is a cardinal sin with teeth.** 20 npm κ rules are member-precise, and `mongoose`'s lists
+  the query verbs and not `connect`:
+
+      import mongoose from "mongoose";  await mongoose.connect(uri);
+        before — ABSENT from `functions`: no Db, no Unknown, no `invisible`, no coverage block,
+                 under a stderr line reading "nothing hidden — every effect sits where its name
+                 says it should"; `deny Db` exit 0, `deny Db src.boot` exit 0, `deny Unknown` exit 0
+        EXECUTED, real mongoose@8 against a `net.createServer` on 127.0.0.1 counting arrivals:
+                 1 TCP connection, 299 bytes on the wire
+        after  — `inferred:["Db"]`, `incomplete:["Db"]`; `deny Db src.boot` exit 1
+
+  **Two halves, because the ledger half alone does not close it.** (1) `kappaKnows` now takes the
+  MEMBER and answers with the κ rule that actually matched the call — one authority, the same table,
+  the same regexes, no second table added (`KAPPA_PURE` was already the whole-package ratification
+  outlet and is unchanged; a whole-module rule still covers every member). (2) The three ORMs beside
+  typeorm gained typeorm's own lifecycle verbs, which its rule has carried since a real app read PURE
+  on `new DataSource(o).initialize()` — `connect`/`disconnect`/`close`/`drop`/`sync`/`watch` for
+  mongoose, `authenticate`/`sync`/`close`/`drop`/`truncate` for sequelize, `$connect`/`$disconnect`
+  for `@prisma/client`. Only `mongoose.connect` is executed ground truth; the rest are analogy to
+  typeorm's list and are labelled that way in the table rather than sharing a sentence with it.
+  FAILURE DIRECTION, stated before the code: the ledger half fails toward OVER-DISCLOSURE
+  (`invisible` carries no effect and no `Unknown`, so it cannot flip a `deny <Effect>` gate and
+  cannot silence anything); the κ verbs are additive and module-gated, so they fail toward
+  over-charge and forgetting one under-fixes and cannot under-report.
+
+- **⚠ FABRICATION FIX (SOUNDNESS R138) — R121's escape charged `Net` over a project's own shim
+  because the directory happened to contain a `package.json`.** `resolvedIsHostFetch`'s guard (3)
+  escaped on `crossesPackageBoundary`, which asks whether some OTHER `package.json` sits above the
+  declaration's file — a question about the FILESYSTEM, where the property R95's guard promised (and
+  R121's replacement dropped) is about the MODULE SPECIFIER. Two trees differing by exactly one
+  one-line file, same `vendor/shim.d.ts`, same pure `vendor/shim.js`, both `tsc --noEmit` clean:
+
+      import { fetch } from "../vendor/shim"; fetch(u)        before        after
+        with vendor/package.json     inferred ["Net"], netClass ["unknown-host"]    inferred []
+        without it                   inferred []                                    inferred []
+
+  — one value, two answers, selected by a `{"type":"module"}` marker. EXECUTED, node 22.12.0, against
+  a real `http.createServer` on 127.0.0.1 counting arrivals: **REQUESTS ARRIVED = 0, TCP CONNECTIONS
+  = 0** from every spelling, while the host's own `fetch` to the same listener in the same process
+  counted 1 and 1. Six functions were charged; `deny Net src.shimcalls` went exit 1 → exit 0.
+  **The escape is narrowed, not deleted** — deleting it silences a real dependency's module-scoped
+  `fetch` reached through a binding hop, which has its own row. It now asks TypeScript's own
+  resolution record (`isSourceFileFromExternalLibrary`), true exactly when a file was reached through
+  node module resolution rather than a relative path — printed at the arm before the code was
+  written: the vendored shim is FALSE with and without the stray `package.json`, and a workspace
+  package reached as `@mono/mock` through a symlink is TRUE despite having no `node_modules/`
+  segment in its real path, which is why the authority is the resolution record and not a path test.
+  FAILURE DIRECTION, stated before the code: too narrow ⇒ this arm stops charging `Net` for a real
+  dependency reached WITHOUT node module resolution (a tsconfig `paths` alias, a vendored copy). Such
+  a call does not go silent — `crossesPackageBoundary` still governs the κ ledger, so it keeps
+  `invisible:[pkg]`, measured rather than asserted.
+
 - **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R130) — the WEB NETWORK GLOBALS. `new WebSocket(url)`,
   `new EventSource(url)`, `ws.send(secret)` and `class D extends WebSocket { super(url) }` charge `Net`.**
   Two of those four were silent in BOTH resolution arms; the other two were the third instance of the

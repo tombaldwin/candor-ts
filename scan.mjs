@@ -4860,11 +4860,15 @@ const dispatchWhy = (qualifiedOwner, member) =>
 // or the dependency's own report already answered by omission — SPEC §2 rule 3) — never a fourth,
 // unexamined silent case. Called directly for a resolved external CallExpression too (see the CLASSIFY
 // arm and the tagged-template arm) so the whole family shares one implementation.
-function disclosureTail(rec, decl, pkg, file) {
+// ⟨R137⟩ `member` is the SAME token κ was asked with at the caller, threaded rather than re-derived
+// here: the ledger's question is "did κ cover THIS call", and re-deriving the member from `decl` would
+// be a second spelling of it that could drift from the first (§G — where two paths compute one fact,
+// make them disagree; better still, do not have two).
+function disclosureTail(rec, decl, pkg, file, member) {
   const declared = packageManifestEffects(file);
   if (declared !== null) { for (const e of declared) rec.direct.add(e); return; } // [] = declared pure
   const abstraction = unanswerableKey(decl);
-  if (!kappaKnows(pkg) && !depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
+  if (!kappaKnows(pkg, member) && !depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
     unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
     rec.blind.add(pkg);
     // ⟨0.21⟩ A package chained ONLY by a SELF-DECLARED-INCOMPLETE report reaches this arm because its
@@ -4919,7 +4923,7 @@ function chargeExternalDecl(rec, decl, tailOverride) {
     : member && ((owner ? crossDeps.get(`${pkg}#${owner}.${member}`) : undefined)
       ?? crossDeps.get(`${pkg}#${member}`));
   if (hit) { applyDepHit(rec, hit); return; }
-  disclosureTail(rec, decl, pkg, decl.getSourceFile().fileName);
+  disclosureTail(rec, decl, pkg, decl.getSourceFile().fileName, member);
 }
 
 // ---- implicit VALUE-COERCION desugaring (the silent-pure holes where the JS coercion protocol calls a
@@ -5632,17 +5636,44 @@ const envTouchingBuiltinCall = (node) => {
  *     the top level of a non-module lib file (lib.dom's `declare function fetch`, printed). A module's
  *     `export function fetch` is reachable only by importing it, so it is never the host global — no
  *     matter where its file lives, whether the scan included it, or how the callee is spelled.
- *     THE `crossesPackageBoundary` ESCAPE IS LOAD-BEARING AND IS THE DIRECTION THIS GUARD FAILS IN: a
- *     real DEPENDENCY exports `fetch` module-scoped too (`import * as nf from "node-fetch-native";
+ *     THE DEPENDENCY ESCAPE IS LOAD-BEARING AND IS THE DIRECTION THIS GUARD FAILS IN: a real
+ *     DEPENDENCY exports `fetch` module-scoped too (`import * as nf from "node-fetch-native";
  *     const { fetch } = nf; fetch(u)` — the import arm above only sees the direct spelling, so this arm
  *     is the only thing charging the hop). Without the escape that call goes SILENT, so the exclusion
- *     is a DENYLIST of one provable shape — module-scoped AND our own package — never an allowlist of
- *     the host's file paths, which would go stale with the next @types/node layout.
- *     WHERE IT FAILS: too broad ⇒ a silent under-report. Bounded to declarations that are both
- *     module-scoped and inside the scanned package, i.e. the project's own source, which candor
- *     analyses as its own units and reaches by an EDGE rather than by this arm. That is the same
- *     bargain guard (2) already makes for `projectFiles`, extended to the project files a given scan's
- *     shape happens to leave out — which is precisely what the old guard was reaching for.
+ *     is a DENYLIST of one provable shape — module-scoped AND not reached as a dependency — never an
+ *     allowlist of the host's file paths, which would go stale with the next @types/node layout.
+ *
+ *     ⟨R138 — THE ESCAPE WAS SPELLED `crossesPackageBoundary` AND THAT ASKED THE WRONG QUESTION.⟩
+ *     `crossesPackageBoundary` asks whether some OTHER `package.json` sits above the declaration's
+ *     file: a question about the FILESYSTEM. What this arm needs is whether the declaration was
+ *     reached AS A DEPENDENCY — a question about the MODULE SPECIFIER, which is the property R95's
+ *     guard promised ("the specifier decides, not file-set membership") and which keying on the
+ *     filesystem quietly dropped. MEASURED over two trees differing by exactly one one-line file:
+ *
+ *       src/main.ts  import { fetch } from "../vendor/shim"; fetch(u)      e5c60bc      HEAD
+ *         with vendor/package.json                                         inferred []  ["Net"]
+ *         without it                                                       inferred []  []
+ *
+ *     — one value, two answers, selected by a `{"type":"module"}` marker. EXECUTED against a real
+ *     127.0.0.1 listener: the shim's `fetch` delivers 0 requests and opens 0 TCP connections in both
+ *     spellings, while the host's own `fetch` to the same listener in the same process counted 1 and 1.
+ *
+ *     ASK THE AUTHORITY, AGAIN (§G). TypeScript's module resolution already recorded the answer:
+ *     `program.isSourceFileFromExternalLibrary` is true exactly when a file was reached through node
+ *     module resolution rather than a relative path. PRINTED at this arm before the code was written:
+ *     `vendor/shim.d.ts` via `../vendor/shim` is FALSE with and without the stray package.json, and a
+ *     workspace package's `dist/index.d.ts` reached as `@mono/mock` through a symlink is TRUE even
+ *     though its real path has no `node_modules/` segment — which is exactly why the authority here is
+ *     the resolution record and not a path test.
+ *     WHERE IT FAILS: too narrow ⇒ this arm stops charging Net for a real dependency reached WITHOUT
+ *     node module resolution (a tsconfig `paths` alias; a dependency copy vendored into the tree).
+ *     Such a call does NOT go silent — `crossesPackageBoundary` still governs the κ-coverage ledger, so
+ *     it keeps `invisible:[pkg]`, the honest answer for a body this scan never read (measured: the
+ *     shim row above carries `invisible:["vendor-shim"]` with and without this narrowing). Bounded, in
+ *     the other direction, to declarations that are both module-scoped and not a resolved dependency —
+ *     the project's own source, which candor analyses as its own units and reaches by an EDGE rather
+ *     than by this arm. That is the same bargain guard (2) already makes for `projectFiles`, extended
+ *     to the project files a given scan's shape happens to leave out.
  *  4. SHAPED LIKE THE WEB FETCH — returns `Promise<Response>`. Not a new judgement: it is the identical
  *     question the import arm above already asks of the identical authority, and it exists because a
  *     package exporting a pure `fetch(key)` cache-getter was once charged Net on its name alone.
@@ -5659,6 +5690,13 @@ const declaredInGlobalScope = (d) => {
   }
   return false;
 };
+// ⟨R138⟩ Was this declaration's file reached AS A DEPENDENCY — i.e. through node module resolution
+// from a bare specifier — rather than through a relative path? `ts.Program` records this while it
+// resolves, so this is the compiler's own answer to the question, not a second reading of the tree.
+// Guarded because a declaration synthesised outside the program has no source file the program knows.
+const declReachedAsDependency = (d) => {
+  try { return program.isSourceFileFromExternalLibrary(d.getSourceFile()); } catch { return false; }
+};
 const resolvedIsHostFetch = (call) => {
   if (!ts.isCallExpression(call)) return false;
   let sig; try { sig = checker.getResolvedSignature?.(call); } catch { return false; }
@@ -5667,7 +5705,7 @@ const resolvedIsHostFetch = (call) => {
   if (d.name?.text !== "fetch") return false;                                   // (1)
   const df = path.resolve(d.getSourceFile().fileName);
   if (projectFiles.has(df)) return false;                                        // (2)
-  if (!declaredInGlobalScope(d) && !crossesPackageBoundary(df)) return false;    // (3)
+  if (!declaredInGlobalScope(d) && !declReachedAsDependency(d)) return false;    // (3)
   let rt; try { rt = checker.typeToString(checker.getReturnTypeOfSignature(sig)); } catch { return false; }
   return /\bResponse\b/.test(rt);                                                // (4)
 };
@@ -6749,7 +6787,7 @@ function visitCalls(node) {
             // already ran its own chained-dep lookup above (`inheritedFromDep`, with its constructor/
             // owner-prefix spelling), so it hands the tail an already-external, already-unmatched `decl`
             // rather than re-deriving the join.
-            disclosureTail(rec, decl, pkg, file);
+            disclosureTail(rec, decl, pkg, file, member);
           }
         }
       }
@@ -9218,8 +9256,13 @@ if (unlistedSeen.size > 0) {
   const top = uncoveredLedger; // ⟨0.15 staged⟩ the shared sorted ledger — same names/counts as envelope `coverage`
   const shown = top.slice(0, 8).map(([p, n]) => `${p} (${n} call${n === 1 ? "" : "s"})`).join(", ");
   const more = top.length > 8 ? ` + ${top.length - 8} more` : "";
-  console.error(`candor-ts: candor's classifier doesn't cover ${top.length} package${top.length === 1 ? "" : "s"} this code calls into — `
-    + `their effects are INVISIBLE to the scan (absent from the report, NOT a claim they're pure): ${shown}${more}`);
+  // ⟨R137⟩ "or answers for only part of its surface": the ledger counts CALLS κ did not cover, and a
+  // package may be partly classified (a member-precise rule) and still owe an answer for the rest.
+  // Saying only "doesn't cover this package" would be the same package-granular overstatement that
+  // switched the ledger off in the first place, in the opposite direction.
+  console.error(`candor-ts: candor's classifier doesn't cover ${top.length} package${top.length === 1 ? "" : "s"} this code calls into `
+    + `(or answers for only part of ${top.length === 1 ? "its" : "their"} surface) — the calls below are INVISIBLE `
+    + `to the scan (absent from the report, NOT a claim they're pure): ${shown}${more}`);
   // SCAN-COMPLETENESS NUDGE. A scan that sees the app but none of its dependencies leaves those
   // dependencies' effects INVISIBLE (the ledger above) — a MISSING INPUT, not a precision defect, and the
   // two read identically in the report. Measured on the JVM engine against a real 18.7k-fn webapp: scanned
@@ -9261,8 +9304,8 @@ if (!wantJson) {
   // classifier does not cover (already enumerated above) beats a tsconfig guess, and a tsconfig this run
   // READ rules the tsconfig guess out entirely.
   const unresolvedCause = unlistedSeen.size > 0
-    ? `the ${uncoveredLedger.length} package${uncoveredLedger.length === 1 ? "" : "s"} named above are not `
-      + `covered by the classifier, so calls into them resolve to Unknown`
+    ? `the calls into the ${uncoveredLedger.length} package${uncoveredLedger.length === 1 ? "" : "s"} named `
+      + `above are not covered by the classifier, so they resolve to Unknown`
     : (usedTsconfig
         ? `this scan read ${path.relative(rootDir, usedTsconfig) || path.basename(usedTsconfig)}, so the `
           + `cause is unresolvable imports rather than a missing tsconfig`

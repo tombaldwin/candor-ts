@@ -17,7 +17,8 @@ import { printAgents, writeStdoutSync } from "./contract.mjs";
 // R111: asserted directly rather than through a scan, so that "the two tables share one member set" is
 // checked as an IDENTITY (`v === CLOCK_READING_PERFORMANCE_MEMBERS`) and not as two regexes that happen
 // to spell the same thing today — which is exactly how R109 and R110 drifted apart.
-import { KAPPA_RULES, CLOCK_READING_PERFORMANCE_MEMBERS, CLOCK_READING_PROCESS_MEMBERS,
+import { KAPPA_RULES, KAPPA_PURE, kappaKnows, CLOCK_READING_PERFORMANCE_MEMBERS,
+         CLOCK_READING_PROCESS_MEMBERS,
          CLOCK_READING_CONSOLE_MEMBERS, NODE_CORE_REVIEWED, CONNECTING_WEB_CTORS,
          WEB_WIRE_MEMBERS } from "./scan-core.mjs";
 // R114 — the member NAMES the node-core floor reviews for `process`, read out of the live table so
@@ -274,6 +275,13 @@ function scan(dir, ...extra) {
   return { r, report, cg, prefix: rp };
 }
 const entry = (rep, fn) => rep.functions.find((e) => e.fn === fn);
+// ⟨R137⟩ A PRECISION guard's property is NO EFFECT FABRICATED — not "the row is absent". Eight of them
+// were spelled `entry(...) == null`, which is the cardinal sin's own signature: a correctly-precise
+// answer and a silently-dropped one are the same bytes, so those rows could not have discriminated
+// one from the other in the direction that matters. They also went red the moment the κ-coverage
+// ledger became member-aware and started DISCLOSING (`invisible:[pkg]`) the very calls they pin —
+// a disclosure with an empty effect set, which is precisely what a precision guard should permit.
+const noEffectCharged = (rep, fn) => ((entry(rep, fn)?.inferred) ?? []).length === 0;
 
 // ── 1. multi-file: cross-file edges resolve and effects propagate ─────────────────────────────────
 if (blk()) {
@@ -2902,7 +2910,16 @@ export function parseEnv(s: string) { return parse(s); }`,
   check("κ: @webpod/ps kill -> Exec", entry(report, "src.cli.killProc")?.inferred.includes("Exec"));
   check("κ: envapi load -> Fs", entry(report, "src.cli.loadEnv")?.inferred.includes("Fs"));
   check("κ: envapi config -> Fs", entry(report, "src.cli.cfgEnv")?.inferred.includes("Fs"));
-  check("κ: envapi parse stays PURE (fabrication guard)", entry(report, "src.cli.parseEnv") == null,
+  check("κ: envapi parse fabricates NO effect (precision guard) — and is now DISCLOSED `invisible:[\"envapi\"]` rather than omitted, because `parse` is a member envapi's member-precise κ rule does not classify (R137)", noEffectCharged(report, "src.cli.parseEnv"),
+        JSON.stringify(entry(report, "src.cli.parseEnv")));
+  // ⟨R137⟩ …AND THE WIDENING IS ASSERTED, NOT MERELY TOLERATED. This is the over-disclosure the
+  // member-aware ledger buys, on one of the eight precision guards it moved: `envapi`'s κ rule
+  // classifies `load|loadSafe|config` and says nothing about `parse`, so the call is now ledgered.
+  // It is the same shape that hid `mongoose.connect`. Whether THIS unmatched member is inert is the κ
+  // rule author's judgement and is left exactly where it was; what changed is that the ledger no
+  // longer reads two sibling verbs matching as a coverage claim over the rest of the package.
+  check("κ ⟨R137⟩: envapi `parse` is DISCLOSED `invisible:[\"envapi\"]`, where before it was omitted on the strength of two SIBLING verbs matching the package name",
+        (entry(report, "src.cli.parseEnv")?.invisible ?? []).includes("envapi"),
         JSON.stringify(entry(report, "src.cli.parseEnv")));
 }
 
@@ -2929,9 +2946,9 @@ export function pure() { return validate("x") ? parse("y") : null; }`,
     });
     const { report } = scan(d);
     check("uuid v4/v7 -> Rand", entry(report, "src.u.gen")?.inferred.includes("Rand"));
-    check("uuid v5 (deterministic hash) is PURE", entry(report, "src.u.hash") == null,
+    check("uuid v5 (deterministic hash) fabricates NO effect — `v5` is outside uuid's κ member regex, so it is disclosed rather than omitted (R137)", noEffectCharged(report, "src.u.hash"),
           JSON.stringify(entry(report, "src.u.hash")));
-    check("uuid parse/validate are PURE", entry(report, "src.u.pure") == null,
+    check("uuid parse/validate fabricate NO effect (R137: disclosed, not omitted)", noEffectCharged(report, "src.u.pure"),
           JSON.stringify(entry(report, "src.u.pure")));
   }
   // nanoid: nanoid/customAlphabet -> Rand; urlAlphabet const -> pure
@@ -3006,7 +3023,7 @@ export function ctor() { return new Stripe("x"); }`,
           entry(report, "src.s.cust")?.inferred.includes("Net"), JSON.stringify(entry(report, "src.s.cust")));
     check("stripe.checkout.sessions.create() (deeper chain) -> Net",
           entry(report, "src.s.sess")?.inferred.includes("Net"), JSON.stringify(entry(report, "src.s.sess")));
-    check("new Stripe() construction is PURE (no Net fabricated)", entry(report, "src.s.ctor") == null,
+    check("new Stripe() construction fabricates NO Net (R137: disclosed, not omitted)", noEffectCharged(report, "src.s.ctor"),
           JSON.stringify(entry(report, "src.s.ctor")));
   }
   // #13 (corpus-audit): a BARE call to an HTTP-client identifier that is DEFAULT- or NAMED-imported from
@@ -3066,7 +3083,7 @@ export function wire(q: Queue) { return q.on("completed", () => {}); }`,
     });
     const { report } = scan(d);
     check("bullmq queue.add -> Db", entry(report, "src.b.enqueue")?.inferred.includes("Db"));
-    check("bullmq queue.on (event wiring) is PURE", entry(report, "src.b.wire") == null,
+    check("bullmq queue.on (event wiring) fabricates NO effect (R137: disclosed, not omitted)", noEffectCharged(report, "src.b.wire"),
           JSON.stringify(entry(report, "src.b.wire")));
   }
   // @sentry/node: captureException/flush -> Net; init is config (pure)
@@ -3086,7 +3103,7 @@ export function setup() { init({}); setTag("a", "b"); }`,
     const { report } = scan(d);
     check("@sentry/node captureException -> Net", entry(report, "src.se.report")?.inferred.includes("Net"));
     check("@sentry/node flush -> Net", entry(report, "src.se.drain")?.inferred.includes("Net"));
-    check("@sentry/node init/setTag (config) are PURE", entry(report, "src.se.setup") == null,
+    check("@sentry/node init/setTag (config) fabricate NO effect (R137: disclosed, not omitted)", noEffectCharged(report, "src.se.setup"),
           JSON.stringify(entry(report, "src.se.setup")));
   }
   // posthog-node: capture/flush -> Net; new PostHog() ctor is config (pure)
@@ -3107,7 +3124,7 @@ export function ctor() { return new PostHog("y"); }`,
     const { report } = scan(d);
     check("posthog-node capture -> Net", entry(report, "src.p.track")?.inferred.includes("Net"));
     check("posthog-node flush -> Net", entry(report, "src.p.drain")?.inferred.includes("Net"));
-    check("new PostHog() construction is PURE", entry(report, "src.p.ctor") == null,
+    check("new PostHog() construction fabricates NO effect (R137: disclosed, not omitted)", noEffectCharged(report, "src.p.ctor"),
           JSON.stringify(entry(report, "src.p.ctor")));
   }
   // nest-winston: the injected logger's level verbs -> Log
@@ -3126,7 +3143,7 @@ export function ctx(l: WinstonLogger) { l.setContext("svc"); }`,
     });
     const { report } = scan(d);
     check("nest-winston logger.log/error -> Log", entry(report, "src.w.emit")?.inferred.includes("Log"));
-    check("nest-winston setContext (config) is PURE", entry(report, "src.w.ctx") == null,
+    check("nest-winston setContext (config) fabricates NO effect (R137: disclosed, not omitted)", noEffectCharged(report, "src.w.ctx"),
           JSON.stringify(entry(report, "src.w.ctx")));
   }
 }
@@ -16581,6 +16598,400 @@ export function go(s: net.Socket): void { s.write("api.example.com"); }`,
   check("R130: the `undici-types` rules are MEMBER-precise — a whole-module (null member-regex) rule would pass every fixture above and fabricate Net on `new Headers()` and `res.json()`",
         KAPPA_RULES.filter(([m]) => m.test("undici-types")).every(([, v]) => v !== null),
         JSON.stringify(KAPPA_RULES.filter(([m]) => m.test("undici-types")).map(([m, v, e]) => [String(m), String(v), e])));
+}
+
+// ── R137: A MEMBER-PRECISE κ RULE SILENCED THE COVERAGE ANSWER FOR THE WHOLE PACKAGE ──────────────
+//
+// `kappaKnows` asked a PACKAGE-granular question — `KAPPA_RULES.some(([mre]) => mre.test(moduleName))`,
+// the member regex never consulted — and it is the gate on the κ-coverage ledger (`!kappaKnows(pkg) &&
+// … && crossesPackageBoundary(file)`). So the moment ANY rule names a package, every OTHER member of
+// that package stops being disclosed. Adding two MEMBER-PRECISE `undici-types` rules (R130, `c4ae525`)
+// flipped `kappaKnows("undici-types")` false -> true and switched the ledger off for the rest of the
+// package's surface. MEASURED, `02cd0a5` vs `c4ae525`, over a 21-file `tsc`-clean fixture, keyed WIDE:
+//
+//     5 rows moved from `invisible:["undici-types"]` to ENTIRELY ABSENT — FormData.append,
+//       FormData.getAll, WebSocket.add/removeEventListener, EventSource.addEventListener — carrying no
+//       `Unknown` and no `invisible`, which under SPEC §2 rule 3 is a POSITIVE PURITY CLAIM.
+//     11 rows lost `invisible` and kept `Unknown`.
+//     `coverage: {uncovered:[{name:"undici-types",calls:16}]}` DISAPPEARED, with its stderr advisory.
+//     `coverage.uncovered` is a CONSUMED verdict surface: query-core.mjs:376/:1278, query.mjs:2578
+//     (`gate --report`, `gains`, `coverageDelta`).
+//
+// THE UNDICI-TYPES INSTANCE IS A LOST DISCLOSURE, NOT A LOST EFFECT, AND THAT IS SAID PLAINLY RATHER
+// THAN LEFT TO READ AS WORSE THAN IT IS. EXECUTED, node 22.12.0, against a real 127.0.0.1 listener
+// counting arrivals: all five of those members perform NOTHING (0 requests each; the same listener
+// counted 1 request for the `new WebSocket(…)` ctor beside them, so the instrument can fail).
+//
+// THE AUDIT BOUNDARY IS NOT DRAWN AROUND ITS OWN TRIGGER (§9), AND ONE HOP OUT IS A CARDINAL SIN WITH
+// TEETH. 22 npm κ rules are member-precise (enumerated by a row below, not remembered), and for every
+// one of them `kappaKnows` answers "covered" for members the rule does not classify. `mongoose`'s rule
+// lists the QUERY verbs and not `connect`:
+//
+//     import mongoose from "mongoose";
+//     export async function boot(uri: string) { await mongoose.connect(uri); }
+//
+//     at c4ae525, real mongoose@8 installed, fixture `tsc`-clean:
+//       `boot` ABSENT from `functions` — no Db, no Unknown, no `invisible`, `coverage` absent
+//       stderr: "candor: nothing hidden — every effect sits where its name says it should."
+//       `deny Db` exit 0.  `deny Db src.k1_connect` exit 0.  `deny Unknown` exit 0.
+//     EXECUTED against a `net.createServer` on 127.0.0.1 counting connections and bytes:
+//       mongoose.connect("mongodb://127.0.0.1:<port>/gt") -> 1 TCP connection, 299 bytes on the wire.
+//
+// THE FIX ASKS ONE AUTHORITY (§G): the κ rule that actually matched the call. `kappaKnows` now takes
+// the MEMBER and answers with the same table, the same regexes and the same (module, member) pair κ
+// itself was asked, instead of a second, weaker package-granular reading of the same table.
+// `KAPPA_PURE` stays exactly what it always was — the explicit whole-package ratification outlet — so
+// nothing new was added to answer this; the residual-review claim already had a home.
+// FAILURE DIRECTION, WRITTEN BEFORE THE CODE: too WIDE ⇒ over-disclosure. A partly-classified package
+// now contributes `invisible:[pkg]` and a `coverage.uncovered` entry for the calls κ did not answer.
+// `invisible` carries no effect and no `Unknown`, so it cannot flip a `deny <Effect>` gate and cannot
+// silence anything; the direction this change CANNOT fail in is silence. Both halves are rows below.
+//
+// AND THE LEDGER HALF ALONE DOES NOT CLOSE THE `mongoose.connect` SIN, WHICH IS WHY THIS ROW HAS A
+// SECOND HALF. Precisely because `invisible` is a disclosure and not an effect, no `deny` gate bites
+// on it. The CLASSIFIER half brings typeorm's own lifecycle verbs — which its rule has carried since a
+// real app read PURE on `new DataSource(o).initialize()` — to its three siblings that never got them
+// (mongoose, sequelize, @prisma/client): §F1.3, separate implementations of one question that drifted.
+// Additive and module-gated, so it fails toward over-charge; forgetting a verb under-fixes and cannot
+// under-report. Only `mongoose.connect` is EXECUTED ground truth; the rest are analogy to typeorm's
+// list and are labelled that way in the κ table rather than sharing a sentence with the measured one.
+if (blk()) {
+  // ── THE ORIGINAL TRIGGER, BOTH ARMS. This engine's standing hazard is two tables answering
+  // overlapping questions (R109/R110/R111/R130), so the undici-types surface is measured under BOTH
+  // tsconfigs with ONE variable — `lib` — exactly as R130 does. Under `lib.dom` these members resolve
+  // into `typescript/lib/lib.dom.d.ts`, which is not a package at all, so the ledger must stay silent
+  // there: a fix that produced a `coverage.uncovered` entry under lib.dom would be inventing a
+  // dependency, and this pair is what tells the two apart.
+  const armTsconfig137 = (lib) => JSON.stringify({
+    compilerOptions: {
+      target: "ES2022", lib, module: "commonjs", strict: false,
+      types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")],
+    },
+    include: ["src"],
+  });
+  const surfaceSrc = `export function fdAppend(f: FormData): void { f.append("a", "b"); }
+export function fdGetAll(f: FormData): unknown { return f.getAll("a"); }
+export function wsListen(w: WebSocket, h: (e: any) => void): void { w.addEventListener("message", h); }
+export function wsUnlisten(w: WebSocket, h: (e: any) => void): void { w.removeEventListener("message", h); }
+export function esListen(s: EventSource, h: (e: any) => void): void { s.addEventListener("message", h); }
+export function hGet(h: Headers): string | null { return h.get("a"); }
+export function rsJson(r: Response): Promise<unknown> { return r.json(); }`;
+  const armRows = {};
+  for (const [armName, lib] of [["@types/node", ["ES2022"]], ["lib.dom", ["ES2022", "DOM"]]]) {
+    const d = project({
+      "tsconfig.json": armTsconfig137(lib),
+      "src/surface.ts": surfaceSrc,
+      // THE κ-CLASSIFIED MEMBERS, in the same tree: the fix must not cost them their effect. If
+      // `kappaKnows` going member-aware had disturbed CLASSIFICATION rather than only the ledger, these
+      // are the rows that would say so.
+      "src/classified.ts": `export function dial(u: string) { return new WebSocket(u); }
+export function wire(w: WebSocket, s: string): void { w.send(s); }`,
+    });
+    const { report, r } = scan(d);
+    const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+    armRows[armName] = { report, r, eff, dir: d };
+    // THE FIVE ROWS THAT WENT ABSENT. An absence assertion is the sin's own signature, so the row is
+    // phrased on the DISCLOSURE, not on the absence: the function must be PRESENT and must carry a
+    // voice. Under lib.dom there is no package to name, so the row is the effect-side control instead.
+    for (const [fn, what] of [
+      ["src.surface.fdAppend", "`FormData.append`"],
+      ["src.surface.fdGetAll", "`FormData.getAll`"],
+      ["src.surface.wsListen", "`WebSocket.addEventListener`"],
+      ["src.surface.wsUnlisten", "`WebSocket.removeEventListener`"],
+      ["src.surface.esListen", "`EventSource.addEventListener`"],
+    ]) {
+      const e = eff(fn);
+      const disclosed = !!e && ((e.invisible ?? []).includes("undici-types")
+                                || (e.inferred ?? []).includes("Unknown"));
+      if (armName === "@types/node")
+        check(`R137 [${armName}]: ${what} — a member of \`undici-types\` that κ does NOT classify — is DISCLOSED, not absent. It carried \`invisible:["undici-types"]\` at 02cd0a5 and vanished entirely at c4ae525, which under SPEC §2 rule 3 is a positive purity claim over a package this scan never read (${fn})`,
+              disclosed, JSON.stringify(e ?? null));
+      else
+        check(`R137 [${armName}] CONTROL: ${what} resolves into lib.dom, which is not a package — so it is NOT ledgered, and a fix that disclosed here would be inventing a dependency (${fn})`,
+              !(e?.invisible ?? []).length, JSON.stringify(e ?? null));
+    }
+    check(`R137 [${armName}] REVERT-INVARIANT CONTROL: \`new WebSocket(u)\` still charges Net — the fix touches the coverage LEDGER, not CLASSIFICATION`,
+          (eff("src.classified.dial")?.inferred ?? []).includes("Net"), JSON.stringify(eff("src.classified.dial") ?? null));
+    check(`R137 [${armName}] REVERT-INVARIANT CONTROL: \`w.send(s)\` still charges Net`,
+          (eff("src.classified.wire")?.inferred ?? []).includes("Net"), JSON.stringify(eff("src.classified.wire") ?? null));
+  }
+  {
+    const unc = (arm) => (armRows[arm].report.coverage?.uncovered ?? []).map((u) => u.name);
+    check("R137: `coverage.uncovered` names `undici-types` again under the @types/node arm — the report-level surface `gate --report`, `gains` and `coverageDelta` read (query-core.mjs:376/:1278, query.mjs:2578). It disappeared wholesale at c4ae525",
+          unc("@types/node").includes("undici-types"), JSON.stringify(armRows["@types/node"].report.coverage ?? null));
+    check("R137: …and the stderr advisory returns with it",
+          /classifier doesn't cover/.test(armRows["@types/node"].r.stderr) && /undici-types/.test(armRows["@types/node"].r.stderr),
+          armRows["@types/node"].r.stderr.slice(0, 400));
+    check("R137 CONTROL: the lib.dom arm still reports NO uncovered package — the two arms disagree here for a real reason (one lands in a package, one in the TS lib), and a fix that made them agree would be wrong",
+          !unc("lib.dom").includes("undici-types"), JSON.stringify(armRows["lib.dom"].report.coverage ?? null));
+    for (const a of ["@types/node", "lib.dom"]) fs.rmSync(armRows[a].dir, { recursive: true, force: true });
+  }
+
+  // ── ONE HOP PAST THE TRIGGER (§9): THE SAME MECHANISM, AN EFFECTFUL UNMATCHED MEMBER, A CARDINAL
+  // SIN — AND IT TOOK BOTH HALVES OF THIS ROW TO CLOSE IT. `mongoose`'s κ rule is member-precise and
+  // `connect` was not one of its verbs, so κ answered null; `kappaKnows("mongoose")` then answered
+  // "covered" at PACKAGE granularity and switched the ledger off too. MEASURED at c4ae525 against real
+  // `mongoose@8` installed from npm, fixture `tsc`-clean:
+  //
+  //     export async function boot(uri: string) { await mongoose.connect(uri); }
+  //       ABSENT from `functions` — no Db, no Unknown, no `invisible`, `coverage` absent
+  //       stderr: "candor: nothing hidden — every effect sits where its name says it should."
+  //       `deny Db` exit 0 · `deny Db src.k1_connect` exit 0 · `deny Unknown` exit 0
+  //     EXECUTED, `net.createServer` on 127.0.0.1 counting connections and bytes:
+  //       mongoose.connect("mongodb://127.0.0.1:<port>/gt")  ->  1 TCP connection, 299 bytes sent
+  //     …and after both halves, on that SAME real-mongoose tree: `inferred:["Db"]`, `incomplete:["Db"]`,
+  //       `deny Db src.k1_connect` exit 1.
+  //
+  // THE LEDGER HALF ALONE WOULD NOT HAVE CLOSED IT, and that is stated rather than glossed: `invisible`
+  // carries no effect and no `Unknown`, so no `deny` gate fires on it. The disclosure makes the report
+  // honest; the κ verbs make the gate bite. The declaration shape below is mongoose's own, vendored so
+  // the rows are hermetic, after the finding was measured on the real package.
+  {
+    const d = project({
+      "package.json": JSON.stringify({ name: "r137-mongo-fixture", version: "1.0.0" }),
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: {
+          target: "ES2022", lib: ["ES2022"], module: "esnext", moduleResolution: "bundler", strict: true,
+          types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")],
+        },
+        include: ["src"],
+      }),
+      "node_modules/mongoose/package.json": JSON.stringify({ name: "mongoose", version: "8.0.0", types: "index.d.ts", main: "index.js" }),
+      "node_modules/mongoose/index.d.ts": `export interface Model<T> { find(filter: object): Promise<T[]>; populate(paths: object): Promise<T[]>; }
+export declare function connect(uri: string, options?: object): Promise<void>;
+export declare function disconnect(): Promise<void>;
+export declare function model<T>(name: string): Model<T>;
+declare const _default: { connect: typeof connect; disconnect: typeof disconnect; model: typeof model };
+export default _default;
+`,
+      "node_modules/mongoose/index.js": `export function connect() { return Promise.resolve(); }\n`,
+      "src/boot.ts": `import mongoose from "mongoose";
+export async function boot(uri: string): Promise<void> { await mongoose.connect(uri); }
+export async function shutdown(): Promise<void> { await mongoose.disconnect(); }`,
+      "src/query.ts": `import mongoose from "mongoose";
+export async function q(m: ReturnType<typeof mongoose.model<{ a: string }>>): Promise<unknown> { return m.find({}); }
+export async function pop(m: ReturnType<typeof mongoose.model<{ a: string }>>): Promise<unknown> { return m.populate({}); }`,
+      "db.pol": "deny Db\n",
+      "bootdb.pol": "deny Db src.boot\n",
+      "popdb.pol": "deny Db src.query\n",
+    });
+    {
+      const tsc = spawnSync("node", [path.join(HERE, "node_modules", "typescript", "bin", "tsc"),
+                                     "-p", path.join(d, "tsconfig.json"), "--noEmit"], { encoding: "utf8" });
+      check("R137 §E3: the mongoose fixture tree COMPILES (`tsc --noEmit` exit 0) — every row below is an assertion about a program, and an uncompilable one makes a correct engine and a broken one produce the same bytes",
+            tsc.status === 0, `exit ${tsc.status}: ${(tsc.stdout || "") + (tsc.stderr || "")}`.slice(0, 600));
+    }
+    const { report } = scan(d);
+    const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+    check("R137 THE CARDINAL SIN ONE PACKAGE OVER, CLASSIFIER HALF: `mongoose.connect(uri)` — EXECUTED, 1 TCP connection and 299 bytes to a 127.0.0.1 listener — charges Db. It was ABSENT from the report at c4ae525: no Db, no Unknown, no `invisible`, under a stderr line reading \"nothing hidden\"",
+          (eff("src.boot.boot")?.inferred ?? []).includes("Db"), JSON.stringify(eff("src.boot.boot") ?? null));
+    check("R137: `mongoose.disconnect()` — the sibling verb, written for the case NOT handed to me (§A.2). typeorm's rule has carried its lifecycle verbs since a real app read PURE on `new DataSource(o).initialize()`; its three siblings listed only the query surface",
+          (eff("src.boot.shutdown")?.inferred ?? []).includes("Db"), JSON.stringify(eff("src.boot.shutdown") ?? null));
+    check("R137 RECALL CONTROL: `model.find({})` — a member the κ rule already classified — is still Db. A fix that widened the ledger by breaking classification would look identical on the rows above",
+          (eff("src.query.q")?.inferred ?? []).includes("Db"), JSON.stringify(eff("src.query.q") ?? null));
+    check("R137 THE LEDGER HALF, AND THE RESIDUAL IT DISCLOSES RATHER THAN CLOSES: `model.populate({})` issues a second query and is STILL not a verb in mongoose's κ rule — so it charges no effect, and now says so with `invisible:[\"mongoose\"]` instead of leaving the caller absent. That is the honest answer for a member nobody has classified, and it is the shape every remaining member-precise rule has",
+          (eff("src.query.pop")?.invisible ?? []).includes("mongoose"), JSON.stringify(eff("src.query.pop") ?? null));
+    check("R137: `coverage.uncovered` names `mongoose` — the calls κ could not answer are COUNTED, which is what makes the ledger per-scan evidence rather than a doc footnote. At c4ae525 the whole block was absent because two κ verbs happened to match elsewhere in the package",
+          (report.coverage?.uncovered ?? []).some((u) => u.name === "mongoose"), JSON.stringify(report.coverage ?? null));
+    const ex = (p) => scan(d, "--policy", path.join(d, p)).r.status;
+    check("R137 GATE: `deny Db src.boot` FIRES (exit 1). It exited 0 at c4ae525 over a function that opens a database connection — measured on the real package, not on this vendored shape",
+          ex("bootdb.pol") === 1, `exit ${ex("bootdb.pol")}`);
+    check("R137 GATE CONTROL: `deny Db` still fires blanket — a change that lost the query surface while gaining the lifecycle verbs would look identical on the row above",
+          ex("db.pol") === 1, `exit ${ex("db.pol")}`);
+    check("R137 GATE, THE LIMIT OF THE LEDGER HALF, STATED RATHER THAN IMPLIED: `deny Db src.query` fires for `find`, and `populate` contributes NOTHING to it — `invisible` is a disclosure, not an effect, so no `deny <Effect>` gate bites on the ledger alone. That is why the classifier half of this row exists",
+          ex("popdb.pol") === 1 && !(eff("src.query.pop")?.inferred ?? []).length,
+          `exit ${ex("popdb.pol")} pop=${JSON.stringify(eff("src.query.pop") ?? null)}`);
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // ── THE ENUMERATION, PRINTED RATHER THAN REMEMBERED (§F1.6). Every member-precise npm κ rule has
+  // this shape; the row asserts the property of the FUNCTION, over the live table, so a rule added
+  // later cannot quietly reintroduce the package-granular reading.
+  {
+    const npmMemberPrecise = KAPPA_RULES.filter(([mre, vre]) =>
+      vre && !/node:/.test(String(mre)) && !/web-globals/.test(String(mre)));
+    const bad = [];
+    for (const [mre, vre] of npmMemberPrecise) {
+      // A token no member regex in this table matches — deliberately not a real member name, because
+      // the question is "does kappaKnows consult the member AT ALL", not "is this member effectful".
+      const token = "candorNoSuchMember";
+      const mod = String(mre).replace(/^\/\^?\(?|\)?\$?\/[a-z]*$/g, "").split("|")[0].replace(/\\/g, "");
+      if (!mre.test(mod) || vre.test(token) || KAPPA_PURE.has(mod)) continue;
+      if (kappaKnows(mod, token)) bad.push([mod, String(vre)]);
+    }
+    check(`R137: kappaKnows consults the MEMBER for every one of the ${npmMemberPrecise.length} member-precise npm κ rules — a package whose rule classifies SOME members no longer answers "covered" for the rest. Enumerated over the live table: ${npmMemberPrecise.map(([m]) => String(m)).join(" ")}`,
+          bad.length === 0, JSON.stringify(bad));
+    check("R137: a WHOLE-MODULE κ rule (null member regex) still answers covered for any member — its author classified the module's whole call surface, and narrowing that would flood every axios/fs consumer with a ledger entry that says nothing",
+          kappaKnows("axios", "candorNoSuchMember") && kappaKnows("fs-extra", "candorNoSuchMember"),
+          `axios=${kappaKnows("axios", "candorNoSuchMember")} fs-extra=${kappaKnows("fs-extra", "candorNoSuchMember")}`);
+    check("R137: `KAPPA_PURE` is still the whole-package ratification outlet and answers covered for any member — the residual-review claim already had a home, so this fix added no second table (§G)",
+          [...KAPPA_PURE].every((p) => kappaKnows(p, "candorNoSuchMember")),
+          JSON.stringify([...KAPPA_PURE].filter((p) => !kappaKnows(p, "candorNoSuchMember"))));
+    check("R137: and a member the rule DOES classify still answers covered — `undici-types` + `send` is the pair R130 added",
+          kappaKnows("undici-types", "send") && kappaKnows("mongoose", "find"),
+          `undici-types.send=${kappaKnows("undici-types", "send")} mongoose.find=${kappaKnows("mongoose", "find")}`);
+  }
+}
+
+// ── R138: R121's `crossesPackageBoundary` ESCAPE FABRICATED Net OVER A STRAY `package.json` ────────
+//
+// `resolvedIsHostFetch`'s guard (3) is `!declaredInGlobalScope(d) && !crossesPackageBoundary(df)`. The
+// escape was written for a real DEPENDENCY's module-scoped `fetch` and it is load-bearing (its own row
+// is below). But `crossesPackageBoundary` answers "is there a DIFFERENT `package.json` above this
+// file" — a question about the FILESYSTEM — where the property R95's guard promised, and the one this
+// arm needs, is about the MODULE SPECIFIER: was this declaration reached as a dependency at all?
+//
+// MEASURED. Two trees differing by exactly one one-line file, `vendor/package.json`, with the same
+// `vendor/shim.d.ts` and the same pure `vendor/shim.js`, both `tsc --noEmit` clean:
+//
+//     deny Net src.main                  e5c60bc      c4ae525 (HEAD)
+//       with vendor/package.json         inferred []  inferred ["Net"], netClass ["unknown-host"]
+//       without it                       inferred []  inferred []
+//
+// GROUND TRUTH IS EXECUTED, node 22.12.0, `http.createServer` on 127.0.0.1 counting arrivals and TCP
+// connections: both spellings of `vendor/shim.js`'s `fetch` return the canned body with REQUESTS
+// ARRIVED = 0 and TCP CONNECTIONS = 0; the real host `fetch` to the SAME listener in the SAME process
+// counted 1 and 1, so the instrument can fail.
+//
+// THE FIX IS A DENYLIST NARROWING AND ASKS THE AUTHORITY (§G): TypeScript's own module resolution
+// already records whether a source file was reached as an external library — `isSourceFileFromExternal
+// Library`, true exactly when resolution went through node module resolution rather than a relative
+// path. PRINTED at the arm before the code was written, over the three shapes:
+//
+//     vendor/shim.d.ts via `../vendor/shim`, WITH a stray package.json    externalLibrary = false
+//     vendor/shim.d.ts via `../vendor/shim`, WITHOUT one                  externalLibrary = false
+//     packages/mock/dist/index.d.ts via `@mono/mock` (workspace symlink)  externalLibrary = true
+//
+// so the answer no longer moves when a one-line file appears, and the workspace shape — which reaches
+// its dependency by a BARE SPECIFIER and is a genuine dependency — is untouched.
+// FAILURE DIRECTION, WRITTEN BEFORE THE CODE: too NARROW ⇒ this arm stops charging Net for a real
+// dependency reached WITHOUT node module resolution (a tsconfig `paths` alias, a vendored copy
+// committed into the tree). That call does NOT go silent — `crossesPackageBoundary` is untouched, so
+// the κ-coverage ledger still discloses `invisible:[pkg]` over it, which is the honest answer for a
+// body this scan never read. That is measured by a row below, not asserted.
+if (blk()) {
+  const d = project({
+    "package.json": JSON.stringify({ name: "r138-fixture", version: "1.0.0" }),
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: {
+        target: "ES2022", lib: ["ES2022"], module: "esnext", moduleResolution: "bundler", strict: true,
+        types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")],
+      },
+      include: ["src"],
+    }),
+    // THE SHAPE R121's OWN FIXTURE MISSED (§A.2 — a test inherits the blind spot of the report that
+    // prompted it): the same project-owned shim, outside `include` exactly as there, but with a
+    // `package.json` of its own. `{"type":"module"}` markers, a `vendor/` drop, a monorepo subpackage
+    // reached by a relative path — every one of these puts a package.json under a directory the app
+    // imports RELATIVELY, and R121's fixture had none.
+    "vendor/package.json": JSON.stringify({ name: "vendor-shim", version: "1.0.0", private: true }),
+    "vendor/shim.ts": `export function fetch(url: string): Promise<Response>;
+export function fetch(url: string, init?: RequestInit): Promise<Response>;
+export function fetch(url: string, _init?: RequestInit): Promise<Response> {
+  return Promise.resolve(new Response("canned-local-no-network:" + url));
+}
+export default { fetch };`,
+    "src/shimcalls.ts": `import * as shim from "../vendor/shim";
+import { fetch as named } from "../vendor/shim";
+import shimDefault from "../vendor/shim";
+export function viaNamed(u: string) { return named(u); }
+export function viaNamespace(u: string) { return shim.fetch(u); }
+export function viaNsDestructure(u: string) { const { fetch } = shim; return fetch(u); }
+export function viaDefaultDestructure(u: string) { const { fetch } = shimDefault; return fetch(u); }
+export function viaMemberAlias(u: string) { const f = shim.fetch; return f(u); }
+export function viaNsBinding(u: string) { const s = shim; return s.fetch(u); }`,
+    // CONTROL 1, THE LOAD-BEARING ESCAPE (§C, guard-deletion): a real installed dependency exporting a
+    // module-scoped `fetch`, reached through a binding hop. The import arm only sees the DIRECT
+    // spelling, so this arm is the only thing charging the hop, and deleting the escape outright reds
+    // exactly this row. It must stay Net.
+    "node_modules/fakenet/package.json": JSON.stringify({ name: "fakenet", version: "1.0.0", types: "index.d.ts", main: "index.js" }),
+    "node_modules/fakenet/index.d.ts": `export declare function fetch(url: string, init?: RequestInit): Promise<Response>;\n`,
+    "node_modules/fakenet/index.js": `export function fetch(u) { return Promise.resolve(new Response(u)); }\n`,
+    // CONTROL 2, THE DISTINCTION THAT MUST BE PRESERVED: a monorepo WORKSPACE dependency, symlinked
+    // into node_modules and reached by a BARE SPECIFIER. Its declaration file resolves to a real path
+    // with no `node_modules/` segment, so a `/node_modules\\//` path test would have silenced it — the
+    // reason the authority here is TypeScript's resolution record and not the path. This shape
+    // fabricates today and is UNCHANGED by this fix: it is a separate, pre-existing question (candor
+    // cannot tell a workspace dependency's `fetch` from the host's without value provenance) and
+    // narrowing it here would be a fix drawing its own boundary around a case it never measured.
+    "packages/mock/package.json": JSON.stringify({ name: "@mono/mock", version: "1.0.0", private: true, main: "dist/index.js", types: "dist/index.d.ts" }),
+    "packages/mock/dist/index.d.ts": `export declare function fetch(input: string): Promise<Response>;\n`,
+    "packages/mock/dist/index.js": `export function fetch(_i) { return Promise.resolve(new Response("canned")); }\n`,
+    // CONTROL 3: the host's own fetch, in every spelling R121 pinned. A narrowing that silenced the
+    // real thing would look identical on every fabrication row above.
+    "src/hostslot.ts": `export const slot = { fetch: globalThis.fetch };`,
+    "src/host.ts": `import { slot } from "./hostslot";
+import * as fake from "fakenet";
+import { fetch as pkgNamed } from "fakenet";
+import * as mono from "@mono/mock";
+export function hostBare(u: string) { return fetch(u); }
+export function hostDestructure(u: string) { const { fetch } = globalThis; return fetch(u); }
+export function hostRenamed(u: string) { const { fetch: f } = globalThis; return f(u); }
+export function hostViaG(u: string) { const g = globalThis; return g.fetch(u); }
+export function hostArr(u: string) { const a = [fetch]; return a[0](u); }
+export function hostGlobalThis(u: string) { return globalThis.fetch(u); }
+export function hostViaSlotMember(u: string) { return slot.fetch(u); }
+export function hostViaSlotDestructure(u: string) { const { fetch } = slot; return fetch(u); }
+export function pkgNamespaceHop(u: string) { const { fetch } = fake; return fetch(u); }
+export function pkgNamedDirect(u: string) { return pkgNamed(u); }
+export function monoNamespaceHop(u: string) { const { fetch } = mono; return fetch(u); }`,
+    "shim.pol": "deny Net src.shimcalls\n",
+    "host.pol": "deny Net src.host\n",
+  });
+  fs.mkdirSync(path.join(d, "node_modules", "@mono"), { recursive: true });
+  fs.symlinkSync(path.join(d, "packages", "mock"), path.join(d, "node_modules", "@mono", "mock"), "dir");
+  {
+    const tsc = spawnSync("node", [path.join(HERE, "node_modules", "typescript", "bin", "tsc"),
+                                   "-p", path.join(d, "tsconfig.json"), "--noEmit"], { encoding: "utf8" });
+    check("R138 §E3: the fixture tree COMPILES (`tsc --noEmit` exit 0) — the fabrication rows are ABSENCE assertions and an uncompilable fixture makes a correct engine and a broken one produce the same bytes",
+          tsc.status === 0, `exit ${tsc.status}: ${(tsc.stdout || "") + (tsc.stderr || "")}`.slice(0, 600));
+  }
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const isNet = (fn) => (eff(fn)?.inferred ?? []).includes("Net");
+
+  for (const [fn, what] of [
+    ["src.shimcalls.viaNamed", "`import { fetch } from \"../vendor/shim\"` — the DIRECT spelling"],
+    ["src.shimcalls.viaNamespace", "`shim.fetch(u)` through a namespace import"],
+    ["src.shimcalls.viaNsDestructure", "`const { fetch } = shimNamespace`"],
+    ["src.shimcalls.viaDefaultDestructure", "`const { fetch } = shimDefault`"],
+    ["src.shimcalls.viaMemberAlias", "`const f = shim.fetch; f(u)`"],
+    ["src.shimcalls.viaNsBinding", "`const s = shim; s.fetch(u)`"],
+  ]) {
+    check(`R138: fabricates nothing over a project-owned shim in a directory that happens to carry its OWN package.json — ${what}. Executed against a real listener this performs no network I/O at all; at c4ae525 it was \`inferred:["Net"], netClass:["unknown-host"]\` (${fn})`,
+          !isNet(fn), JSON.stringify(eff(fn) ?? null));
+  }
+  check("R138 THE DISCLOSURE IS STILL THERE, AND THIS IS THE ARGUMENT THE NARROWING RESTS ON — measured, not asserted: dropping the Net does not make the call silent. `vendor/` is a different package by `nearestPackageName`, so the κ-coverage ledger still discloses it and the caller keeps a voice over a body this scan never read",
+        (eff("src.shimcalls.viaNamed")?.invisible ?? []).includes("vendor-shim"),
+        JSON.stringify(eff("src.shimcalls.viaNamed") ?? null));
+
+  for (const [fn, what] of [
+    ["src.host.hostBare", "the bare global `fetch(u)`"],
+    ["src.host.hostDestructure", "`const { fetch } = globalThis` — R95's cardinal sin, still closed"],
+    ["src.host.hostRenamed", "`const { fetch: f } = globalThis`"],
+    ["src.host.hostViaG", "`const g = globalThis; g.fetch(u)`"],
+    ["src.host.hostArr", "`const a = [fetch]; a[0](u)`"],
+    ["src.host.hostGlobalThis", "`globalThis.fetch(u)`"],
+    ["src.host.hostViaSlotMember", "`slot.fetch(u)` — R121's silent half"],
+    ["src.host.hostViaSlotDestructure", "`const { fetch } = slot`"],
+  ]) {
+    check(`R138 RECALL CONTROL (written before the narrowing): ${what} is still Net (${fn})`,
+          isNet(fn), JSON.stringify(eff(fn) ?? null));
+  }
+  check("R138 THE LOAD-BEARING ESCAPE, PRESERVED: a real INSTALLED dependency's module-scoped `export declare function fetch` reached through a binding hop (`import * as fake from \"fakenet\"; const { fetch } = fake`) is still Net. Deleting the escape outright reds exactly this row, which is why the fix narrows it instead",
+        isNet("src.host.pkgNamespaceHop"), JSON.stringify(eff("src.host.pkgNamespaceHop") ?? null));
+  check("R138: …and the direct spelling of the same dependency import, which the import arm owns, is unchanged",
+        isNet("src.host.pkgNamedDirect"), JSON.stringify(eff("src.host.pkgNamedDirect") ?? null));
+  check("R138 THE DISTINCTION PRESERVED, PINNED AS THE OPEN QUESTION IT IS: a monorepo WORKSPACE dependency reached by a BARE SPECIFIER through a symlink is still Net. It resolves to a path with no `node_modules/` segment, so a path test would have silenced it — and it is NOT what this fix is about, so it asserts today's answer on purpose",
+        isNet("src.host.monoNamespaceHop"), JSON.stringify(eff("src.host.monoNamespaceHop") ?? null));
+  {
+    const ex = (p) => scan(d, "--policy", path.join(d, p)).r.status;
+    check("R138 GATE: `deny Net src.shimcalls` exits 0 — at c4ae525 it exited 1 over six functions whose executed run makes no network call at all, and a red gate that means nothing is the whole cost of a fabrication",
+          ex("shim.pol") === 0, `exit ${ex("shim.pol")}`);
+    check("R138 GATE CONTROL: `deny Net src.host` still exits 1 — a fix that silenced the real host fetch would look identical on the row above",
+          ex("host.pol") === 1, `exit ${ex("host.pol")}`);
+  }
+  fs.rmSync(d, { recursive: true, force: true });
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);

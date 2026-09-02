@@ -194,9 +194,10 @@ export const WEB_WIRE_MEMBERS = /^(send|close)$/;
 // ---- κ — the curated classifier (CLASSIFIER §2: the dispatch/execution boundary, not builders) ----
 // Node builtins + a curated npm tier (the same under-report-and-say-so posture as the crate table:
 // an unlisted package contributes nothing — never a guess).
-// One rules TABLE, two readers: kappa() classifies a call; kappaKnows() answers "is this package
-// curated at all?" for the coverage ledger (a κ-known package whose given call is pure — a TypeORM
-// builder — is covered, not a blind spot). A single source so the two can never drift.
+// One rules TABLE, two readers, and ⟨R137⟩ they now ask it the SAME question: kappa() classifies a
+// call; kappaKnows() answers "did a rule COVER this call" for the coverage ledger — same module, same
+// member, same regexes. It used to answer the weaker "is this package named anywhere in the table",
+// and that reading disagreed with κ in the silent direction (see kappaKnows below).
 // [module-name regex, member regex (null = any member), effect]
 // The member token a rule matches against is the resolved declaration's name, EXCEPT a constructor
 // call (`new X()`), whose synthesized token is "new" (its decl `name` is empty — see CLASSIFY). This
@@ -508,16 +509,32 @@ export const KAPPA_RULES = [
   [/^(typeorm|@nestjs\/typeorm)$/,
    /^(find|save|remove|softRemove|recover|insert|update|upsert|delete|restore|count|exist|sum|average|minimum|maximum|query|clear|increment|decrement|getMany|getOne|getOneOrFail|getRawMany|getRawOne|getCount|getExists|execute|stream|transaction|initialize|connect|synchronize|runMigrations|undoLastMigration|dropDatabase)/,
    "Db"],
+  // ⟨R137, the CLASSIFIER half⟩ THE THREE ORMS BESIDE typeorm WERE MISSING ITS LIFECYCLE VERBS — §F1.3,
+  // separate implementations of one question that drifted. The typeorm rule above deliberately carries
+  // `initialize|connect|synchronize|runMigrations|undoLastMigration|dropDatabase|clear|stream` "the
+  // DataSource lifecycle that performs connection/DDL I/O", after `buildPostgresDataSource` read PURE on
+  // a real app. Its three siblings list only the QUERY surface, so the equivalent calls resolved to
+  // nothing — and because `kappaKnows` was package-granular they were not even ledgered (that is the
+  // other half of R137). Every verb added below is the named analogue of one typeorm already has:
+  //   connect/authenticate <- connect · disconnect/close <- (the pairing verb) · sync* <- synchronize
+  //   drop* <- dropDatabase · truncate <- clear · watch <- stream
+  // GROUND TRUTH IS EXECUTED for the one this was found on, node 22.12.0, real `mongoose@8` from npm
+  // against a `net.createServer` on 127.0.0.1 counting arrivals:
+  //     await mongoose.connect("mongodb://127.0.0.1:<port>/gt")  ->  1 TCP connection, 299 bytes sent
+  // The other five are ANALOGY to typeorm's own list, not execution, and are labelled as such rather
+  // than shared a sentence with the measured one. ADDITIVE and module-gated, so the direction this
+  // fails in is over-charge on a same-named member of one of these four ORMs; forgetting a verb
+  // under-fixes and cannot under-report.
   [/^(@prisma\/client|\.prisma|\.prisma\/client)$/,
-   /^(\$?(queryRaw|executeRaw|transaction)|find(Many|Unique|First)|create|createMany|update|updateMany|upsert|delete|deleteMany|aggregate|count|groupBy)/,
+   /^(\$?(queryRaw|executeRaw|transaction|connect|disconnect)|find(Many|Unique|First)|create|createMany|update|updateMany|upsert|delete|deleteMany|aggregate|count|groupBy)/,
    "Db"],
   [/^mongoose$/,
-   /^(find|save|create|insertMany|updateOne|updateMany|replaceOne|deleteOne|deleteMany|aggregate|countDocuments|estimatedDocumentCount|distinct|exec|bulkWrite)/,
+   /^(find|save|create|insertMany|updateOne|updateMany|replaceOne|deleteOne|deleteMany|aggregate|countDocuments|estimatedDocumentCount|distinct|exec|bulkWrite|connect|disconnect|close|drop|sync|watch)/,
    "Db"],
   // Sequelize is EXECUTE-ON-CALL: `Model.findAll()/create()/update()/destroy()` issue the query and
   // return a promise — so its verbs are the I/O boundary.
   [/^sequelize$/,
-   /^(find|create|update|destroy|upsert|count|max|min|sum|increment|decrement|reload|save|query|transaction)/,
+   /^(find|create|update|destroy|upsert|count|max|min|sum|increment|decrement|reload|save|query|transaction|authenticate|sync|close|drop|truncate)/,
    "Db"],
   // Drizzle is a BUILDER: `db.select().from().where()` / `db.insert().values()` / `db.update().set()` /
   // `db.delete().where()` issue NOTHING until a terminal `.execute()`/await/`.all()`/`.get()`/`.run()` (or
@@ -798,8 +815,39 @@ export const KAPPA_PURE = new Set([
   "class-validator", "class-transformer", "reflect-metadata",
   "rxjs", "zod", "lodash", "ramda", "date-fns",
 ]);
-export function kappaKnows(moduleName) {
-  return KAPPA_PURE.has(moduleName) || KAPPA_RULES.some(([mre]) => mre.test(moduleName));
+/**
+ * ⟨R137⟩ Did κ COVER THIS CALL? — the κ-coverage ledger's gate, asked of the same (module, member)
+ * pair `kappa()` itself was asked, against the same table and the same regexes.
+ *
+ * IT USED TO ASK A PACKAGE-GRANULAR QUESTION — `KAPPA_RULES.some(([mre]) => mre.test(moduleName))`,
+ * the member regex never consulted — which is a SECOND, weaker reading of the one table, and it
+ * disagreed with κ in the silent direction: the moment any rule named a package, every OTHER member
+ * of that package stopped being disclosed. R130 added two MEMBER-PRECISE `undici-types` rules and
+ * that flipped `undici-types` from uncovered to covered wholesale — 5 rows moved from
+ * `invisible:["undici-types"]` to entirely absent (a positive purity claim, SPEC §2 rule 3), 11 lost
+ * their `invisible`, and the report's whole `coverage:{uncovered:[…]}` block disappeared with its
+ * stderr advisory.
+ *
+ * AND THE CLASS IS NOT `undici-types`. Every member-precise npm rule has the same shape, and the
+ * trigger was the mildest instance of it. `mongoose`'s rule lists the QUERY verbs and not `connect`,
+ * so `mongoose.connect(uri)` — EXECUTED against a 127.0.0.1 listener: 1 TCP connection, 299 bytes on
+ * the wire — left the report with no Db, no Unknown, no `invisible` and no coverage entry, under a
+ * stderr line reading "nothing hidden — every effect sits where its name says it should".
+ *
+ * FAILURE DIRECTION: too WIDE ⇒ over-disclosure. A partly-classified package now contributes
+ * `invisible:[pkg]` and a `coverage.uncovered` entry for the calls κ did not answer. `invisible`
+ * carries no effect and no `Unknown`, so it cannot flip a `deny <Effect>` gate and cannot silence
+ * anything — the direction this cannot fail in is silence, which is the side to be wrong on.
+ *
+ * `KAPPA_PURE` is unchanged and is still the whole-package ratification outlet: a package whose
+ * REMAINING surface has been reviewed effect-free belongs there, so this needed no second table. A
+ * WHOLE-MODULE rule (`null` member regex) still covers every member, because its author classified
+ * the module's whole call surface — that is what the null means.
+ */
+export function kappaKnows(moduleName, member) {
+  if (KAPPA_PURE.has(moduleName)) return true;
+  const m = member ?? "";
+  return KAPPA_RULES.some(([mre, vre]) => mre.test(moduleName) && (!vre || vre.test(m)));
 }
 
 // Refine the Exec cliff (spec §4 ⟨0.5⟩): the effects a literal, statically-known subprocess head
