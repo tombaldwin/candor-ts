@@ -374,7 +374,21 @@ export const NODE_CORE_REVIEWED = [
   // (Request/Response/Headers/FormData) is inert construction. It is listed here so the floor does not
   // stack a second, reasonless `Unknown` on top of a call this engine already answers precisely.
   // `web-globals/storage` is DELIBERATELY ABSENT: Node's `localStorage`/`sessionStorage` persist to a
-  // file, so it is not inert and has not been modelled — it fails closed.
+  // file, so it is not inert and has not been modelled — it fails closed HERE.
+  //
+  // AND "IT FAILS CLOSED" WAS A FALSE GUARANTEE FOR AS LONG AS IT STOOD (R109). This table is consulted
+  // only when the declaration came from `@types/node`. The SAME source line resolved through lib.dom —
+  // which is `lib: [...,"DOM"]` and also the DEFAULT `lib` for any ES target, i.e. the common case —
+  // never reached this floor at all: it landed on scan.mjs's conventionally-pure `<es-lib>` arm and read
+  // SILENT-PURE, so `deny Unknown` exited 0 over `localStorage.setItem("token", secret)`. One line, two
+  // answers, selected by tsconfig. The lib.dom half now has its own `parent === "Storage"` branch at the
+  // es-lib arm and converges on this answer; the guarantee has TWO halves and only one of them lives in
+  // this file. Same split as the `crypto` note below, which is where the fix shape came from.
+  //
+  // A FULL SWEEP of the twin set, because an audit scoped to its own trigger misses the next instance:
+  // asking `nodeCoreUnreviewed(m, <unenumerated member>)` for every file in `@types/node/web-globals`
+  // returns FAILS-CLOSED for `storage` and reviewed-pure for the other fifteen. `storage` was the only
+  // member of this class, and it is closed.
   [/^web-globals\/(abortcontroller|blob|console|crypto|domexception|encoding|events|fetch|importmeta|messaging|navigator|performance|streams|timers|url)$/, null],
   // ── mixed modules: the reviewed-pure half, member by member ──
   // node:crypto is deterministic computation plus entropy; κ above takes the entropy (`random*`,

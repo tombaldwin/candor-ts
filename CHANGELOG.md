@@ -8,6 +8,53 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL-SIN FIX (SOUNDNESS R109) — `localStorage.setItem("token", secret)` was silently pure
+  under lib.dom, while the SAME LINE failed closed under `@types/node`.** One source line, two answers,
+  selected by tsconfig:
+
+      export function stash(secret: string) { localStorage.setItem("token", secret); }
+
+      lib.dom resolution      →  functions: []                                 deny Unknown → exit 0
+      @types/node resolution  →  Unknown[native:web-globals/storage.setItem]   deny Unknown → exit 1
+
+  **The wrong half is the common case.** lib.dom is what `lib: [...,"DOM"]` selects and also what the
+  DEFAULT `lib` selects for any ES target, so it covers every browser project, every isomorphic package
+  and every tsconfig that simply does not say `lib`. The @types/node half is reached only by a tsconfig
+  that names `lib` *without* `DOM`. Ground-truthed by EXECUTION under a hand-rolled `Storage` shim, not
+  from candor's own report: the write really happens.
+
+  `scan-core.mjs` asserted of `web-globals/storage` that "it is not inert and has not been modelled — it
+  **fails closed**". True of the spelling that file governs, false of the other one, and a documented
+  guarantee is what stops a property being measured. That comment now names both halves.
+
+  **The fix keys on the RESOLVED DECLARATION's parent (`Storage`), never on the identifier text** — the
+  same mechanism the `Crypto` arm two lines above already used for this exact es-lib/@types-node split.
+  One predicate therefore covers `localStorage`, `sessionStorage`, `window.localStorage`,
+  `globalThis.localStorage`, a `Storage`-typed parameter and every alias, and cannot fire on a project's
+  own `class Storage` (reaching that arm already proves the declaration lives in `typescript/lib/`).
+  Not hypothetical: the corpus A/B charged `this.sessionStore.getItem(k)` in `@supabase/phoenix`,
+  `let storage = self.localStorage; storage.setItem(…)` in `redux-persist`, and a storage FACTORY's
+  return value in `jotai` — an identifier-text key would have reported all three as pure. The whole
+  `Storage` interface is charged, not a verb list: a read of persisted data crosses the boundary as much
+  as a write, and an unlisted member would be silently pure.
+
+  **A/B, 194 npm packages with `node_modules` installed, keyed WIDE (every field, not just `inferred`),
+  pre-image `30fc8ea`:**
+
+      ADDED 5   REMOVED 0   CHANGED 41 (wide)  ·  CHANGED 26 (narrow, `inferred` only)
+      10,695 common rows · 113 hits on the changed branch across 8 packages
+      hits/pkg: localforage 52, redux-persist 21, oidc-client-ts 15, @supabase/auth-js 9,
+                jotai 9, @supabase/supabase-js 3, @dabh/diagnostics 2, @supabase/phoenix 2
+
+  **REMOVED 0** — nothing became pure, which is the direction that hides a sin. All 46 moved rows were
+  audited in FULL (no sampling) and bucket into exactly two mechanisms with none left over: 24 DIRECT
+  (own body calls a lib.dom `Storage` member) and 22 TRANSITIVE (proven by the calls-closure to reach a
+  direct one — not accepted on a `<module>` name-suffix shortcut). Every direct hit was ground-truthed
+  from the real package source; zero fabrications.
+
+  A full sweep of the twin set — `nodeCoreUnreviewed(m, <unenumerated member>)` for all 16 files in
+  `@types/node/web-globals` — shows `storage` was the **only** member of this class, and it is closed.
+
 - **⚠ CARDINAL-SIN FIX (SOUNDNESS R95) — `const { fetch } = globalThis; fetch(url)` was silently pure,
   and so were three more spellings the alias unwrap cannot reach.** Measured at `0b360d4`, i.e. after
   every earlier fix in this vein, and EXECUTED: all four forms were compiled and run against a localhost

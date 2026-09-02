@@ -6052,6 +6052,41 @@ function visitCalls(node) {
           if (parent === "Crypto" && (name === "getRandomValues" || name === "randomUUID")) {
             rec.direct.add("Rand");
           }
+          // Web Storage — `localStorage`/`sessionStorage`. THE SAME es-lib/@types-node SPLIT the `Crypto`
+          // line above exists for, and the half that was still open: @types/node's `web-globals/storage`
+          // is deliberately absent from `NODE_CORE_REVIEWED`, so under `types: ["node"]` with `lib` not
+          // including DOM the call fails closed as `Unknown[native:web-globals/storage.setItem]` and
+          // `deny Unknown` exits 1. Resolve the SAME LINE through lib.dom — which is what `lib: ["…","DOM"]`
+          // gives, and also what the DEFAULT `lib` for any ES target gives, so it is the common case, not
+          // the exotic one — and it landed on the conventionally-pure arm below with no branch of its own:
+          //     export function stash(secret: string) { localStorage.setItem("token", secret); }
+          //   lib.dom   →  functions: []            deny Unknown → exit 0     (silent under-report)
+          //   @types/node → Unknown[native:…]       deny Unknown → exit 1
+          // One line, two answers, selected by tsconfig. Ground-truthed by EXECUTION under a `Storage`
+          // shim: the write really happens. Converging on the fail-closed answer is the only direction
+          // that is sound in both configs.
+          //
+          // KEYED ON THE RESOLVED DECLARATION'S PARENT (`Storage`), NOT ON THE IDENTIFIER TEXT. Keying on
+          // the name `localStorage` would miss `window.localStorage`, `sessionStorage` (lib.dom declares
+          // BOTH as `: Storage`, so both fall out of this one predicate — measured, not assumed) and a
+          // `Storage`-typed parameter, and would fabricate on a user-defined binding called
+          // `localStorage`. Reaching this arm already proves the declaration is `typescript/lib/lib.*.d.ts`
+          // (`declModule`), so a project's own `class Storage` resolves `<local>` and is never charged.
+          //
+          // THE WHOLE INTERFACE, not a verb list: reads persist across sessions and origins just as writes
+          // do, and an unlisted member would be silently pure — the denylist direction, matching what the
+          // node floor already does for every member of that file. `Unknown` rather than `Fs` because the
+          // backing store is not modelled (a browser's is not a filesystem, node's is a file); this is the
+          // node arm's answer, verbatim, which is the point. Reason names the interface actually resolved
+          // — `native:Storage.setItem` — rather than borrowing the node arm's file path, which no DOM-only
+          // project has; both map to reason class `native`, so `Unknown[native]` gates identically.
+          // NOT a claim about the whole DOM surface: `StorageManager.getDirectory` (OPFS), `IDBFactory`,
+          // `caches` and the `localStorage.x = v` INDEX-SIGNATURE spelling are untouched and still pure —
+          // the last of those is pure under @types/node too, so it is not part of this split.
+          if (parent === "Storage") {
+            rec.direct.add("Unknown");
+            rec.why.add(`native:Storage.${name}`);
+          }
           // `new EventSource(url)` / `new WebSocket(url)`: the constructor is declared on an anonymous
           // `declare var` object type (symbol `__type`, no usable parent name), but reaching the es-lib
           // branch already proves the ctor resolved to lib.dom (not a project class shadowing the name),

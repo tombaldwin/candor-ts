@@ -13886,6 +13886,166 @@ module.exports = { add };`,
   }
 }
 
+// ── R109: ONE LINE, TWO ANSWERS, SELECTED BY tsconfig — WEB STORAGE ON THE es-lib ARM ─────────────
+//
+// CARDINAL SIN (silent under-report) on HEAD 30fc8ea, measured against this exact source:
+//
+//     export function stash(secret: string) { localStorage.setItem("token", secret); }
+//
+//   lib.dom resolution     ->  functions: []                                deny Unknown -> exit 0
+//   @types/node resolution ->  Unknown[native:web-globals/storage.setItem]  deny Unknown -> exit 1
+//
+// The engine already had the right answer and gave the wrong one, chosen by which declaration file the
+// checker landed on. And the WRONG half is the common case, not the exotic one: lib.dom is what
+// `lib: ["ES2022","DOM"]` selects AND what the DEFAULT `lib` for any ES target selects, so it covers
+// every browser project, every isomorphic package, and every tsconfig that simply does not say `lib`.
+// The @types/node half is reached only by a tsconfig that names `lib` WITHOUT `DOM`.
+//
+// GROUND-TRUTHED BY EXECUTION, not by candor's own report: the fixture run under a hand-rolled
+// `globalThis.localStorage` shim really does write the secret into the backing store.
+//
+// THE FIX SHAPE CAME FROM THE `Crypto` LINE TWO ABOVE IT — the same es-lib/@types-node split, already
+// solved once. `scan-core.mjs` said of `web-globals/storage`: "it is not inert and has not been
+// modelled — it fails closed." True of one spelling and false of the other, which is attack K: a
+// comment asserting safety is what stops the property being measured.
+//
+// WHY THE CONTROLS ARE THE DELIVERABLE. Charging `Unknown` on a call named `localStorage` is trivially
+// achievable and would (a) MISS `sessionStorage`, `window.localStorage`, a `Storage`-typed parameter and
+// every alias, and (b) FABRICATE on a project's own `class Storage`. Keying on the RESOLVED
+// DECLARATION's parent gets all of those right by construction — and the alias/property spellings are
+// not hypothetical: the corpus A/B caught `this.sessionStore.getItem(k)` in @supabase/phoenix,
+// `let storage = self.localStorage; storage.setItem(...)` in redux-persist, and a storage FACTORY's
+// return value in jotai. An identifier-text key would have reported all three as pure.
+if (blk()) {
+  // No tsconfig anywhere in this tree, and no `lib` named: the DEFAULT lib for the target, which
+  // includes lib.dom. This is the resolution the sin lives in.
+  const d = project({
+    "src/sin.ts": `export function stash(secret: string) { localStorage.setItem("token", secret); }
+export function stashSession(s: string) { sessionStorage.setItem("t", s); }
+export function viaWindow(s: string) { window.localStorage.setItem("t", s); }
+export function viaGlobalThis(s: string) { globalThis.localStorage.setItem("t", s); }
+export function viaParam(st: Storage, s: string) { st.setItem("t", s); }
+export function readIt(): string | null { return localStorage.getItem("token"); }
+export function clearIt(): void { localStorage.clear(); }
+export function delIt(): void { localStorage.removeItem("token"); }
+export function keyIt(): string | null { return localStorage.key(0); }`,
+    // THE ALIAS/INDIRECTION SPELLINGS. Written because the fix's own comment claims the declaration key
+    // gets "every alias right by construction", and an argument is not a measurement (§E2). Note the
+    // DESTRUCTURE row: `const { fetch } = globalThis` was R95's cardinal sin one commit ago, and this
+    // key is immune to that whole class because it never reads the callee's text — which is a property
+    // worth PINNING, not a property worth asserting.
+    "src/alias.ts": `export function viaAlias(s: string): void { const st = localStorage; st.setItem("t", s); }
+export function viaDestructure(s: string): void { const { setItem } = localStorage; setItem("t", s); }
+export function viaField(o: { store: Storage }, s: string): void { o.store.setItem("t", s); }
+export function viaFactory(s: string): void { const f = () => window.localStorage; f().setItem("t", s); }
+export function viaOptional(s: string): void { globalThis.localStorage?.setItem("t", s); }`,
+    // OVER-CHARGE CONTROL — the precision control, and the one that matters. The es-lib arm exists to
+    // keep ordinary code quiet; if this block gains anything the fix has broken the product.
+    "src/pure.ts": `export function pArr(a: number[]): number { return a.map((x) => x + 1).filter((x) => x > 0).reduce((s, x) => s + x, 0); }
+export function pStr(s: string): string { return s.trim().toUpperCase().padStart(4, "0").slice(1); }
+export function pJson(o: unknown): string { return JSON.stringify(o); }
+export function pObj(o: object): string[] { return Object.keys(o); }
+export function pMap(): number { const m = new Map<string, number>(); m.set("a", 1); return m.get("a") ?? 0; }
+export function pSet(): boolean { const s = new Set<string>(); s.add("a"); return s.has("a"); }
+export function pNum(n: number): string { return n.toFixed(2); }`,
+    // SHADOW CONTROL — a project's OWN `Storage`. Reaching the es-lib arm already requires the
+    // declaration to live in `typescript/lib/lib.*.d.ts`, so these resolve `<local>` and are never
+    // asked; the rows exist because that is an argument, and an argument is not a measurement.
+    "src/shadow.ts": `class Storage { setItem(_k: string, _v: string): void { /* in-memory */ } }
+const localStorage2 = new Storage();
+export function shadowClass(s: string): void { localStorage2.setItem("t", s); }
+export function shadowVar(s: string): void { const store = new Storage(); store.setItem("t", s); }`,
+    "unknown.pol": "deny Unknown\n",
+    "native.pol": "deny Unknown[native]\n",
+    "reflect.pol": "deny Unknown[reflect]\n",
+  });
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const why = (fn) => eff(fn)?.unknownWhy ?? [];
+
+  // THE DEFECT and every spelling of it. `viaParam` and `viaWindow` are the rows a name-keyed fix fails.
+  for (const [fn, member, what] of [
+    ["src.sin.stash", "setItem", "the bare `localStorage` global"],
+    ["src.sin.stashSession", "setItem", "`sessionStorage` — lib.dom declares BOTH as `: Storage`, so one predicate covers them"],
+    ["src.sin.viaWindow", "setItem", "`window.localStorage` — the qualified spelling an identifier-text key misses"],
+    ["src.sin.viaGlobalThis", "setItem", "`globalThis.localStorage` — the isomorphic spelling"],
+    ["src.sin.viaParam", "setItem", "a `Storage`-TYPED PARAMETER, which has no global name at all"],
+    ["src.sin.readIt", "getItem", "a READ — persisted data crosses into the program, exactly as a write crosses out"],
+    ["src.sin.clearIt", "clear", "`clear()`"],
+    ["src.sin.delIt", "removeItem", "`removeItem()`"],
+    ["src.sin.keyIt", "key", "`key()` — the whole interface, not a hand-picked verb list"],
+    ["src.alias.viaAlias", "setItem", "`const st = localStorage; st.setItem(…)` — a local alias"],
+    ["src.alias.viaDestructure", "setItem", "`const { setItem } = localStorage` — R95's exact cardinal-sin shape, which this key cannot have because it never reads the callee's text"],
+    ["src.alias.viaField", "setItem", "a `Storage`-typed FIELD of a parameter object"],
+    ["src.alias.viaFactory", "setItem", "a FACTORY's return value — the jotai spelling, found on real code by the corpus A/B"],
+    ["src.alias.viaOptional", "setItem", "optional-chained `globalThis.localStorage?.setItem(…)`"],
+  ]) {
+    check(`R109: Web Storage through lib.dom is Unknown, not silent-pure — ${what}`,
+          (eff(fn)?.inferred ?? []).includes("Unknown"), JSON.stringify(eff(fn) ?? (report.functions ?? []).map((e) => e.fn)));
+    check(`R109: …and it names the resolved declaration, \`native:Storage.${member}\`, so \`Unknown[native]\` can select it`,
+          why(fn).includes(`native:Storage.${member}`), JSON.stringify(why(fn)));
+  }
+
+  // OVER-CHARGE CONTROL. Absence is what a BROKEN engine produces too (§E3), so this is only evidence
+  // because the sin rows above, in the SAME tree and the same scan, are present and charged.
+  for (const fn of ["src.pure.pArr", "src.pure.pStr", "src.pure.pJson", "src.pure.pObj",
+                    "src.pure.pMap", "src.pure.pSet", "src.pure.pNum"]) {
+    check(`R109 OVER-CHARGE CONTROL: ordinary es-lib code gains nothing — ${fn}`,
+          !eff(fn), JSON.stringify(eff(fn)));
+  }
+  // SHADOW CONTROL: a user-defined `Storage`/`localStorage` must not be charged.
+  for (const fn of ["src.shadow.shadowClass", "src.shadow.shadowVar"]) {
+    check(`R109 SHADOW CONTROL: a project's OWN class \`Storage\` fabricates nothing — ${fn}`,
+          !eff(fn), JSON.stringify(eff(fn)));
+  }
+
+  // THE GATE, on its own tree so a mixed fixture's exit code is not read as evidence.
+  {
+    const only = project({
+      "src/only.ts": `export function stash(secret: string) { localStorage.setItem("token", secret); }`,
+      "unknown.pol": "deny Unknown\n",
+      "native.pol": "deny Unknown[native]\n",
+      "reflect.pol": "deny Unknown[reflect]\n",
+    });
+    const g = scan(only, "--policy", path.join(only, "unknown.pol"));
+    check("R109: `deny Unknown` FIRES (exit 1) over a lib.dom `localStorage.setItem` — it answered exit 0 with `policy ✓` before",
+          g.r.status === 1 && /stash/.test(g.r.stdout + g.r.stderr), `exit ${g.r.status}`);
+    const gn = scan(only, "--policy", path.join(only, "native.pol"));
+    check("R109: …and the class-scoped `deny Unknown[native]` selects it — the same reason class the @types/node spelling lands in, so one rule gates both tsconfigs",
+          gn.r.status === 1, `exit ${gn.r.status}`);
+    const gr = scan(only, "--policy", path.join(only, "reflect.pol"));
+    check("R109 CONTROL: `deny Unknown[reflect]` does NOT fire — the reason is classified `native`, and a class-scoped rule that matched everything would gate nothing",
+          gr.r.status === 0, `exit ${gr.r.status}`);
+    fs.rmSync(only, { recursive: true, force: true });
+  }
+
+  // CONVERGENCE CONTROL, and REVERT-INVARIANT BY DESIGN — say so rather than let it read as coverage.
+  // This row passed BEFORE the fix and passes after; it is here to pin the half that must NOT move,
+  // because "make both configs agree" is also satisfiable by breaking the correct one. `typeRoots` is
+  // absolute so the fixture tree does not need its own node_modules; `lib` deliberately omits DOM,
+  // which is the only way to reach @types/node's `web-globals/storage` declaration.
+  {
+    const nodeArm = project({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: {
+          target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: true,
+          types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")],
+        },
+        include: ["src"],
+      }),
+      "src/only.ts": `export function stash(secret: string) { localStorage.setItem("token", secret); }`,
+      "unknown.pol": "deny Unknown\n",
+    });
+    const { report: nr, r } = scan(nodeArm, "--policy", path.join(nodeArm, "unknown.pol"));
+    const e = (nr?.functions ?? []).find((x) => x.fn === "src.only.stash");
+    check("R109 CONVERGENCE CONTROL (revert-invariant by design): the @types/node spelling still reads `native:web-globals/storage.setItem` and still exits 1 — the fix moved the lib.dom half ONTO this answer, it did not move this one",
+          r.status === 1 && (e?.unknownWhy ?? []).includes("native:web-globals/storage.setItem"),
+          `exit ${r.status} ${JSON.stringify(e)}`);
+    fs.rmSync(nodeArm, { recursive: true, force: true });
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── ⟨0.32⟩ THE UNREAD-CODE RULE IS A PROPERTY OF THE VERDICT, NOT OF THE ROUTE ────────────────────
 //
 // ⟨0.32⟩ landed the "a class this scan did not READ makes the verdict INCOMPLETE" rule in scan.mjs and
