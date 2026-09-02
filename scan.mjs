@@ -36,7 +36,8 @@ import { printAgents, writeStdoutSync, writeSinkAtomic, resolveSinkArtifact, isC
 import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadEffects, hostLiteral,
          tablesInSql, modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf,
          partnerFor, CLOCK_READING_PERFORMANCE_MEMBERS, CLOCK_READING_PROCESS_MEMBERS,
-         CLOCK_READING_CONSOLE_MEMBERS } from "./scan-core.mjs";
+         CLOCK_READING_CONSOLE_MEMBERS, CONNECTING_WEB_CTORS,
+         WEB_WIRE_MEMBERS } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -2400,6 +2401,22 @@ const reassignedIn = (sf) => {
   reassignedCache.set(sf, set);
   return set;
 };
+// R130 — THE CLASS NAME A CONSTRUCT SIGNATURE DECLARES. Both `@types/node`'s `undici-types` and lib.dom
+// spell a constructible global as `declare (var|const) X: { prototype: X; new (…): X }`, so the resolved
+// declaration for a construction is a ConstructSignature with NO `.name`, sitting inside an ANONYMOUS type
+// literal. Every name-keyed branch in the classifier therefore sees `""` for it. The authority for the
+// identity is the binding the type literal belongs to: ConstructSignature -> TypeLiteral -> Variable-
+// Declaration. Returns "" for a `class`-declared constructor (whose parent is a ClassDeclaration) and for
+// anything else, so a caller can treat "" as "this mechanism cannot answer".
+function declaredCtorClassName(decl) {
+  const tl = decl && decl.parent;
+  const vd = tl && ts.isTypeLiteralNode(tl) ? tl.parent : null;
+  return vd && ts.isVariableDeclaration(vd) && vd.name && ts.isIdentifier(vd.name) ? vd.name.text : "";
+}
+// R130 — `super(...)`. It is a CallExpression, not a NewExpression, so `ts.isNewExpression` is false and
+// `decl` is the BASE's construct signature — the shape `declaredCtorClassName` exists to read.
+const isSuperCall = (node) =>
+  ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.SuperKeyword;
 const unaliasGlobal = (expr) => {
   let hop = 0;
   for (; hop < ALIAS_HOPS && ts.isIdentifier(expr); hop++) {
@@ -2795,6 +2812,30 @@ function programHeadLiteral(node) {
 // options in the other overloads) — so those two members read arg0-or-arg1. Only STRING-LITERAL positions
 // are considered; returns null when the URL slot is not a static string literal — the safe direction.
 const NET_URL_ARG1_MEMBERS = new Set(["connect", "createConnection"]);
+// R130 — THE Net USE-VERBS, whose argument 0 is the PAYLOAD and never an endpoint. ⟨0.29⟩ fixed exactly
+// this class in three of the four locator surfaces — `programHeadLiteral` for `Exec`, `fsPathLiteral` for
+// `Fs`, the SQL slot for `Db` — and in `Net` it fixed only the POSITION (`fetch(runtimeUrl, "literal")`)
+// and the ONE verb whose position is neither first nor second (dgram `send`). The whole-module `net`
+// rule classifies every non-exempt member `Net`, so `write`/`end` arrive here with their payload at
+// position 0 and fell through to `litAt(0)`. MEASURED on PUBLISHED candor-ts 0.34.0, in isolation:
+//
+//     export function w(s: net.Socket) { s.write("api.example.com"); }
+//        ->  inferred ["Net"], hosts ["api.example.com"], NO `incomplete`
+//        ->  `allow Net in src api.example.com`  =>  policy ✓, exit 0
+//
+// over a socket whose destination this scan never saw. A fabricated destination masking an invisible one
+// — the dgram defect verbatim, one verb over, and it survived because `netEstablishing` (which already
+// excludes use-calls, and whose comment says so: *"NEVER use-calls (write/end/non-dgram send)"*) governs
+// only the `incomplete` branch and was never consulted by the CAPTURE branch. Two paths, one question.
+//
+// FAILURE DIRECTION: this is a list of verbs whose capture is SUPPRESSED, so a verb missing from it keeps
+// today's behaviour (still fabricates) and a verb wrongly IN it loses a host literal — which removes an
+// `allow`-list certification and can never add one. Forgetting an entry under-fixes; it cannot
+// under-report an effect, because `Net` itself is charged by κ either way and is untouched here.
+// Only verbs whose argument 0 is a STRING PAYLOAD are listed: `destroy`/`cork`/`ref` take no string and
+// cannot fabricate, so naming them would be decoration. `pipeline` is deliberately ABSENT — undici's
+// `pipeline(url, opts, handler)` really does put the URL first.
+const NET_USE_VERBS = new Set(["write", "end", "send", "emit", "push", "unshift"]);
 // ⟨0.29⟩ dgram's `send` puts the DESTINATION ADDRESS at position 2 or 4, and position 0 is the MESSAGE.
 // Falling through to `litAt(0)` read the payload as the endpoint: MEASURED,
 // `sock.send("telemetry.example", 0, 17, 53, dst)` published `hosts: ["telemetry.example"]` with NO
@@ -2966,6 +3007,9 @@ function urlArgLiteral(node, member, mod) {
     const i = dgramSendAddressIndex(args);
     return i < 0 ? null : litAt(i);
   }
+  // R130 — a USE-VERB names no endpoint (NET_USE_VERBS). Asked AFTER dgram's `send`, which is the one
+  // spelling of `send` that does carry a destination, so that rule keeps its own answer.
+  if (member && NET_USE_VERBS.has(member)) return null;
   return litAt(0);
 }
 // Is arg0 a RUNTIME STRING expression whose host can't be known statically — a template, a string
@@ -6184,6 +6228,21 @@ function visitCalls(node) {
               else rec.incomplete.add("Net");
             }
           }
+          // R130 — the WIRE verbs of an ALREADY-OPEN `WebSocket`/`EventSource`, which were silently pure
+          // in BOTH arms. The `new WebSocket(url)` branch below charges the CONNECT; nothing charged the
+          // bytes, so a function handed an open socket read PURE with no `invisible` and no `Unknown` —
+          // an omission, which under SPEC §2 rule 3 is a positive purity claim over an exfiltration
+          // primitive. MEASURED on PUBLISHED 0.34.0, in ISOLATION (no other Net call in the file):
+          //     export function exfil(w: WebSocket, s: string): void { w.send(s); }
+          //     lib.dom -> ABSENT from `functions`     all five policy forms -> exit 0
+          // Ground truth EXECUTED against a real 127.0.0.1 listener: the frame arrives, payload intact.
+          // This engine already charges `XMLHttpRequest.send` for exactly this operation eight lines up,
+          // and κ's whole-module `net` rule already charges `socket.write`/`socket.end` — so the gap was
+          // one API's spelling, not a decision. A USE-VERB: the endpoint was fixed at construction, so it
+          // must NOT mark `incomplete` (the XHR `send` note above) and its argument 0 must NOT be read as
+          // a host (NET_USE_VERBS at urlArgLiteral — arg0 is the payload).
+          if ((parent === "WebSocket" || parent === "EventSource") && WEB_WIRE_MEMBERS.test(name))
+            rec.direct.add("Net");
           // `navigator.sendBeacon(url, data)` — Net, and the one this set most needed. It exists to POST
           // data to a server on page-unload, it is what analytics and telemetry reach for, and it read
           // PURE: `deny Net` answered exit 0 over
@@ -6257,13 +6316,38 @@ function visitCalls(node) {
           // `declare var` object type (symbol `__type`, no usable parent name), but reaching the es-lib
           // branch already proves the ctor resolved to lib.dom (not a project class shadowing the name),
           // so the constructed identifier is the real browser global.
+          // R130 — …AND THROUGH `extends`, which is a third spelling neither of the two above can see.
+          // `super(url)` is a CallExpression, so the `isNewExpression` gate below is false; its resolved
+          // declaration is the BASE's construct signature, whose `.name` and whose parent type literal's
+          // name are both empty, so the `parent`/`name` branches above see `""` too. FOUND ON REAL CODE
+          // by re-scanning a corpus under a node-style tsconfig — crossws `src/websocket/bun.ts`:
+          //     const _WebSocket = globalThis.WebSocket;
+          //     class BunWebSocket extends _WebSocket {
+          //       constructor(url, protocols, options) { super(url, protocols); … } }
+          // which dials `url`, and whose constructor candor reported with NO effect at all. The class name
+          // comes from the DECLARATION (`declaredCtorClassName`), never from the `extends` expression:
+          // that expression is an alias here, and reaching this arm already proves the base resolved to
+          // lib.dom rather than to a project class of the same name.
+          if (isSuperCall(node) && CONNECTING_WEB_CTORS.test(declaredCtorClassName(decl))) {
+            rec.direct.add("Net");
+            const u = (node.arguments ?? [])[0];
+            const lit = u && ts.isStringLiteralLike(u)
+              ? u.text : (u ? (resolveConstUrlString(u) ?? literalHeadHostUrl(u)) : null);
+            const h = lit ? hostLiteral(lit) : null;
+            if (h) { rec.hosts.add(h); for (const e of modelHostEffects(h)) rec.direct.add(e); }
+            else rec.incomplete.add("Net");
+          }
           if (ts.isNewExpression(node)) {
             // …through an alias too: `const W = WebSocket; new W(url)` reads a ctor named "W".
             // Same defect as the call path, one node type over — hence the SHARED unwrap.
             const unCtor = unaliasGlobal(node.expression);
             const ctorName = unCtor.node.getText();
             if (unCtor.truncated) { const o = enclosing(node); if (o) fns.get(o).direct.add("Unknown"); }
-            if (ctorName === "EventSource" || ctorName === "WebSocket") {
+            // R130 — the SHARED constant, not a literal pair repeated here. The identical two names are
+            // now κ rules for `undici-types` (the package `@types/node` re-exports these globals from),
+            // and this arm and that table answering the same question from two hand-kept lists is the
+            // single degree of freedom that produced R109, R110 and R111. Measurements at the constant.
+            if (CONNECTING_WEB_CTORS.test(ctorName)) {
               rec.direct.add("Net");
               // The URL is argument 0 of both constructors — see the XHR note above for the measurement.
               const u = (node.arguments ?? [])[0];
@@ -6287,6 +6371,11 @@ function visitCalls(node) {
           // needs no entry here. Inert ctors (Agent/Server/Socket/TLSSocket/Http2Server*/message shells)
           // still synthesize "new" and stay pure.
           const CONNECTING_CTORS = new Set(["ClientRequest"]);
+          // R130 — `new WebSocket(url)` / `new EventSource(url)` are the same shape as `ClientRequest`:
+          // the connection is opened BY the construction, so the blanket `new`-exemption would convert a
+          // real Net source into pure. Read from the SHARED constant the es-lib arm reads, so the two
+          // resolution paths cannot be widened separately.
+          const isConnectingCtor = (n) => CONNECTING_CTORS.has(n) || CONNECTING_WEB_CTORS.test(n);
           // Host-ESTABLISHING Net call names (the masking-fix allowlist): a Net call by one of these whose
           // host is not a captured literal leaves the host invisible. Excludes use-verbs (write/end/send on
           // a connected socket). `post/put/patch/delete/head/options` cover the axios/got/undici tier whose
@@ -6317,8 +6406,10 @@ function visitCalls(node) {
             "fchmodSync", "fchown", "fchownSync", "futimes", "futimesSync", "fstat", "fstatSync",
             "readv", "readvSync", "writev", "writevSync"]);
           const EXEC_USE_VERBS = new Set(["kill", "send", "disconnect", "ref", "unref"]);
+          // `ctorRuleName` (below) rather than `ctorClassName`: a connecting ctor reached through a local
+          // alias must still fail the surface closed on a runtime URL. Evaluated at call time, after it.
           const netEstablishing = (member) =>
-            CONNECTING_CTORS.has(ctorClassName) || NET_ESTABLISHING.has(member)
+            isConnectingCtor(ctorRuleName) || NET_ESTABLISHING.has(member)
             || (/^(node:)?dgram$/.test(mod) && member === "send");
           // ⟨0.32⟩ THE CLASS BEING CONSTRUCTED, TAKEN FROM THE `new` EXPRESSION rather than from the
           // resolved constructor. A class that declares no constructor of its own INHERITS one, and
@@ -6362,8 +6453,31 @@ function visitCalls(node) {
                 && p.name && ts.isIdentifier(p.name)) return p.name.getText();
             return "";
           };
-          const member = isConstruction
-            ? (CONNECTING_CTORS.has(ctorClassName) ? ctorClassName : "new")
+          // R130 — THE NAME A CONNECTING CONSTRUCTION IS JUDGED BY, when the `new` expression's own
+          // identifier is a LOCAL ALIAS. `ctorClassName` is read from the call site (⟨0.32⟩, for a good
+          // reason: an inherited constructor lives in the base's file), so `const W = WebSocket; new W(u)`
+          // names the class "W" and no rule can match — the es-lib arm handles that spelling with
+          // `unaliasGlobal` and this arm had nothing. The authority for a construction's identity is the
+          // `export declare const X: { new (…): X }` binding the construct signature sits inside, so walk
+          // to it: ConstructSignature -> TypeLiteral -> VariableDeclaration. Consulted ONLY when the
+          // call-site name is not already a connecting ctor, and its answer is used only when it IS one —
+          // so it can add a name to the connecting set and can never take one away, and `new Headers()`
+          // (binding name "Headers", no rule) is unchanged. A `class`-declared ctor (`ClientRequest`) has
+          // a ClassDeclaration parent, not a TypeLiteral, and never reaches this.
+          //
+          // …AND THE SAME WALK ANSWERS THE `extends` SPELLING, which is neither a NewExpression nor a
+          // named member. `class BunWebSocket extends globalThis.WebSocket { constructor(u){super(u)} }`
+          // (crossws, real code) resolves `super(u)` to `undici-types`' construct signature: `member`
+          // came out `""`, no rule could match, and a constructor that DIALS A URL reported nothing.
+          // `isConstruction` is deliberately NOT widened to include super-calls — that would re-key every
+          // `super()` into an external base onto the token `new` and hand the whole-module κ rules and the
+          // node-core floor a call they have never been asked about. The name is used ONLY when it is a
+          // connecting ctor, so this can add nothing else.
+          const ctorRuleName = !(isConstruction || isSuperCall(node)) || isConnectingCtor(ctorClassName)
+            ? ctorClassName
+            : (isConnectingCtor(declaredCtorClassName(decl)) ? declaredCtorClassName(decl) : ctorClassName);
+          const member = isConnectingCtor(ctorRuleName) ? ctorRuleName
+            : isConstruction ? "new"
             : (decl.name ? decl.name.getText() : bindingName(decl));
           // ⟨0.32⟩ THE MODULE κ IS READ AGAINST — `mod` for everything except a construction whose
           // constructor came from somewhere else, which is re-keyed onto the CLASS's own module.

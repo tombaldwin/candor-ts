@@ -90,7 +90,10 @@ the service reaching `user` and `follows`.
 
 **The classifier** is curated (the same under-report-and-say-so posture as the other engines): the
 Node builtins (`fs`, `net`/`http`/`tls`, `dns`, `child_process`, `worker_threads`, `node:sqlite`,
-`node:vm`, `process.env`, the clock), the HTTP/queue/mail tier (axios/got/node-fetch/undici/ws/
+`node:vm`, `process.env`, the clock), the **web network globals** (`fetch`, `XMLHttpRequest`,
+`navigator.sendBeacon`, and `WebSocket`/`EventSource` — construction, `send` and `close`, charged
+identically whether they resolve through `lib.dom` or through `@types/node`'s `undici-types`
+re-export), the HTTP/queue/mail tier (axios/got/node-fetch/undici/ws/
 socket.io/nodemailer, gaxios + googleapis-common + google-auth-library, stripe, @sentry/*,
 posthog-node, bull/bullmq), the database drivers (pg/mysql2/mongodb/redis/ioredis/sqlite3/
 better-sqlite3/knex) **and the ORM tier** (TypeORM — with `@Entity("…")` table extraction —

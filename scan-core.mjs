@@ -131,6 +131,66 @@ export const CLOCK_READING_PERFORMANCE_MEMBERS = /^(now|mark|measure|eventLoopUt
 export const CLOCK_READING_PROCESS_MEMBERS = /^(uptime|hrtime|bigint)$/;
 export const CLOCK_READING_CONSOLE_MEMBERS = /^(time|timeEnd|timeLog)$/;
 
+/**
+ * R130 — the WEB NETWORK GLOBALS, and the third resolution split this family has measured (R109
+ * `localStorage`, R110 `performance.now`, now `WebSocket`/`EventSource`). Shared constants for the same
+ * reason those are: the es-lib arm in scan.mjs and the κ table below BOTH answer for these names, and a
+ * single degree of freedom between two tables is what produced all three rows.
+ *
+ * THE SPLIT. `@types/node` does not declare `WebSocket`/`EventSource` itself — `web-globals/fetch.d.ts`
+ * re-exports them from the `undici-types` PACKAGE, so the resolved declaration is not under `@types/node`
+ * and the ⟨0.32⟩ node-core floor (`declIsNodeTypes`) is never consulted. κ had no `undici-types` rule, so
+ * the call landed on pure. Resolve the SAME LINE with `"DOM"` in `lib` and the declaration lands in
+ * `typescript/lib/lib.dom.d.ts`, where the es-lib arm has charged `Net` since ⟨0.29⟩. MEASURED on
+ * PUBLISHED candor-ts 0.34.0, one variable (`lib: ["ES2022"]` vs `lib: ["ES2022","DOM"]`, `types:
+ * ["node"]` in both — both fixtures `tsc`-clean):
+ *
+ *     export function connect(u: string) { return new WebSocket(u); }
+ *       lib.dom     ->  inferred ["Net"], incomplete ["Net"]   deny Net -> exit 1
+ *       @types/node ->  inferred [],      invisible ["undici-types"]   ALL FIVE policy forms -> exit 0
+ *
+ * and identically for `new EventSource(u)` and for a fixture whose URL is the literal
+ * `"wss://evil.example.com/x"` (lib.dom captures the host; the node arm reports nothing to capture).
+ *
+ * `NODE_CORE_REVIEWED` says of the net cluster *"`WebSocket` is deliberately absent — it CONNECTS"*. That
+ * sentence was true of the list it sits in and false of the engine: the name never reached that list.
+ *
+ * GROUND TRUTH IS EXECUTED, node 22.12.0, against a real `http.createServer` listener on 127.0.0.1 that
+ * counts what arrives — not read off a signature:
+ *
+ *     new WebSocket(`ws://127.0.0.1:${port}/socket`)   -> the server's `upgrade` handler fires once
+ *     ws.send("SECRET-EXFIL")                          -> one client frame, unmasked payload
+ *                                                         EXACTLY "SECRET-EXFIL"
+ *     new EventSource(`http://127.0.0.1:${port}/sse`)  -> one HTTP request to /sse
+ *                                                         (node 22.12 needs --experimental-eventsource;
+ *                                                          @types/node declares it unconditionally, so
+ *                                                          source using it type-checks either way)
+ *
+ * TWO SETS, TWO QUESTIONS. The CTOR set is what OPENS the connection — it is host-ESTABLISHING, so a
+ * runtime URL there must mark the surface `incomplete` (scan.mjs `netEstablishing`). The WIRE set is what
+ * moves bytes on a connection someone else opened; its argument 0 is the PAYLOAD, never an endpoint, so it
+ * must NOT be read for a host literal (see NET_USE_VERBS in scan.mjs — `ws.send("api.example.com")`
+ * publishing `hosts:["api.example.com"]` is the same fabrication ⟨0.29⟩ fixed for dgram `send`).
+ *
+ * `send` IS THE ONE THAT WAS SILENT IN BOTH ARMS, which is the R111 shape — agreement between the two
+ * paths is the weakest signal here, not the strongest. `export function exfil(w: WebSocket, s: string) {
+ * w.send(s); }` was ABSENT from `functions` under lib.dom (a positive purity claim, no `invisible`, no
+ * `Unknown`) and `inferred: []` under `@types/node`, on published 0.34.0, while the es-lib arm three
+ * lines away already charges `XMLHttpRequest.send` for the identical operation.
+ *
+ * FAILURE DIRECTION, stated before the code: these are ADDITIVE name sets. Too NARROW and a connecting
+ * global stays pure — the cardinal direction; too WIDE and an inert construction over-charges `Net`,
+ * which is visible and complainable. The sets are deliberately the names lib.dom and `undici-types` BOTH
+ * declare, so the two arms converge rather than one arm being copied. `close` is in the wire set because
+ * it writes a close frame to the peer and because the node:net rule already charges `socket.end()` for
+ * the same teardown; `addEventListener`/`onmessage` are NOT — they register a local handler.
+ * `WebSocketStream`/`WebSocketError` exist in `undici-types` but are NOT re-exported as globals by
+ * `web-globals/fetch.d.ts` (checked, not assumed), so they are reachable only by importing `undici-types`
+ * directly, which no runtime package does.
+ */
+export const CONNECTING_WEB_CTORS = /^(WebSocket|EventSource)$/;
+export const WEB_WIRE_MEMBERS = /^(send|close)$/;
+
 // ---- κ — the curated classifier (CLASSIFIER §2: the dispatch/execution boundary, not builders) ----
 // Node builtins + a curated npm tier (the same under-report-and-say-so posture as the crate table:
 // an unlisted package contributes nothing — never a guess).
@@ -318,6 +378,18 @@ export const KAPPA_RULES = [
   // Performance`), and the module key is `perf_hooks` rather than a name, so this member regex cannot
   // land on an unrelated `now`/`mark`/`measure` in some other module — the κ table asks the MODULE first.
   [/^(node:)?perf_hooks$/, CLOCK_READING_PERFORMANCE_MEMBERS, "Clock"],
+  // R130 — `undici-types`, the package `@types/node` re-exports the web network globals FROM. Not
+  // `@types/undici` and not `undici`, so neither `declModule`'s `@types/X -> X` remap nor the `undici`
+  // rule below reaches it, and the ⟨0.32⟩ node-core floor does not either (its predicate is the FILE,
+  // and this file is not under `@types/node`). Two MEMBER-precise rules rather than a whole-module one:
+  // `undici-types` also declares `Headers`, `FormData`, `Request` and `Response`, whose construction and
+  // accessors are inert, and whose call sites are ordinary furniture in any project using global `fetch`
+  // — a whole-module Net here would fabricate on `new Headers()` and `res.json()`. Measured which
+  // declarations those spellings resolve to before choosing (all of them land in `undici-types/fetch.d.ts`).
+  // The CTOR rule matches because scan.mjs synthesizes the CLASS NAME as κ's member token for a
+  // connecting constructor — the `CONNECTING_CTORS` mechanism `new http.ClientRequest()` already uses.
+  [/^undici-types$/, CONNECTING_WEB_CTORS, "Net"],
+  [/^undici-types$/, WEB_WIRE_MEMBERS, "Net"],
   // the curated npm tier
   [/^(axios|got|node-fetch|undici|ws|socket\.io(-client)?|nodemailer)$/, null, "Net"],
   // gaxios is the axios-like HTTP client under googleapis (request/get/post/put/patch/delete/head do

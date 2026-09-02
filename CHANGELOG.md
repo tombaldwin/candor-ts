@@ -8,6 +8,74 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R130) — the WEB NETWORK GLOBALS. `new WebSocket(url)`,
+  `new EventSource(url)`, `ws.send(secret)` and `class D extends WebSocket { super(url) }` charge `Net`.**
+  Two of those four were silent in BOTH resolution arms; the other two were the third instance of the
+  R109/R110/R111 tsconfig split, and the first where the @types/node arm never reaches the ⟨0.32⟩
+  node-core floor at all: `@types/node/web-globals/fetch.d.ts` re-exports these globals from the
+  **`undici-types` PACKAGE**, so `declIsNodeTypes` is false and κ had no rule for it. Measured on
+  PUBLISHED candor-ts 0.34.0, each fixture isolated in its own tree, both arms `tsc --noEmit` clean,
+  one variable between them (`lib: ["ES2022"]` vs `["ES2022","DOM"]`, `types: ["node"]` in both):
+
+                                          lib.dom arm             @types/node arm
+      new WebSocket(u)                    Net, incomplete Net     inferred [] — 5/5 policy forms exit 0
+      new EventSource(u)                  Net, incomplete Net     inferred [] — 5/5 exit 0
+      new WebSocket("wss://evil.example…")Net, host captured      inferred [] — 5/5 exit 0
+      w.send(secret)                      ABSENT from `functions` inferred [] — 5/5 exit 0    ← BOTH
+      class D extends WebSocket{super(u)} ABSENT from `functions` inferred [] — 5/5 exit 0    ← BOTH
+
+  The two `ABSENT` rows carried no `invisible` and no `Unknown` — an omission, which under SPEC §2 rule
+  3 is a positive purity claim over an exfiltration primitive and over a constructor that dials a URL.
+  `NODE_CORE_REVIEWED` says of the net cluster *"`WebSocket` is deliberately absent — it CONNECTS"*:
+  true of the list it sits in, false of the engine, because the name never reached that list (attack K).
+
+  **Ground truth EXECUTED**, node 22.12.0, against a real `http.createServer` listener on 127.0.0.1
+  that counts what arrives: the constructor fires the server's `upgrade` handler once; `ws.send(
+  "SECRET-EXFIL")` delivers one client frame whose unmasked payload is exactly `SECRET-EXFIL`;
+  `new EventSource(…/sse)` issues one HTTP request.
+
+  **The `extends` spelling was found on REAL CODE, not by enumeration** — re-scanning the crossws corpus
+  under a node-style tsconfig showed `class BunWebSocket extends globalThis.WebSocket { constructor(url,
+  p){ super(url, p) } }` reporting no effect at all. The first cut of this fix covered `new` and the
+  member call and stopped at its own trigger (CLAUDE.md §9).
+
+  **Shape.** Two shared constants (`CONNECTING_WEB_CTORS`, `WEB_WIRE_MEMBERS`) read by the es-lib arm
+  in `scan.mjs` AND by two new `undici-types` κ rules, so the two arms can no longer be widened
+  separately — R111's control, applied to the pair that had just drifted. The κ rules are MEMBER-precise
+  on purpose: `undici-types` also declares `Headers`/`FormData`/`Request`/`Response`, whose construction
+  and accessors are ordinary furniture in any project using global `fetch`, and a whole-module rule would
+  pass every fixture and fabricate `Net` across the corpus. `super(…)` is handled by reading the class
+  name from the DECLARATION (ConstructSignature → TypeLiteral → VariableDeclaration); `isConstruction` is
+  deliberately NOT widened to cover super-calls, which would re-key every `super()` into an external base
+  onto the token `new`.
+
+- **⚠ FABRICATION FIX (SOUNDNESS R130, second half) — a Net USE-VERB's PAYLOAD was read as its ENDPOINT.**
+  ⟨0.29⟩ fixed this class in three of the four locator surfaces and, in `Net`, fixed only the POSITION
+  and dgram's `send`. The whole-module `net` rule classifies every non-exempt member, so `socket.write(
+  payload)` arrived at the host locator with its payload at argument 0. MEASURED on published 0.34.0:
+
+      export function w(s: net.Socket) { s.write("api.example.com"); }
+        ->  inferred ["Net"], hosts ["api.example.com"], NO `incomplete`
+        ->  `allow Net in src api.example.com`  =>  policy ✓, exit 0
+
+  over a socket whose destination the scan never saw. `netEstablishing` already excludes use-calls and
+  its comment says so — it governs the `incomplete` branch and was never consulted by the CAPTURE branch.
+  Closed with `NET_USE_VERBS` (`write`/`end`/`send`/`emit`/`push`/`unshift`), asked AFTER dgram's `send`
+  so that rule keeps its own answer. Forgetting an entry under-fixes; it cannot under-report an effect.
+
+  **A/B, 8 corpora (hono, crossws, got, socket.io, ky, zod, ofetch, and crossws re-scanned under a
+  node-style tsconfig), 2,561 common rows, keyed on 16 fields:** `ADDED 9  REMOVED 2  CHANGED(wide) 102
+  CHANGED(narrow=inferred) 40`, and **zero rows lost any effect**. Every removal audited from SOURCE, not
+  from candor's own report: both are `new Headers(...)` builders, genuinely pure, present before only for
+  an `invisible: ["undici-types"]` ledger line that `kappaKnows` now covers. Of the 62 rows whose only
+  change is losing that ledger line, all 62 still carry `Unknown` and still fail `deny Unknown`. Branch
+  reach, counted in the changed branches (a byte-identical A/B over a corpus that cannot reach the code
+  means nothing): es-lib ctor 1/1 (hono/crossws), es-lib wire 4/10, `super` 5, `undici-types` κ 2 ctor +
+  10 wire + 5 super + 1 alias (node-tsconfig arm), use-verb suppression 5 (got). The six library corpora
+  reach the `undici-types` arm ZERO times — all six leave `lib` unset or name `dom`, and TypeScript's
+  default `lib` includes DOM — so on THOSE the node arm is safety-only, which is why the recall harness
+  exists.
+
 - **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R120) — R115's structural-getter arm stopped at the MODULE
   BOUNDARY, and its own comment stated the residual as a closed list that did not include it.** The
   paragraph read *"what it does NOT reach is a structural literal arriving through a PARAMETER or a call
