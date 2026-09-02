@@ -14,6 +14,10 @@ import { fileURLToPath } from "node:url";
 import { show, loadReport, callersFrontier, blindspots, blindspotsStats } from "./query-core.mjs";
 import { scratch, keepOnFailure } from "./scratch.mjs";
 import { printAgents, writeStdoutSync } from "./contract.mjs";
+// R111: asserted directly rather than through a scan, so that "the two tables share one member set" is
+// checked as an IDENTITY (`v === CLOCK_READING_PERFORMANCE_MEMBERS`) and not as two regexes that happen
+// to spell the same thing today — which is exactly how R109 and R110 drifted apart.
+import { KAPPA_RULES, CLOCK_READING_PERFORMANCE_MEMBERS } from "./scan-core.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // The spec floor this build declares, DERIVED from the binary under test rather than written as a
@@ -14135,11 +14139,13 @@ export function shadowClass(): number { return perf.now(); }
 export function shadowLocal(): number { const p = new Performance(); return p.now(); }
 export const performance3 = { now: () => 7 };
 export function shadowNamed(): number { return performance3.now(); }`,
-    // THE SYMMETRIC GAP, PINNED AS A GAP. `mark()` really does read the clock — executed,
-    // `performance.mark("m").startTime` returns the live elapsed value — and it is silently pure in
-    // BOTH arms, before and after. This row is NOT an endorsement: it exists so that the divergence
-    // cannot silently reopen on a member other than `now`, and so the day `mark` is fixed the change is
-    // deliberate and visible rather than absorbed. See the report row filed alongside this commit.
+    // R110 PINNED THIS AS A GAP; R111 CLOSED IT. The two checks below used to assert
+    // `!has(…, "Clock")` — they pinned the WRONG answer deliberately, so that it could not move by
+    // accident. It has now moved on purpose: `mark()` and `measure()` read the clock (executed —
+    // `performance.mark("m").startTime` returns the live elapsed value, two marks 30ms apart differ by
+    // 30.05ms) and are charged under BOTH arms. The fixture is left exactly as R110 wrote it and only
+    // the ASSERTION is inverted, so the flip reads in the diff as a changed expectation rather than as
+    // a deleted test.
     "src/gap.ts": `export function gapMark(): unknown { return performance.mark("m"); }
 export function gapMeasure(): unknown { return performance.measure("m"); }`,
     "clock.pol": "deny Clock\n",
@@ -14186,10 +14192,13 @@ export function gapMeasure(): unknown { return performance.measure("m"); }`,
     check(`R110 SHADOW CONTROL: a project's OWN \`Performance\` fabricates no Clock — ${fn}`,
           !has(fn, "Clock"), JSON.stringify(eff(fn)));
   }
-  // THE PINNED GAP — revert-invariant BY DESIGN, and it says so rather than reading as coverage.
+  // R110'S PINNED GAP, FLIPPED BY R111. These two checks asserted `!has(fn, "Clock")` when R110 landed
+  // — the wrong answer, pinned on purpose. R111 charges `mark`/`measure`, so the assertion is inverted
+  // here rather than deleted: the point of a pinned gap is that closing it shows up as an expectation
+  // that changed, in the same file, next to the reason.
   for (const fn of ["src.gap.gapMark", "src.gap.gapMeasure"]) {
-    check(`R110 PINNED GAP (revert-invariant by design): \`${fn.split(".").pop()}\` stays uncharged in BOTH arms — a known symmetric under-report, filed separately, pinned so it cannot move by accident`,
-          !has(fn, "Clock"), JSON.stringify(eff(fn)));
+    check(`R111 (was R110's PINNED GAP, assertion FLIPPED): \`${fn.split(".").pop()}\` now charges Clock under @types/node — it was silently pure in BOTH arms, which is why nothing contradicted it`,
+          has(fn, "Clock"), JSON.stringify(eff(fn)));
   }
 
   // THE GATE, on its own tree so a mixed fixture's exit code is never read as evidence.
@@ -14238,6 +14247,271 @@ export function gapMeasure(): unknown { return performance.measure("m"); }`,
           r.status === 1 && (e?.inferred ?? []).includes("Clock"), `exit ${r.status} ${JSON.stringify(e)}`);
     fs.rmSync(domArm, { recursive: true, force: true });
   }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── R111: `mark`/`measure`/`eventLoopUtilization` READ THE CLOCK AND WERE SILENT IN **BOTH** ARMS ──
+//
+// NOT A DIVERGENCE — A MEMBER-COVERAGE GAP, AND IT HID BECAUSE THE TWO PATHS AGREED. R109 was lib.dom
+// silent for `Storage`; R110 was `@types/node` silent for `performance.now`. Each was found by putting
+// one arm's answer beside the other's. This one could not be: `performance.mark("m")` reported NOTHING
+// under lib.dom AND NOTHING under `@types/node`, so no comparison contradicted anything. That is the
+// standing conclusion of the triple and it is why this block asserts the SAME expectation on both arms
+// rather than asserting that they match — two tables agreeing is not evidence that either is right.
+//
+// GROUND TRUTH IS EXECUTED, node 22.12.0, not read off a signature:
+//   performance.mark("a").startTime / mark("b").startTime, 30ms apart  →  11.544 / 41.599   LIVE
+//   performance.measure("m").duration, twice, 30ms apart               →  41.822 / 71.593   LIVE
+//   performance.eventLoopUtilization().active, twice, 30ms apart       →  61.853 / 91.739   LIVE
+// SPEC §1 defines `Clock` as *reading wall-clock or monotonic time*, so all three are Clock reads.
+//
+// AND THE PREMISE THIS ROW WAS HANDED WAS WRONG ON ONE MEMBER, WHICH IS WHY IT WAS MEASURED:
+// `timerify(fn)` does NOT read the clock. Executed: it returns a NEW wrapper (`t !== fn`, and two calls
+// return two different objects); the read happens when the WRAPPER runs, observed as a
+// PerformanceObserver `function` entry with its own startTime. Charging `timerify` would put a Clock on
+// a function that performs none. It is left uncharged, and the hole that leaves — a factory returning
+// an effectful callable — is a different class, filed rather than folded in. See the exclusion controls.
+//
+// THE PRECISION HALF IS THE WHOLE JOB, because User Timing is pervasive in tracing code, and the
+// question "how much real code gains an effect" was MEASURED rather than argued: over 194 npm packages
+// with deps installed (both `lib` arms, 20,871 + 30,991 rows) the corpus contains ZERO `mark`/`measure`/
+// `eventLoopUtilization` call sites — confirmed by grep on the package sources, not inferred from a
+// zero diff — so a RECALL corpus of 371 packages chosen for User Timing use was built. There the
+// movement is 131 rows of 46,103 (0.28%) and 137 of 66,667 (0.21%), in three packages, REMOVED 0.
+if (blk()) {
+  const nodeTsconfig = JSON.stringify({
+    compilerOptions: {
+      target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: true,
+      types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")],
+    },
+    include: ["src"],
+  });
+  const d = project({
+    "tsconfig.json": nodeTsconfig,
+    // THE DEFECT. Every spelling compiles — checked with `tsc --noEmit` on this exact tree below (§E3),
+    // because an ABSENCE assertion over an uncompilable fixture is no evidence at all, and half of this
+    // block is absence assertions.
+    "src/sin.ts": `export function bareMark(): unknown { return performance.mark("m"); }
+export function markStartTime(): number { return performance.mark("m").startTime; }
+export function bareMeasure(): unknown { return performance.measure("m"); }
+export function measureBetween(): unknown { return performance.measure("m", "a", "b"); }
+export function bareElu(): unknown { return performance.eventLoopUtilization(); }
+export function viaGlobalThis(): unknown { return globalThis.performance.mark("m"); }
+export function viaAlias(): unknown { const p = performance; return p.measure("m"); }
+export function viaParam(p: Performance): unknown { return p.mark("m"); }
+export function viaField(o: { clock: Performance }): unknown { return o.clock.measure("m"); }
+export function viaOptional(): unknown { return globalThis.performance?.mark("m"); }`,
+    // THE EXPLICIT-IMPORT SPELLINGS — these resolve into `perf_hooks.d.ts` under ANY `lib`, so they were
+    // silent under both configs before R110 and are the same shape here one member over.
+    "src/imported.ts": `import { performance as ph } from "node:perf_hooks";
+import { performance as ph2 } from "perf_hooks";
+export function importedMark(): unknown { return ph.mark("m"); }
+export function importedMeasure(): unknown { return ph2.measure("m"); }
+export function importedElu(): unknown { return ph.eventLoopUtilization(); }`,
+    // THE OVER-CHARGE CONTROL, AND IT IS THE ONE THAT DECIDES WHETHER THIS IS SHIPPABLE. `Performance`
+    // is a MIXED interface; a rule keyed on the interface (R109's shape) would be trivially "correct" on
+    // every row above and would charge all ten of these. `getEntries*` is the subtle one: it returns
+    // entries carrying timestamps, but MEASURED, those timestamps do not advance between two calls 30ms
+    // apart — they were recorded at the `mark` that made them, which is where the charge belongs.
+    // Ordinary node core is scanned alongside so a run that reports nothing at all cannot pass this.
+    "src/pure.ts": `import { PerformanceObserver } from "node:perf_hooks";
+import * as path from "node:path";
+import * as util from "node:util";
+export function pClearMarks(): void { performance.clearMarks("x"); }
+export function pClearMeasures(): void { performance.clearMeasures("m"); }
+export function pClearRT(): void { performance.clearResourceTimings(); }
+export function pGetEntries(): unknown { return performance.getEntries(); }
+export function pGetByName(): unknown { return performance.getEntriesByName("x"); }
+export function pGetByType(): unknown { return performance.getEntriesByType("mark"); }
+export function pBufSize(): void { performance.setResourceTimingBufferSize(10); }
+export function pAddListener(): void { performance.addEventListener("resourcetimingbufferfull", () => {}); }
+export function pRemoveListener(): void { performance.removeEventListener("resourcetimingbufferfull", () => {}); }
+export function pObserver(): unknown { return new PerformanceObserver(() => {}); }
+export function pPath(a: string, b: string): string { return path.join(a, b); }
+export function pFormat(s: string): string { return util.format("%s", s); }
+export function pBuf(s: string): number { return Buffer.from(s, "utf8").length; }`,
+    // THE DELIBERATE EXCLUSIONS, each pinned with the measurement that put it here rather than left as
+    // an unstated omission. `timerify` is the one the brief for this row got wrong; the other three are
+    // unreachable by this mechanism at all (the classify site fires on CallExpression/NewExpression, and
+    // a bare property access never reaches it), which is a different fact from "decided to be pure" and
+    // is the one that tells the next reader where to look.
+    "src/excluded.ts": `export function xTimerify(): unknown { return performance.timerify((n: number) => n); }
+export function xTimerifyThenCall(): number { const t = performance.timerify((n: number) => n); return t(1); }
+export function xToJSON(): unknown { return performance.toJSON(); }
+export function xTimeOrigin(): number { return performance.timeOrigin; }
+export function xNodeTiming(): number { return performance.nodeTiming.duration; }`,
+    // SHADOW CONTROL — a project's OWN `Performance`, and its own binding named `performance`. Both
+    // tables key on the module of the RESOLVED declaration, so a local class resolves `<local>` and is
+    // never asked. That is the argument; these rows are the measurement.
+    "src/shadow.ts": `class Performance { mark(_n: string): number { return 0; } measure(_n: string): number { return 0; } }
+const perf = new Performance();
+export function shadowClass(): number { return perf.mark("m"); }
+export function shadowLocal(): number { const p = new Performance(); return p.measure("m"); }
+export const performance3 = { mark: (_n: string) => 7, measure: (_n: string) => 7 };
+export function shadowNamed(): number { return performance3.mark("m"); }`,
+    "clock.pol": "deny Clock\n",
+    "clock_src.pol": "deny Clock src\n",
+    "clock_other.pol": "deny Clock other\n",
+    "unknown.pol": "deny Unknown\n",
+    "blanket.pol": "deny Net Fs Exec Env\n",
+    "pure.pol": "pure\n",
+    "pure_other.pol": "pure other\n",
+  });
+  // §E3, RUN NOT ASSUMED: this whole block is absence assertions about `src/excluded.ts`, `src/pure.ts`
+  // and `src/shadow.ts`, and an absence over a fixture that does not compile is what a BROKEN engine
+  // also produces. `tsc --noEmit` on the same tree, exit 0, is what makes those rows evidence.
+  {
+    const tsc = spawnSync("node", [path.join(HERE, "node_modules", "typescript", "bin", "tsc"),
+                                   "-p", path.join(d, "tsconfig.json"), "--noEmit"], { encoding: "utf8" });
+    check("R111 §E3: the fixture tree COMPILES (`tsc --noEmit` exit 0) — every absence assertion below is over a program that exists",
+          tsc.status === 0, `exit ${tsc.status}: ${(tsc.stdout || "") + (tsc.stderr || "")}`.slice(0, 600));
+  }
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+
+  for (const [fn, what] of [
+    ["src.sin.bareMark", "`performance.mark(\"m\")` — the defect exactly as filed"],
+    ["src.sin.markStartTime", "`performance.mark(\"m\").startTime`, the EXECUTED proof: the returned value IS the live elapsed time"],
+    ["src.sin.bareMeasure", "`performance.measure(\"m\")` with no end mark — measured LIVE, the end defaults to now"],
+    ["src.sin.measureBetween", "`measure(name, a, b)` between two marks — charged, and this one is an OVER-APPROXIMATION stated as such: that form reads two ALREADY-RECORDED timestamps. Deciding by argument arity would be a heuristic narrowing a sound answer on an unprovable property (the end mark can be a runtime value), which is the shape that turns into a silent under-report"],
+    ["src.sin.bareElu", "`eventLoopUtilization()` — node-only, and MEASURED live (`.active` advances with wall time)"],
+    ["src.sin.viaGlobalThis", "`globalThis.performance.mark()` — the isomorphic spelling"],
+    ["src.sin.viaAlias", "`const p = performance; p.measure()` — a local alias"],
+    ["src.sin.viaParam", "a `Performance`-TYPED PARAMETER, which has no global name at all"],
+    ["src.sin.viaField", "a `Performance`-typed FIELD of a parameter object"],
+    ["src.sin.viaOptional", "optional-chained `globalThis.performance?.mark()`"],
+    ["src.imported.importedMark", "`import { performance } from \"node:perf_hooks\"` then `.mark()`"],
+    ["src.imported.importedMeasure", "the bare `\"perf_hooks\"` specifier then `.measure()`"],
+    ["src.imported.importedElu", "the imported spelling of `eventLoopUtilization()`"],
+  ]) {
+    check(`R111: charges Clock under @types/node, was silent-pure — ${what}`,
+          has(fn, "Clock"), JSON.stringify(eff(fn) ?? (report.functions ?? []).map((e) => e.fn)));
+  }
+
+  // THE CONTROL THIS FIX IS SHIPPABLE ON. Absence is also what a broken engine produces (§E3), so these
+  // rows are evidence only because the rows above, in the SAME tree and the SAME scan, are charged.
+  for (const fn of ["src.pure.pClearMarks", "src.pure.pClearMeasures", "src.pure.pClearRT",
+                    "src.pure.pGetEntries", "src.pure.pGetByName", "src.pure.pGetByType",
+                    "src.pure.pBufSize", "src.pure.pAddListener", "src.pure.pRemoveListener",
+                    "src.pure.pObserver", "src.pure.pPath", "src.pure.pFormat", "src.pure.pBuf"]) {
+    check(`R111 OVER-CHARGE CONTROL: a genuinely clock-free \`Performance\` member gains nothing — ${fn}`,
+          !has(fn, "Clock"), JSON.stringify(eff(fn)));
+  }
+
+  // THE EXCLUSIONS, PINNED WITH THEIR REASON — revert-invariant by design, and each says WHICH kind of
+  // "not charged" it is, because "measured not to be a clock read" and "no regex here can reach it" are
+  // different facts and only the second one is a lead.
+  check("R111 EXCLUSION (revert-invariant by design): `performance.timerify(fn)` is NOT charged — MEASURED, the call returns a NEW wrapper function and reads no clock; the read happens when the wrapper RUNS. The brief for this row asserted the opposite; charging it would fabricate",
+        !has("src.excluded.xTimerify", "Clock"), JSON.stringify(eff("src.excluded.xTimerify")));
+  check("R111 KNOWN RESIDUAL, disclosed not hidden: `const t = performance.timerify(f); t(1)` is silent-pure — a FACTORY returning an effectful callable, a different class from member coverage, filed rather than folded in here",
+        !has("src.excluded.xTimerifyThenCall", "Clock"), JSON.stringify(eff("src.excluded.xTimerifyThenCall")));
+  check("R111 EXCLUSION (revert-invariant by design): `performance.toJSON()` is NOT charged — MEASURED, its `nodeTiming` is a LIVE REFERENCE (`a.nodeTiming === b.nodeTiming`), so the clock is read by the later `.duration` access, not by this call",
+        !has("src.excluded.xToJSON", "Clock"), JSON.stringify(eff("src.excluded.xToJSON")));
+  for (const [fn, what] of [
+    ["src.excluded.xTimeOrigin", "`performance.timeOrigin` — measured CONSTANT within a process and equal to the wall clock at process start (`timeOrigin + now()` tracks `Date.now()`), so it DISCLOSES the wall clock without reading it live"],
+    ["src.excluded.xNodeTiming", "`performance.nodeTiming.duration` — measured LIVE, and a genuine remaining under-report"],
+  ]) {
+    check(`R111 UNREACHABLE BY THIS MECHANISM (revert-invariant by design), not a purity judgement: ${what}. The classify site fires only on CallExpression/NewExpression, so no member regex in either table can see a bare property access — filed as a lead, with the mechanism named`,
+          !has(fn, "Clock"), JSON.stringify(eff(fn)));
+  }
+
+  // SHADOW CONTROL — asserted on the EFFECT, not on the row's absence: `shadowNamed` carries a
+  // pre-existing `Unknown[callback:…]` (an object-literal method reads as an indeterminate callback),
+  // identical before and after, and a row-absence assertion would fail for a reason unrelated to R111.
+  for (const fn of ["src.shadow.shadowClass", "src.shadow.shadowLocal", "src.shadow.shadowNamed"]) {
+    check(`R111 SHADOW CONTROL: a project's OWN \`Performance\`/\`performance\` fabricates no Clock — ${fn}`,
+          !has(fn, "Clock"), JSON.stringify(eff(fn)));
+  }
+
+  // THE GATE, on its own tree so a mixed fixture's exit code is never read as evidence.
+  {
+    const only = project({
+      "tsconfig.json": nodeTsconfig,
+      "src/only.ts": `export function trace(): void { performance.mark("start"); performance.measure("m"); }`,
+      "clock.pol": "deny Clock\n",
+      "clock_src.pol": "deny Clock src\n",
+      "clock_other.pol": "deny Clock other\n",
+      "unknown.pol": "deny Unknown\n",
+      "blanket.pol": "deny Net Fs Exec Env\n",
+      "pure.pol": "pure\n",
+      "pure_other.pol": "pure other\n",
+    });
+    const ex = (p) => scan(only, "--policy", path.join(only, p)).r.status;
+    check("R111: `deny Clock` FIRES (exit 1) over an @types/node `performance.mark()`/`measure()` — it answered exit 0 with `policy ✓` before",
+          ex("clock.pol") === 1, `exit ${ex("clock.pol")}`);
+    check("R111: …and the SCOPED `deny Clock src` selects it",
+          ex("clock_src.pol") === 1, `exit ${ex("clock_src.pol")}`);
+    check("R111 CONTROL: `deny Clock other` does NOT fire — a scope that matches nothing must gate nothing, or the scope is decorative",
+          ex("clock_other.pol") === 0, `exit ${ex("clock_other.pol")}`);
+    check("R111 CONTROL: `deny Unknown` does NOT fire — a NAMED effect was charged, and charging `Unknown` instead would be the lazy answer that also passes the gate above",
+          ex("unknown.pol") === 0, `exit ${ex("unknown.pol")}`);
+    check("R111 CONTROL: a blanket `deny Net Fs Exec Env` does NOT fire — no boundary effect was fabricated",
+          ex("blanket.pol") === 0, `exit ${ex("blanket.pol")}`);
+    check("R111: `pure` FIRES (exit 1) — `pure` denies EFFECTS and Clock is one",
+          ex("pure.pol") === 1, `exit ${ex("pure.pol")}`);
+    check("R111 CONTROL: `pure other` does NOT fire — non-matching scope",
+          ex("pure_other.pol") === 0, `exit ${ex("pure_other.pol")}`);
+    fs.rmSync(only, { recursive: true, force: true });
+  }
+
+  // THE lib.dom ARM. The SAME expectation, not a match-the-other-arm assertion: both tables were wrong
+  // together here, so "they agree" proves nothing and only the executed ground truth decides. No
+  // tsconfig, so the DEFAULT `lib` applies — `lib.es2022.full.d.ts`, which includes lib.dom.
+  // `eventLoopUtilization` is deliberately absent from this fixture: lib.dom's `Performance` does not
+  // declare it, so the call would not COMPILE, and §E3 says an uncompilable control is no control.
+  {
+    const domArm = project({
+      "src/only.ts": `export function fMark(): unknown { return performance.mark("m"); }
+export function fMeasure(): unknown { return performance.measure("m"); }
+export function fNow(): number { return performance.now(); }
+export function fClear(): void { performance.clearMarks("x"); }
+export function fEntries(): unknown { return performance.getEntries(); }
+export function fToJSON(): unknown { return performance.toJSON(); }`,
+      "clock.pol": "deny Clock\n",
+    });
+    const { report: dr } = scan(domArm, "--policy", path.join(domArm, "clock.pol"));
+    const de = (fn) => (dr?.functions ?? []).find((x) => x.fn === fn);
+    const dhas = (fn) => ((de(fn)?.inferred) ?? []).includes("Clock");
+    for (const fn of ["src.only.fMark", "src.only.fMeasure"]) {
+      check(`R111 lib.dom ARM: \`${fn.split(".").pop()}\` charges Clock here TOO — the gap was symmetric, so fixing only the node table would have MADE a divergence where there was none`,
+            dhas(fn), JSON.stringify(de(fn)));
+    }
+    check("R111 CONTROL 3 — `now` behaves exactly as R110 left it on the lib.dom arm: still Clock. Widening a shared member set is also a way to break the member that already worked",
+          dhas("src.only.fNow"), JSON.stringify(de("src.only.fNow")));
+    for (const fn of ["src.only.fClear", "src.only.fEntries", "src.only.fToJSON"]) {
+      check(`R111 lib.dom OVER-CHARGE CONTROL: \`${fn.split(".").pop()}\` gains nothing — the exclusions hold on BOTH tables, which is the property the shared constant exists to give`,
+            !dhas(fn), JSON.stringify(de(fn)));
+    }
+    // THE lib.dom GATE GOES ON ITS OWN TREE, and that is not tidiness — the first draft asserted it on
+    // the tree above, which also contains `performance.now()`, so it exited 1 with the fix REVERTED and
+    // measured nothing. Caught by running the revert test and reading which rows failed to turn red.
+    // `mark` alone here, so the exit code turns on this fix.
+    {
+      const markOnly = project({
+        "src/only.ts": `export function trace(): unknown { return performance.mark("m"); }`,
+        "clock.pol": "deny Clock\n",
+      });
+      const g = scan(markOnly, "--policy", path.join(markOnly, "clock.pol"));
+      check("R111 lib.dom GATE: `deny Clock` exits 1 over a tree whose ONLY effect is `performance.mark()` — exit 0 with `policy ✓` before",
+            g.r.status === 1, `exit ${g.r.status}`);
+      fs.rmSync(markOnly, { recursive: true, force: true });
+    }
+    fs.rmSync(domArm, { recursive: true, force: true });
+  }
+
+  // ONE DEFINITION, TWO TABLES — the property this row buys beyond the four members. `scan.mjs`'s es-lib
+  // arm and `scan-core.mjs`'s κ rule now read the SAME exported regex, so the member set cannot be
+  // widened on one side only. That is not a claim about the other ~8 `parent ===` arms, which still have
+  // separately-maintained node-side twins; it is one arm, and saying which one is the point.
+  check("R111: the κ rule and the es-lib arm read ONE member set — `KAPPA_RULES` holds the exported `CLOCK_READING_PERFORMANCE_MEMBERS` object itself, not a copy of its source text",
+        KAPPA_RULES.some(([m, v]) => m.test("perf_hooks") && v === CLOCK_READING_PERFORMANCE_MEMBERS),
+        JSON.stringify(KAPPA_RULES.filter(([m]) => m.test("perf_hooks")).map(([m, v, e]) => [String(m), String(v), e])));
+  check("R111: and that shared set is exactly the four EXECUTED clock readers — a regression here changes both tables at once, which is the whole point of the shared token",
+        ["now", "mark", "measure", "eventLoopUtilization"].every((m) => CLOCK_READING_PERFORMANCE_MEMBERS.test(m))
+        && !["timerify", "toJSON", "timeOrigin", "clearMarks", "getEntries", "nodeTiming"].some((m) => CLOCK_READING_PERFORMANCE_MEMBERS.test(m)),
+        String(CLOCK_READING_PERFORMANCE_MEMBERS));
+
   fs.rmSync(d, { recursive: true, force: true });
 }
 

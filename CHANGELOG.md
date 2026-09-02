@@ -8,6 +8,43 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R111) — `performance.mark()`, `performance.measure()` and
+  `performance.eventLoopUtilization()` read the clock and were silently pure under BOTH `lib`
+  configurations.** Not a divergence like R109/R110 — a member-coverage gap, and it hid *because* the
+  two resolution paths agreed, so no comparison contradicted anything.
+
+      export function trace(): void { performance.mark("start"); performance.measure("m"); }
+
+      before, lib.dom AND @types/node  →  functions: []   deny Clock → exit 0
+      after,  lib.dom AND @types/node  →  ["Clock"]       deny Clock → exit 1
+
+  Ground truth is EXECUTED under node 22.12.0, not read off a signature: two `mark()`s 30 ms apart
+  return `startTime` 11.544 / 41.599; `measure("m").duration` 41.822 / 71.593;
+  `eventLoopUtilization().active` 61.853 / 91.739. SPEC §1 defines `Clock` as *reading wall-clock or
+  monotonic time*.
+
+  **`timerify()` is NOT charged, and the row that asked for this fix was wrong about it.** Measured:
+  `performance.timerify(fn)` returns a NEW wrapper function and reads no clock — the read happens when
+  the wrapper runs (observed as a PerformanceObserver `function` entry). `toJSON()` is not charged
+  either: its `nodeTiming` is a live REFERENCE, so the clock is read by the later `.duration` access.
+  `timeOrigin`, `nodeTiming` and `PerformanceEntry.startTime` are property accesses, which the classify
+  site (CallExpression/NewExpression only) cannot see at all — recorded as a lead with its mechanism
+  named, not as a purity judgement.
+
+  **The member set is now ONE exported constant read by BOTH tables** (`CLOCK_READING_PERFORMANCE_MEMBERS`
+  in `scan-core.mjs`, consumed by the κ rule there and by the es-lib `parent === "Performance"` arm in
+  `scan.mjs`). R109, R110 and R111 are three ways the same pair of tables was wrong — silent on one
+  side, silent on the other, silent on both — and every one was possible because the member set could be
+  widened on one side only. That degree of freedom is gone for this interface; the other ~8
+  `parent ===` arms still have separately-maintained node-side twins.
+
+  **Precision, measured rather than argued.** Over 194 npm packages with dependencies installed, both
+  `lib` arms (20,871 and 30,991 rows), the diff is byte-identical — and that zero is SAFETY-ONLY,
+  recorded as such here rather than discovered later: those packages contain **zero**
+  `mark`/`measure`/`eventLoopUtilization` call sites, confirmed by grep on the package sources. A recall
+  corpus of 371 packages chosen for User Timing use moves 131 rows of 46,103 (0.28 %) and 137 of 66,667
+  (0.21 %), in three packages, **REMOVED 0** — nothing became pure. All 268 moved rows audited in full.
+
 - **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R110) — `performance.now()` was silently pure under
   `@types/node`, while the SAME LINE charged `Clock` under lib.dom.** R109's split, pointing the other
   way:

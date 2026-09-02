@@ -11,6 +11,65 @@ export function isTestPath(p) {
   return /(^|\/)(node_modules|__tests__|tests?|spec)(\/|$)/.test(p) || /\.(test|spec)\.[mc]?tsx?$/.test(p);
 }
 
+/** R111 — the `Performance` members that READ A CLOCK, as ONE definition read by BOTH tables.
+ *
+ * WHY THIS IS A SHARED EXPORT AND NOT TWO LITERALS. The same question — "is this `Performance` member
+ * effect-bearing?" — is answered in two places, because the same source line resolves to two different
+ * declarations depending on `lib`: through lib.dom it lands on `<es-lib>` and is judged by scan.mjs's
+ * `parent === "Performance"` arm; through `@types/node` it lands in `perf_hooks.d.ts` and is judged by
+ * the κ rule below. R109 and R110 are what those two tables did when each was edited alone: they
+ * disagreed in BOTH directions, once each way. This constant does not merge the tables — that is a
+ * costed, separate piece of work — but it does remove the ONE degree of freedom that produced both
+ * defects, by making the member set a single token that cannot be widened on one side only.
+ *
+ * MEMBERSHIP IS BY EXECUTED GROUND TRUTH under node 22.12.0, not by name or by intuition:
+ *   now()                    two calls in one process return different values                    → CLOCK
+ *   mark(name)               `performance.mark("m").startTime` is the live elapsed value;
+ *                            two marks 30ms apart differ by 30.05ms                              → CLOCK
+ *   measure(name[, start])   `measure("m")` with no end reads NOW (two calls 30ms apart differ)  → CLOCK
+ *   eventLoopUtilization()   `.active` advances with wall time between two calls                 → CLOCK
+ *
+ * AND THE MEMBERS DELIBERATELY LEFT OUT, each for a measured reason rather than an oversight — the
+ * precision half of this rule is the whole job, because User Timing is pervasive in tracing code:
+ *   timerify(fn)   NOT a clock read. MEASURED: it returns a NEW wrapper function (`t !== fn`, and two
+ *                  calls return two different objects); the clock read happens when the WRAPPER runs,
+ *                  observed via a PerformanceObserver `function` entry. The brief for this row asserted
+ *                  timerify "reads the clock"; it does not, and charging it here would be a fabrication
+ *                  on the enclosing function. The hole it leaves is real but is a DIFFERENT class — a
+ *                  factory returning an effectful callable — and is filed as such, not folded in here.
+ *   toJSON()       returns `{nodeTiming, timeOrigin, eventLoopUtilization}`, and MEASURED, its
+ *                  `nodeTiming` is a LIVE REFERENCE (`a.nodeTiming === b.nodeTiming`) — so the clock is
+ *                  read by the later `.duration` property access, not by this call. Same shape as
+ *                  timerify: the call hands you a reader.
+ *   timeOrigin, nodeTiming, and `PerformanceEntry.startTime`/`.duration`
+ *                  are PROPERTY ACCESSES, and the classify site they would have to be judged at
+ *                  (scan.mjs, `ts.isCallExpression(node) || ts.isNewExpression(node)`) never sees a bare
+ *                  property access. No regex here can reach them; saying so is the point, because
+ *                  "not charged" and "not reachable by this mechanism" are different facts and only the
+ *                  second one tells the next reader where to look. `timeOrigin` is separately
+ *                  interesting — measured CONSTANT within a process, and equal to the wall-clock at
+ *                  process start (`timeOrigin + now()` tracks `Date.now()`) — so it discloses the wall
+ *                  clock without reading it live. Filed, not fixed.
+ *   clearMarks, clearMeasures, clearResourceTimings, getEntries, getEntriesByName, getEntriesByType,
+ *   setResourceTimingBufferSize, markResourceTiming, addEventListener, removeEventListener
+ *                  read no clock at the call. `getEntries*` returns entries whose `startTime`s were
+ *                  recorded EARLIER (measured: the returned timestamps do not advance between two calls
+ *                  30ms apart) — a lookup of past reads, charged at the `mark` that made them.
+ *
+ * SO THIS IS A VERB LIST, NOT AN INTERFACE KEY, and that is the opposite call from R109's whole-`Storage`
+ * predicate for a reason that is about the interface rather than a preference: every `Storage` member
+ * touches the store, so a verb list there could only under-report, whereas `Performance` is genuinely
+ * mixed and ten of its members demonstrably read nothing. The denylist argument does not apply to a
+ * type whose majority surface is inert.
+ *
+ * ONE MEMBER IS NODE-ONLY AND THAT IS NOT AN ACCIDENT OF SPELLING: lib.dom's `Performance` declares no
+ * `eventLoopUtilization` at all, so a lib.dom fixture calling it does not COMPILE (§E3 — checked with
+ * `tsc`, not assumed). It is in this one set because the set is keyed on the MEMBER, and the es-lib arm
+ * simply never sees that name; an alternative that cannot match is not a fabrication risk, and splitting
+ * the set in two to avoid it would reintroduce exactly the drift this constant exists to prevent.
+ */
+export const CLOCK_READING_PERFORMANCE_MEMBERS = /^(now|mark|measure|eventLoopUtilization)$/;
+
 // ---- κ — the curated classifier (CLASSIFIER §2: the dispatch/execution boundary, not builders) ----
 // Node builtins + a curated npm tier (the same under-report-and-say-so posture as the crate table:
 // an unlisted package contributes nothing — never a guess).
@@ -132,6 +191,7 @@ export const KAPPA_RULES = [
   // measured (attack K). It is a belt over braces, not the load-bearing rule; the `crypto` rule below is.
   [/^web-globals\/crypto$/, /^(getRandomValues|randomUUID|generateKey)/, "Rand"],
   // R110 — `performance.now()` is a monotonic CLOCK READ, and it was silent under `@types/node`.
+  // R111 — and so are `mark()`, `measure()` and `eventLoopUtilization()`, silently pure in BOTH arms.
   //
   // THE MIRROR OF R109, POINTING THE OTHER WAY. Resolved through lib.dom, `performance.now()` charges
   // `Clock` at the es-lib arm in scan.mjs (`parent === "Performance" && name === "now"`). Resolved
@@ -165,24 +225,24 @@ export const KAPPA_RULES = [
   // 25.9.2 exports no `performance` from that module and the fixture does not compile (§E3 applied
   // before the claim was written, not after — it was in an earlier draft of this comment).
   //
-  // A VERB LIST OF ONE, DELIBERATELY, and this is the opposite call from R109's whole-`Storage`
-  // interface. Every member of `Storage` touches the persistent store, so a verb list there could only
-  // under-report. `Performance` is genuinely MIXED: of its members, `clearMarks`, `clearMeasures`,
-  // `clearResourceTimings`, `setResourceTimingBufferSize`, `toJSON`, `addEventListener` and
-  // `removeEventListener` read no clock at all, and charging them `Clock` would fabricate. Widening to
-  // the whole interface would ALSO re-open the divergence this row exists to close, in the opposite
-  // direction, because the lib.dom arm charges `now` and nothing else.
+  // A VERB LIST, NOT AN INTERFACE KEY, and this is the opposite call from R109's whole-`Storage`
+  // predicate. Every member of `Storage` touches the persistent store, so a verb list there could only
+  // under-report. `Performance` is genuinely MIXED: ten of its members — `clearMarks`, `clearMeasures`,
+  // `clearResourceTimings`, `getEntries`, `getEntriesByName`, `getEntriesByType`, `markResourceTiming`,
+  // `setResourceTimingBufferSize`, `addEventListener`, `removeEventListener` — read no clock at all,
+  // and charging them `Clock` would fabricate.
   //
-  // WHAT THIS DOES NOT CLAIM, measured and filed rather than asserted safe: `mark()`, `measure()`,
-  // `eventLoopUtilization()` and `timerify()` DO read the clock (`performance.mark("m").startTime` is
-  // a live `now()` — executed, it returns the elapsed value) and are silently pure in BOTH arms. That
-  // is a symmetric member-coverage gap, not a resolution-path divergence, so it is a separate row with
-  // its own over-charge control — the User Timing API is pervasive in tracing code — and folding it in
-  // here would make this rule's A/B unattributable. `now` is declared exactly ONCE in all of
-  // @types/node (`perf_hooks.d.ts:83`, on `interface Performance`), so this member regex cannot land
-  // on an unrelated `now`. It is exactly as fragile as the lib.dom arm it converges on — an allowlist
-  // of one, symmetric on both sides — and that is stated rather than defended.
-  [/^(node:)?perf_hooks$/, /^now$/, "Clock"],
+  // R111 WIDENED THIS FROM A LIST OF ONE TO A LIST OF FOUR, and the member set now lives in
+  // `CLOCK_READING_PERFORMANCE_MEMBERS` at the top of this file, which the lib.dom arm in scan.mjs reads
+  // TOO. R110's original text said widening "would re-open the divergence in the opposite direction,
+  // because the lib.dom arm charges `now` and nothing else" — that was true of a widening applied to one
+  // table, and it is exactly why this widening was applied to the shared constant instead. The two arms
+  // are measured to agree on all four members, both directions, in this commit's own controls.
+  //
+  // `now` is declared exactly ONCE in all of @types/node (`perf_hooks.d.ts:83`, on `interface
+  // Performance`), and the module key is `perf_hooks` rather than a name, so this member regex cannot
+  // land on an unrelated `now`/`mark`/`measure` in some other module — the κ table asks the MODULE first.
+  [/^(node:)?perf_hooks$/, CLOCK_READING_PERFORMANCE_MEMBERS, "Clock"],
   // the curated npm tier
   [/^(axios|got|node-fetch|undici|ws|socket\.io(-client)?|nodemailer)$/, null, "Net"],
   // gaxios is the axios-like HTTP client under googleapis (request/get/post/put/patch/delete/head do

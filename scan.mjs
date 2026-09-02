@@ -35,7 +35,7 @@ import { unverifiedHoleRule, ruleUpgrade, canonicalDenySet, byCodePoint, claimsT
 import { printAgents, writeStdoutSync, writeSinkAtomic, resolveSinkArtifact, isCandorConfigSink } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadEffects, hostLiteral,
          tablesInSql, modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf,
-         partnerFor } from "./scan-core.mjs";
+         partnerFor, CLOCK_READING_PERFORMANCE_MEMBERS } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -5982,7 +5982,21 @@ function visitCalls(node) {
             rec.direct.add("Unknown");
             rec.why.add("reflect:eval"); // eval executes a runtime-supplied string — canonical `reflect:`
           }
-          if ((parent === "DateConstructor" && name === "now") || (parent === "Performance" && name === "now"))
+          // R111 — the `Performance` member set is the SHARED constant, not a literal repeated here.
+          // `performance.mark("m")` and `performance.measure("m")` read the clock and reported nothing
+          // under lib.dom AND under `@types/node` — a member-coverage gap that was invisible precisely
+          // BECAUSE the two resolution paths agreed, which is the third way this pair of tables has now
+          // been wrong (R109 lib.dom-silent, R110 node-silent, R111 both-silent-together). Importing
+          // `CLOCK_READING_PERFORMANCE_MEMBERS` rather than restating the names is the smallest thing
+          // that makes their AGREEMENT mean anything: the two arms can no longer be widened separately,
+          // which is the single degree of freedom that produced all three rows. Ground truth is EXECUTED
+          // and recorded at the constant, together with the members deliberately NOT charged (`timerify`,
+          // `toJSON`, `timeOrigin`, the `getEntries*` surface) and the measurement for each.
+          // `DateConstructor.now` is NOT part of that set and keeps its own test: it is a different
+          // interface with a different member list, and sharing a predicate between them would be a name
+          // collision dressed up as a shared question.
+          if ((parent === "DateConstructor" && name === "now")
+              || (parent === "Performance" && CLOCK_READING_PERFORMANCE_MEMBERS.test(name)))
             rec.direct.add("Clock");
           if (parent === "Math" && name === "random") rec.direct.add("Rand");
           if (ts.isNewExpression(node) && (node.arguments ?? []).length === 0
