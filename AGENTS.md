@@ -1,7 +1,8 @@
 # Using candor-ts (instructions for an AI coding agent)
 
 You are working in a TypeScript project. **candor-ts** tells you, for every function, which side
-effects it can reach — network, filesystem, database, subprocess, env, clock — *including effects
+effects it can reach — network, calls to LLM/model providers (`Llm`, refines network), filesystem,
+database, subprocess, env, clock — *including effects
 inherited transitively through any chain of calls across files*. Use it instead of tracing call
 chains by hand. The language-agnostic consumption contract is
 [candor-spec/AGENTS.md](https://github.com/tombaldwin/candor-spec/blob/main/AGENTS.md); this file is
