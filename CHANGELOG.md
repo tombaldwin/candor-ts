@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.35.0] — 2026-09-03
+
 - **⚠ DISCLOSURE FIX + SILENT-UNDER-REPORT FIX (SOUNDNESS R137) — a κ rule that classifies SOME of a
   package's members silenced the coverage answer for ALL of them.** `kappaKnows` asked a
   PACKAGE-granular question (`KAPPA_RULES.some(([mre]) => mre.test(moduleName))`, the member regex
