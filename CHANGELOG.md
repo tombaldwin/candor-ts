@@ -8,6 +8,81 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R120) — R115's structural-getter arm stopped at the MODULE
+  BOUNDARY, and its own comment stated the residual as a closed list that did not include it.** The
+  paragraph read *"what it does NOT reach is a structural literal arriving through a PARAMETER or a call
+  return"*. It had four more members, and the first is the shape every multi-file project has:
+
+      src/lib.ts   export const structural: Session = { id: 1, get token(){ return fs.readFileSync(…) } };
+      src/a.ts     import { structural } from "./lib";
+                   export function clone() { return { ...structural }; }
+
+      at e5c60bc   src.a.clone  ABSENT      `deny Unknown src.a` -> exit 0
+      executed     the spread invokes the getter ONCE (node 22.12.0, counter on the getter)
+
+  Found by PRINTING the resolved declaration at the point the arm fires, not by reading the code — the
+  arm read `getSymbolAtLocation(srcExpr).declarations`, which for an import is the **ImportSpecifier**,
+  never the `const` holding the literal (`aliasedDecls` had it and was never asked). **Four spellings,
+  enumerated past the trigger:** the alias hop, an `as`-cast initializer, a parenthesised initializer,
+  and a spread source that is not a bare Identifier (`{...(o)}`, `{...(o as T)}`, `{...o!}`). Closed by
+  three unwraps and one `getAliasedSymbol` hop — a **widening**, so the direction it fails in is
+  over-charge, never silence. `const o = {…} satisfies Session` is a fifth spelling this arm also misses
+  and that is charged anyway through the TYPE path; it is pinned as a control rather than counted as
+  coverage, because R109/R110/R111 measured that agreement between two paths answering one question is
+  worthless as a signal. **Residual, now stated as the OPEN list it is and pinned by fixtures asserting
+  today's wrong answer:** a PARAMETER, a call return, and a PROPERTY-ACCESS source (`{...holder.inner}`).
+  R115 is not undone — `{...new Session()}` still charges nothing (executed: 0 invocations).
+
+- **⚠ FABRICATION FIX *and* SILENT-UNDER-REPORT FIX (SOUNDNESS R121) — R95's relative-import guard was
+  wrong in both directions at once, and one binding hop was enough to walk around it.**
+
+  **Fabrication.** `resolvedIsHostFetch` guard (3) asked whether the CALLEE'S HEAD IDENTIFIER came from
+  a relative import. A hop replaces that identifier with a local `BindingElement`/`VariableDeclaration`,
+  so a **project-owned shim** — `vendor/shim.ts`, outside the scanned file set, whose implementation
+  returns a canned `Response` and touches nothing — was charged `Net`, and `deny Net src.shimcalls`
+  exited **1** over four functions that perform no network call. Measured at `30fc8ea` by printing the
+  resolved declaration; all four printed `RESOLVED_DECL=vendor/shim.ts:1`, so the arm was never
+  mistaking a shim for the host global — **it never asked.** It tested four proxies for the host's
+  identity, and a project's own OVERLOAD SIGNATURE satisfies three of them (bodyless, named `fetch`,
+  `Promise<Response>`). Executed against a localhost listener: **0 requests** from all four.
+
+  **Silence, in the same guard.** The head identifier is not always the fetch value. `slot.fetch(u)`,
+  with `slot` relatively imported and `slot = { fetch: globalThis.fetch }`, has head `slot` — so the
+  guard rejected on an import that says nothing about which function is called. The **real host fetch**,
+  ABSENT, `deny Net` exit 0. Its sibling `const { fetch } = slot` was charged `Net` **in the same file**:
+  one value, two answers, selected by punctuation. Executed: **1 request** from both.
+
+  **The fix asks the authority (§G) instead of a proxy.** The host's `fetch` is a GLOBAL declaration and
+  nothing else is — inside `declare global` (`@types/node/web-globals/fetch.d.ts:23`) or at the top level
+  of a non-module lib file (lib.dom's `declare function fetch`). A module's `export function fetch` is
+  reachable only by importing it, so it is never the host global, whatever the callee is spelled as.
+  **The `crossesPackageBoundary` escape is load-bearing and is the direction this guard fails in:** a
+  real dependency exports `fetch` module-scoped too, and the import arm above only sees the direct
+  spelling, so `import * as nf from "pkg"; const { fetch } = nf; fetch(u)` would go silent without it.
+  The exclusion is therefore a **denylist of one provable shape** — module-scoped AND our own package —
+  never an allowlist of the host's file paths, which would go stale with the next `@types/node` layout.
+
+  **The widening this introduces, pinned rather than hidden:** a slot DECLARED `typeof fetch` and holding
+  a local pure function is now `Net` in BOTH spellings (`deps.fetch(u)` moved ABSENT → `Net`). It is an
+  over-charge and it is sound: the checker gives that slot the identical type it gives hono's real
+  `fetch: globalThis.fetch.bind(globalThis)` — MEASURED, both print the same
+  `RESOLVED_DECL=@types/node/web-globals/fetch.d.ts:23`. Separating them needs the PROPERTY
+  INITIALIZER (`{ fetch: localFetch }`), which is interprocedural value provenance and an open bet, not
+  something this arm can reach; that is stated as the assumption it is, and the two pinned rows are the
+  fixture that would go red the day it changes. The defect worth naming is that the two spellings used
+  to **disagree**; both rows are asserted.
+
+  **A/B, 14 real TypeScript repositories** (got, nest, typeorm, hono, supabase-js, ofetch, ky, swr,
+  axios, pinia, react-router, svelte, xstate, zustand), pre-image from a clean worktree at `75ee578`
+  (`grep -c declaredInGlobalScope` = 0), keyed **WIDE** — every report field, not just `inferred`:
+  **7,199 common rows, ADDED 0, REMOVED 0, CHANGED 0.** **Hit counters compiled into the changed branch**
+  say why, and this is written down here rather than discovered later: the changed code was **REACHED**
+  141 times (F1 source unwraps 111, F1 initializer unwraps 9, F1 alias hops 5 — all in supabase-js —
+  F2 guard-(3) reaches 16) and **the new and old code agreed every time**: 0 new accessor hits recorded,
+  0 guard disagreements. **So this A/B is a SAFETY measurement, not a recall measurement** — the corpus
+  reaches the branch and contains no instance of the shapes that change the answer. The recall evidence
+  is the EXECUTED ground truth above and the fixtures built from it, never the zero-diff.
+
 - **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R114) — `process.uptime()`, `os.uptime()`, the module-path
   spellings of `process.hrtime()`/`.bigint()`, and `console.time`/`timeLog`/`timeEnd` are monotonic
   clock reads that were reviewed pure BY NAME.** R110's own commit wrote the criterion down — *"SPEC §1

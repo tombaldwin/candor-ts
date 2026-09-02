@@ -15666,6 +15666,306 @@ module.exports.Ctor = Ctor; module.exports.callH2 = callH2;
         JSON.stringify(report?.functions?.map((f) => [f.fn, f.inferred])));
 }
 
+// ── R120: R115's STRUCTURAL ARM STOPPED AT THE MODULE BOUNDARY, AND ITS COMMENT SAID OTHERWISE ────
+//
+// §E2, on a comment written by the commit that needed it to be true. R115's paragraph closed with
+// *"what it does NOT reach is a structural literal arriving through a PARAMETER or a call return"* — a
+// residual stated as a CLOSED LIST OF TWO. It had four more members, and the first of them is the
+// shape every multi-file project has:
+//
+//     src/lib.ts   export const structural: Session = { id: 1, get token(){ return fs.readFileSync(…) } };
+//     src/a.ts     import { structural } from "./lib";
+//                  export function clone() { return { ...structural }; }
+//
+//     at e5c60bc   src.a.clone  ABSENT     `deny Unknown src.a` -> exit 0
+//     executed     the spread invokes the getter ONCE (own + enumerable on an object literal)
+//
+// A SILENT UNDER-REPORT. Not found by reading the code — found by PRINTING the resolved declaration at
+// the point the arm fires, which is the only thing that distinguishes this from the two proposed fixes
+// in this repo that would never have executed at all:
+//
+//     src=src/a.ts:4  owner=src.a.clone  srcExprKind=Identifier  text="structural"
+//       symDecls     =["ImportSpecifier@src/a.ts:1"]                            ← what the arm read
+//       aliasedDecls =["VariableDeclaration@src/lib.ts:8 init=ObjectLiteral"]   ← what it needed
+//
+// FOUR SPELLINGS, ENUMERATED PAST THE TRIGGER (§9) RATHER THAN THE ONE HANDED OVER — the alias hop,
+// an `as`-cast initializer, a parenthesised initializer, and a non-Identifier spread source. Each is a
+// WIDENING: the fix can only add accessor hits, so the direction it fails in is over-charge, never
+// silence. `satisfies` is a FIFTH spelling of the same question that the arm also misses and that is
+// charged anyway, through the TYPE path — two mechanisms answering one question, so it is pinned here
+// as a control rather than counted as covered (R109/R110/R111: their agreement is not evidence).
+if (blk()) {
+  const nodeTsconfig116 = JSON.stringify({
+    compilerOptions: {
+      target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: true,
+      types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")],
+    },
+    include: ["src"],
+  });
+  const d = project({
+    "tsconfig.json": nodeTsconfig116,
+    "src/lib.ts": `import * as fs from "node:fs";
+export class Session { id = 1; get token(): string { return fs.readFileSync("/etc/token", "utf8"); } }
+export const structural: Session = { id: 1, get token(): string { return fs.readFileSync("/etc/s", "utf8"); } };
+export const holder = { inner: structural };`,
+    // THE DEFECT — the cross-module binding, through all THREE call sites that reach `enumerateGetters`
+    // (spread, `Object.assign` source, rest binding), because a fix that closed one would read as
+    // covering the class.
+    "src/a.ts": `import { structural } from "./lib";
+export function clone() { return { ...structural }; }
+export function assign() { return Object.assign({}, structural); }
+export function rest() { const { ...r } = structural; return r; }`,
+    // THE THREE SIBLING SPELLINGS the row as filed did not name (§A.2), same-module so that the alias
+    // hop is not what is under test here — the UNWRAPS are.
+    "src/b.ts": `import * as fs from "node:fs";
+import { Session, structural } from "./lib";
+const asExpr = { id: 1, get token(): string { return fs.readFileSync("/etc/ae", "utf8"); } } as Session;
+export function viaAs() { return { ...asExpr }; }
+const parenInit: Session = ({ id: 1, get token(): string { return fs.readFileSync("/etc/pi", "utf8"); } });
+export function viaParenInit() { return { ...parenInit }; }
+export function viaParenSource() { return { ...(structural) }; }
+const sat = { id: 1, get token(): string { return fs.readFileSync("/etc/sat", "utf8"); } } satisfies Session;
+export function viaSatisfies() { return { ...sat }; }`,
+    // THE PINNED GAPS — a PROPERTY-ACCESS source and a PARAMETER have no binding whose initializer this
+    // can read. Asserted as today's WRONG answer on purpose (R110's idiom) so closing one shows up as an
+    // expectation that changed, and so the residual is an OPEN list in the fixtures too.
+    "src/gap.ts": `import { Session, holder } from "./lib";
+export function viaMember() { return { ...holder.inner }; }
+export function viaParam(s: Session) { return { ...s }; }`,
+    // R115 MUST NOT BE UNDONE: a real class instance still charges nothing. A fix that reached the
+    // cross-module case by weakening `classBodiedGetter` would pass every row above and re-open the
+    // fabrication R115 closed.
+    "src/keep.ts": `import { Session } from "./lib";
+import * as path from "node:path";
+export function cloneInstance() { return { ...new Session() }; }
+export function pJoin(a: string, b: string) { return path.join(a, b); }`,
+  });
+  {
+    const tsc = spawnSync("node", [path.join(HERE, "node_modules", "typescript", "bin", "tsc"),
+                                   "-p", path.join(d, "tsconfig.json"), "--noEmit"], { encoding: "utf8" });
+    check("R120 §E3: the fixture tree COMPILES (`tsc --noEmit` exit 0) — half this block is ABSENCE assertions and absence over a program that does not exist is what a broken engine also produces",
+          tsc.status === 0, `exit ${tsc.status}: ${(tsc.stdout || "") + (tsc.stderr || "")}`.slice(0, 600));
+  }
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  // ASSERTED ON THE REASON, never on "something was charged". The PRE-FIX engine charges some of these
+  // rows too — `viaSatisfies` through the type path — so a truthiness assertion would be
+  // revert-invariant on exactly the rows that matter. `reflect:accessor:` says the charge came from the
+  // LITERAL's accessor, which is the mechanism under test.
+  const fromLiteral = (fn) => (eff(fn)?.inferred ?? []).includes("Unknown")
+    && (eff(fn)?.unknownWhy ?? []).some((w) => w.startsWith("reflect:accessor:"));
+  for (const [fn, what] of [
+    ["src.a.clone", "`import { structural } from \"./lib\"; {...structural}` — THE DEFECT. The symbol is an ALIAS whose own declaration is the ImportSpecifier, so the VariableDeclaration test failed and the row went absent; `getAliasedSymbol` is what the checker was never asked"],
+    ["src.a.assign", "…and the same binding through `Object.assign({}, structural)` — the second of the three arms that call `enumerateGetters`"],
+    ["src.a.rest", "…and through `const {...r} = structural` — the third; closing one arm would have read as covering the class"],
+    ["src.b.viaAs", "`const o = {…} as Session` — the initializer is an AsExpression, so the ObjectLiteral test failed one node short"],
+    ["src.b.viaParenInit", "`const o: Session = ({…})` — a ParenthesizedExpression initializer, the same miss under different punctuation"],
+    ["src.b.viaParenSource", "`{...(structural)}` — the SPREAD SOURCE itself was required to be a bare Identifier, so parens (and `as`, and `!`) walked around the whole arm"],
+  ]) {
+    check(`R120: charged from the LITERAL's accessor — ${what} (${fn})`, fromLiteral(fn), JSON.stringify(eff(fn) ?? null));
+  }
+  check("R120 CONTROL (two mechanisms, one question): `const o = {…} satisfies Session` is charged — but NOT by this arm. `satisfies` keeps the literal's own type, so the getter's declaration sits in an ObjectLiteralExpression and `classBodiedGetter` never excludes it. Pinned because R109/R110/R111 measured that agreement between two paths answering one question is worthless as a signal, so the second path is named rather than counted as coverage",
+        fromLiteral("src.b.viaSatisfies"), JSON.stringify(eff("src.b.viaSatisfies")));
+  for (const [fn, what] of [
+    ["src.gap.viaMember", "a PROPERTY-ACCESS source `{...holder.inner}` — no binding, so no initializer to read"],
+    ["src.gap.viaParam", "a PARAMETER `{...s}` — R115's own pinned gap, still open and still pinned"],
+  ]) {
+    check(`R120 PINNED GAP (asserts TODAY'S WRONG ANSWER on purpose, R110's idiom): ${what} reads PURE, and executed that program invokes the getter once. The residual is an OPEN list, which is the correction this row exists to make (${fn})`,
+          eff(fn) === undefined, JSON.stringify(eff(fn) ?? null));
+  }
+  check("R120 R115 NOT UNDONE: `{...new Session()}` still charges nothing — a class accessor is prototype-installed and non-enumerable (executed 0). A fix that reached the cross-module case by weakening `classBodiedGetter` would pass every row above and re-open the fabrication R115 closed",
+        eff("src.keep.cloneInstance") === undefined, JSON.stringify(eff("src.keep.cloneInstance") ?? null));
+  check("R120 OVER-CHARGE CONTROL: ordinary `path.join` in the same scan is untouched, so a run that reported nothing at all could not pass the absence rows above",
+        eff("src.keep.pJoin") === undefined, JSON.stringify(eff("src.keep.pJoin") ?? null));
+
+  // THE GATE. Scoped to `src.a` so the exit code is about the CALLER: a blanket `deny Unknown` fires
+  // from `src.b` either way, which would have made a whole-tree gate row measure nothing.
+  {
+    fs.writeFileSync(path.join(d, "a.pol"), "deny Unknown src.a\n");
+    fs.writeFileSync(path.join(d, "keep.pol"), "deny Unknown src.keep\n");
+    const ex = (p) => scan(d, "--policy", path.join(d, p)).r.status;
+    check("R120 GATE: `deny Unknown src.a` exits 1 — it exited 0 at e5c60bc over a spread that invokes an fs-reading getter, which is the whole point of a deny gate",
+          ex("a.pol") === 1, `exit ${ex("a.pol")}`);
+    check("R120 GATE CONTROL: `deny Unknown src.keep` still exits 0 — the widening did not simply start charging everything, which is what would make the row above pass for the wrong reason",
+          ex("keep.pol") === 0, `exit ${ex("keep.pol")}`);
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── R121: R95's RELATIVE-IMPORT GUARD WAS WRONG IN BOTH DIRECTIONS AT ONCE ────────────────────────
+//
+// `resolvedIsHostFetch`'s guard (3) asked whether the CALLEE'S HEAD IDENTIFIER came from a relative
+// import. Both halves of that failed, and the two failures are the same defect the commit itself says
+// it caught one hop earlier — *"does it key on a spelling where it should key on a binding"*.
+//
+// FABRICATION. One binding hop erases the import from the head identifier. MEASURED at 30fc8ea over a
+// `vendor/shim.ts` outside the scanned file set, whose implementation returns a canned `Response` and
+// touches nothing — and measured by PRINTING the resolved declaration, not by reading the code:
+//
+//     const { fetch } = shimNamespace;  fetch(u)    head=BindingElement      -> Net   FABRICATED
+//     const { fetch } = shimDefault;    fetch(u)    head=BindingElement      -> Net   FABRICATED
+//     const f = shim.fetch;             f(u)        head=VariableDeclaration -> Net   FABRICATED
+//     const s = shim;                   s.fetch(u)  head=VariableDeclaration -> Net   FABRICATED
+//     import * as shim from "./shim";   shim.fetch(u)  head=NamespaceImport  -> absent (guard held)
+//
+// all four printing `RESOLVED_DECL=vendor/shim.ts:1`. So the arm was NOT mistaking a shim for the host
+// global — IT NEVER ASKED. It tested four proxies for the host's identity, and a project's own OVERLOAD
+// SIGNATURE satisfies three of them (bodyless, named `fetch`, `Promise<Response>`).
+//
+// SILENCE, in the same guard: the head identifier is not always the fetch value. `slot.fetch(u)`, with
+// `slot` relatively imported and `slot = { fetch: globalThis.fetch }`, has head `slot`, so the guard
+// rejected on an import that says nothing about which function is called — the REAL host fetch, ABSENT,
+// `deny Net` exit 0. Its sibling `const { fetch } = slot` was charged Net IN THE SAME FILE: one value,
+// two answers, selected by punctuation. That pair is the clincher and it is a row below.
+//
+// THE FIX ASKS THE AUTHORITY (§G): the host's `fetch` is a GLOBAL declaration and nothing else is —
+// inside `declare global` (@types/node) or at the top level of a non-module lib file (lib.dom). A
+// module's `export function fetch` is reachable only by importing it, so it is never the host global.
+// The `crossesPackageBoundary` escape keeps a real DEPENDENCY's module-scoped `fetch` charged, and that
+// escape is the direction this guard fails in, so it has its own row.
+if (blk()) {
+  const d = project({
+    "package.json": JSON.stringify({ name: "r116b-fixture", version: "1.0.0" }),
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: {
+        target: "ES2022", lib: ["ES2022"], module: "esnext", moduleResolution: "bundler", strict: true,
+        types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")],
+      },
+      include: ["src"],
+    }),
+    // A PROJECT-OWNED shim, deliberately OUTSIDE `include` so guard (2) cannot be what saves it — this
+    // is the shape guard (3) was written for and the shape it failed on. Ground truth: no network.
+    "vendor/shim.ts": `export function fetch(url: string): Promise<Response>;
+export function fetch(url: string, init?: RequestInit): Promise<Response>;
+export function fetch(url: string, _init?: RequestInit): Promise<Response> {
+  return Promise.resolve(new Response("canned-local-no-network:" + url));
+}
+export default { fetch };`,
+    "src/shimcalls.ts": `import * as shim from "../vendor/shim";
+import { fetch as named } from "../vendor/shim";
+import shimDefault from "../vendor/shim";
+export function viaNamespace(u: string) { return shim.fetch(u); }
+export function viaNamed(u: string) { return named(u); }
+export function viaNsDestructure(u: string) { const { fetch } = shim; return fetch(u); }
+export function viaDefaultDestructure(u: string) { const { fetch } = shimDefault; return fetch(u); }
+export function viaMemberAlias(u: string) { const f = shim.fetch; return f(u); }
+export function viaNsBinding(u: string) { const s = shim; return s.fetch(u); }`,
+    // A real DEPENDENCY exporting a module-scoped `fetch`. The import arm above only sees the DIRECT
+    // spelling, so this arm is the only thing charging the binding hop — which is why the exclusion is
+    // a denylist (module-scoped AND our own package) and not "module-scoped".
+    "node_modules/fakenet/package.json": JSON.stringify({ name: "fakenet", version: "1.0.0", types: "index.d.ts", main: "index.js" }),
+    "node_modules/fakenet/index.d.ts": `export declare function fetch(url: string, init?: RequestInit): Promise<Response>;\n`,
+    "node_modules/fakenet/index.js": `export function fetch(u) { return Promise.resolve(new Response(u)); }\n`,
+    "src/hostslot.ts": `export const slot = { fetch: globalThis.fetch };`,
+    // THE NEAR-MISS, PINNED RATHER THAN HIDDEN. A slot DECLARED `typeof fetch` and HOLDING a local pure
+    // function is indistinguishable from one holding the real thing — the checker gives both the
+    // identical type (MEASURED — both resolve to `@types/node/web-globals/fetch.d.ts:23`). Separating
+    // them means reading the PROPERTY INITIALIZER `{ fetch: localFetch }`, i.e. value provenance — an
+    // open bet, not a capability this arm has. Stated as the assumption it is; these rows are the
+    // fixture that goes red the day it stops being true.
+    // At 30fc8ea the two spellings of that one slot DISAGREED: `const { fetch } = deps` was Net and
+    // `deps.fetch(u)` was absent, because the old guard read the head identifier `deps`. They now agree,
+    // and they agree on the OVER-approximation, which is the sound side. Both rows are asserted so the
+    // widening is visible in the diff rather than discovered later.
+    "src/deps.ts": `export function localFetch(url: string | URL | Request, _init?: RequestInit): Promise<Response> {
+  return Promise.resolve(new Response("canned:" + String(url)));
+}
+export interface Deps { fetch: typeof fetch }
+export const deps: Deps = { fetch: localFetch };`,
+    "src/depcalls.ts": `import { deps } from "./deps";
+export function viaDepsDestructure(u: string) { const { fetch } = deps; return fetch(u); }
+export function viaDepsMember(u: string) { return deps.fetch(u); }`,
+    "src/host.ts": `import { slot } from "./hostslot";
+import * as fake from "fakenet";
+import { fetch as pkgNamed } from "fakenet";
+export function hostBare(u: string) { return fetch(u); }
+export function hostDestructure(u: string) { const { fetch } = globalThis; return fetch(u); }
+export function hostRenamed(u: string) { const { fetch: f } = globalThis; return f(u); }
+export function hostViaG(u: string) { const g = globalThis; return g.fetch(u); }
+export function hostArr(u: string) { const a = [fetch]; return a[0](u); }
+export function hostGlobalThis(u: string) { return globalThis.fetch(u); }
+export function hostViaSlotMember(u: string) { return slot.fetch(u); }
+export function hostViaSlotDestructure(u: string) { const { fetch } = slot; return fetch(u); }
+export function pkgNamespaceHop(u: string) { const { fetch } = fake; return fetch(u); }
+export function pkgNamedDirect(u: string) { return pkgNamed(u); }`,
+  });
+  {
+    const tsc = spawnSync("node", [path.join(HERE, "node_modules", "typescript", "bin", "tsc"),
+                                   "-p", path.join(d, "tsconfig.json"), "--noEmit"], { encoding: "utf8" });
+    check("R121 §E3: the fixture tree COMPILES (`tsc --noEmit` exit 0) — the fabrication rows below are ABSENCE assertions and an uncompilable fixture makes a correct engine and a broken one produce the same bytes",
+          tsc.status === 0, `exit ${tsc.status}: ${(tsc.stdout || "") + (tsc.stderr || "")}`.slice(0, 600));
+  }
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const isNet = (fn) => (eff(fn)?.inferred ?? []).includes("Net");
+
+  for (const [fn, what] of [
+    ["src.shimcalls.viaNsDestructure", "`const { fetch } = shimNamespace` — the head is a BindingElement, so the import the guard was looking for is not there any more"],
+    ["src.shimcalls.viaDefaultDestructure", "`const { fetch } = shimDefault` — the same hop off a default import"],
+    ["src.shimcalls.viaMemberAlias", "`const f = shim.fetch; f(u)` — the hop stores the member, not the namespace"],
+    ["src.shimcalls.viaNsBinding", "`const s = shim; s.fetch(u)` — the hop renames the namespace, and the callee is a PropertyAccess whose head is now local"],
+  ]) {
+    check(`R121: fabricates nothing over a PROJECT-OWNED shim — ${what}. Its resolved declaration printed as \`vendor/shim.ts:1\`, so this was never a mistaken identity; the arm never asked (${fn})`,
+          !isNet(fn), JSON.stringify(eff(fn) ?? null));
+  }
+  for (const [fn, what] of [
+    ["src.shimcalls.viaNamespace", "`shim.fetch(u)` through a namespace import"],
+    ["src.shimcalls.viaNamed", "`named(u)` through a named import"],
+  ]) {
+    check(`R121 (REVERT-INVARIANT BY DESIGN — held by the OLD guard too, kept because the new one must not lose them): ${what} still fabricates nothing (${fn})`,
+          !isNet(fn), JSON.stringify(eff(fn) ?? null));
+  }
+
+  // THE OTHER DIRECTION, and every one of these is why the fabrication fix could not simply delete the
+  // arm. Written BEFORE the narrowing, per the family's measured rate of 4 defects in 5
+  // fabrication-fixes, two of them cardinal sins.
+  for (const [fn, what] of [
+    ["src.host.hostBare", "the bare global `fetch(u)`"],
+    ["src.host.hostDestructure", "`const { fetch } = globalThis` — R95's own cardinal sin, still closed"],
+    ["src.host.hostRenamed", "`const { fetch: f } = globalThis`"],
+    ["src.host.hostViaG", "`const g = globalThis; g.fetch(u)`"],
+    ["src.host.hostArr", "`const a = [fetch]; a[0](u)` — a non-Identifier callee head"],
+    ["src.host.hostGlobalThis", "`globalThis.fetch(u)`"],
+    ["src.host.hostViaSlotDestructure", "`const { fetch } = slot` where `slot = { fetch: globalThis.fetch }` and `slot` is RELATIVELY imported"],
+  ]) {
+    check(`R121 RECALL CONTROL: ${what} is still Net (${fn})`, isNet(fn), JSON.stringify(eff(fn) ?? null));
+  }
+  check("R121 THE SILENT HALF OF THE SAME GUARD: `slot.fetch(u)`, with `slot` relatively imported and `slot = { fetch: globalThis.fetch }`, is Net. It was ABSENT at 30fc8ea — the real host fetch, `deny Net` exit 0 — because the guard rejected on the head identifier `slot`, an import that says nothing about which function is called. Its sibling `const { fetch } = slot` was charged IN THE SAME FILE: one value, two answers, selected by punctuation",
+        isNet("src.host.hostViaSlotMember"), JSON.stringify(eff("src.host.hostViaSlotMember") ?? null));
+  check("R121 THE ESCAPE IS LOAD-BEARING, AND THIS IS THE DIRECTION THE NEW GUARD FAILS IN: a real dependency's module-scoped `export declare function fetch` reached through a binding hop (`import * as fake from \"fakenet\"; const { fetch } = fake`) is still Net. `module-scoped` ALONE would have silenced it — the import arm above only sees the direct spelling — so the exclusion is a DENYLIST of one provable shape (module-scoped AND our own package), never an allowlist of the host's file paths",
+        isNet("src.host.pkgNamespaceHop"), JSON.stringify(eff("src.host.pkgNamespaceHop") ?? null));
+  check("R121 …and the direct spelling of the same dependency import, which the import arm owns, is unchanged",
+        isNet("src.host.pkgNamedDirect"), JSON.stringify(eff("src.host.pkgNamedDirect") ?? null));
+
+  // THE NEAR-MISS, REPORTED RATHER THAN HIDDEN — an audit that hides its own near-miss has said nothing
+  // about the rest of it. A `typeof fetch` SLOT holding a local pure function is an OVER-CHARGE here,
+  // and `viaDepsMember` moved ABSENT -> Net with this change. It is pinned in BOTH spellings because
+  // the defect worth naming is that they used to disagree, and the checker cannot tell this slot from
+  // the one hono actually has (`fetch: globalThis.fetch.bind(globalThis)`) — identical type, different
+  // value. Reading the PROPERTY INITIALIZER would separate them; that is value provenance and this arm
+  // does not do it — the assumption, not a guarantee. Agreeing on the OVER-approximation is
+  // the sound side of that coin; agreeing is the part that is not negotiable.
+  for (const [fn, what] of [
+    ["src.depcalls.viaDepsDestructure", "`const { fetch } = deps` — Net at 30fc8ea too, unchanged"],
+    ["src.depcalls.viaDepsMember", "`deps.fetch(u)` — ABSENT at 30fc8ea, Net now. THE WIDENING THIS CHANGE INTRODUCES, pinned so it cannot move unnoticed"],
+  ]) {
+    check(`R121 PINNED OVER-CHARGE: a slot DECLARED \`typeof fetch\` holding a LOCAL pure function is Net — ${what}. Sound (the type says host fetch and nothing distinguishes it from hono's real one), imprecise, and the same in both spellings, which it was not before (${fn})`,
+          isNet(fn), JSON.stringify(eff(fn) ?? null));
+  }
+
+  // THE GATE, both directions, scoped so the exit code is about the module under test.
+  {
+    fs.writeFileSync(path.join(d, "shim.pol"), "deny Net src.shimcalls\n");
+    fs.writeFileSync(path.join(d, "host.pol"), "deny Net src.host\n");
+    const ex = (p) => scan(d, "--policy", path.join(d, p)).r.status;
+    check("R121 GATE: `deny Net src.shimcalls` exits 0 — it exited 1 at 30fc8ea over four functions whose executed run makes no network call at all, and a red gate that means nothing is the whole cost of a fabrication",
+          ex("shim.pol") === 0, `exit ${ex("shim.pol")}`);
+    check("R121 GATE CONTROL: `deny Net src.host` still exits 1 — a fix that silenced the real host fetch would look identical on the row above",
+          ex("host.pol") === 1, `exit ${ex("host.pol")}`);
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── R115: `{...instance}` CHARGED A CLASS PROTOTYPE GETTER THAT NEVER RUNS ────────────────────────
 //
 // A FABRICATION, and the only row of the R109–R115 vein that makes candor FAIL A GATE on code that

@@ -4341,10 +4341,43 @@ function recordAccessorHit(owner, hit, label) {
 //
 // The `srcExpr` arm below resolves the spread source through its BINDING to an object-literal
 // initializer and enumerates THAT literal's accessors, so this spelling stays charged. It is a
-// widening — it can only add — so it cannot itself hide anything. What it does NOT reach is a
-// structural literal arriving through a PARAMETER or a call return, which has no initializer to read;
-// that residual is pinned by its own fixture asserting today's (wrong) answer, so it cannot move by
-// accident. Before this fix that spelling was charged only by COINCIDENCE — the class accessor's
+// widening — it can only add — so it cannot itself hide anything.
+//
+// R120 — AND THE SENTENCE THAT USED TO FOLLOW WAS FALSE, WHICH IS THE §E2 SHAPE EXACTLY. It read
+// "what it does NOT reach is a structural literal arriving through a PARAMETER or a call return",
+// i.e. it stated the residual as a closed list of two. The arm's first cut required `srcExpr` to be a
+// bare Identifier and read `getSymbolAtLocation(srcExpr).declarations` WITHOUT following an alias, so
+// FOUR more spellings fell out of it — and the first of them is the one the paragraph implicitly
+// promised, a plain `const` binding reached across a MODULE. Measured at e5c60bc by PRINTING the
+// resolved declaration at the point the arm fires, never by reading the code:
+//
+//     src=src/a.ts:4  owner=src.a.clone  srcExprKind=Identifier  text="structural"
+//       symDecls     =["ImportSpecifier@src/a.ts:1"]                           ← what the arm looked at
+//       aliasedDecls =["VariableDeclaration@src/lib.ts:8 init=ObjectLiteral"]  ← what it needed
+//
+//   1. `import { structural } from "./lib"; {...structural}`  → the symbol is an ALIAS; its own
+//      declaration is the ImportSpecifier, so the VariableDeclaration test failed and the row went
+//      ABSENT. `deny Fs src.a.clone` exited 0 over a spread that invokes an fs-reading getter. A
+//      SILENT UNDER-REPORT, and it is the shape any multi-file project has.
+//   2. `const o = { get k(){…} } as Session`      → initializer is an AsExpression, not a literal.
+//   3. `const o = ({ get k(){…} })`               → initializer is a ParenthesizedExpression.
+//   4. `{...(structural)}` / `{...(o as T)}` / `{...o!}` → srcExpr is not an Identifier at all.
+//
+// `const o = {…} satisfies Session` is a FIFTH spelling of the same question that the arm also misses,
+// and it is charged anyway — `satisfies` keeps the literal's own type, so its getter declaration sits
+// in an ObjectLiteralExpression and `classBodiedGetter` never excludes it. Covered by a different
+// mechanism, so it is a control here rather than a fix: two paths answering one question is exactly
+// the R109/R110/R111 shape, and their agreement is not evidence.
+//
+// All four are closed by UNWRAPPING and ASKING THE ALIAS (§G — the checker already knows), and every
+// one of them is a WIDENING: it can only add accessor hits, never remove one, so the direction it
+// fails in is over-charge, not silence.
+//
+// WHAT IS STILL NOT REACHED, stated as the open list it is rather than a closed one: a structural
+// literal arriving through a PARAMETER, through a call return, or through a PROPERTY ACCESS
+// (`{...holder.inner}`, `{...this.o}`) — none has a binding whose initializer this can read. All three
+// are pinned by fixtures asserting today's (wrong) answer, so closing one shows up as an expectation
+// that changed. Before R115 those spellings were charged only by COINCIDENCE — the class accessor's
 // effects were reported in place of the literal's, which is the right verdict off the wrong evidence.
 function classBodiedGetter(sym) {
   const decls = (sym?.declarations ?? []).filter((d) => ts.isGetAccessorDeclaration(d));
@@ -4362,13 +4395,26 @@ function enumerateGetters(owner, type, srcExpr) {
   // The structural arm: `const o: SomeClass = { get k(){…} }` — the BINDING's initializer is an object
   // literal, so its accessors are own+enumerable and the copy DOES invoke them, whatever the annotation
   // says. Follows a plain binding only (one hop, no calls, no conditionals); adds, never removes.
-  if (!srcExpr || !ts.isIdentifier(srcExpr)) return;
-  const sym0 = checker.getSymbolAtLocation(srcExpr);
+  //
+  // R120 — THREE UNWRAPS AND ONE ALIAS HOP, because the question is which OBJECT is being copied and
+  // none of these four wrappers changes that answer. Each is a spelling measured absent at e5c60bc.
+  let se = srcExpr;
+  while (se && (ts.isParenthesizedExpression(se) || ts.isAsExpression(se)
+                || ts.isSatisfiesExpression(se) || ts.isNonNullExpression(se))) se = se.expression;
+  if (!se || !ts.isIdentifier(se)) return;                                  // parameter / call return / member
+  let sym0 = checker.getSymbolAtLocation(se);
   if (!sym0) return;
+  // An IMPORTED binding's own declaration is the ImportSpecifier/ImportClause, never the `const` that
+  // holds the literal — so without this hop every cross-module spread read the alias and gave up. This
+  // is the same `getAliasedSymbol` call the fetch import arm already makes for the same reason.
+  if (sym0.flags & ts.SymbolFlags.Alias) { try { sym0 = checker.getAliasedSymbol(sym0) ?? sym0; } catch { /* unresolved import */ } }
   for (const d of sym0.declarations ?? []) {
     if (!ts.isVariableDeclaration(d) || !d.initializer) continue;
-    if (!ts.isObjectLiteralExpression(d.initializer)) continue;
-    for (const pr of d.initializer.properties) {
+    let init = d.initializer;
+    while (ts.isParenthesizedExpression(init) || ts.isAsExpression(init)
+           || ts.isSatisfiesExpression(init) || ts.isNonNullExpression(init)) init = init.expression;
+    if (!ts.isObjectLiteralExpression(init)) continue;
+    for (const pr of init.properties) {
       if (!ts.isGetAccessorDeclaration(pr)) continue;
       const nm = pr.name?.getText?.() ?? "?";
       recordAccessorHit(owner, { decl: pr, local: projectFiles.has(path.resolve(pr.getSourceFile().fileName)) }, nm);
@@ -5511,39 +5557,73 @@ const envTouchingBuiltinCall = (node) => {
  *     the side to be wrong on here.
  *  2. NOT A PROJECT FILE. A project's own `fetch` shadow must never fabricate Net — control 3, and the
  *     same test every arm above makes.
- *  3. NOT REACHED THROUGH A RELATIVE IMPORT. Same rule and same reasoning as the import arm above:
- *     the module SPECIFIER decides, not file-set membership, so `import { fetch } from "./my-mock"`
- *     stays the project's own even when the scan's shape leaves `./my-mock` outside `projectFiles`.
- *     THE TEST IS ON THE CALLEE'S HEAD IDENTIFIER, not on the callee, and that is not cosmetic — the
- *     first cut of this guard checked `call.expression` only, so it skipped every PropertyAccess and
- *     `import * as shim from "./vendorshim"; shim.fetch(u)` FABRICATED Net on the project's own shim
- *     while the named form beside it correctly gained nothing. Found by asking, of my own guard, the
- *     question this fix is about: does it key on a spelling where it should key on a binding.
+ *  3. THE RESOLVED DECLARATION IS A GLOBAL, unless it crosses a package boundary. ⟨R121 — THIS
+ *     REPLACES A GUARD THAT WAS WRONG IN BOTH DIRECTIONS AT ONCE.⟩ The guard here used to ask whether
+ *     the CALLEE'S HEAD IDENTIFIER came from a RELATIVE import, and both halves of that failed:
+ *
+ *       FABRICATION — one binding hop erases the import from the head identifier, so a project-owned
+ *       shim was charged Net. MEASURED at 30fc8ea by PRINTING the resolved declaration, not by reading
+ *       the code, over a `vendor/shim.ts` whose implementation returns a canned Response and touches
+ *       nothing (`export function fetch(u): Promise<Response>;` × 2 overloads + a pure body):
+ *
+ *         const { fetch } = shimNamespace;  fetch(u)     head=BindingElement     → Net   FABRICATED
+ *         const { fetch } = shimDefault;    fetch(u)     head=BindingElement     → Net   FABRICATED
+ *         const f = shim.fetch;             f(u)         head=VariableDeclaration→ Net   FABRICATED
+ *         const s = shim;                   s.fetch(u)   head=VariableDeclaration→ Net   FABRICATED
+ *         import * as shim from "./shim";   shim.fetch(u)  head=NamespaceImport  → absent (guard held)
+ *
+ *       and every one of those four printed `RESOLVED_DECL=vendor/shim.ts:1`. So the arm was NOT
+ *       "treating a local shim as the host global" — it never asked. It read four proxies for the
+ *       host's identity and a project's own OVERLOAD SIGNATURE satisfies three of them (bodyless,
+ *       named `fetch`, `Promise<Response>`), with the fourth defeated by the hop.
+ *
+ *       SILENCE — the head identifier is not always the fetch value. `slot.fetch(u)`, where
+ *       `slot` is relatively imported and `slot = { fetch: globalThis.fetch }`, has head `slot`, so
+ *       the old guard rejected on an import that says nothing about which function is being called:
+ *       the REAL host fetch, ABSENT, `deny Net` exit 0. Its sibling spelling `const { fetch } = slot`
+ *       was charged Net in the same file — one value, two answers, selected by punctuation.
+ *
+ *     ASK THE AUTHORITY INSTEAD (§G). The host's `fetch` is a GLOBAL declaration and nothing else is:
+ *     it sits inside a `declare global` block (`@types/node/web-globals/fetch.d.ts:23`, printed) or at
+ *     the top level of a non-module lib file (lib.dom's `declare function fetch`, printed). A module's
+ *     `export function fetch` is reachable only by importing it, so it is never the host global — no
+ *     matter where its file lives, whether the scan included it, or how the callee is spelled.
+ *     THE `crossesPackageBoundary` ESCAPE IS LOAD-BEARING AND IS THE DIRECTION THIS GUARD FAILS IN: a
+ *     real DEPENDENCY exports `fetch` module-scoped too (`import * as nf from "node-fetch-native";
+ *     const { fetch } = nf; fetch(u)` — the import arm above only sees the direct spelling, so this arm
+ *     is the only thing charging the hop). Without the escape that call goes SILENT, so the exclusion
+ *     is a DENYLIST of one provable shape — module-scoped AND our own package — never an allowlist of
+ *     the host's file paths, which would go stale with the next @types/node layout.
+ *     WHERE IT FAILS: too broad ⇒ a silent under-report. Bounded to declarations that are both
+ *     module-scoped and inside the scanned package, i.e. the project's own source, which candor
+ *     analyses as its own units and reaches by an EDGE rather than by this arm. That is the same
+ *     bargain guard (2) already makes for `projectFiles`, extended to the project files a given scan's
+ *     shape happens to leave out — which is precisely what the old guard was reaching for.
  *  4. SHAPED LIKE THE WEB FETCH — returns `Promise<Response>`. Not a new judgement: it is the identical
  *     question the import arm above already asks of the identical authority, and it exists because a
  *     package exporting a pure `fetch(key)` cache-getter was once charged Net on its name alone.
  *
  * NOT a `.d.ts` file test: an ambient declaration is what (1) already asks for, and a file-extension
  * test would add a second, weaker spelling of the same question. */
+// Is this declaration in GLOBAL scope — `declare global { … }`, or the top level of a source file that
+// is not an external module? Everything else is reachable only through an import and is therefore some
+// module's own export, never the host global.
+const declaredInGlobalScope = (d) => {
+  for (let n = d.parent; n; n = n.parent) {
+    if (ts.isModuleDeclaration(n)) return !!(n.flags & ts.NodeFlags.GlobalAugmentation);
+    if (ts.isSourceFile(n)) return !ts.isExternalModule(n);
+  }
+  return false;
+};
 const resolvedIsHostFetch = (call) => {
   if (!ts.isCallExpression(call)) return false;
   let sig; try { sig = checker.getResolvedSignature?.(call); } catch { return false; }
   const d = sig?.declaration;
   if (!d || !ts.isFunctionDeclaration(d) || d.body) return false;               // (1)
   if (d.name?.text !== "fetch") return false;                                   // (1)
-  if (projectFiles.has(path.resolve(d.getSourceFile().fileName))) return false;  // (2)
-  let head = call.expression;                                                    // (3)
-  while (ts.isPropertyAccessExpression(head) || ts.isParenthesizedExpression(head)
-         || ts.isAsExpression(head) || ts.isNonNullExpression(head)) head = head.expression;
-  if (ts.isIdentifier(head)) {
-    for (const sd of checker.getSymbolAtLocation(head)?.declarations ?? []) {
-      const imp = ts.isImportSpecifier(sd) ? sd.parent?.parent?.parent
-                : ts.isImportClause(sd) ? sd.parent
-                : ts.isNamespaceImport(sd) ? sd.parent?.parent : null;
-      const spec = imp && ts.isImportDeclaration(imp) ? imp.moduleSpecifier : null;
-      if (spec && ts.isStringLiteralLike(spec) && /^[./]/.test(spec.text)) return false;
-    }
-  }
+  const df = path.resolve(d.getSourceFile().fileName);
+  if (projectFiles.has(df)) return false;                                        // (2)
+  if (!declaredInGlobalScope(d) && !crossesPackageBoundary(df)) return false;    // (3)
   let rt; try { rt = checker.typeToString(checker.getReturnTypeOfSignature(sig)); } catch { return false; }
   return /\bResponse\b/.test(rt);                                                // (4)
 };
