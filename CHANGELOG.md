@@ -8,6 +8,77 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R110) — `performance.now()` was silently pure under
+  `@types/node`, while the SAME LINE charged `Clock` under lib.dom.** R109's split, pointing the other
+  way:
+
+      export function tick(): number { return performance.now(); }
+
+      lib.dom resolution      →  ["Clock"]                      deny Clock → exit 1
+      @types/node resolution  →  functions: []  (silent-pure)    deny Clock → exit 0
+
+  **Together with R109 this establishes that the two resolution paths disagree in BOTH directions, so
+  neither can be treated as the trusted one** — "the other arm is correct" is not available as a reason
+  after this. It was not the reason used here either: `now()` was ground-truthed by EXECUTION under node
+  22.12.0 (two calls in one process return different values; `timeOrigin + now()` tracks `Date.now()`).
+
+  **The wrong half here is the OFFICIAL Node base config**, not an exotic corner. It is reached by any
+  tsconfig naming `lib` without `DOM`, and `@tsconfig/node20` / `@tsconfig/node22` — fetched from npm
+  and read rather than remembered — both set exactly that (`"lib": ["es2023"]`, `"types": ["node"]`).
+
+  **The key is the module the MEMBER's declaration came from, `perf_hooks`.** The fix was proposed as a
+  rule on `web-globals/performance`; that would never have fired — `web-globals/performance.d.ts`
+  declares `var performance` and nothing callable, so `now` resolves into `perf_hooks.d.ts`. The
+  resolved declaration file was printed for both arms before a line of the fix was written. `perf_hooks`
+  was module-wide reviewed-pure in the node-core floor under the justification "(in-process timing)",
+  which conflates "does not leave the process" with "reads no clock"; SPEC §1's `Clock` is *reading
+  wall-clock or monotonic time*. That comment is corrected rather than left standing.
+
+  **A verb list of one, deliberately — the opposite call from R109's whole-`Storage` interface.** Every
+  `Storage` member touches the persistent store, so a verb list there could only under-report;
+  `Performance` is genuinely mixed, and `clearMarks`/`clearMeasures`/`clearResourceTimings`/
+  `setResourceTimingBufferSize`/`toJSON`/`getEntries*`/`addEventListener` read no clock at all. Widening
+  to the interface would also re-open this divergence in the opposite direction. `now` is declared
+  exactly once in all of @types/node, so the regex cannot land on an unrelated member.
+
+  **A third under-report fell out, and it was invisible because both arms agreed:**
+  `import { performance } from "node:perf_hooks"` (and the bare `"perf_hooks"` specifier) resolves into
+  `perf_hooks.d.ts` under *any* `lib`, so that spelling was silently pure under BOTH configs before this
+  and is charged under both after it. The global `performance.now()` spelling under lib.dom is
+  byte-identical before and after — lib.dom loses nothing, it only gains where it was wrong too.
+
+  **A/B — and the first arm is the informative one.** Re-running R109's 194-package corpus unchanged
+  gives `ADDED 0 REMOVED 0 CHANGED 0` over 20,871 common rows with **ZERO hits** on the changed branch:
+  candor-ts's own default for a bare directory is `lib.es2022.full.d.ts`, which *includes* lib.dom, so
+  that corpus cannot reach this code at all. That zero-diff is **safety-only** and is recorded as such.
+  The recall arm re-scans the same 194 packages under a `@tsconfig/node`-shaped tsconfig (`lib` without
+  `DOM`, `types: ["node"]`), which is the configuration under test:
+
+      ADDED 2   REMOVED 0   CHANGED 18 (wide)  ·  CHANGED 18 (narrow, `inferred` only)
+      30,989 common rows · 15 κ-rule matches across 3 packages (lru-cache 12, hono 2, ky 1)
+
+  **REMOVED 0** — nothing became pure. All 20 moved rows audited in FULL, no sampling: 2 DIRECT
+  (`getNow` in lru-cache 10.4.3's esm and commonjs builds, whose entire body is `perf.now()` where
+  `perf` is `performance` or `Date` — ground-truthed from the package source, and **previously ABSENT
+  from the report, i.e. certified pure**) and 18 TRANSITIVE, each proven to reach `getNow` through its
+  recorded edges rather than by name. Zero fabrications. On real code,
+  `deny Clock dist.esm.index.getNow` over lru-cache goes **exit 0 → exit 1**, and all 20 rows now match
+  what the lib.dom arm already said about the same package — the convergence, measured on real code.
+
+  **Reported, not hidden:** hono's 2 matches and ky's 1 produced no row change, because both sites are
+  `performance.now()` with a `Date.now()` fallback on the same line, so the enclosing function already
+  carried `Clock` — two mechanisms with one effect label masking each other. And the *blanket*
+  `deny Clock` over lru-cache was exit 1 before and after; only the scoped form discriminates.
+
+  **Not fixed, measured and filed separately:** `mark()`, `measure()`, `eventLoopUtilization()` and
+  `timerify()` do read the clock and are silently pure in **both** arms — a symmetric member-coverage
+  gap, not a resolution-path divergence, needing its own over-charge control because the User Timing
+  API is pervasive in tracing code. Folding it in here would have made this A/B unattributable. Also
+  measured: the neighbouring κ rule on `web-globals/crypto` does **not** fire for the members it names
+  on @types/node 25.9.2 (they resolve into `crypto.d.ts`, and the `(node:)?crypto` rule is what charges
+  them). It is kept as a belt over braces; its comment claimed to "cover the node spelling" and now
+  says what was measured.
+
 - **⚠ CARDINAL-SIN FIX (SOUNDNESS R109) — `localStorage.setItem("token", secret)` was silently pure
   under lib.dom, while the SAME LINE failed closed under `@types/node`.** One source line, two answers,
   selected by tsconfig:

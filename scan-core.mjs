@@ -119,7 +119,70 @@ export const KAPPA_RULES = [
   [/^(node:)?util$/, /^(debuglog|debug)$/, "Env"],
   // The Web Crypto RNG reached through @types/node's own global typings rather than through lib.dom
   // (the es-lib arm at the classify site covers the `Crypto` interface; this covers the node spelling).
+  //
+  // ON @types/node 25.9.2 THIS RULE DOES NOT FIRE FOR THE MEMBERS IT NAMES, and that is measured, not
+  // suspected: `web-globals/crypto.d.ts` declares only `var crypto` and the `Crypto`/`CryptoKey`/
+  // `SubtleCrypto` type aliases — every callable member is declared in `crypto.d.ts` (the `webcrypto`
+  // namespace), so `declModule` on the resolved `getRandomValues`/`randomUUID` declaration returns
+  // `crypto`, and the `(node:)?crypto` → Rand rule below is what actually charges them. Verified by
+  // printing the resolved declaration file under `lib: ["ES2022"], types: ["node"]`: both land in
+  // `@types/node/crypto.d.ts`. The rule is KEPT — a member DefinitelyTyped moves back into the
+  // web-globals file must not become silently pure on the day it moves — but its comment used to claim
+  // it "covers the node spelling", which is a guarantee, and a guarantee is what stops a property being
+  // measured (attack K). It is a belt over braces, not the load-bearing rule; the `crypto` rule below is.
   [/^web-globals\/crypto$/, /^(getRandomValues|randomUUID|generateKey)/, "Rand"],
+  // R110 — `performance.now()` is a monotonic CLOCK READ, and it was silent under `@types/node`.
+  //
+  // THE MIRROR OF R109, POINTING THE OTHER WAY. Resolved through lib.dom, `performance.now()` charges
+  // `Clock` at the es-lib arm in scan.mjs (`parent === "Performance" && name === "now"`). Resolved
+  // through `@types/node` it charged NOTHING: the declaration lands in `perf_hooks.d.ts`, whose
+  // NODE_CORE_REVIEWED entry marks the module reviewed-pure with the justification "(in-process
+  // timing)" — which conflates "does not leave the process" with "reads no clock". SPEC §1 defines
+  // `Clock` as *reading wall-clock or monotonic time*; staying in-process is not the question.
+  //
+  // Together with R109 the pair establishes that the two resolution paths disagree in BOTH directions,
+  // so neither is the trusted one. The direction chosen here is not "copy lib.dom": `now()` was
+  // ground-truthed by EXECUTION under node 22.12.0 — two calls in one process return different values,
+  // and `timeOrigin + now()` tracks `Date.now()` to within a few ms.
+  //
+  // THE MODULE KEY IS `perf_hooks`, NOT `web-globals/performance`, and that distinction is the whole
+  // reason this needed measuring rather than mirroring the crypto line above. `web-globals/
+  // performance.d.ts` declares `var performance` and nothing callable — its type is
+  // `perf_hooks.Performance`, so `declModule` on the resolved `now` declaration returns `perf_hooks`.
+  // A rule keyed on `web-globals/performance` would never fire. Printed the resolved declaration file
+  // for both arms before writing this: lib.dom → `typescript/lib/lib.dom.d.ts`, @types/node →
+  // `@types/node/perf_hooks.d.ts`.
+  //
+  // AND THE lib.dom ARM DOES MOVE, ON ONE SPELLING — said here rather than claimed untouched.
+  // `import { performance } from "node:perf_hooks"` (and the bare `"perf_hooks"` specifier) resolves
+  // its `now` into `perf_hooks.d.ts` NO MATTER WHICH `lib` is configured, so that spelling was silently
+  // pure under BOTH configs before this rule and is charged under both after it. That is a THIRD
+  // under-report, not part of the divergence — the two arms AGREED on it, and agreed wrongly, which is
+  // why engine agreement is the weakest signal this project has. Measured across nine spellings, both
+  // arms, pre and post: the GLOBAL `performance.now()` spelling under lib.dom is byte-identical before
+  // and after, so the convergence control holds in the direction it exists for — lib.dom loses nothing,
+  // it only gains where it was wrong too. `worker_threads.performance` is NOT a spelling: @types/node
+  // 25.9.2 exports no `performance` from that module and the fixture does not compile (§E3 applied
+  // before the claim was written, not after — it was in an earlier draft of this comment).
+  //
+  // A VERB LIST OF ONE, DELIBERATELY, and this is the opposite call from R109's whole-`Storage`
+  // interface. Every member of `Storage` touches the persistent store, so a verb list there could only
+  // under-report. `Performance` is genuinely MIXED: of its members, `clearMarks`, `clearMeasures`,
+  // `clearResourceTimings`, `setResourceTimingBufferSize`, `toJSON`, `addEventListener` and
+  // `removeEventListener` read no clock at all, and charging them `Clock` would fabricate. Widening to
+  // the whole interface would ALSO re-open the divergence this row exists to close, in the opposite
+  // direction, because the lib.dom arm charges `now` and nothing else.
+  //
+  // WHAT THIS DOES NOT CLAIM, measured and filed rather than asserted safe: `mark()`, `measure()`,
+  // `eventLoopUtilization()` and `timerify()` DO read the clock (`performance.mark("m").startTime` is
+  // a live `now()` — executed, it returns the elapsed value) and are silently pure in BOTH arms. That
+  // is a symmetric member-coverage gap, not a resolution-path divergence, so it is a separate row with
+  // its own over-charge control — the User Timing API is pervasive in tracing code — and folding it in
+  // here would make this rule's A/B unattributable. `now` is declared exactly ONCE in all of
+  // @types/node (`perf_hooks.d.ts:83`, on `interface Performance`), so this member regex cannot land
+  // on an unrelated `now`. It is exactly as fragile as the lib.dom arm it converges on — an allowlist
+  // of one, symmetric on both sides — and that is stated rather than defended.
+  [/^(node:)?perf_hooks$/, /^now$/, "Clock"],
   // the curated npm tier
   [/^(axios|got|node-fetch|undici|ws|socket\.io(-client)?|nodemailer)$/, null, "Net"],
   // gaxios is the axios-like HTTP client under googleapis (request/get/post/put/patch/delete/head do
@@ -353,7 +416,15 @@ export const NODE_CORE_REVIEWED = [
   // ── wholly reviewed, effect-free at the call boundary ──
   // Deterministic in-process computation and string manipulation: assert (throws), async_hooks (in-process
   // hook registration), buffer, constants, diagnostics_channel (in-process pub/sub), domain, events, path,
-  // perf_hooks (in-process timing), punycode, querystring, string_decoder, url, util/types, zlib.
+  // perf_hooks, punycode, querystring, string_decoder, url, util/types, zlib.
+  // `perf_hooks` USED TO SAY "(in-process timing)" HERE, and that justification was wrong on its own
+  // terms (R110): SPEC §1's `Clock` is *reading wall-clock or monotonic time*, and whether the read
+  // leaves the process is not the question — the `timers` note three lines down gets this exactly right
+  // for the neighbouring module and this one did not. `performance.now()` resolves its declaration into
+  // this file, so the module-wide entry made it silently pure under any tsconfig naming `lib` without
+  // `DOM`, while the SAME line resolved through lib.dom charged `Clock`. κ now takes `now` above, before
+  // this floor is consulted; the REST of perf_hooks (the observer/histogram/entry-list surface) stays
+  // reviewed-pure here, which is the precision half of that fix and is pinned by its own controls.
   // Console/TTY I/O — `console`, `readline`, `tty`: §1 has no Console effect and this engine already
   // suppresses the fabricated `Net` on `process.stdout.write` for the same reason; classifying them here
   // would contradict that decision one door along.

@@ -14046,6 +14046,201 @@ export function shadowVar(s: string): void { const store = new Storage(); store.
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── R110: THE MIRROR OF R109 — `performance.now()` WAS SILENT UNDER `@types/node` ─────────────────
+//
+// SILENT UNDER-REPORT on HEAD e620af4, measured against this exact source:
+//
+//     export function tick(): number { return performance.now(); }
+//
+//   lib.dom resolution     ->  ["Clock"]                    deny Clock -> exit 1
+//   @types/node resolution ->  functions: []  (silent-pure)  deny Clock -> exit 0
+//
+// R109 was the same class pointing the other way — lib.dom silent for `Storage`, @types/node correct.
+// TOGETHER THEY ESTABLISH THAT NEITHER RESOLUTION PATH IS THE TRUSTED ONE, so "the other arm is
+// correct" is not available as a reason for anything after this. Nor is it the reason used here:
+// `now()` was GROUND-TRUTHED BY EXECUTION under node 22.12.0 — two calls in one process return
+// different values, and `timeOrigin + now()` tracks `Date.now()` to within a few ms. SPEC §1 defines
+// `Clock` as reading wall-clock or monotonic time.
+//
+// THE ARM THAT WAS WRONG IS THE OFFICIAL NODE BASE CONFIG, not an exotic corner. It is reached by any
+// tsconfig naming `lib` WITHOUT `DOM`, and `@tsconfig/node20` / `@tsconfig/node22` — fetched from npm
+// and read, not remembered — both set exactly that (`"lib": ["es2023"]`, `"types": ["node"]`). Two
+// packages in the corpus ship it too (`logform`, `redux-persist/types`). candor-ts's OWN default for a
+// bare directory is `lib.es2022.full.d.ts`, which DOES include lib.dom — which is why the R109 corpus,
+// re-run unchanged, reaches this branch ZERO times and its byte-identical A/B is safety-only.
+//
+// THE KEY IS THE MODULE THE MEMBER'S DECLARATION CAME FROM, `perf_hooks` — NOT `web-globals/
+// performance`, which was the shape this fix was proposed with and which would never have fired:
+// `web-globals/performance.d.ts` declares `var performance` and nothing callable, so `now` resolves
+// into `perf_hooks.d.ts`. Printed the resolved declaration file for both arms before writing a line of
+// the fix. The same mis-key is already live one rule over — `web-globals/crypto` — where it is
+// harmless only because a second rule catches the members.
+if (blk()) {
+  // Absolute `typeRoots` so the fixture tree needs no node_modules of its own; `lib` deliberately omits
+  // DOM, which is the ONLY way to reach the @types/node declaration. This is the defect's arm.
+  const nodeTsconfig = JSON.stringify({
+    compilerOptions: {
+      target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: true,
+      types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")],
+    },
+    include: ["src"],
+  });
+  const d = project({
+    "tsconfig.json": nodeTsconfig,
+    // THE DEFECT, and every spelling of it. Each of these COMPILES (`tsc --noEmit` exit 0 on the same
+    // source) — §E3, because an absence assertion over an uncompilable fixture is no evidence at all.
+    // `worker_threads.performance` was in an earlier draft and is NOT here: @types/node 25.9.2 exports
+    // no `performance` from that module, `tsc` said so, and the row was deleted rather than reworded.
+    "src/sin.ts": `export function bare(): number { return performance.now(); }
+export function viaGlobalThis(): number { return globalThis.performance.now(); }
+export function viaAlias(): number { const p = performance; return p.now(); }
+export function viaParam(p: Performance): number { return p.now(); }
+export function viaField(o: { clock: Performance }): number { return o.clock.now(); }
+export function viaFactory(): number { const f = () => performance; return f().now(); }
+export function viaOptional(): number { return globalThis.performance?.now() ?? 0; }`,
+    // THE EXPLICIT-IMPORT SPELLINGS, which resolve into `perf_hooks.d.ts` under ANY `lib` — so these
+    // two were silently pure under BOTH configs before the fix. They are a third under-report that the
+    // divergence hid: the two arms agreed here, and agreed wrongly.
+    "src/imported.ts": `import { performance as phPerf } from "node:perf_hooks";
+import { performance as phPerf2 } from "perf_hooks";
+export function viaNodeImport(): number { return phPerf.now(); }
+export function viaBareImport(): number { return phPerf2.now(); }`,
+    // OVER-CHARGE CONTROL, and THE ONE THAT MATTERS. A κ rule that charged the module would be
+    // trivially "correct" on every row above and would destroy the product: `perf_hooks` is otherwise
+    // reviewed effect-free and must stay that way. Every member here reads no clock — the observer /
+    // entry-list / buffer surface, plus ordinary node core in the same scan so a broken run cannot pass
+    // this block by reporting nothing at all.
+    "src/pure.ts": `import { PerformanceObserver } from "node:perf_hooks";
+import * as path from "node:path";
+import * as util from "node:util";
+export function pClearMarks(): void { performance.clearMarks("x"); }
+export function pClearMeasures(): void { performance.clearMeasures("m"); }
+export function pClearRT(): void { performance.clearResourceTimings(); }
+export function pGetEntries(): unknown { return performance.getEntries(); }
+export function pGetByName(): unknown { return performance.getEntriesByName("x"); }
+export function pGetByType(): unknown { return performance.getEntriesByType("mark"); }
+export function pBufSize(): void { performance.setResourceTimingBufferSize(10); }
+export function pToJSON(): unknown { return performance.toJSON(); }
+export function pObserver(): unknown { return new PerformanceObserver(() => {}); }
+export function pPath(a: string, b: string): string { return path.join(a, b); }
+export function pFormat(s: string): string { return util.format("%s", s); }
+export function pBuf(s: string): number { return Buffer.from(s, "utf8").length; }
+export function pJson(o: unknown): string { return JSON.stringify(o); }`,
+    // SHADOW CONTROL — a project's OWN `Performance`, and its own binding named `performance`. The κ
+    // rule is keyed on the module `declModule` computed for the RESOLVED declaration, so a local class
+    // resolves `<local>` and is never asked. That is an argument; these rows are the measurement.
+    "src/shadow.ts": `class Performance { now(): number { return 0; } }
+const perf = new Performance();
+export function shadowClass(): number { return perf.now(); }
+export function shadowLocal(): number { const p = new Performance(); return p.now(); }
+export const performance3 = { now: () => 7 };
+export function shadowNamed(): number { return performance3.now(); }`,
+    // THE SYMMETRIC GAP, PINNED AS A GAP. `mark()` really does read the clock — executed,
+    // `performance.mark("m").startTime` returns the live elapsed value — and it is silently pure in
+    // BOTH arms, before and after. This row is NOT an endorsement: it exists so that the divergence
+    // cannot silently reopen on a member other than `now`, and so the day `mark` is fixed the change is
+    // deliberate and visible rather than absorbed. See the report row filed alongside this commit.
+    "src/gap.ts": `export function gapMark(): unknown { return performance.mark("m"); }
+export function gapMeasure(): unknown { return performance.measure("m"); }`,
+    "clock.pol": "deny Clock\n",
+    "clock_src.pol": "deny Clock src\n",
+    "clock_other.pol": "deny Clock other\n",
+    "unknown.pol": "deny Unknown\n",
+    "blanket.pol": "deny Net Fs Exec Env\n",
+    "pure.pol": "pure\n",
+    "pure_other.pol": "pure other\n",
+  });
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+
+  for (const [fn, what] of [
+    ["src.sin.bare", "the bare `performance` global — the defect exactly as filed"],
+    ["src.sin.viaGlobalThis", "`globalThis.performance.now()` — the isomorphic spelling"],
+    ["src.sin.viaAlias", "`const p = performance; p.now()` — a local alias"],
+    ["src.sin.viaParam", "a `Performance`-TYPED PARAMETER, which has no global name at all"],
+    ["src.sin.viaField", "a `Performance`-typed FIELD of a parameter object"],
+    ["src.sin.viaFactory", "a FACTORY's return value"],
+    ["src.sin.viaOptional", "optional-chained `globalThis.performance?.now()`"],
+    ["src.imported.viaNodeImport", "`import { performance } from \"node:perf_hooks\"` — silent under BOTH configs before this fix"],
+    ["src.imported.viaBareImport", "the bare `\"perf_hooks\"` specifier — same declaration, same silence"],
+  ]) {
+    check(`R110: \`performance.now()\` under @types/node charges Clock, not silent-pure — ${what}`,
+          has(fn, "Clock"), JSON.stringify(eff(fn) ?? (report.functions ?? []).map((e) => e.fn)));
+  }
+
+  // OVER-CHARGE CONTROL. Absence is also what a BROKEN engine produces (§E3), so this is evidence only
+  // because the rows above, in the SAME tree and the SAME scan, are present and charged.
+  for (const fn of ["src.pure.pClearMarks", "src.pure.pClearMeasures", "src.pure.pClearRT",
+                    "src.pure.pGetEntries", "src.pure.pGetByName", "src.pure.pGetByType",
+                    "src.pure.pBufSize", "src.pure.pToJSON", "src.pure.pObserver",
+                    "src.pure.pPath", "src.pure.pFormat", "src.pure.pBuf", "src.pure.pJson"]) {
+    check(`R110 OVER-CHARGE CONTROL: a genuinely clock-free member gains nothing — ${fn}`,
+          !has(fn, "Clock"), JSON.stringify(eff(fn)));
+  }
+  // SHADOW CONTROL: a project's own `Performance`/`performance` must not be charged. Asserted on the
+  // EFFECT, not on the row's absence — `shadowNamed` carries a pre-existing `Unknown[callback:now]`
+  // (an object-literal method reads as an indeterminate callback), identical before and after this
+  // change, and a row-absence assertion would have failed for a reason that has nothing to do with R110.
+  for (const fn of ["src.shadow.shadowClass", "src.shadow.shadowLocal", "src.shadow.shadowNamed"]) {
+    check(`R110 SHADOW CONTROL: a project's OWN \`Performance\` fabricates no Clock — ${fn}`,
+          !has(fn, "Clock"), JSON.stringify(eff(fn)));
+  }
+  // THE PINNED GAP — revert-invariant BY DESIGN, and it says so rather than reading as coverage.
+  for (const fn of ["src.gap.gapMark", "src.gap.gapMeasure"]) {
+    check(`R110 PINNED GAP (revert-invariant by design): \`${fn.split(".").pop()}\` stays uncharged in BOTH arms — a known symmetric under-report, filed separately, pinned so it cannot move by accident`,
+          !has(fn, "Clock"), JSON.stringify(eff(fn)));
+  }
+
+  // THE GATE, on its own tree so a mixed fixture's exit code is never read as evidence.
+  {
+    const only = project({
+      "tsconfig.json": nodeTsconfig,
+      "src/only.ts": `export function tick(): number { return performance.now(); }`,
+      "clock.pol": "deny Clock\n",
+      "clock_src.pol": "deny Clock src\n",
+      "clock_other.pol": "deny Clock other\n",
+      "unknown.pol": "deny Unknown\n",
+      "blanket.pol": "deny Net Fs Exec Env\n",
+      "pure.pol": "pure\n",
+      "pure_other.pol": "pure other\n",
+    });
+    const ex = (p) => scan(only, "--policy", path.join(only, p)).r.status;
+    check("R110: `deny Clock` FIRES (exit 1) over an @types/node `performance.now()` — it answered exit 0 with `policy ✓` before",
+          ex("clock.pol") === 1, `exit ${ex("clock.pol")}`);
+    check("R110: …and the SCOPED `deny Clock src` selects it",
+          ex("clock_src.pol") === 1, `exit ${ex("clock_src.pol")}`);
+    check("R110 CONTROL: `deny Clock other` does NOT fire — a scope that matches nothing must gate nothing, or the scope is decorative",
+          ex("clock_other.pol") === 0, `exit ${ex("clock_other.pol")}`);
+    check("R110 CONTROL: `deny Unknown` does NOT fire — the fix charges a NAMED effect, and charging `Unknown` instead would have been the lazy answer that also passes the gate above",
+          ex("unknown.pol") === 0, `exit ${ex("unknown.pol")}`);
+    check("R110 CONTROL: a blanket `deny Net Fs Exec Env` does NOT fire — no boundary effect was fabricated",
+          ex("blanket.pol") === 0, `exit ${ex("blanket.pol")}`);
+    check("R110: `pure` FIRES (exit 1) — `pure` denies EFFECTS, and Clock is one; unlike the Unknown-only rows of R103/R109, where a `pure` exit 0 was the correct answer",
+          ex("pure.pol") === 1, `exit ${ex("pure.pol")}`);
+    check("R110 CONTROL: `pure other` does NOT fire — non-matching scope",
+          ex("pure_other.pol") === 0, `exit ${ex("pure_other.pol")}`);
+    fs.rmSync(only, { recursive: true, force: true });
+  }
+
+  // CONVERGENCE CONTROL, and REVERT-INVARIANT BY DESIGN. The lib.dom arm answered `Clock` before this
+  // fix and must still answer `Clock` after it: "make both configs agree" is also satisfiable by
+  // breaking the correct one, and for a Clock that would look exactly like a precision win. No
+  // tsconfig at all here, so the DEFAULT `lib` applies — `lib.es2022.full.d.ts`, which includes lib.dom.
+  {
+    const domArm = project({
+      "src/only.ts": `export function tick(): number { return performance.now(); }`,
+      "clock.pol": "deny Clock\n",
+    });
+    const { report: dr, r } = scan(domArm, "--policy", path.join(domArm, "clock.pol"));
+    const e = (dr?.functions ?? []).find((x) => x.fn === "src.only.tick");
+    check("R110 CONVERGENCE CONTROL (revert-invariant by design): the lib.dom spelling still reads `Clock` and still exits 1 — the fix moved the @types/node half ONTO this answer, it did not move this one",
+          r.status === 1 && (e?.inferred ?? []).includes("Clock"), `exit ${r.status} ${JSON.stringify(e)}`);
+    fs.rmSync(domArm, { recursive: true, force: true });
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── ⟨0.32⟩ THE UNREAD-CODE RULE IS A PROPERTY OF THE VERDICT, NOT OF THE ROUTE ────────────────────
 //
 // ⟨0.32⟩ landed the "a class this scan did not READ makes the verdict INCOMPLETE" rule in scan.mjs and
