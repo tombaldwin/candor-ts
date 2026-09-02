@@ -8,6 +8,48 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R114) — `process.uptime()`, `os.uptime()`, the module-path
+  spellings of `process.hrtime()`/`.bigint()`, and `console.time`/`timeLog`/`timeEnd` are monotonic
+  clock reads that were reviewed pure BY NAME.** R110's own commit wrote the criterion down — *"SPEC §1
+  defines `Clock` as reading wall-clock or monotonic time; staying in-process is not the question"* —
+  and applied it only to the module it was about. Applied to the rest of the floor it is violated five
+  ways, each EXECUTED under node 22.12.0 before a line was changed:
+
+      process.uptime()      over a 60 ms busy-wait     0.01006425 → 0.069538625   delta 59.47 ms
+      os.uptime()           over a 1200 ms wait        1947079 → 1947081          delta 2 s
+      process.hrtime.bigint()                          1947081928072375n → 1947081932691916n
+      console.time("C"); …80 ms…; console.time("D")    C: 119.891ms   D: 40.088ms
+
+  That last pair had to be executed rather than argued: two timers started 80 ms apart end 80 ms apart,
+  which proves `console.time()` itself takes a timestamp. SPEC §1's console exemption is about console
+  WRITES not being `Log`/`Fs`; it says nothing about the monotonic read these three perform. The rest of
+  `console` stays reviewed-pure.
+
+  **`process.hrtime` was a live two-answer disagreement, not just an omission.** `scan.mjs`'s
+  global-`process` arm charged `process.hrtime.bigint()` `Clock` while `scan-core.mjs`'s floor listed
+  `hrtime`/`bigint` as reviewed-pure, so the global spelling answered `["Clock"]` and
+  `import * as p from "node:process"; p.hrtime.bigint()` answered silent-pure — in BOTH `lib` shapes.
+  The floor's comment asserted the pure answer was right *"for the reason `Date.now()` is pure in this
+  engine: nothing charges `Clock` for reading a timer"*, which was false in both halves.
+
+  The member sets are now exported constants (`CLOCK_READING_PROCESS_MEMBERS`,
+  `CLOCK_READING_CONSOLE_MEMBERS`) read by BOTH readers each, and asserted by object IDENTITY — R111's
+  control applied to the pair that had actually drifted. `uptime`/`hrtime`/`bigint` are REMOVED from the
+  floor's member list rather than left inert inside a list titled "reviewed effect-free".
+
+  **The sweep's exclusions are stated and were executed too**, because a charge list without them is a
+  verb list that goes stale: `os.freemem()` (moves — 7912144896 → 7736311808 over 300 ms),
+  `os.totalmem()`, `os.loadavg()`, `os.cpus()[].times` (advances), `process.cpuUsage()`,
+  `process.resourceUsage()`, `process.memoryUsage()` are all left pure — moving is not the criterion,
+  reading TIME is. `os.platform`/`arch`/`EOL` and `process.pid` gain nothing, in both `lib` arms.
+
+  A/B over the same 25 real TypeScript repositories, isolated against the R115 image and keyed WIDE:
+  `ADDED 0  REMOVED 0  CHANGED 0`, 20,777 common rows — with **18 counted hits on the changed branches**
+  (zod 15 `process.hrtime.bigint()`, lit 3 `console.time*`), every one landing on a function that
+  already carried `Clock` from another read in the same body. Real code, branch reached, no net row
+  movement; the corpus contains zero `uptime` call sites, so for that half it is safety-only and is
+  recorded as such here.
+
 - **⚠ FABRICATION FIX (SOUNDNESS R115) — `{...instance}`, `Object.assign(t, instance)` and
   `const {...rest} = instance` charged a class PROTOTYPE getter that never runs, and it failed a gate.**
   `enumerateGetters`'s own comment stated the rule — *"copying an object's **own enumerable** props

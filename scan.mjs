@@ -35,7 +35,8 @@ import { unverifiedHoleRule, ruleUpgrade, canonicalDenySet, byCodePoint, claimsT
 import { printAgents, writeStdoutSync, writeSinkAtomic, resolveSinkArtifact, isCandorConfigSink } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadEffects, hostLiteral,
          tablesInSql, modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf,
-         partnerFor, CLOCK_READING_PERFORMANCE_MEMBERS } from "./scan-core.mjs";
+         partnerFor, CLOCK_READING_PERFORMANCE_MEMBERS, CLOCK_READING_PROCESS_MEMBERS,
+         CLOCK_READING_CONSOLE_MEMBERS } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -6060,8 +6061,14 @@ function visitCalls(node) {
           // `DateConstructor.now` is NOT part of that set and keeps its own test: it is a different
           // interface with a different member list, and sharing a predicate between them would be a name
           // collision dressed up as a shared question.
+          // R114 — the `Console` timer members, the lib.dom twin of the `(node:)?console` κ rule, reading
+          // the SAME exported set for the same reason the `Performance` pair does. A project whose `lib`
+          // includes DOM but which has no `@types/node` resolves `console.time` into `lib.dom.d.ts`, where
+          // it is declared on `interface Console` — so without this arm the fix would have landed on one
+          // resolution path only, which is R109/R110's entire failure mode.
           if ((parent === "DateConstructor" && name === "now")
-              || (parent === "Performance" && CLOCK_READING_PERFORMANCE_MEMBERS.test(name)))
+              || (parent === "Performance" && CLOCK_READING_PERFORMANCE_MEMBERS.test(name))
+              || (parent === "Console" && CLOCK_READING_CONSOLE_MEMBERS.test(name)))
             rec.direct.add("Clock");
           if (parent === "Math" && name === "random") rec.direct.add("Rand");
           if (ts.isNewExpression(node) && (node.arguments ?? []).length === 0
@@ -6308,6 +6315,23 @@ function visitCalls(node) {
           // node_modules-installed dependency of the same name is untouched: `isOwnPackageDecl` excludes
           // `node_modules/` outright, before the name is ever compared.
           let eff = isOwnPackageDecl(decl) ? null : kappa(kMod, member); // (CLASSIFY)
+          // R114 — AND WHEN κ WAS ASKED ABOUT THE EMPTY TOKEN, ASK AGAIN WITH THE NAME AT THE CALL SITE.
+          // A member declared as a CALL SIGNATURE on its own interface — `hrtime: HRTime`,
+          // `memoryUsage: MemoryUsageFn` in `process.d.ts` — resolves to a declaration with no `.name`,
+          // so `member` is `""`. Two comments in this family already say so ("`\"\"` is the token a CALL
+          // SIGNATURE on an interface resolves to"), and the floor lists `""` as reviewed-pure — which is
+          // how `import * as p from "node:process"; p.hrtime()` stayed SILENT while the identical global
+          // `process.hrtime()` charged Clock. Same one-line-two-answers shape as R109/R110, reached
+          // through the TOKEN rather than through the tsconfig.
+          //
+          // ONLY WHEN THE FIRST LOOKUP ANSWERED NOTHING, which makes this strictly ADDITIVE: it cannot
+          // move a call off an effect a rule already gave it, and in particular it cannot walk a
+          // net-cluster call into that module's exemption list — the direction that would hide something.
+          // `memoryUsage`, `resourceUsage`, `cpuUsage` and `require` resolve the same way and are
+          // unaffected: no κ rule names them, and the floor below is still asked with the original `""`.
+          if (!eff && member === "" && !isOwnPackageDecl(decl)
+              && ts.isPropertyAccessExpression(node.expression) && node.expression.name)
+            eff = kappa(kMod, node.expression.name.text);
           // process.stdout/stderr/stdin are typed `tty.WriteStream`, which EXTENDS `net.Socket`, so a
           // `.write()`/`.end()` on them resolves to `net.Socket.write` and the whole-module Net rule
           // paints it Net. But a console write to fd 0/1/2 is TTY/console I/O, NOT network — there is no
@@ -6652,7 +6676,16 @@ function visitCalls(node) {
       return null;
     };
     const pmp = processMemberPath();
-    if (pmp === "hrtime" || pmp === "hrtime.bigint") geff = "Clock"; // a monotonic clock read
+    // R114 — THE MEMBER SET IS THE SHARED CONSTANT, read on the LAST segment of the path. This arm and
+    // the `(node:)?process` κ rule in scan-core.mjs are two implementations of one question, and before
+    // this they DISAGREED: this arm charged `process.hrtime.bigint()` Clock while the κ floor listed
+    // `hrtime`/`bigint` as reviewed-pure, so the global spelling answered `["Clock"]` and the imported
+    // spelling answered silent-pure — one line, two answers, selected by how you reach `process`.
+    // Importing the set is what makes their agreement mean something (R111's fix shape, applied to the
+    // pair that was actually inconsistent rather than to the one that happened to be noticed).
+    // The last segment is the token κ is asked about: `hrtime` -> "hrtime", `hrtime.bigint` -> "bigint",
+    // `uptime` -> "uptime". `send` is NOT in the set and keeps its own Ipc line below.
+    if (pmp && CLOCK_READING_PROCESS_MEMBERS.test(pmp.split(".").pop())) geff = "Clock"; // a monotonic clock read
     else if (pmp === "send") geff = "Ipc";                          // the child↔parent IPC channel
     else if (ts.isIdentifier(callee) && importedFromNetPkg(callee))
       geff = "Net"; // a bare call to an HTTP-client default/named import (installed → sig resolves here) — #13

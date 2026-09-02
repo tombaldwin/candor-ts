@@ -70,6 +70,67 @@ export function isTestPath(p) {
  */
 export const CLOCK_READING_PERFORMANCE_MEMBERS = /^(now|mark|measure|eventLoopUtilization)$/;
 
+/**
+ * R114 — the same question asked of `process` and `console`, and the reason both are SHARED constants.
+ *
+ * R110's own commit wrote the criterion down — *"SPEC §1 defines `Clock` as reading wall-clock or
+ * monotonic time; staying in-process is not the question"* — and then applied it only to the module it
+ * was about. §9: an audit's boundary must not be drawn around its own trigger. Applied to the rest of
+ * the floor, it is violated by `process.uptime`, `os.uptime`, `process.hrtime`/`.bigint` on the MODULE
+ * path, and `console.time`/`timeLog`/`timeEnd`.
+ *
+ * GROUND TRUTH IS EXECUTED, node 22.12.0 — every charge below, measured, never read off a signature:
+ *
+ *     process.uptime()      over a 60 ms busy-wait   0.01006425 -> 0.069538625   delta 59.47 ms
+ *     os.uptime()           over a 1200 ms wait      1947079 -> 1947081          delta 2 s (1 s resolution)
+ *     process.hrtime.bigint()                        1947081928072375n -> 1947081932691916n
+ *     console.time("C"); …80ms…; console.time("D")   C: 119.891ms   D: 40.088ms
+ *
+ * That last pair is the one that had to be measured rather than argued: it proves `console.time()` ITSELF
+ * takes a timestamp (two timers started 80 ms apart end 80 ms apart), so it is a clock READ and not only
+ * console output. SPEC §1's exemption is for console WRITES — it says plain stdout/stderr is not `Log`
+ * and not `Fs` — and it says nothing about the monotonic read this API performs to compute a duration.
+ * The precedent is R111's `performance.mark()`, charged for recording a timestamp, which is the same
+ * operation under another name.
+ *
+ * TWO PATHS, ONE SET, and for `process` that is not hygiene — they had already DISAGREED. `scan.mjs`'s
+ * global arm charged `process.hrtime.bigint()` Clock while this file's floor listed `hrtime` and `bigint`
+ * as reviewed-pure, so ONE LINE HAD TWO ANSWERS SELECTED BY SPELLING (measured on 8c7484e, both `lib`
+ * shapes):
+ *
+ *     process.hrtime.bigint()                                    ->  ["Clock"]
+ *     import * as p from "node:process"; p.hrtime.bigint()       ->  absent, SILENT-PURE
+ *
+ * and the floor's own comment asserted the pure answer was right *"for the reason `Date.now()` is pure in
+ * this engine: nothing charges `Clock` for reading a timer"* — false twice over, since `Date.now()`
+ * charges Clock (measured) and the global arm already charged `hrtime`. Attack K: a comment explaining
+ * why something is safe, written by the change that needed it to be true. The member set now lives here
+ * and BOTH readers import it, so the two can no longer be widened separately — the single degree of
+ * freedom that produced R109, R110, R111 and this row.
+ *
+ * `bigint` is in the set because `process.hrtime.bigint()` resolves to a member declared on the `HRTime`
+ * interface in `process.d.ts`, so it arrives at κ under its own bare name with module key `process`.
+ *
+ * THE SWEEP OF WHAT IS DELIBERATELY LEFT PURE, decided on §1's definition and each one EXECUTED, because
+ * a charge list without its exclusions is a verb list that will be right today and stale next quarter:
+ *   os.freemem()          7912144896 -> 7736311808 across a 300 ms wait — it MOVES, and it is not time.
+ *   os.totalmem()         unchanged; host capacity.
+ *   os.loadavg()          unchanged over 200 ms; scheduler load, not a clock.
+ *   os.cpus()[].times     DOES advance — but it is per-core CPU-time ACCOUNTING, not a wall-clock or
+ *                         monotonic read, and `os.cpus()` is reached overwhelmingly for `.length`, so
+ *                         charging it would put Clock on every core-count query.
+ *   process.cpuUsage()    advances; same argument — consumed CPU time is resource accounting.
+ *   process.resourceUsage()  advances; same family.
+ *   process.memoryUsage() / constrainedMemory() / availableMemory()  memory, not time.
+ *   os.platform/arch/EOL/machine/getPriority, process.pid  inert — and these are the PRECISION control:
+ *                         they gain nothing from this change, in both `lib` arms.
+ * `os.homedir`/`tmpdir`/`hostname`/`userInfo`/`networkInterfaces` stay `Env` (their own rule, below) and
+ * `perf_hooks` stays with CLOCK_READING_PERFORMANCE_MEMBERS: three sets, three questions, no sharing
+ * between them, because a shared predicate across unrelated interfaces is a name collision dressed up.
+ */
+export const CLOCK_READING_PROCESS_MEMBERS = /^(uptime|hrtime|bigint)$/;
+export const CLOCK_READING_CONSOLE_MEMBERS = /^(time|timeEnd|timeLog)$/;
+
 // ---- κ — the curated classifier (CLASSIFIER §2: the dispatch/execution boundary, not builders) ----
 // Node builtins + a curated npm tier (the same under-report-and-say-so posture as the crate table:
 // an unlisted package contributes nothing — never a guess).
@@ -171,6 +232,20 @@ export const KAPPA_RULES = [
   // claim an effect this engine cannot defend against the other three.
   [/^(node:)?process$/, /^(loadEnvFile|writeReport)$/, "Fs"],
   [/^(node:)?process$/, /^(getuid|geteuid|getgid|getegid|getgroups)$/, "Env"],
+  // R114 — the monotonic clocks that the floor below reviewed pure BY NAME. `uptime` and `hrtime`/
+  // `bigint` are REMOVED from that floor's member list in the same change, rather than left in a list
+  // titled "reviewed effect-free" while κ contradicts it one screen up. Set + ground truth at
+  // CLOCK_READING_PROCESS_MEMBERS; `scan.mjs`'s global-`process` arm reads the SAME object.
+  [/^(node:)?process$/, CLOCK_READING_PROCESS_MEMBERS, "Clock"],
+  // R114 — `console.time`/`timeLog`/`timeEnd` take and read a monotonic timestamp (EXECUTED: two timers
+  // started 80 ms apart report 119.891ms and 40.088ms). SPEC §1 exempts console WRITES from `Log`/`Fs`;
+  // it does not make the clock read behind them invisible. The es-lib arm in scan.mjs reads this same
+  // object for the lib.dom `Console` interface.
+  [/^(node:)?console$/, CLOCK_READING_CONSOLE_MEMBERS, "Clock"],
+  // R114 — `os.uptime()` is seconds since boot: monotonic, and it advanced 2 s over a 1.2 s wait when
+  // executed. Its own member rule rather than a shared set, because `os` shares no member NAME with
+  // `process` here and pretending otherwise would be the name collision the constants' comment warns of.
+  [/^(node:)?os$/, /^uptime$/, "Clock"],
   // node:module — the compile cache is a real on-disk cache directory.
   [/^(node:)?module$/, /^(enableCompileCache|flushCompileCache|getCompileCacheDir)$/, "Fs"],
   // node:util — `debuglog(section)`/`debug(section)` READ $NODE_DEBUG to decide whether the returned
@@ -488,6 +563,11 @@ export const NODE_CORE_REVIEWED = [
   // Console/TTY I/O — `console`, `readline`, `tty`: §1 has no Console effect and this engine already
   // suppresses the fabricated `Net` on `process.stdout.write` for the same reason; classifying them here
   // would contradict that decision one door along.
+  // …AND THAT ARGUMENT IS ABOUT THE WRITE, WHICH IS NOT ALL `console` DOES (R114). `console.time`,
+  // `timeLog` and `timeEnd` take and read a monotonic timestamp to compute the duration they print —
+  // EXECUTED, two timers started 80 ms apart end 80 ms apart — so κ takes those three above, before this
+  // floor is consulted, and the REST of `console` stays reviewed-pure here. Same shape as `perf_hooks`
+  // one line up: a module whose justification was true of the surface its author had in mind.
   // `stream` and its submodules: transport plumbing. A stream's effect belongs to the concrete source or
   // sink, and is charged where THAT was constructed (`fs.createReadStream` → Fs) — charging `.pipe()` too
   // would double-count the same open.
@@ -526,8 +606,13 @@ export const NODE_CORE_REVIEWED = [
   // `generateKey*`, `generatePrime*`). Written as a denylist of ONE: `setEngine` loads a shared OpenSSL
   // engine library into the process, which is a native-code load, not a hash.
   [/^(node:)?crypto$/, /^(?!setEngine$)/],
-  // node:os — the host-identity reads are Env above; the rest is inert introspection
-  // (platform/arch/cpus/freemem/uptime/EOL/…).
+  // node:os — the host-identity reads are Env above, `uptime` is Clock above (R114), and the rest is
+  // inert introspection (platform/arch/cpus/freemem/totalmem/loadavg/EOL/…). This line USED TO NAME
+  // `uptime` in that list, which is how a monotonic clock stayed pure: a module-wide `null` entry is a
+  // positive purity claim over every member κ does not take, and its prose is the only place the claim
+  // is legible. `freemem`/`loadavg`/`cpus().times` all MOVE between calls and are still left here on
+  // purpose — moving is not the criterion, reading a wall-clock or monotonic TIME is (SPEC §1). Each was
+  // executed; the measurements are at CLOCK_READING_PROCESS_MEMBERS.
   [/^(node:)?os$/, null],
   // node:util — everything but `debuglog`/`debug`, which κ takes as Env above.
   [/^(node:)?util$/, null],
@@ -589,11 +674,18 @@ export const NODE_CORE_REVIEWED = [
   // rather than left to fail closed, because the alternative is an `Unknown` on a call that returns a
   // number.
   [/^(node:)?process$/,
-  // `bigint` is `process.hrtime.bigint()` — a monotonic clock READ, declared on the `HRTime` interface
-  // in the same file, so it arrives here under its own bare name. Pure for the reason `Date.now()` is
-  // pure in this engine: nothing charges `Clock` for reading a timer, and charging one spelling of it
-  // and not the other is the inconsistency the `os.homedir`/`os.hostname` fix was about.
-   /^(|new|version|versions|arch|platform|release|config|features|moduleLoadList|uptime|getActiveResourcesInfo|cpuUsage|resourceUsage|memoryUsage|constrainedMemory|availableMemory|exit|exitCode|abort|finalization|hrtime|bigint|allowedNodeEnvironmentFlags|assert|emitWarning|nextTick|sourceMapsEnabled|setSourceMapsEnabled|getBuiltinModule|hasUncaughtExceptionCaptureCallback|setUncaughtExceptionCaptureCallback|cwd|env|argv|argv0|execArgv|execPath|pid|ppid|title|debugPort|stdout|stdin|stderr|openStdin|ref|unref|getReport|report|throwDeprecation|traceDeprecation|noDeprecation)$/],
+  // R114 REMOVED `uptime`, `hrtime` and `bigint` FROM THIS LINE. They were here under a comment claiming
+  // `bigint` was "pure for the reason `Date.now()` is pure in this engine: nothing charges `Clock` for
+  // reading a timer" — an assertion that was false in both halves. `Date.now()` charges Clock (measured),
+  // and `scan.mjs`'s global-`process` arm was ALREADY charging `hrtime` Clock, so this list was the
+  // dissenting half of a two-answer disagreement rather than a review. They are κ's now
+  // (CLOCK_READING_PROCESS_MEMBERS), which is consulted BEFORE this floor — so leaving them here would
+  // have been inert, and that is exactly why they had to go: an inert name in a list titled "reviewed
+  // effect-free" is how the next reader learns the wrong fact.
+  // `cpuUsage`, `resourceUsage`, `memoryUsage`, `constrainedMemory` and `availableMemory` STAY, measured
+  // and deliberately: they advance between calls, and advancing is not the criterion — §1's `Clock` is a
+  // wall-clock or monotonic TIME read, and consumed-CPU and heap bytes are resource accounting.
+   /^(|new|version|versions|arch|platform|release|config|features|moduleLoadList|getActiveResourcesInfo|cpuUsage|resourceUsage|memoryUsage|constrainedMemory|availableMemory|exit|exitCode|abort|finalization|allowedNodeEnvironmentFlags|assert|emitWarning|nextTick|sourceMapsEnabled|setSourceMapsEnabled|getBuiltinModule|hasUncaughtExceptionCaptureCallback|setUncaughtExceptionCaptureCallback|cwd|env|argv|argv0|execArgv|execPath|pid|ppid|title|debugPort|stdout|stdin|stderr|openStdin|ref|unref|getReport|report|throwDeprecation|traceDeprecation|noDeprecation)$/],
   // The EventEmitter surface, wherever a core module RE-DECLARES it for typed events instead of
   // inheriting it. `process.on("exit", …)` resolves to an overload declared in `process.d.ts`, not to
   // `events.d.ts`, so the module-wide `events` entry above never saw it and an inert listener

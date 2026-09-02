@@ -17,7 +17,15 @@ import { printAgents, writeStdoutSync } from "./contract.mjs";
 // R111: asserted directly rather than through a scan, so that "the two tables share one member set" is
 // checked as an IDENTITY (`v === CLOCK_READING_PERFORMANCE_MEMBERS`) and not as two regexes that happen
 // to spell the same thing today — which is exactly how R109 and R110 drifted apart.
-import { KAPPA_RULES, CLOCK_READING_PERFORMANCE_MEMBERS } from "./scan-core.mjs";
+import { KAPPA_RULES, CLOCK_READING_PERFORMANCE_MEMBERS, CLOCK_READING_PROCESS_MEMBERS,
+         CLOCK_READING_CONSOLE_MEMBERS, NODE_CORE_REVIEWED } from "./scan-core.mjs";
+// R114 — the member NAMES the node-core floor reviews for `process`, read out of the live table so
+// the assertion below cannot go stale against a hand-copied list. The entry is the one whose module
+// regex matches `process` and whose member regex is not null.
+function nodeCoreUnreviewedFloorNames() {
+  const e = NODE_CORE_REVIEWED.find(([m, v]) => m.test("process") && v && !v.test("on"));
+  return e ? String(e[1]).replace(/^\/\^\(|\)\$\/$/g, "").split("|") : [];
+}
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // The spec floor this build declares, DERIVED from the binary under test rather than written as a
@@ -15838,6 +15846,220 @@ export function clone(s: Session) { return { ...s }; }`,
     fs.rmSync(g, { recursive: true, force: true });
   }
   fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── R114: TWO MONOTONIC CLOCKS REVIEWED PURE BY NAME, AND THE SWEEP THAT FOUND THREE MORE ─────────
+//
+// R110's own commit wrote the criterion down — *"SPEC §1 defines `Clock` as reading wall-clock or
+// monotonic time; staying in-process is not the question"* — and then applied it only to the module it
+// was about. §9: an audit's boundary must not be drawn around its own trigger. Applied to the rest of
+// the floor it is violated five ways, every one EXECUTED under node 22.12.0 before a line was changed:
+//
+//     process.uptime()      over a 60 ms busy-wait     0.01006425 -> 0.069538625   delta 59.47 ms
+//     os.uptime()           over a 1200 ms wait        1947079 -> 1947081          delta 2 s
+//     process.hrtime.bigint()                          1947081928072375n -> 1947081932691916n
+//     process.hrtime()      (tuple form, same clock)
+//     console.time("C"); …80 ms…; console.time("D")    C: 119.891ms   D: 40.088ms
+//
+// THE `console` PAIR IS THE ONE THAT HAD TO BE EXECUTED RATHER THAN ARGUED. Two timers started 80 ms
+// apart end 80 ms apart, which proves `console.time()` ITSELF takes a timestamp — so this is a clock
+// READ, not merely console output. SPEC §1's console exemption says plain stdout/stderr is not `Log`
+// and not `Fs`; it says nothing about the monotonic read these three perform. R111 charged
+// `performance.mark()` for recording a timestamp, and this is the same operation under another name.
+//
+// AND `process.hrtime` WAS A LIVE TWO-ANSWER DISAGREEMENT, not just an omission. On 8c7484e, in BOTH
+// `lib` shapes:
+//     process.hrtime.bigint()                                ->  ["Clock"]   (scan.mjs global arm)
+//     import * as p from "node:process"; p.hrtime.bigint()   ->  ABSENT, silent-pure  (the floor)
+// while the floor's own comment asserted the pure answer was right *"for the reason `Date.now()` is
+// pure in this engine: nothing charges `Clock` for reading a timer"* — false in both halves, since
+// `Date.now()` charges Clock (row below) and the global arm already charged `hrtime`. Attack K.
+if (blk()) {
+  const nodeTsconfig = JSON.stringify({
+    compilerOptions: {
+      target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: true,
+      types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")],
+    },
+    include: ["src"],
+  });
+  const files = {
+    // EVERY SPELLING, because the whole vein is one line answering differently depending on how it is
+    // reached — through the global, through a namespace import, through a named import.
+    "src/sin.ts": `import * as os from "node:os";
+import * as process2 from "node:process";
+import { uptime as osUptime } from "node:os";
+export function pUptimeGlobal(): number { return process.uptime(); }
+export function pUptimeImport(): number { return process2.uptime(); }
+export function osUptimeNs(): number { return os.uptime(); }
+export function osUptimeNamed(): number { return osUptime(); }
+export function pHrtimeGlobal(): bigint { return process.hrtime.bigint(); }
+export function pHrtimeImport(): bigint { return process2.hrtime.bigint(); }
+export function pHrtimeTupleGlobal(): [number, number] { return process.hrtime(); }
+export function pHrtimeTupleImport(): [number, number] { return process2.hrtime(); }
+export function cTime(): void { console.time("x"); }
+export function cTimeEnd(): void { console.timeEnd("x"); }
+export function cTimeLog(): void { console.timeLog("x"); }`,
+    // THE PRECISION CONTROL, and it is the half that decides whether this is a fix or a flood. Four of
+    // these MOVE between calls and are still left pure ON PURPOSE, because moving is not the criterion:
+    // `os.freemem()` went 7912144896 -> 7736311808 over 300 ms, `os.cpus()[].times` advances,
+    // `process.cpuUsage()` and `resourceUsage()` advance. They are memory and CPU-time ACCOUNTING, not
+    // a wall-clock or monotonic time read. The other four read nothing at all.
+    "src/ctl.ts": `import * as os from "node:os";
+import * as process2 from "node:process";
+export function cPlatform(): string { return os.platform(); }
+export function cArch(): string { return os.arch(); }
+export function cEOL(): string { return os.EOL; }
+export function cPid(): number { return process2.pid; }
+export function cFreemem(): number { return os.freemem(); }
+export function cTotalmem(): number { return os.totalmem(); }
+export function cLoadavg(): number[] { return os.loadavg(); }
+export function cCpus(): number { return os.cpus().length; }
+export function cMachine(): string { return os.machine(); }
+export function cGetPriority(): number { return os.getPriority(); }
+export function cCpuUsage(): unknown { return process2.cpuUsage(); }
+export function cResourceUsage(): unknown { return process2.resourceUsage(); }
+export function cMemoryUsage(): unknown { return process2.memoryUsage(); }
+export function cLog(): void { console.log("x"); }
+export function cError(): void { console.error("x"); }
+export function cCount(): void { console.count("x"); }
+export function cJoin(a: string, b: string): string { return require("node:path").join(a, b); }`,
+    // THE ROWS THAT MUST NOT MOVE. `os.tmpdir`/`homedir` are Env by their own rule; `Date.now`,
+    // `new Date()` and `performance.now` are Clock by R110's and are the reason the floor's "nothing
+    // charges Clock for reading a timer" comment was false when it was written.
+    "src/nomove.ts": `import * as os from "node:os";
+export function nTmpdir(): string { return os.tmpdir(); }
+export function nHomedir(): string { return os.homedir(); }
+export function nDateNow(): number { return Date.now(); }
+export function nNewDate(): number { return new Date().getTime(); }
+export function nPerfNow(): number { return performance.now(); }`,
+    // SHADOW CONTROL — a project's own `console`/`os`-shaped objects. Both tables key on the MODULE of
+    // the resolved declaration, so a local object resolves `<local>` and is never asked.
+    "src/shadow.ts": `const myConsole = { time: (_s: string) => {}, timeEnd: (_s: string) => {} };
+export function shadowTime(): void { myConsole.time("x"); }
+class Os { uptime(): number { return 0; } }
+export function shadowUptime(): number { return new Os().uptime(); }`,
+    "clock.pol": "deny Clock\n",
+    "clock_src.pol": "deny Clock src\n",
+    "clock_other.pol": "deny Clock other\n",
+    "unknown.pol": "deny Unknown\n",
+    "blanket.pol": "deny Net Fs Exec Env\n",
+  };
+  // BOTH `lib` ARMS, ASSERTED THE SAME WAY. R109/R110 were each one arm silently wrong and R111 was
+  // both wrong together, so this block asserts the EXPECTATION on each arm rather than asserting that
+  // the two arms match — two arms can agree and both be wrong, which is exactly how R111 hid.
+  //   arm "node"    : lib WITHOUT DOM + types:["node"] — @tsconfig/node20's shape, the defect's arm.
+  //   arm "default" : no tsconfig at all — lib.es2022.full, which INCLUDES lib.dom, so `console.time`
+  //                   resolves into lib.dom's `Console` interface and takes the es-lib arm instead.
+  for (const arm of ["node", "default"]) {
+    const d = project(arm === "node" ? { ...files, "tsconfig.json": nodeTsconfig } : files);
+    if (arm === "node") {
+      const tsc = spawnSync("node", [path.join(HERE, "node_modules", "typescript", "bin", "tsc"),
+                                     "-p", path.join(d, "tsconfig.json"), "--noEmit"], { encoding: "utf8" });
+      check("R114 §E3: the fixture tree COMPILES (`tsc --noEmit` exit 0) — the control half of this block is absence assertions, and absence over a program that does not exist is what a broken engine also produces",
+            tsc.status === 0, `exit ${tsc.status}: ${(tsc.stdout || "") + (tsc.stderr || "")}`.slice(0, 600));
+    }
+    const { report } = scan(d);
+    const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+    const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+
+    for (const [fn, what] of [
+      ["pUptimeGlobal", "`process.uptime()` on the global — EXECUTED, 59.47 ms over a 60 ms busy-wait"],
+      ["pUptimeImport", "…and through `import * as p from \"node:process\"`, which is the spelling κ answers"],
+      ["osUptimeNs", "`os.uptime()` — EXECUTED, advanced 2 s over a 1.2 s wait (1 s resolution)"],
+      ["osUptimeNamed", "…and the NAMED import `import { uptime } from \"node:os\"`, which has no `os.` prefix to pattern-match on"],
+      ["pHrtimeImport", "`p.hrtime.bigint()` through the module — this answered SILENT while the global spelling answered Clock, one line with two answers selected by how you reach `process`"],
+      ["pHrtimeTupleImport", "`p.hrtime()`, the TUPLE form — declared as a CALL SIGNATURE on `HRTime`, so κ was asked about the empty token `\"\"` and the floor listed `\"\"` as reviewed-pure"],
+      ["cTime", "`console.time(\"x\")` — EXECUTED, it TAKES the timestamp (two timers started 80 ms apart end 80 ms apart)"],
+      ["cTimeEnd", "`console.timeEnd(\"x\")` — reads it again to print the duration"],
+      ["cTimeLog", "`console.timeLog(\"x\")` — same read, without ending the timer"],
+    ]) {
+      check(`R114 [${arm} arm]: charges Clock, was silent-pure — ${what} (src.sin.${fn})`,
+            has(`src.sin.${fn}`, "Clock"), JSON.stringify(eff(`src.sin.${fn}`) ?? null));
+    }
+    check(`R114 [${arm} arm] CONVERGENCE (revert-invariant by design): the global \`process.hrtime.bigint()\` still reads Clock — it was the arm that was ALREADY right, and "make the two agree" is also satisfiable by breaking the correct one`,
+          has("src.sin.pHrtimeGlobal", "Clock"), JSON.stringify(eff("src.sin.pHrtimeGlobal")));
+    check(`R114 [${arm} arm] CONVERGENCE: and the global tuple form \`process.hrtime()\``,
+          has("src.sin.pHrtimeTupleGlobal", "Clock"), JSON.stringify(eff("src.sin.pHrtimeTupleGlobal")));
+
+    // THE PRECISION CONTROL — the sweep's exclusions, each decided on §1's definition and each executed.
+    for (const [fn, what] of [
+      ["cPlatform", "`os.platform()` — reads nothing"],
+      ["cArch", "`os.arch()`"],
+      ["cEOL", "`os.EOL`"],
+      ["cPid", "`process.pid`"],
+      ["cFreemem", "`os.freemem()` — it MOVES (7912144896 -> 7736311808 over 300 ms) and is deliberately NOT charged: moving is not the criterion, reading TIME is"],
+      ["cTotalmem", "`os.totalmem()` — host capacity, unchanged when executed"],
+      ["cLoadavg", "`os.loadavg()` — scheduler load, unchanged over 200 ms"],
+      ["cCpus", "`os.cpus().length` — `times` DOES advance, but it is per-core CPU-time accounting, and this is the call reached overwhelmingly for a core COUNT"],
+      ["cMachine", "`os.machine()` — named in the sweep's comment, so it gets a row rather than an assertion (executed: `arm64`, constant)"],
+      ["cGetPriority", "`os.getPriority()` — likewise (executed: `0`, scheduler priority, not time)"],
+      ["cCpuUsage", "`process.cpuUsage()` — consumed CPU time is resource accounting, not a clock"],
+      ["cResourceUsage", "`process.resourceUsage()` — same family"],
+      ["cMemoryUsage", "`process.memoryUsage()` — heap bytes; it also resolves through a CALL SIGNATURE, so it is the control for the empty-token retry too"],
+      ["cLog", "`console.log` — the rest of `console` stays reviewed-pure; SPEC §1 has no Console effect"],
+      ["cError", "`console.error`"],
+      ["cCount", "`console.count` — adjacent in the same interface, and it counts calls rather than reading a clock"],
+    ]) {
+      check(`R114 [${arm} arm] PRECISION CONTROL: gains nothing — ${what} (src.ctl.${fn})`,
+            !has(`src.ctl.${fn}`, "Clock"), JSON.stringify(eff(`src.ctl.${fn}`) ?? null));
+    }
+    check(`R114 [${arm} arm] NO-MOVE: \`os.tmpdir()\` is still Env and did not become Clock`,
+          has("src.nomove.nTmpdir", "Env") && !has("src.nomove.nTmpdir", "Clock"), JSON.stringify(eff("src.nomove.nTmpdir")));
+    check(`R114 [${arm} arm] NO-MOVE: \`os.homedir()\` is still Env`,
+          has("src.nomove.nHomedir", "Env"), JSON.stringify(eff("src.nomove.nHomedir")));
+    for (const [fn, what] of [["nDateNow", "`Date.now()`"], ["nNewDate", "`new Date().getTime()`"], ["nPerfNow", "`performance.now()` (R110)"]]) {
+      check(`R114 [${arm} arm] NO-MOVE: ${what} still reads Clock — and it is the direct refutation of the comment this fix deleted, which said "nothing charges \`Clock\` for reading a timer" (src.nomove.${fn})`,
+            has(`src.nomove.${fn}`, "Clock"), JSON.stringify(eff(`src.nomove.${fn}`)));
+    }
+    for (const [fn, what] of [["shadowTime", "a project's OWN object with a `time` method"], ["shadowUptime", "a project's OWN class with an `uptime` method"]]) {
+      check(`R114 [${arm} arm] SHADOW CONTROL: ${what} fabricates no Clock — both tables key on the MODULE of the resolved declaration (src.shadow.${fn})`,
+            !has(`src.shadow.${fn}`, "Clock"), JSON.stringify(eff(`src.shadow.${fn}`)));
+    }
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // THE GATE, on its own tree so a mixed fixture's exit code is never read as evidence.
+  {
+    const g = project({
+      "tsconfig.json": nodeTsconfig,
+      "src/only.ts": `import * as os from "node:os";
+export function up(): number { return os.uptime(); }`,
+      "clock.pol": "deny Clock\n",
+      "clock_src.pol": "deny Clock src\n",
+      "clock_other.pol": "deny Clock other\n",
+      "unknown.pol": "deny Unknown\n",
+      "blanket.pol": "deny Net Fs Exec Env\n",
+    });
+    const ex = (p) => scan(g, "--policy", path.join(g, p)).r.status;
+    check("R114 GATE: `deny Clock` FIRES (exit 1) over `os.uptime()` — it answered exit 0 with `policy ✓` before",
+          ex("clock.pol") === 1, `exit ${ex("clock.pol")}`);
+    check("R114 GATE: …and the SCOPED `deny Clock src` selects it",
+          ex("clock_src.pol") === 1, `exit ${ex("clock_src.pol")}`);
+    check("R114 GATE CONTROL: `deny Clock other` does NOT fire — a scope matching nothing must gate nothing",
+          ex("clock_other.pol") === 0, `exit ${ex("clock_other.pol")}`);
+    check("R114 GATE CONTROL: `deny Unknown` does NOT fire — the fix charges a NAMED effect; charging `Unknown` would have been the lazy answer that also passes the row above",
+          ex("unknown.pol") === 0, `exit ${ex("unknown.pol")}`);
+    check("R114 GATE CONTROL: a blanket `deny Net Fs Exec Env` does NOT fire — no boundary effect was fabricated",
+          ex("blanket.pol") === 0, `exit ${ex("blanket.pol")}`);
+    fs.rmSync(g, { recursive: true, force: true });
+  }
+
+  // ONE SET, TWO READERS — asserted by IDENTITY, not by two regexes that spell the same thing today.
+  // This is R111's control, applied to the pair that had ACTUALLY drifted: `scan.mjs`'s global-`process`
+  // arm and the `(node:)?process` κ rule disagreed about `hrtime` for as long as they held separate
+  // copies of the answer. A source-text comparison would pass the day someone edits one of them.
+  check("R114: the `(node:)?process` κ rule holds the exported CLOCK_READING_PROCESS_MEMBERS object itself, not a copy of its source text — the global-`process` arm in scan.mjs imports the SAME object",
+        KAPPA_RULES.some(([m, v, e]) => m.test("process") && v === CLOCK_READING_PROCESS_MEMBERS && e === "Clock"),
+        JSON.stringify(KAPPA_RULES.filter(([m]) => m.test("process")).map(([m, v, e]) => [String(m), String(v), e])));
+  check("R114: the `(node:)?console` κ rule holds the exported CLOCK_READING_CONSOLE_MEMBERS object itself — the es-lib `Console` arm in scan.mjs reads the same one",
+        KAPPA_RULES.some(([m, v, e]) => m.test("console") && v === CLOCK_READING_CONSOLE_MEMBERS && e === "Clock"),
+        JSON.stringify(KAPPA_RULES.filter(([m]) => m.test("console")).map(([m, v, e]) => [String(m), String(v), e])));
+  check("R114: `uptime`, `hrtime` and `bigint` are GONE from the `process` node-core floor entry — an inert name in a list titled \"reviewed effect-free\" is how the next reader learns the wrong fact, and this one carried a comment asserting it",
+        !nodeCoreUnreviewedFloorNames().some((n) => n === "uptime" || n === "hrtime" || n === "bigint"),
+        JSON.stringify(nodeCoreUnreviewedFloorNames().slice(0, 12)));
+  check("R114: …and the floor still reviews the resource-accounting members it deliberately keeps (`cpuUsage`, `resourceUsage`, `memoryUsage`), so the removal above was surgical rather than a truncation",
+        ["cpuUsage", "resourceUsage", "memoryUsage"].every((n) => nodeCoreUnreviewedFloorNames().includes(n)),
+        JSON.stringify(nodeCoreUnreviewedFloorNames().slice(0, 12)));
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
