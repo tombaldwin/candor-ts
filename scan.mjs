@@ -2367,7 +2367,21 @@ const ALIAS_HOPS = 16;
  *
  * One rule fixes both. A binding that is assigned anywhere is one whose value this analysis does not
  * know, so it resolves to neither answer: it is reported UNKNOWN, through the same `truncated` path a
- * too-long alias chain takes. A binding that is never reassigned still resolves precisely. */
+ * too-long alias chain takes. A binding that is never reassigned still resolves precisely.
+ *
+ * ⟨R103⟩ MEMBER WRITES GO IN THE SAME SET, because they are the same question. `this.h = evil` and
+ * `C.h = evil` make `h`'s value not its initializer for exactly the reason `send = fetch` does, and
+ * `openCallSlot` below is the reader. One set, not two: this rule already had one private copy too many
+ * once (see `unaliasGlobal`'s "DEFINED ONCE, ON PURPOSE"), and a second implementation of "is this
+ * binding written anywhere" is how the next spelling gets missed.
+ *
+ * WHAT THIS DOES TO THE ALIAS UNWRAP, stated as the assumption it is rather than as a guarantee. The
+ * unwrap only ever looks up symbols of IDENTIFIER bindings, so it sees a member symbol in exactly one
+ * situation: a bare identifier and a member write denote the SAME binding — `export namespace N { export
+ * let h = fetch; } N.h = evil;` — and there the extra entry is the right answer, because `h` really was
+ * written. It cannot fire on a mere NAME collision: `let send = fetch; obj.send = x; send(url)` targets
+ * two different symbols and `send` still resolves to Net (fixture in test.mjs, and it goes red if the
+ * set is keyed on text instead of symbols). */
 const reassignedCache = new WeakMap();
 const reassignedIn = (sf) => {
   let set = reassignedCache.get(sf);
@@ -2375,7 +2389,7 @@ const reassignedIn = (sf) => {
   set = new Set();
   const walk = (n) => {
     if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken
-        && ts.isIdentifier(n.left)) {
+        && (ts.isIdentifier(n.left) || ts.isPropertyAccessExpression(n.left))) {
       const sym = checker.getSymbolAtLocation(n.left);
       if (sym) set.add(sym);
     }
@@ -3836,6 +3850,115 @@ function resolveFnRefUnit(refNode, depth = 0) {
       && (ts.isIdentifier(d.initializer) || ts.isPropertyAccessExpression(d.initializer)))
     return resolveFnRefUnit(d.initializer, depth + 1);
   return null;
+}
+
+/** ⟨R103⟩ A CALL THROUGH A WRITABLE SLOT IS NOT A CALL TO THAT SLOT'S INITIALIZER.
+ *
+ * `class Sink { handler = pureDefault; fire() { return this.handler(); } }` — the checker types
+ * `handler` as `typeof pureDefault`, so `getResolvedSignature` hands `visitCalls` the FunctionDeclaration
+ * and the call edges to it. MEASURED on published 0.34.0 (SOUNDNESS R103): the whole report was
+ * `functions: []`, and `deny Fs`, `deny Unknown`, `pure`, `deny Unknown src.lib.Sink.fire` and
+ * `pure src.lib.Sink.fire` ALL exited 0 while a consumer doing `s.handler = () => fs.writeFileSync(…);
+ * s.fire()` really did write the file (executed, not reasoned). The mirror direction was live too:
+ * `private h = fsThing; constructor(){ this.h = () => "x"; } fire(){ return this.h(); }` charged the
+ * caller Fs off a slot that by then held a pure arrow — a POSITIVE WRONG claim, not just silence.
+ *
+ * NEITHER is a new question. `reassignedIn` above already states the rule, one function away, for the
+ * identifier spelling: "ASSIGNED SOMEWHERE ⇒ its value is not its initializer. Neither answer is
+ * available, so say so." This routes the member spelling onto that same rule and adds the one thing a
+ * member has that a local does not: a slot can be written by code this scan never sees.
+ *
+ * A METHOD IS NOT A SLOT, and that is the line. `fire(){…}` declares flesh; `handler = …` declares a
+ * storage location that happens to be seeded with flesh. `Sink.prototype.fire = evil` is also legal JS,
+ * but treating every method call as Unknown answers nothing about any program; treating a member whose
+ * declaration is a *slot* as Unknown is the ⟨0.19⟩ callback posture this engine already takes for
+ * `handler: () => string = pureDefault` — which, MEASURED at HEAD, correctly yields
+ * `Unknown[callback:…]`. The only thing separating the two spellings today is whether the author wrote a
+ * type annotation. That is not a fact about who can write the slot.
+ *
+ * WHAT COUNTS AS CLOSED — one exemption, and it is measured, not stylistic:
+ *   · `private` / `#` AND never written in its own file ⇒ CLOSED, resolves precisely as before. A
+ *     private member can only be written from inside its own class body, so its own source file is a
+ *     complete view of the writes — the same locality `reassignedIn` already relies on.
+ *   · everything else ⇒ OPEN. `public`, `protected` (a subclass outside this scan writes it), `static`,
+ *     and — deliberately — `readonly`.
+ *
+ * `readonly` IS NOT CLOSED, and this was measured rather than argued (tsc 6.0.3, exit 0, executed):
+ * readonly-ness is not part of property assignability, so `const w: { handler: () => string } = r;
+ * w.handler = evil;` compiles with NO cast and NO `any`, and `r.fire()` then returns the attacker's
+ * value. The same widening against a `private` member is a hard error (TS2322). So the type system
+ * enforces `private` and does not enforce `readonly`; only the enforced one may narrow a sound
+ * over-approximation (denylist-over-allowlist).
+ *
+ * THE `private` EXEMPTION IS AN ASSUMPTION, NOT A GUARANTEE, and is worded that way on purpose: `private`
+ * is erased at emit, so a JavaScript consumer, `(s as any).h = …`, or `Object.defineProperty` writes it
+ * regardless. The exemption says candor models the DECLARED interface. It is kept because dropping it
+ * costs the precision this engine's `private envField = () => process.env.HOME` control depends on, and
+ * because a cast is a deliberate act of defeating the declaration — not because the slot is unwritable.
+ *
+ * Returns null for a closed slot (caller resolves exactly as before), else a short callee text for the
+ * `callback:` reason. */
+// THE HIT COUNTER IS PART OF THE FIX, not scaffolding. An A/B that comes back byte-identical says
+// nothing until you can show the corpus REACHED the changed branch (AGENT-CORPUS-BRIEF §E1 — four rows
+// in one day reported a clean zero-diff over corpora that contained none of the shape). `CANDOR_R103_HITS=1`
+// prints one line per slot kind to stderr, so the next person measuring this does not have to re-add it.
+const R103_HITS = process.env.CANDOR_R103_HITS ? new Map() : null;
+const r103Hit = (k) => { if (R103_HITS) R103_HITS.set(k, (R103_HITS.get(k) ?? 0) + 1); };
+if (R103_HITS) process.on("exit", () => {
+  const rows = [...R103_HITS].sort();
+  process.stderr.write(`R103-HITS total=${rows.reduce((a, [, n]) => a + n, 0)}`
+    + rows.map(([k, n]) => ` ${k}=${n}`).join("") + "\n");
+});
+function openCallSlot(node) {
+  if (!ts.isCallExpression(node)) return null;             // `new X()` constructs a class, not a slot
+  let callee = node.expression;
+  while (ts.isParenthesizedExpression(callee)) callee = callee.expression;
+  // ELEMENT ACCESS IS THE SAME SLOT BY ANOTHER SPELLING, and it is here because the first draft of this
+  // comment asserted the opposite — "an element access already reaches the dynamic-key/`callback:` arms"
+  // — and that was FALSE when measured: `this["handler"]()` and `this[k]()` (k narrowed to the literal
+  // key) both read `["Fs"]` with no Unknown, through the identical open slot. An assertion written by the
+  // commit that needs it to be true is the most expensive kind, so it was checked instead of believed.
+  if (!ts.isIdentifier(callee) && !ts.isPropertyAccessExpression(callee)
+      && !ts.isElementAccessExpression(callee)) return null;
+  // The SLOT's own symbol — deliberately NOT `realDecl`, which follows aliases through to the target and
+  // is exactly the hop that loses the question. `getSymbolAtLocation` returns undefined for an element
+  // access (MEASURED, which is why the first attempt at the branch above silently did nothing), so the
+  // member is looked up on the RECEIVER's type by the key's own string-literal TYPE — that covers both
+  // `this["handler"]` and `this[k]` where `k: "handler"`, and yields nothing for a genuinely dynamic key,
+  // which is right: that call is already `Unknown` through the dynamic-key arm.
+  const sym = ts.isElementAccessExpression(callee)
+    ? (() => {
+        const kt = callee.argumentExpression && checker.getTypeAtLocation(callee.argumentExpression);
+        const key = kt && kt.isStringLiteral?.() ? kt.value : null;
+        const rt = checker.getTypeAtLocation(callee.expression);
+        return key && rt ? checker.getPropertyOfType(rt, key) : undefined;
+      })()
+    : checker.getSymbolAtLocation(callee);
+  const d = sym?.valueDeclaration ?? sym?.declarations?.[0];
+  if (!d) return null;
+  // THE JS/CommonJS SPELLING OF THE SAME SLOT, and it is not a guess about JavaScript — both forms were
+  // EXECUTED against a real `require()` consumer: `module.exports.handler = evil; lib.fire()` returned
+  // the attacker's value, and so did `s.handler = evil2` against a constructor-assigned instance field.
+  // The checker gives these no PropertyDeclaration at all: `this.h = f` in a constructor synthesises a
+  // symbol whose valueDeclaration is the BinaryExpression, and `module.exports.h = f` / `exports.h = f`
+  // one whose only declaration is the PropertyAccessExpression. There is nothing to exempt — JavaScript
+  // has no `private` (a `#` field is a PropertyDeclaration and goes down the branch below), and the
+  // declaration IS a write, so the `reassignedIn` question is answered before it is asked.
+  if (ts.isBinaryExpression(d) || ts.isPropertyAccessExpression(d)) {
+    r103Hit("js-expando");
+    return callee.getText().replace(/\s+/g, "").slice(0, 60);
+  }
+  if (!ts.isPropertyDeclaration(d)) return null;
+  const flags = ts.getCombinedModifierFlags(d);
+  const encapsulated = !!(flags & ts.ModifierFlags.Private)
+    || (d.name && ts.isPrivateIdentifier(d.name));
+  const written = !!sym && reassignedIn(d.getSourceFile()).has(sym);
+  if (encapsulated && !written) return null;               // CLOSED — see the exemption above
+  r103Hit(encapsulated ? "private-written"
+          : (flags & ts.ModifierFlags.Static) ? "static"
+          : (flags & ts.ModifierFlags.Protected) ? "protected"
+          : (flags & ts.ModifierFlags.Readonly) ? "readonly" : "public");
+  return callee.getText().replace(/\s+/g, "").slice(0, 60);
 }
 
 // Unwrap a `<ref>.bind(…)` partial-application chain to the underlying function-reference RECEIVER.
@@ -5337,6 +5460,22 @@ function visitCalls(node) {
       const rec = fns.get(owner);
       const sig = checker.getResolvedSignature(node);
       let decl = sig && sig.declaration;
+      // ⟨R103⟩ A WRITABLE SLOT IS AN INCOMPLETE CANDIDATE SET — see `openCallSlot`, and see the class-
+      // override fan-out below, which is the authority this converges on rather than a second rule: it
+      // edges to every candidate it CAN name and adds `Unknown` when the set it enumerated is not
+      // provably the whole one (⟨0.35⟩ "A NON-EMPTY CANDIDATE SET IS NOT A COMPLETE ONE"). A slot's
+      // candidate set is exactly that shape — {the initializer} ∪ {whatever wrote it} — so the
+      // resolution below runs UNCHANGED and this only ADDS.
+      //
+      // ADDITIVE ON PURPOSE, and this was measured, not assumed. The first cut REPLACED the resolution
+      // instead of joining it, and the hono A/B caught it: `hc` went `["Clock","Net","Unknown"]` →
+      // `["Net","Unknown"]`, because dropping the edge to `ClientRequestImpl.fetch` discarded the one
+      // body we CAN see. That flips `deny Clock` from exit 1 to exit 0 — a fix for a silent under-report
+      // introducing a silent under-report, which is this project's most-measured way to get it wrong.
+      // Union cannot do that: no effect is ever removed, so no firing gate can go green. The price is
+      // that the fabrication direction (`private h = fsThing; this.h = pureArrow` charging Fs) is only
+      // DISCLOSED by the added `Unknown`, not cured. That is the right side to be wrong on.
+      const slotCallee = decl ? openCallSlot(node) : null;
       if (!decl) {
         // `new C()` on a class with an IMPLICIT constructor resolves to no declaration — edge to
         // the class's (synthesized) ctor unit via the class identifier before concluding Unknown.
@@ -6225,6 +6364,16 @@ function visitCalls(node) {
             disclosureTail(rec, decl, pkg, file);
           }
         }
+      }
+      // ⟨R103⟩ …and the slot's own answer, JOINED to whatever the resolution above concluded — the same
+      // statement whether the initializer resolved to a local unit, to a dependency, or to a κ-classified
+      // package member. It does NOT fire when `decl` was null, and that is the guard above, not an
+      // oversight: an unresolvable call already lands on `Unknown` with its own `callback:` reason, so
+      // firing here would add nothing to the report while making the hit counter count rows that did not
+      // change — and a hit count that is not a count of CHANGES cannot price the fix.
+      if (slotCallee) {
+        rec.direct.add("Unknown");
+        rec.why.add(`callback:${slotCallee}`); // a function VALUE read out of a writable slot — canonical `callback:`
       }
       // the callee EXPRESSION being a plain identifier of function-typed parameter/field:
       // a PARAMETER defers to callback-flow resolution (below) — if every call site of this

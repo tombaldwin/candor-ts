@@ -14717,6 +14717,205 @@ export function run() { fs.readFileSync("/x"); }
         JSON.stringify(withFlag.report?.functions));
 }
 
+// ── R103: A CALL THROUGH A WRITABLE SLOT IS NOT A CALL TO THAT SLOT'S INITIALIZER ──────────────────
+//
+// MEASURED on the published 0.34.0 artifact. The whole scan target was two lines —
+//   function pureDefault(): string { return "pure"; }
+//   export class Sink { handler = pureDefault; fire(): string { return this.handler(); } }
+// — and the report was `functions: []`. `deny Fs`, `deny Unknown`, `pure`, `deny Unknown
+// src.lib.Sink.fire` and `pure src.lib.Sink.fire` ALL exited 0, while a consumer doing
+// `s.handler = () => fs.writeFileSync(…); s.fire()` really did write the file (compiled with tsc and
+// EXECUTED, not reasoned about). That breaks README:167's own claim that a "function-valued parameter
+// or field being called" is Unknown, never silently pure.
+//
+// The whole 1,746-assertion suite passed both before and after the fix, because nothing in it binds a
+// class field to a function REFERENCE. These are the fixtures for the sibling nobody was handed.
+if (blk()) {
+  const d = project({
+    "src/lib.ts": `function pureDefault(): string { return "pure"; }
+export class Sink { handler = pureDefault; fire(): string { return this.handler(); } }`,
+    "deny-unknown.policy": "deny Unknown\n",
+    "deny-scoped.policy": "deny Unknown src.lib.Sink.fire\n",
+  });
+  const { report } = scan(d);
+  check("R103: a public class field bound to a function reference no longer makes its caller VANISH — `Sink.fire` is in the report",
+        entry(report, "src.lib.Sink.fire") !== undefined, JSON.stringify(report?.functions));
+  check("R103: …as Unknown, with the `callback:` reason class SPEC §4 reserves for an owner-less function value",
+        entry(report, "src.lib.Sink.fire")?.inferred.includes("Unknown")
+          && (entry(report, "src.lib.Sink.fire")?.unknownWhy ?? []).some((w) => w.startsWith("callback:")),
+        JSON.stringify(entry(report, "src.lib.Sink.fire")));
+  check("R103: `deny Unknown` over the two-line library is exit 1 — it was exit 0 on published 0.34.0",
+        scan(d, "--policy", path.join(d, "deny-unknown.policy")).r.status === 1);
+  check("R103: …and so is the README's own strictness knob scoped to the offending unit (`deny Unknown src.lib.Sink.fire`)",
+        scan(d, "--policy", path.join(d, "deny-scoped.policy")).r.status === 1);
+}
+
+// THE UNION IS THE FIX, NOT THE SUPPRESSION — the direction the first cut got wrong, caught by the hono
+// A/B: replacing the resolution instead of joining it took `hc` from ["Clock","Net","Unknown"] to
+// ["Net","Unknown"], flipping `deny Clock` from exit 1 to exit 0. A fix for a silent under-report is not
+// allowed to introduce one. This row fails on the suppressing form and passes on the joining form.
+if (blk()) {
+  const d = project({
+    "src/lib.ts": `import * as fs from "fs";
+function fsDefault(): string { fs.writeFileSync("/tmp/candor-r103", "x"); return "fs"; }
+export class Sink { handler = fsDefault; fire(): string { return this.handler(); } }`,
+    // SCOPED to the CALLER on purpose. An UNSCOPED `deny Fs` here passes with the fix, without the fix,
+    // AND with the broken suppressing form — `fsDefault` is reported in its own right either way, so the
+    // blanket rule fires INCIDENTALLY and discriminates nothing (AGENT-CORPUS-BRIEF §F1: measure all four
+    // policy forms, because a blanket deny catching the callee is not the caller being judged). The
+    // scoped form asks about `Sink.fire` itself, which is the unit this whole row is about.
+    "deny-fs.policy": "deny Fs src.lib.Sink.fire\n",
+  });
+  const { report } = scan(d);
+  const fire = entry(report, "src.lib.Sink.fire");
+  check("R103 NO-LOSS: the initializer's own effects are KEPT — the slot's Unknown is ADDED to them, never substituted for them",
+        fire?.inferred.includes("Fs") && fire?.inferred.includes("Unknown"), JSON.stringify(fire));
+  check("R103 NO-LOSS: …so a SCOPED gate on the caller still fires (`deny Fs src.lib.Sink.fire` exit 1) — it goes exit 0 on the suppressing form",
+        scan(d, "--policy", path.join(d, "deny-fs.policy")).r.status === 1);
+}
+
+// EVERY SLOT KIND, and the two that are CLOSED. `readonly` is open and `private` is closed, and that is
+// measured rather than stylistic: under tsc 6.0.3, `const w: { handler: () => string } = r; w.handler =
+// evil` compiles with NO cast (readonly-ness is not part of property assignability) and `r.fire()` then
+// returns the attacker's value — EXECUTED; the same widening against a `private` member is TS2322.
+if (blk()) {
+  const d = project({
+    "src/lib.ts": `function pureDefault(): string { return "pure"; }
+export class Stat  { static handler = pureDefault; static fire(): string { return Stat.handler(); } }
+export class Prot  { protected handler = pureDefault; fire(): string { return this.handler(); } }
+export class RO    { readonly handler = pureDefault; fire(): string { return this.handler(); } }
+export class Meth  { handler(): string { return "pure"; } fire(): string { return this.handler(); } }
+export class PrivW { private handler = pureDefault; constructor() { this.handler = () => "x"; } fire(): string { return this.handler(); } }
+export class PrivC { private envField = () => process.env.HOME; read(): string | undefined { return this.envField(); } }`,
+    "deny-unknown.policy": "deny Unknown\n",
+  });
+  const { report } = scan(d);
+  const unk = (fn) => entry(report, fn)?.inferred?.includes("Unknown") === true;
+  check("R103: a `static` field is a slot — `Stat.handler = evil` is an ordinary write from anywhere",
+        unk("src.lib.Stat.fire"), JSON.stringify(entry(report, "src.lib.Stat.fire")));
+  check("R103: `protected` is a slot — a subclass outside this scan writes it",
+        unk("src.lib.Prot.fire"), JSON.stringify(entry(report, "src.lib.Prot.fire")));
+  check("R103: `readonly` is a slot — it is erased at emit AND not enforced by assignability (measured under tsc, exit 0, executed)",
+        unk("src.lib.RO.fire"), JSON.stringify(entry(report, "src.lib.RO.fire")));
+  check("R103 PRECISION CONTROL: a METHOD is not a slot — it declares flesh, so an ordinary method call gains NOTHING",
+        entry(report, "src.lib.Meth.fire") === undefined, JSON.stringify(entry(report, "src.lib.Meth.fire")));
+  check("R103: a `private` field WRITTEN in its own class is a slot — the `reassignedIn` rule this converges on, one spelling over",
+        unk("src.lib.PrivW.fire"), JSON.stringify(entry(report, "src.lib.PrivW.fire")));
+  check("R103 PRECISION CONTROL: a `private` field NEVER written keeps its exact answer — `Env`, and no Unknown beside it",
+        entry(report, "src.lib.PrivC.read")?.inferred.join() === "Env",
+        JSON.stringify(entry(report, "src.lib.PrivC.read")));
+}
+
+// THE SPELLING THE FIRST DRAFT ASSERTED WAS ALREADY HANDLED, AND WASN'T. A comment in `openCallSlot` said
+// an element access "already reaches the dynamic-key/`callback:` arms"; measured, `this["handler"]()` and
+// `this[k]()` (k narrowed to the literal key) both read `["Fs"]` with no Unknown through the identical
+// open slot, because `getSymbolAtLocation` returns undefined for an ElementAccessExpression. `#`-private
+// is the mirror: stronger encapsulation than `private` (the language enforces it at runtime), so the
+// never-written exemption applies to it too — and stops applying the moment the class writes it.
+if (blk()) {
+  const d = project({
+    "src/lib.ts": `import * as fs from "fs";
+function fsDefault(): string { fs.writeFileSync("/tmp/candor-r103d", "x"); return "fs"; }
+export class Lit  { handler = fsDefault; fire(): string { return this["handler"](); } }
+export class Narr { handler = fsDefault; fire(k: "handler"): string { return this[k](); } }
+export class Hash { #handler = fsDefault; fire(): string { return this.#handler(); } }
+export class HashW { #handler = fsDefault; constructor() { this.#handler = () => "x"; } fire(): string { return this.#handler(); } }`,
+  });
+  const { report } = scan(d);
+  const unk = (fn) => entry(report, fn)?.inferred?.includes("Unknown") === true;
+  check("R103: an ELEMENT ACCESS with a literal key is the same open slot — `this[\"handler\"]()`",
+        unk("src.lib.Lit.fire"), JSON.stringify(entry(report, "src.lib.Lit.fire")));
+  check("R103: …and so is one whose key TYPE is a string literal — `this[k]()` with `k: \"handler\"`",
+        unk("src.lib.Narr.fire"), JSON.stringify(entry(report, "src.lib.Narr.fire")));
+  check("R103 PRECISION CONTROL: a `#`-private field never written stays exactly resolved — `Fs`, no Unknown",
+        entry(report, "src.lib.Hash.fire")?.inferred.join() === "Fs",
+        JSON.stringify(entry(report, "src.lib.Hash.fire")));
+  check("R103: …and a `#`-private field the class DOES write is open, like its `private` twin",
+        unk("src.lib.HashW.fire"), JSON.stringify(entry(report, "src.lib.HashW.fire")));
+}
+
+// THE OVER-CHARGE CONTROL FOR WIDENING `reassignedIn`. That set is now fed member writes as well as
+// identifier writes, and `unaliasGlobal` reads it — so a member write to something merely SHARING A NAME
+// with a local alias must not poison the alias's answer. `let send = fetch` (never reassigned) beside an
+// unrelated `obj.send = …` in the same file must still resolve to Net, not fall to the fail-closed
+// `truncated` arm. This is red if the set is ever keyed on text rather than on symbols.
+if (blk()) {
+  const d = project({
+    "src/lib.ts": `const send = fetch;
+const obj: { send?: (u: string) => unknown } = {};
+obj.send = (u: string) => u;
+export async function go(u: string) { return send(u); }`,
+  });
+  const { report } = scan(d);
+  check("R103 OVER-CHARGE CONTROL: a member write to a same-NAMED property does not poison a local alias — `send = fetch` still resolves to Net",
+        entry(report, "src.lib.go")?.inferred.includes("Net")
+          && !entry(report, "src.lib.go")?.inferred.includes("Unknown"),
+        JSON.stringify(entry(report, "src.lib.go")));
+}
+
+// THE ESM CONTROLS. An import binding is immutable — `ns.lfn = evil` throws `TypeError: Cannot assign to
+// read only property` on a real module namespace object (EXECUTED under node, not inferred from the
+// spec text) — so an exported `const`/`let` that this module never reassigns is genuinely closed and
+// MUST keep resolving. And the annotated spelling `handler: () => string = pureDefault` was already
+// correct before this fix; it stays correct, which is what makes the two spellings agree at last.
+if (blk()) {
+  const d = project({
+    "src/lib.ts": `import * as fs from "fs";
+function fsDefault(): string { fs.writeFileSync("/tmp/candor-r103b", "x"); return "fs"; }
+export const cfn = fsDefault;
+export let lfn = fsDefault;
+export function callConst(): string { return cfn(); }
+export function callLet(): string { return lfn(); }
+export class Ann { handler: () => string = fsDefault; fire(): string { return this.handler(); } }`,
+  });
+  const { report } = scan(d);
+  check("R103 CONTROL: an exported `const` reached from inside its own module still resolves exactly — no Unknown",
+        entry(report, "src.lib.callConst")?.inferred.join() === "Fs",
+        JSON.stringify(entry(report, "src.lib.callConst")));
+  check("R103 CONTROL: an exported `let` this module never reassigns is closed to importers (ESM bindings are read-only) — still resolves exactly",
+        entry(report, "src.lib.callLet")?.inferred.join() === "Fs",
+        JSON.stringify(entry(report, "src.lib.callLet")));
+  check("R103 CONTROL: the ANNOTATED spelling was already Unknown before this fix and still is — the two spellings now agree",
+        entry(report, "src.lib.Ann.fire")?.inferred.includes("Unknown"),
+        JSON.stringify(entry(report, "src.lib.Ann.fire")));
+}
+
+// THE JavaScript / CommonJS SPELLINGS, which the checker gives no PropertyDeclaration at all: `this.h = f`
+// in a constructor synthesises a symbol declared by a BinaryExpression, and `module.exports.h = f` /
+// `exports.h = f` one declared by a PropertyAccessExpression. Both were EXECUTED against a real
+// `require()` consumer before this fixture was written — `lib.handler = () => "EVIL"; lib.fire()` returned
+// EVIL, and `s.handler = evil2; s.fire()` returned EVIL2 — so this is a genuine cross-module write, not
+// the ESM case above.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", module: "CommonJS", allowJs: true, checkJs: false },
+      include: ["src"],
+    }),
+    "src/lib.js": `const fs = require("fs");
+function fsDefault() { fs.writeFileSync("/tmp/candor-r103c", "x"); return "fs"; }
+class Ctor { constructor() { this.handler = fsDefault; } fire() { return this.handler(); } }
+module.exports.handler = fsDefault;
+module.exports.fire = function fire() { return module.exports.handler(); };
+exports.h2 = fsDefault;
+function callH2() { return exports.h2(); }
+module.exports.Ctor = Ctor; module.exports.callH2 = callH2;
+`,
+  });
+  const { report } = scan(d, "--allow-js");
+  const unk = (fn) => entry(report, fn)?.inferred?.includes("Unknown") === true;
+  check("R103 (JS): a CONSTRUCTOR-ASSIGNED instance field is a slot — there is no declaration to read modifiers off, and JS has no `private`",
+        unk("src.lib.Ctor.fire"), JSON.stringify(entry(report, "src.lib.Ctor.fire")));
+  check("R103 (CommonJS): `module.exports.handler` is a slot — `require('./lib').handler = evil` is a real cross-module write (executed)",
+        unk("src.lib.fire"), JSON.stringify(entry(report, "src.lib.fire")));
+  check("R103 (CommonJS): …and the `exports.h2` shorthand is the same slot by another spelling",
+        unk("src.lib.callH2"), JSON.stringify(entry(report, "src.lib.callH2")));
+  check("R103 (JS) NO-LOSS: the initializer's `Fs` survives on all three — the union, not a substitution",
+        ["src.lib.Ctor.fire", "src.lib.fire", "src.lib.callH2"]
+          .every((fn) => entry(report, fn)?.inferred?.includes("Fs")),
+        JSON.stringify(report?.functions?.map((f) => [f.fn, f.inferred])));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

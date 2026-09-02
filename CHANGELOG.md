@@ -8,6 +8,116 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL-SIN FIX (SOUNDNESS R103) — a call through a WRITABLE FUNCTION SLOT was judged as a call
+  to that slot's INITIALIZER, so a class field bound to a function reference made its caller vanish.**
+  The entire scan target was two lines — `function pureDefault(): string { return "pure"; }` /
+  `export class Sink { handler = pureDefault; fire(): string { return this.handler(); } }` — and the
+  report was `functions: []`. On the published `candor-ts@0.34.0`, **`deny Fs`, `deny Unknown`, `pure`,
+  `deny Unknown src.lib.Sink.fire` and `pure src.lib.Sink.fire` all exited 0**, while a consumer doing
+  `s.handler = () => { fs.writeFileSync(…) }; s.fire()` compiled under `tsc` (exit 0) and, EXECUTED,
+  printed `fire() returned: fs` and wrote the file. That breaks this README's own §4 claim at :167 —
+  "a function-valued parameter or **field** being called" is `Unknown`, never silently pure.
+  The discriminator, probed through the TS API: `handler = pureDefault` resolves to a
+  `FunctionDeclaration` with a body, so `getResolvedSignature` handed the call the initializer and the
+  caller edged to it; `handler: () => string = pureDefault` resolves to a `FunctionType` and was already
+  correctly `Unknown[callback:…]`. **The only thing consulted was whether the author wrote a type
+  annotation — never whether the slot can be written from outside.**
+  The MIRROR direction was live too, and it makes a positive WRONG claim rather than a silent one:
+  `private h = fsThing; constructor() { this.h = () => "x"; } fire() { return this.h(); }` charged the
+  caller `Fs` off a slot that by then held a pure arrow.
+  Fixed by routing the member spelling onto the rule `reassignedIn` already states one function away for
+  the identifier spelling ("ASSIGNED SOMEWHERE ⇒ its value is not its initializer"), widened with the one
+  thing a member has that a local does not — a slot can be written by code this scan never sees. Member
+  writes now go into that same set rather than a second copy of it. A call through an open slot is
+  treated exactly as the class-override fan-out below it already treats an incomplete candidate set
+  (⟨0.35⟩ "A NON-EMPTY CANDIDATE SET IS NOT A COMPLETE ONE"): edge to the candidate you can name, and
+  add `Unknown` because the set is not provably whole.
+  **ADDITIVE, and that was measured rather than chosen.** The first cut SUBSTITUTED the `Unknown` for the
+  resolution, and the hono A/B caught it: `src.client.client.hc` went `["Clock","Net","Unknown"]` →
+  `["Net","Unknown"]`, which flips `deny Clock` from exit 1 to exit 0 — a silent-under-report fix
+  introducing a silent under-report. The shipped form joins, so no effect is ever removed and no firing
+  gate can go green. The price is that the fabrication direction above is DISCLOSED by the added
+  `Unknown` rather than cured.
+  Confirmed against the PUBLISHED artifact, not just HEAD: `npm pack candor-ts@0.34.0` (npm's current
+  version), identity `candor-ts 0.34.0 (spec 0.34)`, `grep -c openCallSlot` = 0 — `functions: []` and all
+  six policy forms (`deny Fs`, `deny Unknown`, `pure`, both scoped forms, `deny Fs Unknown[indirect]`)
+  exit 0.
+  OPEN vs CLOSED, and the `readonly` ruling is measured, not stylistic: `public`, `protected`, `static`
+  and `readonly` are OPEN; `private`/`#` that its own file never writes is CLOSED. Under tsc 6.0.3,
+  `const w: { handler: () => string } = r; w.handler = evil` compiles with **no cast and no `any`** —
+  readonly-ness is not part of property assignability — and `r.fire()` then returns the attacker's value
+  (executed); the same widening against a `private` member is a hard `TS2322`. So the type system
+  enforces one and not the other, and only the enforced one may narrow a sound over-approximation. The
+  `private` exemption is worded as an ASSUMPTION in the code: `private` is erased at emit, so a JS
+  consumer or `(s as any)` still writes it — it says candor models the declared interface.
+  The JS/CommonJS spellings are covered too, both EXECUTED against a real `require()` consumer before
+  the fixtures were written: `module.exports.handler = evil; lib.fire()` returned the attacker's value,
+  and so did `s.handler = evil` against a constructor-assigned instance field. The checker gives these
+  no `PropertyDeclaration` at all (a `BinaryExpression` and a `PropertyAccessExpression` respectively).
+  CONTROLS, all measured: an exported `const`/`let` this module never reassigns stays exactly resolved —
+  `ns.lfn = evil` throws `TypeError: Cannot assign to read only property` on a real ESM namespace object
+  (executed under node); a `private envField = () => process.env.HOME` never written keeps `['Env']` with
+  no `Unknown` beside it; a `Record`/`Map` registry was already `Unknown[callback:unresolved call]`; and
+  an ordinary METHOD call gains nothing — a method declares flesh, a property declares a slot.
+  **Corpus A/B — 9 configurations over 8 real packages with `node_modules` installed, pre-image taken
+  from a `git worktree` at `e40a995` (proven pre-fix: `grep -c openCallSlot` = 0), diff keyed on EVERY
+  field (`inferred`, `direct`, `unresolved`, `unknownWhy`, `invisible`, `incomplete`, `declared`,
+  `netClass`, `hosts`, `paths`, `cmds`, `tables`, `calls`, `ambiguous`, `outOfScope`, `scannedUnder`,
+  `peeked`, `unitKind`), with a HIT COUNTER in the changed branch (`CANDOR_R103_HITS=1`) so a quiet
+  diff cannot be mistaken for a corpus that never reached it:**
+
+  | corpus | analyzed | reported | R103 hits | ADDED | REMOVED | CHANGED (wide) | effects lost |
+  |---|---|---|---|---|---|---|---|
+  | hono | 928 | 367 | 94 (public 84, private-written 8, readonly 2) | 0 | 0 | 51 | 0 |
+  | zod (packages/zod) | 1397 | 716 | 32 (static 29, public 3) | **21** | 0 | 3 | 0 |
+  | axios (TS only) | 60 | 59 | **0 — SAFETY-ONLY, this arm never reached the branch** | 0 | 0 | 0 | 0 |
+  | axios `--allow-js` | 453 | 323 | 8 (js-expando) | 0 | 0 | 1 | 0 |
+  | rxjs (packages/rxjs) | 398 | 263 | 13 (readonly 12, private-written 1) | 0 | 0 | 5 | 0 |
+  | winston `--allow-js` | 152 | 125 | 69 (public 65, js-expando 4) | 0 | 0 | 20 | 0 |
+  | commander `--allow-js` | 422 | 272 | 2 (js-expando) | 0 | 0 | 2 | 0 |
+  | express `--allow-js` | 116 | 92 | 24 (js-expando) | 0 | 0 | 10 | 0 |
+  | typeorm | 4018 | 2376 | 36 (public 34, protected 2) | 0 | 0 | 35 | 0 |
+  | **total** | **7944** | **4593** | **278** | **21** | **0** | **127** | **0** |
+
+  **ZERO removals and ZERO effects lost in every corpus** — by construction, since the rule only adds.
+  The whole over-charge is **21 rows (0.46% of 4,593)**, all in zod, all one documented pattern:
+  `static create = (params) => {…}` on `ZodString`/`ZodNumber`/… plus `augment = this.extend`, read from
+  zod's own source rather than from candor's report. `ZodString.create = evil` is an ordinary write from
+  any consumer, so those rows are true "cannot prove which body runs" — they are noise about code that
+  happens to be pure, not misclassification.
+  24 fixtures added. **Revert test against the pre-fix worktree: 15 go RED**; the 9 that stay green are
+  every CONTROL and are revert-invariant by design. Two of those eight (the NO-LOSS rows) were separately
+  proven discriminating by degrading a copy of the engine to the SUBSTITUTING form, where they go red.
+  One row was rewritten mid-verification because it did NOT discriminate: an unscoped `deny Fs` passes in
+  all three states, because the callee is reported in its own right and the blanket rule fires
+  incidentally — it is now `deny Fs src.lib.Sink.fire`, which asks about the caller.
+  **The ELEMENT-ACCESS spelling is covered by FIXTURE ONLY — SAFETY-ONLY on these corpora, said here
+  rather than discovered later.** It exists because a comment in `openCallSlot` asserted the spelling was
+  "already reaching the dynamic-key/`callback:` arms" and that was false when measured:
+  `this["handler"]()` and `this[k]()` (k narrowed to the literal key) both read `["Fs"]` with no Unknown,
+  because `getSymbolAtLocation` returns undefined for an `ElementAccessExpression`. The member is now
+  looked up on the receiver's type by the key's string-literal TYPE. Its hit count is **0 on all nine
+  configurations** and every post-fix report is byte-identical with and without that branch — so the
+  fixture is its whole evidence, and the corpora say nothing about it either way.
+  **RESIDUAL, PRICED and NOT closed** (each still resolves through the slot; each is externally
+  writable): an object-literal property (`const reg = { go: fn }; reg.go()`), `Object.assign`'s result
+  (which resolves to the same `PropertyAssignment`), and an `export namespace` `let`. A
+  measurement-only widening of `openCallSlot` to cover them was built and run over the same 9
+  configurations: hits go **278 → 984** and the over-charge goes **21 → 106 rows** (+85: zod 60,
+  axios `--allow-js` 19, express 4, winston 1, commander 1) — still zero removals and zero effects lost,
+  but **4× the shipped cost**, and unlike a class member these shapes have no encapsulation keyword to
+  exempt the closed cases with (a module-local object literal that never escapes is genuinely closed and
+  nothing in the declaration says so). Left as a separate decision with a number attached rather than
+  bundled into this one.
+  `assert-audit.sh` flagged one claim in this diff that was too strong, and it was corrected rather than
+  defended: the widened `reassignedIn` comment said the alias unwrap "can never be handed a member
+  symbol". It can — when a bare identifier and a member write denote the same binding (`export namespace
+  N { export let h = fetch; } N.h = evil`), where the extra entry is the RIGHT answer. The comment now
+  says that, and the over-charge control it demanded is in the suite: `let send = fetch` beside an
+  unrelated `obj.send = …` must still resolve to `Net`. That row is revert-invariant by design; it was
+  proven discriminating against a copy of the engine degraded to key the set on TEXT rather than on
+  symbols, where it goes red.
+
 - **⚠ CARDINAL-SIN FIX (SOUNDNESS R93) — `process` reached through a LOCAL BINDING of `globalThis`/
   `global` (destructured or plain) loses its `Env` effect entirely.** `'NO_COLOR' in process.env` was
   correctly charged `Env`; the identical read through `const { process } = globalThis as any;
