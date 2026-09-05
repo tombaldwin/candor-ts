@@ -8,6 +8,53 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R154) — a policy ALIAS line disarmed the ⟨0.30⟩ fail-closed
+  INCOMPLETE verdict.** The out-of-scope peek called `parsePolicy(text, {})` while the gate called it with
+  the real `.candor/config` `unknown-alias` map, so one policy meant two different things to two paths
+  reading the same bytes. `{}` is not an empty alias map — it has no `.has`, and the parser's alias arm is
+  `aliases && aliases.has(cn)`, so the first `Unknown[<token>]` whose token is not `*`, `dynamic` or a
+  built-in reason class threw `TypeError` straight into the peek's "a peek that cannot run must not fail
+  the gate" catch. `peekPolicy` stayed null and **the peek was never ATTEMPTED**, which is worse than one
+  that ran and found nothing: `outOfScope` and `scannedUnder` go ABSENT rather than `[]`,
+  `excluded[].peeked` reads `false`, and ⟨0.30⟩'s INCOMPLETE verdict never arms.
+
+  Measured against the published 0.35.0, one excluded file (outside the tsconfig program) performing `Fs`,
+  `.candor/config` carrying `unknown-alias corp = reflect`. Executed ground truth: run under `node`, that
+  file really writes `/tmp/r154-leak.txt`.
+
+      deny Fs                           exit 2   outOfScope:[run:Fs]  peeked:true    (correct)
+      deny Fs + deny Unknown[corp]      exit 0   outOfScope ABSENT    peeked:false   "policy ✓"
+      deny Fs + deny Unknown[reflect]   exit 2   outOfScope:[run:Fs]  peeked:true    (built-in class —
+                                                                                     never reached the
+                                                                                     alias arm)
+
+  An unrelated rule turned a red verdict green, with no `incomplete` and no disclosure of any kind — and
+  every other soundness row in this engine is measured THROUGH that verdict. The same defect also deleted
+  the ⟨0.33⟩ *asked-and-clear* answer on a clean tree: `deny Unknown[corp]` over a project with nothing
+  excluded emitted neither key — the document a no-policy scan produces. After the fix that tree emits
+  `outOfScope: []` and `scannedUnder: {deny: […]}` and still exits 0.
+
+  The vocabulary is now parsed ONCE, anchored at the policy file (SPEC §3.1 `99eb4e9` — the anchor the
+  gate already used), memoized, and read by both paths; the peek's `try` covers the READ only, since the
+  gate calls the same `parsePolicy` on the same bytes with no `try` at all. Alias-DEFINITION errors are
+  folded into the peek's own `fatalPolicyErrors` check, so `unknown-alias corp = reflect,nativ` — which
+  leaves `corp` resolvable and the policy itself error-free while the gate refuses at exit 2 — no longer
+  lets the peek publish a look taken under rules that never stood (⟨0.29⟩, SPEC §2). Measured by deleting
+  that fold: `outOfScope:["runs"]`, `peeked:true`, beside `policy NOT evaluated` in the same run.
+
+  One measured behaviour change rides along, and it moves the right way: `discoverConfigText` refuses an
+  existing-but-unreadable `.candor/config` with `exit 2`, and it now runs at the peek rather than at the
+  gate. Where the policy is filed in a directory of its own whose config is unreadable — the only tree the
+  target-anchored reads do not already catch — that refusal now lands BEFORE the envelope is written
+  instead of after, which is the §3.1 posture (a refusal produces no report). Both arms measured; both
+  exit 2.
+
+  Direction: this can only make gates MORE red, so the risk it carries is noise. The over-charge controls
+  are in `test.mjs` — a legitimate `deny Unknown[<alias>]` over a tree with nothing out of scope still
+  exits 0, and the alias still classifies in both directions (`corp = reflect` fires on a reflective unit
+  at exit 1; `other = dispatch` leaves the same unit alone at exit 0). Nine rows added; three go red on
+  reverting `scan.mjs` alone. candor-spec PART 48 and PART 53 ts arms re-run pre/post: identical MATCH/OK.
+
 ## [0.35.0] — 2026-09-03
 
 - **⚠ DISCLOSURE FIX + SILENT-UNDER-REPORT FIX (SOUNDNESS R137) — a κ rule that classifies SOME of a

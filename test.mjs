@@ -4849,6 +4849,150 @@ if (blk()) {
   fs.rmSync(badPolDir, { recursive: true, force: true });
 }
 
+// ── R154 A POLICY ALIAS LINE MUST NOT DISARM THE ⟨0.30⟩ FAIL-CLOSED INCOMPLETE VERDICT ───────────
+// The peek called `parsePolicy(text, {})` while the gate called it with the real `unknown-alias` map, so
+// ONE policy meant two things to two paths. `{}` is not an empty map — it has no `.has`, and the parser's
+// alias arm is `aliases && aliases.has(cn)`, so the FIRST `Unknown[<token>]` whose token is not `*`,
+// `dynamic` or a built-in REASON_CLASS threw TypeError into the peek's catch. `peekPolicy` stayed null,
+// so the peek was never ATTEMPTED — worse than one that ran and found nothing: `outOfScope` and
+// `scannedUnder` go ABSENT rather than `[]`, `excluded[].peeked` reads false, and ⟨0.30⟩'s INCOMPLETE
+// verdict never arms. MEASURED on published 0.35.0 over an excluded file performing `Fs`: `deny Fs` alone
+// exits 2 naming the function; `deny Fs` + `deny Unknown[corp]` exits **0 `policy ✓`** with no disclosure
+// of any kind. An unrelated rule turned a red verdict green — which is why this row sits above the other
+// ts soundness rows: every one of them is measured THROUGH this verdict.
+//
+// THE PAIR THAT ISOLATES THE ARM: `Unknown[reflect]` (a built-in class) never reaches the alias arm and
+// was always fine; `Unknown[corp]` needs the map. Both are asserted below, because a fix that made the
+// peek withhold on every `Unknown[…]` rule would pass the first row and be a different silence.
+if (blk()) {
+  const tsconfig = JSON.stringify({
+    compilerOptions: { target: "ES2022", module: "ESNext", moduleResolution: "bundler",
+                       skipLibCheck: true, noEmit: true },
+    include: ["src/**/*.ts"],
+  });
+  const files = {
+    "tsconfig.json": tsconfig,
+    ".candor/config": "unknown-alias corp = reflect\n",
+    "src/ok.ts": `export function pure(a: number): number { return a + 1; }`,
+    "outside/bad.ts": `import { execSync } from "node:child_process";
+export function runs(): Buffer { return execSync("ls"); }`,
+    "alias.pol": "deny Exec\ndeny Unknown[corp]\n",     // the alias arm — the disarming spelling
+    "builtin.pol": "deny Exec\ndeny Unknown[reflect]\n", // the built-in arm — never broken
+    "plain.pol": "deny Exec\n",                          // the ⟨0.30⟩ baseline
+  };
+  const d = project(files);
+  const oosOf = (r) => r.report?.outOfScope ?? [];
+  const namesExec = (r) => oosOf(r).some((e) => e.fn === "runs" && (e.effects ?? []).includes("Exec"));
+  const peekedAll = (r) => (r.report?.excluded ?? []).length > 0
+                        && (r.report?.excluded ?? []).every((e) => e.peeked === true);
+
+  // BASELINE, so a red row below cannot be a broken fixture: the plain ⟨0.30⟩ policy still fires here.
+  const plain = scan(d, "--policy", path.join(d, "plain.pol"));
+  check("R154 BASELINE: `deny Exec` alone makes the excluded Exec an INCOMPLETE verdict (exit 2)",
+        plain.r.status === 2 && namesExec(plain) && peekedAll(plain),
+        `exit ${plain.r.status}: ${JSON.stringify(oosOf(plain))} ${JSON.stringify(plain.report?.excluded)}`);
+
+  const alias = scan(d, "--policy", path.join(d, "alias.pol"));
+  check("R154 adding `deny Unknown[<config alias>]` beside it does NOT disarm the verdict — still exit 2, still named",
+        alias.r.status === 2 && namesExec(alias) && peekedAll(alias),
+        `exit ${alias.r.status}: ${JSON.stringify(oosOf(alias))} ${JSON.stringify(alias.report?.excluded)}`);
+  check("R154 …and `scannedUnder` records the deny set WITH the alias expanded — the peek used the gate's vocabulary, not a second one",
+        JSON.stringify(alias.report?.scannedUnder) === JSON.stringify({ deny: ["deny Exec", "deny Unknown[reflect]"] }),
+        JSON.stringify(alias.report?.scannedUnder));
+
+  const builtin = scan(d, "--policy", path.join(d, "builtin.pol"));
+  check("R154 CONTROL: the built-in-class spelling `Unknown[reflect]` is unmoved — exit 2, named (it never reached the alias arm)",
+        builtin.r.status === 2 && namesExec(builtin) && peekedAll(builtin),
+        `exit ${builtin.r.status}: ${JSON.stringify(oosOf(builtin))}`);
+
+  // THE OVER-CHARGE CONTROL, WRITTEN FIRST. This fix can only make gates MORE red, so the risk it carries
+  // is noise: a legitimate `deny Unknown[<alias>]` over a tree with NOTHING out of scope must still exit 0
+  // — and must say so POSITIVELY (⟨0.33⟩ asked-and-clear), which is the second half of the same defect:
+  // pre-fix this tree emitted NEITHER key, the document a no-policy scan produces.
+  const cleanDir = project({
+    "tsconfig.json": tsconfig,
+    ".candor/config": "unknown-alias corp = reflect\n",
+    "src/ok.ts": `export function pure(a: number): number { return a + 1; }`,
+    "alias.pol": "deny Exec\ndeny Unknown[corp]\n",
+  });
+  const clean = scan(cleanDir, "--policy", path.join(cleanDir, "alias.pol"));
+  check("R154 CONTROL: an alias policy over a tree with NOTHING out of scope still exits 0 — and says so with `outOfScope: []`",
+        clean.r.status === 0 && Array.isArray(clean.report?.outOfScope) && clean.report.outOfScope.length === 0
+          && JSON.stringify(clean.report?.scannedUnder) === JSON.stringify({ deny: ["deny Exec", "deny Unknown[reflect]"] }),
+        `exit ${clean.r.status}: ${JSON.stringify(clean.report?.outOfScope)} ${JSON.stringify(clean.report?.scannedUnder)}`);
+
+  // …AND THE ALIAS MUST STILL CLASSIFY. A fix that broke `unknown-alias` resolution would restore every
+  // row above and be a worse bug, so both directions of the alias itself are pinned on one tree: the
+  // classes it names FIRE, the classes it does not name DO NOT.
+  const classDir = project({
+    "tsconfig.json": tsconfig,
+    ".candor/config": "unknown-alias corp = reflect\nunknown-alias other = dispatch\n",
+    "src/dyn.ts": `export function dyn(s: string): any { return (0, eval)(s); }`,
+    "fires.pol": "deny Unknown[corp]\n",
+    "quiet.pol": "deny Unknown[other]\n",
+  });
+  const fires = scan(classDir, "--policy", path.join(classDir, "fires.pol"));
+  const quiet = scan(classDir, "--policy", path.join(classDir, "quiet.pol"));
+  check("R154 CONTROL: the alias still RESOLVES at the gate — `corp = reflect` fires on a reflective unit (exit 1)",
+        fires.r.status === 1 && /AS-EFF-006/.test(fires.r.stdout), `exit ${fires.r.status}: ${fires.r.stdout.slice(0, 200)}`);
+  check("R154 CONTROL: …and does not over-fire — `other = dispatch` leaves the same unit alone (exit 0)",
+        quiet.r.status === 0, `exit ${quiet.r.status}: ${quiet.r.stdout.slice(0, 200)}`);
+
+  // ⟨0.29⟩ WITHHOLDING, ON THE ALIAS DEFINITION. `unknown-alias corp = reflect,nativ` keeps `corp` in the
+  // map, so the POLICY parses without error while the gate refuses at exit 2 over the DEFINITION's typo
+  // (SPEC §6.2 `be0b9a9`). Without folding those errors into the peek's own fatal check, the peek runs and
+  // publishes `outOfScope`/`scannedUnder` against rules that never stood — MEASURED by deleting the fold:
+  // `outOfScope: ["runs"]`, `peeked: true`, beside a `policy NOT evaluated` refusal in the same run.
+  const badAliasDir = project({
+    "tsconfig.json": tsconfig,
+    ".candor/config": "unknown-alias corp = reflect,nativ\n",
+    "src/ok.ts": `export function pure(a: number): number { return a + 1; }`,
+    "outside/bad.ts": `import { execSync } from "node:child_process";
+export function runs(): Buffer { return execSync("ls"); }`,
+    "alias.pol": "deny Exec\ndeny Unknown[corp]\n",
+  });
+  const badAlias = scan(badAliasDir, "--policy", path.join(badAliasDir, "alias.pol"));
+  check("R154 ⟨0.29⟩ a typo in the ALIAS DEFINITION refuses the gate, and the peek withholds too — both keys ABSENT, not a look under refused rules",
+        badAlias.r.status === 2 && badAlias.report !== null
+          && !("outOfScope" in badAlias.report) && !("scannedUnder" in badAlias.report)
+          && /nativ/.test(badAlias.r.stderr),
+        `exit ${badAlias.r.status}: ${JSON.stringify(Object.keys(badAlias.report ?? {}))} ${badAlias.r.stderr.slice(0, 200)}`);
+
+  // The alias parser's own warnings come from ONE parse, not two — the map is memoized across peek and
+  // gate. A reserved name is warn-and-skip, and it must appear exactly once on stderr.
+  const warnDir = project({
+    "tsconfig.json": tsconfig,
+    ".candor/config": "unknown-alias reflect = native\nunknown-alias corp = reflect\n",
+    "src/ok.ts": `export function pure(a: number): number { return a + 1; }`,
+    "alias.pol": "deny Exec\ndeny Unknown[corp]\n",
+  });
+  const warned = scan(warnDir, "--policy", path.join(warnDir, "alias.pol"));
+  check("R154 the shared alias map is parsed ONCE — the reserved-name warning is printed exactly once",
+        (warned.r.stderr.match(/reserved\/empty name/g) ?? []).length === 1,
+        JSON.stringify((warned.r.stderr.match(/reserved\/empty name/g) ?? []).length));
+
+  // THE ONE MEASURED BEHAVIOUR CHANGE the vocabulary hoist carries, pinned so it cannot drift back.
+  // `discoverConfigText` refuses an existing-but-unreadable `.candor/config` with `process.exit(2)`, and
+  // it now runs at the peek rather than at the gate. The target's own config is read far earlier (:1151,
+  // :1314), so the only tree where this is the FIRST read is one whose policy lives in a directory of its
+  // own carrying the unreadable config — and there the refusal now lands BEFORE the envelope is written.
+  // That is the §3.1 posture (a refusal produces no report), not a regression from it: at 0.35.0 the same
+  // input exited 2 with a report already on disk.
+  const polHome = project({ ".candor/config": "unknown-alias corp = reflect\n",
+                            "p.pol": "deny Exec\ndeny Unknown[corp]\n" });
+  const tgt = project({ "tsconfig.json": tsconfig,
+                        "src/ok.ts": `export function pure(a: number): number { return a + 1; }` });
+  fs.chmodSync(path.join(polHome, ".candor", "config"), 0o000);
+  const unread = scan(tgt, "--policy", path.join(polHome, "p.pol"));
+  fs.chmodSync(path.join(polHome, ".candor", "config"), 0o644);
+  check("R154 an unreadable `.candor/config` beside the policy refuses at exit 2 BEFORE the report is written (§3.1: a refusal produces no report)",
+        unread.r.status === 2 && unread.report === null && /could not be read/.test(unread.r.stderr),
+        `exit ${unread.r.status} report=${unread.report === null ? "none" : "written"}: ${unread.r.stderr.slice(0, 200)}`);
+  for (const t of [polHome, tgt]) fs.rmSync(t, { recursive: true, force: true });
+
+  for (const t of [cleanDir, classDir, badAliasDir, warnDir]) fs.rmSync(t, { recursive: true, force: true });
+}
+
 // ── scan-completeness nudge: a high CALL VOLUME into unscanned packages means a missing input ─────
 // A scan that sees the app but none of its dependencies leaves their effects invisible — indistinguishable
 // in the report from "there is nothing there". The trigger is call VOLUME, not package count (candor-java's

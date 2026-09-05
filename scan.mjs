@@ -8731,6 +8731,37 @@ let peekAttempted = false;
 // per CLASS, so the answer is too: a class is peeked only when no file of that class went unread.
 const peekUnread = new Set();
 let peekUnattributed = false;
+// ⟨0.19⟩/⟨0.24⟩ SPEC §6.2 — THE POLICY'S REASON-CLASS VOCABULARY (`.candor/config` `unknown-alias`),
+// parsed ONCE here and read by BOTH the peek below and the §6.2 gate far below. It used to be parsed only
+// at the gate, and the peek passed a bare `{}` in its place.
+//
+// R154: `{}` is not an EMPTY alias map, it is an object with no `.has`. `parsePolicy`'s alias arm reads
+// `else if (aliases && aliases.has(cn))` — truthy, then TypeError — so the FIRST `Unknown[<token>]` whose
+// token is not `*`, `dynamic` or a built-in REASON_CLASS threw straight into the peek's catch, leaving
+// `peekPolicy` null. The peek was then never ATTEMPTED, which is strictly worse than a peek that ran and
+// found nothing: `outOfScope` and `scannedUnder` go ABSENT rather than `[]`, `excluded[].peeked` reads
+// false, and ⟨0.30⟩'s fail-closed INCOMPLETE verdict never arms. MEASURED on published 0.35.0 over one
+// excluded file performing `Fs`: `deny Fs` alone exits 2 naming the function; adding `deny Unknown[corp]`
+// beside it exits 0 `policy ✓` with no disclosure of any kind. An unrelated rule turned a red verdict
+// green — while the gate honoured that same rule correctly, so two paths disagreed about one policy.
+//
+// THE TRIGGER IS A TOKEN THE MAP IS NEEDED FOR, not an alias being defined. `Unknown[nosuchalias]` disarms
+// the peek identically; there the gate's own §6.2 refusal happens to hold the exit at 2, which is why only
+// the defined-alias spelling surfaces as a silent under-report. `Unknown[reflect]` (a built-in class)
+// never reaches the alias arm and was always fine — that pair is what isolates the arm.
+//
+// ANCHORED AT THE POLICY FILE, the same anchor the gate uses (SPEC §3.1 `99eb4e9`) — vocabulary travels
+// with the policy that uses it, and two anchors would expand one rule two ways. Memoized rather than
+// eager, so `parseUnknownAliases`'s own stderr warnings are still printed exactly once.
+let policyAliasMap = null, policyAliasErrs = null;
+const policyAliases = () => {
+  if (policyAliasMap === null) {
+    policyAliasErrs = [];
+    policyAliasMap = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(policyPath, target)),
+                                         policyAliasErrs);
+  }
+  return policyAliasMap;
+};
 if (policyPath) {
   // ⟨0.33⟩ NO LONGER GATED ON `excludedFiles.length`. A tree with a policy and NOTHING excluded used to
   // skip this whole block, so `outOfScopeFindings`/`scannedUnderRules` stayed `null` and both
@@ -8747,17 +8778,40 @@ if (policyPath) {
   // run must not fail the gate" catch — findings silently empty, gate green. The catch is right; a bug
   // hiding behind it is not, which is why the trigger below is now a POSITIVE test on the rules.
   let peekPolicy = null;
-  try {
-    const pol = parsePolicy(fs.readFileSync(policyPath, "utf8"), {});
+  // R154 — THE CATCH COVERS THE READ ONLY. It used to wrap the parse too, and its own comment named only
+  // the read ("an unreadable policy"), which is exactly how the TypeError above sat behind it for a whole
+  // rung: the ⟨0.30⟩ note above already records a ReferenceError hiding in this same catch, and answered it
+  // by tightening the TRIGGER — which does nothing for a throw one line earlier. The ARGUMENT for
+  // narrowing, stated as the assumption it is: the gate below calls the SAME `parsePolicy` on the SAME
+  // bytes with the SAME map and no `try` at all, so on every input that reaches both, a throw here is one
+  // that would kill the run at the gate anyway — catching it only moved where it died and made one of the
+  // two places a silent green. That holds while both reach the parse, which is every run bar a policy file
+  // that becomes unreadable between these two lines.
+  //
+  // ONE MEASURED BEHAVIOUR CHANGE, and it moves the right way. `policyAliases()` runs here now, and
+  // `discoverConfigText` refuses an existing-but-unreadable `.candor/config` with `process.exit(2)`. Where
+  // the policy is filed in a tree of its OWN whose config is unreadable — the only case the target-anchored
+  // reads at :1151/:1314 do not already catch — the refusal now lands BEFORE the envelope is written
+  // instead of after. MEASURED both arms: exit 2 either way, report WRITTEN at 0.35.0 and NONE here, which
+  // is the §3.1 posture (a refusal produces no report), not a regression from it.
+  let peekText = null;
+  try { peekText = fs.readFileSync(policyPath, "utf8"); }
+  catch { /* an unreadable policy is the gate's business to refuse (exit 2), not the peek's */ }
+  if (peekText !== null) {
+    const pol = parsePolicy(peekText, policyAliases());
     // ⟨0.29⟩ A REFUSED POLICY LEAVES THE KEY ABSENT (SPEC §2). The peek is a producer reading the policy,
     // so §3.1 binds it exactly as it binds the gate: over a policy no route will honour, `outOfScope: []`
     // claims a look taken against rules that never stood, and the `denied` set it would look for is the
     // parser's SALVAGE of an unhonourable file — the rewriting `fatalPolicyErrors` exists to refuse.
     // candor-java already withheld here; this engine, candor-rust and candor-swift did not.
-    if (!fatalPolicyErrors(pol.errors).length) {
+    // R154: the ALIAS-DEFINITION errors count under that same rule, and the gate already folds them into
+    // its own refusal (`parseErrs` below). `unknown-alias corp = reflect,nativ` keeps `corp` in the map, so
+    // `pol.errors` alone is EMPTY and the peek would have published `outOfScope`/`scannedUnder` against a
+    // policy the gate is about to refuse at exit 2 — a look taken under rules that never stood.
+    if (!fatalPolicyErrors([...policyAliasErrs, ...pol.errors]).length) {
       peekPolicy = pol;
     }
-  } catch { /* an unreadable policy is the gate's business to refuse, not the peek's */ }
+  }
   // ⟨0.30⟩ THE TRIGGER IS "ARE THERE DENY RULES", not "is the flattened effect-name set non-empty". The
   // old test read the name set, and `pure` is a deny rule with an EMPTY effect list meaning "every effect
   // except Unknown" — so under the STRICTEST policy the set was empty, the peek never ran, and the tree
@@ -9545,8 +9599,12 @@ if (policyPath !== null) {
     // with the policy filed outside the scan target the two expanded the SAME rule differently and §3.1's
     // byte-equality MUST was breakable by a file that is neither the report nor the policy. `net-partner`
     // (above, at the target) is deliberately NOT moved: it describes the thing being scanned.
-    const parseErrs = [];
-    const unknownAliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(policyPath, target)), parseErrs);
+    // R154 — THE SAME MAP THE PEEK USED, not a second parse of the same file. The peek passed `{}` and this
+    // route passed the real vocabulary, so one `Unknown[<alias>]` line meant two different things to two
+    // paths reading one policy: the gate honoured it, the peek threw on it. `policyAliases()` is memoized
+    // above, so the alias parser's own stderr warnings are still printed exactly once per run.
+    const unknownAliases = policyAliases();
+    const parseErrs = [...policyAliasErrs];
     const gatePolicy = parsePolicy(text, unknownAliases);
     parseErrs.push(...gatePolicy.errors);
     // ⟨0.28⟩ SPEC §6.2 — the LINES THE PARSE DROPPED, for the verdict document below. Non-fatal by
