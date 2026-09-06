@@ -8,6 +8,61 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL SIN FIXED (SOUNDNESS R251) — `Reflect.get(t, k)` HAD NO ARM AT ALL, SO AN EFFECTFUL
+  GETTER REACHED THROUGH IT WAS SILENT IN EVERY SPELLING.** (Row id supplied by the coordinator.) The
+  exact mirror of the `Reflect.set` arm R116 added by widening past its own trigger, and it was never
+  written. `Reflect.get` performs the ordinary [[Get]] — it runs whatever getter the property lookup
+  finds — and nothing handled it. Not the unprovable-key case R240/R247 are about: it was silent for
+  the plain string-literal key too, so the whole builtin was missing.
+
+      class Src { get token() { return fs.readFileSync("/etc/hosts", "utf8"); } }
+      export function go() { const s = new Src(); return Reflect.get(s, "token"); }
+        before: `go` ABSENT from functions[]; over a tree with nothing else,
+                `deny Fs src.only.go` exit 0 AND `pure src.only.go` exit 0, both scopes binding
+        after:  `go` ["Fs"] through an EDGE into the getter; both gates exit 1
+
+  A literal key names exactly one property and resolves to it; a runtime key falls to the unprovable
+  branch and DISCLOSES `Unknown` with `reflect:accessor:dynamic-key` — R240(b)'s own tag, because
+  `Reflect.get(t, k)` and `t[k]` are one operation. `enumerateTargetSetters` is now
+  `enumerateTargetAccessors`, parameterised by accessor kind: one body answers both directions, which
+  is the rule R247 was filed to restore after those two spellings drifted.
+
+  GROUND TRUTH EXECUTED (node 22.12.0), getter invocations, object LITERAL vs CLASS instance:
+
+      Reflect.get(o,"token")   literal 1  class 1      Reflect.get(o,"other")   0  0
+      Reflect.get(o,k)                 1        1
+      Reflect.has 0/0   ownKeys 0/0   deleteProperty 0/0   defineProperty 0/0
+      getOwnPropertyDescriptor 0/0     getPrototypeOf 0/0     ← the rest of Reflect.*, swept
+
+  The class column is why there is no `classBodiedGetter` exclusion on this path: a prototype accessor
+  is not COPIED by a spread (R115) but IS found by a property LOOKUP. `Reflect.apply`/`Reflect.construct`
+  do invoke user code and were already handled by the reflective-invoke arm — asserted, not assumed.
+
+  **CORPUS A/B, WIDE KEY** (21 fields, not `inferred` alone), two fresh corpora — 7 tag-pinned TS repos
+  + 165 npm packages, 172 roster entries, 14,977 rows, 149/172 entries non-empty in the pre-image:
+
+      ADDED 0   REMOVED 0   CHANGED 1        (narrow `inferred`-only key: CHANGED 0)
+
+  The one row is node-fetch 3.3.2 `src/headers.js:143` `Headers.constructor`, whose Proxy `get` trap
+  ends in `Reflect.get(target, p, receiver)` over a class declaring `get [Symbol.toStringTag]()`. It
+  gains `reflect:accessor:dynamic-key` on an `Unknown` it already carried; `inferred` is unchanged, so
+  an `inferred`-keyed A/B would have reported nothing at all. Audited in full (n=1) from the package
+  source, not from candor's report.
+
+  **BRANCH REACH, counted at the CHARGE SITE and not at an outer branch:** 3 `Reflect.get` call sites
+  entered the new arm across both corpora; the PINNED-charge site fired 0 times and the DISCLOSURE
+  charge site fired 1 — which is exactly the one changed row, so the A/B is accounted for rather than
+  merely quiet.
+
+  **RECALL, over got 14.4.1's own unmodified `Options` (48 real getters) plus a three-line consumer:**
+
+      Reflect.get(o, "url")           ABSENT -> edge into got's real `Options.get url` (pure, so the
+                                      caller stays absent — the correct answer, and `o.url` agrees)
+      Reflect.get(o, "searchParams")  ABSENT -> ["Unknown"] + edge into got's own effectful getter,
+                                      which is exactly what `o.searchParams` has always answered
+      Reflect.get(o, k)               ABSENT -> ONE `Unknown` disclosure, ZERO edges — not 48
+                                      fabricated ones
+
 - **⚠ CONSISTENCY FIX (SOUNDNESS R247) — WHERE THE COPIED KEY SET IS UNPROVABLE,
   `Object.assign`/`Reflect.set` NOW DISCLOSE `Unknown` INSTEAD OF CHARGING EVERY SETTER ON THE
   TARGET.** (Row id pending; the coordinator files it.) One ECMAScript operation answered two ways:

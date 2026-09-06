@@ -18371,6 +18371,227 @@ export function go(k: string, src: { plain: number }) { const s = new Sink(); ${
   }
 }
 
+// ── SOUNDNESS R251: `Reflect.get(t, k)` HAD NO ARM AT ALL ────────────────────────────────────────
+//
+// The exact mirror of the `Reflect.set` arm R116 added by widening past its own trigger (§9), and it
+// was never written. `Reflect.get(t, k)` performs the ordinary [[Get]] — it runs whatever getter the
+// property lookup finds — and nothing in scan.mjs handled it in ANY spelling. Not the unprovable-key
+// case R240/R247 are about: it was silent for the plain string-literal key too, so the whole builtin
+// was missing. Found by grepping the MECHANISM while closing R247: `Reflect.get` sits one entry away
+// from `Reflect.set` in `ENV_TOUCHING_BUILTIN`, and only one of them had an accessor arm.
+//
+// MEASURED AT f2d30a8, in a tree containing nothing else:
+//     class Src { get token() { return fs.readFileSync("/etc/hosts", "utf8"); } }
+//     export function go() { const s = new Src(); return Reflect.get(s, "token"); }
+//       -> `go` ABSENT from `functions[]`;  `deny Fs src.only.go` exit 0  AND  `pure src.only.go` exit 0,
+//          both scopes BINDING (no unmatched-scope warning, so the zero is a verdict and not a no-op).
+//
+// GROUND TRUTH EXECUTED, node 22.12.0, counting real getter invocations — object LITERAL vs CLASS
+// instance. The class column is why there is no `classBodiedGetter` exclusion on this path: a
+// prototype getter is not COPIED by a spread (R115) but IS found by a property LOOKUP.
+//     Reflect.get(o,"token")        literal 1  class 1        Reflect.get(o,"other")        0  0
+//     Reflect.get(o,k) k="token"            1        1
+// §9 — THE REST OF `Reflect.*` SWEPT, not just the entry the row named. All zero, so this fix is one
+// name and not a family:
+//     Reflect.has 0/0   Reflect.ownKeys 0/0   Reflect.deleteProperty 0/0   Reflect.defineProperty 0/0
+//     Reflect.getOwnPropertyDescriptor 0/0    Reflect.getPrototypeOf 0/0
+// `Reflect.apply` and `Reflect.construct` DO invoke user code (1 each) and were ALREADY handled by the
+// reflective-invoke arm (`invokedRef`, scan.mjs ~:6296) — asserted below rather than assumed, because
+// "another arm covers it" is the sentence that hides the next miss.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: false,
+                         types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+      include: ["src"],
+    }),
+    "src/sin.ts": `import * as fs from "fs";
+export class Src { id = 1; get token() { return fs.readFileSync("/etc/r251", "utf8"); } }
+export function rgLit()          { const s = new Src(); return Reflect.get(s, "token"); }
+export function rgDyn(k: string) { const s = new Src(); return Reflect.get(s, k); }
+export function rgRecv()         { const s = new Src(); return Reflect.get(s, "token", s); }
+export function rgGlobalThis()   { const s = new Src(); return globalThis.Reflect.get(s, "token"); }
+export function namedRead()      { const s = new Src(); return s.token; }`,
+    // A getter INHERITED from a base class. `Reflect.get` is a property LOOKUP, so it walks the
+    // prototype chain and DOES invoke it (executed: 1) — the asymmetry against R115's copy reasoning.
+    "src/inherit.ts": `import * as fs from "fs";
+class Base { get token() { return fs.readFileSync("/etc/r251b", "utf8"); } }
+export class Derived extends Base { id = 1; }
+export function rgInherited() { const s = new Derived(); return Reflect.get(s, "token"); }`,
+    // OVER-CHARGE CONTROLS. Every one drives the SAME `Reflect.get` call site; what differs is whether
+    // a getter is actually reachable. Executed: 0 real reads in every row here.
+    "src/pure.ts": `export class Plain { a = 0; b = 0; }
+export function rgData()  { const p = new Plain(); return Reflect.get(p, "a"); }
+export function rgDataDyn(k: string) { const p = new Plain(); return Reflect.get(p, k); }
+export function rgRecord(o: Record<string, number>, k: string) { return Reflect.get(o, k); }`,
+    // THE PROVABLE-EXCLUSION ROW THIS FIX RESTS ON: the target HAS an effectful getter and the key
+    // provably names a different property. Executed: 0 invocations. A blanket hedge would fail here.
+    "src/precise.ts": `import * as fs from "fs";
+export class Src2 { plain = 0; get token() { return fs.readFileSync("/etc/r251c", "utf8"); } }
+export function rgOtherKey() { const s = new Src2(); return Reflect.get(s, "plain"); }`,
+    // §9 — THE REST OF `Reflect.*`, EXECUTED AT 0 INVOCATIONS. These rows pin today's (correct) silence,
+    // so a future widening of the arm above that swept them in would show up here as a red row rather
+    // than as a corpus surprise.
+    "src/rest.ts": `import * as fs from "fs";
+export class Src3 { plain = 0; get token() { return fs.readFileSync("/etc/r251d", "utf8"); } }
+export function rHas()   { const s = new Src3(); return Reflect.has(s, "token"); }
+export function rOwn()   { const s = new Src3(); return Reflect.ownKeys(s); }
+export function rDel()   { const s = new Src3(); return Reflect.deleteProperty(s, "token" as never); }
+export function rDefine(){ const s = new Src3(); return Reflect.defineProperty(s, "token", { value: 1 }); }
+export function rGopd()  { const s = new Src3(); return Reflect.getOwnPropertyDescriptor(s, "token"); }
+export function rProto() { const s = new Src3(); return Reflect.getPrototypeOf(s); }`,
+    // THE SYMBOL DENYLIST, on the NEW call site. `keyCouldNameAccessor` is R247's shared authority, and
+    // sharing it is only worth something if the new caller actually exercises it — so the two-way guard
+    // is driven from here too: a STRING key can never name a symbol-keyed getter (axios's
+    // `[Symbol.toStringTag]` rows), and a SYMBOL key can never name a string-keyed one (mongoose's).
+    // Executed: 0 real reads in both. Degrading `keyCouldNameAccessor` to `return true` reddens these.
+    "src/sym.ts": `import * as fs from "node:fs";
+export const TAG: unique symbol = Symbol("tag");
+export class OnlySym { a = 1; get [Symbol.toStringTag](): string { return fs.readFileSync("/etc/r251j", "utf8"); } }
+export class OnlyStr { [k: symbol]: unknown; get hot(): number { return fs.readFileSync("/etc/r251k", "utf8").length; } }
+export function strKeyOverSymGet(o: OnlySym, k: string) { return Reflect.get(o, k); }
+export function symKeyOverStrGet(o: OnlyStr, k: typeof TAG) { return Reflect.get(o, k); }`,
+    // SHADOW CONTROL — a project's own `Reflect`. The arm is `globalBuiltinCallee`-guarded.
+    "src/shadow.ts": `import * as fs from "fs";
+class Src4 { get token() { return fs.readFileSync("/etc/r251e", "utf8"); } }
+const Reflect = { get(_t: unknown, _k: string) { return 1; } };
+export function shadowGet() { const s = new Src4(); return Reflect.get(s, "token"); }`,
+    "fslit.pol": "deny Fs src.sin.rgLit\ndeny Fs src.sin.rgRecv\ndeny Fs src.sin.rgGlobalThis\ndeny Fs src.inherit.rgInherited\n",
+    "purelit.pol": "pure src.sin.rgLit\n",
+    "unkdyn.pol": "deny Unknown src.sin.rgDyn\n",
+    "refldyn.pol": "deny Unknown[reflect] src.sin.rgDyn\n",
+    "dispdyn.pol": "deny Unknown[dispatch] src.sin.rgDyn\n",
+    "scopedpure.pol": "pure src.pure\n",
+    "scopedprecise.pol": "deny Fs src.precise.rgOtherKey\ndeny Unknown src.precise.rgOtherKey\n",
+    "scopedsym.pol": "deny Fs src.sym.strKeyOverSymGet\ndeny Unknown src.sym.strKeyOverSymGet\n"
+                   + "deny Fs src.sym.symKeyOverStrGet\ndeny Unknown src.sym.symKeyOverStrGet\n",
+    "scopedrest.pol": ["rHas", "rOwn", "rDel", "rDefine", "rGopd", "rProto"]
+      .flatMap((f) => [`deny Fs src.rest.${f}`, `deny Unknown src.rest.${f}`]).join("\n") + "\n",
+  });
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+  for (const [fn, what] of [
+    ["src.sin.rgLit", "`Reflect.get(s, \"token\")` — R251's own trigger, EXECUTED: the getter runs and the file is read"],
+    ["src.sin.rgRecv", "…the THREE-argument form `Reflect.get(t, k, receiver)`, which is the same [[Get]]"],
+    ["src.sin.rgGlobalThis", "…through the `globalThis.` qualifier, which defeated five text-keyed arms at once and would have defeated a sixth"],
+    ["src.inherit.rgInherited", "a getter INHERITED from a base class — `Reflect.get` is a LOOKUP, so it walks the prototype chain and DOES invoke it, which is exactly where R115's copy reasoning does not transfer"],
+  ]) {
+    check(`R251: charges Fs through an EDGE, not silent-pure — ${what}`, has(fn, "Fs") && !has(fn, "Unknown"),
+          JSON.stringify(eff(fn) ?? (report.functions ?? []).map((x) => x.fn)));
+  }
+  check("R251: an UNPROVABLE key discloses Unknown, never silent-pure — `Reflect.get(s, k)` with `k: string`",
+        has("src.sin.rgDyn", "Unknown") && !has("src.sin.rgDyn", "Fs"), JSON.stringify(eff("src.sin.rgDyn") ?? null));
+  check("R251: …and it names `reflect:accessor:dynamic-key` — R240(b)'s OWN tag, because `Reflect.get(t,k)` and `t[k]` are one operation and a `deny Unknown[reflect]` written for either already selects the other",
+        (eff("src.sin.rgDyn")?.unknownWhy ?? []).includes("reflect:accessor:dynamic-key"),
+        JSON.stringify(eff("src.sin.rgDyn")?.unknownWhy ?? null));
+  check("R251 DISCRIMINATOR: the named-read spelling the engine ALREADY answered right is unchanged — a fix that reached the rows above by widening `s.token` into a hedge would look identical",
+        has("src.sin.namedRead", "Fs") && !has("src.sin.namedRead", "Unknown"), JSON.stringify(eff("src.sin.namedRead")));
+  for (const [fn, what] of [
+    ["src.pure.rgData", "a DATA property — `Reflect.get(p, \"a\")` invokes nothing (executed: 0)"],
+    ["src.pure.rgDataDyn", "…with a runtime key over a receiver declaring NO accessor: unprovable must still charge NOTHING when there is nothing to invoke"],
+    ["src.pure.rgRecord", "…over an opaque `Record<string, number>`, the shape real code hands this builtin"],
+    ["src.precise.rgOtherKey", "the target HAS an effectful `token` getter and the literal key provably names `plain` instead (executed: 0) — the row the denylist rests on"],
+    ["src.rest.rHas", "`Reflect.has` — a key test, no value read (executed: 0)"],
+    ["src.rest.rOwn", "`Reflect.ownKeys` — names only (executed: 0)"],
+    ["src.rest.rDel", "`Reflect.deleteProperty` (executed: 0)"],
+    ["src.rest.rDefine", "`Reflect.defineProperty` — a descriptor INSTALLS a property and bypasses the accessor (executed: 0)"],
+    ["src.rest.rGopd", "`Reflect.getOwnPropertyDescriptor` — returns the getter FUNCTION without calling it (executed: 0)"],
+    ["src.rest.rProto", "`Reflect.getPrototypeOf` (executed: 0)"],
+    ["src.sym.strKeyOverSymGet", "SYMBOL DENYLIST on the new call site: a STRING key cannot name the symbol-keyed `get [Symbol.toStringTag]()` — `Reflect.get` asks R247's shared `keyCouldNameAccessor`, and this row is what makes that sharing load-bearing rather than decorative"],
+    ["src.sym.symKeyOverStrGet", "…and its mirror: a SYMBOL key cannot name the string-keyed `get hot()`"],
+    ["src.shadow.shadowGet", "SHADOW CONTROL: a project's own `const Reflect = { get(){} }` — the arm is `globalBuiltinCallee`-guarded"],
+  ]) {
+    check(`R251 OVER-CHARGE CONTROL: nothing fabricated — ${what}`,
+          !has(fn, "Fs") && !(eff(fn)?.unknownWhy ?? []).some((w) => /^reflect:accessor:/.test(w)),
+          JSON.stringify(eff(fn) ?? null));
+  }
+  {
+    const ex = (p) => scan(d, "--policy", path.join(d, p)).r.status;
+    check("R251 GATE: `deny Fs` scoped to the CALLERS fires for every PROVABLE spelling (exit 1) — exit 0 at f2d30a8",
+          ex("fslit.pol") === 1, `exit ${ex("fslit.pol")}`);
+    check("R251 GATE: `pure src.sin.rgLit` FIRES (exit 1) — exit 0 at f2d30a8. `pure` forbids EFFECTS, so it can only fire because the fix propagates the getter's NAMED `Fs` through an edge rather than hedging to Unknown",
+          ex("purelit.pol") === 1, `exit ${ex("purelit.pol")}`);
+    check("R251 GATE: `deny Unknown` over the unprovable-key caller FIRES (exit 1) — exit 0 at f2d30a8",
+          ex("unkdyn.pol") === 1, `exit ${ex("unkdyn.pol")}`);
+    check("R251 GATE: `deny Unknown[reflect]` selects it — the reason class is what a policy reads",
+          ex("refldyn.pol") === 1, `exit ${ex("refldyn.pol")}`);
+    check("R251 GATE CONTROL: `deny Unknown[dispatch]` does NOT — a narrowed policy must stay narrow",
+          ex("dispdyn.pol") === 0, `exit ${ex("dispdyn.pol")}`);
+    check("R251 GATE CONTROL: `pure src.pure` stays exit 0 — the over-charge controls really do gate clean, not merely report empty",
+          ex("scopedpure.pol") === 0, `exit ${ex("scopedpure.pol")}`);
+    check("R251 GATE CONTROL: the PROVABLY-EXCLUDED key gates clean on BOTH `deny Fs` and `deny Unknown` (exit 0) — a blanket hedge over every declared getter would fire on the second",
+          ex("scopedprecise.pol") === 0, `exit ${ex("scopedprecise.pol")}`);
+    check("R251 GATE CONTROL: the two SYMBOL-DENYLIST callers gate clean on both `deny Fs` and `deny Unknown` (exit 0) — a guard that only holds in the report shape is not a guard a policy can rely on",
+          ex("scopedsym.pol") === 0, `exit ${ex("scopedsym.pol")}`);
+    check("R251 GATE CONTROL: the six OTHER `Reflect.*` builtins gate clean on both `deny Fs` and `deny Unknown` (exit 0) — the sweep is asserted, not asserted-about",
+          ex("scopedrest.pol") === 0, `exit ${ex("scopedrest.pol")}`);
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+  // `Reflect.apply` / `Reflect.construct` DO invoke user code (executed: 1 each). They are handled by a
+  // DIFFERENT arm (`invokedRef`), and "another arm covers it" is the sentence that hides the next miss —
+  // so it is measured here rather than believed. If that arm ever regresses this row goes red and names it.
+  {
+    const ra = project({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: { target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: false,
+                           types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+        include: ["src"],
+      }),
+      "src/ra.ts": `import * as fs from "fs";
+export function leak() { return fs.readFileSync("/etc/r251f", "utf8"); }
+export class Boom { constructor() { fs.writeFileSync("/tmp/r251g", "x"); } }
+export function viaApply()     { return Reflect.apply(leak, null, []); }
+export function viaConstruct() { return Reflect.construct(Boom, []); }`,
+    });
+    const rep = scan(ra).report;
+    for (const fn of ["src.ra.viaApply", "src.ra.viaConstruct"]) {
+      const e = (rep.functions ?? []).find((x) => x.fn === fn);
+      check(`R251 §9 SWEEP, ALREADY-COVERED: ${fn} reaches its target's effect (executed: 1 user-code invocation) — the reflective-invoke arm, asserted rather than assumed`,
+            ((e?.inferred) ?? []).length > 0, JSON.stringify(e ?? (rep.functions ?? []).map((x) => x.fn)));
+    }
+    fs.rmSync(ra, { recursive: true, force: true });
+  }
+  // THE ISOLATED TREE, which is the row's worst claim: a file containing ONLY the `Reflect.get` spelling
+  // got `deny Fs` exit 0 AND `pure` exit 0 at f2d30a8, with both scopes binding. The sibling named-read
+  // above catches it only INCIDENTALLY — a blanket `deny Fs` fires either way through the getter's own unit.
+  for (const [name, src, expect] of [
+    ["literal key", `import * as fs from "fs";
+class Src { get token() { return fs.readFileSync("/etc/r251h", "utf8"); } }
+export function go() { const s = new Src(); return Reflect.get(s, "token"); }`, "Fs"],
+    ["runtime key", `import * as fs from "fs";
+class Src { get token() { return fs.readFileSync("/etc/r251i", "utf8"); } }
+export function go(k: string) { const s = new Src(); return Reflect.get(s, k); }`, "Unknown"],
+  ]) {
+    const only = project({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: { target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: false,
+                           types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+        include: ["src"],
+      }),
+      "src/only.ts": src,
+      "fs.pol": "deny Fs src.only.go\n",
+      "pure.pol": "pure src.only.go\n",
+      "unk.pol": "deny Unknown src.only.go\n",
+    });
+    const ex = (f) => scan(only, "--policy", path.join(only, f)).r.status;
+    if (expect === "Fs") {
+      check(`R251 GATE [isolated ${name}]: \`deny Fs src.only.go\` — the CALLER — FIRES (exit 1); measured exit 0 at f2d30a8 on this exact tree`,
+            ex("fs.pol") === 1, `exit ${ex("fs.pol")}`);
+      check(`R251 GATE [isolated ${name}]: \`pure src.only.go\` FIRES (exit 1) — exit 0 at f2d30a8`,
+            ex("pure.pol") === 1, `exit ${ex("pure.pol")}`);
+      check(`R251 GATE CONTROL [isolated ${name}]: \`deny Unknown\` does NOT fire — a literal key resolves to the named getter and propagates its effect through an EDGE; hedging to Unknown instead would pass every gate above and say nothing`,
+            ex("unk.pol") === 0, `exit ${ex("unk.pol")}`);
+    } else {
+      check(`R251 GATE [isolated ${name}]: \`deny Unknown src.only.go\` FIRES (exit 1) — exit 0 at f2d30a8`,
+            ex("unk.pol") === 1, `exit ${ex("unk.pol")}`);
+      check(`R251 GATE, THE COST STATED [isolated ${name}]: \`deny Fs\` stays 0 and \`pure\` stays 0 — an unprovable key is a DISCLOSURE, and \`pure\` deliberately forbids effects and not the §4 \`Unknown\` (policy.mjs ~:1139). This is R247's answer for the SET side, reached by the same reasoning`,
+            ex("fs.pol") === 0 && ex("pure.pol") === 0, `deny Fs exit ${ex("fs.pol")}, pure exit ${ex("pure.pol")}`);
+    }
+    fs.rmSync(only, { recursive: true, force: true });
+  }
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

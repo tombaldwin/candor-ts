@@ -4685,7 +4685,31 @@ const provenCopiedKeys = (sources) => {
 // two-way symbol/string denylist can rule out a provably-unreachable accessor exactly as R240(b) does.
 // `Object.assign` passes null — it copies own enumerable STRING **and SYMBOL** keys, so no accessor on
 // the target is provably out of reach and the guard must lift entirely.
-function enumerateTargetSetters(owner, targetExpr, keys, unprovable = {}) {
+//
+// SOUNDNESS R251 — AND THE SAME FUNCTION ANSWERS THE **GET** SIDE, WHICH HAD NO ARM AT ALL.
+// `Reflect.get(t, k)` performs the ordinary [[Get]] — it runs whatever getter the property lookup finds
+// — and nothing in this file handled it, in ANY spelling. Not the unprovable-key case R240/R247 are
+// about: it was silent for the plain string-literal key too, so the whole builtin was missing.
+//
+//     class Src { get token() { return fs.readFileSync("/etc/hosts", "utf8"); } }
+//     export function go() { const s = new Src(); return Reflect.get(s, "token"); }
+//       -> `go` ABSENT from `functions[]`; in a tree containing NOTHING else, `deny Fs src.only.go`
+//          exit 0 AND `pure src.only.go` exit 0, both scopes binding (no unmatched-scope warning).
+//
+// This is `kind`-parameterised rather than copied, which is §G: R247 already merged the two spellings of
+// the SET question into one body after they drifted, and a private `enumerateTargetGetters` would be the
+// same mistake in the other direction. Only the accessor kind differs — the key-set logic, the
+// unprovable-key disclosure, the symbol/string denylist and the no-fabrication exit are identical.
+//
+// GROUND TRUTH EXECUTED, node 22.12.0, counting real getter invocations:
+//     Reflect.get(o,"token")  literal 1  class 1     ← BOTH, and the class arm is why there is no
+//     Reflect.get(o,k) k="token"      1        1        `classBodiedGetter` exclusion below
+//     Reflect.get(o,"other")          0        0     ← the provable-exclusion control
+//     Reflect.has / ownKeys / deleteProperty / defineProperty / getOwnPropertyDescriptor / getPrototypeOf
+//                                     0        0     ← the whole rest of `Reflect.*`, swept, all zero
+// (`Reflect.apply`/`Reflect.construct` DO invoke user code — 1 each — and are already handled by the
+// reflective-invoke arm near `invokedRef`, not here.)
+function enumerateTargetAccessors(owner, targetExpr, keys, kind /* "get" | "set" */, unprovable = {}) {
   if (!owner || !targetExpr) return;
   const t = checker.getTypeAtLocation(targetExpr);
   if (!t || !t.getProperties) return;
@@ -4695,14 +4719,14 @@ function enumerateTargetSetters(owner, targetExpr, keys, unprovable = {}) {
   // argument would throw rather than take this branch.
   if (!keys) {
     for (const p of t.getProperties()) {
-      if (!accessorsFromSym(p, "set").length) continue;
+      if (!accessorsFromSym(p, kind).length) continue;
       if (!keyCouldNameAccessor(p, unprovable.keyType ?? null)) continue;
       const rec = fns.get(owner);
       rec.direct.add("Unknown");
       rec.why.add(`reflect:accessor:${unprovable.why ?? "dynamic-key"}`);
-      return;   // one disclosure per site — WHICH setter runs is the thing not known
+      return;   // one disclosure per site — WHICH accessor runs is the thing not known
     }
-    return;     // a target declaring no reachable setter discloses nothing (0 real invocations)
+    return;     // a target declaring no reachable accessor discloses nothing (0 real invocations)
   }
   for (const p of t.getProperties()) {
     // NO `classBodiedGetter`-style exclusion here, and the asymmetry is the point rather than an
@@ -4710,8 +4734,11 @@ function enumerateTargetSetters(owner, targetExpr, keys, unprovable = {}) {
     // therefore never COPIED. A prototype SETTER is the opposite — it is found by the assignment's
     // property lookup and IS invoked. Executed above: the `Sink` setter lives on `Sink.prototype` and
     // runs once. Excluding it here would be R115's reasoning applied to the direction it does not hold.
-    if (!keys.has(p.getName())) continue;                      // proven not written by this copy
-    for (const hit of accessorsFromSym(p, "set")) recordAccessorHit(owner, hit, p.getName());
+    // R251 — and the same holds for the GET side reached this way: `Reflect.get` is a property LOOKUP,
+    // not a copy, so it finds a prototype getter too (executed: class 1). The exclusion belongs to
+    // `enumerateGetters`, whose callers really are copies, and to nothing here.
+    if (!keys.has(p.getName())) continue;                      // proven not touched by this operation
+    for (const hit of accessorsFromSym(p, kind)) recordAccessorHit(owner, hit, p.getName());
   }
 }
 
@@ -7551,8 +7578,8 @@ function visitCalls(node) {
       // pre-existing and is REPORTED rather than silently widened here (it is a fabrication-direction
       // question of its own), but the charge this fix ADDS does not inherit the hole.
       if (globalBuiltinCallee(callee) === "Object.assign")
-        enumerateTargetSetters(owner, (node.arguments ?? [])[0], provenCopiedKeys(sources),
-                               { why: "dynamic-keyset", keyType: null });   // R247 — copies string AND symbol keys
+        enumerateTargetAccessors(owner, (node.arguments ?? [])[0], provenCopiedKeys(sources), "set",
+                                 { why: "dynamic-keyset", keyType: null });   // R247 — copies string AND symbol keys
     }
     // R116 §9 — WIDENED PAST THE ROW'S OWN TRIGGER, by grepping the MECHANISM ("a builtin that writes a
     // property into a caller-supplied target") rather than the one call the row named. `Reflect.set(t, k,
@@ -7568,13 +7595,31 @@ function visitCalls(node) {
     // project's own `const Object = …` would match its text test. Left as it is rather than widened
     // silently: it is a separate (fabrication-direction) question, it is REPORTED rather than folded in
     // here, and this new arm does not inherit the hole.
-    if (globalBuiltinCallee(callee) === "Reflect.set") {
+    //
+    // SOUNDNESS R251 — `Reflect.get(t, k)` IS THE SAME ARM, AND IT DID NOT EXIST. Found the way R116's
+    // own `Reflect.set` sibling was: by grepping the MECHANISM rather than the name. The two are one
+    // table entry apart in `ENV_TOUCHING_BUILTIN` above, and only one of them had an accessor arm.
+    // EXECUTED: 1 getter invocation for the literal-key spelling AND for the runtime-key one, on an
+    // object literal AND on a class instance; the caller was ABSENT from `functions[]` in all four.
+    //
+    // ONE key-set expression for both directions, deliberately, because two spellings of one question
+    // is what R247 was filed to close and a second copy here would reopen it (§G / F1-3). Today it is a
+    // string-literal test: a literal key names exactly one property, anything else falls to the
+    // unprovable branch and DISCLOSES. It is knowingly weaker than `accessorsAt`, which pins a key
+    // whose TYPE names a finite set (R240(a): `const k = "token"`, a literal union, a string enum) — so
+    // `s[k] = v` resolves a pinned key while `Reflect.set(s, k, v)` discloses `Unknown` for it. That
+    // residual fails in the DISCLOSE direction, not the silent one, so it is a precision gap and is
+    // REPORTED as its own row rather than folded into this fix's pricing.
+    const reflectKeySet = (k) => (k && ts.isStringLiteralLike(k) ? new Set([k.text]) : null);
+    for (const [name, kind] of [["Reflect.set", "set"], ["Reflect.get", "get"]]) {
+      if (globalBuiltinCallee(callee) !== name) continue;
       const k = (node.arguments ?? [])[1];
       // R247 — an unprovable key here answers with R240(b)'s OWN tag, because `Reflect.set(t, k, v)` and
-      // `t[k] = v` are one operation: one runtime key, at most one setter (executed above).
-      enumerateTargetSetters(enclosing(node), (node.arguments ?? [])[0],
-                             k && ts.isStringLiteralLike(k) ? new Set([k.text]) : null,
-                             { why: "dynamic-key", keyType: k ? checker.getTypeAtLocation(k) : null });
+      // `t[k] = v` are one operation: one runtime key, at most one setter (executed above). R251 —
+      // `Reflect.get(t, k)` and `t[k]` are that same one operation on the read side, so it takes the
+      // same tag; a `deny Unknown[reflect]` written for one already selects the other.
+      enumerateTargetAccessors(enclosing(node), (node.arguments ?? [])[0], reflectKeySet(k), kind,
+                               { why: "dynamic-key", keyType: k ? checker.getTypeAtLocation(k) : null });
     }
   }
   // GET/SET ACCESSOR access (the silent-pure-accessor fix): a property read that resolves to a
