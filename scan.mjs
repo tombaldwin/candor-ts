@@ -5652,6 +5652,49 @@ const identIsEnvMayAlias = (id) => {
   return !!sym && envMayAliasSymbols.has(sym);
 };
 
+// R113 — WEB STORAGE, IDENTIFIED FROM THE RECEIVER'S TYPE rather than from the member's declaration.
+// R109 charged `localStorage.setItem(k, v)` by keying on the resolved MEMBER — `decl.parent.name ===
+// "Storage"` in the es-lib arm. That reading can only see a member the interface DECLARES. `Storage` also
+// carries an INDEX SIGNATURE (`[name: string]: any` — in lib.dom AND in @types/node's
+// `web-globals/storage.d.ts`, identically), so `localStorage.x = secret` resolves to no declaration at
+// all, no accessor exists for the property arm to find, and the write was reported as NOTHING in BOTH
+// lib configurations.
+//
+// GROUND TRUTH IS EXECUTED, node 22.12.0 with `--experimental-webstorage --localstorage-file=./ls.db`:
+// process 1 runs `localStorage.x = "SECRET"; localStorage["tok"] = "SECRET"`, process 2 reads both back.
+// The index-signature write PERSISTS ACROSS PROCESSES, byte-identically to the `setItem` call that IS
+// charged. `debug` publishes `localStorage.debug = 'worker:*'` as its documented browser API and
+// `util-deprecate/browser.js` does `global.localStorage[name]`, so this is the spelling real code uses.
+//
+// R109's OWN COMMENT DISMISSED THIS ROW — "the `localStorage.x = v` INDEX-SIGNATURE spelling is untouched
+// and still pure — pure under @types/node too, so it is not part of this split." Every literal word was
+// true. The conclusion was not: both arms agreeing is not a safety property, it is the R111 failure mode.
+// Attack K, in the comment that made the previous fix look complete.
+//
+// KEYED ON THE RECEIVER'S TYPE SYMBOL, which is the identity the call arm already uses — one step
+// earlier in the same chain, so it reaches the members the interface never named. It also gets the alias
+// and parameter spellings for free: `const ls = localStorage; ls.x = v`, `window.localStorage.x = v`,
+// `sessionStorage.x = v` and `function f(s: Storage) { s.x = v }` all have a `Storage`-typed receiver and
+// no new branch. FABRICATION GUARD: the type symbol must have a declaration in `typescript/lib/lib.*.d.ts`
+// or under `@types/node/`, so a project's own `interface Storage` / `class Storage` is never charged
+// (measured, not argued — the shadow control in test.mjs).
+//
+// `some`, not `every`: this INCLUDES rather than excludes, so the conservative direction is to charge on
+// any host declaration. Under @types/node the symbol legitimately carries two declarations (the
+// module-local `interface Storage` and the `declare global { interface Storage extends _Storage {} }`
+// merge), and `every` would have to be right about both.
+const webStorageDeclFile = (d) => {
+  const f = path.resolve(d.getSourceFile().fileName).replace(/\\/g, "/");
+  return /typescript\/lib\/lib\..*\.d\.ts$/.test(f) || declIsNodeTypes(d);
+};
+const isWebStorageExpr = (expr) => {
+  if (!expr) return false;
+  let t; try { t = checker.getTypeAtLocation(expr); } catch { return false; }
+  const sym = t && (t.symbol ?? t.aliasSymbol);
+  if (!sym || sym.name !== "Storage") return false;
+  return (sym.declarations ?? []).some(webStorageDeclFile);
+};
+
 // ---- whole-object process.env access via builtins/spread ------------------------------------------------
 // `process.env.KEY` is caught above, but the WHOLE env object handed to a builtin that enumerates or mutates it
 // is the same Env effect and read silent-pure: `Object.assign(process.env, o)` / `Object.defineProperty(...)` /
@@ -6982,6 +7025,54 @@ function visitCalls(node) {
     // `for (const k in process.env)` — the for-in loop enumerates every key of the environment.
     else if (ts.isForInStatement(node) && readsProcessEnv(node.expression)) {
       markEnv();
+    }
+  }
+  // R113 — WEB STORAGE, THE WHOLE INTERFACE, through the same six shapes the `process.env` block above
+  // enumerates. That block is the AUTHORITY for "a host object touched as a whole", not a template to
+  // paraphrase (§G): the question — which spellings reach a foreign key/value store — has one answer, and
+  // writing a second, shorter list is how the next spelling gets missed. The shapes are dot/bracket access
+  // (literal OR runtime key), destructuring, the `in` test, spread, a key-enumerating builtin, and for-in.
+  //
+  // `Unknown`, not `Fs`: the backing store is not modelled (a browser's is not a filesystem; node's
+  // `--localstorage-file` one is). That is R109's answer verbatim, and the point is that the two lib
+  // configurations converge on it. The reason names the interface actually resolved, so it gates as
+  // `Unknown[native]` exactly like the `setItem` call.
+  //
+  // THE WHOLE INTERFACE, NOT A VERB LIST — the denylist direction, R109's argument transferring verbatim.
+  // Reads persist across sessions and origins just as writes do, `length`/`key(i)` expose the stored key
+  // set, and an unlisted member would be silently pure. Over-charging a `Storage` receiver is a precision
+  // cost bounded to code that already touches web storage; under-charging one is the cardinal sin.
+  {
+    const markStore = (label) => {
+      const owner = enclosing(node);
+      if (!owner) return;
+      const r = fns.get(owner);
+      r.direct.add("Unknown");
+      r.why.add(`native:Storage.${label}`);
+    };
+    const memberLabel = (n) => (ts.isPropertyAccessExpression(n) ? (n.name?.getText?.() ?? "?")
+      : (n.argumentExpression && ts.isStringLiteralLike(n.argumentExpression)
+         ? n.argumentExpression.text : "[computed]"));
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))
+        && isWebStorageExpr(node.expression)) {
+      markStore(memberLabel(node));
+    }
+    else if (ts.isVariableDeclaration(node) && node.name && ts.isObjectBindingPattern(node.name)
+             && node.initializer && isWebStorageExpr(node.initializer)) {
+      markStore("<destructure>");
+    }
+    else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InKeyword
+             && isWebStorageExpr(node.right)) {
+      markStore("<in>");
+    }
+    else if ((ts.isSpreadAssignment(node) || ts.isSpreadElement(node)) && isWebStorageExpr(node.expression)) {
+      markStore("<spread>");
+    }
+    else if (envTouchingBuiltinCall(node) && node.arguments.some((a) => isWebStorageExpr(a))) {
+      markStore("<enumerate>");
+    }
+    else if (ts.isForInStatement(node) && isWebStorageExpr(node.expression)) {
+      markStore("<for-in>");
     }
   }
   // Runtime GLOBALS reached as CALLS with no import for the κ resolver to classify: `process.hrtime()`/

@@ -8,6 +8,71 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R113) — `localStorage.x = secret`, the INDEX-SIGNATURE write,
+  persists to disk and read PURE in BOTH lib configurations.** R109 charged `localStorage.setItem(k, v)`
+  by keying on the resolved MEMBER (`decl.parent.name === "Storage"`). `Storage` also declares an index
+  signature — `[name: string]: any`, in lib.dom and in @types/node's `web-globals/storage.d.ts`
+  identically — so `localStorage.x = secret` resolves to no declaration, no accessor exists for the
+  property arm to find, and the write was reported as nothing at all.
+
+  Ground truth EXECUTED, node 22.12.0 with `--experimental-webstorage --localstorage-file=./ls.db`:
+  process 1 runs `localStorage.x = "SECRET"` and `localStorage["tok"] = "SECRET"`; a SEPARATE process 2
+  reads both back intact. The index-signature write persists to disk exactly as the `setItem` call that
+  IS charged does. `debug` publishes `localStorage.debug = 'worker:*'` as its documented browser API and
+  `util-deprecate/browser.js` does `global.localStorage[name]`, so this is the spelling real code uses.
+
+  Measured at 87d0388 under `lib: ["ES2022","DOM"]`: of **18 spellings that reach the store, ONE was
+  charged** (`localStorage.setItem` — the instrument proving itself able to fail) and the other
+  seventeen were absent from `functions[]` with no `invisible` and no `Unknown`.
+
+  **R109's own comment closed the door on this row** — *"the `localStorage.x = v` INDEX-SIGNATURE
+  spelling is untouched and still pure — pure under @types/node too, so it is not part of this split."*
+  Every literal word was true; the conclusion was not, because agreement between the two resolution
+  paths is the R111 failure mode, not a safety property.
+
+  The fix keys on the RECEIVER's type symbol — the same identity the call arm already uses, one step
+  earlier in the chain, so it reaches members the interface never named — and mirrors the six shapes the
+  `process.env` block already enumerates (dot/bracket access with a literal OR runtime key,
+  destructuring, `in`, spread, a key-enumerating builtin, `for-in`) rather than writing a second, shorter
+  list. It also gets the alias, `window.localStorage`, `sessionStorage` and `Storage`-typed-parameter
+  spellings with no branch of their own.
+
+  **Direction of failure:** it charges every member of the interface, including ones it never named —
+  the denylist direction, over-charge on a receiver that is already web storage, never silence on an
+  unlisted member. The fabrication guard is a declaration-FILE test (`typescript/lib/lib.*.d.ts` or
+  `@types/node/`), so a project's own `interface Storage` / `class Storage` is never charged.
+
+  `Unknown` with reason `native:Storage.<member>`, which is R109's answer verbatim: the backing store is
+  not modelled. `deny Unknown[native]` fires on it and `deny Unknown[reflect]` and `deny Net` do not.
+
+  **CORPUS A/B, TWO CORPORA, diffed on the WIDE key (16 fields, not `inferred` alone).**
+
+      corpus                                     targets  common rows   ADDED  REMOVED  CHANGED
+      194 published npm packages                     194       21,736       6        0       30
+      12 real TypeScript SOURCE trees                 12        2,095       0        0        0
+
+  **REMOVED 0 on both.** Reach, instrumented in the changed branch: the receiver predicate was evaluated
+  295,860 times on the npm corpus and charged 150 times; 29,883 times on the source corpus and charged
+  **zero** — none of those twelve trees touches web storage, which makes that whole corpus a 2,095-row
+  over-charge control that came back byte-identical.
+
+  Every added and changed row lives in a package that genuinely touches `Storage`: localforage (24),
+  jotai (3), oidc-client-ts (3), redux-persist (3), util-deprecate (2), firebase-auth-lite (1). The four
+  that moved `direct` (rather than only adding a disclosure reason) are localforage's
+  `_isLocalStorageUsable` in its four builds. Ground-truthed from each package's own source:
+
+  - `util-deprecate/browser.js:64` — `var val = global.localStorage[name];`, a runtime-key READ. Both
+    `config` and its caller `deprecate` were ABSENT from `functions[]` before this. That is the exact
+    line R113's row cites, in a package with tens of millions of weekly downloads.
+  - `localforage/src/utils/isLocalStorageValid.js` — `'setItem' in localStorage` and `!!localStorage.setItem`
+    (a property READ of a method, never a call, so R109's member-keyed arm could not see either). ABSENT
+    before; now `Unknown[native:Storage.<in>, native:Storage.setItem]`.
+  - `localforage/src/drivers/localstorage.js:41` — `localStorage.length > 0`. `direct: [] -> ["Unknown"]`.
+  - `jotai`'s `createJSONStorage` reads `.subscribe` off a `Storage`-typed value through the index
+    signature. It only ADDS a reason to a row that already carried `native:Storage.{get,set,remove}Item`,
+    so `inferred` does not move — and it is the honest edge of the denylist: an index-signature read is
+    what this fix cannot distinguish from `localStorage.token`, which is the whole reason it exists.
+
 - **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R116) — `Object.assign(target, src)` invokes the TARGET's
   setters and charged nothing.** The mirror of R115's site: `enumerateGetters` handled the SOURCE's
   getters and the target-setter arm did not exist. `Object.assign` is specified as `t[k] = s[k]` for every

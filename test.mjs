@@ -17534,6 +17534,177 @@ export function go() { const s = new Sink(); Reflect.set(s, "token", 1); }`],
   }
 }
 
+// ── R113: `localStorage.x = secret` — THE INDEX-SIGNATURE WRITE, PURE IN BOTH ARMS ────────────────
+//
+// R109 charged `localStorage.setItem(k, v)` by keying on the resolved MEMBER (`decl.parent.name ===
+// "Storage"`). `Storage` also declares an INDEX SIGNATURE — `[name: string]: any` in lib.dom, and the
+// identical line in @types/node's `web-globals/storage.d.ts` — so `localStorage.x = secret` resolves to
+// no declaration, no accessor exists for the property arm to find, and it was reported as NOTHING.
+//
+// GROUND TRUTH IS EXECUTED, node 22.12.0, `--experimental-webstorage --localstorage-file=./ls.db`:
+// process 1 writes `localStorage.x = "SECRET"` and `localStorage["tok"] = "SECRET"`; a SEPARATE process 2
+// reads both back intact. The index-signature write persists to disk exactly as the `setItem` call that
+// IS charged does. `debug` publishes `localStorage.debug = 'worker:*'` as its documented browser API and
+// `util-deprecate/browser.js` does `global.localStorage[name]`, so this is the spelling real code uses.
+//
+// MEASURED AT HEAD (5377eb6) under `lib: ["ES2022","DOM"]` — of 18 spellings that reach the store, ONE
+// was charged (`localStorage.setItem`, which is the instrument proving itself able to fail) and the other
+// SEVENTEEN were absent from `functions[]` with no `invisible` and no `Unknown`.
+//
+// R109's OWN COMMENT CLOSED THE DOOR ON THIS ROW: "the `localStorage.x = v` INDEX-SIGNATURE spelling is
+// untouched and still pure — pure under @types/node too, so it is not part of this split." Every literal
+// word was true. The conclusion was not, because agreement between the two resolution paths is the R111
+// failure mode, not a safety property — R109 was lib.dom-silent, R110 node-silent, R111 both-silent-
+// together, and this is a fourth instance of the third, sitting inside the comment that waved it away.
+// §K, in a comment written by the commit that needed it to be true.
+//
+// DIRECTION OF FAILURE: the identity is taken from the RECEIVER's type symbol rather than the member's
+// declaration, so it charges every member of the interface including ones it never named. That is the
+// denylist direction — over-charge on a receiver that is already web storage, never silence on an
+// unlisted member. The fabrication guard is a declaration-FILE test (lib.*.d.ts or @types/node), so a
+// project's own `Storage` is never charged; the shadow control below is the measurement, not the argument.
+if (blk()) {
+  const armTsconfig = (lib, types) => JSON.stringify({
+    compilerOptions: {
+      target: "ES2022", lib, module: "commonjs", strict: false,
+      ...(types ? { types, typeRoots: [path.join(HERE, "node_modules", "@types")] } : { types: [] }),
+    },
+    include: ["src"],
+  });
+  // ONE VARIABLE between the arms: which declaration file `Storage` resolves through. Both must converge
+  // on the fail-closed answer — that convergence is the whole point of the row, and it is asserted per
+  // arm rather than once, because R109/R110/R111 are three different ways for the two to disagree.
+  for (const [armName, lib, types] of [["@types/node", ["ES2022"], ["node"]],
+                                       ["lib.dom", ["ES2022", "DOM"], null]]) {
+    const d = project({
+      "tsconfig.json": armTsconfig(lib, types),
+      "src/sin.ts": `export function w1(s: string) { localStorage.x = s; }
+export function w2(s: string) { localStorage["tok"] = s; }
+export function w3(k: string, s: string) { localStorage[k] = s; }
+export function r1(): any { return localStorage.tok; }
+export function r2(k: string): any { return localStorage[k]; }
+export function r3(): number { return localStorage.length; }
+export function d1(): void { delete localStorage.tok; }
+export function c1(s: string): void { localStorage.tok += s; }
+export function de1(): any { const { debug } = localStorage; return debug; }
+export function sp1(): any { return { ...localStorage }; }
+export function in1(): boolean { return "tok" in localStorage; }
+export function ok1(): string[] { return Object.keys(localStorage); }
+export function fi1(): string[] { const out: string[] = []; for (const k in localStorage) { out.push(k); } return out; }
+export function ses(s: string) { sessionStorage.x = s; }
+export function alias(s: string) { const ls = localStorage; ls.x = s; }
+export function param(st: Storage, s: string) { st.x = s; }
+export function ctlSetItem(s: string) { localStorage.setItem("tok2", s); }`,
+      // SHADOW CONTROL — a project's OWN `Storage`, structurally identical down to the index signature.
+      // The guard is a declaration-FILE test, so this must fabricate nothing.
+      "src/shadow.ts": `export interface Storage { [k: string]: any; setItem(k: string, v: string): void; }
+export function shadowWrite(st: Storage, s: string) { st.x = s; }
+export function shadowRead(st: Storage): any { return st.tok; }
+export class Storage2 { [k: string]: any; }
+export function shadow2(s: string) { const st = new Storage2(); st.x = s; }`,
+      // OVER-CHARGE CONTROLS — the identical property-write and whole-object shapes on ordinary objects
+      // and on OTHER host types with the same surface. A blanket "any index-signature write is Unknown"
+      // would pass every row above and fail every one of these.
+      "src/pure.ts": `export function pObj(s: string) { const o: any = {}; o.x = s; return o.x; }
+export function pRecord(r: Record<string, string>, s: string) { r.x = s; return r.x; }
+export function pArr(a: string[], s: string) { a[0] = s; return a[0]; }
+export function pMap(m: Map<string, string>, s: string) { m.set("k", s); return m.get("k"); }
+export function pSpread(o: Record<string, string>) { return { ...o }; }
+export function pKeys(o: Record<string, string>) { return Object.keys(o); }
+export function pForIn(o: Record<string, string>) { const out: string[] = []; for (const k in o) { out.push(k); } return out; }
+export function pJson(o: unknown): string { return JSON.stringify(o); }`,
+      "unk.pol": "deny Unknown\n",
+      // `deny Unknown <scope>`, not `pure <scope>`: `pure` treats an Unknown-only function as PASSING
+      // with an advisory, so it answers exit 0 whether or not this fix over-charges — a control that
+      // could not fail. `deny Unknown` is the form that fires on exactly the thing being guarded against.
+      "purepure.pol": "deny Unknown src.pure\n",
+      "pureshadow.pol": "deny Unknown src.shadow\n",
+    });
+    const { report } = scan(d);
+    const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+    const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+    for (const [fn, what] of [
+      ["src.sin.w1", "`localStorage.x = secret` — R113's own trigger; EXECUTED, the value survives the process"],
+      ["src.sin.w2", "`localStorage[\"tok\"] = secret` — the bracket spelling"],
+      ["src.sin.w3", "`localStorage[k] = secret` — a RUNTIME key, which no member-keyed rule can name"],
+      ["src.sin.r1", "`return localStorage.tok` — a READ persists across sessions and origins too"],
+      ["src.sin.r2", "`localStorage[k]` — `util-deprecate/browser.js` does exactly this"],
+      ["src.sin.r3", "`localStorage.length` — a DECLARED member that is a property, not a call, so the call arm could never see it"],
+      ["src.sin.d1", "`delete localStorage.tok`"],
+      ["src.sin.c1", "`localStorage.tok += s` — a compound assignment reads AND writes"],
+      ["src.sin.de1", "`const { debug } = localStorage` — destructuring"],
+      ["src.sin.sp1", "`{ ...localStorage }` — a spread enumerates every key"],
+      ["src.sin.in1", "`\"tok\" in localStorage`"],
+      ["src.sin.ok1", "`Object.keys(localStorage)`"],
+      ["src.sin.fi1", "`for (const k in localStorage)`"],
+      ["src.sin.ses", "`sessionStorage.x = s` — lib.dom types BOTH globals as `Storage`, so one predicate covers them"],
+      ["src.sin.alias", "`const ls = localStorage; ls.x = s` — keying on the RECEIVER's type gets the alias for free"],
+      ["src.sin.param", "a `Storage`-typed PARAMETER — likewise"],
+      ["src.sin.ctlSetItem", "…and R109's `localStorage.setItem` is unchanged (the row that proves the instrument can fail)"],
+    ]) {
+      check(`R113 [${armName}]: charges Unknown, not silent-pure — ${what}`, has(fn, "Unknown"),
+            JSON.stringify(eff(fn) ?? (report.functions ?? []).map((x) => x.fn)));
+    }
+    check(`R113 [${armName}]: the reason names the interface actually resolved, so it gates as \`Unknown[native]\` exactly like the \`setItem\` call rather than as an anonymous hedge`,
+          (eff("src.sin.w1")?.unknownWhy ?? []).some((w) => /^native:Storage\./.test(w)),
+          JSON.stringify(eff("src.sin.w1")));
+    for (const [fn, what] of [
+      ["src.shadow.shadowWrite", "a write through a project's OWN `interface Storage` — same name, same index signature"],
+      ["src.shadow.shadowRead", "…and a read through it"],
+      ["src.shadow.shadow2", "a project's own `class Storage2` with an index signature"],
+    ]) {
+      check(`R113 [${armName}] SHADOW CONTROL: fabricates nothing — ${what}`,
+            (eff(fn)?.inferred ?? []).length === 0, JSON.stringify(eff(fn) ?? null));
+    }
+    for (const fn of ["src.pure.pObj", "src.pure.pRecord", "src.pure.pArr", "src.pure.pMap",
+                      "src.pure.pSpread", "src.pure.pKeys", "src.pure.pForIn", "src.pure.pJson"]) {
+      check(`R113 [${armName}] OVER-CHARGE CONTROL: the identical shape on an ordinary object gains nothing — ${fn}`,
+            (eff(fn)?.inferred ?? []).length === 0, JSON.stringify(eff(fn) ?? null));
+    }
+    {
+      const ex = (p) => scan(d, "--policy", path.join(d, p)).r.status;
+      check(`R113 GATE [${armName}]: \`deny Unknown src.pure\` stays exit 0 — the over-charge controls gate clean, not merely report empty`,
+            ex("purepure.pol") === 0, `exit ${ex("purepure.pol")}`);
+      check(`R113 GATE [${armName}]: \`deny Unknown src.shadow\` stays exit 0 — a project's own \`Storage\` does not fail its owner's gate`,
+            ex("pureshadow.pol") === 0, `exit ${ex("pureshadow.pol")}`);
+    }
+    fs.rmSync(d, { recursive: true, force: true });
+    // THE GATE, one tree per spelling, so no sibling can pass one incidentally. At HEAD every one of
+    // these answered exit 0 in BOTH arms.
+    for (const [name, src] of [
+      ["localStorage.x = secret", `export function go(s: string) { localStorage.x = s; }`],
+      ["localStorage[k] = secret", `export function go(k: string, s: string) { localStorage[k] = s; }`],
+      ["return localStorage.tok", `export function go(): any { return localStorage.tok; }`],
+      ["debug's own API: localStorage.debug = v", `export function go(v: string) { localStorage.debug = v; }`],
+    ]) {
+      const only = project({
+        "tsconfig.json": armTsconfig(lib, types),
+        "src/only.ts": src,
+        "unk.pol": "deny Unknown\n",
+        "scoped.pol": "deny Unknown src.only\n",
+        "native.pol": "deny Unknown[native]\n",
+        "reflect.pol": "deny Unknown[reflect]\n",
+        "net.pol": "deny Net\n",
+      });
+      const ex = (f) => scan(only, "--policy", path.join(only, f)).r.status;
+      check(`R113 GATE [${armName}] ${name}: blanket \`deny Unknown\` FIRES (exit 1) — exit 0 at HEAD`, ex("unk.pol") === 1, `exit ${ex("unk.pol")}`);
+      check(`R113 GATE [${armName}] ${name}: the SCOPED \`deny Unknown src.only\` selects it`, ex("scoped.pol") === 1, `exit ${ex("scoped.pol")}`);
+      // `pure src` is deliberately NOT asserted, and the reason is measured rather than assumed: `pure`
+      // treats an Unknown-only function as PASSING with an advisory ("1 function(s) PASS the policy but
+      // are Unknown … add `deny Unknown src`"), so it answers exit 0 both before and after this fix. A row
+      // asserting it would be a test that passes with AND without the change. That posture is ⟨0.24⟩'s,
+      // unchanged here, and it is exactly why the reason-class pair below is the row that carries weight.
+      check(`R113 GATE [${armName}] ${name}: the REASON-SCOPED \`deny Unknown[native]\` fires — the charge names the interface actually resolved, so it gates the same way R109's \`setItem\` call does`,
+            ex("native.pol") === 1, `exit ${ex("native.pol")}`);
+      check(`R113 GATE CONTROL [${armName}] ${name}: \`deny Unknown[reflect]\` does NOT fire — the reason class is \`native\`, not a metaprogramming hedge; if it were, every \`deny Unknown[…]\` a project writes would select the wrong things`,
+            ex("reflect.pol") === 0, `exit ${ex("reflect.pol")}`);
+      check(`R113 GATE CONTROL [${armName}] ${name}: \`deny Net\` does NOT fire — the charge is Unknown because the backing store is not modelled; smearing it across other effects would pass every gate above and say nothing true`,
+            ex("net.pol") === 0, `exit ${ex("net.pol")}`);
+      fs.rmSync(only, { recursive: true, force: true });
+    }
+  }
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
