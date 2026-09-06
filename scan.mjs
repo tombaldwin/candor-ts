@@ -4500,6 +4500,70 @@ function enumerateGetters(owner, type, srcExpr) {
   }
 }
 
+// R116 — THE MIRROR OF `enumerateGetters`, AND THE ARM THAT DID NOT EXIST. `Object.assign(t, s)` is
+// specified as `t[k] = s[k]` for every own enumerable key of every source, so it invokes the TARGET's
+// SETTERS exactly as `t.k = v` does. `enumerateGetters` above handles the SOURCE side; nothing handled
+// this one, so a setter that writes a file was reported as nothing at all:
+//
+//     export class Sink { set token(x: number) { fs.writeFileSync("/tmp/leak", String(x)); } }
+//     export function viaAssign() { const s = new Sink(); Object.assign(s, { token: 1 }); }
+//       -> `viaAssign` ABSENT from `functions[]`, `deny Fs` exit 0, in a tree containing NOTHING else
+//     export function viaNamedWrite() { const s = new Sink(); s.token = 2; }   -> ["Fs"], correctly
+//
+// One spelling of a question the engine already answers right, which is what makes it a defect rather
+// than a coverage gap. GROUND TRUTH EXECUTED on node 22.12.0, counting setter invocations: 1 for every
+// `Object.assign` spelling (literal source, two sources, a parameter source, a spread source, a
+// computed key) and 1 for `Reflect.set`; 0 for `{...s, token: 1}` (a spread builds a FRESH object, so
+// no setter runs) and 0 for `Object.defineProperties(s, { token: { value: 3 } })` (a `value:` descriptor
+// installs an own property and bypasses the setter). Those two zeroes are the controls.
+//
+// THE KEY SET IS A DENYLIST OF THE PROVEN, NOT AN ALLOWLIST OF THE GUESSED — the family rule, and the
+// direction this fails in is over-charge. Every setter the target declares is charged UNLESS the copied
+// key set can be PROVEN and excludes it. It is provable in exactly one shape: a fresh object literal at
+// the call site with no spread and no computed key, whose keys are its own text. It is NOT provable from
+// a source's declared TYPE, because TypeScript is structural and the runtime object may carry more keys
+// than the annotation admits:
+//     function f(s: { a: number }) { Object.assign(target, s); }   f({ a: 1, token: 2 });   // token IS copied
+// so a type-keyed answer would be an allowlist of guessed-safe keys, which is how a silent under-report
+// gets introduced while killing an over-charge.
+//
+// NO FABRICATION WHERE THERE IS NOTHING TO CHARGE: a target that declares no `set` accessor takes this
+// function through zero iterations, so the overwhelmingly common `Object.assign(cfg, opts)` over plain
+// data objects is untouched — measured on the corpus, not assumed.
+//
+// `keys === null` means "the copied key set is not provable"; a Set means it is, exactly.
+const provenCopiedKeys = (sources) => {
+  const keys = new Set();
+  for (let s of sources) {
+    while (s && (ts.isParenthesizedExpression(s) || ts.isAsExpression(s)
+                 || ts.isSatisfiesExpression(s) || ts.isNonNullExpression(s))) s = s.expression;
+    if (!s || !ts.isObjectLiteralExpression(s)) return null;   // parameter / call return / variable
+    for (const pr of s.properties) {
+      if (ts.isSpreadAssignment(pr)) return null;              // `{...o}` copies an unknown key set
+      const n = pr.name;
+      if (!n) return null;
+      if (ts.isIdentifier(n) || ts.isStringLiteralLike(n) || ts.isNumericLiteral(n)) keys.add(n.text);
+      else return null;                                        // computed key `{[k]: v}`
+    }
+  }
+  return keys;
+};
+function enumerateTargetSetters(owner, targetExpr, keys) {
+  if (!owner || !targetExpr) return;
+  const t = checker.getTypeAtLocation(targetExpr);
+  if (!t || !t.getProperties) return;
+  for (const p of t.getProperties()) {
+    // NO `classBodiedGetter`-style exclusion here, and the asymmetry is the point rather than an
+    // oversight: R115 excluded a class-bodied GETTER because a prototype accessor is non-enumerable and
+    // therefore never COPIED. A prototype SETTER is the opposite — it is found by the assignment's
+    // property lookup and IS invoked. Executed above: the `Sink` setter lives on `Sink.prototype` and
+    // runs once. Excluding it here would be R115's reasoning applied to the direction it does not hold.
+    if (keys && !keys.has(p.getName())) continue;              // proven not written by this copy
+    const hit = accessorFromSym(p, "set");
+    if (hit) recordAccessorHit(owner, hit, p.getName());
+  }
+}
+
 // The synthesized `<module>` unit for a source file's TOP-LEVEL executable statements (spec §2
 // unitKind "initializer" — java's `<clinit>` twin). Top-level `await fetch(…)`, a bare
 // `readFileSync(…)`, an IIFE, `export const r = await fetch(…)` execute at MODULE-LOAD time and
@@ -7181,11 +7245,42 @@ function visitCalls(node) {
     }
     // Object.assign(target, ...sources) copies each SOURCE's own enumerable props → invokes their
     // getters (the object-spread twin). Enumerate the sources' local getters.
-    if (callee.getText().replace(/\s+/g, "") === "Object.assign") {
+    //
+    // R116 — …AND THE TARGET'S SETTERS, which the copy invokes for every key it writes. See
+    // `enumerateTargetSetters`: the source arm and the target arm are the two halves of one operation
+    // and only one of them existed.
+    const ct116 = callee.getText().replace(/\s+/g, "");
+    if (ct116 === "Object.assign") {
       const owner = enclosing(node);
-      for (const src of (node.arguments ?? []).slice(1)) {
+      const sources = (node.arguments ?? []).slice(1);
+      for (const src of sources) {
         enumerateGetters(owner, checker.getTypeAtLocation(src), src);
       }
+      // SHADOW-GUARDED, like the `Reflect.set` arm below. The getter line above is NOT — it matches
+      // `Object.assign` by TEXT, so a project's own `const Object = { assign(){} }` reaches it. That is
+      // pre-existing and is REPORTED rather than silently widened here (it is a fabrication-direction
+      // question of its own), but the charge this fix ADDS does not inherit the hole.
+      if (ts.isPropertyAccessExpression(callee) && identIsGlobal(callee.expression))
+        enumerateTargetSetters(owner, (node.arguments ?? [])[0], provenCopiedKeys(sources));
+    }
+    // R116 §9 — WIDENED PAST THE ROW'S OWN TRIGGER, by grepping the MECHANISM ("a builtin that writes a
+    // property into a caller-supplied target") rather than the one call the row named. `Reflect.set(t, k,
+    // v)` is specified to run the setter the property lookup finds, and it was silent for the same reason
+    // — EXECUTED, 1 setter invocation for both the literal-key and the runtime-key spelling, and both
+    // ABSENT from `functions[]` before this. A literal key names exactly one property; a runtime key can
+    // name any, so it falls to the unprovable branch and charges every setter the target declares.
+    // (`Object.defineProperty`/`defineProperties` are deliberately NOT here: a descriptor INSTALLS a
+    // property and bypasses the setter — executed, 0 invocations — and the engine already indexes those
+    // through `definePropAccessors`. `Object.create`/`structuredClone`/spread all build fresh objects.)
+    //
+    // SHADOW-GUARDED with `identIsGlobal`, which the `Object.assign` line above still is not — a
+    // project's own `const Object = …` would match its text test. Left as it is rather than widened
+    // silently: it is a separate (fabrication-direction) question, it is REPORTED rather than folded in
+    // here, and this new arm does not inherit the hole.
+    if (ct116 === "Reflect.set" && ts.isPropertyAccessExpression(callee) && identIsGlobal(callee.expression)) {
+      const k = (node.arguments ?? [])[1];
+      enumerateTargetSetters(enclosing(node), (node.arguments ?? [])[0],
+                             k && ts.isStringLiteralLike(k) ? new Set([k.text]) : null);
     }
   }
   // GET/SET ACCESSOR access (the silent-pure-accessor fix): a property read that resolves to a

@@ -8,6 +8,66 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R116) — `Object.assign(target, src)` invokes the TARGET's
+  setters and charged nothing.** The mirror of R115's site: `enumerateGetters` handled the SOURCE's
+  getters and the target-setter arm did not exist. `Object.assign` is specified as `t[k] = s[k]` for every
+  own enumerable key of every source, so it runs the target's setters exactly as `t.k = v` does.
+
+  Measured at HEAD and on published 0.35.0, in a tree containing nothing else:
+
+      export class Sink { set token(x: number) { fs.writeFileSync("/tmp/leak", String(x)); } }
+      export function viaAssign()     { const s = new Sink(); Object.assign(s, { token: 1 }); }
+        -> ABSENT from `functions[]`, no `invisible`, no `Unknown`;   `deny Fs` exit 0
+      export function viaNamedWrite() { const s = new Sink(); s.token = 2; }   -> ["Fs"], correctly
+
+  Ground truth EXECUTED on node 22.12.0, counting setter invocations: **1** for every `Object.assign`
+  spelling (literal source, two sources, a parameter source, a spread source, a computed key) and **1**
+  for `Reflect.set` (literal key and runtime key alike); **0** for `{...s, token: 1}` (a spread builds a
+  fresh object), **0** for `Object.defineProperties(s, { token: { value: 3 } })` (a `value:` descriptor
+  installs an own property and bypasses the setter) and **0** for assigning a key the target has no
+  setter for. Those three zeroes are why this is precise rather than a blanket hedge.
+
+  **§9 — widened past the row's own trigger.** Grepping the MECHANISM ("a builtin that writes a property
+  into a caller-supplied target") rather than the one call the row named found `Reflect.set(t, k, v)`
+  silent for the identical reason, in both spellings.
+
+  **Direction of failure, stated before the change:** charging target setters can FABRICATE, so the key
+  set is a DENYLIST OF THE PROVEN rather than an allowlist of the guessed — every setter the target
+  declares is charged unless the copied key set is provable and excludes it, and it is provable only for a
+  fresh object literal at the call site with no spread and no computed key. It is deliberately NOT taken
+  from a source's declared TYPE: TypeScript is structural, so `f(s: {a: number})` can receive
+  `{a: 1, token: 2}` and the extra key IS copied. A type-keyed answer would be an allowlist of guessed-safe
+  keys, which is exactly how killing an over-charge introduces a silent under-report.
+
+  The charge is an EDGE into the setter unit where one exists, not a hedge, so the path/verb surface
+  propagates with it (`paths: ["/tmp/leak"]`, `fs: ["write"]`) and `allow Fs <path>` still gates.
+
+  **CORPUS A/B, TWO CORPORA, diffed on the WIDE key (16 fields, not `inferred` alone).**
+
+      corpus                                     targets  common rows   ADDED  REMOVED  CHANGED
+      194 published npm packages                     194       21,736       0        0        3
+      12 real TypeScript SOURCE trees                 12        2,095       0        0        0
+
+  Reach, instrumented in the changed branch: 661 `Object.assign` sites and 11 `Reflect.set` sites
+  entered, 94 target setters found, 6 charged, **88 SKIPPED by the proven-key denylist**.
+
+  All three changed rows are ONE package, `oidc-client-ts`, in its three bundle flavours of one source:
+  `unknownWhy` gained `reflect:accessor:expires_in` from `Object.assign(response, tokenResponse)` where
+  the target class declares `set expires_in(value)` — a setter that really runs on an OAuth token
+  response and calls `Timer.getEpochTime()`. Ground-truthed from that package's own source. `inferred`
+  did not move and no gate verdict changed.
+
+  **The over-charge control is a measurement, not an absence.** The proven-key denylist fired 88 times on
+  real code — `got`'s six `Reflect.set(target, '<literal>', v)` sites, whose targets (`Options`, 46
+  setters) carry setters the literal key provably does not name. Without the denylist each of those 88
+  would have been a fabricated charge on `got/source/create.ts` and `core/options.ts`. One branch was
+  **NOT exercised and is recorded as safety-only at the time of writing**: no `Object.assign`/`Reflect.set`
+  callee anywhere in either corpus was project-shadowed, so the `identIsGlobal` guard's evidence is the
+  fixture, not the A/B.
+
+  The new charge is `identIsGlobal`-guarded. The pre-existing GETTER arm one line above is not — it
+  matches `Object.assign` by text — which is reported rather than silently widened here.
+
 - **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R136) — a construction's identity was read from the CALL SITE,
   where the authority is the DECLARATION: a `WebSocket` SUBCLASS with no explicit constructor was PURE
   under `lib.dom`.** R130's own declaration-walk (`declaredCtorClassName`) landed on the κ arm and on the

@@ -17332,6 +17332,208 @@ export function shadowDate() { return new SubDate(); }`,
   }
 }
 
+// ── R116: `Object.assign` INVOKES THE TARGET'S SETTERS, AND THE TARGET ARM DID NOT EXIST ──────────
+//
+// The mirror of R115's site, found by widening that audit's boundary past its own trigger (§9).
+// `Object.assign(t, ...srcs)` is specified as `t[k] = src[k]` for every own enumerable key of every
+// source, so it invokes the TARGET's setters exactly as `t.k = v` does. `enumerateGetters` handled the
+// SOURCE side; nothing handled this one.
+//
+// MEASURED AT HEAD (5377eb6) and on PUBLISHED 0.35.0, in a tree containing nothing else:
+//     export class Sink { set token(x: number) { fs.writeFileSync("/tmp/leak", String(x)); } }
+//     export function viaAssign()    { const s = new Sink(); Object.assign(s, { token: 1 }); }
+//       -> ABSENT from `functions[]`, no `invisible`, no `Unknown`;  `deny Fs` exit 0
+//     export function viaNamedWrite(){ const s = new Sink(); s.token = 2; }   -> ["Fs"], correctly
+//
+// GROUND TRUTH EXECUTED, node 22.12.0, counting setter invocations on a real class:
+//     Object.assign literal src 1   two sources 1   parameter src 1   spread src 1   computed key 1
+//     Reflect.set literal key   1   Reflect.set runtime key 1
+//     {...s, token: 1}          0   Object.defineProperties(s,{token:{value:3}}) 0   assign a non-setter key 0
+// The three zeroes are why this can be precise rather than a blanket hedge: a spread builds a FRESH
+// object, a `value:` descriptor installs an own property and bypasses the setter, and a key the target
+// has no setter for invokes nothing.
+//
+// §9 — WIDENED PAST THE TRIGGER. Grepping the MECHANISM ("a builtin that writes a property into a
+// caller-supplied target") rather than the one call the row named found `Reflect.set(t, k, v)` silent for
+// the identical reason, in both its literal-key and runtime-key spellings. Executed: one setter
+// invocation each.
+//
+// DIRECTION OF FAILURE, stated before the change: charging target setters can FABRICATE, so the key set
+// is a DENYLIST OF THE PROVEN rather than an allowlist of the guessed. Every setter the target declares
+// is charged unless the copied key set is PROVABLE and excludes it — provable only for a fresh object
+// literal at the call site with no spread and no computed key. It is deliberately NOT taken from a
+// source's declared TYPE: TypeScript is structural, so `f(s: {a: number})` can receive `{a: 1, token: 2}`
+// and the extra key IS copied. A type-keyed answer would be an allowlist of guessed-safe keys, which is
+// precisely how killing an over-charge introduces a silent under-report.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: false,
+                         types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+      include: ["src"],
+    }),
+    "src/sin.ts": `import * as fs from "fs";
+export class Sink {
+  set token(x: number) { fs.writeFileSync("/tmp/candor-r116", String(x)); }
+  plain = 0;
+}
+export function viaAssign() { const s = new Sink(); Object.assign(s, { token: 1 }); }
+export function viaAssignTwoSrc() { const s = new Sink(); Object.assign(s, { plain: 0 }, { token: 1 }); }
+export function viaAssignParam(o: { token: number }) { const s = new Sink(); Object.assign(s, o); }
+export function viaAssignComputed(k: string) { const s = new Sink(); Object.assign(s, { [k]: 1 }); }
+export function viaAssignSpreadSrc(o: { token: number }) { const s = new Sink(); Object.assign(s, { ...o }); }
+export function viaReflectSetLit() { const s = new Sink(); Reflect.set(s, "token", 1); }
+export function viaReflectSetDyn(k: string) { const s = new Sink(); Reflect.set(s, k, 1); }
+export function viaNamedWrite() { const s = new Sink(); s.token = 2; }`,
+    // A setter inherited from a BASE class. Unlike R115's getter case, a prototype setter IS found by the
+    // assignment's property lookup and IS invoked — the asymmetry `enumerateTargetSetters` is built on.
+    "src/inherit.ts": `import * as fs from "fs";
+class Base { set token(x: number) { fs.writeFileSync("/tmp/candor-r116b", String(x)); } }
+export class Derived extends Base { plain = 0; }
+export function viaAssignInherited() { const s = new Derived(); Object.assign(s, { token: 1 }); }`,
+    // OVER-CHARGE CONTROLS, written before the change. Every one drives the SAME `Object.assign` /
+    // `Reflect.set` call site; what differs is whether a setter is actually reachable.
+    "src/pure.ts": `export class Plain { a = 0; b = 0; }
+export function pureAssign() { const p = new Plain(); Object.assign(p, { a: 1, b: 2 }); return p; }
+export function pureAssignEmpty() { const p = new Plain(); Object.assign(p, {}); return p; }
+export function pureAssignObjLit() { return Object.assign({}, { a: 1 }); }
+export function pureAssignParam(o: Record<string, number>) { return Object.assign({}, o); }
+export function pureReflect(o: Record<string, number>) { Reflect.set(o, "a", 1); }`,
+    // THE PRECISION ROW THIS FIX RESTS ON: the target HAS a setter, and the copy provably does not write
+    // its key. Executed: 0 setter invocations. If this went red the fix would be a blanket hedge.
+    "src/precise.ts": `import * as fs from "fs";
+export class Sink2 { set token(x: number) { fs.writeFileSync("/tmp/candor-r116c", String(x)); } plain = 0; }
+export function assignOtherKey() { const s = new Sink2(); Object.assign(s, { plain: 9 }); }
+export function reflectOtherKey() { const s = new Sink2(); Reflect.set(s, "plain", 9); }
+export function spreadOut() { const s = new Sink2(); return { ...s, token: 1 }; }
+export function definePropsValue() { const s = new Sink2(); Object.defineProperties(s, { token: { value: 3, configurable: true } }); }`,
+    // SHADOW CONTROL — a project's own `Object`/`Reflect`. The `Reflect.set` arm is guarded by
+    // `identIsGlobal`; the `Object.assign` arm is NOT (pre-existing, reported rather than widened here),
+    // so this row asserts today's answer for both rather than a wish.
+    "src/shadow.ts": `import * as fs from "fs";
+class Sink3 { set token(x: number) { fs.writeFileSync("/tmp/candor-r116d", String(x)); } }
+const Reflect = { set(_t: unknown, _k: string, _v: unknown) { return true; } };
+const Object = { assign(t: unknown, ..._s: unknown[]) { return t; } };
+export function shadowReflect() { const s = new Sink3(); Reflect.set(s, "token", 1); }
+export function shadowObject() { const s = new Sink3(); Object.assign(s, { token: 1 }); }`,
+    "fs.pol": "deny Fs\n",
+    "callers.pol": ["viaAssign", "viaAssignTwoSrc", "viaAssignParam", "viaAssignComputed",
+                    "viaAssignSpreadSrc", "viaReflectSetLit", "viaReflectSetDyn"]
+      .map((f) => `deny Fs src.sin.${f}`).join("\n")
+      + "\ndeny Fs src.inherit.viaAssignInherited\n",
+    "unk.pol": "deny Unknown\n",
+    "scopedpure.pol": "pure src.pure\n",
+    // NOT `pure src.precise`: that scope also selects `src.precise.Sink2.set token`, the setter's OWN
+    // unit, which is correctly Fs and always was. A policy that fails on the thing the fix is supposed to
+    // find would be a control that could never pass. Name the four CALLERS instead.
+    "scopedprecise.pol": "deny Fs src.precise.assignOtherKey\ndeny Fs src.precise.reflectOtherKey\n"
+                       + "deny Fs src.precise.spreadOut\ndeny Fs src.precise.definePropsValue\n",
+  });
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+  for (const [fn, what] of [
+    ["src.sin.viaAssign", "`Object.assign(s, { token: 1 })` — R116's own trigger, EXECUTED: the setter runs and the file is written"],
+    ["src.sin.viaAssignTwoSrc", "…with two sources, one of which carries the key"],
+    ["src.sin.viaAssignParam", "…with a PARAMETER source, whose runtime key set the annotation cannot bound"],
+    ["src.sin.viaAssignComputed", "…with a computed key `{ [k]: 1 }` — unprovable, so every target setter is charged"],
+    ["src.sin.viaAssignSpreadSrc", "…with a spread source `{ ...o }` — likewise unprovable"],
+    ["src.sin.viaReflectSetLit", "`Reflect.set(s, \"token\", 1)` — the WIDENED find, same mechanism, one builtin over"],
+    ["src.sin.viaReflectSetDyn", "`Reflect.set(s, k, 1)` with a runtime key"],
+    ["src.inherit.viaAssignInherited", "a setter INHERITED from a base class — a prototype setter is found by the assignment lookup and IS invoked, which is where R115's getter reasoning does NOT transfer"],
+  ]) {
+    check(`R116: charges Fs, not silent-pure — ${what}`, has(fn, "Fs"),
+          JSON.stringify(eff(fn) ?? (report.functions ?? []).map((x) => x.fn)));
+  }
+  check("R116 DISCRIMINATOR: the named-write spelling the engine ALREADY answered right is unchanged — a fix that reached the Object.assign rows by widening `s.token = 2` into a hedge would look identical above",
+        has("src.sin.viaNamedWrite", "Fs") && !has("src.sin.viaNamedWrite", "Unknown"),
+        JSON.stringify(eff("src.sin.viaNamedWrite")));
+  for (const [fn, what] of [
+    ["src.pure.pureAssign", "a target with NO setter at all — the overwhelmingly common `Object.assign(cfg, opts)`"],
+    ["src.pure.pureAssignEmpty", "…with an empty source"],
+    ["src.pure.pureAssignObjLit", "`Object.assign({}, { a: 1 })` — a fresh object-literal target"],
+    ["src.pure.pureAssignParam", "…with an opaque `Record` source, which is the unprovable branch: unprovable must still charge NOTHING when the target declares no setter"],
+    ["src.pure.pureReflect", "`Reflect.set` into a setter-less target"],
+  ]) {
+    check(`R116 OVER-CHARGE CONTROL: gains nothing, and is not blanket-hedged into Unknown — ${what}`,
+          (eff(fn)?.inferred ?? []).length === 0, JSON.stringify(eff(fn) ?? null));
+  }
+  for (const [fn, what] of [
+    ["src.precise.assignOtherKey", "`Object.assign(s, { plain: 9 })` on a target that HAS a `token` setter — the copied key set is provable and excludes it (executed: 0 invocations)"],
+    ["src.precise.reflectOtherKey", "`Reflect.set(s, \"plain\", 9)` — a literal key names exactly one property"],
+    ["src.precise.spreadOut", "`{ ...s, token: 1 }` — a spread builds a FRESH object, so no setter runs (executed: 0)"],
+    ["src.precise.definePropsValue", "`Object.defineProperties(s, { token: { value: 3 } })` — a `value:` descriptor installs an own property and BYPASSES the setter (executed: 0)"],
+  ]) {
+    check(`R116 PRECISION — this is the row the denylist rests on, and a blanket hedge would fail it: ${what}`,
+          (eff(fn)?.inferred ?? []).length === 0, JSON.stringify(eff(fn) ?? null));
+  }
+  // ⟨R137⟩ THE PROPERTY IS "NO EFFECT FABRICATED", NOT "THE ROW IS ABSENT" — the rule stated at
+  // `noEffectCharged` above, and the first draft of these two rows broke it. Both shadow callers carry a
+  // PRE-EXISTING `Unknown[callback:set]` / `Unknown[callback:assign]`: a call into a local object
+  // literal's method resolves to a property signature, not a body, so the engine discloses rather than
+  // guessing — measured BYTE-IDENTICAL at a87d290 and at HEAD. Asserting emptiness would have failed on
+  // someone else's correct disclosure and said nothing about this fix. What must not appear is the
+  // setter's `Fs` and this arm's own `reflect:accessor:` reason.
+  for (const [fn, what] of [
+    ["src.shadow.shadowReflect", "`Reflect.set`"],
+    ["src.shadow.shadowObject", "`Object.assign` — the pre-existing getter arm matches this by TEXT, so the setter charge is guarded separately rather than inheriting that hole"],
+  ]) {
+    check(`R116 SHADOW CONTROL: a project's OWN ${what} fabricates no Fs and no accessor hit — the new charge is \`identIsGlobal\`-guarded`,
+          !has(fn, "Fs") && !(eff(fn)?.unknownWhy ?? []).some((w) => /^reflect:accessor:/.test(w)),
+          JSON.stringify(eff(fn) ?? null));
+  }
+  {
+    const ex = (p) => scan(d, "--policy", path.join(d, p)).r.status;
+    // §A — THE GATE MUST BE SCOPED TO THE CALLER, and the first draft of these rows was not. A blanket
+    // `deny Fs`, and a `deny Fs src.sin` scoped to the FILE, both fire on `src.sin.Sink.set token` — the
+    // setter's OWN unit, which is correctly Fs and always was. MEASURED by actually stashing scan.mjs:
+    // every such row passed with the fix REVERTED, so it read as coverage and could not discriminate.
+    // That is this row's own "caught only INCIDENTALLY via the named sibling", turned on the test.
+    //     tree with one `Object.assign` caller and its setter    pre-fix   post-fix
+    //       deny Fs              (blanket)                         1         1     ← cannot discriminate
+    //       deny Fs src.only     (file scope)                      1         1     ← cannot discriminate
+    //       deny Fs src.only.go  (the CALLER)                      0         1     ← the measurement
+    //       pure src.only.go                                       0         1     ← the measurement
+    check("R116 GATE: `deny Fs` scoped to the CALLER fires for every spelling (exit 1) — exit 0 at HEAD. The blanket and file-scoped forms fire either way through the setter's own unit, so they are not asserted here",
+          ex("callers.pol") === 1, `exit ${ex("callers.pol")}`);
+    check("R116 GATE CONTROL: `pure src.pure` stays exit 0 — the over-charge controls really do gate clean, not merely report empty",
+          ex("scopedpure.pol") === 0, `exit ${ex("scopedpure.pol")}`);
+    check("R116 GATE CONTROL: `deny Fs` scoped to the four PRECISION callers stays exit 0 — a blanket hedge over every target setter would fire here",
+          ex("scopedprecise.pol") === 0, `exit ${ex("scopedprecise.pol")}`);
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+  // THE ISOLATED TREE, which is the row's worst claim: at HEAD a file containing ONLY the
+  // `Object.assign` spelling got `deny Fs` exit 0 and a clean bill, because nothing else in the report
+  // carried the effect. The sibling named-write above catches it only INCIDENTALLY.
+  for (const [name, src] of [
+    ["Object.assign", `import * as fs from "fs";
+class Sink { set token(x: number) { fs.writeFileSync("/tmp/candor-r116e", String(x)); } }
+export function go() { const s = new Sink(); Object.assign(s, { token: 1 }); }`],
+    ["Reflect.set", `import * as fs from "fs";
+class Sink { set token(x: number) { fs.writeFileSync("/tmp/candor-r116f", String(x)); } }
+export function go() { const s = new Sink(); Reflect.set(s, "token", 1); }`],
+  ]) {
+    const only = project({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: { target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: false,
+                           types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+        include: ["src"],
+      }),
+      "src/only.ts": src,
+      "caller.pol": "deny Fs src.only.go\n",
+      "purecaller.pol": "pure src.only.go\n",
+      "unk.pol": "deny Unknown\n",
+    });
+    const ex = (f) => scan(only, "--policy", path.join(only, f)).r.status;
+    check(`R116 GATE [isolated ${name}]: \`deny Fs src.only.go\` — the CALLER — FIRES (exit 1); measured exit 0 at a87d290 on this exact tree`,
+          ex("caller.pol") === 1, `exit ${ex("caller.pol")}`);
+    check(`R116 GATE [isolated ${name}]: \`pure src.only.go\` FIRES — exit 0 at a87d290`, ex("purecaller.pol") === 1, `exit ${ex("purecaller.pol")}`);
+    check(`R116 GATE CONTROL [isolated ${name}]: \`deny Unknown\` does NOT fire — the fix propagates the setter's NAMED effect through an edge; charging Unknown instead would pass every gate above and say nothing`,
+          ex("unk.pol") === 0, `exit ${ex("unk.pol")}`);
+    fs.rmSync(only, { recursive: true, force: true });
+  }
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
