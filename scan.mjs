@@ -207,6 +207,14 @@ const CONFIG_KEYS_IMPLEMENTED = new Set(["policy", "baseline", "deps", "unknown-
 // It carries its own `prefix` because §3.3.1's direct-file locator accepts any `.json` name whatever its
 // dot-segments: a consumer handed one file cannot recover the prefix from the filename.
 let refusalPrefix = null, refusalTarget = null;
+// The flags the parse loop accepts WITHOUT a value. A target may legitimately follow one of these
+// (`candor-ts --json .`), so they are not stopping points; the value-taking flags are skipped by the
+// arm above, and anything else dash-shaped is what that loop calls an unknown flag. `-h`/`-V`/
+// `--help`/`--version` are print-and-exit modes consumed before this walk and are listed for symmetry.
+const KNOWN_VALUELESS_FLAGS = new Set([
+  "--agents", "--json", "--allow-js", "--workspace", "--deps", "--dep-inits",
+  "--peek-excluded", "-h", "-V", "--help", "--version",
+]);
 const noteRefusalPrefix = (pfx) => { if (refusalPrefix === null) refusalPrefix = pfx; };
 const noteRefusalTarget = (t)   => { if (refusalTarget === null) refusalTarget = t; };
 const writeRefusalMarker = (why) => {
@@ -239,6 +247,7 @@ const clearRefusalMarker = () => {
 //      deleting the question.
 const preScan = (av) => {
   let gate = null, policy = null, target = null, out = null, refused = false;
+  let stopped = false, markerTarget = null;
   for (let i = 0; i < av.length; i++) {
     const a = av[i], v = av[i + 1];
     if (a === "--gate-json" || a === "--policy" || a === "--out") {
@@ -264,11 +273,23 @@ const preScan = (av) => {
       i++;
       continue;
     }
+    // ⟨0.32⟩ A TOKEN THE PARSE LOOP WOULD REFUSE STOPS THE MARKER TARGET, BUT NOT THE GUARD TARGET.
+    // The two consumers of this walk want opposite things and used to share one variable. `target`
+    // feeds the input GUARDS, where the comment above is right that over-collecting can only protect a
+    // file more. `markerTarget` feeds the ⟨0.32⟩ refusal MARKER's prefix, where over-collecting is a
+    // WRITE: measured, `candor-ts --scope src` resolved `src` — the rejected flag's operand — and the
+    // marker was written to `src/.candor/`, creating that directory in the operator's tree. The parse
+    // loop never reaches that token; it refuses at `--scope`. candor-rust had the same defect on a
+    // different argv (SOUNDNESS R232); candor-swift writes nothing here and is the shape to match.
+    if (a.startsWith("-") && !KNOWN_VALUELESS_FLAGS.has(a)) stopped = true;
     // The scan TARGET, needed to discover the `.candor/config` whose `policy` key may name an input
     // this sink must not overwrite.
-    if (!a.startsWith("-") && target === null) { target = a; noteRefusalTarget(a); }
+    if (!a.startsWith("-") && target === null) {
+      target = a;
+      if (!stopped && !refused) { markerTarget = a; noteRefusalTarget(a); }
+    }
   }
-  return { gate, policy, target, out };
+  return { gate, policy, target, out, markerTarget };
 };
 
 // SPEC §3.3.1 ⟨0.28⟩ — every `--gate-json` this argv names. `preScan` keeps only the last, which is what
@@ -514,7 +535,7 @@ const preGateSink = preScan(argv).gate;
 // The raw target is used rather than the resolved root: they coincide for a directory target, and being
 // slightly wrong about WHERE costs a marker nobody reads, while being late costs the marker entirely.
 {
-  const preT = preScan(argv).target;
+  const preT = preScan(argv).markerTarget;
   if (preT) { noteRefusalTarget(preT); noteRefusalPrefix(path.join(preT, ".candor", "report")); }
 }
 // ⟨0.28⟩ SPEC §3.3.1 (4) — THE SAME RULE ONE HOP UPSTREAM, FOR THE REPORT STREAM. `--json` is the

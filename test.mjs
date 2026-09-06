@@ -6704,6 +6704,45 @@ if (blk()) {
         !r.stdout.includes('"functions"'), r.stdout.slice(0, 120));
 }
 
+// ── CLI-1b. an unknown flag's OPERAND is never the marker target ──────────────────────────────────
+// ⟨0.32⟩ The refusal MARKER is written to the prefix the refusing run WOULD have used, and preScan
+// resolved that from the first bare token — which on `candor-ts --scope src` is the REJECTED flag's
+// operand. The parse loop never reaches it; it refuses at `--scope`. So the marker was written to
+// `src/.candor/`, CREATING that directory in the operator's tree and replacing any marker there.
+//
+// preScan's own comment said target "keeps collecting past the breakage" because "over-collection can
+// only protect a file more". That is true of the input GUARDS it was written for and FALSE of the
+// marker, which was wired to the same variable later: over-collecting there is a WRITE. The two
+// consumers are separated now — `target` still over-collects, `markerTarget` stops.
+//
+// candor-rust had this on a different argv (SOUNDNESS R232); candor-swift writes nothing and is the
+// shape matched here.
+if (blk()) {
+  const d = project({ "src/a.ts": `export const f = 1;` });
+  const decoy = path.join(d, "src", ".candor", "report.refused.json");
+  fs.mkdirSync(path.dirname(decoy), { recursive: true });
+  fs.writeFileSync(decoy, "PRECIOUS");
+
+  // The bad flag must come BEFORE any positional, and the run must start INSIDE d — `runScan(d, ...)`
+  // passes d as the first bare token, so the target is already latched and the defect cannot fire.
+  // (Written that way first: the test passed against the unfixed scan.mjs, which is the only reason
+  // it was caught. A regression test that is not RED before the fix is testing nothing.)
+  const r = spawnSync("node", [path.join(HERE, "scan.mjs"), "--scope", "src"],
+                      { encoding: "utf8", cwd: d });
+  check("an unknown flag still refuses (exit 2)", r.status === 2, `status=${r.status}`);
+  check("the rejected flag's operand is not a marker sink — the file under it is untouched",
+        fs.readFileSync(decoy, "utf8") === "PRECIOUS",
+        `decoy now: ${fs.readFileSync(decoy, "utf8").slice(0, 80)}`);
+
+  // The control: with a REAL target before the bad flag, the marker still lands, at that target.
+  const d2 = project({ "src/a.ts": `export const f = 1;` });
+  const r2 = spawnSync("node", [path.join(HERE, "scan.mjs"), ".", "--scope", "src"],
+                       { encoding: "utf8", cwd: d2 });
+  check("…and a target given BEFORE the bad flag still gets its marker (the fix is not a mute)",
+        r2.status === 2 && fs.existsSync(path.join(d2, ".candor", "report.refused.json")),
+        `status=${r2.status}`);
+}
+
 // ── CLI-2. --json + a CLEAN policy → pure JSON envelope on stdout, exit 0 (the gate passes) ───────
 // §3a already covers --json (envelope shape, no files) and --json + a VIOLATING policy (exit 1,
 // stderr-only violations). The missing leg is the clean-pass: a satisfied gate must stay exit 0 with
