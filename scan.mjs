@@ -2429,9 +2429,22 @@ const reassignedIn = (sf) => {
 // identity is the binding the type literal belongs to: ConstructSignature -> TypeLiteral -> Variable-
 // Declaration. Returns "" for a `class`-declared constructor (whose parent is a ClassDeclaration) and for
 // anything else, so a caller can treat "" as "this mechanism cannot answer".
+//
+// R136 — …AND THE INTERFACE SPELLING, which is the second half of the same question. The lib files use
+// BOTH shapes for a constructible global: `declare var WebSocket: { new (…): WebSocket }` (an anonymous
+// type literal) and `declare var Date: DateConstructor; interface DateConstructor { new (): Date }` (a
+// NAMED interface). Only the first was walked, so every declaration-keyed branch saw `""` for the second
+// and a `Date` reached through an inherited constructor could not be named. Both parents are the binding
+// the construct signature belongs to; which one the lib author chose is not a fact about the program.
+// Still returns "" for a `class`-declared constructor (parent is a ClassDeclaration) and for anything
+// else. Callers use the answer ONLY to ADD a name to a denylist they already hold, never to remove one,
+// so widening the walk can over-charge and can never silence.
 function declaredCtorClassName(decl) {
-  const tl = decl && decl.parent;
-  const vd = tl && ts.isTypeLiteralNode(tl) ? tl.parent : null;
+  const owner = decl && decl.parent;
+  if (owner && ts.isInterfaceDeclaration(owner)) {
+    return owner.name && ts.isIdentifier(owner.name) ? owner.name.text : "";
+  }
+  const vd = owner && ts.isTypeLiteralNode(owner) ? owner.parent : null;
   return vd && ts.isVariableDeclaration(vd) && vd.name && ts.isIdentifier(vd.name) ? vd.name.text : "";
 }
 // R130 — `super(...)`. It is a CallExpression, not a NewExpression, so `ts.isNewExpression` is false and
@@ -6254,8 +6267,19 @@ function visitCalls(node) {
               || (parent === "Console" && CLOCK_READING_CONSOLE_MEMBERS.test(name)))
             rec.direct.add("Clock");
           if (parent === "Math" && name === "random") rec.direct.add("Rand");
+          // R136 — …AND THROUGH A SUBCLASS. `checker.getTypeAtLocation(node.expression)` names the
+          // CALL-SITE expression's type, so `class MyDate extends Date {}` + `new MyDate()` reads
+          // "MyDate" and the clock read vanished — silently, with no `Unknown` and no `invisible`.
+          // The authority is the same one the connecting-ctor arm below now uses: the DECLARATION the
+          // constructor resolved to, which for an inherited implicit constructor is the BASE's construct
+          // signature, here `interface DateConstructor`. ADDITIVE (an `||`): a construction that named
+          // itself before still fires, so this can only add a Clock, never remove one. Ground truth
+          // EXECUTED on node 22.12.0 — `new MyDate()` and a two-level `class Deep extends MyDate {}`
+          // both return the current time; `new MyDate(0)` returns the epoch and is correctly NOT charged,
+          // because the zero-argument test is unchanged.
           if (ts.isNewExpression(node) && (node.arguments ?? []).length === 0
-              && checker.getTypeAtLocation(node.expression)?.symbol?.name === "DateConstructor")
+              && (checker.getTypeAtLocation(node.expression)?.symbol?.name === "DateConstructor"
+                  || declaredCtorClassName(decl) === "DateConstructor"))
             rec.direct.add("Clock");
           // Browser/runtime NETWORK globals declared in lib.dom — no importable module for the κ table to
           // key on, so they read SILENT-PURE. `XMLHttpRequest.send`/`.open` issue the HTTP request; the
@@ -6400,8 +6424,26 @@ function visitCalls(node) {
             // …through an alias too: `const W = WebSocket; new W(url)` reads a ctor named "W".
             // Same defect as the call path, one node type over — hence the SHARED unwrap.
             const unCtor = unaliasGlobal(node.expression);
-            const ctorName = unCtor.node.getText();
+            const ctorSiteName = unCtor.node.getText();
             if (unCtor.truncated) { const o = enclosing(node); if (o) fns.get(o).direct.add("Unknown"); }
+            // R136 — …AND THROUGH A SUBCLASS, which neither the call-site name nor the alias unwrap can
+            // see. `class Y3 extends WebSocket {}` declares no constructor, so `new Y3(u)` resolves to
+            // the BASE's construct signature and the identifier at the call site is "Y3" — no rule
+            // matches and a construction that opens a real socket reported NOTHING: absent from
+            // `functions[]`, no `invisible`, no `Unknown`, and `deny Net` went exit 1 -> exit 0. This is
+            // R130's own `declaredCtorClassName` walk, which landed on the κ arm's `ctorRuleName` and on
+            // the `super(…)` branch six lines up but NOT here, so the fix was invisible to any test that
+            // exercised the lib.dom path: under `types: ["node"]` the identical source read `['Net']`.
+            // Same discipline as `ctorRuleName`: consulted ONLY when the call-site name is not already a
+            // connecting ctor, and its answer used ONLY when it IS one — so it can add a name to the
+            // connecting set and can never take one away. `class Y1 extends Headers {}` (declared name
+            // "Headers", no rule) stays absent, measured. Ground truth EXECUTED on node 22.12.0: the
+            // implicit-constructor subclass fires one real upgrade handshake against an
+            // `http.createServer` listener, and so does a two-level `class ZZ extends Y3 {}`.
+            const ctorName = CONNECTING_WEB_CTORS.test(ctorSiteName)
+              ? ctorSiteName
+              : (CONNECTING_WEB_CTORS.test(declaredCtorClassName(decl))
+                 ? declaredCtorClassName(decl) : ctorSiteName);
             // R130 — the SHARED constant, not a literal pair repeated here. The identical two names are
             // now κ rules for `undici-types` (the package `@types/node` re-exports these globals from),
             // and this arm and that table answering the same question from two hand-kept lists is the

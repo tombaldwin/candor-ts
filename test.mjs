@@ -17177,6 +17177,161 @@ export function monoNamespaceHop(u: string) { const { fetch } = mono; return fet
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── R136: A CONSTRUCTION'S IDENTITY READ FROM THE CALL SITE, WHERE THE AUTHORITY IS THE DECLARATION ──
+//
+// R130's own fix, landing in ONE arm of two. The declaration-walk (`declaredCtorClassName`) was added to
+// the κ arm's `ctorRuleName` and to the `super(…)` branch; the es-lib arm still keyed a construction on
+// `unaliasGlobal(node.expression).getText()` — the CALL-SITE identifier — so a subclass name could never
+// match `CONNECTING_WEB_CTORS`. A class that declares no constructor INHERITS one, and
+// `getResolvedSignature()` hands back the BASE's, which is exactly the shape the walk exists to read.
+//
+// MEASURED AT HEAD (5377eb6), identical sources, identical `node_modules`, tsconfig differing only in
+// `lib`, both arms `tsc --noEmit` clean:
+//
+//                                          lib.dom arm                 @types/node arm
+//   class Y3 extends WebSocket {}          ABSENT from `functions`     ["Net"], incomplete ["Net"]
+//   + new Y3(u)                            no `invisible`, no Unknown  `deny Net` exit 1
+//                                          `deny Net src.y3implicit` exit 0        ← the sin
+//
+// GROUND TRUTH EXECUTED, node 22.12.0: `new Y3(u)` on the implicit-constructor subclass fires exactly
+// one real upgrade handshake against an `http.createServer` listener, and so does a two-level
+// `class ZZ extends Y3 {}`.
+//
+// §9 — WIDENED PAST THE TRIGGER RATHER THAN SCOPED TO IT. Grepping the MECHANISM ("a construction judged
+// by the call-site name") rather than the row's own fixture found a second victim in the same arm eleven
+// lines up: the `new Date()` clock read tests `checker.getTypeAtLocation(node.expression)?.symbol?.name
+// === "DateConstructor"`, which is also the call-site expression, so `class MyDate extends Date {}` +
+// `new MyDate()` read PURE. Executed: it returns the current time. That one also needed the walk taught
+// the INTERFACE spelling — lib.es5 writes `declare var Date: DateConstructor; interface DateConstructor
+// { new (): Date }`, a named interface rather than the anonymous type literal lib.dom uses for
+// `WebSocket` — which is a second way the same helper could only answer half the question.
+//
+// DIRECTION OF FAILURE, stated before the change: the declaration name is consulted ONLY when the
+// call-site name is not already a rule match, and its answer is used ONLY when it IS one. So it can add
+// a name to a denylist the engine already holds and can never take one away — it over-charges or does
+// nothing. The over-charge control below drives the new branch 7 times and gains zero effects.
+if (blk()) {
+  const armTsconfig = (lib) => JSON.stringify({
+    compilerOptions: {
+      target: "ES2022", lib, module: "commonjs", strict: false,
+      types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")],
+    },
+    include: ["src"],
+  });
+  // ONE VARIABLE between the arms: `lib`. Everything else is held constant, which is the whole point —
+  // a fix landing in one resolution path is invisible to any test that exercises the other.
+  for (const [armName, lib] of [["@types/node", ["ES2022"]], ["lib.dom", ["ES2022", "DOM"]]]) {
+    const d = project({
+      "tsconfig.json": armTsconfig(lib),
+      "src/sin.ts": `export class Y3 extends WebSocket {}
+export class ZZ extends Y3 {}
+export class E3 extends EventSource {}
+export class MyDate extends Date {}
+export class DeepDate extends MyDate {}
+export function y3implicit(u: string) { return new Y3(u); }
+export function zzDeep(u: string) { return new ZZ(u); }
+export function e3implicit(u: string) { return new E3(u); }
+export function y3lit() { return new Y3("wss://evil.example.com/x"); }
+export function subDate() { return new MyDate(); }
+export function deepDate() { return new DeepDate(); }`,
+      // The R130 arm that ALREADY worked, kept as the discriminator: if a change ever silenced the
+      // explicit-constructor spelling, the rows above would not notice.
+      "src/explicit.ts": `export class Y2 extends WebSocket { constructor(u: string) { super(u); } }
+export function y2explicit(u: string) { return new Y2(u); }`,
+      // OVER-CHARGE CONTROL — the pure twins through the IDENTICAL shape: an implicit-constructor
+      // subclass of a lib global, which is the exact construct the fix widened. Instrumented while
+      // writing it (§E "count hits on the changed branch"): this file drives the new declaration-walk
+      // branch 7 times and charges nothing, so the zero below is a measurement rather than a miss.
+      "src/pure.ts": `export class MyHeaders extends Headers {}
+export class MyMap extends Map<string, string> {}
+export class MyErr extends Error {}
+export class MyURL extends URL {}
+export class MyDate2 extends Date {}
+class Base { constructor(public n: number) {} }
+export class MySub extends Base {}
+export function pHeaders() { return new MyHeaders(); }
+export function pMap() { return new MyMap(); }
+export function pErr() { return new MyErr("boom"); }
+export function pUrl() { return new MyURL("https://example.com/a"); }
+export function pDateArg() { return new MyDate2(0); }
+export function pSub() { return new MySub(1); }`,
+      // SHADOW CONTROL — a project's OWN `WebSocket` and `Date`. The walk only ever reads a declaration
+      // the checker resolved; a local class resolves `<local>` and the es-lib arm is never entered.
+      // That is an argument, and this row is the measurement.
+      "src/shadow.ts": `class WebSocket { constructor(_u: string) {} }
+class Date { constructor() {} }
+export class SubWs extends WebSocket {}
+export class SubDate extends Date {}
+export function shadowWs(u: string) { return new SubWs(u); }
+export function shadowDate() { return new SubDate(); }`,
+    });
+    const { report } = scan(d);
+    const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+    const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+    for (const [fn, e, what] of [
+      ["src.sin.y3implicit", "Net", "`class Y3 extends WebSocket {}` with NO explicit constructor — R136's own trigger"],
+      ["src.sin.zzDeep", "Net", "…and two levels down (`class ZZ extends Y3 {}`), because the inherited signature is the same one"],
+      ["src.sin.e3implicit", "Net", "the `EventSource` twin — the constant carries both names, so neither arm can be widened alone"],
+      ["src.sin.y3lit", "Net", "…with a literal endpoint"],
+      ["src.sin.subDate", "Clock", "`class MyDate extends Date {}` + `new MyDate()` — the WIDENED find, a clock read judged by the call-site name"],
+      ["src.sin.deepDate", "Clock", "…two levels down"],
+      ["src.explicit.y2explicit", "Net", "the explicit-constructor spelling R130 already covered, kept so a regression here cannot hide"],
+    ]) {
+      check(`R136 [${armName}]: charges ${e}, not silent-pure — ${what}`,
+            has(fn, e), JSON.stringify(eff(fn) ?? (report.functions ?? []).map((x) => x.fn)));
+    }
+    check(`R136 [${armName}]: a literal endpoint on the SUBCLASS is captured as a host, so \`allow Net\` can gate it`,
+          (eff("src.sin.y3lit")?.hosts ?? []).includes("evil.example.com"), JSON.stringify(eff("src.sin.y3lit")));
+    check(`R136 [${armName}]: a RUNTIME endpoint on the subclass marks the surface \`incomplete: Net\` — the connecting-ctor branch is host-ESTABLISHING, and reaching it through the declaration must not skip that`,
+          (eff("src.sin.y3implicit")?.incomplete ?? []).includes("Net"), JSON.stringify(eff("src.sin.y3implicit")));
+    for (const [fn, what] of [
+      ["src.pure.pHeaders", "`class MyHeaders extends Headers {}`"],
+      ["src.pure.pMap", "`class MyMap extends Map {}`"],
+      ["src.pure.pErr", "`class MyErr extends Error {}`"],
+      ["src.pure.pUrl", "`class MyURL extends URL {}` — URL parsing is pure"],
+      ["src.pure.pDateArg", "`new MyDate2(0)` — a Date built from a FIXED epoch reads no clock, and the zero-argument test that says so is unchanged"],
+      ["src.pure.pSub", "a subclass of a PROJECT class"],
+    ]) {
+      check(`R136 [${armName}] OVER-CHARGE CONTROL: the pure twin through the identical shape gains nothing, and is not blanket-hedged into Unknown — ${what}`,
+            (eff(fn)?.inferred ?? []).length === 0, JSON.stringify(eff(fn) ?? null));
+    }
+    for (const [fn, what] of [
+      ["src.shadow.shadowWs", "a project's OWN `WebSocket`"],
+      ["src.shadow.shadowDate", "a project's OWN `Date`"],
+    ]) {
+      check(`R136 [${armName}] SHADOW CONTROL: a subclass of ${what} fabricates nothing`,
+            (eff(fn)?.inferred ?? []).length === 0, JSON.stringify(eff(fn) ?? null));
+    }
+    // THE GATE, on its own tree per spelling, so no sibling call can pass one incidentally. At HEAD the
+    // lib.dom arm answered exit 0 to every one of these.
+    for (const [name, src, pol, ctlPol] of [
+      ["subclass WebSocket, implicit ctor", `export class Y3 extends WebSocket {}\nexport function go(u: string) { return new Y3(u); }`, "net.pol", "clock.pol"],
+      ["subclass EventSource, implicit ctor", `export class E3 extends EventSource {}\nexport function go(u: string) { return new E3(u); }`, "net.pol", "clock.pol"],
+      ["subclass Date, implicit ctor", `export class MyDate extends Date {}\nexport function go() { return new MyDate(); }`, "clock.pol", "net.pol"],
+    ]) {
+      const only = project({
+        "tsconfig.json": armTsconfig(lib),
+        "src/only.ts": src,
+        "net.pol": "deny Net\n",
+        "clock.pol": "deny Clock\n",
+        "pure.pol": "pure src\n",
+        "unknown.pol": "deny Unknown\n",
+        "scoped.pol": "deny Net Clock src.only\n",
+      });
+      const ex = (f) => scan(only, "--policy", path.join(only, f)).r.status;
+      check(`R136 GATE [${armName}] ${name}: the blanket \`${pol.replace(".pol", "")}\` deny FIRES (exit 1)`, ex(pol) === 1, `exit ${ex(pol)}`);
+      check(`R136 GATE [${armName}] ${name}: \`pure src\` FIRES`, ex("pure.pol") === 1, `exit ${ex("pure.pol")}`);
+      check(`R136 GATE [${armName}] ${name}: the SCOPED \`deny Net Clock src.only\` selects it`, ex("scoped.pol") === 1, `exit ${ex("scoped.pol")}`);
+      check(`R136 GATE CONTROL [${armName}] ${name}: \`deny Unknown\` does NOT fire — the fix charges a NAMED effect; a blanket Unknown would pass every gate above and say nothing`,
+            ex("unknown.pol") === 0, `exit ${ex("unknown.pol")}`);
+      check(`R136 GATE CONTROL [${armName}] ${name}: the OTHER effect's blanket deny does NOT fire — \`${ctlPol.replace(".pol", "")}\` stays exit 0, so the row above is discriminating an effect rather than a hedge`,
+            ex(ctlPol) === 0, `exit ${ex(ctlPol)}`);
+      fs.rmSync(only, { recursive: true, force: true });
+    }
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

@@ -8,6 +8,73 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R136) — a construction's identity was read from the CALL SITE,
+  where the authority is the DECLARATION: a `WebSocket` SUBCLASS with no explicit constructor was PURE
+  under `lib.dom`.** R130's own declaration-walk (`declaredCtorClassName`) landed on the κ arm and on the
+  `super(…)` branch but not on the es-lib arm, which still keyed a construction on
+  `unaliasGlobal(node.expression).getText()`. A class that declares no constructor INHERITS one, so
+  `class Y3 extends WebSocket {}` + `new Y3(u)` named the class "Y3" and no rule matched.
+
+  Identical sources, identical `node_modules`, tsconfig differing only in `lib`, both arms `tsc --noEmit`
+  clean, measured at 5377eb6:
+
+      class Y3 extends WebSocket {}   lib.dom       ABSENT from `functions`, no `invisible`, no Unknown
+      export function go(u){          `deny Net`    exit 0                       ← the silent under-report
+        return new Y3(u); }           @types/node   ["Net"] + incomplete ["Net"], `deny Net` exit 1
+
+  Ground truth EXECUTED on node 22.12.0: the implicit-constructor subclass fires one real upgrade
+  handshake against an `http.createServer` listener, and so does a two-level `class ZZ extends Y3 {}`.
+
+  **§9 — widened past the row's own trigger.** Grepping the MECHANISM rather than the fixture found a
+  second victim eleven lines up in the same arm: the `new Date()` clock read tests
+  `checker.getTypeAtLocation(node.expression)?.symbol?.name === "DateConstructor"`, also the call-site
+  expression, so `class MyDate extends Date {}` + `new MyDate()` read PURE in BOTH arms. Executed: it
+  returns the current time. Closing it also required teaching `declaredCtorClassName` the INTERFACE
+  spelling (`declare var Date: DateConstructor; interface DateConstructor { new (): Date }`) beside the
+  anonymous-type-literal one lib.dom uses for `WebSocket` — a second way one helper answered half a
+  question.
+
+  **Direction of failure, stated before the change:** the declaration name is consulted only when the
+  call-site name is not already a rule match, and used only when it IS one, so it can add a name to a
+  denylist the engine already holds and can never take one away — it over-charges or does nothing.
+
+  **CORPUS A/B, TWO CORPORA, diffed on the WIDE key (16 fields, not `inferred` alone).**
+
+      corpus                                     targets  common rows   ADDED  REMOVED  CHANGED
+      194 published npm packages                     194       21,736       0        0        5
+      12 real TypeScript SOURCE trees                 12        2,094       1        0        1
+
+  The npm corpus is the tree assembled for R109 (supabase/axios/typeorm/localforage/oidc-client-ts/…),
+  scanned with `--allow-js` so the shipped `.js` is read. The source corpus is hono, zod (3 packages),
+  got, chalk, zx, idb, zustand, axios and socket.io (client, server, engine.io-client), freshly cloned —
+  the six trees under the shared `candor-corpus/src` were included in the first roster and are recorded
+  here as having contributed **0 rows**: their checkouts are hollowed out (directories present, `.ts`
+  files gone), so candor refused them at exit 2. A roster entry that scans to nothing is not evidence,
+  and finding that out afterwards is why the second corpus was cloned rather than assumed.
+
+  The changed branch was instrumented and REACHED, so the zero-removal column is a measurement rather
+  than an untriggered branch: 6,325 consults of the new declaration fallback and 6,626 answers from the
+  widened interface walk across the two corpora.
+
+  **Every changed row, ground-truthed from the package's own source rather than from candor's report:**
+
+  - `@supabase/phoenix` `assets/js/phoenix/socket.js` (5 rows) — `Socket.transportConnect` gained `Net`
+    and four callers gained `incomplete: ["Net"]`. `this.transport = opts.transport || global.WebSocket
+    || LongPoll` then `this.conn = new this.transport(this.endPointURL(), protocols)`; the call-site
+    expression is `this.transport`, and the resolved declaration is lib.dom's `WebSocket` construct
+    signature. A real Net source that read pure.
+  - `socket.io` `engine.io-client/lib/transports/websocket.ts` (2 rows) — `WS.createSocket` was ABSENT
+    from `functions[]` entirely and now reads `Net` + `incomplete`, and its caller `BaseWS.doOpen` gained
+    `Net` on top of its existing `["Clock","Rand","Unknown"]`. `const WebSocketCtor = globalThis.WebSocket
+    || globalThis.MozWebSocket` then `new WebSocketCtor(uri)`: the alias unwrap stops at the `||` and the
+    call site names "WebSocketCtor". A function whose entire job is to dial a URL, certified pure.
+
+  Keyed on `inferred` alone the npm A/B would have printed "0 rows changed".
+
+  The Clock half is **SAFETY-ONLY on both corpora** and says so at the time of writing rather than being
+  discovered later: the widened Date branch fired 0 times across all 206 targets (no
+  `class X extends Date {}` anywhere in them), so its evidence is the executed fixture, not the A/B.
+
 - **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R154) — a policy ALIAS line disarmed the ⟨0.30⟩ fail-closed
   INCOMPLETE verdict.** The out-of-scope peek called `parsePolicy(text, {})` while the gate called it with
   the real `.candor/config` `unknown-alias` map, so one policy meant two different things to two paths
