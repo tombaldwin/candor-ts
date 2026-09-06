@@ -7581,6 +7581,48 @@ function visitCalls(node) {
         enumerateTargetAccessors(owner, (node.arguments ?? [])[0], provenCopiedKeys(sources), "set",
                                  { why: "dynamic-keyset", keyType: null });   // R247 — copies string AND symbol keys
     }
+    // SOUNDNESS R252 — THE OTHER BUILTINS THAT READ EVERY OWN ENUMERABLE **VALUE**, AND THE COMMENT
+    // THAT RULED THEM OUT ON THE WRONG HALF OF THE QUESTION.
+    //
+    // `Object.entries`/`Object.values`/`JSON.stringify`/`structuredClone` each read every own enumerable
+    // property's VALUE, so each invokes an own enumerable getter exactly as a spread or an
+    // `Object.assign` SOURCE does. They are the same operation as the line above; nothing routed them
+    // through it. Executed: caller ABSENT from `functions[]` in all four, `deny Fs` and `pure` scoped to
+    // the caller both exit 0 over a tree containing nothing but the literal and the call.
+    //
+    // WHY IT SURVIVED, and it is the constraint on the fix rather than trivia. R115's comment states
+    // "`JSON.stringify(c)` and `Object.entries(c)` STAYING PURE IS CORRECT … (executed: 0 invocations on
+    // a class instance)". That is TRUE — a class accessor is installed on the prototype and is
+    // non-enumerable, so these never visit it — and it is FALSE for an object LITERAL, whose getter is an
+    // OWN enumerable property. The sentence measured the case in front of it and then read as a general
+    // ruling. §K, in a comment written by the commit that needed it.
+    //
+    // SO THE CLASS-INSTANCE ANSWER MUST NOT MOVE — it is correct, and it is this fix's over-charge
+    // control. That is why this routes through `enumerateGetters` rather than growing a private loop:
+    // `classBodiedGetter` is exactly R115's exclusion, so the correct half is preserved BY CONSTRUCTION
+    // instead of by a second implementation that has to remember to agree (§G).
+    //
+    // GROUND TRUTH EXECUTED, node 22.12.0, counting real getter invocations — object LITERAL vs CLASS
+    // instance. The zeroes are as load-bearing as the ones: they are the rest of the sweep, and they are
+    // why this list is four names and not "every whole-object builtin".
+    //     Object.entries 1/0   Object.values 1/0   JSON.stringify 1/0   structuredClone 1/0
+    //     Object.keys 0/0      Object.getOwnPropertyNames 0/0      Object.getOwnPropertyDescriptors 0/0
+    //     Object.freeze 0/0    Object.seal 0/0     for..in 0/0     console.log 0/0   String(o) 0/0
+    //     `${o}` 0/0           util.inspect(o) 0/0                 assert.deepStrictEqual 0/0
+    // `Object.keys` and `getOwnPropertyNames` read NAMES, never values; a descriptor read returns the
+    // accessor function itself without calling it; `console.log`/`util.inspect` print `[Getter]`.
+    // (`Object.assign` and spread are the line above; `{...o}`/rest are the object-literal arm.)
+    //
+    // RESIDUALS, stated as the open list they are: `console.log("%j", o)` and
+    // `util.inspect(o, {getters: true})` DO invoke (executed 1) and are option/format-string dependent;
+    // and every one of these reads NESTED objects too — `JSON.stringify({ a: lit })` and
+    // `structuredClone([lit])` invoke the getter one level down (executed 1), which no arm here reaches
+    // because `enumerateGetters` asks the ARGUMENT's own property list.
+    if (["Object.entries", "Object.values", "JSON.stringify"].includes(globalBuiltinCallee(callee))
+        || (ts.isIdentifier(callee) && callee.text === "structuredClone" && identIsGlobal(callee))) {
+      const arg = (node.arguments ?? [])[0];
+      if (arg) enumerateGetters(enclosing(node), checker.getTypeAtLocation(arg), arg);
+    }
     // R116 §9 — WIDENED PAST THE ROW'S OWN TRIGGER, by grepping the MECHANISM ("a builtin that writes a
     // property into a caller-supplied target") rather than the one call the row named. `Reflect.set(t, k,
     // v)` is specified to run the setter the property lookup finds, and it was silent for the same reason

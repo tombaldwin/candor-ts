@@ -18592,6 +18592,282 @@ export function go(k: string) { const s = new Src(); return Reflect.get(s, k); }
   }
 }
 
+// ── SOUNDNESS R252: THE OWN-ENUMERABLE **VALUE** READERS, AND R115's COMMENT ON THE WRONG HALF ────
+//
+// `Object.entries`/`Object.values`/`JSON.stringify`/`structuredClone` each read every own enumerable
+// property's VALUE, so each invokes an own enumerable getter exactly as `{...o}` and `Object.assign`'s
+// SOURCE arm do. Those two were handled (R115/R120); these four were not, in any spelling.
+//
+// MEASURED AT f2d30a8, one file, nothing else in the tree:
+//     const lit = { id: 1, get token() { return fs.readFileSync("/etc/hosts", "utf8"); } };
+//     export function go() { return Object.entries(lit); }   // …and values / JSON.stringify / structuredClone
+//       -> `go` ABSENT from `functions[]`;  `deny Fs src.only.go` exit 0, `pure src.only.go` exit 0.
+//
+// WHY IT SURVIVED, and it is the constraint on the fix rather than trivia. R115's comment states
+// "`JSON.stringify(c)` and `Object.entries(c)` STAYING PURE IS CORRECT … (executed: 0 invocations on a
+// class instance)". Every literal word is TRUE — a class accessor is installed on the prototype and is
+// non-enumerable, so these never visit it — and it is FALSE for an object LITERAL, whose getter is an
+// OWN enumerable property. The sentence measured the case in front of its author and then read as a
+// general ruling to everyone after. §K / the audit-boundary rule, in a comment written by the commit
+// that needed it to be true. **So the class-instance answer is not collateral: it is CORRECT, it must
+// not move, and it is this fix's over-charge control.** The fix routes through `enumerateGetters`, whose
+// `classBodiedGetter` exclusion IS R115, so the correct half is preserved by construction rather than by
+// a second implementation that has to remember to agree (§G).
+//
+// GROUND TRUTH EXECUTED, node 22.12.0, real getter invocations — object LITERAL vs CLASS instance:
+//     Object.entries 1/0   Object.values 1/0   JSON.stringify 1/0   structuredClone 1/0
+//     {...o} 1/0   const {...r}=o 1/0   Object.assign({},o) 1/0                (already handled)
+// §9 — SWEPT PAST THE THREE THE ROW NAMED, and the zeroes decide the list as much as the ones:
+//     Object.keys 0/0   Object.getOwnPropertyNames 0/0   Object.getOwnPropertyDescriptors 0/0
+//     Object.freeze 0/0  Object.seal 0/0  for..in 0/0  console.log(o) 0/0  util.inspect(o) 0/0
+//     String(o) 0/0  `${o}` 0/0  Object.fromEntries(map) 0/0  assert.deepStrictEqual 0/0
+// A name read is not a value read; a descriptor read returns the getter FUNCTION without calling it;
+// `console.log`/`util.inspect` print `[Getter]`; `String(o)`/`${o}` reach `toString`, not the properties.
+//
+// RESIDUALS, as the open list they are rather than a closed one — reported, not fixed:
+//   • `console.log("%j", o)` and `util.inspect(o, { getters: true })` DO invoke (executed 1 each), and
+//     both turn on an argument this arm does not read.
+//   • NESTING: `JSON.stringify({ a: lit })`, `JSON.stringify([lit])`, `structuredClone({ a: lit })` all
+//     invoke one level down (executed 1). `enumerateGetters` asks the ARGUMENT's own property list, so
+//     no arm here reaches them. Pinned below as today's answer so closing one shows up as a change.
+if (blk()) {
+  const lit = `{ id: 1, get token() { return fs.readFileSync("/etc/r252", "utf8"); } }`;
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: false,
+                         types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+      include: ["src"],
+    }),
+    "src/sin.ts": `import * as fs from "fs";
+export const lit = ${lit};
+export function viaEntries() { return Object.entries(lit); }
+export function viaValues()  { return Object.values(lit); }
+export function viaJson()    { return JSON.stringify(lit); }
+export function viaClone()   { return structuredClone(lit); }
+export function viaEntriesGlobalThis() { return globalThis.Object.entries(lit); }
+export function viaJsonGlobalThis()    { return globalThis.JSON.stringify(lit); }
+// THE CONVERGENCE ROWS: two spellings of the SAME ECMAScript operation that were already handled
+// (R115/R120). They are the answer the four above must now agree with — one operation, one answer.
+export function viaSpread()  { return { ...lit }; }
+export function viaAssign()  { return Object.assign({}, lit); }
+export function namedRead()  { return lit.token; }`,
+    // R115's CASE, AND IT MUST NOT MOVE. A class accessor is prototype-installed and NON-enumerable, so
+    // none of these visits it — executed: 0 invocations for all four. This is the over-charge control the
+    // row hands the fix, and it is the whole reason this routes through `enumerateGetters`.
+    "src/cls.ts": `import * as fs from "fs";
+export class Session { id = 1; get token() { return fs.readFileSync("/etc/r252b", "utf8"); } }
+export function clsEntries() { const c = new Session(); return Object.entries(c); }
+export function clsValues()  { const c = new Session(); return Object.values(c); }
+export function clsJson()    { const c = new Session(); return JSON.stringify(c); }
+export function clsClone()   { const c = new Session(); return structuredClone(c); }`,
+    // R120's STRUCTURAL SHAPE, and it is what makes passing `srcExpr` load-bearing here rather than
+    // decorative. TypeScript is STRUCTURAL, so a value whose static TYPE is a class can be an object
+    // literal with an OWN enumerable getter — `classBodiedGetter` excludes it on the type, and
+    // `enumerateGetters`'s binding arm rescues it by reading the literal the binding actually holds.
+    // Executed: 1 real invocation. The cross-MODULE row is the one R120 measured silent at e5c60bc,
+    // because an imported binding's own declaration is the ImportSpecifier and not the `const`.
+    "src/lib.ts": `import * as fs from "fs";
+export class Session { id = 1; get token() { return fs.readFileSync("/etc/r252d", "utf8"); } }
+export const structural: Session = { id: 1, get token() { return fs.readFileSync("/etc/r252e", "utf8"); } };`,
+    "src/struct.ts": `import { structural, Session } from "./lib.js";
+import * as fs from "fs";
+const localStructural: Session = { id: 1, get token() { return fs.readFileSync("/etc/r252f", "utf8"); } };
+export function structLocal()  { return JSON.stringify(localStructural); }
+export function structImport() { return Object.entries(structural); }`,
+    // OVER-CHARGE CONTROLS, written before the change: the SAME four call sites with nothing reachable.
+    "src/pure.ts": `import * as fs from "fs";
+export const plain = { id: 1, name: "x" };
+export function dataEntries() { return Object.entries(plain); }
+export function dataJson()    { return JSON.stringify(plain); }
+export function dataClone()   { return structuredClone(plain); }
+export function opaque(o: Record<string, number>) { return Object.entries(o); }
+export function opaqueJson(o: Record<string, number>) { return JSON.stringify(o); }
+// A getter that is NEVER READ — the literal exists, the getter exists, no whole-object reader touches it.
+export const unread = { id: 1, get token() { return fs.readFileSync("/etc/r252c", "utf8"); } };
+export function neverReads() { return unread.id; }`,
+    // §9 — THE BUILTINS THAT READ NAMES OR DESCRIPTORS, NEVER VALUES. Executed: 0 invocations, all of
+    // them, on the literal AND the class. These rows pin today's correct silence, so a future widening
+    // of the list above shows up here as a red row rather than as a corpus surprise.
+    "src/names.ts": `import * as fs from "fs";
+export const lit2 = ${lit};
+export function nKeys()   { return Object.keys(lit2); }
+export function nGopn()   { return Object.getOwnPropertyNames(lit2); }
+export function nGopds()  { return Object.getOwnPropertyDescriptors(lit2); }
+export function nGopd()   { return Object.getOwnPropertyDescriptor(lit2, "token"); }
+export function nFreeze() { return Object.freeze(lit2); }
+export function nSeal()   { return Object.seal(lit2); }
+export function nForIn()  { let c = 0; for (const k in lit2) c++; return c; }
+export function nLog()    { console.log(lit2); }
+export function nString() { return String(lit2); }
+export function nTmpl()   { return \`\${lit2}\`; }`,
+    // SHADOW CONTROLS — a project's own `Object` / `JSON` / `structuredClone`. The member arms are
+    // `globalBuiltinCallee`-guarded and the bare one is `identIsGlobal`-guarded.
+    "src/shadow.ts": `import * as fs from "fs";
+const lit3 = ${lit};
+const Object = { entries(_o: unknown) { return []; }, values(_o: unknown) { return []; } };
+const JSON = { stringify(_o: unknown) { return ""; } };
+function structuredClone(_o: unknown) { return _o; }
+export function shadowEntries() { return Object.entries(lit3); }
+export function shadowJson()    { return JSON.stringify(lit3); }
+export function shadowClone()   { return structuredClone(lit3); }`,
+    // THE NESTING RESIDUAL, pinned as today's (wrong) answer rather than described. Executed: 1 real
+    // invocation each; the engine reports nothing, because `enumerateGetters` asks the ARGUMENT's own
+    // property list and the getter is one level down. Closing this shows up as an expectation that changed.
+    "src/nested.ts": `import * as fs from "fs";
+const lit4 = ${lit};
+export function nestObj() { return JSON.stringify({ a: lit4 }); }
+export function nestArr() { return JSON.stringify([lit4]); }
+export function nestClone() { return structuredClone({ a: lit4 }); }`,
+    "unk.pol": ["viaEntries", "viaValues", "viaJson", "viaClone", "viaEntriesGlobalThis", "viaJsonGlobalThis"]
+      .map((f) => `deny Unknown src.sin.${f}`).join("\n") + "\n",
+    "refl.pol": ["viaEntries", "viaValues", "viaJson", "viaClone"]
+      .map((f) => `deny Unknown[reflect] src.sin.${f}`).join("\n") + "\n",
+    "disp.pol": ["viaEntries", "viaValues", "viaJson", "viaClone"]
+      .map((f) => `deny Unknown[dispatch] src.sin.${f}`).join("\n") + "\n",
+    // R115's case, as a GATE rather than a report shape: the four class-instance callers must gate clean
+    // on `deny Unknown` too, not merely report an empty effect list.
+    "cls.pol": ["clsEntries", "clsValues", "clsJson", "clsClone"]
+      .flatMap((f) => [`deny Fs src.cls.${f}`, `deny Unknown src.cls.${f}`]).join("\n") + "\n",
+    // NOT `pure src.pure` / `deny Unknown src.pure`: that FILE scope also selects `src.pure.<module>`,
+    // which carries the `unread` literal getter's own `Fs` — a pre-existing modelling artefact (an
+    // object-literal accessor has no unit, so its body's effects walk up to the module initializer) that
+    // is REPORTED separately and has nothing to do with this fix. Measured: the file-scoped form exits 1
+    // in BOTH arms, so it could never have discriminated. Name the six CALLERS instead.
+    "purescope.pol": ["dataEntries", "dataJson", "dataClone", "opaque", "opaqueJson", "neverReads"]
+      .flatMap((f) => [`pure src.pure.${f}`, `deny Unknown src.pure.${f}`]).join("\n") + "\n",
+    "names.pol": ["nKeys", "nGopn", "nGopds", "nGopd", "nFreeze", "nSeal", "nForIn", "nLog", "nString", "nTmpl"]
+      .flatMap((f) => [`deny Fs src.names.${f}`, `deny Unknown src.names.${f}`]).join("\n") + "\n",
+  });
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+  const why = (fn) => eff(fn)?.unknownWhy ?? [];
+  for (const [fn, what] of [
+    ["src.sin.viaEntries", "`Object.entries(lit)` — R252's own trigger, EXECUTED: the getter runs and the file is read"],
+    ["src.sin.viaValues", "`Object.values(lit)`"],
+    ["src.sin.viaJson", "`JSON.stringify(lit)` — the spelling R115's comment named as PROVEN pure, true of a class instance and false here"],
+    ["src.sin.viaClone", "`structuredClone(lit)` — the §9 widening past the three the row named, and a BARE global rather than a member (executed: 1)"],
+    ["src.sin.viaEntriesGlobalThis", "…through the `globalThis.` qualifier, which defeated five text-keyed arms at once"],
+    ["src.sin.viaJsonGlobalThis", "…and the same for `globalThis.JSON.stringify`"],
+    ["src.struct.structLocal", "R120's STRUCTURAL shape — `const o: Session = { get token(){…} }` annotated as a CLASS but an object literal at runtime, so `classBodiedGetter` excludes it on the type and only the binding arm sees the literal (executed: 1)"],
+    ["src.struct.structImport", "…the same literal reached across a MODULE, whose symbol is an ImportSpecifier — the alias hop R120 added, measured silent at e5c60bc"],
+  ]) {
+    check(`R252: discloses the own-enumerable getter, never silent-pure — ${what}`,
+          has(fn, "Unknown") && why(fn).includes("reflect:accessor:token"),
+          JSON.stringify(eff(fn) ?? (report.functions ?? []).map((x) => x.fn)));
+  }
+  // THE CONVERGENCE, which is the row's real claim: one ECMAScript operation, one answer. `{...lit}` and
+  // `Object.assign({}, lit)` have answered `Unknown` + `reflect:accessor:token` since R115/R120; at
+  // f2d30a8 the four builtins above answered NOTHING AT ALL over the identical literal. Asserted as an
+  // IDENTITY of the reported shape, not as two lists that happen to agree today.
+  for (const fn of ["src.sin.viaEntries", "src.sin.viaValues", "src.sin.viaJson", "src.sin.viaClone"]) {
+    const shape = (f) => JSON.stringify([[...(eff(f)?.inferred ?? [])].sort(), [...why(f)].sort()]);
+    check(`R252 CONVERGENCE: ${fn} now answers EXACTLY what \`{...lit}\` does over the same literal — one operation, one answer (at f2d30a8 the spread said Unknown and this said nothing)`,
+          shape(fn) === shape("src.sin.viaSpread"), `${shape(fn)} vs spread ${shape("src.sin.viaSpread")}`);
+    check(`R252 CONVERGENCE: …and exactly what \`Object.assign({}, lit)\` does — the arm this one should always have sat beside`,
+          shape(fn) === shape("src.sin.viaAssign"), `${shape(fn)} vs assign ${shape("src.sin.viaAssign")}`);
+  }
+  check("R252 DISCRIMINATOR: the named-read spelling the engine ALREADY answered right is unchanged — a fix that reached the rows above by widening `lit.token` would look identical",
+        has("src.sin.namedRead", "Unknown") && why("src.sin.namedRead").some((w) => /^reflect:accessor:/.test(w)),
+        JSON.stringify(eff("src.sin.namedRead")));
+  // R115's CASE — THE OVER-CHARGE CONTROL THE ROW HANDS THIS FIX. Executed: 0 invocations, all four.
+  for (const [fn, what] of [
+    ["src.cls.clsEntries", "`Object.entries(new Session())`"],
+    ["src.cls.clsValues", "`Object.values(new Session())`"],
+    ["src.cls.clsJson", "`JSON.stringify(new Session())` — the exact call R115's comment measured"],
+    ["src.cls.clsClone", "`structuredClone(new Session())`"],
+  ]) {
+    check(`R252 OVER-CHARGE CONTROL, R115's CORRECT HALF: a CLASS accessor is prototype-installed and NON-enumerable, so nothing is charged (executed: 0) — ${what}`,
+          (eff(fn)?.inferred ?? []).length === 0, JSON.stringify(eff(fn) ?? null));
+  }
+  for (const [fn, what] of [
+    ["src.pure.dataEntries", "a literal of DATA properties only — `Object.entries` invokes nothing (executed: 0)"],
+    ["src.pure.dataJson", "…the same through `JSON.stringify`"],
+    ["src.pure.dataClone", "…the same through `structuredClone`"],
+    ["src.pure.opaque", "an opaque `Record<string, number>` parameter — the shape real code hands this builtin, and the one a blanket hedge would flood"],
+    ["src.pure.opaqueJson", "…the same through `JSON.stringify`"],
+    ["src.pure.neverReads", "a literal that HAS an effectful getter, read only for its data property — the getter exists and is never visited"],
+    ["src.names.nKeys", "`Object.keys` — NAMES, never values (executed: 0)"],
+    ["src.names.nGopn", "`Object.getOwnPropertyNames` (executed: 0)"],
+    ["src.names.nGopds", "`Object.getOwnPropertyDescriptors` — returns the getter FUNCTION without calling it (executed: 0)"],
+    ["src.names.nGopd", "`Object.getOwnPropertyDescriptor` (executed: 0)"],
+    ["src.names.nFreeze", "`Object.freeze` (executed: 0)"],
+    ["src.names.nSeal", "`Object.seal` (executed: 0)"],
+    ["src.names.nForIn", "`for (const k in lit)` — key iteration, no value read (executed: 0)"],
+    ["src.names.nLog", "`console.log(lit)` — node prints `[Getter]` (executed: 0)"],
+    ["src.names.nString", "`String(lit)` — reaches `toString`, not the properties (executed: 0)"],
+    ["src.names.nTmpl", "template interpolation `${lit}` (executed: 0)"],
+    ["src.shadow.shadowEntries", "SHADOW CONTROL: a project's own `Object.entries` — `globalBuiltinCallee`-guarded"],
+    ["src.shadow.shadowJson", "SHADOW CONTROL: a project's own `JSON.stringify`"],
+    ["src.shadow.shadowClone", "SHADOW CONTROL: a project's own bare `structuredClone` — `identIsGlobal`-guarded"],
+  ]) {
+    check(`R252 OVER-CHARGE CONTROL: nothing fabricated — ${what}`,
+          !has(fn, "Fs") && !why(fn).some((w) => /^reflect:accessor:/.test(w)),
+          JSON.stringify(eff(fn) ?? null));
+  }
+  // THE NESTING RESIDUAL, PINNED AS TODAY'S ANSWER. Executed: 1 real invocation each. This is a MISS
+  // that survives this fix, written down at the time of writing rather than discovered later.
+  for (const [fn, what] of [
+    ["src.nested.nestObj", "`JSON.stringify({ a: lit })`"],
+    ["src.nested.nestArr", "`JSON.stringify([lit])`"],
+    ["src.nested.nestClone", "`structuredClone({ a: lit })`"],
+  ]) {
+    check(`R252 RESIDUAL, pinned rather than described: ${what} invokes the getter ONE LEVEL DOWN (executed: 1) and is still reported as nothing — \`enumerateGetters\` asks the ARGUMENT's own property list. Red here means someone closed it`,
+          (eff(fn)?.inferred ?? []).length === 0, JSON.stringify(eff(fn) ?? null));
+  }
+  {
+    const ex = (p) => scan(d, "--policy", path.join(d, p)).r.status;
+    check("R252 GATE: `deny Unknown` over the six new callers FIRES (exit 1) — exit 0 at f2d30a8",
+          ex("unk.pol") === 1, `exit ${ex("unk.pol")}`);
+    check("R252 GATE: `deny Unknown[reflect]` selects them — the reason class is what a policy reads",
+          ex("refl.pol") === 1, `exit ${ex("refl.pol")}`);
+    check("R252 GATE CONTROL: `deny Unknown[dispatch]` does NOT — a narrowed policy must stay narrow",
+          ex("disp.pol") === 0, `exit ${ex("disp.pol")}`);
+    check("R252 GATE, R115's HALF: the four CLASS-instance callers gate clean on `deny Fs` AND `deny Unknown` (exit 0) — the correct answer really does gate clean, not merely report empty",
+          ex("cls.pol") === 0, `exit ${ex("cls.pol")}`);
+    check("R252 GATE CONTROL: `pure` AND `deny Unknown` over the six over-charge callers both stay exit 0 — the controls really do gate clean, not merely report empty",
+          ex("purescope.pol") === 0, `exit ${ex("purescope.pol")}`);
+    check("R252 GATE CONTROL: the ten NAME/DESCRIPTOR readers gate clean on both `deny Fs` and `deny Unknown` (exit 0) — the sweep is asserted, not asserted-about",
+          ex("names.pol") === 0, `exit ${ex("names.pol")}`);
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+  // THE ISOLATED TREE, which is the row's worst claim: a file containing ONLY the literal and one of
+  // these calls got `deny Fs` exit 0 AND `pure` exit 0 at f2d30a8, both scopes binding — and the row was
+  // ABSENT from `functions[]` entirely, so there was no disclosure of any kind to read.
+  //
+  // WHAT MOVES AND WHAT DOES NOT, stated as the trade it is. An object-literal getter is not minted as a
+  // UNIT (only class accessors are), so `recordAccessorHit` has nothing to edge into and discloses
+  // `Unknown` — which is what `{...lit}` and `lit.token` have always answered. So `deny Fs` stays 0 and
+  // `pure` stays 0 (`pure` forbids EFFECTS and deliberately not the §4 `Unknown` — policy.mjs ~:1139),
+  // and `deny Unknown` moves 0 -> 1. That is the sin closed — silence to disclosure — and the residual
+  // precision gap (an object-literal accessor has no unit, so its `Fs` cannot propagate) is REPORTED as
+  // its own question rather than folded in here.
+  for (const [name, call] of [["Object.entries", "Object.entries(lit)"], ["Object.values", "Object.values(lit)"],
+                              ["JSON.stringify", "JSON.stringify(lit)"], ["structuredClone", "structuredClone(lit)"]]) {
+    const only = project({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: { target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: false,
+                           types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+        include: ["src"],
+      }),
+      "src/only.ts": `import * as fs from "fs";
+const lit = ${lit};
+export function go() { return ${call}; }`,
+      "fs.pol": "deny Fs src.only.go\n",
+      "pure.pol": "pure src.only.go\n",
+      "unk.pol": "deny Unknown src.only.go\n",
+      "refl.pol": "deny Unknown[reflect] src.only.go\n",
+    });
+    const ex = (f) => scan(only, "--policy", path.join(only, f)).r.status;
+    check(`R252 GATE [isolated ${name}]: \`deny Unknown src.only.go\` — the CALLER — FIRES (exit 1); measured exit 0 at f2d30a8 on this exact tree, with the row ABSENT entirely`,
+          ex("unk.pol") === 1, `exit ${ex("unk.pol")}`);
+    check(`R252 GATE [isolated ${name}]: \`deny Unknown[reflect]\` selects it`, ex("refl.pol") === 1, `exit ${ex("refl.pol")}`);
+    check(`R252 GATE, THE RESIDUAL STATED AS A COST [isolated ${name}]: \`deny Fs\` and \`pure\` both stay exit 0 — an object-literal accessor has no minted UNIT, so this is a disclosure and not an edge. Same answer \`{...lit}\` gives; the missing unit is a separate, REPORTED question`,
+          ex("fs.pol") === 0 && ex("pure.pol") === 0, `deny Fs exit ${ex("fs.pol")}, pure exit ${ex("pure.pol")}`);
+    fs.rmSync(only, { recursive: true, force: true });
+  }
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

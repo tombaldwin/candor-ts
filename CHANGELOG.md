@@ -8,6 +8,61 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL SIN FIXED (SOUNDNESS R252) — `Object.entries` / `Object.values` /
+  `JSON.stringify` / `structuredClone` OVER AN OBJECT LITERAL WITH A GETTER WERE ALL SILENT, AND
+  R115's COMMENT ASSERTED THE OPPOSITE WAS CORRECT.** (Row id supplied by the coordinator.) Each of
+  these reads every own enumerable property's VALUE, so each invokes an own enumerable getter exactly
+  as `{...o}` and `Object.assign`'s SOURCE arm do. Those two were handled (R115/R120); these were not,
+  in any spelling — the caller was ABSENT from `functions[]` entirely.
+
+  **Why it survived, which is also the constraint on the fix.** R115's comment states
+  "`JSON.stringify(c)` and `Object.entries(c)` STAYING PURE IS CORRECT … (executed: 0 invocations on a
+  class instance)". Every literal word is TRUE — a class accessor is prototype-installed and
+  non-enumerable, so these never visit it — and FALSE for an object LITERAL, whose getter is an OWN
+  enumerable property. The sentence measured the case in front of its author and then read as a general
+  ruling. **So the class-instance answer is not collateral: it is correct, it must not move, and it is
+  this fix's over-charge control.** The fix routes through `enumerateGetters`, whose `classBodiedGetter`
+  exclusion IS R115, so the correct half is preserved by construction rather than by a second
+  implementation that has to remember to agree.
+
+  GROUND TRUTH EXECUTED (node 22.12.0), getter invocations, object LITERAL vs CLASS instance — the
+  zeroes decide the list as much as the ones:
+
+      Object.entries 1/0   Object.values 1/0   JSON.stringify 1/0   structuredClone 1/0
+      Object.keys 0/0   getOwnPropertyNames 0/0   getOwnPropertyDescriptors 0/0   freeze 0/0
+      seal 0/0   for..in 0/0   console.log 0/0   util.inspect 0/0   String(o) 0/0   `${o}` 0/0
+
+  Callers now DISCLOSE `Unknown` + `reflect:accessor:<name>`, which is byte-identical to what `{...lit}`
+  and `Object.assign({}, lit)` have answered over the same literal since R115/R120 — asserted as an
+  identity, not as two lists that happen to agree. `deny Unknown` and `deny Unknown[reflect]` move
+  exit 0 -> 1. `deny Fs` and `pure` stay 0: an object-literal accessor is not minted as a unit, so this
+  is a disclosure and not an edge — the same answer `lit.token` itself gives, and the missing unit is a
+  separate question reported rather than folded in here.
+
+  **RESIDUALS, written down now rather than found later:** `console.log("%j", o)` and
+  `util.inspect(o, {getters: true})` do invoke (executed 1 each) and turn on an argument this arm does
+  not read; and all four read NESTED objects — `JSON.stringify({ a: lit })`, `structuredClone([lit])`
+  invoke one level down (executed 1) and are still reported as nothing. All three are pinned by tests
+  asserting today's answer, so closing one shows as an expectation that changed.
+
+  **CORPUS A/B, WIDE KEY** (21 fields), same two fresh corpora as R251 — 172 roster entries, 14,977
+  rows: `ADDED 0  REMOVED 0  CHANGED 0`. **That zero is SAFETY-ONLY and is labelled so here at the time
+  of writing.** The arm was entered at 342 real call sites, and instrumenting the CHARGE SITE rather
+  than the outer branch shows why nothing moved: across those sites the argument types carried 2,621
+  properties and **zero** of them declared a getter of any kind. So the corpus cannot reach this change,
+  and the zero is not evidence about it.
+
+  **RECALL, since a corpus that cannot trigger a change is the most flattering number available.** Five
+  REAL published object literals carrying getters, vendored verbatim from the corpus (axios 1.7.2
+  `lib/adapters/fetch.js:32` — a feature-probe getter whose entire purpose is to observe that something
+  read it; mongodb `src/mongo_client.ts:379` `MongoClient.s`, five getters; zod 3.23.8
+  `src/types.ts:4473`; hono 4.4.6 `src/adapter/cloudflare-workers/websocket.ts:17`; plus one effectful
+  literal so a disclosure is distinguishable from a miss), each with a consumer:
+
+      7 caller rows  ABSENT -> disclosed;  16 accessor names disclosed, EXACTLY the 16 real getters
+      those five literals declare — no fabrication, no omission
+      `Object.keys` / `Object.getOwnPropertyDescriptors` over the same literals: ABSENT in both arms
+
 - **⚠ CARDINAL SIN FIXED (SOUNDNESS R251) — `Reflect.get(t, k)` HAD NO ARM AT ALL, SO AN EFFECTFUL
   GETTER REACHED THROUGH IT WAS SILENT IN EVERY SPELLING.** (Row id supplied by the coordinator.) The
   exact mirror of the `Reflect.set` arm R116 added by widening past its own trigger, and it was never
