@@ -17809,6 +17809,106 @@ export function pJson(o: unknown) { return globalThis.JSON.stringify(o); }`,
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── UNION-TYPED RECEIVER: the accessor arm was picked by DECLARATION ORDER ────────────────────────
+//
+// CARDINAL SIN (silent under-report), found while sweeping the mechanism behind SOUNDNESS R240 rather
+// than the case R240 named. `accessorFromSym` was a `.find` over the property symbol's declarations.
+// TypeScript synthesizes ONE symbol for `x.token` where `x: Aa | Bb`, carrying BOTH classes' accessors,
+// and orders them its own way — so the engine charged whichever arm the checker happened to list first.
+//
+// GROUND-TRUTHED BY EXECUTION (node 22.12.0), counting real `fs.appendFileSync` calls by reading the
+// log file back — not a counter, so what is measured is the effect itself:
+//
+//     class Aa { set token(v: string) { /* pure */ } }
+//     class Bb { set token(v: string) { fs.appendFileSync(LOG, "Bb:set\n"); } }
+//     function u1(x: Aa | Bb) { x.token = "v"; }
+//     u1(new Aa()) -> 0 writes      u1(new Bb()) -> 1 write
+//
+//     pre-fix (f58dc0f):  c.u1 ABSENT from functions[]   `deny Fs` -> exit 0
+//     post-fix:           c.u1 ["Fs"]                    `deny Fs` -> exit 1
+//
+// THE ORDER-DEPENDENCE IS WHY THIS IS A TEST AND NOT A ONE-LINER. The identical program with the two
+// classes written the other way round REPORTED `Fs` pre-fix, so a fixture that fixed one file order
+// would have passed before the fix. Both orders are pinned below, in separate files, for exactly that
+// reason — and the union order at the USE site is varied independently of the declaration order.
+if (blk()) {
+  const d = project({
+    // pure arm DECLARED first — the order that went silent
+    "src/pf.ts": `import * as fs from "node:fs";
+export class Aa { set token(v: string) { /* pure */ } get token(): string { return ""; } }
+export class Bb { set token(v: string) { fs.appendFileSync("/tmp/candor-union", v); } get token(): string { return fs.readFileSync("/tmp/candor-union", "utf8"); } }
+export function setDeclPure(x: Aa | Bb) { x.token = "v"; }
+export function setDeclPureFlipped(x: Bb | Aa) { x.token = "v"; }
+export function getDeclPure(x: Aa | Bb) { return x.token; }
+export function elemDeclPure(x: Aa | Bb) { x["token"] = "v"; }`,
+    // effectful arm DECLARED first — the order that already worked; a control against a fix that only
+    // moves the coin flip rather than removing it
+    "src/df.ts": `import * as fs from "node:fs";
+export class Cc { set token(v: string) { fs.appendFileSync("/tmp/candor-union", v); } }
+export class Dd { set token(v: string) { /* pure */ } }
+export function setDeclDirty(x: Cc | Dd) { x.token = "v"; }
+export function setDeclDirtyFlipped(x: Dd | Cc) { x.token = "v"; }`,
+    // OVER-CHARGE CONTROL: a union whose EVERY arm is pure must stay absent. Charging every declaration
+    // is a widening, so this is the direction the change could break.
+    "src/pure.ts": `export class Ee { set token(v: string) { /* pure */ } get token(): string { return ""; } }
+export class Ff { set token(v: string) { /* pure */ } get token(): string { return ""; } }
+export function allPureSet(x: Ee | Ff) { x.token = "v"; }
+export function allPureGet(x: Ee | Ff) { return x.token; }
+export function plainData(x: { a: number } | { a: number; b: number }) { x.a = 1; }`,
+    // ACCESSOR-KIND CONTROL, and the one the widening could actually break: charging EVERY declaration
+    // must still mean every declaration OF THE WANTED KIND. `Gg`'s GETTER reads a file and its SETTER is
+    // pure, so the write site must gain nothing and the read site must gain `Fs`. EXECUTED (node
+    // 22.12.0), real `fs.appendFileSync` calls counted by reading the log back:
+    //     kindSet(new Gg()) 0   kindSet(new Hh()) 0   kindGet(new Gg()) 1   kindGet(new Hh()) 0
+    // Degrading `accessorsFromSym` to drop its `want(d)` filter turns `kindSet` red, which is what makes
+    // this a measurement rather than a restatement of the fix.
+    "src/kind.ts": `import * as fs from "node:fs";
+export class Gg { get token(): string { return fs.readFileSync("/tmp/candor-union", "utf8"); } set token(v: string) { /* pure */ } }
+export class Hh { get token(): string { return ""; } set token(v: string) { /* pure */ } }
+export function kindSet(x: Gg | Hh) { x.token = "v"; }
+export function kindGet(x: Gg | Hh) { return x.token; }`,
+    "fs.pol": "deny Fs\n",
+  });
+  const { report } = scan(d);
+  const has = (fn, e) => (entry(report, fn)?.inferred ?? []).includes(e);
+  for (const [fn, what] of [
+    ["src.pf.setDeclPure", "the SIN: pure arm declared first, `x.token = v`"],
+    ["src.pf.setDeclPureFlipped", "…and with the USE-site union order flipped, which does not change the answer"],
+    ["src.pf.getDeclPure", "the READ direction, `return x.token` — a getter arm, same mechanism"],
+    ["src.pf.elemDeclPure", "the ELEMENT-ACCESS spelling, `x[\"token\"] = v`"],
+    ["src.df.setDeclDirty", "CONTROL, effectful arm declared first — was already charged and must stay charged"],
+    ["src.df.setDeclDirtyFlipped", "…and its use-site flip"],
+  ]) {
+    check(`union-receiver: every arm's accessor is charged, not the first the checker lists — ${what}`,
+          has(fn, "Fs"), JSON.stringify(entry(report, fn) ?? (report.functions ?? []).map((e) => e.fn)));
+  }
+  for (const fn of ["src.pure.allPureSet", "src.pure.allPureGet", "src.pure.plainData", "src.kind.kindSet"]) {
+    check(`union-receiver OVER-CHARGE CONTROL: a union whose arms perform nothing AT THIS ACCESS KIND gains nothing — ${fn}`,
+          noEffectCharged(report, fn), JSON.stringify(entry(report, fn) ?? null));
+  }
+  check("union-receiver: …and the SAME union READ charges `Fs`, so the control above is a kind filter and not an empty tree",
+        has("src.kind.kindGet", "Fs"), JSON.stringify(entry(report, "src.kind.kindGet") ?? null));
+  // THE GATE, on a tree containing NOTHING ELSE — the mixed fixture above already charges `Fs` from
+  // `src/df.ts`, so its exit code could not have discriminated the fix from its absence.
+  {
+    const sin = project({ "src/pf.ts": `import * as fs from "node:fs";
+export class Aa { set token(v: string) { /* pure */ } }
+export class Bb { set token(v: string) { fs.appendFileSync("/tmp/candor-union", v); } }
+export function setDeclPure(x: Aa | Bb) { x.token = "v"; }`, "fs.pol": "deny Fs src.pf.setDeclPure\n" });
+    const st = scan(sin, "--policy", path.join(sin, "fs.pol")).r.status;
+    check("union-receiver GATE: `deny Fs src.pf.setDeclPure` fires (exit 1) on a tree holding only the union caller — exit 0 at f58dc0f",
+          st === 1, `exit ${st}`);
+    fs.rmSync(sin, { recursive: true, force: true });
+    const only = project({ "src/pure.ts": `export class Ee { set token(v: string) { /* pure */ } }
+export class Ff { set token(v: string) { /* pure */ } }
+export function allPureSet(x: Ee | Ff) { x.token = "v"; }`, "fs.pol": "deny Fs\n" });
+    const st2 = scan(only, "--policy", path.join(only, "fs.pol")).r.status;
+    check("union-receiver GATE CONTROL: an all-pure union gates clean on its own tree (exit 0)", st2 === 0, `exit ${st2}`);
+    fs.rmSync(only, { recursive: true, force: true });
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

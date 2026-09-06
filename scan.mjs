@@ -3210,7 +3210,7 @@ const classOverrides = new Map();// base-method MemberDeclaration node -> overri
 const classDescendants = new Map();// base ClassDeclaration -> transitive LOCAL subclass ClassDeclarations (coercion-CHA)
 // `Object.defineProperty(target, key, { get/set })` runtime accessors (the silent-pure defineProperty
 // hole): the TS checker types `target.key` as a plain DATA property (defineProperty is a runtime
-// construct), so `accessorAt` finds no get-accessor and the forcing site `target.key` reads
+// construct), so `accessorsAt` finds no get-accessor and the forcing site `target.key` reads
 // silent-pure. We index, keyed by the TARGET's symbol → key string → { get, set } descriptor function
 // node, every such accessor seen in the project. The forcing-site arm consults this when the type-level
 // accessor resolution comes up empty (precise edge when target+key resolve; else honest Unknown).
@@ -4309,34 +4309,54 @@ for (const sf of sources) {
 // when the accessor's declaration lives in a project file (a UNIT we minted; edge to it). A resolved
 // accessor we CAN'T see (external/typed-only declaration) returns local:false so the caller follows
 // the existing Unknown/curated-κ posture — never silent-pure for a resolved-but-unseen accessor.
-// A property SYMBOL → its accessor declaration of the wanted kind (or null). `local` is true when that
-// declaration lives in a project file (a unit we minted; edge to it). Shared by every property-read
-// shape: dot access, element access, and object destructuring.
-function accessorFromSym(sym, kind /* "get" | "set" */) {
-  if (!sym) return null;
+// A property SYMBOL → EVERY accessor declaration of the wanted kind (a possibly-empty list). `local` is
+// true when that declaration lives in a project file (a unit we minted; edge to it). Shared by every
+// property-read shape: dot access, element access, and object destructuring.
+//
+// EVERY DECLARATION, NOT THE FIRST — this was a `.find`, and on a UNION-TYPED RECEIVER that is a silent
+// under-report chosen by declaration order. TypeScript synthesizes ONE property symbol for `x.token`
+// where `x: Aa | Bb`, carrying BOTH classes' accessor declarations, and their order is the checker's,
+// not the source's. `.find` therefore picked an arbitrary arm and, when it picked the pure one, the
+// effectful arm vanished. EXECUTED, node 22.12.0, counting real `fs.appendFileSync` calls by reading the
+// log file back:
+//
+//     export class Aa { set token(v: string) { /* pure */ } }
+//     export class Bb { set token(v: string) { fs.appendFileSync("/tmp/x", v); } }
+//     export function u1(x: Aa | Bb) { x.token = "v"; }
+//
+//     u1(new Bb())  ->  1 real write        pre-fix: `c.u1` ABSENT from functions[], `deny Fs` exit 0
+//                                           post-fix: `c.u1` ["Fs"], `deny Fs` exit 1
+//
+// and it was order-dependent in a way no reader could predict: the SAME program with the two classes
+// swapped in the file reported `Fs` (the checker happened to list the effectful arm first). A union
+// receiver is a disjunction — ANY arm may be the runtime value — so the sound answer is the UNION of
+// the arms' accessors, which is also what `classBodiedGetter`'s `every` already assumes one line up.
+// The direction this fails in is over-charge (an arm that cannot occur at this site), never silence.
+function accessorsFromSym(sym, kind /* "get" | "set" */) {
+  if (!sym) return [];
   const want = kind === "get" ? ts.isGetAccessorDeclaration : ts.isSetAccessorDeclaration;
   // A symbol is an accessor only if its declarations include an accessor of the wanted kind.
-  const decl = (sym.declarations ?? []).find((d) => want(d));
-  if (!decl) return null;
-  return { decl, local: projectFiles.has(path.resolve(decl.getSourceFile().fileName)) };
+  return (sym.declarations ?? []).filter((d) => want(d))
+    .map((decl) => ({ decl, local: projectFiles.has(path.resolve(decl.getSourceFile().fileName)) }));
 }
-function accessorAt(propNode, kind /* "get" | "set" */) {
-  let sym;
+function accessorsAt(propNode, kind /* "get" | "set" */) {
   if (ts.isElementAccessExpression(propNode)) {
-    // `c["prop"]` carries no `.name`; resolve the LITERAL key as a property on the receiver's type.
-    // A dynamic key (`c[k]`) can't be pinned to one property — leave it unresolved (the existing
-    // dynamic-access posture stands; resolving it would guess, never fabricate here).
+    // `c["prop"]` carries no `.name`; resolve the key to the property NAMES it can hold and look each
+    // one up on the receiver's type. Returns `null` — distinct from `[]` — when the key is NOT pinned
+    // to a finite name set, so the caller can tell "pinned, and none of them is an accessor" (nothing
+    // to charge) from "we do not know which property this is" (a disclosure question).
     const arg = propNode.argumentExpression;
-    sym = arg && ts.isStringLiteralLike(arg)
-      ? checker.getTypeAtLocation(propNode.expression)?.getProperty?.(arg.text)
-      : null;
-  } else {
-    sym = checker.getSymbolAtLocation(propNode.name ?? propNode);
+    const texts = arg && ts.isStringLiteralLike(arg) ? new Set([arg.text]) : null;
+    if (!texts) return null;
+    const recvType = checker.getTypeAtLocation(propNode.expression);
+    const out = [];
+    for (const t of texts) out.push(...accessorsFromSym(recvType?.getProperty?.(t), kind));
+    return out;
   }
-  return accessorFromSym(sym, kind);
+  return accessorsFromSym(checker.getSymbolAtLocation(propNode.name ?? propNode), kind);
 }
 // A `Object.defineProperty` descriptor accessor for the forcing site `recv.key` (read → get, assign →
-// set), consulted ONLY when the type-level `accessorAt` came up empty (the checker types target.key as
+// set), consulted ONLY when the type-level `accessorsAt` came up empty (the checker types target.key as
 // a data prop, so defineProperty accessors are invisible to it). Resolve the receiver expression to its
 // binding symbol and the key to a static string; look both up in `definePropAccessors`. Returns the
 // descriptor function NODE (a minted unit) when found, or null. NO fabrication: a data (`value:`)
@@ -4466,8 +4486,7 @@ function enumerateGetters(owner, type, srcExpr) {
   if (type && type.getProperties) {
     for (const p of type.getProperties()) {
       if (classBodiedGetter(p)) continue; // prototype + non-enumerable → not copied by a spread
-      const hit = accessorFromSym(p, "get");
-      if (hit) recordAccessorHit(owner, hit, p.getName());
+      for (const hit of accessorsFromSym(p, "get")) recordAccessorHit(owner, hit, p.getName());
     }
   }
   // The structural arm: `const o: SomeClass = { get k(){…} }` — the BINDING's initializer is an object
@@ -4559,8 +4578,7 @@ function enumerateTargetSetters(owner, targetExpr, keys) {
     // property lookup and IS invoked. Executed above: the `Sink` setter lives on `Sink.prototype` and
     // runs once. Excluding it here would be R115's reasoning applied to the direction it does not hold.
     if (keys && !keys.has(p.getName())) continue;              // proven not written by this copy
-    const hit = accessorFromSym(p, "set");
-    if (hit) recordAccessorHit(owner, hit, p.getName());
+    for (const hit of accessorsFromSym(p, "set")) recordAccessorHit(owner, hit, p.getName());
   }
 }
 
@@ -7439,18 +7457,18 @@ function visitCalls(node) {
     const compoundAssign = isBinAssign && !simpleAssign
       && p.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && p.operatorToken.kind <= ts.SyntaxKind.LastAssignment;
     const recordKind = (kind) => {
-      const hit = accessorAt(node, kind);
-      if (hit) {
+      const hits = accessorsAt(node, kind);
+      if (hits && hits.length) {
         const owner = enclosing(node);
         if (!owner) return;
-        const an = hit.decl.parent?.name?.getText?.() ?? "?";
         const pn = node.name?.getText?.() ?? node.argumentExpression?.getText?.() ?? "?";
-        recordAccessorHit(owner, hit, `${an}.${pn}`);
+        for (const hit of hits)
+          recordAccessorHit(owner, hit, `${hit.decl.parent?.name?.getText?.() ?? "?"}.${pn}`);
         return;
       }
       // No type-level accessor — try the `Object.defineProperty` runtime-accessor index. The checker
       // types target.key as a data prop, so an effectful defineProperty getter/setter is invisible to
-      // accessorAt; consult definePropForceTarget so the forcing site edges to the descriptor unit
+      // accessorsAt; consult definePropForceTarget so the forcing site edges to the descriptor unit
       // (precise) instead of reading silent-pure (the cardinal sin). A descriptor we minted is always
       // local, so this is an EDGE; never Unknown for a resolved-and-seen descriptor.
       const dpNode = definePropForceTarget(node, kind);
@@ -7497,8 +7515,8 @@ function visitCalls(node) {
         const keyName = ts.isIdentifier(key) ? key.text
           : ts.isStringLiteralLike(key) ? key.text : null;
         if (keyName === null) continue; // computed key (`{[k]: v}`) — unresolvable to one property
-        const hit = accessorFromSym(recvType?.getProperty?.(keyName), "get");
-        if (hit) recordAccessorHit(owner, hit, keyName);
+        for (const hit of accessorsFromSym(recvType?.getProperty?.(keyName), "get"))
+          recordAccessorHit(owner, hit, keyName);
       }
     }
   }

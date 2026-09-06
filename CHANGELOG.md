@@ -8,6 +8,53 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SILENT-UNDER-REPORT FIX — a UNION-TYPED RECEIVER charged whichever accessor arm the CHECKER
+  listed first.** (SOUNDNESS row id pending; the coordinator files it.) Found while sweeping the
+  mechanism behind R240 rather than the case R240 named. `accessorFromSym` was a `.find` over the
+  property symbol's declarations; TypeScript synthesizes ONE symbol for `x.token` where
+  `x: Aa | Bb`, carrying BOTH classes' accessors in an order that is the checker's, not the source's.
+
+  GROUND-TRUTHED BY EXECUTION (node 22.12.0), counting real `fs.appendFileSync` calls by reading the
+  log file back:
+
+      class Aa { set token(v: string) { /* pure */ } }
+      class Bb { set token(v: string) { fs.appendFileSync(LOG, v); } }
+      function u1(x: Aa | Bb) { x.token = "v"; }
+      u1(new Aa()) -> 0 real writes      u1(new Bb()) -> 1 real write
+
+      pre-fix (f58dc0f):  `c.u1` ABSENT from functions[]   `deny Fs` -> exit 0
+      post-fix:           `c.u1` ["Fs"]                    `deny Fs` -> exit 1
+
+  It was ORDER-DEPENDENT in a way no reader could predict: the identical program with the two classes
+  written the other way round reported `Fs` pre-fix. Both file orders are pinned, in separate files.
+
+  A union receiver is a disjunction — any arm may be the runtime value — so the answer is the UNION of
+  the arms' accessors. The direction it now fails in is over-charge, never silence.
+
+  CORPUS A/B, two corpora, wide key (`inferred`, `direct`, `unresolved`, `incomplete`, `unknownWhy`,
+  `calls`, `fs`, `hosts`, `cmds`, `paths`, `netClass`, `invisible`, `declared`) against a pre-fix
+  `git archive` of f58dc0f, freshly cloned trees:
+
+      TS SOURCE  zod chalk hono got zx vue-{runtime,reactivity,compiler,shared}  1,275 rows
+                 ADDED 0  REMOVED 0  CHANGED(wide) 2  CHANGED(inferred) 0
+      NPM TREE   rxjs typeorm mongoose winston lodash axios express yargs        5,576 rows
+                 ADDED 0  REMOVED 0  CHANGED(wide) 0  CHANGED(inferred) 0
+
+  BRANCH-HIT COUNT, because an unchanged row is not evidence the new code ran: the multi-declaration
+  branch fired **2 times in 20,812 accessor-symbol resolutions** on the TS-source corpus and **0 times
+  in 68,000 on the npm tree** — so the npm arm is SAFETY-ONLY and is recorded as such. Both TS-source
+  hits are the two changed rows, and both are precision GAINS, ground-truthed from package source:
+
+      zx  `core.ProcessPromise.run` gained the call edge `core.ProcessOutput.get stdout`
+          — zx/src/core.ts:268 `($.input as ProcessPromise | ProcessOutput)?.stdout`, a genuine union
+          receiver in shipped code. Pre-fix only `ProcessPromise.get stdout` was resolved; the second
+          arm's accessor was silently dropped. (It happens to be pure, so no effect moved — but the
+          edge is the thing that would have carried one.)
+      hono `jsx.dom.render.applyNode` gained `reflect:accessor:DocumentFragment.textContent` beside the
+          `Element.textContent` it already had — the second arm of the same union, disclosed.
+
+  Zero rows lost on either corpus.
+
 - **⚠ SILENT-UNDER-REPORT FIX — the `globalThis.` QUALIFIER defeated FIVE text-keyed arms at once.**
   (SOUNDNESS row id pending; the coordinator files it.) Found by widening past R116's own trigger:
   grepping the MECHANISM — "a whole-object builtin recognised by the callee's TEXT" — rather than the
