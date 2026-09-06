@@ -8,6 +8,59 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R240(a)) — `s[k] = v` NEVER RESOLVED A SETTER, INCLUDING WHEN
+  THE KEY'S TYPE PINNED IT TO EXACTLY THE PROPERTIES IT COULD NAME.** (Row id pending; the coordinator
+  files it.) `accessorAt` resolved only a syntactic string literal, under a comment asserting that a
+  dynamic key "can't be pinned to one property … resolving it would guess". True of `k: string`, FALSE
+  of `k: "token" | "other"` — whose TYPE names exactly two properties, both of them setters. The same
+  shape as R232/R233: true for the case in front of the author, false one spelling over.
+
+  GROUND TRUTH IS EXECUTED (node 22.12.0) — a real `fs.appendFileSync` inside each accessor, counted by
+  reading the log file back, so what is compared is the effect itself. Real writes / reported at
+  f58dc0f -> reported now:
+
+      s["token"]="x"           1 / ["Fs"]  -> ["Fs"]     k: "token"|"other"      1 / ABSENT -> ["Fs"]
+      s.token="x"              1 / ["Fs"]  -> ["Fs"]     const k="token"         1 / ABSENT -> ["Fs"]
+      s[k]+="x" (get AND set)  2 / ABSENT  -> ["Fs"]     k: EK / k: EK.Token     1 / ABSENT -> ["Fs"]
+      s[k]||="x"               2 / ABSENT  -> ["Fs"]     k: keyof Session        1 / ABSENT -> ["Fs"]
+      return s[k]  (getter)    1 / ABSENT  -> ["Fs"]     K extends keyof Session 1 / ABSENT -> ["Fs"]
+      ({v: s[k]} = src)        1 / ABSENT  -> ["Fs"]     s[KEYS.primary] as const 1 / ABSENT -> ["Fs"]
+      [s[k]] = arr             1 / ABSENT  -> ["Fs"]     defineProperty via k    1 / ABSENT -> ["Fs"]
+
+  **The coordinator's row named two cells; the sweep found NINETEEN of 27 fixture cases silent at
+  f58dc0f, and 16 of them are now charged.** The ones the row did not have include the most ordinary
+  spelling in the language — `const k = "token"; s[k] = v`, a single literal TYPE rather than a literal
+  NODE — plus every GETTER read through such a key, both compound/logical assignment forms (which
+  invoke BOTH accessors), destructuring assignment targets, string enums, `keyof T`, `K extends keyof
+  T`, and `Object.defineProperty` descriptors reached the same way.
+
+  NOT AN OVER-APPROXIMATION: every name charged is one the key is DECLARED able to take. The resolver
+  fails toward the pre-fix answer (silence) on anything it cannot enumerate — the denylist direction —
+  and a receiver type with NO accessors stays ABSENT, executed at 0 writes, in every spelling.
+
+  CORPUS A/B vs a `git archive` of f58dc0f, wide key, freshly cloned trees (cumulative with the
+  union-receiver fix above):
+
+      TS SOURCE  9 entries, 1,275 rows   ADDED 0  REMOVED 0  CHANGED(wide) 3  CHANGED(inferred) 0
+      NPM TREE   8 entries, 5,576 rows   ADDED 0  REMOVED 0  CHANGED(wide) 0  CHANGED(inferred) 0
+
+  BRANCH HITS: the type-pinning branch resolved **432 of 1,425** dynamic-key element accesses on the
+  TS-source corpus and **1,456 of 5,566** on the npm tree — so the code is reached constantly, and it
+  charges only where the receiver actually declares an accessor.
+
+  THE ONE REAL-WORLD ROW IS THE POINT, AND AN `inferred`-KEYED DIFF WOULD HAVE MISSED IT.
+  `got` v14.4.1, `source/core/options.ts:1080`, in `Options.merge`:
+
+      this[key as keyof Options] = value;      // key: keyof Options, ~90 declared properties
+
+  Pre-fix that site resolved NOTHING; `Options.merge` carried 5 call edges. Post-fix it carries 96,
+  including 43 accessors that are themselves `Unknown` (`set url`, `set agent`, `set cookieJar`,
+  `set dnsCache`, …). `inferred` did not move — `merge` was already `Unknown` from another site — so
+  this fix reads as "0 rows changed" on the narrow key and as a 43-edge reconnection on the wide one.
+
+  STILL OPEN, deliberately: an UNCONSTRAINED `k: string` on a receiver that HAS setters (R240(b)), and
+  any receiver typed `any` (an `--allow-js` tree), where there is no declared property set to resolve.
+
 - **⚠ SILENT-UNDER-REPORT FIX — a UNION-TYPED RECEIVER charged whichever accessor arm the CHECKER
   listed first.** (SOUNDNESS row id pending; the coordinator files it.) Found while sweeping the
   mechanism behind R240 rather than the case R240 named. `accessorFromSym` was a `.find` over the

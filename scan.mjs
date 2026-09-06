@@ -4339,6 +4339,55 @@ function accessorsFromSym(sym, kind /* "get" | "set" */) {
   return (sym.declarations ?? []).filter((d) => want(d))
     .map((decl) => ({ decl, local: projectFiles.has(path.resolve(decl.getSourceFile().fileName)) }));
 }
+// SOUNDNESS R240(a) — THE KEY'S TYPE PINS THE PROPERTY SET, AND ASKING IT IS NOT A GUESS.
+// `accessorsAt` used to resolve only a syntactic string literal, under a comment that said a dynamic
+// key "can't be pinned to one property … resolving it would guess". That is true of `k: string` and
+// FALSE of `k: "token" | "other"`, whose TYPE names exactly two properties — the same shape as R232/R233,
+// where a safety comment was true for the case in front of its author and false one spelling over.
+//
+// Returns the FINITE set of property names the key can hold, or `null` when there is no finite set.
+// `null` is a real answer ("we cannot say which property this is"), distinct from an empty set.
+//
+// THIS IS NOT AN OVER-APPROXIMATION: every name returned is a value the key is DECLARED to be able to
+// take, so charging all of them charges exactly what the program says can run. It fails toward `null`
+// (today's silence) on anything it cannot enumerate, which is the denylist direction — a name is
+// admitted only when a literal type PROVES it, never guessed from the receiver's property list.
+//
+// FIVE SPELLINGS, all measured on executed fixtures (see the test block and the CHANGELOG):
+//   "token" | "other"   a literal union                       -> {token, other}
+//   const k = "token"   a single literal type                 -> {token}
+//   EK / EK.Token       a string enum, whole or one member    -> {token, other} / {token}   (EnumLiteral
+//                                                                carries StringLiteral, so `.value` is
+//                                                                the runtime key)
+//   keyof Session       an Index type the checker has already normalised to a literal union
+//   K extends keyof T   a TYPE PARAMETER — pinned through its CONSTRAINT, which is that same union
+//
+// The CAP is a rail, not a semantic: a template-literal type can expand to tens of thousands of names,
+// and past the cap this returns `null` — the pre-fix answer, so the cap can only lose precision, never
+// soundness.
+const KEY_NAME_CAP = 512;
+function keyLiteralNames(t, depth = 0, seen = new Set()) {
+  if (!t || depth > 4 || seen.has(t)) return null;
+  seen.add(t);
+  if (t.isUnion?.()) {
+    const out = new Set();
+    for (const c of t.types) {
+      const s = keyLiteralNames(c, depth + 1, seen);
+      if (!s) return null;                        // ONE unpinnable arm makes the whole key unpinnable
+      for (const x of s) out.add(x);
+      if (out.size > KEY_NAME_CAP) return null;
+    }
+    return out;
+  }
+  // A string/number literal type IS the property name. `EK.Token` is `EnumLiteral | StringLiteral`, so a
+  // string enum member lands here and `.value` is the runtime key the enum member compiles to.
+  if (t.isStringLiteral?.()) return new Set([t.value]);
+  if (t.isNumberLiteral?.()) return new Set([String(t.value)]);
+  // `K extends keyof Session` — the type parameter itself names nothing; its CONSTRAINT does.
+  const c = checker.getBaseConstraintOfType?.(t);
+  if (c && c !== t) return keyLiteralNames(c, depth + 1, seen);
+  return null;                                    // `string`, `symbol`, `keyof T` for generic T, …
+}
 function accessorsAt(propNode, kind /* "get" | "set" */) {
   if (ts.isElementAccessExpression(propNode)) {
     // `c["prop"]` carries no `.name`; resolve the key to the property NAMES it can hold and look each
@@ -4346,7 +4395,8 @@ function accessorsAt(propNode, kind /* "get" | "set" */) {
     // to a finite name set, so the caller can tell "pinned, and none of them is an accessor" (nothing
     // to charge) from "we do not know which property this is" (a disclosure question).
     const arg = propNode.argumentExpression;
-    const texts = arg && ts.isStringLiteralLike(arg) ? new Set([arg.text]) : null;
+    const texts = arg && ts.isStringLiteralLike(arg) ? new Set([arg.text])
+                : arg ? keyLiteralNames(checker.getTypeAtLocation(arg)) : null;
     if (!texts) return null;
     const recvType = checker.getTypeAtLocation(propNode.expression);
     const out = [];
@@ -4362,25 +4412,32 @@ function accessorsAt(propNode, kind /* "get" | "set" */) {
 // descriptor function NODE (a minted unit) when found, or null. NO fabrication: a data (`value:`)
 // descriptor was never indexed, an absent target/key returns null.
 function definePropForceTarget(propNode, kind /* "get" | "set" */) {
-  if (definePropAccessors.size === 0) return null;
-  let recvExpr, keyText;
+  if (definePropAccessors.size === 0) return [];
+  // R240(a) — the key set, not one key: the SAME literal-type pinning the type-level arm now does. A
+  // descriptor installed under `"hot"` and reached as `target[k]` with `k: "hot" | "cold"` was silent
+  // here for exactly the reason it was silent there (executed: 1 real setter invocation, row ABSENT).
+  let recvExpr, keyTexts;
   if (ts.isElementAccessExpression(propNode)) {
     recvExpr = propNode.expression;
     const arg = propNode.argumentExpression;
-    keyText = arg && ts.isStringLiteralLike(arg) ? arg.text : null;
+    keyTexts = arg && ts.isStringLiteralLike(arg) ? new Set([arg.text])
+             : arg ? keyLiteralNames(checker.getTypeAtLocation(arg)) : null;
   } else if (ts.isPropertyAccessExpression(propNode)) {
     recvExpr = propNode.expression;
-    keyText = propNode.name?.getText?.();
-  } else return null;
-  if (keyText == null) return null;
+    const n = propNode.name?.getText?.();
+    keyTexts = n == null ? null : new Set([n]);
+  } else return [];
+  if (keyTexts == null) return [];
   // Resolve the receiver to the SAME symbol the defineProperty target identifier resolved to. Follow an
   // import alias so a cross-module `import { config }` access joins the defining module's index entry.
   const rsym0 = checker.getSymbolAtLocation(recvExpr);
-  if (!rsym0) return null;
+  if (!rsym0) return [];
   const rsym = rsym0.flags & ts.SymbolFlags.Alias ? (() => { try { return checker.getAliasedSymbol(rsym0); } catch { return rsym0; } })() : rsym0;
   const byKey = definePropAccessors.get(rsym) ?? definePropAccessors.get(rsym0);
-  const entry = byKey?.get(keyText);
-  return entry?.[kind] ?? null;
+  if (!byKey) return [];
+  const out = [];
+  for (const k of keyTexts) { const n = byKey.get(k)?.[kind]; if (n) out.push(n); }
+  return out;
 }
 // Record a resolved accessor HIT (read or write) as an edge from `owner`: into the accessor UNIT when
 // it's a local declaration we minted; otherwise Unknown (a resolved-but-unseen accessor body — never
@@ -7471,11 +7528,13 @@ function visitCalls(node) {
       // accessorsAt; consult definePropForceTarget so the forcing site edges to the descriptor unit
       // (precise) instead of reading silent-pure (the cardinal sin). A descriptor we minted is always
       // local, so this is an EDGE; never Unknown for a resolved-and-seen descriptor.
-      const dpNode = definePropForceTarget(node, kind);
-      if (dpNode) {
+      const dpNodes = definePropForceTarget(node, kind);
+      if (dpNodes.length) {
         const owner = enclosing(node);
-        const t = owner && nodeName.get(dpNode);
-        if (t) fns.get(owner).edges.add(t);
+        if (owner) for (const dpNode of dpNodes) {
+          const t = nodeName.get(dpNode);
+          if (t) fns.get(owner).edges.add(t);
+        }
         return;
       }
       // A computed-key descriptor accessor on this receiver's target means `recv.<anything>` MIGHT

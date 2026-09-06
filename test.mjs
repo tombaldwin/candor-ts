@@ -17909,6 +17909,152 @@ export function allPureSet(x: Ee | Ff) { x.token = "v"; }`, "fs.pol": "deny Fs\n
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── SOUNDNESS R240(a): A DYNAMIC KEY WHOSE TYPE PINS IT IS NOT A GUESS ───────────────────────────
+//
+// CARDINAL SIN (silent under-report). `s[k] = v` never resolved a setter unless `k` was a syntactic
+// string literal, under a comment at scan.mjs's `accessorAt` asserting that a dynamic key "can't be
+// pinned to one property … resolving it would guess". True of `k: string`; FALSE of
+// `k: "token" | "other"`, whose TYPE names exactly two properties, BOTH of them setters.
+//
+// GROUND TRUTH IS EXECUTED, node 22.12.0 — a real `fs.appendFileSync` inside each accessor, counted by
+// reading the log file back, so what is compared is the effect itself and not a stand-in counter.
+// Per case: real writes performed / reported at f58dc0f -> reported now.
+//
+//   litKey  s["token"]=x              1 / ["Fs"]  -> ["Fs"]      dynUnion   k:"token"|"other"  1 / ABSENT -> ["Fs"]
+//   dotKey  s.token=x                 1 / ["Fs"]  -> ["Fs"]      constLit   const k="token"    1 / ABSENT -> ["Fs"]
+//   compound  s[k]+=x  (get AND set)  2 / ABSENT  -> ["Fs"]      enum       k:EK / k:EK.Token  1 / ABSENT -> ["Fs"]
+//   logical   s[k]||=x                2 / ABSENT  -> ["Fs"]      keyof      k:keyof Session    1 / ABSENT -> ["Fs"]
+//   getter    return s[k]             1 / ABSENT  -> ["Fs"]      generic    K extends keyof T  1 / ABSENT -> ["Fs"]
+//   destructuring target ({v:s[k]}=o) 1 / ABSENT  -> ["Fs"]      asConst    s[KEYS.primary]    1 / ABSENT -> ["Fs"]
+//   defineProperty descriptor via k   1 / ABSENT  -> ["Fs"]      unionRecv  Session|Session2   1 / ABSENT -> ["Fs"]
+//
+// CONTROLS, both directions, and both stay correct: a receiver type with NO accessors (`dynPlain`,
+// `compoundPlain`, `dynUnionPlain`) performs 0 writes and stays ABSENT, and a pinned key naming only
+// DATA properties on a receiver that DOES declare effectful accessors elsewhere (`dataOnlyKey`)
+// performs 0 writes and stays ABSENT — that last one is what separates "resolve the names the type
+// gives" from "charge every property the receiver has", and degrading `accessorsAt` to the latter
+// turns it red.
+//
+// STILL OPEN AND DELIBERATELY NOT PINNED HERE: an UNCONSTRAINED `k: string` on a receiver that has
+// setters (R240(b)). It is a disclosure question with a corpus price, not a resolution question.
+if (blk()) {
+  const d = project({
+    "src/a.ts": `import * as fs from "node:fs";
+export class Session {
+  id = 1; count = 0;
+  #t = ""; #o = "";
+  set token(v: string) { fs.appendFileSync("/tmp/candor-r240", "set:token\\n"); this.#t = v; }
+  get token(): string { fs.appendFileSync("/tmp/candor-r240", "get:token\\n"); return this.#t; }
+  set other(v: string) { fs.appendFileSync("/tmp/candor-r240", "set:other\\n"); this.#o = v; }
+  get other(): string { fs.appendFileSync("/tmp/candor-r240", "get:other\\n"); return this.#o; }
+}
+export class Session2 {
+  #t = "";
+  set token(v: string) { fs.appendFileSync("/tmp/candor-r240", "set2:token\\n"); this.#t = v; }
+  get token(): string { fs.appendFileSync("/tmp/candor-r240", "get2:token\\n"); return this.#t; }
+  set other(v: string) { fs.appendFileSync("/tmp/candor-r240", "set2:other\\n"); this.#t = v; }
+  get other(): string { fs.appendFileSync("/tmp/candor-r240", "get2:other\\n"); return this.#t; }
+}
+export enum EK { Token = "token", Other = "other" }
+const KEYS = { primary: "token" } as const;
+export function litKey(s: Session) { s["token"] = "x"; }
+export function dotKey(s: Session) { s.token = "x"; }
+export function dynUnion(s: Session, k: "token" | "other") { s[k] = "x"; }
+export function compoundDynUnion(s: Session, k: "token" | "other") { s[k] += "x"; }
+export function logicalDynUnion(s: Session, k: "token" | "other") { s[k] ||= "x"; }
+export function getDynUnion(s: Session, k: "token" | "other") { return s[k]; }
+export function destrObjDynUnion(s: Session, k: "token" | "other", src: { v: string }) { ({ v: s[k] } = src); }
+export function destrArrDynUnion(s: Session, k: "token" | "other", arr: string[]) { [s[k]] = arr; }
+export function enumKey(s: Session, k: EK) { s[k] = "x"; }
+export function enumMemberKey(s: Session, k: EK.Token) { s[k] = "x"; }
+export function keyofKey(s: Session, k: keyof Session) { s[k] = "x" as never; }
+export function genericKeyof<K extends keyof Session>(s: Session, k: K) { s[k] = "x" as never; }
+export function constLitKey(s: Session) { const k = "token"; s[k] = "x"; }
+export function asConstKey(s: Session) { s[KEYS.primary] = "x"; }
+export function tmplKey(s: Session) { s[\`token\`] = "x"; }
+export function mixedUnionKey(s: Session, k: "token" | "id") { s[k] = "x" as never; }
+export function unionRecvDyn(s: Session | Session2, k: "token" | "other") { s[k] = "x"; }`,
+    // `Object.defineProperty` DESCRIPTOR reached through a pinned key — the same question one arm over.
+    // The checker types `target.hot` as a data property, so the type-level arm cannot see the accessor
+    // at all; the descriptor index is consulted with the SAME pinned key set.
+    "src/dp.ts": `import * as fs from "node:fs";
+export const target: { hot?: string; cold?: string } = {};
+Object.defineProperty(target, "hot", {
+  set(v: string) { fs.appendFileSync("/tmp/candor-r240", "dp:set:hot\\n"); },
+  get() { fs.appendFileSync("/tmp/candor-r240", "dp:get:hot\\n"); return ""; },
+});
+export function dpLit() { target["hot"] = "v"; }
+export function dpDynUnion(k: "hot" | "cold") { target[k] = "v"; }
+export function dpDynUnionGet(k: "hot" | "cold") { return target[k]; }`,
+    // CONTROLS. `Plain` declares no accessor at all, so every spelling over it must stay ABSENT — and
+    // `dataOnlyKey` is the sharper one: the receiver DOES have effectful accessors, and the key's type
+    // names only data properties.
+    "src/ctl.ts": `import { Session } from "./a.js";
+export class Plain { a = 0; b = 0; }
+export function dynPlain(p: Plain, k: string) { p[k] = 1; }
+export function dynUnionPlain(p: Plain, k: "a" | "b") { p[k] = 1; }
+export function compoundPlain(p: Plain, k: string) { p[k] += 1; }
+export function litPlain(p: Plain) { p["a"] = 1; }
+export function dataOnlyKey(s: Session, k: "id" | "count") { s[k] = 1; }`,
+    "fs.pol": "deny Fs\n",
+  });
+  const { report } = scan(d);
+  const has = (fn, e) => (entry(report, fn)?.inferred ?? []).includes(e);
+  for (const [fn, writes, what] of [
+    ["src.a.litKey", 1, "CONTROL, a syntactic literal key — already worked, must keep working"],
+    ["src.a.dotKey", 1, "CONTROL, dot access — already worked"],
+    ["src.a.tmplKey", 1, "CONTROL, a no-substitution template key — `isStringLiteralLike` already covered it"],
+    ["src.a.dynUnion", 1, "THE ROW'S CELL: `k: \"token\" | \"other\"`, both properties setters"],
+    ["src.a.compoundDynUnion", 2, "`s[k] += v` — invokes BOTH accessors, so both must be charged"],
+    ["src.a.logicalDynUnion", 2, "`s[k] ||= v` — the logical-assignment spelling"],
+    ["src.a.getDynUnion", 1, "the READ direction, `return s[k]` — a GETTER through a pinned key"],
+    ["src.a.destrObjDynUnion", 1, "an OBJECT-DESTRUCTURING assignment target, `({v: s[k]} = src)`"],
+    ["src.a.destrArrDynUnion", 1, "an ARRAY-DESTRUCTURING assignment target, `[s[k]] = arr`"],
+    ["src.a.enumKey", 1, "a STRING ENUM key — `EnumLiteral` carries `StringLiteral`, so the member's value is the runtime key"],
+    ["src.a.enumMemberKey", 1, "a single ENUM MEMBER type"],
+    ["src.a.keyofKey", 1, "`k: keyof Session` — the checker has already normalised it to a literal union"],
+    ["src.a.genericKeyof", 1, "`K extends keyof Session` — a TYPE PARAMETER, pinned through its CONSTRAINT"],
+    ["src.a.constLitKey", 1, "`const k = \"token\"` — a single literal TYPE, not a literal NODE; the most ordinary spelling of all and it was silent"],
+    ["src.a.asConstKey", 1, "`s[KEYS.primary]` where KEYS is `as const`"],
+    ["src.a.mixedUnionKey", 1, "a union where only ONE arm is an accessor and the other a data property"],
+    ["src.a.unionRecvDyn", 1, "a UNION RECEIVER reached through a pinned key — both mechanisms at once"],
+    ["src.dp.dpLit", 1, "CONTROL, a `defineProperty` descriptor under a literal key — already worked"],
+    ["src.dp.dpDynUnion", 1, "a `defineProperty` SETTER descriptor reached through a pinned key"],
+    ["src.dp.dpDynUnionGet", 1, "…and its GETTER"],
+  ]) {
+    check(`R240(a): the key's TYPE pins the property set — ${what} (executed: ${writes} real fs write(s))`,
+          has(fn, "Fs"), JSON.stringify(entry(report, fn) ?? (report.functions ?? []).map((e) => e.fn)));
+  }
+  // OVER-CHARGE CONTROLS. Absence is also what a BROKEN engine produces (§E3), so these are evidence
+  // only because the rows above, in the SAME tree and the same scan, are present and charged.
+  for (const [fn, why] of [
+    ["src.ctl.litPlain", "a literal key on a receiver with no accessors"],
+    ["src.ctl.dynPlain", "an unconstrained key on a receiver with no accessors — the row's own control"],
+    ["src.ctl.dynUnionPlain", "a PINNED key naming only data properties on a receiver with no accessors"],
+    ["src.ctl.compoundPlain", "…and its compound-assignment spelling"],
+    ["src.ctl.dataOnlyKey", "a PINNED key naming only DATA properties on a receiver that DOES declare effectful accessors — this is what separates resolving the type's names from charging every property"],
+  ]) {
+    check(`R240(a) OVER-CHARGE CONTROL: 0 real writes, nothing charged — ${why} (${fn})`,
+          noEffectCharged(report, fn), JSON.stringify(entry(report, fn) ?? null));
+  }
+  // THE GATE, on trees holding nothing else, so the exit code cannot be carried by a sibling row.
+  {
+    const sin = project({ "src/s.ts": `import * as fs from "node:fs";
+export class Session { #t = ""; set token(v: string) { fs.appendFileSync("/tmp/candor-r240", v); } set other(v: string) { this.#t = v; } }
+export function dynUnion(s: Session, k: "token" | "other") { s[k] = "x"; }`, "fs.pol": "deny Fs src.s.dynUnion\n" });
+    const st = scan(sin, "--policy", path.join(sin, "fs.pol")).r.status;
+    check("R240(a) GATE: `deny Fs src.s.dynUnion` fires (exit 1) on a tree holding only the caller — exit 0 at f58dc0f",
+          st === 1, `exit ${st}`);
+    fs.rmSync(sin, { recursive: true, force: true });
+    const ctl = project({ "src/s.ts": `export class Plain { a = 0; b = 0; }
+export function dynUnionPlain(p: Plain, k: "a" | "b") { p[k] = 1; }`, "fs.pol": "deny Fs\n" });
+    const st2 = scan(ctl, "--policy", path.join(ctl, "fs.pol")).r.status;
+    check("R240(a) GATE CONTROL: a pinned key over an accessor-less receiver gates clean (exit 0)", st2 === 0, `exit ${st2}`);
+    fs.rmSync(ctl, { recursive: true, force: true });
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
