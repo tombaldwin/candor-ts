@@ -7550,6 +7550,67 @@ function visitCalls(node) {
         if (kinds && kinds.has(kind)) {
           const owner = enclosing(node);
           if (owner) { fns.get(owner).direct.add("Unknown"); fns.get(owner).why.add(`reflect:defineProperty:dynamic-key`); } // dynamic-key descriptor install — metaprogramming, canonical `reflect:`
+          return;
+        }
+      }
+      // SOUNDNESS R240(b) — AN UNPINNABLE KEY ON A RECEIVER THAT DECLARES ACCESSORS.
+      // `hits === null` means the key names no finite property set (`k: string`), so R240(a)'s resolver
+      // had nothing to enumerate. Charging every declared accessor would be a guess about WHICH one runs;
+      // saying nothing certifies the caller pure, which is the cardinal sin. Disclose `Unknown` — the
+      // posture this same function already takes eleven lines up for a computed-key `defineProperty`
+      // descriptor, and the one §4 prescribes for an unresolvable target.
+      //
+      // GATED ON THE RECEIVER'S OWN DECLARATIONS, so it is not a blanket hedge on every `obj[k] = v`: a
+      // receiver type that declares NO accessor of this kind cannot invoke one, and stays ABSENT
+      // (executed: 0 real writes). Measured over 17 corpus entries — 5,535 unpinnable element accesses,
+      // of which 14 sit on a receiver declaring an accessor of the wanted kind.
+      if (hits === null) {
+        const rt = checker.getTypeAtLocation(node.expression);
+        // A SYMBOL-NAMED accessor (`get [Symbol.toStringTag]() {…}`) cannot be reached by a STRING key,
+        // and arming the disclosure on one is a fabrication, not a hedge. FOUND BY AUDITING THE CORPUS
+        // ROWS RATHER THAN THE COUNT: the first cut of this branch fired on all six flagged
+        // `AxiosHeaders` methods in axios 1.7.2 — every one because `AxiosHeaders` declares
+        // `get [Symbol.toStringTag]()`, which `self[key]` with `key: string` can never name. The
+        // exclusion is a DENYLIST of the PROVEN-unreachable: it fires only when EVERY declaration of
+        // the property has a computed name whose expression is symbol-TYPED, and it lifts entirely if
+        // the key's own type could hold a symbol (`PropertyKey`, `symbol`, `any`).
+        // BOTH DIRECTIONS, because the first cut had only one and the corpus caught it twice. A string
+        // key cannot name a symbol property, AND a symbol key cannot name a string one — the mirror was
+        // missing and produced the whole of this branch's measured price: mongoose 8's 18 rows traced to
+        // ONE direct source, `types/objectid.js:39` `ObjectId.prototype[objectIdSymbol] = true` with
+        // `objectIdSymbol: unique symbol`, armed by bson's STRING-named `get id()`. Same audit-boundary
+        // error one line over from the fix for it.
+        const keyT = ts.isElementAccessExpression(node) && node.argumentExpression
+          ? checker.getTypeAtLocation(node.argumentExpression) : null;
+        const arms = (t) => (t?.isUnion?.() ? t.types : t ? [t] : []);
+        const SYMBOLISH = ts.TypeFlags.ESSymbolLike, WILD = ts.TypeFlags.Any | ts.TypeFlags.Unknown;
+        const keyMayBeSymbol = !keyT || arms(keyT).some((t) => t.flags & (SYMBOLISH | WILD));
+        const keyMayBeString = !keyT || arms(keyT).some((t) => !(t.flags & SYMBOLISH));
+        const symbolNamed = (sym) => {
+          const ds = sym.declarations ?? [];
+          return ds.length > 0 && ds.every((d) => d.name && ts.isComputedPropertyName(d.name)
+            && !!(checker.getTypeAtLocation(d.name.expression)?.flags & SYMBOLISH));
+        };
+        for (const prop of (rt?.getProperties?.() ?? [])) {
+          if (!accessorsFromSym(prop, kind).length) continue;
+          if (symbolNamed(prop) ? !keyMayBeSymbol : !keyMayBeString) continue;
+          const owner = enclosing(node);
+          if (owner) { fns.get(owner).direct.add("Unknown"); fns.get(owner).why.add(`reflect:accessor:dynamic-key`); } // runtime-chosen property name — metaprogramming, canonical `reflect:`
+          return;
+        }
+        // …and the same question for a `defineProperty` DESCRIPTOR: the descriptor was installed under a
+        // LITERAL key (so `definePropDynamicKey` above does not fire) but is being reached through an
+        // unpinnable one, which is the mirror of that case and was silent for the mirror reason.
+        if (definePropAccessors.size > 0) {
+          const r0 = checker.getSymbolAtLocation(node.expression);
+          const r1 = r0 && (r0.flags & ts.SymbolFlags.Alias)
+            ? (() => { try { return checker.getAliasedSymbol(r0); } catch { return r0; } })() : r0;
+          const byKey = (r1 && definePropAccessors.get(r1)) || (r0 && definePropAccessors.get(r0));
+          if (byKey) for (const e of byKey.values()) if (e?.[kind]) {
+            const owner = enclosing(node);
+            if (owner) { fns.get(owner).direct.add("Unknown"); fns.get(owner).why.add(`reflect:accessor:dynamic-key`); }
+            break;
+          }
         }
       }
     };

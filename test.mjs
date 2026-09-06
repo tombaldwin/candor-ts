@@ -18055,6 +18055,136 @@ export function dynUnionPlain(p: Plain, k: "a" | "b") { p[k] = 1; }`, "fs.pol": 
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── SOUNDNESS R240(b): AN UNPINNABLE KEY ON A RECEIVER THAT DECLARES ACCESSORS ───────────────────
+//
+// The other half of R240. `k: string` names no finite property set, so R240(a)'s resolver has nothing
+// to enumerate; charging every declared accessor would be a guess about WHICH one runs, and saying
+// nothing certifies the caller pure — the cardinal sin. Disclose `Unknown`, which is the posture the
+// same function already took eleven lines up for a computed-key `defineProperty` descriptor.
+//
+// EXECUTED (node 22.12.0), real `fs.appendFileSync` calls counted by reading the log back:
+//   dynTyped   `s[k]="x"`, k: string, Session has setters      1 write / ABSENT at f58dc0f -> Unknown
+//   compound   `s[k]+="x"`                                     2 writes / ABSENT           -> Unknown
+//   getTyped   `return s[k]`                                   1 write / ABSENT            -> Unknown
+//   dpTyped    a defineProperty descriptor reached the same way 1 write / ABSENT            -> Unknown
+//
+// GATED ON THE RECEIVER'S OWN DECLARATIONS, not blanket — a receiver that declares no accessor of this
+// kind performs 0 writes and stays ABSENT. MEASURED PRICE over two corpora, 17 entries, 6,851 rows:
+// ADDED 0, REMOVED 0, rows that GAINED `Unknown` 0, `inferred` changes 0; 9 rows gained the
+// `reflect:accessor:dynamic-key` tag on an `Unknown` they already carried.
+//
+// AND THE SYMBOL GUARDS RUN BOTH WAYS, because the first cut had one direction and the corpus caught
+// the other. A STRING key cannot name a symbol-keyed property (axios 1.7.2: six `AxiosHeaders` rows
+// armed only by `get [Symbol.toStringTag]()`), and a SYMBOL key cannot name a string-keyed one
+// (mongoose 8: 18 rows traced to one site, `ObjectId.prototype[objectIdSymbol] = true`, armed by
+// bson's `get id()`). Both are pinned below with their positive twins, so the guard is a filter and
+// not an empty tree.
+//
+// THE HONEST LIMIT, pinned rather than described: `Unknown` is a DISCLOSURE, not an effect. A scoped
+// `deny Fs` over one of these callers still exits 0; `deny Unknown` and `deny Unknown[reflect]` fire.
+// And a receiver typed `any` — the norm in an `--allow-js` tree — declares no properties at all, so
+// this branch cannot see it. That half of the hole is still open.
+if (blk()) {
+  const d = project({
+    "src/a.ts": `import * as fs from "node:fs";
+export class Session {
+  id = 1; count = 0;
+  #t = ""; #o = "";
+  set token(v: string) { fs.appendFileSync("/tmp/candor-r240b", "set:token\\n"); this.#t = v; }
+  get token(): string { fs.appendFileSync("/tmp/candor-r240b", "get:token\\n"); return this.#t; }
+  set other(v: string) { this.#o = v; }
+}
+export function dynTyped(s: Session, k: string) { s[k] = "x"; }
+export function compoundDynTyped(s: Session, k: string) { s[k] += "x"; }
+export function getDynTyped(s: Session, k: string) { return s[k]; }`,
+    "src/dp.ts": `import * as fs from "node:fs";
+export const target: { hot?: string; cold?: string } = {};
+Object.defineProperty(target, "hot", {
+  set(v: string) { fs.appendFileSync("/tmp/candor-r240b", "dp:set:hot\\n"); },
+});
+export function dpDynTyped(k: string) { target[k] = "v"; }`,
+    // CONTROLS. No accessor of the wanted kind on the receiver => nothing to disclose.
+    "src/ctl.ts": `import { Session } from "./a.js";
+export class Plain { a = 0; b = 0; }
+export function dynPlain(p: Plain, k: string) { p[k] = 1; }
+export function compoundPlain(p: Plain, k: string) { p[k] += 1; }
+export function dataOnlyKey(s: Session, k: "id" | "count") { s[k] = 1; }
+export const other: { hot?: string; cold?: string } = {};
+export function dpOther(k: string) { other[k] = "v"; }`,
+    // THE SYMBOL GUARDS, both directions plus both positive twins. EXECUTED, real writes:
+    //   strKeyOverSym 0   strKeyOverSymGet 0   symKeyOverStr 0   symKeyOverSym 1   strKeyOverStr 1
+    "src/sym.ts": `import * as fs from "node:fs";
+export const TAG: unique symbol = Symbol("tag");
+export class OnlySym {
+  a = 1;
+  get [Symbol.toStringTag](): string { fs.appendFileSync("/tmp/candor-r240b", "get:tag\\n"); return "OnlySym"; }
+  set [TAG](v: number) { fs.appendFileSync("/tmp/candor-r240b", "set:TAG\\n"); }
+}
+export class OnlyStr {
+  [k: symbol]: unknown;
+  #v = 0;
+  set hot(v: number) { fs.appendFileSync("/tmp/candor-r240b", "set:hot\\n"); this.#v = v; }
+  get hot(): number { fs.appendFileSync("/tmp/candor-r240b", "get:hot\\n"); return this.#v; }
+}
+export function strKeyOverSym(o: OnlySym, k: string) { o[k] = 1; }
+export function strKeyOverSymGet(o: OnlySym, k: string) { return o[k]; }
+export function symKeyOverStr(o: OnlyStr, k: typeof TAG) { o[k] = 1; }
+export function symKeyOverSym(o: OnlySym, k: typeof TAG) { o[k] = 1; }
+export function strKeyOverStr(o: OnlyStr, k: string) { o[k] = 1; }`,
+  });
+  const { report } = scan(d);
+  const has = (fn, e) => (entry(report, fn)?.inferred ?? []).includes(e);
+  const why = (fn) => entry(report, fn)?.unknownWhy ?? [];
+  for (const [fn, what] of [
+    ["src.a.dynTyped", "`s[k] = v` with `k: string` on a receiver that declares setters (1 real write, ABSENT at f58dc0f)"],
+    ["src.a.compoundDynTyped", "`s[k] += v` — 2 real writes, both accessors"],
+    ["src.a.getDynTyped", "`return s[k]` — the getter direction"],
+    ["src.dp.dpDynTyped", "a `defineProperty` descriptor reached through an unpinnable key — the mirror of the computed-key install this file already discloses"],
+    ["src.sym.symKeyOverSym", "POSITIVE TWIN: a SYMBOL key over a symbol-named accessor DOES disclose (1 real write)"],
+    ["src.sym.strKeyOverStr", "POSITIVE TWIN: a STRING key over a string-named accessor DOES disclose (1 real write)"],
+  ]) {
+    check(`R240(b): an unpinnable key over a receiver WITH accessors discloses Unknown, never silent-pure — ${what}`,
+          has(fn, "Unknown"), JSON.stringify(entry(report, fn) ?? (report.functions ?? []).map((e) => e.fn)));
+    check(`R240(b): …and it names \`reflect:accessor:dynamic-key\`, so \`Unknown[reflect]\` can select it — ${fn}`,
+          why(fn).includes("reflect:accessor:dynamic-key"), JSON.stringify(why(fn)));
+  }
+  for (const [fn, what] of [
+    ["src.ctl.dynPlain", "a receiver that declares NO accessor — 0 real writes"],
+    ["src.ctl.compoundPlain", "…and its compound spelling"],
+    ["src.ctl.dataOnlyKey", "a PINNED key naming only data properties, on a receiver that does declare accessors"],
+    ["src.ctl.dpOther", "a same-shaped sibling object with no descriptor of its own — the receiver join must not spread the disclosure"],
+    ["src.sym.strKeyOverSym", "SYMBOL GUARD: a STRING key cannot name a symbol-keyed accessor (the axios `[Symbol.toStringTag]` shape) — 0 real writes"],
+    ["src.sym.strKeyOverSymGet", "…and its read direction"],
+    ["src.sym.symKeyOverStr", "MIRROR SYMBOL GUARD: a SYMBOL key cannot name a string-keyed accessor (the mongoose `ObjectId.prototype[objectIdSymbol]` shape) — 0 real writes"],
+  ]) {
+    check(`R240(b) OVER-CHARGE CONTROL: nothing disclosed — ${what} (${fn})`,
+          noEffectCharged(report, fn), JSON.stringify(entry(report, fn) ?? null));
+  }
+  // THE GATE, on its own tree, INCLUDING the limit: `Unknown` is a disclosure, not an effect.
+  {
+    const g = project({ "src/a.ts": `import * as fs from "node:fs";
+export class Session { #t = ""; set token(v: string) { fs.appendFileSync("/tmp/candor-r240b", v); } }
+export function dynTyped(s: Session, k: string) { s[k] = "x"; }`,
+      "unk.pol": "deny Unknown src.a.dynTyped\n",
+      "refl.pol": "deny Unknown[reflect] src.a.dynTyped\n",
+      "disp.pol": "deny Unknown[dispatch] src.a.dynTyped\n",
+      "fs.pol": "deny Fs src.a.dynTyped\n" });
+    const ex = (f) => scan(g, "--policy", path.join(g, f)).r.status;
+    check("R240(b) GATE: `deny Unknown src.a.dynTyped` fires (exit 1) — exit 0 at f58dc0f", ex("unk.pol") === 1, `exit ${ex("unk.pol")}`);
+    check("R240(b) GATE: `deny Unknown[reflect]` selects it — the reason class is what a policy reads", ex("refl.pol") === 1, `exit ${ex("refl.pol")}`);
+    check("R240(b) GATE CONTROL: `deny Unknown[dispatch]` does NOT — the class is `reflect`, and a narrowed policy must stay narrow", ex("disp.pol") === 0, `exit ${ex("disp.pol")}`);
+    check("R240(b) LIMIT, pinned rather than described: `deny Fs` still exits 0 — this posture discloses that an accessor MIGHT run, it does not claim the accessor's effects",
+          ex("fs.pol") === 0, `exit ${ex("fs.pol")}`);
+    fs.rmSync(g, { recursive: true, force: true });
+    const c = project({ "src/a.ts": `export class Plain { a = 0; }
+export function dynPlain(p: Plain, k: string) { p[k] = 1; }`, "unk.pol": "deny Unknown\n" });
+    const st = scan(c, "--policy", path.join(c, "unk.pol")).r.status;
+    check("R240(b) GATE CONTROL: an accessor-less receiver gates clean under `deny Unknown` (exit 0)", st === 0, `exit ${st}`);
+    fs.rmSync(c, { recursive: true, force: true });
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

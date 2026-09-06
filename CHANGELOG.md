@@ -8,6 +8,51 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R240(b)) — AN UNPINNABLE KEY ON A RECEIVER THAT DECLARES
+  ACCESSORS NOW DISCLOSES `Unknown` INSTEAD OF CERTIFYING THE CALLER PURE.** (Row id pending; the
+  coordinator files it.) `k: string` names no finite property set, so R240(a)'s resolver has nothing
+  to enumerate. Charging every declared accessor would guess which one runs; saying nothing is the
+  cardinal sin. `Unknown` is the posture this same function already took eleven lines up for a
+  computed-key `defineProperty` descriptor.
+
+  EXECUTED (node 22.12.0), real writes / f58dc0f -> now:
+
+      s[k]="x"  k: string, Session has setters       1 / ABSENT -> ["Unknown"]
+      s[k]+="x"                                      2 / ABSENT -> ["Unknown"]
+      return s[k]                                    1 / ABSENT -> ["Unknown"]
+      a defineProperty descriptor reached the same way 1 / ABSENT -> ["Unknown"]
+
+  GATED ON THE RECEIVER'S OWN DECLARATIONS, so it is not a blanket hedge on every `obj[k] = v`: a
+  receiver declaring no accessor of this kind performs 0 real writes and stays ABSENT.
+
+  MEASURED PRICE, two corpora, 17 entries, 6,851 rows, arm A = the R240(a) commit and arm B this one,
+  everything else held constant:
+
+      TS SOURCE  1,275 rows   ADDED 0  REMOVED 0  CHANGED(wide) 0  GAINED-Unknown 0
+      NPM TREE   5,576 rows   ADDED 0  REMOVED 0  CHANGED(wide) 9  GAINED-Unknown 0
+
+  Nine rows gained the `reflect:accessor:dynamic-key` tag on an `Unknown` they already carried; no row
+  gained `Unknown`, no row lost anything, no `inferred` moved. It is not a flood.
+
+  THE SYMBOL GUARDS RUN BOTH WAYS, AND THE CORPUS IS WHY. A string key cannot name a symbol-keyed
+  property and a symbol key cannot name a string-keyed one. The first cut had only the first direction
+  and priced at 0.32%; auditing those ROWS rather than the count found the mirror:
+
+      axios 1.7.2     6 `AxiosHeaders` rows armed only by `get [Symbol.toStringTag]()`, reached as
+                      `self[key]` with `key: string` — unreachable, a fabrication.
+      mongoose 8      all 18 rows traced to ONE direct source, `types/objectid.js:39`
+                      `ObjectId.prototype[objectIdSymbol] = true` with `objectIdSymbol: unique symbol`,
+                      armed by bson's STRING-named `get id()` — also unreachable.
+
+  With both guards the price fell to the numbers above. Both directions are pinned with their positive
+  twins, and degrading either one turns its control red.
+
+  THE LIMITS, pinned as tests rather than described: `Unknown` is a DISCLOSURE, not an effect — a
+  scoped `deny Fs` over one of these callers still exits 0, while `deny Unknown` and
+  `deny Unknown[reflect]` fire and `deny Unknown[dispatch]` does not. And a receiver typed `any` — the
+  norm in an `--allow-js` tree — declares no properties at all, so this branch cannot see it. That half
+  of R240 is still open.
+
 - **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R240(a)) — `s[k] = v` NEVER RESOLVED A SETTER, INCLUDING WHEN
   THE KEY'S TYPE PINNED IT TO EXACTLY THE PROPERTIES IT COULD NAME.** (Row id pending; the coordinator
   files it.) `accessorAt` resolved only a syntactic string literal, under a comment asserting that a
