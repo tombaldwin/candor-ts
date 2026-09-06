@@ -4453,6 +4453,29 @@ function recordAccessorHit(owner, hit, label) {
   }
 }
 
+// SOUNDNESS R247 — ONE AUTHORITY for "could a runtime key of this TYPE ever name this property?".
+// Extracted from R240(b)'s unpinnable-key branch, which is where the question was first answered and
+// where the corpus proved it has to be asked BOTH ways: a STRING key cannot name a symbol-keyed
+// accessor (axios 1.7.2's six `AxiosHeaders` rows, armed only by `get [Symbol.toStringTag]()`), and a
+// SYMBOL key cannot name a string-keyed one (mongoose 8's 18 rows, armed by bson's `get id()`).
+// R247's convergence needs the identical test on the `Reflect.set(t, k, v)` side, and a second private
+// copy is how the two spellings drift apart again — which is the entire subject of the row.
+//
+// A DENYLIST OF THE PROVEN-UNREACHABLE, not an allowlist: it excludes only when EVERY declaration of
+// the property has a computed name whose expression is symbol-TYPED, and it lifts entirely when the
+// key's own type could hold the other kind (`PropertyKey`, `symbol`, `any`, `unknown`) or when there is
+// no key expression to read at all (`keyT == null` → every property stays reachable).
+function keyCouldNameAccessor(propSym, keyT) {
+  const arms = (t) => (t?.isUnion?.() ? t.types : t ? [t] : []);
+  const SYMBOLISH = ts.TypeFlags.ESSymbolLike, WILD = ts.TypeFlags.Any | ts.TypeFlags.Unknown;
+  const keyMayBeSymbol = !keyT || arms(keyT).some((t) => t.flags & (SYMBOLISH | WILD));
+  const keyMayBeString = !keyT || arms(keyT).some((t) => !(t.flags & SYMBOLISH));
+  const ds = propSym?.declarations ?? [];
+  const symbolNamed = ds.length > 0 && ds.every((d) => d.name && ts.isComputedPropertyName(d.name)
+    && !!(checker.getTypeAtLocation(d.name.expression)?.flags & SYMBOLISH));
+  return symbolNamed ? keyMayBeSymbol : keyMayBeString;
+}
+
 // Object PROPERTY-ENUMERATION (`{...obj}`, `const {...rest} = obj`, `Object.assign(t, obj)`): copying an
 // object's own enumerable props INVOKES each source getter — the whole-object analog of `obj.prop`,
 // invisible to the property-access arm (no PropertyAccess node per key). Edge `owner` to every LOCAL
@@ -4624,17 +4647,70 @@ const provenCopiedKeys = (sources) => {
   }
   return keys;
 };
-function enumerateTargetSetters(owner, targetExpr, keys) {
+//
+// SOUNDNESS R247 — WHERE THE KEY SET IS UNPROVABLE, DISCLOSE `Unknown`; DO NOT CHARGE EVERY SETTER.
+// The paragraph above ("every setter the target declares is charged unless the copied key set can be
+// PROVEN and excludes it") described what this branch did until R247, and it made ONE ECMAScript
+// operation answer two ways: `Reflect.set(s, k, v)` with a runtime key charged `['Fs']` here, while
+// `s[k] = v` — the same property write, the same unpinnable key — disclosed `['Unknown']` under
+// R240(b) a few hundred lines down. A scoped `deny Fs` caught one and not the other.
+//
+// The two directions are not symmetric and that is what decides it: charging every setter is
+// FABRICATION (it claims an effect that a run may not perform), disclosing `Unknown` is honest about
+// exactly what is not known. The family's posture is to under-report rather than fabricate, and R240(b)
+// had already spent that posture on the other spelling.
+//
+// GROUND TRUTH EXECUTED, node 22.12.0, counting real `fs.writeFileSync` calls on a class declaring TWO
+// setters (`token`, `other`) and one data property (`plain`):
+//     Reflect.set(s, k, v)      k="token" 1   k="other" 1   k="plain" 0      ← at most ONE, never both
+//     Object.assign(s, src)     src={plain}  0   {plain,token} 1   {plain,token,other} 2
+//     Reflect.set(s,"token",v)  1   Object.assign(s,{token:1}) 1   Object.assign(s,{plain:1}) 0
+// So the invoked set is an UNKNOWN SUBSET of the declared setters in both cases — including the empty
+// subset, which is the input the old charge fabricated on.
+//
+// THE PROVABLE BRANCH IS UNTOUCHED: a fresh object literal at the call site, or a string-literal
+// `Reflect.set` key, still resolves to the named setters and still propagates their effects through an
+// EDGE. Only `keys === null` changed. WITHDRAWAL PRICED FIRST, over 14,149 rows (1,623 TS-source +
+// 12,526 npm): 316 sites reach this branch and 0 rows lose an effect — every effect it charged is
+// either pure or already carried by another path.
+//
+// TWO REASON TAGS, deliberately not one. `Reflect.set` is the SAME mechanism as `s[k] = v` — one
+// runtime-chosen key, at most one setter — so it emits R240(b)'s own `reflect:accessor:dynamic-key`,
+// and that identity IS the convergence this row asked for. `Object.assign` is a different mechanism
+// with a different bound (an unprovable copied key SET; 0..n setters, measured 2 above), so it emits
+// `reflect:accessor:dynamic-keyset`. Both sit in the `reflect` class, so `deny Unknown[reflect]`
+// selects both and no policy has to know the difference.
+//
+// `keyType` is the type of the runtime key where there IS one (`Reflect.set`'s second argument), so the
+// two-way symbol/string denylist can rule out a provably-unreachable accessor exactly as R240(b) does.
+// `Object.assign` passes null — it copies own enumerable STRING **and SYMBOL** keys, so no accessor on
+// the target is provably out of reach and the guard must lift entirely.
+function enumerateTargetSetters(owner, targetExpr, keys, unprovable = {}) {
   if (!owner || !targetExpr) return;
   const t = checker.getTypeAtLocation(targetExpr);
   if (!t || !t.getProperties) return;
+  // `!keys`, not `keys === null`: a Set is always truthy, so this is exactly "the key set is not
+  // provable" — and it keeps the tolerance the old `keys && !keys.has(…)` line had for a caller that
+  // passes nothing. `keys.has` below is now unguarded, so a future third call site omitting the
+  // argument would throw rather than take this branch.
+  if (!keys) {
+    for (const p of t.getProperties()) {
+      if (!accessorsFromSym(p, "set").length) continue;
+      if (!keyCouldNameAccessor(p, unprovable.keyType ?? null)) continue;
+      const rec = fns.get(owner);
+      rec.direct.add("Unknown");
+      rec.why.add(`reflect:accessor:${unprovable.why ?? "dynamic-key"}`);
+      return;   // one disclosure per site — WHICH setter runs is the thing not known
+    }
+    return;     // a target declaring no reachable setter discloses nothing (0 real invocations)
+  }
   for (const p of t.getProperties()) {
     // NO `classBodiedGetter`-style exclusion here, and the asymmetry is the point rather than an
     // oversight: R115 excluded a class-bodied GETTER because a prototype accessor is non-enumerable and
     // therefore never COPIED. A prototype SETTER is the opposite — it is found by the assignment's
     // property lookup and IS invoked. Executed above: the `Sink` setter lives on `Sink.prototype` and
     // runs once. Excluding it here would be R115's reasoning applied to the direction it does not hold.
-    if (keys && !keys.has(p.getName())) continue;              // proven not written by this copy
+    if (!keys.has(p.getName())) continue;                      // proven not written by this copy
     for (const hit of accessorsFromSym(p, "set")) recordAccessorHit(owner, hit, p.getName());
   }
 }
@@ -7475,7 +7551,8 @@ function visitCalls(node) {
       // pre-existing and is REPORTED rather than silently widened here (it is a fabrication-direction
       // question of its own), but the charge this fix ADDS does not inherit the hole.
       if (globalBuiltinCallee(callee) === "Object.assign")
-        enumerateTargetSetters(owner, (node.arguments ?? [])[0], provenCopiedKeys(sources));
+        enumerateTargetSetters(owner, (node.arguments ?? [])[0], provenCopiedKeys(sources),
+                               { why: "dynamic-keyset", keyType: null });   // R247 — copies string AND symbol keys
     }
     // R116 §9 — WIDENED PAST THE ROW'S OWN TRIGGER, by grepping the MECHANISM ("a builtin that writes a
     // property into a caller-supplied target") rather than the one call the row named. `Reflect.set(t, k,
@@ -7493,8 +7570,11 @@ function visitCalls(node) {
     // here, and this new arm does not inherit the hole.
     if (globalBuiltinCallee(callee) === "Reflect.set") {
       const k = (node.arguments ?? [])[1];
+      // R247 — an unprovable key here answers with R240(b)'s OWN tag, because `Reflect.set(t, k, v)` and
+      // `t[k] = v` are one operation: one runtime key, at most one setter (executed above).
       enumerateTargetSetters(enclosing(node), (node.arguments ?? [])[0],
-                             k && ts.isStringLiteralLike(k) ? new Set([k.text]) : null);
+                             k && ts.isStringLiteralLike(k) ? new Set([k.text]) : null,
+                             { why: "dynamic-key", keyType: k ? checker.getTypeAtLocation(k) : null });
     }
   }
   // GET/SET ACCESSOR access (the silent-pure-accessor fix): a property read that resolves to a
@@ -7580,20 +7660,14 @@ function visitCalls(node) {
         // ONE direct source, `types/objectid.js:39` `ObjectId.prototype[objectIdSymbol] = true` with
         // `objectIdSymbol: unique symbol`, armed by bson's STRING-named `get id()`. Same audit-boundary
         // error one line over from the fix for it.
+        // R247 — the two-way symbol/string test now lives in `keyCouldNameAccessor`, ONE authority shared
+        // with `enumerateTargetSetters`'s `Reflect.set` arm. The behaviour here is unchanged (pinned by
+        // the four symbol rows below); what changed is that the other spelling now asks the same code.
         const keyT = ts.isElementAccessExpression(node) && node.argumentExpression
           ? checker.getTypeAtLocation(node.argumentExpression) : null;
-        const arms = (t) => (t?.isUnion?.() ? t.types : t ? [t] : []);
-        const SYMBOLISH = ts.TypeFlags.ESSymbolLike, WILD = ts.TypeFlags.Any | ts.TypeFlags.Unknown;
-        const keyMayBeSymbol = !keyT || arms(keyT).some((t) => t.flags & (SYMBOLISH | WILD));
-        const keyMayBeString = !keyT || arms(keyT).some((t) => !(t.flags & SYMBOLISH));
-        const symbolNamed = (sym) => {
-          const ds = sym.declarations ?? [];
-          return ds.length > 0 && ds.every((d) => d.name && ts.isComputedPropertyName(d.name)
-            && !!(checker.getTypeAtLocation(d.name.expression)?.flags & SYMBOLISH));
-        };
         for (const prop of (rt?.getProperties?.() ?? [])) {
           if (!accessorsFromSym(prop, kind).length) continue;
-          if (symbolNamed(prop) ? !keyMayBeSymbol : !keyMayBeString) continue;
+          if (!keyCouldNameAccessor(prop, keyT)) continue;
           const owner = enclosing(node);
           if (owner) { fns.get(owner).direct.add("Unknown"); fns.get(owner).why.add(`reflect:accessor:dynamic-key`); } // runtime-chosen property name — metaprogramming, canonical `reflect:`
           return;

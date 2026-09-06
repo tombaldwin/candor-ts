@@ -8,6 +8,75 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CONSISTENCY FIX (SOUNDNESS R247) — WHERE THE COPIED KEY SET IS UNPROVABLE,
+  `Object.assign`/`Reflect.set` NOW DISCLOSE `Unknown` INSTEAD OF CHARGING EVERY SETTER ON THE
+  TARGET.** (Row id pending; the coordinator files it.) One ECMAScript operation answered two ways:
+  R116's `enumerateTargetSetters` charged `['Fs']` for `Reflect.set(s, k, v)` with a runtime key,
+  while R240(b) disclosed `['Unknown']` for `s[k] = v` — the same property write, the same unpinnable
+  key. A scoped `deny Fs` caught one and not the other.
+
+  Charging every setter FABRICATES (a run may invoke none of them); disclosing is honest about what is
+  not known, and the family's posture is to under-report rather than fabricate. **The provable half is
+  untouched:** a fresh object literal at the call site, or a string-literal `Reflect.set` key, still
+  resolves to the named setters and still propagates their effects through an edge, so `deny Fs` on
+  those callers still fires.
+
+  GROUND TRUTH EXECUTED (node 22.12.0), real `fs.writeFileSync` calls, class with setters
+  `token`/`other` and data property `plain`:
+
+      Reflect.set(s, k, v)      k="token" 1   k="other" 1   k="plain" 0    at most ONE, never both
+      Object.assign(s, src)     {plain} 0   {plain,token} 1   {plain,token,other} 2
+      s[k] = v                  k="token" 1                                 R240(b)'s spelling
+      Reflect.set(s,"token",v)  1   Object.assign(s,{token:1}) 1   Object.assign(s,{plain:1}) 0
+
+  The invoked set is an unknown SUBSET of the declared setters, and the empty subset is reachable —
+  the input the old charge fabricated on.
+
+  GATE CONSEQUENCE, measured on isolated one-caller trees (0341b0f -> now):
+
+      spelling          deny Fs   deny Unknown   Unknown[reflect]   Unknown[dispatch]   pure
+      Reflect.set        1 -> 0      0 -> 1           0 -> 1              0 -> 0        1 -> 0
+      Object.assign      1 -> 0      0 -> 1           0 -> 1              0 -> 0        1 -> 0
+      s[k] = v           0 -> 0      1 -> 1           1 -> 1              0 -> 0        0 -> 0
+
+  The three rows are now identical, which is the row's whole claim. (`pure` forbids EFFECTS and
+  deliberately not the §4 `Unknown` — policy.mjs ~:1139.)
+
+  TWO REASON TAGS, and the split is measured, not stylistic. `Reflect.set` is R240(b)'s mechanism —
+  one runtime key, at most one setter — so it emits R240(b)'s own `reflect:accessor:dynamic-key`.
+  `Object.assign` has a different bound (an unprovable key SET; 0..n setters, 2 measured above) and
+  emits `reflect:accessor:dynamic-keyset`. Both are `reflect`, so `deny Unknown[reflect]` selects both.
+
+  THE SYMBOL DENYLIST APPLIES TO ONE OF THEM ONLY, EXECUTED BOTH WAYS on a class whose only setter is
+  `set [TAG](v)` with `TAG: unique symbol` — `Reflect.set(o, k: string)` 0 invocations,
+  `Reflect.set(o, k: typeof TAG)` 1, `Object.assign(o, {a})` 0, `Object.assign(o, {a, [TAG]: 9})` 1.
+  `Object.assign` copies own enumerable STRING **and SYMBOL** keys, so nothing on the target is
+  provably out of reach and the guard must lift there; sharing it blindly would have made a real setter
+  invocation silent. R240(b)'s two-way test now lives in one helper, `keyCouldNameAccessor`, that both
+  sites and R240(b) itself call — two paths answering one question is how these spellings drifted apart
+  in the first place.
+
+  A/B, WIDE KEY (every field, not just `inferred`), 28 entries / 20,024 rows over two corpora — the
+  harness's 7-project TypeScript roster and 20 npm packages (`--allow-js`; `execa` scans to 0 rows
+  without it and was re-run with it rather than counted, per R242):
+
+      ADDED 0   REMOVED 0   CHANGED 2   rows losing an inferred effect 0
+
+  **AND THAT ZERO IS SAFETY-ONLY, said here rather than discovered later.** The changed branch is
+  entered **528 times** across those 28 entries and the target declares a reachable setter **0** of
+  them — instrumented, not inferred: a counter in the branch, and a counter on the pre-image's charge
+  site. So the corpus proves the change is quiet; it does not price the withdrawal.
+
+  THE RECALL HARNESS IS WHERE IT PRICES. got 14.4.1's own `Options` class (~48 real setters,
+  unmodified) with a three-line consumer that applies a user options bag to it:
+
+      applyOpts  Object.assign(o, userOpts)   PRE 48 fabricated call edges -> POST Unknown[dynamic-keyset]
+      applyOne   Reflect.set(o, k, v)         PRE 48 fabricated call edges -> POST Unknown[dynamic-key]
+      applyLiteral Object.assign(o, {url})    PRE = POST, exactly one edge: `Options.set url`
+
+  96 fabricated call-graph edges withdrawn over one real class, 0 effects lost, and the provable
+  control keeps its single named edge — which is what distinguishes this from a blanket withdrawal.
+
 - **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R240(b)) — AN UNPINNABLE KEY ON A RECEIVER THAT DECLARES
   ACCESSORS NOW DISCLOSES `Unknown` INSTEAD OF CERTIFYING THE CALLER PURE.** (Row id pending; the
   coordinator files it.) `k: string` names no finite property set, so R240(a)'s resolver has nothing

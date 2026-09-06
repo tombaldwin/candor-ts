@@ -17417,10 +17417,20 @@ const Object = { assign(t: unknown, ..._s: unknown[]) { return t; } };
 export function shadowReflect() { const s = new Sink3(); Reflect.set(s, "token", 1); }
 export function shadowObject() { const s = new Sink3(); Object.assign(s, { token: 1 }); }`,
     "fs.pol": "deny Fs\n",
-    "callers.pol": ["viaAssign", "viaAssignTwoSrc", "viaAssignParam", "viaAssignComputed",
-                    "viaAssignSpreadSrc", "viaReflectSetLit", "viaReflectSetDyn"]
+    // R247 SPLIT THE GATE, and the split IS the row: the four PROVABLE spellings still gate on `Fs`
+    // (their setters' effects still propagate through an edge); the four UNPROVABLE ones now gate on
+    // `Unknown` and no longer on `Fs`. Both halves are asserted, in both directions, below.
+    "callers.pol": ["viaAssign", "viaAssignTwoSrc", "viaReflectSetLit"]
       .map((f) => `deny Fs src.sin.${f}`).join("\n")
       + "\ndeny Fs src.inherit.viaAssignInherited\n",
+    "unprovfs.pol": ["viaAssignParam", "viaAssignComputed", "viaAssignSpreadSrc", "viaReflectSetDyn"]
+      .map((f) => `deny Fs src.sin.${f}`).join("\n") + "\n",
+    "unprovunk.pol": ["viaAssignParam", "viaAssignComputed", "viaAssignSpreadSrc", "viaReflectSetDyn"]
+      .map((f) => `deny Unknown src.sin.${f}`).join("\n") + "\n",
+    "unprovrefl.pol": ["viaAssignParam", "viaAssignComputed", "viaAssignSpreadSrc", "viaReflectSetDyn"]
+      .map((f) => `deny Unknown[reflect] src.sin.${f}`).join("\n") + "\n",
+    "unprovdisp.pol": ["viaAssignParam", "viaAssignComputed", "viaAssignSpreadSrc", "viaReflectSetDyn"]
+      .map((f) => `deny Unknown[dispatch] src.sin.${f}`).join("\n") + "\n",
     "unk.pol": "deny Unknown\n",
     "scopedpure.pol": "pure src.pure\n",
     // NOT `pure src.precise`: that scope also selects `src.precise.Sink2.set token`, the setter's OWN
@@ -17435,15 +17445,25 @@ export function shadowObject() { const s = new Sink3(); Object.assign(s, { token
   for (const [fn, what] of [
     ["src.sin.viaAssign", "`Object.assign(s, { token: 1 })` — R116's own trigger, EXECUTED: the setter runs and the file is written"],
     ["src.sin.viaAssignTwoSrc", "…with two sources, one of which carries the key"],
-    ["src.sin.viaAssignParam", "…with a PARAMETER source, whose runtime key set the annotation cannot bound"],
-    ["src.sin.viaAssignComputed", "…with a computed key `{ [k]: 1 }` — unprovable, so every target setter is charged"],
-    ["src.sin.viaAssignSpreadSrc", "…with a spread source `{ ...o }` — likewise unprovable"],
     ["src.sin.viaReflectSetLit", "`Reflect.set(s, \"token\", 1)` — the WIDENED find, same mechanism, one builtin over"],
-    ["src.sin.viaReflectSetDyn", "`Reflect.set(s, k, 1)` with a runtime key"],
     ["src.inherit.viaAssignInherited", "a setter INHERITED from a base class — a prototype setter is found by the assignment lookup and IS invoked, which is where R115's getter reasoning does NOT transfer"],
   ]) {
     check(`R116: charges Fs, not silent-pure — ${what}`, has(fn, "Fs"),
           JSON.stringify(eff(fn) ?? (report.functions ?? []).map((x) => x.fn)));
+  }
+  // SOUNDNESS R247 — the four UNPROVABLE-key spellings that used to sit in the list above. They charged
+  // `Fs` (every setter the target declares) until R247 and now DISCLOSE `Unknown`, which is what the
+  // same operation written `s[k] = v` has answered since R240(b). The provable four above are untouched.
+  for (const [fn, why, what] of [
+    ["src.sin.viaAssignParam", "reflect:accessor:dynamic-keyset", "…with a PARAMETER source, whose runtime key set the annotation cannot bound"],
+    ["src.sin.viaAssignComputed", "reflect:accessor:dynamic-keyset", "…with a computed key `{ [k]: 1 }`"],
+    ["src.sin.viaAssignSpreadSrc", "reflect:accessor:dynamic-keyset", "…with a spread source `{ ...o }`"],
+    ["src.sin.viaReflectSetDyn", "reflect:accessor:dynamic-key", "`Reflect.set(s, k, 1)` with a runtime key — R240(b)'s OWN tag, because it is R240(b)'s operation"],
+  ]) {
+    check(`R247: an UNPROVABLE key set discloses Unknown instead of charging every setter — ${what}`,
+          has(fn, "Unknown") && !has(fn, "Fs"), JSON.stringify(eff(fn) ?? null));
+    check(`R247: …and names \`${why}\`, so \`deny Unknown[reflect]\` selects it — ${fn}`,
+          (eff(fn)?.unknownWhy ?? []).includes(why), JSON.stringify(eff(fn)?.unknownWhy ?? null));
   }
   check("R116 DISCRIMINATOR: the named-write spelling the engine ALREADY answered right is unchanged — a fix that reached the Object.assign rows by widening `s.token = 2` into a hedge would look identical above",
         has("src.sin.viaNamedWrite", "Fs") && !has("src.sin.viaNamedWrite", "Unknown"),
@@ -17494,8 +17514,19 @@ export function shadowObject() { const s = new Sink3(); Object.assign(s, { token
     //       deny Fs src.only     (file scope)                      1         1     ← cannot discriminate
     //       deny Fs src.only.go  (the CALLER)                      0         1     ← the measurement
     //       pure src.only.go                                       0         1     ← the measurement
-    check("R116 GATE: `deny Fs` scoped to the CALLER fires for every spelling (exit 1) — exit 0 at HEAD. The blanket and file-scoped forms fire either way through the setter's own unit, so they are not asserted here",
+    check("R116 GATE: `deny Fs` scoped to the CALLER fires for every PROVABLE spelling (exit 1) — exit 0 at HEAD. The blanket and file-scoped forms fire either way through the setter's own unit, so they are not asserted here",
           ex("callers.pol") === 1, `exit ${ex("callers.pol")}`);
+    // R247 THE GATE CONSEQUENCE, stated as the trade it is rather than described. Over the four
+    // unprovable callers: `deny Fs` STOPS firing (the withdrawn fabrication) and `deny Unknown` STARTS
+    // (the disclosure that replaces it). Both rows measured 1 -> 0 and 0 -> 1 by stashing scan.mjs.
+    check("R247 GATE: `deny Fs` over the four UNPROVABLE callers no longer fires (exit 0) — exit 1 at 0341b0f. This is the withdrawal, and it is the half that costs something",
+          ex("unprovfs.pol") === 0, `exit ${ex("unprovfs.pol")}`);
+    check("R247 GATE: `deny Unknown` over the same four FIRES (exit 1) — exit 0 at 0341b0f. A converged `Reflect.set` is not a silent one",
+          ex("unprovunk.pol") === 1, `exit ${ex("unprovunk.pol")}`);
+    check("R247 GATE: `deny Unknown[reflect]` selects them — the reason class is what a policy reads",
+          ex("unprovrefl.pol") === 1, `exit ${ex("unprovrefl.pol")}`);
+    check("R247 GATE CONTROL: `deny Unknown[dispatch]` does NOT — a narrowed policy must stay narrow",
+          ex("unprovdisp.pol") === 0, `exit ${ex("unprovdisp.pol")}`);
     check("R116 GATE CONTROL: `pure src.pure` stays exit 0 — the over-charge controls really do gate clean, not merely report empty",
           ex("scopedpure.pol") === 0, `exit ${ex("scopedpure.pol")}`);
     check("R116 GATE CONTROL: `deny Fs` scoped to the four PRECISION callers stays exit 0 — a blanket hedge over every target setter would fire here",
@@ -18183,6 +18214,161 @@ export function dynPlain(p: Plain, k: string) { p[k] = 1; }`, "unk.pol": "deny U
     fs.rmSync(c, { recursive: true, force: true });
   }
   fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── SOUNDNESS R247: ONE ECMAScript OPERATION, ONE ANSWER ─────────────────────────────────────────
+//
+// R116 charged EVERY setter the target declares when the copied key set was unprovable; R240(b)
+// DISCLOSES `Unknown` for the same unpinnable key written `s[k] = v`. So `Reflect.set(s, k, v)` and
+// `s[k] = v` — the same property write, spelled two ways — answered differently, and a scoped
+// `deny Fs` caught one and not the other. R247 converges on the DISCLOSURE side: charging every setter
+// FABRICATES (a run may invoke none of them), disclosing is honest about what is not known, and the
+// family's posture is to under-report rather than fabricate.
+//
+// GROUND TRUTH EXECUTED, node 22.12.0, counting real `fs.writeFileSync` calls. A class declaring two
+// setters (`token`, `other`) and a data property (`plain`):
+//     Reflect.set(s, k, v)     k="token" 1   k="other" 1   k="plain" 0     ← at most ONE, never both
+//     Object.assign(s, src)    src={plain} 0   {plain,token} 1   {plain,token,other} 2
+//     s[k] = v                 k="token" 1                                  ← R240(b)'s spelling
+//     Reflect.set(s,"token",v) 1   Object.assign(s,{token:1}) 1   Object.assign(s,{plain:1}) 0
+// The invoked set is an UNKNOWN SUBSET of the declared setters, and the EMPTY subset is reachable —
+// which is the input the old charge fabricated on.
+//
+// THE PROVABLE HALF IS UNTOUCHED and is pinned in the R116 block above: a fresh object literal, or a
+// string-literal `Reflect.set` key, still resolves to the named setters and still propagates their
+// effects through an EDGE, so `deny Fs` on those callers still fires.
+//
+// THE WITHDRAWAL WAS PRICED BEFORE IT WAS MADE, over 14,149 rows (1,623 TS-source + 12,526 npm):
+// 316 sites reach the changed branch and 0 rows lose an effect.
+//
+// TWO TAGS, and the asymmetry is MEASURED rather than assumed. `Reflect.set` names one runtime key and
+// invokes at most one setter, exactly like `s[k] = v`, so it emits R240(b)'s own
+// `reflect:accessor:dynamic-key` — that identity is the convergence. `Object.assign` has a different
+// bound (an unprovable key SET; 0..n setters, 2 measured above) so it emits
+// `reflect:accessor:dynamic-keyset`. Both are in the `reflect` class, so no policy has to know.
+//
+// AND THE SYMBOL DENYLIST APPLIES TO ONE OF THEM ONLY, EXECUTED BOTH WAYS on a class whose ONLY setter
+// is `set [TAG](v)` with `TAG: unique symbol`:
+//     Reflect.set(o, k: string)  0 invocations   Reflect.set(o, k: typeof TAG)          1
+//     Object.assign(o, {a})      0               Object.assign(o, {a, [TAG]: 9})        1
+// `Object.assign` copies own enumerable STRING **and SYMBOL** keys, so no setter on the target is
+// provably out of reach and the guard must LIFT — applying R240(b)'s string-key exclusion there would
+// have made `assignParamSrc` silent over a real setter invocation. `Reflect.set` reads one typed key,
+// so the exclusion holds. One helper, `keyCouldNameAccessor`, answers for both call sites and for
+// R240(b) itself (§G: two paths computing one fact is how the spellings drifted in the first place).
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: false,
+                         types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+      include: ["src"],
+    }),
+    // THE CONVERGENCE ITSELF: three spellings of one operation, in one file, over one receiver.
+    "src/conv.ts": `import * as fs from "fs";
+export class Sink {
+  set token(x: number) { fs.writeFileSync("/tmp/candor-r247", String(x)); }
+  set other(x: number) { fs.writeFileSync("/tmp/candor-r247b", String(x)); }
+  plain = 0;
+}
+export function viaElement(s: Sink, k: string) { s[k] = 1; }
+export function viaReflect(s: Sink, k: string) { Reflect.set(s, k, 1); }
+export function viaAssign(s: Sink, src: { plain: number }) { Object.assign(s, src); }`,
+    // OVER-CHARGE CONTROLS. Every one drives the SAME unprovable branch; what differs is whether a
+    // setter is reachable at all. Executed: 0 real invocations for each.
+    "src/ctl.ts": `export class Plain { a = 0; b = 0; }
+export function reflectNoSetter(p: Plain, k: string) { Reflect.set(p, k, 1); }
+export function assignNoSetter(p: Plain, src: { a: number }) { Object.assign(p, src); }
+export function reflectRecord(o: Record<string, number>, k: string) { Reflect.set(o, k, 1); }`,
+    // THE SYMBOL DENYLIST, both directions plus both positive twins — the rows that make the
+    // Object.assign/Reflect.set asymmetry a measurement rather than a preference.
+    "src/sym.ts": `import * as fs from "fs";
+export const TAG: unique symbol = Symbol("tag");
+export class OnlySym { a = 1; set [TAG](v: number) { fs.writeFileSync("/tmp/candor-r247c", "1"); } }
+export function reflectStrKey(o: OnlySym, k: string) { Reflect.set(o, k, 1); }
+export function reflectSymKey(o: OnlySym, k: typeof TAG) { Reflect.set(o, k, 1); }
+export function assignSymTarget(o: OnlySym, src: { a: number }) { Object.assign(o, src); }`,
+  });
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+  const why = (fn) => (eff(fn)?.unknownWhy ?? []).filter((w) => /^reflect:accessor:/.test(w));
+
+  // THE ROW'S OWN CLAIM, asserted as an EQUALITY between two spellings rather than as two separate
+  // expectations — a pair of independent assertions would both stay green if the two arms drifted apart
+  // again in the same direction, which is exactly how R247 came to exist.
+  check("R247 CONVERGENCE: `Reflect.set(s, k, v)` and `s[k] = v` — the same operation, the same unpinnable key — now give the SAME `inferred` AND the SAME reason. At 0341b0f they gave [\"Fs\"] and [\"Unknown\"]",
+        JSON.stringify(eff("src.conv.viaReflect")?.inferred ?? null) === JSON.stringify(eff("src.conv.viaElement")?.inferred ?? null)
+        && JSON.stringify(why("src.conv.viaReflect")) === JSON.stringify(why("src.conv.viaElement")),
+        `element=${JSON.stringify(eff("src.conv.viaElement") ?? null)} reflect=${JSON.stringify(eff("src.conv.viaReflect") ?? null)}`);
+  for (const [fn, tag, what] of [
+    ["src.conv.viaElement", "reflect:accessor:dynamic-key", "`s[k] = v` — R240(b)'s spelling, unchanged by R247 and the target of the convergence"],
+    ["src.conv.viaReflect", "reflect:accessor:dynamic-key", "`Reflect.set(s, k, v)` — one runtime key, at most one setter (executed), so it takes R240(b)'s OWN tag"],
+    ["src.conv.viaAssign", "reflect:accessor:dynamic-keyset", "`Object.assign(s, src)` with an unprovable source — 0..n setters (executed: 2), so a tag of its own inside the same `reflect` class"],
+  ]) {
+    check(`R247: discloses Unknown, never a fabricated Fs and never silence — ${what}`,
+          has(fn, "Unknown") && !has(fn, "Fs"), JSON.stringify(eff(fn) ?? (report.functions ?? []).map((x) => x.fn)));
+    check(`R247: …under \`${tag}\` — ${fn}`, why(fn).length === 1 && why(fn)[0] === tag, JSON.stringify(why(fn)));
+  }
+  for (const [fn, what] of [
+    ["src.ctl.reflectNoSetter", "`Reflect.set` into a target that declares NO setter — 0 real invocations, and the disclosure must not become a blanket hedge on every dynamic write"],
+    ["src.ctl.assignNoSetter", "`Object.assign` into the same — the overwhelmingly common `Object.assign(cfg, opts)` over plain data"],
+    ["src.ctl.reflectRecord", "`Reflect.set` into an opaque `Record<string, number>`, which declares no properties at all"],
+    ["src.sym.reflectStrKey", "SYMBOL DENYLIST: a STRING key cannot name the class's only setter, `set [TAG]` — executed, 0 real invocations"],
+  ]) {
+    check(`R247 OVER-CHARGE CONTROL: nothing charged and nothing disclosed — ${what} (${fn})`,
+          noEffectCharged(report, fn), JSON.stringify(eff(fn) ?? null));
+  }
+  for (const [fn, what] of [
+    ["src.sym.reflectSymKey", "POSITIVE TWIN: a SYMBOL-typed key over that symbol-named setter DOES disclose — executed, 1 real invocation"],
+    ["src.sym.assignSymTarget", "THE ASYMMETRY, EXECUTED: `Object.assign` copies own enumerable SYMBOL keys too, so a string-key exclusion must NOT be applied here — `Object.assign(o, {a, [TAG]: 9})` invokes the setter once, and this row goes silent the moment the guard is shared blindly"],
+  ]) {
+    check(`R247 SYMBOL GUARD — the denylist is a filter, not an empty tree: ${what}`, has(fn, "Unknown"),
+          JSON.stringify(eff(fn) ?? (report.functions ?? []).map((x) => x.fn)));
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+
+  // THE GATE, on ISOLATED trees — one caller and its setter, nothing else — because that is the only
+  // shape in which the verdict is attributable to this arm. A blanket or file-scoped `deny Fs` fires
+  // either way through the setter's own unit and cannot discriminate.
+  for (const [name, call] of [
+    ["Reflect.set", `Reflect.set(s, k, 1);`],
+    ["Object.assign", `Object.assign(s, src);`],
+    ["s[k] = v (R240(b), the arm converged ONTO — its verdicts must not have moved)", `s[k] = 1;`],
+  ]) {
+    const only = project({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: { target: "ES2022", lib: ["ES2022"], module: "commonjs", strict: false,
+                           types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+        include: ["src"],
+      }),
+      "src/only.ts": `import * as fs from "fs";
+class Sink { set token(x: number) { fs.writeFileSync("/tmp/candor-r247d", String(x)); } plain = 0; }
+export function go(k: string, src: { plain: number }) { const s = new Sink(); ${call} }`,
+      "fs.pol": "deny Fs src.only.go\n",
+      "unk.pol": "deny Unknown src.only.go\n",
+      "refl.pol": "deny Unknown[reflect] src.only.go\n",
+      "disp.pol": "deny Unknown[dispatch] src.only.go\n",
+      "pure.pol": "pure src.only.go\n",
+    });
+    const ex = (f) => scan(only, "--policy", path.join(only, f)).r.status;
+    check(`R247 GATE [isolated ${name}]: \`deny Unknown src.only.go\` FIRES (exit 1) — the caller is disclosed, not silent`,
+          ex("unk.pol") === 1, `exit ${ex("unk.pol")}`);
+    check(`R247 GATE [isolated ${name}]: \`deny Unknown[reflect]\` selects it — the reason class is what a policy reads`,
+          ex("refl.pol") === 1, `exit ${ex("refl.pol")}`);
+    check(`R247 GATE CONTROL [isolated ${name}]: \`deny Unknown[dispatch]\` does NOT — a narrowed policy must stay narrow`,
+          ex("disp.pol") === 0, `exit ${ex("disp.pol")}`);
+    // WRITTEN AS AN ASSERTION THAT `pure` FIRES, AND MEASURED WRONG — kept as the corrected row rather
+    // than deleted, because the correction is the interesting half. `pure` forbids every EFFECT and
+    // deliberately NOT `Unknown` (policy.mjs ~:1139, the §4 trust boundary; an Unknown-only entry was
+    // wrongly counted a `pure` violation until 2026-07-09). So all three spellings exit 0 here — and
+    // that AGREEMENT is itself the convergence: at 0341b0f `Reflect.set`/`Object.assign` exited 1 on
+    // this policy and `s[k] = v` exited 0, over one operation.
+    check(`R247 GATE, THE SECOND HALF OF THE COST [isolated ${name}]: \`pure src.only.go\` exits 0 — \`pure\` forbids EFFECTS, not the §4 \`Unknown\` disclosure. For the two builtin spellings this moved 1 -> 0; \`s[k] = v\` has answered 0 since R240(b)`,
+          ex("pure.pol") === 0, `exit ${ex("pure.pol")}`);
+    check(`R247 GATE, THE WITHDRAWAL STATED AS A COST [isolated ${name}]: \`deny Fs src.only.go\` exits 0. For the two builtin spellings this is a CHANGE (exit 1 at 0341b0f) and it is the price of the convergence; for \`s[k] = v\` it is R240(b)'s long-standing answer, which is what they converged on`,
+          ex("fs.pol") === 0, `exit ${ex("fs.pol")}`);
+    fs.rmSync(only, { recursive: true, force: true });
+  }
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
