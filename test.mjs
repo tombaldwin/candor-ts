@@ -17705,6 +17705,110 @@ export function pJson(o: unknown): string { return JSON.stringify(o); }`,
   }
 }
 
+// ── THE `globalThis.` QUALIFIER DEFEATED FIVE TEXT-KEYED ARMS AT ONCE ─────────────────────────────
+// (SOUNDNESS row id pending — filed by the coordinator, not invented here.)
+//
+// Found by §9, widening past R116's own trigger: grepping the MECHANISM ("a whole-object builtin
+// recognised by the callee's TEXT") rather than the call the row named. `globalThis.Object.assign(...)`
+// is the same function as `Object.assign(...)`; every arm that matched on text saw a different string.
+//
+// MEASURED at 31ce3a2, ONE file, `tsc --noEmit` clean, each pair differing ONLY in the qualifier:
+//
+//     Object.assign(sink, {token:1})         ["Fs"]       globalThis.Object.assign(…)   ABSENT
+//     Reflect.set(sink, "token", 1)          ["Fs"]       globalThis.Reflect.set(…)     ABSENT
+//     Object.assign({}, literalWithGetter)   ["Unknown"]  globalThis.Object.assign(…)   ABSENT
+//     Object.keys(process.env)               ["Env"]      globalThis.Object.keys(env)   ABSENT
+//     Object.keys(localStorage)              ["Unknown"]  globalThis.Object.keys(ls)    ABSENT
+//
+// Five arms — the R116 target-setter arm, its `Reflect.set` sibling, R115/R120's SOURCE-getter arm, the
+// `process.env` whole-object arm and R113's Storage whole-object arm — and only two of them are new.
+// The `Env` one is the worst: a read of the entire environment, reported as nothing.
+//
+// GROUND TRUTH EXECUTED, node 22.12.0: each qualified spelling invokes the accessor exactly once, the
+// same as its bare twin; `globalThis.Object.keys(process.env)` returns the identical 66-key array.
+//
+// This is R95's `globalThis.fetch` class one builtin family over, and the fix is the same shape: ONE
+// authority (`globalBuiltinCallee`) that every arm asks, rather than each arm carrying its own text
+// test. The shadow guard moved INTO that helper, so what counts as "the global" did not widen — only
+// how it may be spelled.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", lib: ["ES2022", "DOM"], module: "commonjs", strict: false,
+                         types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+      include: ["src"],
+    }),
+    "src/a.ts": `import * as fs from "fs";
+export class Sink { set token(x: number) { fs.writeFileSync("/tmp/candor-gq", String(x)); } }
+export const lit = { get g(): number { fs.writeFileSync("/tmp/candor-gq2", "x"); return 1; } };
+export function tBare() { const s = new Sink(); Object.assign(s, { token: 1 }); }
+export function tGlobal() { const s = new Sink(); globalThis.Object.assign(s, { token: 1 }); }
+export function tRefBare() { const s = new Sink(); Reflect.set(s, "token", 1); }
+export function tRefGlobal() { const s = new Sink(); globalThis.Reflect.set(s, "token", 1); }
+export function sBare() { return Object.assign({}, lit); }
+export function sGlobal() { return globalThis.Object.assign({}, lit); }
+export function eBare() { return Object.keys(process.env); }
+export function eGlobal() { return globalThis.Object.keys(process.env); }
+export function stBare() { return Object.keys(localStorage); }
+export function stGlobal() { return globalThis.Object.keys(localStorage); }`,
+    // SHADOW CONTROL — a project's OWN `Object`/`Reflect`, bare and hung off `globalThis`. The helper
+    // still runs `identIsGlobal` on the root, so widening the SPELLING must not widen what counts as
+    // the global. Both callers carry a pre-existing `Unknown[callback:*]` (a call into a local object
+    // literal's method resolves to a property signature); what must not appear is `Fs`.
+    "src/shadow.ts": `import * as fs from "fs";
+class Sink2 { set token(x: number) { fs.writeFileSync("/tmp/candor-gq3", String(x)); } }
+const Object = { assign(t: unknown, ..._s: unknown[]) { return t; } };
+const Reflect = { set(_t: unknown, _k: string, _v: unknown) { return true; } };
+export function shadowBare() { const s = new Sink2(); Object.assign(s, { token: 1 }); }
+export function shadowRef() { const s = new Sink2(); Reflect.set(s, "token", 1); }`,
+    // OVER-CHARGE CONTROL — the qualified spelling on targets and sources that have no accessor at all.
+    "src/pure.ts": `export class Plain { a = 0; }
+export function pAssign() { const p = new Plain(); globalThis.Object.assign(p, { a: 1 }); return p; }
+export function pKeys(o: Record<string, string>) { return globalThis.Object.keys(o); }
+export function pRefl(o: Record<string, number>) { globalThis.Reflect.set(o, "a", 1); }
+export function pJson(o: unknown) { return globalThis.JSON.stringify(o); }`,
+    "fs.pol": "deny Fs src.a.tGlobal\ndeny Fs src.a.tRefGlobal\n",
+    "env.pol": "deny Env src.a.eGlobal\n",
+    "unk.pol": "deny Unknown src.a.sGlobal\ndeny Unknown src.a.stGlobal\n",
+    "purepol.pol": "deny Fs src.pure\ndeny Env src.pure\ndeny Unknown src.pure\n",
+    "shadowpol.pol": "deny Fs src.shadow.shadowBare\ndeny Fs src.shadow.shadowRef\n",
+  });
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+  for (const [bare, qualified, e, what] of [
+    ["src.a.tBare", "src.a.tGlobal", "Fs", "`Object.assign` -> the TARGET's setter (R116's arm)"],
+    ["src.a.tRefBare", "src.a.tRefGlobal", "Fs", "`Reflect.set` -> the TARGET's setter"],
+    ["src.a.sBare", "src.a.sGlobal", "Unknown", "`Object.assign` -> the SOURCE's getter (R115/R120's arm)"],
+    ["src.a.eBare", "src.a.eGlobal", "Env", "`Object.keys(process.env)` — a read of the ENTIRE environment, reported as nothing"],
+    ["src.a.stBare", "src.a.stGlobal", "Unknown", "`Object.keys(localStorage)` (R113's arm)"],
+  ]) {
+    check(`globalThis-qualifier: the BARE spelling still charges ${e} — ${what}`, has(bare, e), JSON.stringify(eff(bare) ?? null));
+    check(`globalThis-qualifier: …and so does the QUALIFIED one, which was ABSENT at 31ce3a2 — ${what}`,
+          has(qualified, e), JSON.stringify(eff(qualified) ?? (report.functions ?? []).map((x) => x.fn)));
+  }
+  for (const [fn, what] of [
+    ["src.shadow.shadowBare", "`Object.assign`"],
+    ["src.shadow.shadowRef", "`Reflect.set`"],
+  ]) {
+    check(`globalThis-qualifier SHADOW CONTROL: a project's OWN ${what} charges no Fs — the helper still tests \`identIsGlobal\`, so the SPELLING widened and the identity did not`,
+          !has(fn, "Fs"), JSON.stringify(eff(fn) ?? null));
+  }
+  for (const fn of ["src.pure.pAssign", "src.pure.pKeys", "src.pure.pRefl", "src.pure.pJson"]) {
+    check(`globalThis-qualifier OVER-CHARGE CONTROL: the qualified spelling over an accessor-less object gains nothing — ${fn}`,
+          (eff(fn)?.inferred ?? []).length === 0, JSON.stringify(eff(fn) ?? null));
+  }
+  {
+    const ex = (p) => scan(d, "--policy", path.join(d, p)).r.status;
+    check("globalThis-qualifier GATE: `deny Fs` scoped to the two QUALIFIED callers fires (exit 1) — exit 0 at 31ce3a2", ex("fs.pol") === 1, `exit ${ex("fs.pol")}`);
+    check("globalThis-qualifier GATE: `deny Env src.a.eGlobal` fires — a whole-environment read that gated clean", ex("env.pol") === 1, `exit ${ex("env.pol")}`);
+    check("globalThis-qualifier GATE: `deny Unknown` scoped to the qualified getter/storage callers fires", ex("unk.pol") === 1, `exit ${ex("unk.pol")}`);
+    check("globalThis-qualifier GATE CONTROL: the over-charge file still gates clean under Fs+Env+Unknown", ex("purepol.pol") === 0, `exit ${ex("purepol.pol")}`);
+    check("globalThis-qualifier GATE CONTROL: the shadow file still gates clean under `deny Fs`", ex("shadowpol.pol") === 0, `exit ${ex("shadowpol.pol")}`);
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

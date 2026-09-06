@@ -5715,14 +5715,58 @@ const ENV_TOUCHING_BUILTIN = new Set([
 const ENV_TOUCHING_GLOBAL = new Set(["structuredClone"]);
 const identIsGlobal = (id) => // an identifier that is the ambient global (no project-local declaration shadows it)
   !(checker.getSymbolAtLocation(id)?.declarations ?? []).some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+// THE `globalThis.` QUALIFIER, WHICH DEFEATED FIVE TEXT-KEYED ARMS AT ONCE (SOUNDNESS row id pending —
+// filed by the coordinator, not invented here). Every arm below
+// recognises a whole-object builtin by the callee's TEXT (`Object.assign`, `Reflect.set`, `Object.keys`),
+// and `globalThis.Object.assign(...)` is the same function under a different spelling. MEASURED, one
+// file, `tsc --noEmit` clean, each pair differing ONLY in the qualifier:
+//
+//     Object.assign(sink, {token:1})            ["Fs"]      globalThis.Object.assign(…)     ABSENT
+//     Reflect.set(sink, "token", 1)             ["Fs"]      globalThis.Reflect.set(…)       ABSENT
+//     Object.assign({}, literalWithGetter)      ["Unknown"] globalThis.Object.assign(…)     ABSENT
+//     Object.keys(process.env)                  ["Env"]     globalThis.Object.keys(env)     ABSENT
+//     Object.keys(localStorage)                 ["Unknown"] globalThis.Object.keys(ls)      ABSENT
+//
+// Ground truth EXECUTED on node 22.12.0: `globalThis.Object.assign`, `globalThis.Reflect.set` and the
+// bare spellings each invoke the accessor exactly once; `globalThis.Object.keys(process.env)` reads the
+// whole environment. Five arms, one spelling, and the `Env` one is a whole-environment read reported as
+// nothing. This is R95's `globalThis.fetch` class, one builtin family over.
+//
+// RETURNS THE CANONICAL `Owner.member` TEXT for a call whose callee is a member of an ambient global
+// builtin, reached BARE or through a proven-global `globalThis`/`global`/`window`/`self` root (parens,
+// `as` casts and `!` unwrapped, as `identIsGlobalProcess` already does for the process object). Returns
+// null for anything else, so a project's own `Object` — bare or hung off a project-shadowed root — is
+// never matched. It can only make an existing text test recognise MORE spellings of the same function;
+// it cannot make one stop matching.
+const GLOBAL_ROOTS = new Set(["globalThis", "global", "window", "self"]);
+const globalBuiltinCallee = (callee) => {
+  if (!callee || !ts.isPropertyAccessExpression(callee)) return null;
+  const member = callee.name?.text;
+  if (!member) return null;
+  let owner = callee.expression;
+  while (owner && (ts.isParenthesizedExpression(owner) || ts.isAsExpression(owner)
+                   || ts.isNonNullExpression(owner))) owner = owner.expression;
+  if (ts.isIdentifier(owner)) return identIsGlobal(owner) ? `${owner.text}.${member}` : null;
+  if (!ts.isPropertyAccessExpression(owner) || !owner.name?.text) return null;
+  let root = owner.expression;
+  while (root && (ts.isParenthesizedExpression(root) || ts.isAsExpression(root)
+                  || ts.isNonNullExpression(root))) root = root.expression;
+  if (!ts.isIdentifier(root) || !GLOBAL_ROOTS.has(root.text) || !identIsGlobal(root)) return null;
+  return `${owner.name.text}.${member}`;
+};
 // True when `node` is a call to a global builtin that reads/writes every key of an object argument (so any
 // env-object argument makes the enclosing fn Env): `Object.*`/`Reflect.*`/`JSON.stringify` (member) or
 // `structuredClone` (bare). Guarded against a project-local shadow of the callee.
 const envTouchingBuiltinCall = (node) => {
   if (!ts.isCallExpression(node)) return false;
   const c = node.expression;
-  if (ts.isPropertyAccessExpression(c) && ts.isIdentifier(c.expression))
-    return ENV_TOUCHING_BUILTIN.has(`${c.expression.text}.${c.name.text}`) && identIsGlobal(c.expression);
+  // THE `globalThis.` QUALIFIER (SOUNDNESS row id pending — filed by the coordinator) — through
+  // `globalBuiltinCallee`, so `globalThis.Object.keys(process.env)` is the same call
+  // as `Object.keys(process.env)`. The old test required `c.expression` to be an IDENTIFIER, so the
+  // qualified spelling produced `"undefined.keys"` and read false: a whole-environment read reported as
+  // nothing. The shadow guard moves INTO the helper (it still checks `identIsGlobal` on the root), so
+  // this is not a widening of what counts as global, only of how it may be spelled.
+  if (ts.isPropertyAccessExpression(c)) return ENV_TOUCHING_BUILTIN.has(globalBuiltinCallee(c) ?? "");
   if (ts.isIdentifier(c)) return ENV_TOUCHING_GLOBAL.has(c.text) && identIsGlobal(c);
   return false;
 };
@@ -7340,7 +7384,11 @@ function visitCalls(node) {
     // R116 — …AND THE TARGET'S SETTERS, which the copy invokes for every key it writes. See
     // `enumerateTargetSetters`: the source arm and the target arm are the two halves of one operation
     // and only one of them existed.
-    const ct116 = callee.getText().replace(/\s+/g, "");
+    // THE `globalThis.` QUALIFIER (SOUNDNESS row id pending — filed by the coordinator) — the SAME
+    // text, recognised through the qualifier too. `globalBuiltinCallee`
+    // is the one authority for that question (`envTouchingBuiltinCall` reads it as well); a second
+    // private copy is how the next spelling gets missed.
+    const ct116 = globalBuiltinCallee(callee) ?? callee.getText().replace(/\s+/g, "");
     if (ct116 === "Object.assign") {
       const owner = enclosing(node);
       const sources = (node.arguments ?? []).slice(1);
@@ -7351,7 +7399,7 @@ function visitCalls(node) {
       // `Object.assign` by TEXT, so a project's own `const Object = { assign(){} }` reaches it. That is
       // pre-existing and is REPORTED rather than silently widened here (it is a fabrication-direction
       // question of its own), but the charge this fix ADDS does not inherit the hole.
-      if (ts.isPropertyAccessExpression(callee) && identIsGlobal(callee.expression))
+      if (globalBuiltinCallee(callee) === "Object.assign")
         enumerateTargetSetters(owner, (node.arguments ?? [])[0], provenCopiedKeys(sources));
     }
     // R116 §9 — WIDENED PAST THE ROW'S OWN TRIGGER, by grepping the MECHANISM ("a builtin that writes a
@@ -7368,7 +7416,7 @@ function visitCalls(node) {
     // project's own `const Object = …` would match its text test. Left as it is rather than widened
     // silently: it is a separate (fabrication-direction) question, it is REPORTED rather than folded in
     // here, and this new arm does not inherit the hole.
-    if (ct116 === "Reflect.set" && ts.isPropertyAccessExpression(callee) && identIsGlobal(callee.expression)) {
+    if (globalBuiltinCallee(callee) === "Reflect.set") {
       const k = (node.arguments ?? [])[1];
       enumerateTargetSetters(enclosing(node), (node.arguments ?? [])[0],
                              k && ts.isStringLiteralLike(k) ? new Set([k.text]) : null);

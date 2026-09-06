@@ -8,6 +8,49 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SILENT-UNDER-REPORT FIX — the `globalThis.` QUALIFIER defeated FIVE text-keyed arms at once.**
+  (SOUNDNESS row id pending; the coordinator files it.) Found by widening past R116's own trigger:
+  grepping the MECHANISM — "a whole-object builtin recognised by the callee's TEXT" — rather than the
+  call the row named. `globalThis.Object.assign(...)` is the same function as `Object.assign(...)`, and
+  every arm that matched on text saw a different string.
+
+  Measured at 31ce3a2, one file, `tsc --noEmit` clean, each pair differing ONLY in the qualifier:
+
+      Object.assign(sink, {token:1})        ["Fs"]       globalThis.Object.assign(…)   ABSENT
+      Reflect.set(sink, "token", 1)         ["Fs"]       globalThis.Reflect.set(…)     ABSENT
+      Object.assign({}, literalWithGetter)  ["Unknown"]  globalThis.Object.assign(…)   ABSENT
+      Object.keys(process.env)              ["Env"]      globalThis.Object.keys(env)   ABSENT
+      Object.keys(localStorage)             ["Unknown"]  globalThis.Object.keys(ls)    ABSENT
+
+  Five arms — R116's target-setter arm, its `Reflect.set` sibling, R115/R120's SOURCE-getter arm, the
+  `process.env` whole-object arm and R113's Storage whole-object arm — of which only two are new. The
+  `Env` one is the worst: a read of the entire environment, reported as nothing.
+
+  Ground truth EXECUTED on node 22.12.0: each qualified spelling invokes the accessor exactly once, the
+  same as its bare twin, and `globalThis.Object.keys(process.env)` returns the identical 66-key array.
+
+  This is R95's `globalThis.fetch` class one builtin family over, and the fix has the same shape (§G):
+  ONE authority, `globalBuiltinCallee`, that every arm asks, instead of each arm carrying its own text
+  test. `globalThis` / `global` / `window` / `self` roots are accepted, with parens, `as` casts and `!`
+  unwrapped — the same unwrap `identIsGlobalProcess` already performs for the process object. **The
+  shadow guard moved INTO the helper**, which still runs `identIsGlobal` on the root: what counts as
+  "the global" did not widen, only how it may be spelled.
+
+  **CORPUS A/B — 200 targets (194 published npm packages + 6 refused source trees), 21,742 common rows,
+  WIDE key: ADDED 0, REMOVED 0, CHANGED 0 — byte-identical.** And it is **NOT** a zero over an
+  untriggered branch: the new helper resolved a qualified global callee **306 times** across the corpus
+  (`location.assign` ×100, `document.createElement` ×50, `localStorage.{set,get,remove}Item` ×60,
+  `history.replaceState` ×20, `crypto.randomUUID` ×15, …). None of those names is `Object.assign`,
+  `Reflect.set` or a member of `ENV_TOUCHING_BUILTIN`, so nothing changed. **Stated at the time of
+  writing rather than discovered later: this corpus contains no `globalThis.Object.assign`,
+  `globalThis.Reflect.set` or `globalThis.Object.keys(process.env)` at all, so the A/B is an
+  OVER-CHARGE CONTROL only** — 21,742 rows and 306 reaches with zero movement — and the RECALL evidence
+  is the executed fixture, not the corpus.
+
+  A side observation recorded rather than acted on: 100 of those 306 are `location.assign` reached off a
+  qualified global. `location.href = url` and `location.assign(url)` are still silently pure — a
+  separate residual, reported to the coordinator rather than folded in here.
+
 - **⚠ SILENT-UNDER-REPORT FIX (SOUNDNESS R113) — `localStorage.x = secret`, the INDEX-SIGNATURE write,
   persists to disk and read PURE in BOTH lib configurations.** R109 charged `localStorage.setItem(k, v)`
   by keying on the resolved MEMBER (`decl.parent.name === "Storage"`). `Storage` also declares an index
