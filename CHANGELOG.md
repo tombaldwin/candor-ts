@@ -8,6 +8,46 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SPEC CONFORMANCE (SOUNDNESS R284) — AN UNNAMEABLE-OWNER MEMBER DISPATCH WAS KINDED `callback:`,
+  WHICH SPEC §4 ⟨0.24⟩ NAMES AND REJECTS — AT THREE SITES, NOT THE ONE THE ROW HANDED US.** (Row id
+  supplied by the coordinator.) `dispatchWhy` decides §4's class from whether an OWNER STRING could be
+  formed, so a producer that fails to form one silently demotes a member dispatch from `dispatch` to
+  `indirect` and narrows every `deny E Unknown[dispatch]` gate in the field. The producing arm read
+  `sigDecl.parent?.name`, which an `InterfaceDeclaration` has and a `TypeLiteral` never does:
+
+      interface Shape { m(): void }   x.m()  ->  dispatch:src.a.Shape.m
+      type Shape = { m(): void };     x.m()  ->  callback:m
+
+  — a pure spelling difference in TypeScript. Grepping the MECHANISM ("a site that forms a
+  `dispatch:`/`callback:` owner") rather than the arm in hand found two more:
+
+  * the **>12-override family** arm emitted an UNQUALIFIED `dispatch:Shape.m` where every other site
+    emits `mod.Owner.member`; the consumer's `^dispatch:(.+)\.([^.]+)$` then yields owner `Shape`,
+    which matches no `declaringType` qual, so the frontier can never resolve it. The producing arm's
+    comment asserted "the other emission sites produced none" of the 1,234 malformed strings measured
+    on a 15-repo corpus — true of that corpus, false of the code; a 14-subclass fixture produces one
+    on demand. The repo's own test enshrined the bare form and called it "canonical".
+  * `reflect:accessor:` took its owner from the same `parent?.name`, with `?? "?"`, so a type-alias
+    accessor disclosed `reflect:accessor:?.val` where the interface spelling disclosed
+    `reflect:accessor:Shape.val`.
+
+  All three now go through one helper. **NOT claimed:** a fully anonymous inline literal
+  (`function f(x: { m(): void })`) still has no owner to name and stays `callback:`, because §4
+  reserves `dispatch:` for an owner AND member both known. That residual is stated, not closed.
+
+  **Gate impact, both directions, measured with the real gate on fresh clones** (183 rows changed
+  across 1,726; no effect gained or lost anywhere, and blanket `deny Unknown` is unmoved):
+
+  | repo | `deny Unknown[dispatch]` | `deny Unknown[indirect]` | blanket `deny Unknown` |
+  |---|---|---|---|
+  | got | 0 → 63 — **exit 0 → 1**, the gate was passing entirely | 141 → 116 | 198 → 198 |
+  | hono | 40 → 137 | 386 → 385 | 425 → 425 |
+  | zod | 120 → 125 | 854 → 852 | 932 → 932 |
+  | zx | 0 → 15 — **exit 2 → 1** | 93 → 92 | 94 → 94 |
+
+  `[indirect]` falls by only 29 rows in total because most carry several reasons and keep an
+  `indirect` one, so this does not disarm `[indirect]` gates wholesale.
+
 - **⚠ CARDINAL SIN FIXED (SOUNDNESS R283) — A TYPE-PARAMETER KEY WAS READ AS PROVABLY-NOT-A-SYMBOL,
   AND ONE ARM PASSED BY ACCIDENT.** (Row id supplied by the coordinator.) `keyCouldNameAccessor` is
   R247's one authority for "could a runtime key of this TYPE ever name this property?", and it tested

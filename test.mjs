@@ -7506,9 +7506,24 @@ export function dispatch(b: Base): void { b.m(); }`;
         atD?.inferred.includes("Fs") && !atD.inferred.includes("Unknown"), JSON.stringify(atD));
   const over = scan(project({ "src/w.ts": src(13) })); // OVER the bound: too wide to enumerate soundly
   const overD = over.report.functions.find((e) => e.fn === "src.w.dispatch");
-  check("override dispatch over the bound (13): Unknown disclosed with the canonical dispatch:Base.m why",
-        overD?.inferred.includes("Unknown") && (overD.unknownWhy ?? []).some((w) => w === "dispatch:Base.m"),
-        JSON.stringify(overD));
+  // SOUNDNESS R284 — THIS ASSERTION USED TO PIN `dispatch:Base.m`, CALLING IT "canonical". It is not:
+  // every OTHER emission site writes `<module>.<Owner>.<member>`, this one alone wrote a bare owner, and
+  // the frontier consumer's `^dispatch:(.+)\.([^.]+)$` then yields owner `Base`, which matches no
+  // `declaringType` qual — so the reason could never be resolved against the hierarchy sidecar. The
+  // producing arm's own comment claimed the other sites produced none of the malformed strings measured
+  // on a 15-repo corpus; true of that corpus, false of the code, and a 14-subclass tree produces one on
+  // demand. §K, in a comment written by the commit that needed it.
+  const overWhy = (overD?.unknownWhy ?? []).find((w) => w.startsWith("dispatch:"));
+  check("override dispatch over the bound (13): Unknown disclosed with the QUALIFIED dispatch:<mod>.<Owner>.<member> why",
+        overD?.inferred.includes("Unknown") && overWhy === "dispatch:src.w.Base.m", JSON.stringify(overD));
+  // …and the property that makes it qualified rather than merely longer: the owner+member the reason
+  // names IS a unit the report/callgraph declares, which is exactly what a bare `Base.m` was not. This
+  // is the gate on the whole class — a future site that forms an owner it cannot qualify fails here.
+  const overUnits = new Set([...(over.report.functions ?? []).map((e) => e.fn),
+                             ...Object.keys(over.cg?.functions ?? over.cg ?? {})]);
+  check("R284: the >12-family dispatch reason names a REAL unit — the frontier can resolve it",
+        !!overWhy && overUnits.has(overWhy.slice("dispatch:".length)),
+        overWhy + " | units: " + JSON.stringify([...overUnits].slice(0, 20)));
 }
 
 // ── ⟨0.31⟩ netPartners: the ambient config that moved a verdict is named in it ─────────────────────

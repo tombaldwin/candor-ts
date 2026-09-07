@@ -5221,6 +5221,56 @@ const dispatchWhy = (qualifiedOwner, member) =>
   qualifiedOwner && member ? `dispatch:${qualifiedOwner}.${member}`
                            : `callback:${qualifiedOwner ?? member ?? "unresolved call"}`;
 
+// SOUNDNESS R284 — THE OWNER A MEMBER HAS AND NOBODY WENT LOOKING FOR, plus the one site that formed an
+// owner it could not qualify. `dispatchWhy` above decides §4's class from whether an owner STRING could
+// be formed, so every producer that fails to form one silently demotes a member dispatch to `callback:`
+// and moves its §6.2 class from `dispatch` to `indirect` — narrowing every `deny E Unknown[dispatch]`
+// gate in the field, which SPEC §4 ⟨0.24⟩ names and rejects in terms.
+//
+// The producing arm read `sigDecl.parent?.name`, which an `InterfaceDeclaration` has and a `TypeLiteral`
+// NEVER does. MEASURED, one program, at 9a0cfd9 — a pure spelling difference in TypeScript:
+//
+//     interface Shape { m(): void }   x.m()   ->  dispatch:src.a.Shape.m        [dispatch] RED
+//     type Shape = { m(): void };     x.m()   ->  callback:m                    [dispatch] —, [indirect] RED
+//
+// AND THE BOUNDARY OF THE ROW THAT FILED IT WAS DRAWN AROUND ITS OWN TRIGGER — one arm, the one in hand.
+// Grepping the MECHANISM ("a site that forms a dispatch:/callback: owner") rather than the name found
+// two more, both measured on executing fixtures:
+//
+//   · the >12-override family arm emits an UNQUALIFIED `dispatch:Shape.m` where every other site emits
+//     `mod.Owner.member`. The consumer's `^dispatch:(.+)\.([^.]+)$` then yields owner `Shape`, which
+//     matches no `declaringType` qual, so the dispatch frontier can never resolve it. The comment at the
+//     producing arm asserts "the other emission sites produced none" of the 1,234 malformed strings — a
+//     §K sentence: true of the corpus it was measured on, false of the code. A 14-subclass fixture
+//     produces one on demand.
+//   · `reflect:accessor:` took its owner from the same `parent?.name`, with `?? "?"` as the fallback, so
+//     a type-alias-declared accessor discloses `reflect:accessor:?.val` where the interface spelling
+//     discloses `reflect:accessor:Shape.val`. The class does not move (both are `reflect`), but `?` is
+//     not an owner anything can scope to.
+//
+// WHAT THIS DOES **NOT** CLAIM: a fully anonymous inline literal (`function f(x: { m(): void })`) still
+// has no owner to name and stays `callback:`, because SPEC §4 reserves `dispatch:` for an owner type AND
+// member that are BOTH known. That residual is stated, not closed — it is the open list, and a nested
+// literal names the alias that declares the shape it sits in rather than inventing a path.
+const NAMED_TYPE_OWNER = (d) => ts.isInterfaceDeclaration(d) || ts.isClassDeclaration(d)
+  || ts.isClassExpression(d) || ts.isTypeAliasDeclaration(d) || ts.isEnumDeclaration(d);
+/** The nearest ancestor declaration that NAMES the type this member belongs to, or null. */
+const namedTypeAncestor = (node) => {
+  for (let n = node?.parent, guard = 0; n && guard++ < 32; n = n.parent) {
+    if (ts.isSourceFile(n)) return null;
+    if (NAMED_TYPE_OWNER(n) && n.name) return n;
+  }
+  return null;
+};
+/** `<module>.<namespace prefix><Name>` — the spelling `mod.Class.member` quals use, so the dispatch
+ *  frontier can resolve it against the hierarchy sidecar. A bare name cannot be resolved by anything. */
+const qualifiedTypeName = (d) => (d?.name
+  ? `${moduleOf(d.getSourceFile())}.${namespacePrefixOf(d)}${d.name.getText()}` : null);
+/** The owner qual for a member whose immediate parent may be an ANONYMOUS type literal. Falls back to
+ *  the nearest NAMED type declaration; null only when there genuinely is not one. */
+const memberOwnerQual = (member) => qualifiedTypeName(
+  member?.parent?.name ? member.parent : namedTypeAncestor(member));
+
 // ⟨THE FUNNEL⟩ Every site that reaches a resolved EXTERNAL declaration whose own κ lookup found nothing
 // answers the SAME question — chained sibling report, §5.1 manifest, κ-coverage ledger, or the
 // unanswerable-key disclosure — and it used to answer it up to four times over, independently, in the
@@ -6590,7 +6640,9 @@ function visitCalls(node) {
                   }
                 } else {
                   rec.direct.add("Unknown"); // override family too wide to enumerate soundly
-                  rec.why.add(dispatchWhy(decl.parent?.name?.getText?.(), decl.name?.getText?.())); // class-override dispatch (overridable member, unresolved/too-wide family) — canonical `dispatch:OWNER.member`, frontier-relevant
+                  // R284 — QUALIFIED, like its <=12 sibling four lines up and like every other emission
+                  // site. This one alone emitted a bare `dispatch:Shape.m`, which no frontier resolves.
+                  rec.why.add(dispatchWhy(memberOwnerQual(decl), decl.name?.getText?.())); // class-override dispatch (overridable member, unresolved/too-wide family) — canonical `dispatch:OWNER.member`, frontier-relevant
                 }
               }
             }
@@ -6688,9 +6740,11 @@ function visitCalls(node) {
                 // QUALIFIED owner (module.Type), matching the `mod.Class.member` fn quals so the
                 // dispatch-frontier (callers --include-unknown) can resolve overrides against the
                 // hierarchy sidecar. Bare `decl.parent.name` would not match a reacher's declaringType.
-                const tn = sigDecl.parent?.name
-                  ? `${moduleOf(sigDecl.parent.getSourceFile())}.${namespacePrefixOf(sigDecl.parent)}${sigDecl.parent.name.getText()}`
-                  : null;
+                // R284 — `memberOwnerQual`, not `parent?.name`: a MethodSignature in a `type X = {...}`
+                // has an owner (`X`) that only the ancestor walk can see, and demoting it to `callback:`
+                // moved its §6.2 class out of `dispatch`. Same helper as the class-override arm, so the
+                // two cannot answer this differently again.
+                const tn = memberOwnerQual(sigDecl);
                 // A CALL SIGNATURE has no member to name (`interface UnaryFunction { (x: T): R }`,
                 // `type PatchFn = (a, b) => void`), and a member of an ANONYMOUS type literal has no
                 // owner to name. Both are function-VALUE invocations, not member dispatch — see
@@ -7834,8 +7888,14 @@ function visitCalls(node) {
         const owner = enclosing(node);
         if (!owner) return;
         const pn = node.name?.getText?.() ?? node.argumentExpression?.getText?.() ?? "?";
-        for (const hit of hits)
-          recordAccessorHit(owner, hit, `${hit.decl.parent?.name?.getText?.() ?? "?"}.${pn}`);
+        // R284 — `?` is not an owner. A type-alias-declared accessor's parent is a TypeLiteral with no
+        // name; the alias that declares it does have one. BARE here, matching this label's existing
+        // spelling (`reflect:` detail is best-effort per §4, and requalifying it would move strings
+        // nothing asked to move) — the fallback only fires where the old code printed `?`.
+        for (const hit of hits) {
+          const aOwner = hit.decl.parent?.name?.getText?.() ?? namedTypeAncestor(hit.decl)?.name?.getText?.() ?? "?";
+          recordAccessorHit(owner, hit, `${aOwner}.${pn}`, node.expression);
+        }
         return;
       }
       // No type-level accessor — try the `Object.defineProperty` runtime-accessor index. The checker
