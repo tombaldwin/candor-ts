@@ -16312,8 +16312,22 @@ export function pJoin(a: string, b: string) { return path.join(a, b); }`,
     check(`R115 PRECISION CONTROL: ${what} stays charged — the runtime object behind that type may be an object literal, so the exclusion is a DENYLIST of one provable shape (a class body) and never an allowlist (${fn})`,
           (eff(fn)?.inferred ?? []).length > 0, JSON.stringify(eff(fn)));
   }
-  check("R115 PRECISION CONTROL: a UNION `Session | { get token(): string }` stays charged — the predicate is `every` over the symbol's get-declarations, not `find`, so one object-literal arm is enough to keep the charge. `find` would have read the class declaration first and dropped it",
-        has("src.keep.cloneUnion", "Fs"), JSON.stringify(eff("src.keep.cloneUnion")));
+  // R259 MOVED THE EVIDENCE HERE, NOT THE VERDICT, and the distinction is the point. This asserted `Fs`
+  // — charged from `Session`'s CLASS getter, which a spread can never invoke. EXECUTED, node 22.12.0,
+  // counting real getter invocations on the two runtime values this static type admits:
+  //     {...new Session()}  0 invocations, copied keys ["id"]        ← the Fs was for an operation
+  //     {...objectLiteral}  1 invocation,  copied keys ["id","token"]  that cannot happen
+  // Before R259 the union handed `classBodiedGetter` ONE merged symbol carrying both arms' declarations,
+  // so `every` could not exclude the class arm without also dropping the literal one, and the charge
+  // survived off the wrong arm — right verdict, wrong evidence, exactly what the structural-arm block
+  // below says about itself. R259 enumerates the arms SEPARATELY, so each is judged on its own: the class
+  // arm is excluded (0 invocations) and the literal arm keeps the disclosure it earns. What must never
+  // move is that the union stays CHARGED — a silent union is the cardinal sin R259 was filed for.
+  check("R115/R259 PRECISION CONTROL: a UNION `Session | { get token(): string }` stays CHARGED — one object-literal arm is enough, and per-arm judging is what keeps it",
+        (eff("src.keep.cloneUnion")?.inferred ?? []).length > 0, JSON.stringify(eff("src.keep.cloneUnion")));
+  check("R115/R259 PRECISION CONTROL: …and it is charged as `Unknown` off the LITERAL arm, not `Fs` off the class arm a spread never invokes (executed: 0 vs 1)",
+        has("src.keep.cloneUnion", "Unknown") && !has("src.keep.cloneUnion", "Fs"),
+        JSON.stringify(eff("src.keep.cloneUnion")));
 
   // THE STRUCTURAL ARM — the hole this fix opens, half closed and half pinned, said out loud.
   // ASSERTED ON THE REASON, NOT ON "SOMETHING WAS CHARGED", and that distinction is the whole value of
@@ -18156,6 +18170,123 @@ export function mStrConstrained<K extends string>(s: StrSrc, k: K) { return Refl
     check("R283 GATE: `deny Unknown` scoped to the seven generic-key callers fires (exit 1) — exit 0 at 9a0cfd9", ex("unk.pol") === 1, `exit ${ex("unk.pol")}`);
     check("R283 GATE CONTROL: the proven-unreachable file still gates clean under Unknown+Fs", ex("ctl.pol") === 0, `exit ${ex("ctl.pol")}`);
     check("R283 GATE: the mirror's symbol-constrained key gates clean, the string one does not", ex("mir.pol") === 0, `exit ${ex("mir.pol")}`);
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── SOUNDNESS R259: a UNION receiver drops every accessor not present in ALL arms ──────────────────
+//
+// CARDINAL SIN, and R245 fixed this question ONE CALL TOO LOW. R245 fixed `accessorsFromSym` — one
+// synthesised symbol carrying several declarations — and its own commit message states the rule this
+// level did not implement: "a union receiver is a disjunction — ANY arm may be the runtime value — so
+// the sound answer is the UNION of the arms' accessors." Every whole-object arm takes its property LIST
+// from `type.getProperties()`, which on a union returns only what is present in EVERY constituent, so an
+// accessor declared on ONE arm never reached the (already-correct) helper. Proven against the TS API:
+// for `x: Aa | Bb` where only `Aa` declares `token`, `getProperties()` is `[other]`, `getProperty("token")`
+// is null.
+//
+// EXECUTED, node 22.12.0, 1 real `fs.appendFileSync` per cell counted by reading the log back, over a
+// GENERATED matrix of six union shapes crossed with every arm that typechecks — 46 cells, caller ABSENT
+// from `functions[]` in all 46, and on the caller ALL EIGHT policy forms exit 0 (blanket `deny Fs`,
+// `deny Unknown`, `deny Fs Unknown`, `pure <caller>`, `deny Fs <caller>`, and the three reason-scoped
+// ones) with the scoped rules BINDING. `Aa|undefined` 5/5 arms silent, `Aa|null` 5/5, `Aa|string` 6/6,
+// `Aa|Bb` 10/10, `Aa|{lit}` 10/10, and a ternary-formed union 10/10.
+//
+// THE PROPERTY THIS PINS IS CONVERGENCE, NOT VOLUME: a union receiver must answer what the SINGLE-arm
+// receiver answers, because any arm may be the runtime value. That is why the non-union twin sits beside
+// every union row below — a fix that reached these rows by charging more would move the twin too.
+if (blk()) {
+  const arms = { assignSrc: "Object.assign({}, x)", json: "JSON.stringify(x)", sclone: "structuredClone(x)",
+                 spread: "({ ...x })", entries: "Object.entries(x)" };
+  const d = project({
+    "src/a.ts": `import * as fs from "fs";
+export interface Aa { get token(): string; other?: number }
+export interface Bb { other: number }
+export const mkAa = (): Aa => ({ get token(): string { fs.writeFileSync("/tmp/candor-r259", "x"); return "t"; }, other: 1 });
+${Object.entries(arms).map(([n, e]) => `export function u_${n}(x: Aa | Bb) { return ${e}; }
+export function s_${n}(x: Aa) { return ${e}; }`).join("\n")}
+export function uUndef(x: Aa | undefined) { return JSON.stringify(x); }
+export function uNull(x: Aa | null) { return structuredClone(x); }
+export function uString(x: Aa | string) { return JSON.stringify(x); }
+export function uTernary(f: boolean, a: Aa, b: Bb) { return JSON.stringify(f ? a : b); }
+export function uReflectGet(x: Aa | Bb) { return Reflect.get(x, "token"); }`,
+    // SETTER side — the `Object.assign` TARGET and `Reflect.set` arms, whose property list comes from the
+    // same call and was equally blind.
+    "src/w.ts": `import * as fs from "fs";
+export interface Wa { set token(v: number); other?: number }
+export interface Wb { other: number }
+export const mkWa = (): Wa => ({ set token(v: number) { fs.writeFileSync("/tmp/candor-r259b", String(v)); } });
+export function wAssign(x: Wa | Wb) { return Object.assign(x, { token: 1 }); }
+export function wReflect(x: Wa | Wb) { return Reflect.set(x, "token", 1); }
+export function wSingle(x: Wa) { return Object.assign(x, { token: 1 }); }`,
+    // NARROWED CONTROLS — the row asserts these are correct TODAY, and they are the reason the hole needs
+    // the union to SURVIVE into the operation. TS narrows before the site, so nothing here should move.
+    "src/n.ts": `import { Aa } from "./a";
+export function nCoalesce(x: Aa | undefined, fb: Aa) { return JSON.stringify(x ?? fb); }
+export function nGuard(x: Aa | undefined) { if (!x) { return ""; } return JSON.stringify(x); }`,
+    // NO-FABRICATION CONTROL — a union NO arm of which declares an accessor charges nothing at all.
+    "src/p.ts": `export interface Pa { a: number }
+export interface Pb { b: number }
+export function pUnion(x: Pa | Pb) { return JSON.stringify(x); }
+export function pSpread(x: Pa | Pb) { return { ...x }; }`,
+    // R115's CORRECT HALF, on a union arm — a CLASS-bodied getter is prototype-installed and
+    // NON-enumerable, so a COPY never invokes it (executed: 0). Charging it because the receiver is now
+    // a union would be R115's fabrication reintroduced through the new door.
+    "src/k.ts": `import * as fs from "fs";
+export class Ka { get token(): string { fs.writeFileSync("/tmp/candor-r259c", "x"); return "t"; } }
+export class Kb { other = 1; }
+export function kSpreadUnion(x: Ka | Kb) { return { ...x }; }
+export function kJsonUnion(x: Ka | Kb) { return JSON.stringify(x); }`,
+    "unk.pol": Object.keys(arms).map((n) => `deny Unknown src.a.u_${n}`).join("\n")
+             + "\ndeny Unknown src.a.uUndef\ndeny Unknown src.a.uNull\ndeny Unknown src.a.uString\n"
+             + "deny Unknown src.a.uTernary\ndeny Unknown src.a.uReflectGet\n"
+             + "deny Fs src.w.wAssign\ndeny Unknown src.w.wAssign\ndeny Unknown src.w.wReflect\n",
+    "ctl.pol": "deny Unknown src.p\ndeny Fs src.p\ndeny Unknown src.k.kSpreadUnion\ndeny Fs src.k.kSpreadUnion\n"
+             + "deny Unknown src.k.kJsonUnion\ndeny Fs src.k.kJsonUnion\n",
+  });
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const inf = (fn) => JSON.stringify([...(eff(fn)?.inferred ?? [])].sort());
+  for (const n of Object.keys(arms)) {
+    check(`R259: a UNION receiver answers on the ${arms[n]} arm — silent at 9a0cfd9 with 1 real getter invocation`,
+          (eff(`src.a.u_${n}`)?.inferred ?? []).length > 0, JSON.stringify(eff(`src.a.u_${n}`) ?? null));
+    check(`R259 CONVERGENCE: …and it answers EXACTLY what the SINGLE-arm receiver answers — ${arms[n]}. This is the property; a fix that merely charged MORE would move the single-arm twin too`,
+          inf(`src.a.u_${n}`) === inf(`src.a.s_${n}`), `union ${inf(`src.a.u_${n}`)} vs single ${inf(`src.a.s_${n}`)}`);
+  }
+  for (const [fn, what] of [
+    ["src.a.uUndef", "`JSON.stringify(x: Aa | undefined)` — the everyday spelling"],
+    ["src.a.uNull", "`structuredClone(x: Aa | null)`"],
+    ["src.a.uString", "`JSON.stringify(x: Aa | string)`"],
+    ["src.a.uTernary", "a union formed AT THE SITE by a ternary"],
+    ["src.a.uReflectGet", "`Reflect.get` over a two-arm union"],
+    ["src.w.wAssign", "the `Object.assign` TARGET side — the setter the copy invokes"],
+    ["src.w.wReflect", "`Reflect.set` over a two-arm union"],
+  ]) {
+    check(`R259: ${what} — 1 real invocation, ABSENT from functions[] at 9a0cfd9`,
+          (eff(fn)?.inferred ?? []).length > 0, JSON.stringify(eff(fn) ?? null));
+  }
+  check("R259 CONVERGENCE (setter side): the union target answers what the single-arm target answers",
+        inf("src.w.wAssign") === inf("src.w.wSingle"), `union ${inf("src.w.wAssign")} vs single ${inf("src.w.wSingle")}`);
+  for (const [fn, what] of [
+    ["src.n.nCoalesce", "`x ?? fb` — TS narrows before the site, so this was already right"],
+    ["src.n.nGuard", "`if (!x) return` — likewise"],
+  ]) {
+    check(`R259 NARROWED CONTROL: ${what} still discloses (unchanged)`,
+          (eff(fn)?.inferred ?? []).includes("Unknown"), JSON.stringify(eff(fn) ?? null));
+  }
+  for (const [fn, what] of [
+    ["src.p.pUnion", "a union NO arm of which declares an accessor — `JSON.stringify`"],
+    ["src.p.pSpread", "…and its spread spelling"],
+    ["src.k.kSpreadUnion", "R115's CORRECT half on a union arm: a CLASS-bodied getter is prototype-installed and non-enumerable, so a spread never invokes it (executed: 0)"],
+    ["src.k.kJsonUnion", "…and `JSON.stringify` over the same class union"],
+  ]) {
+    check(`R259 NO-FABRICATION CONTROL: nothing charged — ${what}`,
+          (eff(fn)?.inferred ?? []).length === 0, JSON.stringify(eff(fn) ?? null));
+  }
+  {
+    const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
+    check("R259 GATE: `deny Unknown`/`deny Fs` scoped to the union callers fires (exit 1) — every one exited 0 at 9a0cfd9 with the scope binding", ex("unk.pol") === 1, `exit ${ex("unk.pol")}`);
+    check("R259 GATE CONTROL: the accessor-less union and the class-bodied union still gate clean under Unknown+Fs", ex("ctl.pol") === 0, `exit ${ex("ctl.pol")}`);
   }
   fs.rmSync(d, { recursive: true, force: true });
 }

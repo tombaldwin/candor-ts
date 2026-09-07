@@ -8,6 +8,43 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL SIN FIXED (SOUNDNESS R259) — A UNION RECEIVER DROPPED EVERY ACCESSOR NOT PRESENT IN
+  ALL ARMS, AND R245 FIXED THIS QUESTION ONE CALL TOO LOW.** R245 fixed `accessorsFromSym` — one
+  synthesised symbol carrying several declarations — and its own commit message states the rule this
+  level did not implement: *"a union receiver is a disjunction — ANY arm may be the runtime value — so
+  the sound answer is the UNION of the arms' accessors."* Every whole-object arm takes its property
+  LIST from `type.getProperties()`, which on a union returns only what is present in EVERY constituent,
+  so an accessor declared on ONE arm never reached the (already-correct) helper. Proven against the TS
+  API: for `x: Aa | Bb` where only `Aa` declares `token`, `getProperties()` is `[other]` and
+  `getProperty("token")` is null.
+
+  EXECUTED, node 22.12.0, 1 real `fs.appendFileSync` per cell counted by reading the log back, over a
+  GENERATED matrix — 46 cells silent, caller ABSENT from `functions[]` in every one, and on the caller
+  ALL EIGHT policy forms exit 0 (blanket `deny Fs`, `deny Unknown`, `deny Fs Unknown`, `pure <caller>`,
+  `deny Fs <caller>`, and the three reason-scoped ones) with the scoped rules BINDING:
+
+  | union at the site | silent arms, of those that typecheck |
+  |---|---|
+  | `Aa \| undefined` / `Aa \| null` | assign-source, `JSON.stringify`, `structuredClone`, spread, rest — 5/5 |
+  | `Aa \| string` | + `Object.assign` target, `Object.entries`, `Object.values` — 6/6 |
+  | `Aa \| Bb`, `Aa \| { … }`, `(f ? a : b)` | + `Reflect.get`, `Reflect.set` — 10/10 each |
+  | narrowed by `?? ` or `if (!x)` | **0/12 each — correct today and unchanged** |
+
+  Blanket `deny Fs` is red elsewhere in the module only when the object's PRODUCER is in scope; when
+  the object arrives as a parameter, nothing anywhere goes red. The fix fails in the OVER-CHARGE
+  direction (an arm that cannot be the runtime value at this site), never silence — the same trade
+  `accessorsFromSym`'s `every` already makes one level down.
+
+  **Prevalence was filed as 0 in 1,652 rows; a wide-key A/B over fresh clones found it is not.** hono
+  gains 5 rows and changes 1 more (`HonoRequest.#cachedBody` and the four body accessors that call it),
+  from `JSON.stringify(body)` where `body: BodyInit` — a union whose `ArrayBuffer` arm declares
+  `detached` / `maxByteLength` / `resizable`. Those disclosures are the pre-existing R115 residual, not
+  a new one: **an identical non-union `JSON.stringify(x: ArrayBuffer)` is charged the same way on both
+  arms** (measured), because `ArrayBuffer` is an `interface` in lib.d.ts and `classBodiedGetter` can
+  only exclude accessors declared in a `class` body. The union arms have simply joined the answer the
+  single-arm receiver already had, which is the convergence property this fix is for. That residual is
+  reported open, not narrowed here.
+
 - **⚠ SPEC CONFORMANCE (SOUNDNESS R284) — AN UNNAMEABLE-OWNER MEMBER DISPATCH WAS KINDED `callback:`,
   WHICH SPEC §4 ⟨0.24⟩ NAMES AND REJECTS — AT THREE SITES, NOT THE ONE THE ROW HANDED US.** (Row id
   supplied by the coordinator.) `dispatchWhy` decides §4's class from whether an OWNER STRING could be

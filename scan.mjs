@@ -4332,6 +4332,52 @@ for (const sf of sources) {
 // receiver is a disjunction — ANY arm may be the runtime value — so the sound answer is the UNION of
 // the arms' accessors, which is also what `classBodiedGetter`'s `every` already assumes one line up.
 // The direction this fails in is over-charge (an arm that cannot occur at this site), never silence.
+// SOUNDNESS R259 — A UNION RECEIVER IS A DISJUNCTION, AND `getProperties()` ANSWERS THE INTERSECTION.
+// R245 fixed the union question at `accessorsFromSym` — ONE synthesised symbol carrying several
+// declarations — and its own commit message states the rule this level does not implement: *"a union
+// receiver is a disjunction — ANY arm may be the runtime value — so the sound answer is the UNION of the
+// arms' accessors."* Every whole-object arm gets its property LIST from `type.getProperties()`, which on
+// a union returns only the properties present in EVERY constituent, so an accessor declared on ONE arm is
+// never handed to the (now-correct) helper at all. Proven against the TS API directly: for `x: Aa | Bb`
+// where only `Aa` declares `token`, `getProperties()` is `[other]` and `getProperty("token")` is null.
+//
+// EXECUTED, node 22.12.0, 1 real accessor invocation per cell, over 46 cells of a generated matrix —
+// six union shapes crossed with every arm that typechecks, caller ABSENT from `functions[]` in all 46:
+//
+//     Aa|undefined  assign-src, JSON.stringify, structuredClone, spread, rest        5 of 5 arms silent
+//     Aa|null       the same five                                                    5 of 5
+//     Aa|string     + Object.assign target, Object.entries, Object.values            6 of 6
+//     Aa|Bb         + Reflect.get, Reflect.set                                      10 of 10
+//     Aa|{lit}      the same ten                                                    10 of 10
+//     (f ? a : b)   the same ten — a union formed AT THE SITE                       10 of 10
+//
+// and on the caller ALL EIGHT policy forms exit 0 — blanket `deny Fs`, `deny Unknown`, `deny Fs Unknown`,
+// `pure <caller>`, `deny Fs <caller>`, and the three reason-scoped ones — with the scoped rules BINDING.
+// Blanket `deny Fs` is red elsewhere in the module only when the object's PRODUCER is in scope; when the
+// object arrives as a parameter, nothing anywhere goes red. NARROWED forms are correct today and stay
+// correct — `x ?? fb` and `if (!x) return` both disclose, because TS narrows before the site, so the hole
+// needs the union to SURVIVE into the operation (12 arms each, 0 silent, carried as controls).
+//
+// The direction this fails in is OVER-CHARGE — an arm that cannot be the runtime value at this site —
+// never silence, which is the same trade `accessorsFromSym`'s `every` already makes one level down.
+/** Every property symbol ANY arm of `type` declares — the disjunction, not `getProperties()`'s intersection. */
+function propertiesAcrossArms(type) {
+  if (!type?.getProperties) return [];
+  if (!type.isUnion?.()) return type.getProperties();
+  const seen = new Set();
+  for (const arm of type.types) for (const p of (arm.getProperties?.() ?? [])) seen.add(p);
+  return [...seen];
+}
+/** Every arm's symbol for `name` — a LIST, because two arms can declare the same name with different
+ *  accessor bodies and picking one is the order-dependence R245 was filed to kill. */
+function propertySymbolsAcrossArms(type, name) {
+  if (!type?.getProperty) return [];
+  const seen = new Set();
+  const direct = type.getProperty(name);
+  if (direct) seen.add(direct);
+  if (type.isUnion?.()) for (const arm of type.types) { const p = arm.getProperty?.(name); if (p) seen.add(p); }
+  return [...seen];
+}
 function accessorsFromSym(sym, kind /* "get" | "set" */) {
   if (!sym) return [];
   const want = kind === "get" ? ts.isGetAccessorDeclaration : ts.isSetAccessorDeclaration;
@@ -4400,7 +4446,10 @@ function accessorsAt(propNode, kind /* "get" | "set" */) {
     if (!texts) return null;
     const recvType = checker.getTypeAtLocation(propNode.expression);
     const out = [];
-    for (const t of texts) out.push(...accessorsFromSym(recvType?.getProperty?.(t), kind));
+    // R259 — every ARM's symbol for the name, not just the union's own (which is null unless the
+    // property is common to all of them).
+    for (const t of texts) for (const sym of propertySymbolsAcrossArms(recvType, t))
+      out.push(...accessorsFromSym(sym, kind));
     return out;
   }
   return accessorsFromSym(checker.getSymbolAtLocation(propNode.name ?? propNode), kind);
@@ -4664,9 +4713,9 @@ function classBodiedGetter(sym) {
 function enumerateGetters(owner, type, srcExpr) {
   if (!owner) return;
   if (type && type.getProperties) {
-    for (const p of type.getProperties()) {
+    for (const p of propertiesAcrossArms(type)) {   // R259 — the disjunction, not the intersection
       if (classBodiedGetter(p)) continue; // prototype + non-enumerable → not copied by a spread
-      for (const hit of accessorsFromSym(p, "get")) recordAccessorHit(owner, hit, p.getName());
+      for (const hit of accessorsFromSym(p, "get")) recordAccessorHit(owner, hit, p.getName(), srcExpr);
     }
   }
   // The structural arm: `const o: SomeClass = { get k(){…} }` — the BINDING's initializer is an object
@@ -4818,7 +4867,7 @@ function enumerateTargetAccessors(owner, targetExpr, keys, kind /* "get" | "set"
   // passes nothing. `keys.has` below is now unguarded, so a future third call site omitting the
   // argument would throw rather than take this branch.
   if (!keys) {
-    for (const p of t.getProperties()) {
+    for (const p of propertiesAcrossArms(t)) {      // R259 — the disjunction, not the intersection
       if (!accessorsFromSym(p, kind).length) continue;
       if (!keyCouldNameAccessor(p, unprovable.keyType ?? null)) continue;
       const rec = fns.get(owner);
@@ -4828,7 +4877,7 @@ function enumerateTargetAccessors(owner, targetExpr, keys, kind /* "get" | "set"
     }
     return;     // a target declaring no reachable accessor discloses nothing (0 real invocations)
   }
-  for (const p of t.getProperties()) {
+  for (const p of propertiesAcrossArms(t)) {        // R259 — the disjunction, not the intersection
     // NO `classBodiedGetter`-style exclusion here, and the asymmetry is the point rather than an
     // oversight: R115 excluded a class-bodied GETTER because a prototype accessor is non-enumerable and
     // therefore never COPIED. A prototype SETTER is the opposite — it is found by the assignment's
@@ -4838,7 +4887,7 @@ function enumerateTargetAccessors(owner, targetExpr, keys, kind /* "get" | "set"
     // not a copy, so it finds a prototype getter too (executed: class 1). The exclusion belongs to
     // `enumerateGetters`, whose callers really are copies, and to nothing here.
     if (!keys.has(p.getName())) continue;                      // proven not touched by this operation
-    for (const hit of accessorsFromSym(p, kind)) recordAccessorHit(owner, hit, p.getName());
+    for (const hit of accessorsFromSym(p, kind)) recordAccessorHit(owner, hit, p.getName(), targetExpr);
   }
 }
 
@@ -8004,7 +8053,8 @@ function visitCalls(node) {
         const keyName = ts.isIdentifier(key) ? key.text
           : ts.isStringLiteralLike(key) ? key.text : null;
         if (keyName === null) continue; // computed key (`{[k]: v}`) — unresolvable to one property
-        for (const hit of accessorsFromSym(recvType?.getProperty?.(keyName), "get"))
+        for (const sym of propertySymbolsAcrossArms(recvType, keyName))   // R259
+        for (const hit of accessorsFromSym(sym, "get"))
           recordAccessorHit(owner, hit, keyName);
       }
     }
