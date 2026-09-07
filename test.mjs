@@ -17937,6 +17937,113 @@ export function pClass(k: Klass) { return globalThis.structuredClone(k); }`,
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── SOUNDNESS R282: an ACCESSOR's class overrides were never consulted — and `abstract` is the TRIGGER,
+//    not the class ───────────────────────────────────────────────────────────────────────────────────
+//
+// CARDINAL SIN. `recordAccessorHit` edged into the accessor RESOLUTION landed on and stopped. For a
+// base-typed receiver that is the BASE's accessor, so a subclass override's effects never reached the
+// caller. The METHOD path one arm over does consult `classOverrides` — off the SAME index, which already
+// keys accessor declarations (its indexing loop matches `isGetAccessorDeclaration` explicitly). The index
+// knew; the consumer never asked. §F1 question 3: separate implementations of one question, one drifted.
+//
+// THE ROW THAT FILED THIS NAMED `abstract get` — A DECLARATION WITH NO BODY. That is the trigger, not the
+// class, and the boundary was drawn around it. A CONCRETE base accessor WITH a body fails identically and
+// is the shape real code has. EXECUTED, node 22.12.0, counting real `fs.appendFileSync` calls by reading
+// the log back, receiver typed as the base in all three:
+//
+//     abstract class T { abstract get val(): string; }        + override   1 real write, caller ABSENT
+//     class T { get val() { return "b"; } }                   + override   1 real write, caller ABSENT
+//     class T { m() { return "b"; } }                         + override   1 real write, caller ['Fs'] ← control
+//
+// In a tree containing nothing else: `pure <caller>` and `deny Fs <caller>` both exit 0 with the scope
+// BINDING, `deny Unknown` exits 0, and blanket `deny Fs` exits 1 only INCIDENTALLY — via the
+// independently-reported `TImpl.get val` unit, never via the caller, which was never judged at all.
+if (blk()) {
+  const mkSubs = (n) => Array.from({ length: n }, (_, i) =>
+    i === 0 ? `export class W${i} extends WBase { override get val(): string { fs.writeFileSync("/tmp/candor-r282w", "x"); return "v"; } }`
+            : `export class W${i} extends WBase { override get val(): string { return "p"; } }`).join("\n");
+  const d = project({
+    "src/a.ts": `import * as fs from "fs";
+export abstract class A { abstract get val(): string; abstract set sink(v: string); abstract m(): string; }
+export class AImpl extends A {
+  get val(): string { fs.writeFileSync("/tmp/candor-r282a", "x"); return "v"; }
+  set sink(v: string) { fs.writeFileSync("/tmp/candor-r282b", v); }
+  m(): string { fs.writeFileSync("/tmp/candor-r282c", "x"); return "v"; }
+}
+export function leakAbsGet(x: A) { return x.val; }
+export function leakAbsSet(x: A) { x.sink = "w"; }
+export function leakAbsMethod(x: A) { return x.m(); }`,
+    // THE SHAPE THE ROW MISSED: a CONCRETE base accessor, with a body, overridden.
+    "src/c.ts": `import * as fs from "fs";
+export class C { get val(): string { return "b"; } set sink(v: string) { /* pure */ } m(): string { return "b"; } }
+export class CImpl extends C {
+  override get val(): string { fs.writeFileSync("/tmp/candor-r282d", "x"); return "v"; }
+  override set sink(v: string) { fs.writeFileSync("/tmp/candor-r282e", v); }
+  override m(): string { fs.writeFileSync("/tmp/candor-r282f", "x"); return "v"; }
+}
+export function leakConcGet(x: C) { return x.val; }
+export function leakConcSet(x: C) { x.sink = "w"; }
+export function leakConcMethod(x: C) { return x.m(); }`,
+    // PRECISION CONTROL — the receiver-subtree scoping the method path already has. A receiver typed as
+    // the PURE sibling `P2` can never bind `P1`'s effectful override, so charging it would be
+    // fabrication-adjacent. This is the cell that distinguishes "consulted the index" from "unioned it".
+    "src/p.ts": `import * as fs from "fs";
+export class PBase { get val(): string { return "b"; } }
+export class P1 extends PBase { override get val(): string { fs.writeFileSync("/tmp/candor-r282g", "x"); return "v"; } }
+export class P2 extends PBase { override get val(): string { return "p"; } }
+export function viaBase(x: PBase) { return x.val; }
+export function viaPureSibling(x: P2) { return x.val; }`,
+    // PURE TWIN — the identical shape with a pure override. A fix that reached the rows above by
+    // charging every accessor would flip this, which is the whole point of carrying it.
+    "src/t.ts": `export abstract class T { abstract get val(): string; }
+export class TImpl extends T { get val(): string { return "v"; } }
+export function twinAbsGet(x: T) { return x.val; }`,
+    // THE >12 FAMILY — too wide to enumerate soundly, so it DISCLOSES rather than dropping what it
+    // could not enumerate, exactly as the method arm does at the same bound.
+    "src/w.ts": `import * as fs from "fs";
+export class WBase { get val(): string { return "b"; } }
+${mkSubs(14)}
+export function viaWide(x: WBase) { return x.val; }`,
+    "fs.pol": "deny Fs src.a.leakAbsGet\ndeny Fs src.a.leakAbsSet\ndeny Fs src.c.leakConcGet\ndeny Fs src.c.leakConcSet\n",
+    "purepol.pol": "deny Fs src.t\ndeny Unknown src.t\ndeny Fs src.p.viaPureSibling\n",
+  });
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+  for (const [fn, what] of [
+    ["src.a.leakAbsGet", "an `abstract get` — the shape the row named"],
+    ["src.a.leakAbsSet", "an `abstract set`"],
+    ["src.c.leakConcGet", "a CONCRETE base getter WITH A BODY, overridden — the shape the row MISSED, and the common one"],
+    ["src.c.leakConcSet", "a CONCRETE base setter WITH A BODY, overridden"],
+  ]) {
+    check(`R282: the override's effect reaches the caller — ${what}`, has(fn, "Fs"), JSON.stringify(eff(fn) ?? null));
+  }
+  for (const [fn, what] of [
+    ["src.a.leakAbsMethod", "the abstract METHOD — the arm that was always right"],
+    ["src.c.leakConcMethod", "the concrete METHOD — the control that made this a drift and not a gap"],
+  ]) {
+    check(`R282 DISCRIMINATOR: ${what} is unchanged (Fs) — a fix that reached the accessor rows by widening the METHOD path would look identical here`,
+          has(fn, "Fs"), JSON.stringify(eff(fn) ?? null));
+  }
+  check("R282: a BASE-typed receiver keeps the subtree fan-out — src.p.viaBase charges the effectful override",
+        has("src.p.viaBase", "Fs"), JSON.stringify(eff("src.p.viaBase") ?? null));
+  check("R282 PRECISION CONTROL: a receiver typed as the PURE SIBLING charges nothing — a sibling's override is type-impossible on this path, and the receiver-subtree scoping is what keeps this row green",
+        (eff("src.p.viaPureSibling")?.inferred ?? []).length === 0, JSON.stringify(eff("src.p.viaPureSibling") ?? null));
+  check("R282 PURE TWIN: the identical abstract-accessor shape with a PURE override charges nothing",
+        (eff("src.t.twinAbsGet")?.inferred ?? []).length === 0, JSON.stringify(eff("src.t.twinAbsGet") ?? null));
+  check("R282: a >12 override family DISCLOSES Unknown rather than dropping what it could not enumerate — the method arm's bound, applied to accessors",
+        has("src.w.viaWide", "Unknown"), JSON.stringify(eff("src.w.viaWide") ?? null));
+  check("R282: …and it names a QUALIFIED `dispatch:<mod>.<Owner>.<member>` (R284's spelling), so the frontier can resolve it",
+        (eff("src.w.viaWide")?.unknownWhy ?? []).includes("dispatch:src.w.WBase.val"),
+        JSON.stringify(eff("src.w.viaWide")?.unknownWhy ?? null));
+  {
+    const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
+    check("R282 GATE: `deny Fs` scoped to the four accessor callers fires (exit 1) — all four exited 0 at 9a0cfd9, with the scopes binding", ex("fs.pol") === 1, `exit ${ex("fs.pol")}`);
+    check("R282 GATE CONTROL: the pure twin and the pure sibling still gate clean under Fs+Unknown", ex("purepol.pol") === 0, `exit ${ex("purepol.pol")}`);
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── UNION-TYPED RECEIVER: the accessor arm was picked by DECLARATION ORDER ────────────────────────
 //
 // CARDINAL SIN (silent under-report), found while sweeping the mechanism behind SOUNDNESS R240 rather

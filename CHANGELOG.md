@@ -8,6 +8,36 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL SIN FIXED (SOUNDNESS R282) — AN ACCESSOR'S CLASS OVERRIDES WERE NEVER CONSULTED, AND
+  `abstract` WAS THE TRIGGER, NOT THE CLASS.** (Row id supplied by the coordinator.)
+  `recordAccessorHit` edged into the declaration resolution landed on — for a base-typed receiver, the
+  BASE's accessor — and stopped. Nothing consulted `classOverrides`, so a subclass override's effects
+  never reached the caller. The METHOD path one arm over does exactly this, off the SAME index, which
+  already keys accessor declarations: its indexing loop matches `isGetAccessorDeclaration` explicitly.
+  The index knew; the consumer never asked.
+
+  **The filing row named `abstract get` — a declaration with no body — and that is the trigger, not
+  the class.** A CONCRETE base accessor WITH a body fails identically, and that is the shape real code
+  has. EXECUTED, node 22.12.0, counting real `fs.appendFileSync` calls, receiver typed as the base:
+
+  | shape | executed | caller |
+  |---|---|---|
+  | `abstract class T { abstract get val(): string; }` + override | 1 real write | **ABSENT** |
+  | `class T { get val() { return "b"; } }` + `override get val()` | 1 real write | **ABSENT** |
+  | `class T { m() { return "b"; } }` + `override m()` | 1 real write | `['Fs']` — the control |
+
+  In a tree containing nothing else, `pure <caller>` and `deny Fs <caller>` both exit 0 with the scope
+  BINDING, `deny Unknown` exits 0, and blanket `deny Fs` exits 1 only INCIDENTALLY, via the
+  independently-reported `TImpl.get val` unit — never via the caller, which was not judged at all.
+
+  Bounded exactly as the method path is: the fan-out is scoped to the RECEIVER's static-type subtree
+  when the receiver pins a local class (a sibling subclass's override is type-impossible on that path);
+  past `CHA_FANOUT_LIMIT`, or with any override not minted as a unit, it DISCLOSES rather than dropping
+  what it could not enumerate. A base accessor no subclass overrides has no index entry, so that answer
+  is preserved byte-for-byte. Corpus A/B over fresh zod / hono / got / zx: `recordAccessorHit`'s
+  local-edge branch fires **957** times and the new fan-out branch inside it **0** — none of those
+  accessors has a local subclass override in those four repos.
+
 - **⚠ CARDINAL SIN FIXED (SOUNDNESS R281) — `globalThis.structuredClone(process.env)` WAS SILENT IN
   BOTH DIRECTIONS, SIX COMMITS AFTER THE COMMIT THAT FIXED EXACTLY THIS CLASS.** (Row id supplied by
   the coordinator.) `f58dc0f` fixed FIVE member-keyed arms — `Object.assign`, `Reflect.set`,

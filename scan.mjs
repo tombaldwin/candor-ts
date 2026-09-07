@@ -4442,11 +4442,69 @@ function definePropForceTarget(propNode, kind /* "get" | "set" */) {
 // Record a resolved accessor HIT (read or write) as an edge from `owner`: into the accessor UNIT when
 // it's a local declaration we minted; otherwise Unknown (a resolved-but-unseen accessor body — never
 // silent-pure, SPEC §4). `label` tags the §-why disclosure.
-function recordAccessorHit(owner, hit, label) {
+// SOUNDNESS R282 — AND THE OVERRIDES, WHICH THIS NEVER ASKED FOR. The edge above lands on the
+// declaration RESOLUTION picked — for a base-typed receiver that is the BASE's accessor — and nothing
+// here consulted `classOverrides`, so a subclass override's effects never reached the caller. The
+// method path one arm over (`allOverrides` at the CallExpression site) does exactly this, off the SAME
+// index, which already keys accessor declarations: `classOverrides`'s own indexing loop matches
+// `isGetAccessorDeclaration`/`isSetAccessorDeclaration` explicitly. The index knew; the consumer never
+// asked. §F1 question 3 — separate implementations of one question, and this is the one that drifted.
+//
+// THE ROW THAT FILED THIS NAMED `abstract get` — A DECLARATION WITH NO BODY — AND THAT IS THE TRIGGER,
+// NOT THE CLASS. A CONCRETE base accessor WITH a body fails identically, and that is the shape real code
+// has. EXECUTED, node 22.12.0, counting real `fs.appendFileSync` calls, receiver typed as the base:
+//
+//     abstract class T { abstract get val(): string; }                     1 real write, `leak` ABSENT
+//     class T { get val() { return "b"; } }  + override get val()          1 real write, `leak` ABSENT
+//     class T { m() { return "b"; } }        + override m()                1 real write, `leak` ['Fs']  ← the control
+//
+// In a tree containing nothing else, `pure src.only.leak` and `deny Fs src.only.leak` both exit 0 with
+// the scope BINDING, `deny Unknown` exits 0, and blanket `deny Fs` exits 1 only INCIDENTALLY — via the
+// independently-reported `src.only.TImpl.get val` unit, never via the caller, which was not judged at all.
+//
+// Bounded exactly as the method path is, and the bounds are the point rather than trivia: the fan-out is
+// scoped to the RECEIVER's static-type subtree when the receiver pins a local class (a sibling
+// subclass's override is type-impossible on this path, and charging it would be fabrication-adjacent);
+// past `CHA_FANOUT_LIMIT`, or with any override not minted as a unit, it DISCLOSES rather than silently
+// dropping what it could not enumerate. A base accessor no subclass overrides has no index entry, so
+// today's answer is preserved byte-for-byte there.
+function accessorOverrideFanOut(rec, decl, recvExpr) {
+  const allOverrides = classOverrides.get(decl);
+  if (!allOverrides || allOverrides.length === 0) return;
+  let overrides = allOverrides;
+  if (recvExpr) {
+    const rt = checker.getTypeAtLocation(recvExpr);
+    const rootClass = (rt?.symbol?.declarations ?? []).find((d) =>
+      ts.isClassDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+    // SOUNDNESS-PRESERVING FALLBACK, the method path's verbatim: a receiver we cannot pin to a LOCAL
+    // class (a union, an interface, `any`, an external type) keeps the FULL override set.
+    if (rootClass) overrides = allOverrides.filter((om) =>
+      ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass));
+  }
+  if (overrides.length === 0) return;
+  const ownerQual = (d) => (d.parent?.name
+    ? `${moduleOf(d.parent.getSourceFile())}.${namespacePrefixOf(d.parent)}${d.parent.name.getText()}`
+    : null);
+  if (overrides.length > CHA_FANOUT_LIMIT) {
+    rec.direct.add("Unknown");                       // override family too wide to enumerate soundly
+    rec.why.add(dispatchWhy(ownerQual(decl), decl.name?.getText?.()));
+    return;
+  }
+  let allResolved = true;
+  const targets = [];
+  for (const om of overrides) { const ot = nodeName.get(om); if (ot) targets.push(ot); else allResolved = false; }
+  for (const ot of targets) rec.edges.add(ot);       // (EDGE) into each override — effects propagate
+  if (!allResolved) {
+    rec.direct.add("Unknown");                       // an override we could not name is not a pure one
+    rec.why.add(dispatchWhy(ownerQual(decl), decl.name?.getText?.()));
+  }
+}
+function recordAccessorHit(owner, hit, label, recvExpr = null) {
   const rec = fns.get(owner);
   const t = nodeName.get(hit.decl);
   if (hit.local && t) {
     rec.edges.add(t); // (EDGE) into the accessor unit — effects propagate
+    accessorOverrideFanOut(rec, hit.decl, recvExpr);  // R282 — …and into every override it may bind to
   } else {
     rec.direct.add("Unknown");
     rec.why.add(`reflect:accessor:${label}`); // a defineProperty runtime accessor (descriptor get/set unseen) — metaprogramming, canonical `reflect:`
