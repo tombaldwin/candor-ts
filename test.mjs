@@ -18044,6 +18044,107 @@ export function viaWide(x: WBase) { return x.val; }`,
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── SOUNDNESS R283: a TYPE-PARAMETER key read as provably-not-a-symbol ─────────────────────────────
+//
+// CARDINAL SIN. `keyCouldNameAccessor` is R247's one authority for "could a runtime key of this TYPE
+// ever name this property?", and it tested `flags & (ESSymbolLike | Any | Unknown)`. A TYPE PARAMETER's
+// flags are `TypeParameter` — neither symbol-ish nor wild — so both tests read FALSE, the key was treated
+// as provably not a symbol, and every symbol-named accessor was excluded as unreachable. Its own comment
+// says it "lifts entirely when the key's own type could hold the other kind (`PropertyKey`, `symbol`,
+// `any`, `unknown`)": true of those four SPELLINGS, false of a type parameter CONSTRAINED to them. §K,
+// in a safety sentence written by the commit that needed it.
+//
+// MEASURED through the TS API at 9a0cfd9: `k: K` where `K extends PropertyKey` has flags 524288
+// (TypeParameter), `keyMayBeSymbol` FALSE, and `getBaseConstraintOfType` returns `PropertyKey`, whose
+// arms answer TRUE. EXECUTED, 1 real getter/setter invocation per cell, over a class whose ONLY accessor
+// is `get [SYM]()`:
+//
+//     K extends keyof Src    Reflect.get SILENT  Reflect.set SILENT  s[k] SILENT  s[k]=v SILENT
+//     K extends symbol       Reflect.get SILENT  Reflect.set SILENT
+//     K extends PropertyKey  Reflect.get SILENT  Reflect.set DISCLOSED  ← passed BY ACCIDENT
+//
+// THAT LAST ROW IS WHY THE AXIS HERE IS THE CONSTRAINT AND NOT THE SPELLINGS. `Reflect.set`'s lib.d.ts
+// `propertyKey: PropertyKey` is NON-generic, so the checker handed the helper `PropertyKey` and it
+// answered right for the wrong reason; `Reflect.get` is generic (`P extends PropertyKey`), so `k` kept
+// type `K` and it answered wrong. A guard that passes because of an overload's shape is one TypeScript
+// release from flipping, and a green that depends on a `.d.ts` detail is not a guard.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", lib: ["ES2022", "DOM"], module: "commonjs", strict: true,
+                         noImplicitAny: false, types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+      include: ["src"],
+    }),
+    "src/a.ts": `import * as fs from "fs";
+export const SYM: unique symbol = Symbol("s");
+export class Src { get [SYM](): string { fs.writeFileSync("/tmp/candor-r283", "x"); return "v"; } set [SYM](v: string) { fs.writeFileSync("/tmp/candor-r283b", v); } }
+export function gPropKeyGet<K extends PropertyKey>(s: Src, k: K) { return Reflect.get(s, k); }
+export function gPropKeySet<K extends PropertyKey>(s: Src, k: K) { return Reflect.set(s, k, "w"); }
+export function gKeyofGet<K extends keyof Src>(s: Src, k: K) { return Reflect.get(s, k); }
+export function gKeyofSet<K extends keyof Src>(s: Src, k: K) { return Reflect.set(s, k, "w"); }
+export function gKeyofElemGet<K extends keyof Src>(s: Src, k: K) { return s[k]; }
+export function gKeyofElemSet<K extends keyof Src>(s: Src, k: K) { s[k] = "w"; }
+export function gSymbolGet<K extends symbol>(s: Src, k: K) { return Reflect.get(s, k); }
+export function gSymbolSet<K extends symbol>(s: Src, k: K) { return Reflect.set(s, k, "w"); }
+export function gBare<K>(s: Src, k: K) { return Reflect.get(s, k as PropertyKey); }`,
+    // OVER-CHARGE CONTROL — the DENYLIST direction R247 exists to keep. A key CONSTRAINED to `string`,
+    // and the non-generic string spellings, cannot name a symbol-keyed accessor: no legal call reaches
+    // it (0 executed), so nothing may be charged. A fix that read the constraint as "anything goes"
+    // would flip every one of these.
+    "src/ctl.ts": `import { Src } from "./a";
+export function cStrConstrained<K extends string>(s: Src, k: K) { return Reflect.get(s, k); }
+export function cString(s: Src, k: string) { return Reflect.get(s, k); }
+export function cLiteral(s: Src, k: "tok") { return Reflect.get(s, k); }
+export function cLiteralUnion(s: Src, k: "tok" | "other") { return Reflect.get(s, k); }`,
+    // …and the mirror, which R247's row cites as its own evidence: a SYMBOL-constrained key over a
+    // STRING-named accessor is equally unreachable.
+    "src/mir.ts": `import * as fs from "fs";
+export class StrSrc { get tok(): string { fs.writeFileSync("/tmp/candor-r283c", "x"); return "v"; } }
+export function mSymConstrained<K extends symbol>(s: StrSrc, k: K) { return Reflect.get(s, k); }
+export function mStrConstrained<K extends string>(s: StrSrc, k: K) { return Reflect.get(s, k); }`,
+    "unk.pol": "deny Unknown src.a.gPropKeyGet\ndeny Unknown src.a.gKeyofGet\ndeny Unknown src.a.gKeyofSet\ndeny Unknown src.a.gSymbolGet\ndeny Unknown src.a.gSymbolSet\n",
+    "ctl.pol": "deny Unknown src.ctl\ndeny Fs src.ctl\n",
+    "mir.pol": "deny Unknown src.mir.mSymConstrained\n",
+  });
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+  for (const [fn, what] of [
+    ["src.a.gPropKeyGet",  "`K extends PropertyKey` + `Reflect.get` — the arm whose sibling passed BY ACCIDENT"],
+    ["src.a.gKeyofGet",    "`K extends keyof Src` + `Reflect.get`"],
+    ["src.a.gKeyofSet",    "`K extends keyof Src` + `Reflect.set` — blind on ALL FOUR arms, which is the finding"],
+    ["src.a.gKeyofElemGet","`K extends keyof Src` + `s[k]`"],
+    ["src.a.gKeyofElemSet","`K extends keyof Src` + `s[k] = v`"],
+    ["src.a.gSymbolGet",   "`K extends symbol` + `Reflect.get`"],
+    ["src.a.gSymbolSet",   "`K extends symbol` + `Reflect.set`"],
+    ["src.a.gBare",        "an UNCONSTRAINED `<K>` — nothing is proven, so nothing may be excluded (fail OPEN)"],
+  ]) {
+    check(`R283: the CONSTRAINT is consulted, so the symbol-named accessor is not excluded — ${what}`,
+          has(fn, "Unknown"), JSON.stringify(eff(fn) ?? null));
+  }
+  check("R283 DISCRIMINATOR: `K extends PropertyKey` + `Reflect.set` still discloses — it did so at 9a0cfd9 too, because lib.d.ts's `propertyKey: PropertyKey` is non-generic. Red here means the fix moved a row that was already right",
+        has("src.a.gPropKeySet", "Unknown"), JSON.stringify(eff("src.a.gPropKeySet") ?? null));
+  for (const [fn, what] of [
+    ["src.ctl.cStrConstrained", "`K extends string` — the CONSTRAINT proves the key cannot be the symbol"],
+    ["src.ctl.cString", "a plain `string` key"],
+    ["src.ctl.cLiteral", "a single literal key"],
+    ["src.ctl.cLiteralUnion", "a literal-union key"],
+    ["src.mir.mSymConstrained", "MIRROR: `K extends symbol` over a STRING-named accessor (R247's own mongoose evidence)"],
+  ]) {
+    check(`R283 OVER-CHARGE CONTROL: nothing charged — ${what} (0 real invocations: no legal key reaches the accessor)`,
+          (eff(fn)?.inferred ?? []).length === 0, JSON.stringify(eff(fn) ?? null));
+  }
+  check("R283 POSITIVE TWIN on the mirror: `K extends string` over a STRING-named accessor DOES disclose — the control above must fail for the RIGHT reason, not because the mirror file charges nothing at all",
+        has("src.mir.mStrConstrained", "Unknown"), JSON.stringify(eff("src.mir.mStrConstrained") ?? null));
+  {
+    const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
+    check("R283 GATE: `deny Unknown` scoped to the seven generic-key callers fires (exit 1) — exit 0 at 9a0cfd9", ex("unk.pol") === 1, `exit ${ex("unk.pol")}`);
+    check("R283 GATE CONTROL: the proven-unreachable file still gates clean under Unknown+Fs", ex("ctl.pol") === 0, `exit ${ex("ctl.pol")}`);
+    check("R283 GATE: the mirror's symbol-constrained key gates clean, the string one does not", ex("mir.pol") === 0, `exit ${ex("mir.pol")}`);
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── UNION-TYPED RECEIVER: the accessor arm was picked by DECLARATION ORDER ────────────────────────
 //
 // CARDINAL SIN (silent under-report), found while sweeping the mechanism behind SOUNDNESS R240 rather

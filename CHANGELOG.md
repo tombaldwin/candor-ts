@@ -8,6 +8,41 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL SIN FIXED (SOUNDNESS R283) — A TYPE-PARAMETER KEY WAS READ AS PROVABLY-NOT-A-SYMBOL,
+  AND ONE ARM PASSED BY ACCIDENT.** (Row id supplied by the coordinator.) `keyCouldNameAccessor` is
+  R247's one authority for "could a runtime key of this TYPE ever name this property?", and it tested
+  `flags & (ESSymbolLike | Any | Unknown)`. A TYPE PARAMETER's flags are `TypeParameter` — neither
+  symbol-ish nor wild — so the guard read FALSE, the key was treated as provably not a symbol, and
+  every symbol-named accessor was excluded as unreachable. The helper's own comment says it "lifts
+  entirely when the key's own type could hold the other kind (`PropertyKey`, `symbol`, `any`,
+  `unknown`)": true of those four SPELLINGS, false of a type parameter CONSTRAINED to them — a safety
+  sentence written by the commit that needed it.
+
+  MEASURED through the TS API at `9a0cfd9`: `k: K` where `K extends PropertyKey` has flags 524288
+  (`TypeParameter`), `keyMayBeSymbol` FALSE, and `getBaseConstraintOfType` returns `PropertyKey`,
+  whose arms answer TRUE. EXECUTED, 1 real invocation per cell, over a class whose only accessor is
+  `get [SYM]()`:
+
+  | key type | `Reflect.get` | `Reflect.set` | `s[k]` | `s[k] = v` |
+  |---|---|---|---|---|
+  | `K extends keyof Src` | SILENT | SILENT | SILENT | SILENT |
+  | `K extends symbol` | SILENT | SILENT | *(type error)* | *(type error)* |
+  | `K extends PropertyKey` | SILENT | **discloses — by accident** | *(type error)* | *(type error)* |
+
+  **That last cell is why the fix reads the CONSTRAINT rather than adding spellings.** `Reflect.set`'s
+  lib.d.ts `propertyKey: PropertyKey` is NON-generic, so the checker handed the helper `PropertyKey`
+  and it answered right for the wrong reason; `Reflect.get` is generic (`P extends PropertyKey`), so
+  `k` kept type `K` and it answered wrong. A guard that passes because of an overload's shape is one
+  TypeScript release from flipping.
+
+  An UNCONSTRAINED `<K>` fails OPEN — nothing is proven, so nothing may be excluded. The DENYLIST
+  direction R247 exists to keep is preserved and pinned: `K extends string`, plain `string`, a literal
+  and a literal union over a symbol-named accessor all stay correctly silent (0 executed — no legal key
+  reaches the accessor), and the mirror (`K extends symbol` over a STRING-named accessor) now stops
+  charging, with a positive twin beside it so the control cannot pass by being inert. Corpus A/B over
+  fresh zod / hono / got / zx: the constraint-expansion branch fires **0** times (calibrated to 46
+  expansions / 23 verdict flips on the fixture matrix).
+
 - **⚠ CARDINAL SIN FIXED (SOUNDNESS R282) — AN ACCESSOR'S CLASS OVERRIDES WERE NEVER CONSULTED, AND
   `abstract` WAS THE TRIGGER, NOT THE CLASS.** (Row id supplied by the coordinator.)
   `recordAccessorHit` edged into the declaration resolution landed on — for a base-typed receiver, the

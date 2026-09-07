@@ -4523,11 +4523,53 @@ function recordAccessorHit(owner, hit, label, recvExpr = null) {
 // the property has a computed name whose expression is symbol-TYPED, and it lifts entirely when the
 // key's own type could hold the other kind (`PropertyKey`, `symbol`, `any`, `unknown`) or when there is
 // no key expression to read at all (`keyT == null` → every property stays reachable).
+//
+// SOUNDNESS R283 — A TYPE PARAMETER IS NOT A SPELLING, AND THE COMMENT ABOVE IS TRUE OF FOUR SPELLINGS
+// AND FALSE OF EVERY GENERIC ONE. "It lifts entirely when the key's own type could hold the other kind
+// (`PropertyKey`, `symbol`, `any`, `unknown`)" was written by the commit that needed it, and it reads as
+// a considered ruling — §K exactly. A TYPE PARAMETER's own flags are `TypeParameter` and nothing else:
+// neither symbol-ish nor wild, so both tests read FALSE and the key was treated as provably not a symbol,
+// although `K extends PropertyKey` binds to one at the call site. The key's vocabulary is in its
+// CONSTRAINT, and `getBaseConstraintOfType` is where the checker keeps it — the same call `keyLiteralNames`
+// already makes twenty lines up for exactly this reason (§G: ask the authority, it already knows).
+//
+// MEASURED through the TS API on the fixture, at 9a0cfd9:
+//     k: K where K extends PropertyKey   flags 524288 (TypeParameter)   keyMayBeSymbol FALSE
+//                                        getBaseConstraintOfType -> PropertyKey, whose arms answer TRUE
+//
+// AND THE PART THAT DECIDES HOW MUCH THIS MATTERS: the blindness was NOT uniform, because one arm passed
+// BY ACCIDENT. `Reflect.set(t, k, v)`'s lib.d.ts `propertyKey: PropertyKey` is NON-generic, so the
+// checker hands this helper `PropertyKey` and the guard answered right for the wrong reason; `Reflect.get`
+// is generic (`P extends PropertyKey`), so `k` keeps type `K` and the guard answered wrong. A guard that
+// passes because of an overload's shape is one TypeScript release from flipping, and it is why the
+// axis here is the CONSTRAINT and not the four spellings. EXECUTED, 1 real getter invocation per cell,
+// over a class whose only accessor is `get [SYM]()`:
+//
+//     K extends keyof Src    Reflect.get SILENT  Reflect.set SILENT  s[k] SILENT  s[k]=v SILENT
+//     K extends symbol       Reflect.get SILENT  Reflect.set SILENT
+//     K extends PropertyKey  Reflect.get SILENT  Reflect.set discloses  ← the accidental pass
+//     PropertyKey / symbol / keyof Src / any (non-generic)   all four arms disclose
+//     string / "tok" / "tok"|"other"   correctly silent — 0 executed, no legal key reaches the accessor
+//
+// UNCONSTRAINED `<K>` fails OPEN (both kinds possible), which is the disclose direction: a bare type
+// parameter can be instantiated with anything, so nothing is proven and nothing may be excluded.
 function keyCouldNameAccessor(propSym, keyT) {
-  const arms = (t) => (t?.isUnion?.() ? t.types : t ? [t] : []);
   const SYMBOLISH = ts.TypeFlags.ESSymbolLike, WILD = ts.TypeFlags.Any | ts.TypeFlags.Unknown;
-  const keyMayBeSymbol = !keyT || arms(keyT).some((t) => t.flags & (SYMBOLISH | WILD));
-  const keyMayBeString = !keyT || arms(keyT).some((t) => !(t.flags & SYMBOLISH));
+  // A key type flattened to the arms whose FLAGS actually answer the question: a union spreads to its
+  // constituents, a type parameter to its constraint's, and an UNCONSTRAINED one to `null` — "no
+  // vocabulary is proven here", which both tests below read as possible.
+  const arms = (t, depth = 0) => {
+    if (!t) return [];
+    if (t.isUnion?.()) return t.types.flatMap((x) => arms(x, depth));
+    if ((t.flags & ts.TypeFlags.TypeParameter) && depth < 4) {
+      const c = checker.getBaseConstraintOfType?.(t);
+      return c && c !== t ? arms(c, depth + 1) : [null];
+    }
+    return [t];
+  };
+  const keyArms = keyT ? arms(keyT) : [];
+  const keyMayBeSymbol = !keyT || keyArms.some((t) => t === null || (t.flags & (SYMBOLISH | WILD)));
+  const keyMayBeString = !keyT || keyArms.some((t) => t === null || !(t.flags & SYMBOLISH));
   const ds = propSym?.declarations ?? [];
   const symbolNamed = ds.length > 0 && ds.every((d) => d.name && ts.isComputedPropertyName(d.name)
     && !!(checker.getTypeAtLocation(d.name.expression)?.flags & SYMBOLISH));
