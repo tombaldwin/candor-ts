@@ -8,6 +8,35 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ CARDINAL SIN FIXED (SOUNDNESS R281) — `globalThis.structuredClone(process.env)` WAS SILENT IN
+  BOTH DIRECTIONS, SIX COMMITS AFTER THE COMMIT THAT FIXED EXACTLY THIS CLASS.** (Row id supplied by
+  the coordinator.) `f58dc0f` fixed FIVE member-keyed arms — `Object.assign`, `Reflect.set`,
+  `Object.keys`, … — by routing them through one authority, `globalBuiltinCallee`. `structuredClone`
+  is not a member of anything; it is a BARE global in its own table (`ENV_TOUCHING_GLOBAL`), and both
+  consumers of that table still tested `ts.isIdentifier(callee)`, which a qualified spelling is not.
+  R252, six commits later, then added the SECOND consumer with the same identifier test — born with
+  the hole its sibling commit had just closed.
+
+  MEASURED at `9a0cfd9`, three isolated trees each containing exactly one exported function:
+
+  | spelling | `functions[]` | `deny Env` | `deny Unknown` | `deny Env Unknown` | `pure <fn>` | `deny Env <fn>` |
+  |---|---|---|---|---|---|---|
+  | `structuredClone(process.env)` | `[["src.only.leak",["Env"]]]` | 1 | 0 | 1 | 1 | 1 |
+  | `globalThis.` / `window.` / `self.` | **`[]`** | **0** | **0** | **0** | **0** | **0** |
+
+  The scoped rules BOUND in every case (a bogus name prints `matched NO function`; these did not), so
+  there is no incidental catch anywhere — a whole-environment read reported as nothing at all. This is
+  the only finding of its round that a BLANKET policy is silent on too. EXECUTED on node 22.12.0 with
+  `window`/`self` bound to `globalThis` as a browser and a worker bind them: each spelling really
+  clones all 66 environment variables, a planted `CANDOR_SECRET` among them. The row that filed this
+  asserted `window.`/`self.` were identical "BY CONSTRUCTION"; they are measured here instead.
+
+  Fixed at BOTH consumers through one new authority, `globalBareCallee`, which answers "which bare
+  global does this callee name?" with the same `identIsGlobal` shadow guard the member helper uses —
+  so the SPELLING widened and what counts as the global did not. Corpus A/B over fresh zod / hono /
+  got / zx (1,726 rows): the qualified spelling occurs **0** times, while the bare spelling reaches
+  the same arm **8** times, so the zero is a measured absence and not a dead path.
+
 - **⚠ CARDINAL SIN FIXED (SOUNDNESS R252) — `Object.entries` / `Object.values` /
   `JSON.stringify` / `structuredClone` OVER AN OBJECT LITERAL WITH A GETTER WERE ALL SILENT, AND
   R115's COMMENT ASSERTED THE OPPOSITE WAS CORRECT.** (Row id supplied by the coordinator.) Each of

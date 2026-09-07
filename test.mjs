@@ -17840,6 +17840,103 @@ export function pJson(o: unknown) { return globalThis.JSON.stringify(o); }`,
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── SOUNDNESS R281: `globalThis.structuredClone` — THE BARE-GLOBAL TABLE THE QUALIFIER FIX MISSED ──
+//
+// CARDINAL SIN, and the only one in its round that BLANKET policies are silent on too. `f58dc0f` fixed
+// five MEMBER-keyed arms (`Object.assign`, `Reflect.set`, …) by routing them through `globalBuiltinCallee`.
+// `structuredClone` is not a member of anything — it is a bare global in its own table
+// (`ENV_TOUCHING_GLOBAL`) — and BOTH consumers of that table still tested `ts.isIdentifier(callee)`, which
+// a qualified spelling is not. R252, the range's HEAD commit, then added the SECOND consumer using the
+// same identifier test, so it was born with the hole its sibling commit had just closed.
+//
+// MEASURED at 9a0cfd9, three isolated trees each containing exactly one exported function:
+//
+//     structuredClone(process.env)             functions[] = [["src.only.leak",["Env"]]]
+//     globalThis.structuredClone(process.env)  functions[] = []   deny Env / deny Unknown /
+//     window.structuredClone(process.env)      functions[] = []   deny Env Unknown / pure <fn> /
+//     self.structuredClone(process.env)        functions[] = []   deny Env <fn>  ALL exit 0
+//
+// with the scoped rule BINDING in every case (a bogus name prints `matched NO function`; these did not).
+// No incidental catch anywhere. EXECUTED on node 22.12.0 with `window`/`self` bound to `globalThis` as a
+// browser and a worker bind them: each spelling really clones all 66 environment variables, a planted
+// `CANDOR_SECRET` among them. `window.`/`self.` were asserted "identical BY CONSTRUCTION" in the row that
+// filed this; they are asserted by those two runs here instead.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", lib: ["ES2022", "DOM"], module: "commonjs", strict: false,
+                         types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+      include: ["src"],
+    }),
+    "src/a.ts": `import * as fs from "fs";
+export const lit = { id: 1, get token(): string { fs.writeFileSync("/tmp/candor-r281", "x"); return "t"; } };
+export function envBare() { return structuredClone(process.env); }
+export function envGT() { return globalThis.structuredClone(process.env); }
+export function envWin() { return window.structuredClone(process.env); }
+export function envSelf() { return self.structuredClone(process.env); }
+export function getBare() { return structuredClone(lit); }
+export function getGT() { return globalThis.structuredClone(lit); }
+export function getWin() { return window.structuredClone(lit); }
+export function getSelf() { return self.structuredClone(lit); }`,
+    // SHADOW CONTROL — a project's OWN `structuredClone`, bare and hung off a project-local `window`.
+    // The helper still asks `identIsGlobal` on the identifier that decides (the bare callee, or the
+    // global ROOT), so the SPELLING widened and what counts as the global did not.
+    "src/shadow.ts": `function structuredClone(x: unknown) { return x; }
+const window = { structuredClone(x: unknown) { return x; } };
+export function shadowBare() { return structuredClone(process.env); }
+export function shadowWin() { return window.structuredClone(process.env); }`,
+    // OVER-CHARGE CONTROL — the qualified spelling over an object with no accessor, and over a CLASS
+    // instance, whose accessor is prototype-installed and NON-enumerable so a clone never visits it
+    // (R115's correct half, which this fix must not move: executed, 0 invocations).
+    "src/pure.ts": `import * as fs from "fs";
+export class Klass { id = 1; get token(): string { fs.writeFileSync("/tmp/candor-r281b", "x"); return "t"; } }
+export function pPlain(o: { a: number }) { return globalThis.structuredClone(o); }
+export function pClass(k: Klass) { return globalThis.structuredClone(k); }`,
+    "env.pol": "deny Env src.a.envGT\ndeny Env src.a.envWin\ndeny Env src.a.envSelf\n",
+    "unk.pol": "deny Unknown src.a.getGT\ndeny Unknown src.a.getWin\ndeny Unknown src.a.getSelf\n",
+    "purepol.pol": "deny Fs src.pure.pPlain\ndeny Env src.pure.pPlain\ndeny Unknown src.pure.pPlain\n"
+                 + "deny Fs src.pure.pClass\ndeny Env src.pure.pClass\ndeny Unknown src.pure.pClass\n",
+    "shadowpol.pol": "deny Env src.shadow\n",
+  });
+  const { report } = scan(d);
+  const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
+  const has = (fn, e) => (eff(fn)?.inferred ?? []).includes(e);
+  for (const [bare, qualified, e, what] of [
+    ["src.a.envBare", "src.a.envGT",  "Env", "`globalThis.structuredClone(process.env)` — the WHOLE environment, reported as nothing"],
+    ["src.a.envBare", "src.a.envWin", "Env", "`window.structuredClone(process.env)` — executed in a browser binding, 66 variables cloned"],
+    ["src.a.envBare", "src.a.envSelf","Env", "`self.structuredClone(process.env)` — executed in a worker binding"],
+    ["src.a.getBare", "src.a.getGT",  "Unknown", "`globalThis.structuredClone(lit)` — R252's own-enumerable getter arm, second consumer of the same table"],
+    ["src.a.getBare", "src.a.getWin", "Unknown", "`window.structuredClone(lit)`"],
+    ["src.a.getBare", "src.a.getSelf","Unknown", "`self.structuredClone(lit)`"],
+  ]) {
+    check(`R281: the BARE spelling still charges ${e} — ${what}`, has(bare, e), JSON.stringify(eff(bare) ?? null));
+    check(`R281: …and so does the QUALIFIED one, ABSENT from functions[] at 9a0cfd9 — ${what}`,
+          has(qualified, e), JSON.stringify(eff(qualified) ?? (report.functions ?? []).map((x) => x.fn)));
+  }
+  for (const fn of ["src.shadow.shadowBare", "src.shadow.shadowWin"]) {
+    check(`R281 SHADOW CONTROL: a project's OWN structuredClone charges no Env — ${fn}`,
+          !has(fn, "Env"), JSON.stringify(eff(fn) ?? null));
+  }
+  for (const [fn, what] of [
+    ["src.pure.pPlain", "an object with no accessor at all"],
+    ["src.pure.pClass", "R115's CORRECT half — a CLASS accessor is prototype-installed and non-enumerable, so a clone never invokes it (executed: 0)"],
+  ]) {
+    check(`R281 OVER-CHARGE CONTROL: the qualified spelling gains nothing over ${what} — ${fn}`,
+          (eff(fn)?.inferred ?? []).length === 0, JSON.stringify(eff(fn) ?? null));
+  }
+  {
+    const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
+    check("R281 GATE: `deny Env` scoped to the three QUALIFIED env callers fires (exit 1) — all three exited 0 at 9a0cfd9, with the scope binding", ex("env.pol") === 1, `exit ${ex("env.pol")}`);
+    check("R281 GATE: `deny Unknown` scoped to the three qualified getter callers fires", ex("unk.pol") === 1, `exit ${ex("unk.pol")}`);
+    // Scoped to the two CALLERS, not the file: `Klass.get token` is an effectful unit by construction
+    // (that is what makes `pClass` a real test of R115's exclusion rather than an empty one), so a
+    // file-wide `deny Fs` would fire on the fixture's own bait and prove nothing about the callers.
+    check("R281 GATE CONTROL: both over-charge callers still gate clean under Fs+Env+Unknown", ex("purepol.pol") === 0, `exit ${ex("purepol.pol")}`);
+    check("R281 GATE CONTROL: the shadow file still gates clean under `deny Env`", ex("shadowpol.pol") === 0, `exit ${ex("shadowpol.pol")}`);
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── UNION-TYPED RECEIVER: the accessor arm was picked by DECLARATION ORDER ────────────────────────
 //
 // CARDINAL SIN (silent under-report), found while sweeping the mechanism behind SOUNDNESS R240 rather

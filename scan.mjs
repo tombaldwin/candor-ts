@@ -5932,6 +5932,47 @@ const globalBuiltinCallee = (callee) => {
   if (!ts.isIdentifier(root) || !GLOBAL_ROOTS.has(root.text) || !identIsGlobal(root)) return null;
   return `${owner.name.text}.${member}`;
 };
+// SOUNDNESS R281 — THE SAME QUESTION FOR A **BARE** GLOBAL, AND THE TABLE THE QUALIFIER FIX DID NOT REACH.
+// `globalBuiltinCallee` above canonicalises a MEMBER of a global object (`globalThis.Object.assign` ->
+// `Object.assign`). `structuredClone` is not a member of anything — it is a bare global — so it lives in
+// its own table (`ENV_TOUCHING_GLOBAL`) whose two consumers both tested `ts.isIdentifier(callee)`, and a
+// qualified spelling is a PropertyAccess. `f58dc0f` fixed FIVE member-keyed arms by routing them through
+// the helper above and left this one; `9a0cfd9` (R252) then added a NEW consumer of the same table with
+// the same identifier test, so it was born with the hole its sibling commit had just closed.
+//
+// MEASURED at 9a0cfd9, three isolated trees each containing exactly one function, `tsc --noEmit` clean:
+//
+//     structuredClone(process.env)              functions[] = [["src.only.leak",["Env"]]]   deny Env -> 1
+//     globalThis.structuredClone(process.env)   functions[] = []                            deny Env -> 0
+//     window.structuredClone(process.env)       functions[] = []                            deny Env -> 0
+//     self.structuredClone(process.env)         functions[] = []                            deny Env -> 0
+//
+// and `deny Unknown`, `deny Env Unknown`, `pure src.only.leak` and `deny Env src.only.leak` ALL exit 0 on
+// the three qualified spellings, with the scoped rule BINDING (a bogus name prints `matched NO function`;
+// these do not). No incidental catch anywhere — a whole-environment read reported as nothing at all.
+// EXECUTED on node 22.12.0 with `window`/`self` bound to `globalThis` as a browser/worker binds them:
+// each spelling really clones all 66 variables, a planted `CANDOR_SECRET` among them.
+//
+// `window.`/`self.` were asserted "identical BY CONSTRUCTION" in the row that filed this; they are not
+// asserted here, they are the two rows above, run.
+//
+// Returns the BARE global name a callee resolves to, or null. Shadow-guarded by the same `identIsGlobal`
+// the member helper uses, on the identifier that actually decides: the bare callee itself, or the
+// `globalThis`/`global`/`window`/`self` root. It can only make an existing text test recognise MORE
+// spellings of the same function; a project's own `structuredClone`, bare or hung off a shadowed root,
+// still matches nothing.
+const globalBareCallee = (callee) => {
+  if (!callee) return null;
+  if (ts.isIdentifier(callee)) return identIsGlobal(callee) ? callee.text : null;
+  if (!ts.isPropertyAccessExpression(callee) || !callee.name?.text) return null;
+  let root = callee.expression;
+  while (root && (ts.isParenthesizedExpression(root) || ts.isAsExpression(root)
+                  || ts.isNonNullExpression(root))) root = root.expression;
+  // ONLY a global ROOT, never an arbitrary owner: `Object.assign` must not read as the bare global
+  // `assign`, and `globalThis.Object.assign` must not read as the bare global `Object` — both are the
+  // member helper's business, and answering them here would be the second copy §G exists to prevent.
+  return ts.isIdentifier(root) && GLOBAL_ROOTS.has(root.text) && identIsGlobal(root) ? callee.name.text : null;
+};
 // True when `node` is a call to a global builtin that reads/writes every key of an object argument (so any
 // env-object argument makes the enclosing fn Env): `Object.*`/`Reflect.*`/`JSON.stringify` (member) or
 // `structuredClone` (bare). Guarded against a project-local shadow of the callee.
@@ -5944,9 +5985,12 @@ const envTouchingBuiltinCall = (node) => {
   // qualified spelling produced `"undefined.keys"` and read false: a whole-environment read reported as
   // nothing. The shadow guard moves INTO the helper (it still checks `identIsGlobal` on the root), so
   // this is not a widening of what counts as global, only of how it may be spelled.
-  if (ts.isPropertyAccessExpression(c)) return ENV_TOUCHING_BUILTIN.has(globalBuiltinCallee(c) ?? "");
-  if (ts.isIdentifier(c)) return ENV_TOUCHING_GLOBAL.has(c.text) && identIsGlobal(c);
-  return false;
+  if (ts.isPropertyAccessExpression(c) && ENV_TOUCHING_BUILTIN.has(globalBuiltinCallee(c) ?? "")) return true;
+  // R281 — the bare-global table, through `globalBareCallee`, so `globalThis.structuredClone(process.env)`
+  // is the same call as `structuredClone(process.env)`. The old test required an IDENTIFIER callee, so
+  // every qualified spelling read false: a whole-environment read reported as nothing. NOT a widening of
+  // what counts as global — the helper still asks `identIsGlobal` — only of how it may be spelled.
+  return ENV_TOUCHING_GLOBAL.has(globalBareCallee(c) ?? "");
 };
 
 /** ⟨R95⟩ Does this CALL reach the host's `fetch`, whatever the callee is spelled as?
@@ -7618,8 +7662,12 @@ function visitCalls(node) {
     // and every one of these reads NESTED objects too — `JSON.stringify({ a: lit })` and
     // `structuredClone([lit])` invoke the getter one level down (executed 1), which no arm here reaches
     // because `enumerateGetters` asks the ARGUMENT's own property list.
+    // R281 — `structuredClone` asks `globalBareCallee`, the SAME authority the Env arm asks, so the two
+    // consumers of `ENV_TOUCHING_GLOBAL` cannot drift the way they just did. The identifier-only test
+    // this replaces was copied here by R252 from the Env arm six commits after `f58dc0f` had fixed the
+    // identical hole one table over.
     if (["Object.entries", "Object.values", "JSON.stringify"].includes(globalBuiltinCallee(callee))
-        || (ts.isIdentifier(callee) && callee.text === "structuredClone" && identIsGlobal(callee))) {
+        || globalBareCallee(callee) === "structuredClone") {
       const arg = (node.arguments ?? [])[0];
       if (arg) enumerateGetters(enclosing(node), checker.getTypeAtLocation(arg), arg);
     }
