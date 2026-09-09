@@ -5303,10 +5303,39 @@ const dispatchWhy = (qualifiedOwner, member) =>
 // literal names the alias that declares the shape it sits in rather than inventing a path.
 const NAMED_TYPE_OWNER = (d) => ts.isInterfaceDeclaration(d) || ts.isClassDeclaration(d)
   || ts.isClassExpression(d) || ts.isTypeAliasDeclaration(d) || ts.isEnumDeclaration(d);
+// SOUNDNESS R355 — THE WALK MUST STOP AT A VALUE BOUNDARY, or it names a type that does not declare
+// the member. R284 added this ancestor walk so a member of an anonymous type LITERAL could still name
+// the alias that declares it; it climbs every parent until it finds a named declaration, and nothing
+// stopped it leaving the type position. Four shapes measured wrong on real code:
+//
+//   literal in a method BODY      eslint 9.x `SourceCode.traverse` -> dispatch:….SourceCode.enterNode
+//                                 (`enterNode` is a method of a literal declared inside the method;
+//                                  SourceCode declares no such member)
+//   literal in a class FIELD      zx `ProcessPromise.bus` -> dispatch:….ProcessPromise.unpipe, which
+//                                 names a REAL but DIFFERENT method of that class
+//   TYPE-PARAMETER constraint     `class A<T extends {m(): void}>` -> dispatch:….A.m — the class named
+//                                 as owner of its own constraint's member
+//   inline PROPERTY type          `cb!: { m(): void }` -> dispatch:….Holder.m
+//
+// SPEC §4 makes the dotted `dispatch:<owner-type>.<member>` detail NORMATIVE, so a phantom owner is a
+// wrong normative field, and `callers --include-unknown` builds frontier edges from it. It is
+// over-approximate rather than silent — never a cardinal sin — but 0.35.0 ships these rows as
+// `callback:`, so publishing the phantom and fixing it later would flip `deny Unknown[dispatch]` twice
+// on identical bytes.
+//
+// A DENYLIST OF VALUE-POSITION BOUNDARIES, not an allowlist of permitted ancestors: a node kind nobody
+// foresaw keeps climbing and over-fires visibly, rather than silently demoting a real owner to
+// `callback:`. Say which direction it fails in — this one fails loud.
+const VALUE_POSITION_BOUNDARY = (n) =>
+  ts.isFunctionLike(n) || ts.isBlock(n) || ts.isObjectLiteralExpression(n)
+  || ts.isVariableDeclaration(n) || ts.isVariableStatement(n) || ts.isParameter(n)
+  || ts.isPropertyDeclaration(n) || ts.isPropertyAssignment(n) || ts.isExpressionStatement(n)
+  || ts.isTypeParameterDeclaration(n);
 /** The nearest ancestor declaration that NAMES the type this member belongs to, or null. */
 const namedTypeAncestor = (node) => {
   for (let n = node?.parent, guard = 0; n && guard++ < 32; n = n.parent) {
     if (ts.isSourceFile(n)) return null;
+    if (VALUE_POSITION_BOUNDARY(n)) return null;   // R355 — left the type position; no owner to name
     if (NAMED_TYPE_OWNER(n) && n.name) return n;
   }
   return null;

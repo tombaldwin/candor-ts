@@ -7506,6 +7506,53 @@ export function dispatch(b: Base): void { b.m(); }`;
         atD?.inferred.includes("Fs") && !atD.inferred.includes("Unknown"), JSON.stringify(atD));
   const over = scan(project({ "src/w.ts": src(13) })); // OVER the bound: too wide to enumerate soundly
   const overD = over.report.functions.find((e) => e.fn === "src.w.dispatch");
+  // ── SOUNDNESS R355 — THE ANCESTOR WALK MUST STOP AT A VALUE BOUNDARY ────────────────────────────
+  // R284 gave a member of an anonymous type LITERAL an owner by climbing to the nearest named
+  // declaration. Nothing stopped the climb leaving the TYPE position, so four shapes named a type that
+  // does not declare the member — on real code: eslint 9.x's `SourceCode.traverse` was given
+  // `dispatch:….SourceCode.enterNode`, and `enterNode` is a method of an object literal declared
+  // INSIDE that method. SPEC §4 makes the dotted `dispatch:<owner>.<member>` detail normative and
+  // conformance-compared, and `callers --include-unknown` builds frontier edges from it.
+  //
+  // THIS TEST EXISTS BECAUSE R284 HAD NO TEETH: stubbing `namedTypeAncestor` to `return null` reverted
+  // the entire headline fix and all six shards still passed. The controls below are what give it teeth
+  // in BOTH directions — the phantoms must go, and the real owners must stay.
+  {
+    const r355 = scan(project({ "src/r355.ts": `
+export class InBody { go(): void { const a = { m(): void {} }; a.m(); } }
+export class InField { bus = { m(): void {} }; go(): void { this.bus.m(); } }
+export class InConstraint<T extends { m(): void }> { go(t: T): void { t.m(); } }
+export class InProp { cb!: { m(): void }; go(): void { this.cb.m(); } }
+export type Named = { m(): void };
+export function useNamed(n: Named): void { n.m(); }
+export type Inter = { m(): void } & { z: number };
+export function useInter(i: Inter): void { i.m(); }
+export function useAnon(p: { m(): void }): void { p.m(); }
+` }));
+    const whyOf = (fn) => (r355.report.functions.find((e) => e.fn === fn)?.unknownWhy ?? []);
+    // THE ROW: none of the four may name a type that does not declare `m`. Fails at pre-R355 HEAD.
+    for (const fn of ["src.r355.InBody.go", "src.r355.InField.go",
+                      "src.r355.InConstraint.go", "src.r355.InProp.go"]) {
+      const bad = whyOf(fn).filter((w) => w.startsWith("dispatch:"));
+      check(`R355: ${fn} names no phantom owner — the literal's member is not declared by the enclosing type`,
+            bad.length === 0, `${fn} -> ${JSON.stringify(whyOf(fn))}`);
+    }
+    // CONTROL 1+2 — a NAMED type alias really does own its member, and R284's gain must survive.
+    // These fail if the stop condition is too wide, which is the direction a denylist fails in.
+    check("R355 control: a named type alias still owns its member (R284's gain is preserved)",
+          whyOf("src.r355.useNamed").includes("dispatch:src.r355.Named.m"),
+          JSON.stringify(whyOf("src.r355.useNamed")));
+    check("R355 control: an INTERSECTION alias still owns its member",
+          whyOf("src.r355.useInter").includes("dispatch:src.r355.Inter.m"),
+          JSON.stringify(whyOf("src.r355.useInter")));
+    // CONTROL 3 — the stated residual: a fully anonymous parameter literal has no owner and stays
+    // `callback:`. It must not acquire one, and it must still DISCLOSE.
+    check("R355 control: an anonymous parameter literal still has no owner, and still discloses",
+          whyOf("src.r355.useAnon").some((w) => w.startsWith("callback:")) &&
+          !whyOf("src.r355.useAnon").some((w) => w.startsWith("dispatch:")),
+          JSON.stringify(whyOf("src.r355.useAnon")));
+  }
+
   // SOUNDNESS R284 — THIS ASSERTION USED TO PIN `dispatch:Base.m`, CALLING IT "canonical". It is not:
   // every OTHER emission site writes `<module>.<Owner>.<member>`, this one alone wrote a bare owner, and
   // the frontier consumer's `^dispatch:(.+)\.([^.]+)$` then yields owner `Base`, which matches no
