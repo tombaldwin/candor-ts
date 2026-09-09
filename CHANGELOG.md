@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.36.0] — 2026-09-09
+
 - ⚠ **Three more phantom dispatch owners — SOUNDNESS R359.** R355 stopped the ancestor walk at a
   class property and not at the interface or type-alias spelling of the same thing, nor at a literal
   in a type argument: `interface I { cb: { m(): void } }`, `type W = { inner: { m(): void } }` and
