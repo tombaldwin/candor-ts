@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.36.0] — 2026-09-09
+
 - ⚠ **The dispatch owner is now verified against the TYPE CHECKER, and the node-kind denylist is gone —
   SOUNDNESS R367.** R355 and R359 decided whether a type literal's enclosing declaration could be named
   as the owner by enumerating syntax positions to stop at. That is a syntactic proxy for a semantic
@@ -18,7 +20,6 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   Effect sets are unchanged across 41,669 corpus rows and no `dispatch:` token moved; the visible change
   is `callback:` details becoming more informative.
 
-## [0.36.0] — 2026-09-09
 
 - ⚠ **Three more phantom dispatch owners — SOUNDNESS R359.** R355 stopped the ancestor walk at a
   class property and not at the interface or type-alias spelling of the same thing, nor at a literal
