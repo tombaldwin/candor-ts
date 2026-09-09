@@ -8,6 +8,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **A dispatch reason named an owner that does not declare the member — SOUNDNESS R355.** R284's
+  ancestor walk climbed out of the type position, so four shapes named a phantom owner on real code:
+  a literal in a method body (eslint's `SourceCode.traverse`), a literal in a class field (zx's
+  `ProcessPromise.bus`, which named a real but different method), a type-parameter constraint (the
+  class named as owner of its own constraint's member), and an inline property type. The dotted
+  `dispatch:<owner>.<member>` detail is normative and conformance-compared, and the frontier builds
+  edges from it. Over-approximate, never silent. Fixed with a denylist of value-position boundaries,
+  so an unforeseen node kind over-fires visibly rather than silently demoting a real owner. A/B over
+  28 packages, 41,669 rows: `inferred` CHANGED 0 — no effect set moves, so no gate verdict can move.
+
 - ⚠ **An unknown flag's OPERAND was resolved as the refusal-marker target, and CLOBBERED a file
   there — SOUNDNESS R233.** `candor-ts --scope src` refuses at the unknown flag with the right exit 2,
   but the ⟨0.32⟩ refusal marker is written to the prefix the run WOULD have used, and `preScan`
