@@ -5326,21 +5326,24 @@ const NAMED_TYPE_OWNER = (d) => ts.isInterfaceDeclaration(d) || ts.isClassDeclar
 // A DENYLIST OF VALUE-POSITION BOUNDARIES, not an allowlist of permitted ancestors: a node kind nobody
 // foresaw keeps climbing and over-fires visibly, rather than silently demoting a real owner to
 // `callback:`. Say which direction it fails in — this one fails loud.
-const VALUE_POSITION_BOUNDARY = (n) =>
-  ts.isFunctionLike(n) || ts.isBlock(n) || ts.isObjectLiteralExpression(n)
-  || ts.isVariableDeclaration(n) || ts.isVariableStatement(n) || ts.isParameter(n)
-  || ts.isPropertyDeclaration(n) || ts.isPropertyAssignment(n) || ts.isExpressionStatement(n)
-  || ts.isTypeParameterDeclaration(n)
-  // R359 — a PROPERTY SIGNATURE is a type-position boundary too, and R355 missed it: it stopped the
-  // walk at a class PropertyDeclaration (`class C { cb!: { m(): void } }`) and not at the interface
-  // or type-alias spelling one keyword over (`interface I { cb: { m(): void } }`), so the identical
-  // phantom kept being emitted. The audit was drawn around its own trigger.
-  || ts.isPropertySignature(n) || ts.isTypeReferenceNode(n);
+// SOUNDNESS R367 — RETIRED, AND KEPT ONLY AS THE RECORD OF WHY. This denylist was the syntactic proxy
+// for "has the walk left the type position", and it was wrong in BOTH directions: too narrow at R355
+// (it missed the interface/type-alias property spelling, which R359 then added), and once wide enough
+// to catch that, too broad — `ts.isTypeReferenceNode` demoted `type RO = Readonly<{ m(): void }>`,
+// which genuinely has `m`, turning a firing `deny Unknown[dispatch]` green on a real owner (R363).
+// Three commits chasing one question with the wrong instrument.
+//
+// `ownerDeclaresMember` now asks the checker directly and answers all six shapes correctly, including
+// the four this list was written for. The list is no longer consulted; it is left here, unused, for
+// one release so the next reader meets the reasoning rather than the deletion. THE GENERAL POINT is
+// in `candor-handlist-vein`: an engine WITH a type checker should not hand-maintain what the checker
+// derives — that instrument belongs to candor-rust and candor-swift, which have no checker.
+// (the list itself is deleted — `npm test`'s lint is right that a retired binding is dead code;
+//  the shapes it covered are in SOUNDNESS R355/R359/R363/R367, which is where they belong.)
 /** The nearest ancestor declaration that NAMES the type this member belongs to, or null. */
 const namedTypeAncestor = (node) => {
   for (let n = node?.parent, guard = 0; n && guard++ < 32; n = n.parent) {
     if (ts.isSourceFile(n)) return null;
-    if (VALUE_POSITION_BOUNDARY(n)) return null;   // R355 — left the type position; no owner to name
     if (NAMED_TYPE_OWNER(n) && n.name) return n;
   }
   return null;
@@ -5349,10 +5352,50 @@ const namedTypeAncestor = (node) => {
  *  frontier can resolve it against the hierarchy sidecar. A bare name cannot be resolved by anything. */
 const qualifiedTypeName = (d) => (d?.name
   ? `${moduleOf(d.getSourceFile())}.${namespacePrefixOf(d)}${d.name.getText()}` : null);
+/** SOUNDNESS R367 — ASK THE CHECKER WHETHER THE CANDIDATE OWNER ACTUALLY HAS THE MEMBER.
+ *
+ *  R284 walked up to the nearest named declaration and named it. R355 and R359 then tried to fix the
+ *  cases where that walk leaves the type position by enumerating NODE KINDS to stop at — a hand-
+ *  maintained syntactic list, which is the instrument the two engines WITHOUT a type checker are
+ *  forced to use. candor-ts has a checker. Enumerating positions here was answering a semantic
+ *  question with a syntactic proxy, and the proxy was wrong in both directions: it missed
+ *  `interface I { cb: { m(): void } }` (R359) and, once widened enough to catch that, it demoted
+ *  `type RO = Readonly<{ m(): void }>`, which genuinely HAS `m` — turning a firing
+ *  `deny Unknown[dispatch]` green on a real owner (R363).
+ *
+ *  The question is not "what syntax is this literal sitting in". It is "does the type this
+ *  declaration declares have a property by this name". That is one checker call and it is exact:
+ *      type Named  = { m(): void }              -> has m   -> owner kept
+ *      type RO     = Readonly<{ m(): void }>    -> has m   -> owner kept   (the mapped type maps it)
+ *      type Id<T>=T; type IdLit = Id<{m()}>     -> has m   -> owner kept
+ *      type ListOf = Array<{ m(): void }>       -> no m    -> no owner
+ *      interface I { cb: { m(): void } }        -> no m    -> no owner
+ *      class C { go(){ const a={m(){}}; a.m() }}-> no m    -> no owner
+ *
+ *  FAILS LOUD BY CONSTRUCTION. Any uncertainty — no symbol, no declared type, the checker throwing —
+ *  answers "yes, keep the owner", so an unanswerable case over-approximates visibly rather than
+ *  silently demoting a real owner to `callback:`. That is the direction R363 recorded as the one
+ *  nothing warns about. */
+const ownerDeclaresMember = (ownerDecl, memberName) => {
+  if (!ownerDecl || !memberName) return true;
+  try {
+    const sym = ownerDecl.name && checker.getSymbolAtLocation(ownerDecl.name);
+    if (!sym) return true;
+    const t = checker.getDeclaredTypeOfSymbol(sym);
+    if (!t) return true;
+    return !!checker.getPropertyOfType(t, memberName);
+  } catch { return true; }
+};
+
 /** The owner qual for a member whose immediate parent may be an ANONYMOUS type literal. Falls back to
- *  the nearest NAMED type declaration; null only when there genuinely is not one. */
-const memberOwnerQual = (member) => qualifiedTypeName(
-  member?.parent?.name ? member.parent : namedTypeAncestor(member));
+ *  the nearest NAMED type declaration, VERIFIED to have the member; null when there genuinely is not
+ *  one, or when the one found does not declare it. */
+const memberOwnerQual = (member) => {
+  if (member?.parent?.name) return qualifiedTypeName(member.parent);
+  const anc = namedTypeAncestor(member);
+  const name = member?.name?.getText?.();
+  return ownerDeclaresMember(anc, name) ? qualifiedTypeName(anc) : null;
+};
 
 // ⟨THE FUNNEL⟩ Every site that reaches a resolved EXTERNAL declaration whose own κ lookup found nothing
 // answers the SAME question — chained sibling report, §5.1 manifest, κ-coverage ledger, or the
