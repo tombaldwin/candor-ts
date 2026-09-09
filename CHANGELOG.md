@@ -8,6 +8,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **The dispatch owner is now verified against the TYPE CHECKER, and the node-kind denylist is gone —
+  SOUNDNESS R367.** R355 and R359 decided whether a type literal's enclosing declaration could be named
+  as the owner by enumerating syntax positions to stop at. That is a syntactic proxy for a semantic
+  question, and it was wrong in both directions: too narrow (it missed the interface spelling) and, once
+  widened, too broad — `type RO = Readonly<{ m(): void }>` genuinely has `m`, and demoting it turned a
+  firing `deny Unknown[dispatch]` green on a real owner. The engine now asks the checker whether the
+  candidate owner's type actually has that property, and fails loud: any uncertainty keeps the owner.
+  Effect sets are unchanged across 41,669 corpus rows and no `dispatch:` token moved; the visible change
+  is `callback:` details becoming more informative.
+
 ## [0.36.0] — 2026-09-09
 
 - ⚠ **Three more phantom dispatch owners — SOUNDNESS R359.** R355 stopped the ancestor walk at a
