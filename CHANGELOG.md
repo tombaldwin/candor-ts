@@ -8,6 +8,14 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **An unknown flag's OPERAND was resolved as the refusal-marker target, and CLOBBERED a file
+  there — SOUNDNESS R233.** `candor-ts --scope src` refuses at the unknown flag with the right exit 2,
+  but the ⟨0.32⟩ refusal marker is written to the prefix the run WOULD have used, and `preScan`
+  resolved that from the first bare token — which on that argv is the rejected flag's operand. The
+  parse loop never reaches it, so the marker was written into `src/.candor/`, creating that directory
+  in the operator's tree and REPLACING any marker already there. Measured with a decoy at the operand
+  path: clobbered before, untouched after. The rust sibling of this is R232.
+
 - **⚠ CARDINAL SIN FIXED (SOUNDNESS R259) — A UNION RECEIVER DROPPED EVERY ACCESSOR NOT PRESENT IN
   ALL ARMS, AND R245 FIXED THIS QUESTION ONE CALL TOO LOW.** R245 fixed `accessorsFromSym` — one
   synthesised symbol carrying several declarations — and its own commit message states the rule this
