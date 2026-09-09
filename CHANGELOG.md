@@ -8,6 +8,13 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **Three more phantom dispatch owners — SOUNDNESS R359.** R355 stopped the ancestor walk at a
+  class property and not at the interface or type-alias spelling of the same thing, nor at a literal
+  in a type argument: `interface I { cb: { m(): void } }`, `type W = { inner: { m(): void } }` and
+  `type L = Array<{ m(): void }>` all named an owner that does not declare the member. Ground-truthed
+  on zod, whose `CustomCheck` declares `_zod` and not the `check` it was credited with. Over-approximate,
+  never silent; `inferred` unchanged across 41,669 corpus rows, so no gate verdict moves.
+
 - ⚠ **A dispatch reason named an owner that does not declare the member — SOUNDNESS R355.** R284's
   ancestor walk climbed out of the type position, so four shapes named a phantom owner on real code:
   a literal in a method body (eslint's `SourceCode.traverse`), a literal in a class field (zx's
