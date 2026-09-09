@@ -48,7 +48,7 @@ const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 // literal stamped into the envelope's `spec` field, so the doc lines and the report can never drift.
 // Reused, never re-littered.
 const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, "package.json"), "utf8")).version;
-const SPEC_VERSION = "0.35";
+const SPEC_VERSION = "0.36";
 
 // A TREE TOO DEEP TO WALK IS "COULD NOT EVALUATE" (exit 2), NEVER "FOUND A VIOLATION" (exit 1).
 //
@@ -5330,7 +5330,12 @@ const VALUE_POSITION_BOUNDARY = (n) =>
   ts.isFunctionLike(n) || ts.isBlock(n) || ts.isObjectLiteralExpression(n)
   || ts.isVariableDeclaration(n) || ts.isVariableStatement(n) || ts.isParameter(n)
   || ts.isPropertyDeclaration(n) || ts.isPropertyAssignment(n) || ts.isExpressionStatement(n)
-  || ts.isTypeParameterDeclaration(n);
+  || ts.isTypeParameterDeclaration(n)
+  // R359 — a PROPERTY SIGNATURE is a type-position boundary too, and R355 missed it: it stopped the
+  // walk at a class PropertyDeclaration (`class C { cb!: { m(): void } }`) and not at the interface
+  // or type-alias spelling one keyword over (`interface I { cb: { m(): void } }`), so the identical
+  // phantom kept being emitted. The audit was drawn around its own trigger.
+  || ts.isPropertySignature(n) || ts.isTypeReferenceNode(n);
 /** The nearest ancestor declaration that NAMES the type this member belongs to, or null. */
 const namedTypeAncestor = (node) => {
   for (let n = node?.parent, guard = 0; n && guard++ < 32; n = n.parent) {
@@ -6824,9 +6829,17 @@ function visitCalls(node) {
                 // two cannot answer this differently again.
                 const tn = memberOwnerQual(sigDecl);
                 // A CALL SIGNATURE has no member to name (`interface UnaryFunction { (x: T): R }`,
-                // `type PatchFn = (a, b) => void`), and a member of an ANONYMOUS type literal has no
-                // owner to name. Both are function-VALUE invocations, not member dispatch — see
-                // `dispatchWhy`. This is where all 1,234 malformed strings measured on a 15-repo corpus
+                // `type PatchFn = (a, b) => void`) — a function-VALUE invocation, not member dispatch.
+                //
+                // THE SECOND HALF OF THIS SENTENCE WAS FALSE FROM R284 UNTIL R359, and R355's commit
+                // message claimed to have corrected it while changing nothing here. It read "…and a
+                // member of an ANONYMOUS type literal has no owner to name". R284 gave such a member an
+                // owner deliberately — the named declaration that DECLARES the literal — which is right
+                // for `type Named = { m(): void }` and wrong the moment the walk leaves the type
+                // position. The rule now is: a literal in TYPE position takes the name of the
+                // declaration that declares it; a literal in VALUE position, or nested behind a
+                // property signature or a type argument, has no owner and stays `callback:`. See
+                // `VALUE_POSITION_BOUNDARY` and `dispatchWhy`. This is where all 1,234 malformed strings measured on a 15-repo corpus
                 // came from; the other emission sites produced none.
                 rec.why.add(dispatchWhy(tn, sigDecl.name?.getText?.())); // resolution landed on a type, not a body — canonical `dispatch:OWNER.member` (frontier-relevant)
               }

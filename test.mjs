@@ -7528,11 +7528,26 @@ export function useNamed(n: Named): void { n.m(); }
 export type Inter = { m(): void } & { z: number };
 export function useInter(i: Inter): void { i.m(); }
 export function useAnon(p: { m(): void }): void { p.m(); }
+export interface IHolder { cb: { m(): void } }
+export function viaIface(h: IHolder): void { h.cb.m(); }
+export type Wrap = { inner: { m(): void } };
+export function viaWrap(w: Wrap): void { w.inner.m(); }
+export type ListOf = Array<{ m(): void }>;
+export function viaList(l: ListOf): void { l[0].m(); }
+export interface Ext extends Array<string> { m2(): void }
+export function viaExt(e: Ext): void { e.m2(); }
 ` }));
     const whyOf = (fn) => (r355.report.functions.find((e) => e.fn === fn)?.unknownWhy ?? []);
     // THE ROW: none of the four may name a type that does not declare `m`. Fails at pre-R355 HEAD.
+    // SOUNDNESS R359 — the same class one keyword over, which R355's own audit boundary missed:
+    // it stopped the walk at a class PropertyDeclaration and not at the interface / type-alias
+    // PropertySignature, nor at a literal sitting in a TypeReference's type arguments. All three
+    // named an owner that does not declare the member, on shapes as ordinary as
+    // `interface I { cb: { m(): void } }`. R284 is UNRELEASED, so these were new phantom normative
+    // fields about to ship — which is the exact argument R355 used for fixing rather than filing.
     for (const fn of ["src.r355.InBody.go", "src.r355.InField.go",
-                      "src.r355.InConstraint.go", "src.r355.InProp.go"]) {
+                      "src.r355.InConstraint.go", "src.r355.InProp.go",
+                      "src.r355.viaIface", "src.r355.viaWrap", "src.r355.viaList"]) {
       const bad = whyOf(fn).filter((w) => w.startsWith("dispatch:"));
       check(`R355: ${fn} names no phantom owner — the literal's member is not declared by the enclosing type`,
             bad.length === 0, `${fn} -> ${JSON.stringify(whyOf(fn))}`);
@@ -7547,6 +7562,12 @@ export function useAnon(p: { m(): void }): void { p.m(); }
           JSON.stringify(whyOf("src.r355.useInter")));
     // CONTROL 3 — the stated residual: a fully anonymous parameter literal has no owner and stays
     // `callback:`. It must not acquire one, and it must still DISCLOSE.
+    // R359 CONTROL — an owner reachable THROUGH a TypeReference must survive the new boundary.
+    // This is the direction a too-wide denylist breaks, and it is why the entry was trialled against
+    // this shape before it was kept.
+    check("R359 control: an interface extending a generic still owns its own member",
+          whyOf("src.r355.viaExt").includes("dispatch:src.r355.Ext.m2"),
+          JSON.stringify(whyOf("src.r355.viaExt")));
     check("R355 control: an anonymous parameter literal still has no owner, and still discloses",
           whyOf("src.r355.useAnon").some((w) => w.startsWith("callback:")) &&
           !whyOf("src.r355.useAnon").some((w) => w.startsWith("dispatch:")),
