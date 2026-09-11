@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.36.1] — 2026-09-11
+
 - **No engine change in this cut.** This release is a family build bump: the analysis changes are in candor-rust and candor-swift (see their changelogs), and the spec did not move. This engine's classifier, gate and report behaviour are unchanged from 0.36.0.
 
 ## [0.36.0] — 2026-09-09
