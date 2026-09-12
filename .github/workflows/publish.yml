@@ -93,6 +93,11 @@ jobs:
     needs: publish
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && !github.event.repository.fork
     runs-on: ubuntu-latest
+    # Every job declares one — release-preflight [7b] gates it, and caught this job missing it before
+    # the cut. The publish step retries 5x with 30s backoff for npm README propagation, so the real
+    # ceiling is a few minutes; 15 leaves room for a slow registry without letting a hang hold a
+    # release for the six hours GitHub would otherwise allow.
+    timeout-minutes: 15
     permissions:
       id-token: write   # GitHub OIDC → registry namespace auth
       contents: read
