@@ -108,6 +108,27 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
   process.exit(0);
 }
 
+// --mcp: a MODE, in the same place and for the same reason as --version above — it hands the process
+// to the MCP server so the ONE bin the MCP Registry can invoke (`npx -y candor-ts`) is able to serve.
+//
+// WHY A FLAG AND NOT A BARE `mcp` SUBCOMMAND, which is what ebman does. This script takes its scan
+// target POSITIONALLY, so `candor-ts mcp` would be ambiguous with a directory literally named `mcp` —
+// and a registry-invoked server runs in whatever repo the client happens to be in, where that
+// directory may well exist. A flag cannot collide with a path. The ambiguity would be rare and silent,
+// which is the combination worth designing out rather than documenting.
+//
+// spawnSync rather than `await import("./mcp.mjs")`: an import would RUN the server and then fall
+// through into this file's own argument walk when it returned. Handing the child our stdio and
+// exiting on its status keeps the two programs separate, which is what the transport needs anyway.
+if (process.argv.includes("--mcp")) {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const server = fileURLToPath(new URL("./mcp.mjs", import.meta.url));
+  const rest = process.argv.slice(2).filter((a) => a !== "--mcp");
+  const r = spawnSync(process.execPath, [server, ...rest], { stdio: "inherit" });
+  process.exit(r.status ?? 0);
+}
+
 // -h / --help: a print-and-exit MODE (like --version), handled before the arg walk so `-h` (a single
 // dash) is never mistaken for the scan target by the positional fallthrough below.
 if (process.argv.includes("-h") || process.argv.includes("--help")) {

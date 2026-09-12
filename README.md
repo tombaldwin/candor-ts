@@ -249,3 +249,26 @@ node scan.mjs <dir | file.ts | tsconfig.json> --out .candor/report   # scan a pr
 The pure cores are factored into importable modules — `query-core.mjs` (the §3.1 queries),
 `policy.mjs` (the §6.2 DSL + literal matchers), and `scan-core.mjs` (the classifier + the SQL/
 command/host extractors) — so they're unit-tested directly; the TS-compiler-driven walk stays in `scan.mjs`.
+
+## Agents: install candor as an MCP server
+
+`candor-ts` ships candor's read-only query surface as an MCP server, so an agent asks *"what is the
+blast radius of changing this?"* or *"what reaches the network?"* and gets a deterministic answer from a
+precomputed report instead of grepping for it.
+
+```bash
+npx -y candor-ts --mcp        # the server, over stdio
+candor mcp install            # or let the umbrella write/merge .mcp.json for you
+```
+
+Registration instructions come from **the package you already installed** — `candor mcp --help` prints
+the `.mcp.json` snippet and the `claude mcp add` line, and `candor mcp install` writes them. There is no
+remote file to fetch, tamper with, or auto-execute, and nothing here tells an agent to run anything it
+did not already choose to install.
+
+Discovery is passive: the manifest is [`server.json`](server.json), published to the official
+[MCP Registry](https://registry.modelcontextprotocol.io) so clients and directories can find candor
+without being handed a script. The registry verifies namespace ownership through the marker below.
+
+mcp-name: io.github.tombaldwin/candor
+

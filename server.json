@@ -1,0 +1,35 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.tombaldwin/candor",
+  "title": "candor",
+  "description": "Per-function effect analysis for agents: blast radius, what reaches the network, gate verdicts.",
+  "version": "0.36.1",
+  "websiteUrl": "https://candor.poly.io",
+  "repository": {
+    "url": "https://github.com/tombaldwin/candor-ts",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "candor-ts",
+      "version": "0.36.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "--mcp"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "CANDOR_ROOT",
+          "description": "Lock the server to one workspace: every report prefix is resolved under this root. Unset, the server reads .candor/ relative to the client's working directory.",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}

@@ -76,3 +76,61 @@ jobs:
       - name: Publish to npm (provenance via OIDC)
         if: steps.exists.outputs.published == 'false'
         run: npm publish --provenance --access public
+
+  mcp_registry:
+    # Publish server.json to the official MCP Registry so agents and directories can DISCOVER candor,
+    # instead of a human pasting instructions that tell an agent to fetch and read a remote file. That
+    # is the install route this job exists to replace: discovery is passive, and the registration
+    # instructions themselves keep coming from the package you already installed (`candor mcp --help`,
+    # `candor mcp install`), never from a URL.
+    #
+    # `needs: publish` because the registry verifies namespace ownership by fetching the PUBLISHED npm
+    # README and looking for the visible `mcp-name:` marker — so the package carrying that marker has to
+    # be live first. GitHub OIDC proves the io.github.tombaldwin namespace, so no secret is stored.
+    # Isolated from the publish job: a registry hiccup must not affect an npm release that already
+    # succeeded.
+    name: publish to MCP Registry
+    needs: publish
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && !github.event.repository.fork
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # GitHub OIDC → registry namespace auth
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sync server.json version to the release tag
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.tmp
+          mv server.tmp server.json
+      - name: Install mcp-publisher
+        # PINNED AND CHECKSUMMED, deliberately. This step runs in a job holding `id-token: write`, so
+        # whatever it downloads can mint an OIDC token for the whole io.github.tombaldwin namespace.
+        # Fetching `releases/latest` and piping it into tar would hand that token to an unreviewed
+        # binary on every release. Bump the version and the hash together, never one alone.
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+        run: |
+          set -euo pipefail
+          url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          curl -fsSL "$url" -o mcp-publisher.tar.gz
+          echo "$MCP_PUBLISHER_SHA256  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+      - name: Authenticate (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+      - name: Publish server.json
+        # npm's rendered README — which the registry reads to verify the mcp-name marker — can lag a
+        # publish by up to a minute, so retry rather than fail a fresh release on propagation timing.
+        run: |
+          set -eu
+          for attempt in 1 2 3 4 5; do
+            if ./mcp-publisher publish; then exit 0; fi
+            echo "publish attempt $attempt failed; the npm README may not have propagated yet — retrying in 30s"
+            sleep 30
+          done
+          echo "mcp-publisher failed after 5 attempts"
+          exit 1
+
