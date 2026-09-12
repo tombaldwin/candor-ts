@@ -191,6 +191,82 @@ export const CLOCK_READING_CONSOLE_MEMBERS = /^(time|timeEnd|timeLog)$/;
 export const CONNECTING_WEB_CTORS = /^(WebSocket|EventSource)$/;
 export const WEB_WIRE_MEMBERS = /^(send|close)$/;
 
+/** THE CALL-CLASSIFICATION NAME SETS — module scope, and exported for the R111 reason above.
+ *
+ * All four lived ~740 lines INSIDE scan.mjs's `visitCalls`, re-allocated on every classified call and,
+ * more to the point, unimportable: no test could identity-check one, so every assertion about them had
+ * to be a hand-copied spelling asserted through a scan — which is exactly how R109 and R110 drifted.
+ * They close over nothing. The PREDICATES that read them do (`isConnectingCtor` and `netEstablishing`
+ * close over `ctorRuleName`/`mod`), and those stay in scan.mjs; these are pure literal sets.
+ *
+ * They are deliberately NOT merged with scan.mjs's `NET_USE_VERBS`, which spells some of the same names
+ * while answering a DIFFERENT question — "is this call's argument 0 a PAYLOAD rather than a locator?" —
+ * and fails in the opposite direction. Two questions, two sets.
+ */
+
+// The net cluster's documented public CONNECTING constructors. `new X()` normally synthesizes the member
+// token "new" so a κ rule can exempt inert construction from a module-wide effect (`new http.Agent()`),
+// BUT a connecting constructor is NOT inert: `new http.ClientRequest(url)` performs the network I/O on
+// construction (it is what `http.request()` returns and dispatches), so the blanket `new`-exemption would
+// convert a real Net source into pure — a cardinal-sin under-report. For such a ctor scan.mjs synthesizes
+// the CLASS name instead of "new", so the net-cluster rule's `/^(?!new$)/` matcher keeps the effect.
+// http2 connects via `connect()` (a function, not a ctor) so it needs no entry here. Inert ctors
+// (Agent/Server/Socket/TLSSocket/Http2Server*/message shells) still synthesize "new" and stay pure.
+// `CONNECTING_WEB_CTORS` above is the es-lib arm of the same question and is read beside this set.
+export const CONNECTING_CTORS = new Set(["ClientRequest"]);
+
+// Host-ESTABLISHING Net call names (the masking-fix allowlist): a Net call by one of these whose
+// host is not a captured literal leaves the host invisible. Excludes use-verbs (write/end/send on
+// a connected socket). `post/put/patch/delete/head/options` cover the axios/got/undici tier whose
+// URL is the call arg (sweep [18]); `dgram.send(buf,port,host)` is added module-aware by
+// scan.mjs's `netEstablishing` (UDP has no connect, so send carries the destination — sweep [12]).
+// SOUNDNESS R410 — THE RESOLVER FAMILY WAS MISSING, and its absence is a GATE BYPASS, not a
+// missed disclosure. `dns.resolve` classifies Net (see the κ table below), so a resolver call
+// carries the effect while contributing NO host; with this list not naming it, nothing marked
+// the surface incomplete and a benign sibling `fetch("https://api.stripe.com")` certified a
+// caller-controlled DNS target — `allow Net api.stripe.com` exit 0, measured, with the
+// sibling-free control correctly caught by AS-EFF-008. Written as the WHOLE family rather than
+// the spelling in hand (R346): every node `dns` resolver, the `dns/promises` twins (same names)
+// and the `Resolver` class methods, which share these member names. test.mjs pins that family by
+// IDENTITY against this export — the assertion R410 shipped without, because the set was unreachable.
+//
+// NOTE THE SHAPE PROBLEM THIS DOES NOT FIX. This set is an INCLUSION list, so forgetting a
+// member UNDER-reports — the opposite of `FS_USE_VERBS`/`EXEC_USE_VERBS` below, where
+// forgetting over-charges and is safe. That asymmetry is the defect class itself: java's Net
+// is sound precisely because it uses the general rule (any Net call contributing no visible
+// host leaves the surface incomplete) rather than a list. The durable repair is to INVERT this
+// into a use-verb denylist beside the other two; that is a wider change with its own
+// over-charge bill to price, so it is filed rather than smuggled in here.
+export const NET_ESTABLISHING = new Set(["request", "get", "post", "put", "patch", "delete", "head",
+  "options", "connect", "createConnection", "fetch",
+  "lookup", "lookupService", "reverse", "resolve", "resolve4", "resolve6", "resolveAny",
+  "resolveCname", "resolveCaa", "resolveMx", "resolveNaptr", "resolveNs", "resolvePtr",
+  "resolveSoa", "resolveSrv", "resolveTxt"]);
+
+// Fs/Exec USE-verbs whose LOCATOR was fixed earlier, not an arg of THIS call — so a missing literal
+// here is the legitimate split-construct/use shape, never the masking signal (the establishing-
+// allowlist discipline, generalized from Net to all 4 effects; sweep [11]). Fs: the fd/FileHandle
+// ops (fd came from open()); the path-taking fs.* fns are establishing. Exec: ChildProcess methods
+// (the command was fixed at spawn); the spawn fns are establishing.
+// The node `fs` verbs whose FIRST argument is a DESCRIPTOR, not a path — the fd came from a
+// prior `open()` whose path this analysis already saw, so their invisible destination is not a
+// gap and marking them `incomplete` charges every buffered write in a real tree.
+//
+// ⟨0.29⟩ `readv`/`writev` (+Sync) were MISSING, and the ⟨0.29⟩ positional-literal fix is what
+// made it visible: before it, `writev(fd, "/tmp/lit")` had its literal found ANYWHERE in the
+// call and published as a path — a fabrication — so the set was never consulted for these four.
+// Killing the fabrication moved them into the other wrong bucket. Found by generating a case
+// per node `fs` export rather than reasoning about the list (24 fd verbs in node, 20 here).
+//
+// Forgetting a member here OVER-charges (safe); adding a path-taking verb by mistake
+// UNDER-reports. An allowlist is the right shape for exactly that reason — the inverse of
+// the denylist rule that governs the classifier surface.
+export const FS_USE_VERBS = new Set(["write", "writeSync", "read", "readSync", "close", "closeSync",
+  "fsync", "fsyncSync", "fdatasync", "fdatasyncSync", "ftruncate", "ftruncateSync", "fchmod",
+  "fchmodSync", "fchown", "fchownSync", "futimes", "futimesSync", "fstat", "fstatSync",
+  "readv", "readvSync", "writev", "writevSync"]);
+export const EXEC_USE_VERBS = new Set(["kill", "send", "disconnect", "ref", "unref"]);
+
 // ---- κ — the curated classifier (CLASSIFIER §2: the dispatch/execution boundary, not builders) ----
 // Node builtins + a curated npm tier (the same under-report-and-say-so posture as the crate table:
 // an unlisted package contributes nothing — never a guess).

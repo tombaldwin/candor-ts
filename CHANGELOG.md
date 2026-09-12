@@ -8,6 +8,39 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ A locator that is DETERMINED is determined however it reaches the call — SOUNDNESS R416.**
+  `const p = "/tmp/benign"; fs.writeFileSync(p, "")` published `paths: null` and marked
+  `incomplete: ["Fs"]`, so `allow Fs /tmp/benign` REFUSED a fully determined write, while the inline
+  spelling one line away was captured. rust credits a plain local and a `const`, java and swift credit
+  it; ts was the worst of the four (conformance `gen_stat_locator.py`, arm `a4local`: `rc=1 ✘` → `rc=0
+  ok`, with `a1arg` and `a3handle` unchanged). The path position now reads `constStringValue` — the
+  resolver the Net surface has used for the identical question since ⟨0.29⟩ — so nothing new decides
+  what a determined value is.
+
+  It fails CLOSED, so this is precision rather than soundness; it is here now because "captured" has to
+  be a VALUE fact before any further rung marks a surface incomplete for want of a captured locator, or
+  every such rung compounds the over-mask. Under-approximation stays: a `let`, a parameter, a
+  concatenation and a `path.join` are all still invisible and still mark `incomplete`.
+
+  **Priced, and the reach is ZERO — recorded as that and not as a safety result.** 7-project A/B
+  (axios, got, hono, zod, execa, zx, chalk), PRE a worktree at HEAD: 550 rows both arms, ADDED 0 /
+  REMOVED 0 / CHANGED 0 on every key, **0 marks**. The branch itself is reached 1,473 times on
+  candor-ts's own source and resolves nothing — real code computes its paths — so the widening is
+  measured as inert on this corpus rather than assumed safe. The first run of that probe printed its
+  summary line unconditionally and `corpus-ab.py --mark` counted a flattering "7 hits across 7
+  entries"; the instrument was fixed, not the number.
+
+- **The four call-classification name sets are module-scope exports (`scan-core.mjs`), so they can be
+  ASSERTED.** `CONNECTING_CTORS`, `NET_ESTABLISHING`, `FS_USE_VERBS` and `EXEC_USE_VERBS` lived ~740
+  lines inside `visitCalls`: unimportable, so every claim about them had to be a hand-copied spelling in
+  a fixture — the way R109 and R110 drifted apart. A move, no behaviour change. With them importable,
+  R410's resolver family is now pinned by IDENTITY against `node:dns` itself (the module's own
+  DNS-querying exports, the `dns/promises` twins and the `Resolver` prototype), which reds the row if
+  node adds a resolver, plus the two boundaries nothing guarded: no Net use-verb in `NET_ESTABLISHING`,
+  no path-taking verb in `FS_USE_VERBS`. R410 shipped with none of this — `bin/assert-audit.sh` says so
+  of its commit, and that verdict on that range is permanent; what changes is that the rule now has
+  something beside it that fails if the rule is wrong.
+
 - **`mcpName` in `package.json` — npm's ownership check, which is NOT the crates.io one.** The MCP
   Registry verifies an npm package's namespace from a `mcpName` field; the `mcp-name:` README marker is
   the *crates.io* convention and was carried across without checking it transfers. The 0.36.2 publish

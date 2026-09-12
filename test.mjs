@@ -20,7 +20,12 @@ import { printAgents, writeStdoutSync } from "./contract.mjs";
 import { KAPPA_RULES, KAPPA_PURE, kappaKnows, CLOCK_READING_PERFORMANCE_MEMBERS,
          CLOCK_READING_PROCESS_MEMBERS,
          CLOCK_READING_CONSOLE_MEMBERS, NODE_CORE_REVIEWED, CONNECTING_WEB_CTORS,
-         WEB_WIRE_MEMBERS } from "./scan-core.mjs";
+         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, FS_USE_VERBS,
+         EXEC_USE_VERBS } from "./scan-core.mjs";
+// R410's assertion needs node's OWN dns surface, not a list copied out of the engine — see the block
+// at the end of this file for why the family is DERIVED and not spelled.
+import dnsModule from "node:dns";
+import dnsPromises from "node:dns/promises";
 // R114 — the member NAMES the node-core floor reviews for `process`, read out of the live table so
 // the assertion below cannot go stale against a hand-copied list. The entry is the one whose module
 // regex matches `process` and whose member regex is not null.
@@ -19385,6 +19390,155 @@ export function go() { return ${call}; }`,
           ex("fs.pol") === 0 && ex("pure.pol") === 0, `deny Fs exit ${ex("fs.pol")}, pure exit ${ex("pure.pol")}`);
     fs.rmSync(only, { recursive: true, force: true });
   }
+}
+
+// ── R410 / R416: THE FOUR CALL-CLASSIFICATION SETS ARE IMPORTABLE NOW, SO THEY CAN BE ASSERTED ────
+//
+// `CONNECTING_CTORS`, `NET_ESTABLISHING`, `FS_USE_VERBS` and `EXEC_USE_VERBS` lived ~740 lines inside
+// scan.mjs's `visitCalls`. Function-local means unimportable, and unimportable means every claim about
+// them had to be spelled out a second time in a fixture — which is how R109 and R110 drifted apart, and
+// is why `bash bin/assert-audit.sh candor-ts <R410's commit>` reported "a rule moved with nothing beside
+// it that would fail if the new rule were wrong". R410 shipped a 16-name resolver family into an
+// INCLUSION list — the direction whose failure is a silent under-report — with no assertion of any kind.
+// These are that assertion. They are possible only because the sets are now module-scope exports.
+if (blk()) {
+  // THE FAMILY IS DERIVED FROM `node:dns` ITSELF, never spelled here. A hand-copied list asserts that
+  // someone typed the same sixteen names twice; this asserts the property R346 actually asks for — the
+  // WHOLE family is named, so a resolver node adds next year reds this row instead of silently leaving
+  // a Net call that contributes no host and marks nothing incomplete.
+  //
+  // The exclusion is a DENYLIST (candor's own rule for narrowing a sound over-approximation): the four
+  // names below read or set LOCAL resolver configuration and query nothing. Forgetting to exclude a new
+  // local-config function makes this row DEMAND it be in the table — the loud direction. An allowlist
+  // (`/^resolve/`) would have failed the other way, silently, on the next `lookup`-shaped addition.
+  const DNS_LOCAL_CONFIG = new Set(["getServers", "setServers",
+                                    "getDefaultResultOrder", "setDefaultResultOrder"]);
+  const dnsQueryFns = (m) => Object.keys(m)
+    .filter((k) => typeof m[k] === "function" && k !== "Resolver" && !DNS_LOCAL_CONFIG.has(k));
+  const missing = (names) => names.filter((n) => !NET_ESTABLISHING.has(n));
+
+  const modFns = dnsQueryFns(dnsModule);
+  check(`R410: EVERY DNS-querying function \`node:dns\` exports is in NET_ESTABLISHING (${modFns.length} names, derived from the module, not copied) — a resolver missing from this INCLUSION list carries Net while contributing no host, so nothing marks the surface incomplete and a benign sibling literal certifies a caller-controlled target`,
+        modFns.length >= 16 && missing(modFns).length === 0, `missing: ${JSON.stringify(missing(modFns))}`);
+  const promFns = dnsQueryFns(dnsPromises);
+  check("R410: …and the `node:dns/promises` twins, which R410's comment asserts share these member names — asserted against the real module rather than believed",
+        promFns.length >= 16 && missing(promFns).length === 0, `missing: ${JSON.stringify(missing(promFns))}`);
+  const resolverFns = Object.getOwnPropertyNames(dnsModule.Resolver.prototype).filter((k) => k !== "constructor");
+  check(`R410: …and every \`dns.Resolver\` prototype method (${resolverFns.length}), which reaches this table under the same member names`,
+        resolverFns.length >= 14 && missing(resolverFns).length === 0, `missing: ${JSON.stringify(missing(resolverFns))}`);
+
+  // TWO QUESTIONS, TWO SETS — the boundary a future reader is most likely to erase. `NET_ESTABLISHING`
+  // answers "does this call ESTABLISH a host, so a runtime value there must mark the surface
+  // incomplete"; scan.mjs's `NET_USE_VERBS` answers "is argument 0 a PAYLOAD rather than an endpoint".
+  // They fail in OPPOSITE directions, so merging them would under-report on one side or fabricate on
+  // the other. `send` is in neither: dgram's is added module-aware by `netEstablishing`, and every
+  // other `send` is a use-verb.
+  for (const v of ["write", "end", "emit", "push", "unshift", "send"]) {
+    check(`R410/R130 BOUNDARY: the Net USE-VERB \`${v}\` is NOT in NET_ESTABLISHING — a use-verb names no endpoint, and putting one here would fail the surface closed on every socket write`,
+          !NET_ESTABLISHING.has(v), `NET_ESTABLISHING has ${v}`);
+  }
+
+  // FS_USE_VERBS is the mirror-image shape: forgetting a member OVER-charges (safe), adding a
+  // PATH-TAKING verb UNDER-reports (the cardinal direction). Nothing asserted that until now.
+  const PATH_TAKING_FS = ["writeFileSync", "readFileSync", "appendFileSync", "open", "openSync",
+                          "unlink", "unlinkSync", "rm", "rmSync", "mkdir", "mkdirSync", "copyFile",
+                          "copyFileSync", "rename", "renameSync", "stat", "statSync", "truncate",
+                          "chmod", "chown", "readdir", "realpath", "createReadStream",
+                          "createWriteStream", "existsSync"];
+  check(`R410 MIRROR: none of the ${PATH_TAKING_FS.length} PATH-TAKING fs verbs is in FS_USE_VERBS — that set exempts the fd/FileHandle ops from the masking guard, so a path-taking verb landing in it silently drops the guard on a runtime path (forgetting one over-charges and is safe; adding one under-reports)`,
+        PATH_TAKING_FS.every((v) => !FS_USE_VERBS.has(v)),
+        `FS_USE_VERBS wrongly holds ${JSON.stringify(PATH_TAKING_FS.filter((v) => FS_USE_VERBS.has(v)))}`);
+  check("R410 MIRROR: the Exec SPAWN verbs are NOT in EXEC_USE_VERBS — only ChildProcess methods, whose command was fixed at spawn, belong there",
+        !["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"].some((v) => EXEC_USE_VERBS.has(v)),
+        JSON.stringify([...EXEC_USE_VERBS]));
+  check("R130: CONNECTING_CTORS holds the connecting ctor and NOT the inert ones — `new http.Agent()`/`new net.Socket()` open nothing until a later call, and naming one here would over-charge every pool construction",
+        CONNECTING_CTORS.has("ClientRequest")
+        && !["Agent", "Server", "Socket", "TLSSocket", "OutgoingMessage"].some((c) => CONNECTING_CTORS.has(c)),
+        JSON.stringify([...CONNECTING_CTORS]));
+  check("R130: CONNECTING_CTORS and CONNECTING_WEB_CTORS stay two arms of one question — the web ctors are NOT duplicated into the node set, they are read beside it by `isConnectingCtor`",
+        !["WebSocket", "EventSource"].some((c) => CONNECTING_CTORS.has(c))
+        && ["WebSocket", "EventSource"].every((c) => CONNECTING_WEB_CTORS.test(c)),
+        JSON.stringify([...CONNECTING_CTORS]) + " / " + String(CONNECTING_WEB_CTORS));
+
+  // AND THE ROW THAT TIES THE TABLE TO THE ENGINE. Every assertion above is about an object; this one
+  // is about what scan.mjs DOES with it, and it is R410's own measured gate bypass. It is
+  // revert-invariant against the hoist (a move changes no behaviour, which is the claim) and it is
+  // exactly the row R410 shipped without: delete the resolver names from NET_ESTABLISHING and it goes
+  // exit 1 -> exit 0, certifying a caller-controlled DNS target under a benign sibling's literal.
+  {
+    const d = project({
+      "src/a.ts": `import dns from "node:dns";
+export async function f(h: string): Promise<void> {
+  await fetch("https://api.stripe.com/v1/x");
+  dns.resolve(h, () => {});
+}`,
+      "allow.pol": "allow Net api.stripe.com\n",
+    });
+    const ex = scan(d, "--policy", path.join(d, "allow.pol")).r.status;
+    check("R410 GATE: `allow Net api.stripe.com` FIRES (exit 1) over a `dns.resolve(h)` beside a benign `fetch` literal — measured exit 0 before the resolver family was named, with the sibling-free control correctly caught by AS-EFF-008",
+          ex === 1, `exit ${ex}`);
+  }
+}
+
+// ── SOUNDNESS R416: A LOCATOR THAT IS DETERMINED IS DETERMINED HOWEVER IT REACHES THE CALL ────────
+//
+// MEASURED on shipped 0.36.2: `const p = "/tmp/benign"; fs.writeFileSync(p, "")` reported
+// `paths: null, incomplete: ["Fs"]`, so `allow Fs /tmp/benign` REFUSED a fully determined write, while
+// the inline spelling one line away was captured. rust credits a plain local and a `const`; java and
+// swift credit it; ts was the worst of the four (conformance `gen_stat_locator.py`, arm `a4local`).
+// It fails CLOSED, so it is precision — but "captured" has to become a VALUE fact before any further
+// rung marks a surface incomplete because "the locator was not captured", or every such rung compounds
+// the over-mask.
+if (blk()) {
+  const d = project({
+    "src/a.ts": `import fsm from "node:fs";
+const TOP = "/tmp/top";
+export function okLocal(): void { const p = "/tmp/benign"; fsm.writeFileSync(p, ""); }
+export function okTop(): void { fsm.writeFileSync(TOP, ""); }
+export function okInline(): void { fsm.writeFileSync("/tmp/benign", ""); }
+export function letBound(u: string): void { let p = "/tmp/x"; p = u; fsm.writeFileSync(p, ""); }
+export function param(u: string): void { fsm.writeFileSync(u, ""); }
+export function contentConst(u: string): void { const C = "/tmp/evil"; fsm.writeFileSync(u, C); }
+export function twoPath(u: string): void { const a = "/tmp/a"; fsm.copyFileSync(a, u); }
+export function twoPathBoth(): void { const a = "/tmp/a"; const b = "/tmp/b"; fsm.copyFileSync(a, b); }
+export function notPathShaped(): void { const n = "data"; fsm.writeFileSync(n, ""); }`,
+    "allow.pol": "allow Fs /tmp/benign\n",
+  });
+  const { report } = scan(d);
+  const row = (fn) => (report.functions ?? []).find((e) => e.fn === `src.a.${fn}`);
+  const paths = (fn) => row(fn)?.paths ?? [];
+  const incFs = (fn) => (row(fn)?.incomplete ?? []).includes("Fs");
+
+  // THE ROWS THAT MOVE. All four read `paths: null, incomplete: ["Fs"]` on the PRE arm, measured.
+  check("R416: a LOCAL `const` path is captured — `const p = \"/tmp/benign\"; fs.writeFileSync(p, \"\")` published NO path and marked `incomplete: [\"Fs\"]` on 0.36.2, so `allow Fs /tmp/benign` refused a fully determined write",
+        paths("okLocal").includes("/tmp/benign") && !incFs("okLocal"), JSON.stringify(row("okLocal")));
+  check("R416: a MODULE-level `const` path is captured too — the binding's scope was never the question",
+        paths("okTop").includes("/tmp/top") && !incFs("okTop"), JSON.stringify(row("okTop")));
+  check("R416 CONTROL, and the reason the row above is evidence: the INLINE spelling still answers exactly as it did — a fix that broke capture would pass nothing here",
+        paths("okInline").includes("/tmp/benign") && !incFs("okInline"), JSON.stringify(row("okInline")));
+  check("R416: both positions of a TWO-PATH op resolve — `copyFileSync(A, B)` with two consts is complete",
+        paths("twoPathBoth").includes("/tmp/a") && paths("twoPathBoth").includes("/tmp/b") && !incFs("twoPathBoth"),
+        JSON.stringify(row("twoPathBoth")));
+  const ex = scan(d, "--policy", path.join(d, "allow.pol")).r.status;
+  check("R416 GATE: the tree still FAILS `allow Fs /tmp/benign` (exit 1) — because the runtime-path rows beside it are correctly incomplete. The capture must not buy a certification for its neighbours",
+        ex === 1, `exit ${ex}`);
+
+  // THE CONTROLS, REVERT-INVARIANT BY DESIGN and said so rather than left to be discovered. None of
+  // these moves when this change is reverted; they exist because a WIDENING of what counts as captured
+  // is where a fabricated locator gets introduced (the ⟨0.29⟩ class), and the second fixture is written
+  // first on purpose. Each names the direction it guards.
+  check("R416 FABRICATION CONTROL (revert-invariant by design): a `const` holding the CONTENT is not published as a path — `writeFileSync(userPath, C)` reads position 0 only, so the ⟨0.29⟩ content-literal defect cannot return through const resolution",
+        paths("contentConst").length === 0 && incFs("contentConst"), JSON.stringify(row("contentConst")));
+  check("R416 MUTABILITY CONTROL (revert-invariant by design): a `let` is NOT resolved — it can be reassigned, and `constStringValue` requires EVERY value declaration to be an immutable `const` string",
+        paths("letBound").length === 0 && incFs("letBound"), JSON.stringify(row("letBound")));
+  check("R416 UNDER-APPROXIMATION CONTROL (revert-invariant by design): a PARAMETER is still invisible and still marks `incomplete` — what is not statically determined keeps failing closed",
+        paths("param").length === 0 && incFs("param"), JSON.stringify(row("param")));
+  // NOT revert-invariant, and labelled accordingly after it was measured rather than assumed: its
+  // capture half moves with this change (PRE published nothing here), its `incomplete` half does not.
+  check("R416 MASKING CONTROL: a two-path op with ONE const and one runtime path publishes the const AND stays `incomplete` — the ⟨0.29⟩ `copyFile(\"/safe\", userPath)` shape, which a position-0 capture alone would certify",
+        paths("twoPath").includes("/tmp/a") && incFs("twoPath"), JSON.stringify(row("twoPath")));
+  check("R416 SHAPE CONTROL (revert-invariant by design): a const resolving to a NON-path-shaped string is not published and still marks `incomplete` — const resolution changes WHERE the value comes from, not what counts as a path",
+        paths("notPathShaped").length === 0 && incFs("notPathShaped"), JSON.stringify(row("notPathShaped")));
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);

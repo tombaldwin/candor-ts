@@ -37,7 +37,8 @@ import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadE
          tablesInSql, modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf,
          partnerFor, CLOCK_READING_PERFORMANCE_MEMBERS, CLOCK_READING_PROCESS_MEMBERS,
          CLOCK_READING_CONSOLE_MEMBERS, CONNECTING_WEB_CTORS,
-         WEB_WIRE_MEMBERS } from "./scan-core.mjs";
+         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, FS_USE_VERBS,
+         EXEC_USE_VERBS } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -2925,9 +2926,62 @@ const FS_TWO_PATH_MEMBERS = new Set([
   "copyFile", "copyFileSync", "cp", "cpSync", "rename", "renameSync",
   "link", "linkSync", "symlink", "symlinkSync",
 ]);
+// SOUNDNESS R416 — A LOCATOR THAT IS DETERMINED IS DETERMINED HOWEVER IT REACHES THE CALL. This
+// function read ONLY a syntactic string literal sitting in the path position, so a path bound one line
+// above was lost entirely. MEASURED on shipped 0.36.2:
+//     export function f() { const p = "/tmp/benign"; fs.writeFileSync(p, ""); }
+//        ->  paths: null, incomplete: ["Fs"]   =>  `allow Fs /tmp/benign` REFUSES a fully determined write
+//     export function g() { fs.writeFileSync("/tmp/benign", ""); }
+//        ->  paths: ["/tmp/benign"]            =>  certified, correctly
+// rust credits a plain local and a const; java and swift credit it; ts was the worst of the four
+// (conformance `gen_stat_locator.py`, arm `a4local`, which exists to pin exactly this).
+//
+// THIS FAILS CLOSED, so it is precision, not soundness — but it is SEQUENCING-CRITICAL. "Captured" has
+// to be a VALUE fact before any further rung marks a surface incomplete because "the locator was not
+// captured", or every such rung compounds the over-mask. Under-approximation stays permitted: what is
+// NOT resolved (a `let`, a parameter, a concatenation, a `path.join`) keeps today's behaviour and its
+// `incomplete` marker.
+//
+// THE RESOLVER IS `constStringValue`, unchanged and already trusted by the Net surface for the identical
+// question (`resolveConstUrlString` has read it since ⟨0.29⟩). Its bar is strict: EVERY value declaration
+// of the symbol must be an immutable `const` (or `readonly` field) whose initializer is a plain string
+// literal, and conflicting declarations resolve to null. Reusing it rather than writing a second path
+// resolver is the point — R288's fifteen-copies shape is what a private one would start.
+//
+// FAILURE DIRECTION, both ways, because this function feeds TWO consumers:
+//   · `lits` is PUBLISHED as `paths`. Resolving a value wrongly would FABRICATE a locator — the cardinal
+//     direction — which is why the resolver's bar is "every declaration is a const string literal" and
+//     not "some declaration looks like one".
+//   · `complete` SUPPRESSES the masking guard. Resolving more means marking `incomplete` less, so the
+//     same wrong resolution would also un-mask. One resolver, one bar, both consumers.
+// Siblings NOT touched here: `programHeadLiteral` (Exec) and the SQL slot (Db) have the same gap, each
+// with its own over-charge bill to price. Filed, not smuggled in.
+//
+// `CANDOR_R416_HITS=1` prints one stderr line naming the members whose const-bound path was resolved —
+// the R103 hit-counter pattern, kept for the same reason (an A/B that comes back byte-identical says
+// nothing until the corpus is shown to REACH the branch). It prints ONLY when the count is non-zero,
+// and that is not a detail: the first run of this probe emitted its summary line unconditionally, so
+// `corpus-ab.py --mark R416PROBE` counted 7 hits across 7 entries over a corpus whose real hit count
+// was 0 — a flattering reach figure manufactured by the instrument, which is AGENT-CORPUS-BRIEF §E1
+// happening to the very measurement written to prevent it.
+const R416_HITS = process.env.CANDOR_R416_HITS ? new Map() : null;
+const r416Hit = (k) => { if (R416_HITS) R416_HITS.set(k, (R416_HITS.get(k) ?? 0) + 1); };
+if (R416_HITS) process.on("exit", () => {
+  const rows = [...R416_HITS].sort();
+  const total = rows.reduce((a, [, n]) => a + n, 0);
+  if (total) process.stderr.write(`R416PROBE total=${total}`
+    + rows.map(([k, n]) => ` ${k}=${n}`).join("") + "\n");
+});
 function fsPathLiteral(node, member) {
   const args = node.arguments ?? [];
-  const at = (i) => (args[i] && ts.isStringLiteralLike(args[i]) ? args[i].text : null);
+  const at = (i) => {
+    const a = args[i];
+    if (!a) return null;
+    if (ts.isStringLiteralLike(a)) return a.text;
+    const c = constStringValue(a);          // R416 — a const-bound path is a captured path
+    if (c != null) r416Hit(member);
+    return c;
+  };
   const a0 = at(0);
   const needsTwo = FS_TWO_PATH_MEMBERS.has(member);
   const a1 = needsTwo ? at(1) : null;
@@ -7145,69 +7199,12 @@ function visitCalls(node) {
           // The member token κ matches: the resolved declaration's name, EXCEPT a `new X()` call,
           // whose declaration is a Constructor (empty name) — synthesize "new" so a rule can exempt
           // inert construction from its module-wide effect (the net cluster: `new http.Agent()` etc.).
-          // BUT a CONNECTING constructor is NOT inert: `new http.ClientRequest(url)` performs the
-          // network I/O on construction (it is what `http.request()` returns and dispatches), so the
-          // blanket `new`-exemption would convert a real Net source into pure (a cardinal-sin under-
-          // report). For such a ctor we synthesize the CLASS name instead of "new", so the net-cluster
-          // rule's `/^(?!new$)/` matcher keeps the effect. The set is the net cluster's documented
-          // public connecting ctors; http2 connects via `connect()` (a function, not a ctor) so it
-          // needs no entry here. Inert ctors (Agent/Server/Socket/TLSSocket/Http2Server*/message shells)
-          // still synthesize "new" and stay pure.
-          const CONNECTING_CTORS = new Set(["ClientRequest"]);
+          // A CONNECTING ctor is the exception to that exemption; the set, and why, is in scan-core.
           // R130 — `new WebSocket(url)` / `new EventSource(url)` are the same shape as `ClientRequest`:
           // the connection is opened BY the construction, so the blanket `new`-exemption would convert a
           // real Net source into pure. Read from the SHARED constant the es-lib arm reads, so the two
           // resolution paths cannot be widened separately.
           const isConnectingCtor = (n) => CONNECTING_CTORS.has(n) || CONNECTING_WEB_CTORS.test(n);
-          // Host-ESTABLISHING Net call names (the masking-fix allowlist): a Net call by one of these whose
-          // host is not a captured literal leaves the host invisible. Excludes use-verbs (write/end/send on
-          // a connected socket). `post/put/patch/delete/head/options` cover the axios/got/undici tier whose
-          // URL is the call arg (sweep [18]); `dgram.send(buf,port,host)` is added module-aware below (UDP
-          // has no connect, so send carries the destination — sweep [12]).
-          // SOUNDNESS R410 — THE RESOLVER FAMILY WAS MISSING, and its absence is a GATE BYPASS, not a
-          // missed disclosure. `dns.resolve` classifies Net (see the κ table below), so a resolver call
-          // carries the effect while contributing NO host; with this list not naming it, nothing marked
-          // the surface incomplete and a benign sibling `fetch("https://api.stripe.com")` certified a
-          // caller-controlled DNS target — `allow Net api.stripe.com` exit 0, measured, with the
-          // sibling-free control correctly caught by AS-EFF-008. Written as the WHOLE family rather than
-          // the spelling in hand (R346): every node `dns` resolver, the `dns/promises` twins (same names)
-          // and the `Resolver` class methods, which share these member names.
-          //
-          // NOTE THE SHAPE PROBLEM THIS DOES NOT FIX. This set is an INCLUSION list, so forgetting a
-          // member UNDER-reports — the opposite of `FS_USE_VERBS`/`EXEC_USE_VERBS` below, where
-          // forgetting over-charges and is safe. That asymmetry is the defect class itself: java's Net
-          // is sound precisely because it uses the general rule (any Net call contributing no visible
-          // host leaves the surface incomplete) rather than a list. The durable repair is to INVERT this
-          // into a use-verb denylist beside the other two; that is a wider change with its own
-          // over-charge bill to price, so it is filed rather than smuggled in here.
-          const NET_ESTABLISHING = new Set(["request", "get", "post", "put", "patch", "delete", "head",
-            "options", "connect", "createConnection", "fetch",
-            "lookup", "lookupService", "reverse", "resolve", "resolve4", "resolve6", "resolveAny",
-            "resolveCname", "resolveCaa", "resolveMx", "resolveNaptr", "resolveNs", "resolvePtr",
-            "resolveSoa", "resolveSrv", "resolveTxt"]);
-          // Fs/Exec USE-verbs whose LOCATOR was fixed earlier, not an arg of THIS call — so a missing literal
-          // here is the legitimate split-construct/use shape, never the masking signal (the establishing-
-          // allowlist discipline, generalized from Net to all 4 effects; sweep [11]). Fs: the fd/FileHandle
-          // ops (fd came from open()); the path-taking fs.* fns are establishing. Exec: ChildProcess methods
-          // (the command was fixed at spawn); the spawn fns are establishing.
-          // The node `fs` verbs whose FIRST argument is a DESCRIPTOR, not a path — the fd came from a
-          // prior `open()` whose path this analysis already saw, so their invisible destination is not a
-          // gap and marking them `incomplete` charges every buffered write in a real tree.
-          //
-          // ⟨0.29⟩ `readv`/`writev` (+Sync) were MISSING, and the ⟨0.29⟩ positional-literal fix is what
-          // made it visible: before it, `writev(fd, "/tmp/lit")` had its literal found ANYWHERE in the
-          // call and published as a path — a fabrication — so the set was never consulted for these four.
-          // Killing the fabrication moved them into the other wrong bucket. Found by generating a case
-          // per node `fs` export rather than reasoning about the list (24 fd verbs in node, 20 here).
-          //
-          // Forgetting a member here OVER-charges (safe); adding a path-taking verb by mistake
-          // UNDER-reports. An allowlist is the right shape for exactly that reason — the inverse of
-          // the denylist rule that governs the classifier surface.
-          const FS_USE_VERBS = new Set(["write", "writeSync", "read", "readSync", "close", "closeSync",
-            "fsync", "fsyncSync", "fdatasync", "fdatasyncSync", "ftruncate", "ftruncateSync", "fchmod",
-            "fchmodSync", "fchown", "fchownSync", "futimes", "futimesSync", "fstat", "fstatSync",
-            "readv", "readvSync", "writev", "writevSync"]);
-          const EXEC_USE_VERBS = new Set(["kill", "send", "disconnect", "ref", "unref"]);
           // `ctorRuleName` (below) rather than `ctorClassName`: a connecting ctor reached through a local
           // alias must still fail the surface closed on a runtime URL. Evaluated at call time, after it.
           const netEstablishing = (member) =>
