@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.36.2] — 2026-09-12
+
 - **The DNS resolver family was missing from `NET_ESTABLISHING`, and its absence was a GATE BYPASS —
   SOUNDNESS R410.** `dns.resolve` classifies Net, so a resolver call carried the effect while contributing
   no host; with the list not naming it, nothing marked the host surface incomplete and a benign sibling
