@@ -8,6 +8,32 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **The DNS resolver family was missing from `NET_ESTABLISHING`, and its absence was a GATE BYPASS —
+  SOUNDNESS R410.** `dns.resolve` classifies Net, so a resolver call carried the effect while contributing
+  no host; with the list not naming it, nothing marked the host surface incomplete and a benign sibling
+  `fetch("https://api.stripe.com")` certified a caller-controlled DNS target — `allow Net api.stripe.com`
+  exit **0**. Widened to the whole family (`lookup`, `lookupService`, `reverse` and every `resolve*`),
+  written out rather than the spelling in hand, since `dns/promises` and the `Resolver` class share these
+  member names.
+
+  Measured both directions plus both controls: the masked arm goes 0 → 1; the sibling-free control was
+  already caught; **the fabrication control holds — `dns.resolve(host, "TXT")` reports `hosts: null` with
+  `incomplete: ["Net"]`, so the rrtype string is NOT captured as a host** (the locator-position trap that
+  caught two earlier fixes in this family); and a literal-only `fetch` still certifies at exit 0.
+
+  **Reach on the corpus is ZERO and is recorded as such, not as a safety result.** The 7-project A/B
+  (axios, got, hono, zod, execa, zx, chalk) is 550 rows pre and post, ADDED 0 / REMOVED 0 / CHANGED 0 —
+  but the only `dns` references in that corpus are one import inside an axios *test* file and one *doc
+  comment* in got, so the corpus cannot reach this branch. It is a no-regression result; the fixture is
+  what proves the branch fires.
+
+  **The shape problem this does NOT fix, stated rather than left implied:** `NET_ESTABLISHING` is an
+  inclusion list, so forgetting a member under-reports — the opposite of `FS_USE_VERBS`/`EXEC_USE_VERBS`,
+  where forgetting over-charges and is safe. candor-java's Net surface is sound precisely because it uses
+  the general rule instead of a list. Inverting this into a use-verb denylist is the durable repair and
+  carries its own over-charge bill to price.
+
+
 ## [0.36.1] — 2026-09-11
 
 - **No engine change in this cut.** This release is a family build bump: the analysis changes are in candor-rust and candor-swift (see their changelogs), and the spec did not move. This engine's classifier, gate and report behaviour are unchanged from 0.36.0.

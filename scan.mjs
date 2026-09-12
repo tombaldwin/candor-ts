@@ -7143,8 +7143,27 @@ function visitCalls(node) {
           // a connected socket). `post/put/patch/delete/head/options` cover the axios/got/undici tier whose
           // URL is the call arg (sweep [18]); `dgram.send(buf,port,host)` is added module-aware below (UDP
           // has no connect, so send carries the destination — sweep [12]).
+          // SOUNDNESS R410 — THE RESOLVER FAMILY WAS MISSING, and its absence is a GATE BYPASS, not a
+          // missed disclosure. `dns.resolve` classifies Net (see the κ table below), so a resolver call
+          // carries the effect while contributing NO host; with this list not naming it, nothing marked
+          // the surface incomplete and a benign sibling `fetch("https://api.stripe.com")` certified a
+          // caller-controlled DNS target — `allow Net api.stripe.com` exit 0, measured, with the
+          // sibling-free control correctly caught by AS-EFF-008. Written as the WHOLE family rather than
+          // the spelling in hand (R346): every node `dns` resolver, the `dns/promises` twins (same names)
+          // and the `Resolver` class methods, which share these member names.
+          //
+          // NOTE THE SHAPE PROBLEM THIS DOES NOT FIX. This set is an INCLUSION list, so forgetting a
+          // member UNDER-reports — the opposite of `FS_USE_VERBS`/`EXEC_USE_VERBS` below, where
+          // forgetting over-charges and is safe. That asymmetry is the defect class itself: java's Net
+          // is sound precisely because it uses the general rule (any Net call contributing no visible
+          // host leaves the surface incomplete) rather than a list. The durable repair is to INVERT this
+          // into a use-verb denylist beside the other two; that is a wider change with its own
+          // over-charge bill to price, so it is filed rather than smuggled in here.
           const NET_ESTABLISHING = new Set(["request", "get", "post", "put", "patch", "delete", "head",
-            "options", "connect", "createConnection", "fetch"]);
+            "options", "connect", "createConnection", "fetch",
+            "lookup", "lookupService", "reverse", "resolve", "resolve4", "resolve6", "resolveAny",
+            "resolveCname", "resolveCaa", "resolveMx", "resolveNaptr", "resolveNs", "resolvePtr",
+            "resolveSoa", "resolveSrv", "resolveTxt"]);
           // Fs/Exec USE-verbs whose LOCATOR was fixed earlier, not an arg of THIS call — so a missing literal
           // here is the legitimate split-construct/use shape, never the masking signal (the establishing-
           // allowlist discipline, generalized from Net to all 4 effects; sweep [11]). Fs: the fd/FileHandle
