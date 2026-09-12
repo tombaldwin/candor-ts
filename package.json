@@ -2,7 +2,7 @@
   "name": "candor-ts",
   "version": "0.36.2",
   "mcpName": "io.github.tombaldwin/candor",
-  "description": "candor for TypeScript — per-function side effects, transitively, with a policy gate (candor-spec 0.36)",
+  "description": "candor for TypeScript — per-function side effects, transitively, with a policy gate (candor-spec 0.37)",
   "type": "module",
   "dependencies": {
     "@types/node": "^25.9.2",
