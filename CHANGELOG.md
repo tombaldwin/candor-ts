@@ -8,6 +8,20 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **`mcpName` in `package.json` — npm's ownership check, which is NOT the crates.io one.** The MCP
+  Registry verifies an npm package's namespace from a `mcpName` field; the `mcp-name:` README marker is
+  the *crates.io* convention and was carried across without checking it transfers. The 0.36.2 publish
+  surfaced it registry-side: `missing required 'mcpName' field`. Because 0.36.2 is already on npm without
+  the field and npm does not allow republishing a version, the registry listing lands with the next
+  release.
+
+- **The MCP Registry job no longer gates a release.** It publishes discovery metadata to a third-party
+  preview registry; its failure means candor is not *listed*, and cannot affect an install, since the npm
+  package is live and `npx` resolves it. Without `continue-on-error` its failure reddened the whole
+  publish workflow, and `release-preflight` [10] then refused to cut the UMBRELLA — which had nothing to
+  do with it. The failure stays visible as failed-but-ignored.
+
+
 ## [0.36.2] — 2026-09-12
 
 - **The DNS resolver family was missing from `NET_ESTABLISHING`, and its absence was a GATE BYPASS —
