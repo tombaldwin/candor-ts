@@ -268,7 +268,13 @@ did not already choose to install.
 
 Discovery is passive: the manifest is [`server.json`](server.json), published to the official
 [MCP Registry](https://registry.modelcontextprotocol.io) so clients and directories can find candor
-without being handed a script. The registry verifies namespace ownership through the marker below.
+without being handed a script.
+
+The registry verifies namespace ownership from the **`mcpName` field in `package.json`** — that is the
+npm mechanism. (A `mcp-name:` README marker is the *crates.io* convention and does nothing here; the
+first cut of this used it, and the registry refused the publish with
+`missing required 'mcpName' field`. The line below is kept only because it is how a human greps for the
+namespace.)
 
 mcp-name: io.github.tombaldwin/candor
 
