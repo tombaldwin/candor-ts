@@ -90,6 +90,18 @@ jobs:
     # Isolated from the publish job: a registry hiccup must not affect an npm release that already
     # succeeded.
     name: publish to MCP Registry
+    # NON-BLOCKING, and the reason is a judgement worth stating rather than a convenience. This job
+    # publishes DISCOVERY METADATA to a third-party preview registry. Its failure means candor is not
+    # listed; it cannot affect an install, because the npm package is already live and `npx` resolves it.
+    # Without this line a registry outage — or a rejection like the one that produced this comment —
+    # makes the whole publish workflow red, and `release-preflight` [10] then refuses to cut the UMBRELLA
+    # over a workflow that has nothing to do with the umbrella. That is a real cost: on 0.36.2 it left the
+    # Homebrew front door pinned to the previous engines while the engines themselves were already
+    # published with the gate-bypass fixes.
+    #
+    # The failure stays VISIBLE — GitHub marks the job failed-but-ignored and the log keeps the registry's
+    # own message — so this hides nothing. It only stops a discovery service from gating a release.
+    continue-on-error: true
     needs: publish
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && !github.event.repository.fork
     runs-on: ubuntu-latest
