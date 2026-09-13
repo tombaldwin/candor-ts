@@ -19424,6 +19424,39 @@ if (blk()) {
   // version turns an unreproducible red into a one-line diagnosis.
   const where = `(node ${process.version})`;
 
+  // DERIVE FROM THE AUTHORITY THE ENGINE ACTUALLY READS — `@types/node`, not the RUNTIME.
+  //
+  // The first cut of these rows derived from `import dnsModule from "node:dns"`, and that is the wrong
+  // source: `scan.mjs` classifies from the TYPE DECLARATIONS, so the set that matters is whatever
+  // `@types/node/dns.d.ts` declares. Measured on this box (node v22.12): the runtime exports 20 query
+  // functions and does NOT have `resolveTlsa`, while `dns.d.ts` DOES declare it. So the exact defect
+  // this row was written to pin — `resolveTlsa` missing from NET_ESTABLISHING — is reachable HERE, and
+  // the row stayed green. Removing the name from the table reproduces the bypass (gate exit 1 -> 0)
+  // while all three runtime-derived rows still report true.
+  //
+  // It reddened CI only because the runner's node happened to be newer than the developer's. That is a
+  // coincidence, not the row working — and stating it as the row working is what would let the next
+  // resolver land in the types, be classified, and go unpinned until some runner catches up.
+  const typesDns = (() => {
+    try {
+      const src = fs.readFileSync(new URL("./node_modules/@types/node/dns.d.ts", import.meta.url), "utf8");
+      return [...src.matchAll(/^\s*(?:export\s+)?function\s+([A-Za-z0-9_]+)\s*\(/gm)].map((m) => m[1]);
+    } catch { return []; }
+  })();
+  const typeFns = [...new Set(typesDns)].filter((k) => k !== "Resolver" && !DNS_LOCAL_CONFIG.has(k)
+                                                       && !k.startsWith("__"));
+  check(`R410 PRIMARY: every DNS-querying function \`@types/node/dns.d.ts\` DECLARES is in NET_ESTABLISHING (${typeFns.length} names) — this is the authority scan.mjs classifies from, so a resolver present in the TYPES and absent from this table is a live gate bypass whatever the local runtime happens to export`,
+        // VACUITY FLOOR, and it caught its own author: the first cut asserted `>= 18` when the types
+        // declare 17, so the row failed with an EMPTY missing list — the floor firing, not the table.
+        // The floor exists because a regex that stops matching returns [] and `missing([])` is empty,
+        // which passes vacuously. 15 leaves room for the types to drop a name without a false red while
+        // still catching a parse that collapses. The two named probes catch a regex that matches the
+        // WRONG thing — a count alone cannot tell 17 right names from 17 wrong ones.
+        typeFns.length >= 15 && typeFns.includes("resolveTlsa") && typeFns.includes("resolveMx")
+          && missing(typeFns).length === 0,
+        `missing: ${JSON.stringify(missing(typeFns))} (types: ${typeFns.length} names, `
+          + `resolveTlsa:${typeFns.includes("resolveTlsa")} resolveMx:${typeFns.includes("resolveMx")})`);
+
   const modFns = dnsQueryFns(dnsModule);
   check(`R410: EVERY DNS-querying function \`node:dns\` exports is in NET_ESTABLISHING (${modFns.length} names, derived from the module, not copied) — a resolver missing from this INCLUSION list carries Net while contributing no host, so nothing marks the surface incomplete and a benign sibling literal certifies a caller-controlled target`,
         modFns.length >= 16 && missing(modFns).length === 0, `missing: ${JSON.stringify(missing(modFns))} ${where}`);

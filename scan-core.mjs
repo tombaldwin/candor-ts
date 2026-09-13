@@ -215,6 +215,27 @@ export const WEB_WIRE_MEMBERS = /^(send|close)$/;
 // `CONNECTING_WEB_CTORS` above is the es-lib arm of the same question and is read beside this set.
 export const CONNECTING_CTORS = new Set(["ClientRequest"]);
 
+// SPEC §2.2's RESERVED TRAILING SEGMENTS — the family-wide set, and the ONE owner of it in this engine.
+//
+// §2.2 exists, in its own words, "because the engines were already drifting on it": three of the four
+// excluded these by name and one discriminated by segment count, and the by-name lists DISAGREED. A
+// consumer with the shorter list claims another engine's sidecar as a report.
+//
+// This engine had THREE spellings and they disagreed: `isReport`'s chained `endsWith` calls in
+// query-core.mjs (six segments, MISSING `layerreach`), and two five-name arrays in query-core.mjs and
+// scan.mjs. MEASURED 2026-09-13, and the missing one was live: candor-rust writes
+// `<prefix>.<crate>.<kind>.layerreach.json`, `isReport` called it a REPORT, and a `map --json` over a
+// perfectly good rust report flipped from `{"(root)": …}` to `{"incomplete": …, "modules": …}` with two
+// "malformed report" diagnostics — fail-closed and disclosed, so not a cardinal sin, but it breaks the
+// cross-engine premise this loader states in its own comment ("an agent queries a report from any
+// language identically").
+//
+// `encountered-*` is NOT here: it is a FAMILY matched by prefix, not a fixed trailing segment, and the
+// engine-local scan bookkeeping no query reads. It stays an explicit `.includes()` at the one predicate
+// that needs it, rather than being smuggled into a list of exact segments.
+export const RESERVED_SIDECAR_SEGMENTS =
+  ["callgraph", "hierarchy", "calibrated", "layerreach", "locs", "gate", "refused"];
+
 // Host-ESTABLISHING Net call names (the masking-fix allowlist): a Net call by one of these whose
 // host is not a captured literal leaves the host invisible. Excludes use-verbs (write/end/send on
 // a connected socket). `post/put/patch/delete/head/options` cover the axios/got/undici tier whose
@@ -237,26 +258,6 @@ export const CONNECTING_CTORS = new Set(["ClientRequest"]);
 // host leaves the surface incomplete) rather than a list. The durable repair is to INVERT this
 // into a use-verb denylist beside the other two; that is a wider change with its own
 // over-charge bill to price, so it is filed rather than smuggled in here.
-// SPEC §2.2's RESERVED TRAILING SEGMENTS — the family-wide set, and the ONE owner of it in this engine.
-//
-// §2.2 exists, in its own words, "because the engines were already drifting on it": three of the four
-// excluded these by name and one discriminated by segment count, and the by-name lists DISAGREED. A
-// consumer with the shorter list claims another engine's sidecar as a report.
-//
-// This engine had THREE spellings and they disagreed: `isReport`'s chained `endsWith` calls in
-// query-core.mjs (six segments, MISSING `layerreach`), and two five-name arrays in query-core.mjs and
-// scan.mjs. MEASURED 2026-09-13, and the missing one was live: candor-rust writes
-// `<prefix>.<crate>.<kind>.layerreach.json`, `isReport` called it a REPORT, and a `map --json` over a
-// perfectly good rust report flipped from `{"(root)": …}` to `{"incomplete": …, "modules": …}` with two
-// "malformed report" diagnostics — fail-closed and disclosed, so not a cardinal sin, but it breaks the
-// cross-engine premise this loader states in its own comment ("an agent queries a report from any
-// language identically").
-//
-// `encountered-*` is NOT here: it is a FAMILY matched by prefix, not a fixed trailing segment, and the
-// engine-local scan bookkeeping no query reads. It stays an explicit `.includes()` at the one predicate
-// that needs it, rather than being smuggled into a list of exact segments.
-export const RESERVED_SIDECAR_SEGMENTS =
-  ["callgraph", "hierarchy", "calibrated", "layerreach", "locs", "gate", "refused"];
 
 export const NET_ESTABLISHING = new Set(["request", "get", "post", "put", "patch", "delete", "head",
   "options", "connect", "createConnection", "fetch",

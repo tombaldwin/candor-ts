@@ -38,6 +38,19 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Workflow files GitHub can actually parse
+        # THE DEFECT THIS CATCHES HAPPENED HERE, IN THIS FILE. An empty GitHub expression inside a shell
+        # COMMENT made this ci.yml unparseable: no jobs ran, and the failure reported against the file
+        # PATH rather than the workflow name. `yaml.safe_load` passes on it — it is valid YAML and
+        # invalid Actions, and only the second validator runs on github.com.
+        #
+        # Run HERE rather than only in the umbrella, because this file exists only in this repo at push
+        # time. An umbrella-only check is a decoration: found by review, which measured that the gate as
+        # first wired could not see any of the four engine workflows it was written for.
+        run: |
+          git clone --depth 1 https://github.com/tombaldwin/candor /tmp/candor-tools 2>/dev/null || true
+          [ -d /tmp/candor-tools ] || git clone --depth 1 https://github.com/tombaldwin/candor /tmp/candor-tools
+          CANDOR_ROOT="$(cd "$PWD/.." && pwd)" bash /tmp/candor-tools/bin/workflow-check.sh "$(basename "$PWD")"
       - name: Safety assertions must arrive with a test
         run: |
           set -u
