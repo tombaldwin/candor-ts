@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.37.0] — 2026-09-13
+
 - **R410 — the derived assertion read the RUNTIME, not the authority the engine classifies from.**
   `scan.mjs` classifies from `@types/node`; the row derived from the runtime `node:dns`. On node v22.12
   the runtime has no `resolveTlsa` while the types DO declare it, so the defect the row pins was reachable
