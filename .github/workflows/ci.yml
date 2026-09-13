@@ -48,8 +48,13 @@ jobs:
         # time. An umbrella-only check is a decoration: found by review, which measured that the gate as
         # first wired could not see any of the four engine workflows it was written for.
         run: |
-          git clone --depth 1 https://github.com/tombaldwin/candor /tmp/candor-tools 2>/dev/null || true
-          [ -d /tmp/candor-tools ] || git clone --depth 1 https://github.com/tombaldwin/candor /tmp/candor-tools
+          # ONE SHARED CHECKOUT, FETCHED IDEMPOTENTLY. This step and the assert-audit step below both
+          # need the umbrella's bin/, and they run in the SAME job with a shared /tmp — so a bare
+          # `git clone` in whichever runs second dies with "destination path already exists" (exit 128).
+          # That is exactly how candor-swift's CI failed on the commit that added this step, and it can
+          # only surface in CI: `bin/gates.sh` marks both blocks `~`, so neither runs in a local gate list
+          # and no amount of local verification could have caught it.
+          [ -d /tmp/candor-tools/.git ] || git clone --depth 1 https://github.com/tombaldwin/candor /tmp/candor-tools
           CANDOR_ROOT="$(cd "$PWD/.." && pwd)" bash /tmp/candor-tools/bin/workflow-check.sh "$(basename "$PWD")"
       - name: Safety assertions must arrive with a test
         run: |
@@ -69,7 +74,7 @@ jobs:
           # /tmp rather than a checkout under the workspace: a checkout inside this tree would dirty it,
           # and several gates in this family refuse a dirty tree. Same shape candor-ts already uses to
           # reach candor-spec.
-          git clone --depth 1 https://github.com/tombaldwin/candor /tmp/candor-tools
+          [ -d /tmp/candor-tools/.git ] || git clone --depth 1 https://github.com/tombaldwin/candor /tmp/candor-tools
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             range="origin/${{ github.base_ref }}...HEAD"
           else
