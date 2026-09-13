@@ -33,6 +33,13 @@ jobs:
   # Green on arrival: all four engines pass at HEAD, so this lands on no backlog.
   assert-audit:
     runs-on: ubuntu-latest
+    # A DEADLINE. With no `timeout-minutes` GitHub's 6-hour default applies, so a hung clone or a stuck
+    # runner blocks a release for six hours and reads as "slow" rather than as broken. This job shallow-
+    # clones one repo and scans one git range; ten minutes is already generous.
+    #
+    # preflight [7b] caught EXACTLY this on the 0.36.2 cut, in a job I had just added, and it blocked that
+    # cut until fixed. I then added four more jobs without one. The check earns its place twice over.
+    timeout-minutes: 10
     steps:
       # fetch-depth 0: the audit reads a RANGE, and the default shallow clone has no parent to diff.
       - uses: actions/checkout@v6
