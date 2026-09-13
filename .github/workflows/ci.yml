@@ -44,7 +44,14 @@ jobs:
           # The clone lives INSIDE this block on purpose. `bin/gates.sh` extracts every `run:` step so
           # `gate-run.sh` can replay a repo's CI locally, and a single-line `run:` is executed verbatim —
           # so a standalone clone step would put a NETWORK FETCH in every local gate run. Kept here, the
-          # whole block carries `${{ }}`, is skipped locally as a block line, and still runs in full in CI.
+          # whole block carries GitHub expressions, is skipped locally as a block line, and still runs
+          # in full in CI.
+          #
+          # AND DO NOT WRITE AN EMPTY EXPRESSION IN A COMMENT HERE. GitHub interpolates expressions
+          # BEFORE the shell ever sees this file, so the empty one this line used to contain — written
+          # to NAME the mechanism — was parsed as an expression, failed, and made the whole workflow
+          # invalid: no jobs ran and all four engines reported the failure against the file PATH rather
+          # than the workflow name. A comment about a mechanism triggered the mechanism.
           #
           # /tmp rather than a checkout under the workspace: a checkout inside this tree would dirty it,
           # and several gates in this family refuse a dirty tree. Same shape candor-ts already uses to
