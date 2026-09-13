@@ -8,6 +8,19 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **R410 — the derived assertion read the RUNTIME, not the authority the engine classifies from.**
+  `scan.mjs` classifies from `@types/node`; the row derived from the runtime `node:dns`. On node v22.12
+  the runtime has no `resolveTlsa` while the types DO declare it, so the defect the row pins was reachable
+  locally with the row GREEN. It reddened CI only because the runner's node was newer — a coincidence, not
+  the row working. A PRIMARY row now reads `@types/node/dns.d.ts`, calibrated both ways.
+- **`dns.resolveTlsa` was missing from `NET_ESTABLISHING`** — a Net call contributing no host, so nothing
+  marked the surface incomplete and a benign sibling literal certified a caller-controlled target.
+- **`isReport` called a real candor-rust sidecar a REPORT.** Seven chained `endsWith` calls, missing
+  `layerreach`, which candor-rust really writes: a `map --json` over a good rust report flipped to the
+  INCOMPLETE shape with two malformed-report diagnostics. SPEC §2.2's reserved set now has ONE owner in
+  `scan-core.mjs`, and both narrowings derive from it with their exclusions NAMED.
+- **Spec floor 0.36 → 0.37** (the STAT-LOCATOR rung), and `assert-audit` + `workflow-check` now run in CI.
+
 - **⚠ A locator that is DETERMINED is determined however it reaches the call — SOUNDNESS R416.**
   `const p = "/tmp/benign"; fs.writeFileSync(p, "")` published `paths: null` and marked
   `incomplete: ["Fs"]`, so `allow Fs /tmp/benign` REFUSED a fully determined write, while the inline
