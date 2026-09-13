@@ -19504,6 +19504,14 @@ export async function f(h: string): Promise<void> {
         /export const RESERVED_SIDECAR_SEGMENTS\s*=/.test(core),
         "located no RESERVED_SIDECAR_SEGMENTS — this census is asserting about source it can no longer find");
 
+  // THE PROBE SEGMENTS ARE `layerreach` AND `calibrated`, AND THAT CHOICE IS LOAD-BEARING — do not
+  // "improve" this by switching to `refused`. Counted 2026-09-13: `"layerreach"` and `"calibrated"` are
+  // 1/0/0 across scan-core/query-core/scan, so a stray copy moves the count. `"refused"` is 1/1/1 — it
+  // appears legitimately in each narrowing's excluded Set — so a census probing on it would pass no
+  // matter what the reserved array held. The swift port made exactly that mistake: its assertion searched
+  // the whole file for `"refused"`, which also appears there three times as a JSON reasonKey, and
+  // renaming the segment left the census GREEN. Probe on a name that appears ONCE, or parse the array.
+  //
   // ONE OWNER. Measured 2026-09-13: this engine had THREE spellings and they disagreed — isReport's
   // chained endsWith calls were MISSING `layerreach`, which candor-rust really writes, so a map --json
   // over a good rust report flipped to the INCOMPLETE shape with two malformed-report diagnostics.
