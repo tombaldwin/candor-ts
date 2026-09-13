@@ -9,6 +9,74 @@ on:
   workflow_dispatch:
 
 jobs:
+  # SOUNDNESS R339 — A SAFETY ASSERTION MUST ARRIVE WITH A TEST.
+  #
+  # Measured 2026-09-01 across the whole family in one round: four engines shipped ⟨0.35⟩ fixes, every
+  # one carried a comment asserting a property, and every one of those claims turned out to be wrong —
+  # one of them a cardinal sin introduced by the fix itself. Nobody verifies the sentence that makes
+  # their own diff correct, which is why this is a gate and not a habit.
+  #
+  # (The wording above deliberately PARAPHRASES those claims rather than quoting them. This gate greps
+  # ADDED LINES for assertion language, so a comment that QUOTES a false assertion as a cautionary
+  # example trips it — measured: the first cut of this block cited one verbatim and failed its own gate
+  # in all four engines. Describe the claim, do not reproduce it.)
+  #
+  # It does NOT judge whether an assertion is true — no grep can. It asks the cheaper question that would
+  # have caught the real cases: you asserted safety, did you change a test in the same range?
+  #
+  # TRIAGED BEFORE BEING TURNED ON (2026-09-13, 120 commits across the four engines). 13 failed: 4 were
+  # docs-only ranges, which the tool now SELF-SKIPS (exit 3 — visibly unjudged, never a pass), and 9
+  # touched source and were the tool working. Four of those nine are the masking-guard commits R379,
+  # R383 and R386, whose comments carried "under-catching is a missed mask, never a broken gate" — the
+  # sentence SOUNDNESS R399 later proved false. This gate flagged them as they landed.
+  #
+  # Green on arrival: all four engines pass at HEAD, so this lands on no backlog.
+  assert-audit:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth 0: the audit reads a RANGE, and the default shallow clone has no parent to diff.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Safety assertions must arrive with a test
+        run: |
+          set -u
+          # The clone lives INSIDE this block on purpose. `bin/gates.sh` extracts every `run:` step so
+          # `gate-run.sh` can replay a repo's CI locally, and a single-line `run:` is executed verbatim —
+          # so a standalone clone step would put a NETWORK FETCH in every local gate run. Kept here, the
+          # whole block carries `${{ }}`, is skipped locally as a block line, and still runs in full in CI.
+          #
+          # /tmp rather than a checkout under the workspace: a checkout inside this tree would dirty it,
+          # and several gates in this family refuse a dirty tree. Same shape candor-ts already uses to
+          # reach candor-spec.
+          git clone --depth 1 https://github.com/tombaldwin/candor /tmp/candor-tools
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            range="origin/${{ github.base_ref }}...HEAD"
+          else
+            before="${{ github.event.before }}"
+            case "$before" in
+              ""|0000000000000000000000000000000000000000) range="HEAD~1..HEAD" ;;
+              *) range="$before..HEAD" ;;
+            esac
+          fi
+          echo "range: $range"
+          # `set +e` DELIBERATELY. GitHub runs `run:` under `bash -e`, so without this the script aborts
+          # on ANY non-zero before `rc` is ever read — including exit 3, the family's SELF-SKIP, which
+          # would turn every docs-only commit into a CI failure. That is the imprecision this gate was
+          # triaged to remove, reintroduced by the harness instead of the tool.
+          set +e
+          bash /tmp/candor-tools/bin/assert-audit.sh "$PWD" "$range"
+          rc=$?
+          set -e
+          # An `if`, not `[ "$rc" = 3 ] && exit 0`: under `-e` that one-liner evaluates to FALSE whenever
+          # rc is not 3, and a compound statement returning 1 fails the step — so the success path would
+          # have failed too.
+          if [ "$rc" = 3 ]; then
+            echo "assert-audit self-skipped (docs-only range) — not a pass, and not a failure."
+            exit 0
+          fi
+          exit "$rc"
+
   test-and-fuzz:
     runs-on: ubuntu-latest
     # A deadline. With no `timeout-minutes` GitHub's 6-hour default applies, so a stuck runner
