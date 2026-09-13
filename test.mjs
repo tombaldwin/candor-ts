@@ -19416,16 +19416,23 @@ if (blk()) {
   const dnsQueryFns = (m) => Object.keys(m)
     .filter((k) => typeof m[k] === "function" && k !== "Resolver" && !DNS_LOCAL_CONFIG.has(k));
   const missing = (names) => names.filter((n) => !NET_ESTABLISHING.has(n));
+  // NAME THE NODE VERSION IN THE FAILURE. This row is DERIVED from the running `node:dns`, so it reds
+  // when a newer Node exports a resolver the table lacks — which is the point, and it means CI can go
+  // red on a runtime upgrade with no code change, on a machine the developer is not using. It happened
+  // on its first CI run: local Node v22.12 exports 13 `resolve*`, CI's exported `resolveTlsa` too, and
+  // the failure read `missing: ["resolveTlsa"]` with nothing to say WHERE that came from. Printing the
+  // version turns an unreproducible red into a one-line diagnosis.
+  const where = `(node ${process.version})`;
 
   const modFns = dnsQueryFns(dnsModule);
   check(`R410: EVERY DNS-querying function \`node:dns\` exports is in NET_ESTABLISHING (${modFns.length} names, derived from the module, not copied) — a resolver missing from this INCLUSION list carries Net while contributing no host, so nothing marks the surface incomplete and a benign sibling literal certifies a caller-controlled target`,
-        modFns.length >= 16 && missing(modFns).length === 0, `missing: ${JSON.stringify(missing(modFns))}`);
+        modFns.length >= 16 && missing(modFns).length === 0, `missing: ${JSON.stringify(missing(modFns))} ${where}`);
   const promFns = dnsQueryFns(dnsPromises);
   check("R410: …and the `node:dns/promises` twins, which R410's comment asserts share these member names — asserted against the real module rather than believed",
-        promFns.length >= 16 && missing(promFns).length === 0, `missing: ${JSON.stringify(missing(promFns))}`);
+        promFns.length >= 16 && missing(promFns).length === 0, `missing: ${JSON.stringify(missing(promFns))} ${where}`);
   const resolverFns = Object.getOwnPropertyNames(dnsModule.Resolver.prototype).filter((k) => k !== "constructor");
   check(`R410: …and every \`dns.Resolver\` prototype method (${resolverFns.length}), which reaches this table under the same member names`,
-        resolverFns.length >= 14 && missing(resolverFns).length === 0, `missing: ${JSON.stringify(missing(resolverFns))}`);
+        resolverFns.length >= 14 && missing(resolverFns).length === 0, `missing: ${JSON.stringify(missing(resolverFns))} ${where}`);
 
   // TWO QUESTIONS, TWO SETS — the boundary a future reader is most likely to erase. `NET_ESTABLISHING`
   // answers "does this call ESTABLISH a host, so a runtime value there must mark the surface

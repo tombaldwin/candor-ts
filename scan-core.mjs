@@ -241,7 +241,7 @@ export const NET_ESTABLISHING = new Set(["request", "get", "post", "put", "patch
   "options", "connect", "createConnection", "fetch",
   "lookup", "lookupService", "reverse", "resolve", "resolve4", "resolve6", "resolveAny",
   "resolveCname", "resolveCaa", "resolveMx", "resolveNaptr", "resolveNs", "resolvePtr",
-  "resolveSoa", "resolveSrv", "resolveTxt"]);
+  "resolveSoa", "resolveSrv", "resolveTlsa", "resolveTxt"]);
 
 // Fs/Exec USE-verbs whose LOCATOR was fixed earlier, not an arg of THIS call — so a missing literal
 // here is the legitimate split-construct/use shape, never the masking signal (the establishing-
