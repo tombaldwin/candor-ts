@@ -10,6 +10,7 @@
  */
 import fs from "node:fs";
 import nodePath from "node:path";
+import { RESERVED_SIDECAR_SEGMENTS } from "./scan-core.mjs";
 import { reasonClass, REASON_CLASSES, DYNAMIC_CLASSES, resolveReasonClasses, reasonClassesMatch,
          classFilterExcludes, netClassResolver, reportNetClasses, unanswerableScoped,
          effectiveInferred, reportUnits } from "./policy.mjs";
@@ -44,7 +45,14 @@ function siblings(prefix, predicate) {
 // exists to prevent. CAUGHT BY PART 56 the moment ⟨0.32⟩ landed in this engine: a refusal "left a report",
 // because discovery counted the marker the refusal had just written. Adding a file kind beside the
 // reports means teaching discovery about it in the same change.
-export const isReport = (f) => !f.endsWith(".callgraph.json") && !f.endsWith(".hierarchy.json") && !f.endsWith(".locs.json") && !f.includes(".encountered-") && !f.endsWith(".calibrated.json") && !f.endsWith(".gate.json") && !f.endsWith(".refused.json");
+// DERIVED from SPEC §2.2's reserved set, not restated. This was seven chained `endsWith` calls and it
+// was MISSING `layerreach` — so `<prefix>.<crate>.<kind>.layerreach.json`, which candor-rust really
+// writes, came back `true` from a predicate whose whole job is "is this a report". Measured: a
+// `map --json` over a good rust report flipped to the INCOMPLETE shape with two malformed-report
+// diagnostics. `encountered-*` stays a separate `.includes()` because it is a prefix FAMILY, not a
+// fixed trailing segment.
+export const isReport = (f) =>
+  !RESERVED_SIDECAR_SEGMENTS.some((seg) => f.endsWith(`.${seg}.json`)) && !f.includes(".encountered-");
 
 // A report exists at the prefix if there's an exact `<prefix>.json` (candor-ts) OR a sibling
 // `<prefix>.<crate>.scan.json` (the candor-scan/Rust multi-report form) — the loaders read both, so a
@@ -153,7 +161,11 @@ const reportFilesAt = (prefix) => (fs.existsSync(`${prefix}.json`) ? [`${prefix}
 // beside-the-report layout — the exact spelling `--gate-json` exists for, pinned by the control test —
 // and `encountered-*` because it is engine-local scan bookkeeping no query reads. Existing files only:
 // the guard protects data, and a sidecar not on disk has none to lose.
-const PAIRED_SIDECAR_SEGMENTS = ["calibrated", "callgraph", "hierarchy", "layerreach", "locs"];
+// A DELIBERATE SUBSET of the reserved set, with both exclusions NAMED rather than achieved by omission
+// — a copy that is shorter than its source cannot be read as intentional. Derived, so an eighth
+// reserved segment arrives here automatically.
+const PAIRED_SIDECAR_EXCLUDED = new Set(["gate", "refused"]);
+const PAIRED_SIDECAR_SEGMENTS = RESERVED_SIDECAR_SEGMENTS.filter((s) => !PAIRED_SIDECAR_EXCLUDED.has(s));
 export function gateReportInputFiles(prefix) {
   if (!prefix) return [];
   const out = [];

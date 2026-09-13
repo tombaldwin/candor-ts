@@ -38,7 +38,7 @@ import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadE
          partnerFor, CLOCK_READING_PERFORMANCE_MEMBERS, CLOCK_READING_PROCESS_MEMBERS,
          CLOCK_READING_CONSOLE_MEMBERS, CONNECTING_WEB_CTORS,
          WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, FS_USE_VERBS,
-         EXEC_USE_VERBS } from "./scan-core.mjs";
+         EXEC_USE_VERBS, RESERVED_SIDECAR_SEGMENTS } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -692,7 +692,14 @@ const outArmedSidecars = [];
 // destroying it from the report sink is precisely the cross-sink harm §3.3.1 measures, failing OPEN in
 // the way `armGateJsonFailClosed` refuses to. `encountered-*` is a prefix family rather than a segment
 // and belongs to no report's pair. Exclusion by argument, not by a shorter list.
-const REPORT_SIDECAR_SEGMENTS = ["callgraph", "hierarchy", "locs", "calibrated", "layerreach"];
+// …and `refused` is the THIRD exclusion, which this list dropped by OMISSION while the paragraph above
+// argued the other two. The ⟨0.32⟩ refusal MARKER has its own lifecycle — a run that completes its
+// write phase removes it, and the rung guarantees a LOST marker fails OPEN while a STALE one fails
+// CLOSED. Sweeping it from the report sink makes "lost" the common case, inverting exactly that. Named
+// now, so all three exclusions are arguments rather than a shorter list, which is what the paragraph
+// above already claimed of this line.
+const REPORT_SIDECAR_EXCLUDED = new Set(["gate", "refused"]);
+const REPORT_SIDECAR_SEGMENTS = RESERVED_SIDECAR_SEGMENTS.filter((s) => !REPORT_SIDECAR_EXCLUDED.has(s));
 const removeArmedReportSidecars = (report, prefix, inputs) => {
   const stem = report.replace(/\.json$/i, "");
   for (const seg of REPORT_SIDECAR_SEGMENTS) {

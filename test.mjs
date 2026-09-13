@@ -19487,6 +19487,54 @@ export async function f(h: string): Promise<void> {
   }
 }
 
+// ======================================================================================================
+// SOURCE-HYGIENE CENSUS — ported from candor-java's SourceHygieneTest (BACKLOG item 3).
+//
+// These read this engine's OWN SOURCE and count. The defects they catch are invisible to every
+// behavioural test: a rule stated once and then silently copied, or a single rule nothing asks any more.
+// Both keep the suite green. Each carries a VACUITY FLOOR so the census cannot pass by failing to find
+// the source it asserts about.
+{
+  const src = (f) => fs.readFileSync(new URL(f, import.meta.url), "utf8");
+  const core = src("./scan-core.mjs"), qcore = src("./query-core.mjs"), scanSrc = src("./scan.mjs");
+  const count = (h, n) => h.split(n).length - 1;
+
+  // VACUITY FLOOR first: everything below asserts about these names.
+  check("HYGIENE vacuity floor: the reserved-segment set is locatable in scan-core.mjs",
+        /export const RESERVED_SIDECAR_SEGMENTS\s*=/.test(core),
+        "located no RESERVED_SIDECAR_SEGMENTS — this census is asserting about source it can no longer find");
+
+  // ONE OWNER. Measured 2026-09-13: this engine had THREE spellings and they disagreed — isReport's
+  // chained endsWith calls were MISSING `layerreach`, which candor-rust really writes, so a map --json
+  // over a good rust report flipped to the INCOMPLETE shape with two malformed-report diagnostics.
+  check("HYGIENE: SPEC §2.2's reserved segments are enumerated in ONE place (scan-core RESERVED_SIDECAR_SEGMENTS) — a second list is a list that can drift, and this engine's three spellings already had",
+        count(core, '"layerreach"') === 1 && count(qcore, '"layerreach"') === 0 && count(scanSrc, '"layerreach"') === 0,
+        `layerreach literals — scan-core:${count(core, '"layerreach"')} query-core:${count(qcore, '"layerreach"')} scan:${count(scanSrc, '"layerreach"')} (want 1/0/0)`);
+  check("HYGIENE: …and the same for `calibrated`, the segment most likely to be re-typed from memory",
+        count(qcore, '"calibrated"') === 0 && count(scanSrc, '"calibrated"') === 0,
+        `calibrated literals — query-core:${count(qcore, '"calibrated"')} scan:${count(scanSrc, '"calibrated"')} (want 0/0)`);
+
+  // THE RULE MUST ACTUALLY BE ASKED. A const nothing consults has stopped being the owner.
+  const uses = count(qcore, "RESERVED_SIDECAR_SEGMENTS") + count(scanSrc, "RESERVED_SIDECAR_SEGMENTS");
+  check("HYGIENE: the single reserved set is CONSULTED by the locators — fewer than four references means one has stopped asking it and is discriminating some other way, which is the drift SPEC §2.2 was written to stop",
+        uses >= 4, `RESERVED_SIDECAR_SEGMENTS referenced ${uses} time(s) outside its definition`);
+
+  // THE TWO NARROWINGS ARE DELIBERATE AND MUST STAY NAMED. Both of these lists are DELETION or
+  // pair-carrying paths where an over-reach destroys a file, so unifying them with the reserved set
+  // would be a bug, not a cleanup. Pinning the difference fails in BOTH directions.
+  for (const [file, sym, where] of [[qcore, "PAIRED_SIDECAR_EXCLUDED", "query-core"],
+                                    [scanSrc, "REPORT_SIDECAR_EXCLUDED", "scan"]])
+    check(`HYGIENE: ${where}'s narrowing of the reserved set names its exclusions (${sym}) instead of achieving them by omission — \`gate\` is a VERDICT SINK and \`refused\` is the ⟨0.32⟩ marker whose whole guarantee is that a LOST marker fails OPEN while a STALE one fails CLOSED`,
+          new RegExp(`${sym}\\s*=\\s*new Set\\(\\["gate", "refused"\\]\\)`).test(file),
+          `${where}: ${sym} is not the named {gate, refused} pair`);
+
+  // isReport must DERIVE, not restate. This is the one that was actually wrong.
+  check("HYGIENE: isReport derives from the reserved set rather than chaining endsWith calls — the chain was missing `layerreach` and called a real candor-rust sidecar a REPORT",
+        /RESERVED_SIDECAR_SEGMENTS\.some\(/.test(qcore) && !/endsWith\(".calibrated.json"\)/.test(qcore),
+        "isReport still restates the segment list");
+}
+
+
 // ── SOUNDNESS R416: A LOCATOR THAT IS DETERMINED IS DETERMINED HOWEVER IT REACHES THE CALL ────────
 //
 // MEASURED on shipped 0.36.2: `const p = "/tmp/benign"; fs.writeFileSync(p, "")` reported
