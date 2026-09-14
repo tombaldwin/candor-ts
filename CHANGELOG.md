@@ -8,6 +8,27 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.38.0] — 2026-09-14
+
+- **Spec floor 0.37 → 0.38.** This engine is a DECLARED EXCLUSION from the ⟨0.38⟩ rung's conformance
+  part (PART 89), and the reason is not the one that used to be written down. It was recorded as "no
+  such construct"; that is false. `package.json` `imports`/`exports` **condition maps** ARE a
+  mutually-exclusive configuration arm set, this engine reads them through `moduleResolution: NodeNext`,
+  and it resolves ONE condition and drops the others **with no disclosure** — measured as a
+  differential, two trees identical but for which condition NAME carries which file, answering the same
+  scoped `deny Fs` with **exit 1 and exit 0** over a real write, `unanalyzed` and `incompleteSurfaces`
+  both absent. That is **SOUNDNESS R439**, a ⟨0.21⟩ break rather than a ⟨0.38⟩ one, and it is OPEN at
+  this release. It is excluded from PART 89 because that part's fixtures are source-level arms, **not
+  because the shape is absent or harmless.**
+
+- **`package-lock.json` had described 0.16.0 since 0.16.0 — 21 releases.** Wrong `version`, and missing
+  three `bin` entries `package.json` declares (`candor-ts-sensitivity`, `candor-ts-transitive-recall`,
+  `candor-ts-verify`). Every `npm install` rewrote it, so any tree that installed dependencies became
+  dirty. Found from the other end: candor-spec's conformance suite installs here when `node_modules` is
+  absent, npm rewrote the lock mid-suite, and a new mid-run engine-tree guard reported this repo as
+  MOVED. `npm ci` verified clean against the corrected lock.
+
+
 ## [0.37.0] — 2026-09-13
 
 - **R410 — the derived assertion read the RUNTIME, not the authority the engine classifies from.**
