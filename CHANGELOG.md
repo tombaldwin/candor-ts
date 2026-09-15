@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.38.2] — 2026-09-15
+
 - **A `package.json` subpath-`imports` CONDITION MAP no longer resolves one arm silently (SOUNDNESS
   R439 — a cardinal-sin fix).** `"imports": {"#impl": {"node": "./a.js", "browser": "./b.js"}}` resolves
   to exactly one arm, so a caller whose effects arrived through the OTHER arm was ABSENT from
