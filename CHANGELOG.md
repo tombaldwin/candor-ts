@@ -8,6 +8,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **A `package.json` subpath-`imports` CONDITION MAP no longer resolves one arm silently (SOUNDNESS
+  R439 — a cardinal-sin fix).** `"imports": {"#impl": {"node": "./a.js", "browser": "./b.js"}}` resolves
+  to exactly one arm, so a caller whose effects arrived through the OTHER arm was ABSENT from
+  `functions[]` — which under ⟨0.21⟩ is an affirmative purity claim. Measured on two trees differing only
+  in which condition NAME carried the effectful file: `deny Fs` exited 0 one way and 1 the other. The
+  caller now discloses `Unknown` with `unknownWhy: ["ambiguous:condition-map #impl"]`, so both orders
+  agree and both exit 2 (fail-closed incomplete). Effects are NOT unioned across arms: which arm a call
+  has is a cross-engine question, and charging a body that may never run would be fabrication. A
+  single-arm subpath import (the common shape) is unaffected.
+
 ## [0.38.0] — 2026-09-14
 
 - **Spec floor 0.37 → 0.38.** This engine is a DECLARED EXCLUSION from the ⟨0.38⟩ rung's conformance
