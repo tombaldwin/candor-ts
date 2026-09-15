@@ -19637,6 +19637,86 @@ export function notPathShaped(): void { const n = "data"; fsm.writeFileSync(n, "
         paths("notPathShaped").length === 0 && incFs("notPathShaped"), JSON.stringify(row("notPathShaped")));
 }
 
+// ── ⟨R439⟩ SUBPATH-IMPORT CONDITION MAPS. `"imports": {"#impl": {"node":"./a.js","browser":"./b.js"}}`
+// resolves to exactly ONE arm — whichever the tsconfig's conditions pick — so a call through it edges
+// into that arm only, and a caller whose effects arrive through the OTHER arm reads SILENT-PURE: absent
+// from `functions[]`, which under ⟨0.21⟩ is an affirmative purity claim. Measured 2026-09-14 on two trees
+// differing ONLY in which condition NAME carries the Fs file: `caller` ABSENT with `deny Fs` exit 0, vs
+// `caller` ["Fs"] exit 1. The winning condition belongs to the CONSUMER's build, not to the code, so the
+// silent tree is the dangerous one.
+//
+// THE MIRROR ARM IS THE POINT. A positive test alone passes just as well if the engine charges everything
+// unconditionally; what the defect actually violated is that the two orders DISAGREE, so the property
+// under test is that they AGREE. The two negative arms below are precision controls in the sense of
+// ⟨R137⟩: they fail if the rule has degenerated into "any `#` import is ambiguous", which would put
+// `Unknown` on most well-typed packages (chalk's `#ansi-styles` is exactly that shape, a single string).
+if (blk()) {
+  const mkCondMap = (impl) => project({
+    "package.json": `{"name":"cm","version":"0.0.0","type":"module","imports":{"#impl":${impl}}}`,
+    "tsconfig.json": `{"compilerOptions":{"target":"ES2022","module":"NodeNext","moduleResolution":"NodeNext"},"include":["src/**/*.ts"]}`,
+    "src/pure.ts": `export function go(x: string): void { /* nothing */ }`,
+    "src/fsarm.ts": `import * as fs from "node:fs";
+export function go(x: string): void { fs.writeFileSync("/tmp/victim.txt", x); }`,
+    "src/main.ts": `import { go } from "#impl";
+export function caller(s: string) { return go(s); }`,
+  });
+  const callerOf = (rep) => rep?.functions?.find((e) => e.fn.endsWith("caller"));
+
+  // The two orders, differing ONLY in which condition name carries the effectful file.
+  const nodePure = mkCondMap(`{"node":"./src/pure.js","browser":"./src/fsarm.js"}`);
+  const nodeFs   = mkCondMap(`{"node":"./src/fsarm.js","browser":"./src/pure.js"}`);
+  const aRep = scan(nodePure).report, bRep = scan(nodeFs).report;
+  const a = callerOf(aRep), b = callerOf(bRep);
+
+  check("⟨R439⟩ the caller is NOT absent when the checker picks the PURE arm (the silent-pure claim is withdrawn)",
+        a != null, `caller=${a ? JSON.stringify(a.inferred) : "ABSENT"}`);
+  check("⟨R439⟩ …and the withdrawal is DISCLOSED as Unknown, not charged as a fabricated Fs",
+        (a?.inferred ?? []).includes("Unknown") && !(a?.inferred ?? []).includes("Fs"),
+        `inferred=${JSON.stringify(a?.inferred)}`);
+  check("⟨R439⟩ …and names the specifier, so the reason is actionable rather than a bare 'unresolved'",
+        (a?.unknownWhy ?? []).some((w) => w === "ambiguous:condition-map #impl"),
+        `unknownWhy=${JSON.stringify(a?.unknownWhy)}`);
+
+  // THE INVARIANT. Which condition name happens to win is not a property of the code under scan, so the
+  // two trees must not disagree about whether the target is knowable.
+  check("⟨R439⟩ THE MIRROR: the other arm order discloses the SAME ambiguity (the disagreement was the defect)",
+        (b?.inferred ?? []).includes("Unknown")
+          && (b?.unknownWhy ?? []).some((w) => w === "ambiguous:condition-map #impl"),
+        `inferred=${JSON.stringify(b?.inferred)} why=${JSON.stringify(b?.unknownWhy)}`);
+  check("⟨R439⟩ …while the arm the checker CAN see is still charged (the disclosure did not displace the resolution)",
+        (b?.inferred ?? []).includes("Fs"), `inferred=${JSON.stringify(b?.inferred)}`);
+
+  // PRECISION CONTROL 1 — chalk's `#ansi-styles` shape: a subpath import that is a plain STRING has one
+  // arm and nothing is ambiguous. If this reddens, the rule is keyed on `#` rather than on ambiguity.
+  const single = project({
+    "package.json": `{"name":"cm","version":"0.0.0","type":"module","imports":{"#impl":"./src/fsarm.js"}}`,
+    "tsconfig.json": `{"compilerOptions":{"target":"ES2022","module":"NodeNext","moduleResolution":"NodeNext"},"include":["src/**/*.ts"]}`,
+    "src/fsarm.ts": `import * as fs from "node:fs";
+export function go(x: string): void { fs.writeFileSync("/tmp/victim.txt", x); }`,
+    "src/main.ts": `import { go } from "#impl";
+export function caller(s: string) { return go(s); }`,
+  });
+  const s = callerOf(scan(single).report);
+  check("⟨R439⟩ CONTROL: a SINGLE-arm subpath import is not ambiguous — Fs resolved, no Unknown added",
+        (s?.inferred ?? []).includes("Fs") && !(s?.inferred ?? []).includes("Unknown"),
+        `inferred=${JSON.stringify(s?.inferred)}`);
+
+  // PRECISION CONTROL 2 — the common dual-package map, whose arms are BUILD OUTPUT outside `include`.
+  // Those arms are external calls the κ ledger already carries; flagging them would put `Unknown` on
+  // most dual-published repos for nothing.
+  const dual = project({
+    "package.json": `{"name":"cm","version":"0.0.0","type":"module","imports":{"#impl":{"import":"./dist/x.mjs","require":"./dist/x.cjs"}}}`,
+    "tsconfig.json": `{"compilerOptions":{"target":"ES2022","module":"NodeNext","moduleResolution":"NodeNext"},"include":["src/**/*.ts"]}`,
+    "dist/x.mjs": `export function go(x) {}`,
+    "dist/x.cjs": `exports.go = function (x) {};`,
+    "src/main.ts": `export function caller(s: string) { return s.length; }`,
+  });
+  const du = callerOf(scan(dual).report);
+  check("⟨R439⟩ CONTROL: arms that resolve OUTSIDE the analysed project add no Unknown (no double-report)",
+        du == null || !(du.inferred ?? []).includes("Unknown"),
+        `inferred=${JSON.stringify(du?.inferred)}`);
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

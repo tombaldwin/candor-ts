@@ -2781,6 +2781,127 @@ function importPkgOfHead(expr) {
   return null;
 }
 
+// ⟨R439⟩ SUBPATH-IMPORT CONDITION MAPS — `"imports": { "#impl": { "node": "./src/pure.js",
+// "browser": "./src/fsarm.js" } }`. TypeScript resolves a `#impl` import to exactly ONE arm, whichever
+// the tsconfig's conditions select, so the other arm's body is never reached by the call machinery and a
+// caller whose only effects arrive through it reads SILENT-PURE — absent from `functions[]`, which under
+// ⟨0.21⟩ is an affirmative purity claim, the cardinal sin.
+//
+// MEASURED 2026-09-14 on two trees differing ONLY in which condition NAME carries the Fs file:
+//     node→pure,  browser→fsarm    caller ABSENT      `deny Fs` exit 0
+//     node→fsarm, browser→pure     caller ["Fs"]      `deny Fs` exit 1
+// The winning condition is a property of the CONSUMER's build, not of the code under scan, so neither
+// answer is the whole truth and the tree that reports nothing is the dangerous one.
+//
+// WHAT THIS DOES NOT DO: it does not union the arms' effects. Which arm a call "has" is a cross-engine
+// question — SPEC ⟨0.38⟩ settles it for a conditional BINDING, and a condition map is the packaging-level
+// analogue, not yet specified. Unioning here would charge this caller for a body that may never run on
+// the consumer's platform, i.e. fabrication, and would do it in ONE engine ahead of the spec. What can be
+// said without inventing anything is that the target is AMBIGUOUS: disclose `Unknown`, which withdraws
+// the purity claim and lets a gate see there is something here, and name the specifier so the reason is
+// actionable. Both trees above then report the SAME thing, which is the invariant the defect violates.
+//
+// THE BOUNDARY IS DELIBERATE AND IS A DENYLIST NARROWING (see `candor-denylist-over-allowlist`): we flag
+// only when ≥2 arms resolve to DISTINCT files the scan actually ANALYSES. Arms that leave the project are
+// external calls, already carried by the κ ledger / `invisible` machinery — adding Unknown there would
+// double-report a covered case. The common dual `{"import":"./dist/x.mjs","require":"./dist/x.cjs"}` is
+// build OUTPUT, outside `include`, so it resolves to no project file and stays quiet: that pair is one
+// source compiled twice, and flagging it would put `Unknown` on most dual-package repos for nothing.
+// The direction this fails in, when it is wrong, is SILENCE on arms we cannot see — which is the
+// pre-existing external posture, not a new hole.
+const _condMapCache = new Map();
+// The nearest package.json OBJECT at or above a file (not just its name, which `nearestPackageName`
+// already caches) — needed for the `imports` field. Memoized per directory including the misses.
+function nearestPackageJson(file) {
+  let dir = path.dirname(file);
+  const seen = [];
+  while (dir && dir !== path.dirname(dir)) {
+    if (_condMapCache.has(dir)) { const v = _condMapCache.get(dir); for (const d of seen) _condMapCache.set(d, v); return v; }
+    seen.push(dir);
+    const pj = path.join(dir, "package.json");
+    try {
+      if (fs.existsSync(pj)) {
+        let v = null;
+        try { v = JSON.parse(fs.readFileSync(pj, "utf8")); } catch { v = null; } // malformed: treat as absent
+        const rec = v ? { json: v, dir } : null;
+        for (const d of seen) _condMapCache.set(d, rec);
+        return rec;
+      }
+    } catch { /* unreadable — keep climbing */ }
+    dir = path.dirname(dir);
+  }
+  for (const d of seen) _condMapCache.set(d, null);
+  return null;
+}
+
+// Every LEAF path string in a condition value, which nests: `{"node":{"import":"./a.js"}}`. The `types`
+// condition is skipped on purpose — a `.d.ts` arm is the declaration FOR an implementation arm, not an
+// alternative implementation, so counting it would make every well-typed single-impl subpath look
+// ambiguous. `null` is a legal arm value meaning "blocked here" and carries no file.
+function _condLeaves(v, out) {
+  if (typeof v === "string") { out.add(v); return out; }
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    for (const [k, sub] of Object.entries(v)) { if (k !== "types") _condLeaves(sub, out); }
+  }
+  return out;
+}
+
+// `./src/pure.js` as written in package.json names the EMITTED file; the scan sees the TypeScript source.
+// Map it back the way tsc does, and require the result to be a file this scan actually analyses —
+// `projectFiles` is the authority on that, so an arm pointing outside the project yields nothing.
+function _armProjectFile(dir, rel) {
+  if (typeof rel !== "string" || !rel.startsWith(".")) return null;
+  const abs = path.resolve(dir, rel);
+  const cands = [abs];
+  const m = abs.match(/^(.*)\.(js|mjs|cjs|jsx)$/);
+  if (m) cands.push(m[1] + ".ts", m[1] + ".tsx", m[1] + ".mts", m[1] + ".cts", m[1] + ".d.ts");
+  for (const c of cands) if (projectFiles.has(path.resolve(c))) return path.resolve(c);
+  return null;
+}
+
+// The specifier a call's HEAD identifier binds to, when that specifier goes through a multi-arm condition
+// map over files we analyse. Returns the specifier text for the disclosure reason, else null. Mirrors
+// `importPkgOfHead`'s declaration walk exactly — same three import forms, same head unwrap.
+function conditionMapAmbiguity(expr) {
+  let head = expr;
+  while (head && ts.isPropertyAccessExpression(head)) head = head.expression;
+  if (!head || !ts.isIdentifier(head)) return null;
+  const sym = checker.getSymbolAtLocation(head);
+  for (const d of sym?.declarations ?? []) {
+    let spec = null;
+    if (ts.isNamespaceImport(d)) spec = d.parent?.parent?.moduleSpecifier;
+    else if (ts.isImportClause(d)) spec = d.parent?.moduleSpecifier;
+    else if (ts.isImportSpecifier(d)) spec = d.parent?.parent?.parent?.moduleSpecifier;
+    if (!spec || !ts.isStringLiteralLike(spec)) continue;
+    const text = spec.text;
+    if (!text.startsWith("#")) continue;            // subpath imports only — see the boundary note above
+    const pkg = nearestPackageJson(path.resolve(spec.getSourceFile().fileName));
+    const imports = pkg?.json?.imports;
+    if (!imports || typeof imports !== "object") continue;
+    // Exact key first, then the `#foo/*` pattern form, longest prefix winning as Node resolves it.
+    let val = Object.prototype.hasOwnProperty.call(imports, text) ? imports[text] : undefined;
+    if (val === undefined) {
+      let best = null;
+      for (const k of Object.keys(imports)) {
+        const star = k.indexOf("*");
+        if (star < 0) continue;
+        const pre = k.slice(0, star), post = k.slice(star + 1);
+        if (text.startsWith(pre) && text.endsWith(post) && text.length >= pre.length + post.length
+            && (!best || pre.length > best.pre.length)) best = { pre, k };
+      }
+      if (best) val = imports[best.k];
+    }
+    if (!val || typeof val !== "object") continue;  // a plain string subpath has ONE arm: nothing ambiguous
+    const files = new Set();
+    for (const leaf of _condLeaves(val, new Set())) {
+      const f = _armProjectFile(pkg.dir, leaf);
+      if (f) files.add(f);
+    }
+    if (files.size >= 2) return text;
+  }
+  return null;
+}
+
 // SPEC §5.1 — the effect manifest. An uncurated package MAY declare its effect surface in its
 // package.json (`"candorEffects": ["Net"]`), read as the declared-not-verified tier: it kills the
 // silent pure/blind-spot the package would otherwise carry, exactly like a cap type (and unlike
@@ -6507,6 +6628,22 @@ function visitCalls(node) {
     const owner = enclosing(node);
     if (owner) {
       const rec = fns.get(owner);
+      // ⟨R439⟩ BEFORE the dispatch chain, not inside one of its branches. The checker has already
+      // collapsed a condition-map import to a single arm by the time any branch below runs, and every
+      // branch would have to repeat the test; R429 was the same mistake one engine over (the swift union
+      // sat after the dispatch chain and missed the arm it had picked). Additive — this only ever ADDS
+      // `Unknown`, so no effect the resolution finds is displaced and no firing gate can go green.
+      if (rec && node.expression) {
+        const cmSpec = conditionMapAmbiguity(node.expression);
+        if (cmSpec) {
+          rec.direct.add("Unknown"); rec.why.add(`ambiguous:condition-map ${cmSpec}`);
+          // REACH instrument for the corpus A/B (`bin/corpus-ab.py --mark`). "CHANGED 0" and "the code
+          // never ran" print identically; this is what tells them apart. Env-gated, stderr, never in the
+          // report — see `candor-locator-spelling-vein`, where 17,944 units read "inert" and the probe
+          // showed the edited line was never reached.
+          if (process.env.CANDOR_R439_MARK) process.stderr.write(`CANDOR_R439_HIT ${cmSpec}\n`);
+        }
+      }
       const sig = checker.getResolvedSignature(node);
       let decl = sig && sig.declaration;
       // ⟨R103⟩ A WRITABLE SLOT IS AN INCOMPLETE CANDIDATE SET — see `openCallSlot`, and see the class-
