@@ -8,6 +8,9 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- No engine change since 0.38.2 (R439, the condition-map silent under-report, shipped in that release).
+  Released to keep the family line aligned at 0.38.3.
+
 ## [0.38.2] — 2026-09-15
 
 - **A `package.json` subpath-`imports` CONDITION MAP no longer resolves one arm silently (SOUNDNESS
