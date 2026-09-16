@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.38.3] — 2026-09-16
+
 - No engine change since 0.38.2 (R439, the condition-map silent under-report, shipped in that release).
   Released to keep the family line aligned at 0.38.3.
 
