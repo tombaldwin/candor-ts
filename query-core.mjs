@@ -1599,6 +1599,11 @@ export function callersFrontier(cg, fns, hierarchy, q) {
   const possible = [];
   for (const f of fns) {
     if (confirmed.has(f.fn)) continue;
+    // ⟨0.39⟩: a synthetic `interfaceUnion` entry is the union over an abstraction member's implementors,
+    // not a function with a body — it cannot CALL anything, so it is not a possible caller. Un-gating
+    // ⟨0.23⟩ made these default rather than opt-in, and this arm then named the bodiless DECLARATION
+    // beside the dispatcher. Found by the four-way frontier differential on (producer=java, consumer=ts).
+    if (f.interfaceUnion) continue;
     const hits = new Set();
     for (const w of f.unknownWhy ?? []) {
       if (!w.startsWith("dispatch:")) continue;
