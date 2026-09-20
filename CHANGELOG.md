@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.39.1] — 2026-09-21
+
 - ⚠ **SOUNDNESS R519 — MINTING A STRUCTURAL MEMBER MOVED ITS BODY OUT OF THE ENCLOSING UNIT, AND THE
   ENCLOSING FUNCTION THEN READ PURE.** A cardinal sin (silent under-report), shipped in **v0.39.0** and
   bisected to **`54d76a6` (SOUNDNESS R512)** — its parent `ee844f0` charges, `54d76a6` does not.
