@@ -20131,6 +20131,115 @@ export const opts: InspectOptionsStylized = {
         structural.union !== undefined, shown(structural));
 }
 
+// ── SOUNDNESS R519 — MINTING A STRUCTURAL MEMBER MOVED ITS BODY OUT OF THE ENCLOSING UNIT ────────
+//
+// R512 made a structural implementor of a FOREIGN abstraction reach `mintStructuralMembers`, which
+// gives every function-valued member its own `<mod>.<structural>@<pos>.<name>` unit. Minting was
+// written as a MOVE rather than an addition: `enclosing()` stops at the first `nodeName` hit, so the
+// member's body stopped being charged to the function that lexically contains it. When no in-scan
+// dispatch resolves to the minted unit — and NOTHING in a producer package need ever dispatch on a
+// dependency's abstraction — the effects land in a unit reachable from nothing and the enclosing
+// function reads PURE. MEASURED on v0.38.3 vs the released v0.39.0, one package, no chain, no
+// unscanned dispatcher: `hold` went `['Rand']` -> ABSENT and `deny Rand hold` exit 1 -> exit 0, in
+// EIGHT distinct spellings. Absence is the cardinal sin's own signature.
+//
+// The remedy is SPEC §2's own rule for closures — syntactic containment. "The implementor is nothing
+// to the enclosing unit" is a statement about an implementor in ANOTHER PACKAGE; a literal written
+// inside this function's body is not that. The minted unit STAYS (R512's publication depends on it);
+// the enclosing unit gains an edge to it, so minting is additive rather than a relocation.
+//
+// EVERY ARM IS GENERATED FROM ONE TEMPLATE WITH ONE SUBSTITUTION, and the pure twin of each is
+// asserted beside it — a fix that charged containment unconditionally-and-wrongly would pass the
+// first half and fail the second.
+if (blk()) {
+  const ifaceSrc = `export interface Backend { size(): number }
+export interface Bag { [k: string]: () => void }
+export interface Opt { maybe?(): void }
+export function wrap<T>(x: T): T { return x }`;
+  // The SHAPES. Each is a construct that reaches `mintStructuralMembers`; the sweep is over the AST
+  // kinds that can get there, not over the three spellings the row was filed with.
+  const SPELLING = {
+    method:    `const o: Backend = { size(): number { SINK; return 0 } }; void o;`,
+    arrow:     `const o: Backend = { size: (): number => { SINK; return 0 } }; void o;`,
+    fnexpr:    `const o: Backend = { size: function (): number { SINK; return 0 } }; void o;`,
+    unionLit:  `const o: Backend | { run(): void } = { run(): void { SINK } }; void o;`,
+    indexed:   `const o: Bag = { anything(): void { SINK } }; void o;`,
+    optional:  `const o: Opt = { maybe(): void { SINK } }; void o;`,
+    objAssign: `const o: Backend = Object.assign({}, { size(): number { SINK; return 0 } }); void o;`,
+    wrapper:   `const o: Backend = wrap({ size(): number { SINK; return 0 } }); void o;`,
+    classExpr: `const o: Backend = new (class Ct implements Backend { size(): number { SINK; return 0 } })(); void o;`,
+    classProp: `const o: Backend = new (class implements Backend { size(): number { return 0 }; extra = (): void => { SINK } })(); void o;`,
+  };
+  const armOf = (spelling, sink) => {
+    const dir = project({
+      "package.json": `{"name":"holdz6","version":"1.0.0","dependencies":{"ifz6":"1.0.0"}}`,
+      "node_modules/ifz6/package.json": `{"name":"ifz6","version":"1.0.0","main":"src/index.ts"}`,
+      "node_modules/ifz6/src/index.ts": ifaceSrc,
+      "src/index.ts": `import { Backend, Bag, Opt, wrap } from "ifz6";
+export function hold(): void { ${SPELLING[spelling].replace("SINK", sink)} }`,
+    });
+    const { report } = scan(dir);
+    fs.writeFileSync(path.join(dir, "policy.candor"), "deny Rand hold\n");
+    const g = spawnSync("node", [path.join(HERE, "scan.mjs"), dir, "--policy", path.join(dir, "policy.candor")],
+                        { encoding: "utf8" });
+    return { report, gate: g.status, row: entry(report, "src.index.hold"),
+             minted: (report?.functions ?? []).filter((e) => e.fn.includes("<structural>")) };
+  };
+  for (const spelling of Object.keys(SPELLING)) {
+    const eff = armOf(spelling, `Math.random()`);
+    check(`R519 [${spelling}]: the enclosing function CARRIES the effect of the structural member it contains`,
+          (eff.row?.inferred ?? []).includes("Rand"),
+          JSON.stringify([eff.row, eff.minted.map((e) => [e.fn, e.inferred])]));
+    check(`R519 GATE [${spelling}]: \`deny Rand hold\` exits 1 — measured 1 on v0.38.3 and 0 on the released v0.39.0`,
+          eff.gate === 1, `gate=${eff.gate} ${JSON.stringify(eff.row)}`);
+    // THE PURE TWIN. Containment must charge what the body DOES, never the fact that a body exists —
+    // without this arm every row above would pass for an engine that charged Rand on sight. The
+    // property asserted is NO FABRICATED `Rand` and a clean gate, not an absent row: the two
+    // class-expression arms carry an `Unknown[callback:…]` hedge of their own, on both sides of this
+    // fix and on v0.38.3 too, and demanding an empty row would be asserting something this change
+    // neither causes nor repairs. The strict form is asserted once, below, where it IS the property.
+    const pure = armOf(spelling, `void 0`);
+    check(`R519 PRECISION [${spelling}]: the same shape with a PURE body charges no Rand and gates clean`,
+          !(pure.row?.inferred ?? []).includes("Rand") && pure.gate === 0,
+          `gate=${pure.gate} ${JSON.stringify(pure.row)}`);
+  }
+  // R512 IS PRESERVED, ASSERTED HERE AND NOT ASSUMED: the member still has its OWN addressable unit
+  // carrying the effect (that unit is what the foreign union entry is emitted from). Containment is an
+  // ADDITION — if it had been implemented as "fold it back and stop minting", this row goes red and
+  // R512's own chained-consumer arms above go red with it.
+  const m = armOf("method", `Math.random()`);
+  // THE STRICT PURE TWIN, on the plain object-literal shape where an absent row IS the property: a
+  // pure structural implementor must leave the enclosing function out of `functions[]` entirely, not
+  // merely un-Rand'd. This is R512's own fabrication guard one level in.
+  const strictPure = armOf("method", `void 0`);
+  check("R519 PRECISION (strict): a PURE structural implementor leaves the enclosing function absent — no row, no hedge",
+        strictPure.row === undefined, JSON.stringify(strictPure.report?.functions));
+  check("R519 CONTROL: minting is still ADDITIVE — the member keeps its own unit and its own effect",
+        m.minted.some((e) => (e.inferred ?? []).includes("Rand")),
+        JSON.stringify(m.minted.map((e) => [e.fn, e.inferred])));
+  check("R519 CONTROL: …and the foreign union entry R512 publishes is still emitted",
+        (m.report?.functions ?? []).some((e) => e.hash === "ifz6#Backend.size" && e.interfaceUnion === true
+                                                && (e.inferred ?? []).includes("Rand")),
+        JSON.stringify((m.report?.functions ?? []).map((e) => [e.hash, e.inferred, e.interfaceUnion])));
+  // THE SHAPES THAT MINT NOTHING must be unchanged — an accessor, a spread and a computed key are not
+  // minted, so their bodies were never moved and containment must not double-charge or newly hedge.
+  const unmoved = project({
+    "package.json": `{"name":"holdz6b","version":"1.0.0","dependencies":{"ifz6":"1.0.0"}}`,
+    "node_modules/ifz6/package.json": `{"name":"ifz6","version":"1.0.0","main":"src/index.ts"}`,
+    "node_modules/ifz6/src/index.ts": ifaceSrc,
+    "src/index.ts": `import { Bag } from "ifz6";
+const KEY = "dyn";
+export function viaGetter(): void { const o: Bag & { g: () => void } = { get g() { Math.random(); return () => {} } }; void o; }
+export function viaComputed(): void { const o: Bag = { [KEY]: (): void => { Math.random() } }; void o; }
+export function viaUntyped(): void { const o = { run(): void { Math.random() } }; void o; }`,
+  });
+  const ur = scan(unmoved).report;
+  for (const fn of ["viaGetter", "viaComputed", "viaUntyped"])
+    check(`R519 CONTROL: \`${fn}\` mints no structural unit and keeps the effect it always had`,
+          (entry(ur, `src.index.${fn}`)?.inferred ?? []).includes("Rand"),
+          JSON.stringify(ur.functions.map((e) => [e.fn, e.inferred])));
+}
+
 // ── R507 / R497 — AN AMBIGUOUS FUNCTION SELECTOR IS REFUSED, NOT RESOLVED TO AN ARBITRARY ONE ──────
 // The asymmetry IS the defect: `path` and `impact` have refused at exit 2 for ZERO matches for a long
 // time, while SEVERAL matches were answered silently. MEASURED on this engine against HEAD before the

@@ -4654,6 +4654,50 @@ function mintPositionalStructuralUnit(mod, sf, prop, name) {
                     endLine: sf.getLineAndCharacterOfPosition(prop.getEnd()).line + 1 });
   }
   nodeName.set(prop, qual);
+  // ⟨SOUNDNESS R519⟩ CONTAINMENT. Minting is an ADDITION, never a MOVE.
+  //
+  // `enclosing()` returns the FIRST ancestor carrying a `nodeName`, so the line above — which exists to
+  // give the member an addressable unit a dispatch can land on — also silently STOPS the member's body
+  // being charged to the function that lexically contains it. Whenever no in-scan dispatch resolves to
+  // the minted unit, the effects then sit in a unit reachable from nothing and the enclosing function
+  // reads PURE: SPEC §2 rule 3's positive purity claim over code this engine read and understood.
+  //
+  // Nothing in a producer package need ever dispatch on a DEPENDENCY's abstraction — R512's own measured
+  // shape is a package that merely SUPPLIES an implementor — and the orphaning is not confined to that
+  // case: a union arm's type-literal member, an index-signature interface's member, and any member the
+  // matched interface does not declare are unreachable by name in ANY scan. MEASURED, v0.38.3 vs the
+  // released v0.39.0, one package, no chain, no unscanned dispatcher: ten spellings went `['Rand']` ->
+  // ABSENT with `deny Rand` exit 1 -> exit 0 (the R519 block in test.mjs, generated from one template).
+  //
+  // THE CONDITION IS UNCONDITIONAL, and that is a decision, not an omission. The obvious narrowing —
+  // "charge unless the member is provably dispatched in-scan" — is UNSOUND for this property: a
+  // dispatch elsewhere in the scan charges the DISPATCHING unit, never the enclosing one, so the
+  // containing function would still read pure over a body written inside it. MEASURED: a function that
+  // builds a class expression and calls its `size` two lines later still lost that `Rand` on v0.39.0.
+  // The exception would also remove charges v0.38.3 made, which is the one direction a fix for a silent
+  // under-report may not move in.
+  //
+  // FAILURE DIRECTION: OVER-charge. A function that builds an implementor it never runs is charged for
+  // what that implementor would do. That is the same over-approximation this engine already makes for
+  // EVERY closure it does not mint — an untyped `{ run(){ … } }` in the same position has always been
+  // charged to its enclosing function (asserted as `viaUntyped` in the R519 block) — so the fix removes
+  // an inconsistency rather than introducing an approximation.
+  //
+  // ALIASES ARE DELIBERATELY EXCLUDED: `mintStructuralMembers`'s `go: other.method` arm sets `nodeName`
+  // to an EXISTING unit and never reaches here. That body is not lexically contained, referencing a
+  // function is not calling it, and v0.38.3 charged nothing for it either — charging it would be a
+  // fabrication introduced in the name of closing an under-report.
+  const owner = enclosing(prop.parent);
+  if (owner && owner !== qual) {
+    fns.get(owner)?.edges.add(qual);
+    // REACH PROBE, env-gated and left in place deliberately. A byte-identical A/B over a corpus that
+    // cannot reach a changed branch is the most flattering number available and the least informative,
+    // and it has been mistaken for evidence four times in this family. `CANDOR_R519_REACH=1` makes this
+    // branch announce itself on stderr so `bin/corpus-ab.py --mark` can COUNT the hits rather than
+    // anyone inferring them afterwards by grep. Off by default: no output, one env read per minted
+    // member.
+    if (process.env.CANDOR_R519_REACH) console.error(`R519-REACH ${qual} <- ${owner}`);
+  }
 }
 for (const sf of sources) {
   (function walkStructural(node) {

@@ -8,6 +8,55 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R519 — MINTING A STRUCTURAL MEMBER MOVED ITS BODY OUT OF THE ENCLOSING UNIT, AND THE
+  ENCLOSING FUNCTION THEN READ PURE.** A cardinal sin (silent under-report), shipped in **v0.39.0** and
+  bisected to **`54d76a6` (SOUNDNESS R512)** — its parent `ee844f0` charges, `54d76a6` does not.
+  `mintStructuralMembers` gives every function-valued member of a structural implementor its own
+  `<mod>.<structural>@<pos>.<name>` unit, and `enclosing()` stops at the first `nodeName` hit — so
+  minting was a MOVE, not an addition. Where no in-scan dispatch resolves to the minted unit (nothing in
+  a producer package need ever dispatch on a DEPENDENCY's abstraction) the effects sat in a unit
+  reachable from nothing and the containing function vanished from `functions[]`: SPEC §2 rule 3's
+  positive purity claim over code the engine read and understood.
+
+  MEASURED, one package, no chain, no unscanned dispatcher, v0.38.3 vs the released v0.39.0 — **ten**
+  spellings went `['Rand']` → ABSENT: method shorthand, arrow initializer, function-expression
+  initializer, a union arm's plain type literal, an index-signature interface, an optional member, the
+  `Object.assign` climb, the proven-identity-wrapper climb, a class expression, and a class-expression
+  property initializer. `deny Rand <module>` went **exit 1 → exit 0** while blanket `deny Rand` stayed 1
+  in both arms — the orphaned unit is still in the report, so the sin is visible only to a SCOPED rule
+  and a blanket gate reads clean over it.
+
+  The remedy is SPEC §2's own rule for closures — **syntactic containment**. "The implementor is nothing
+  to the enclosing unit" is a statement about an implementor in ANOTHER PACKAGE; a literal written inside
+  this function's body is not that. The minted unit STAYS and R512's foreign `interfaceUnion` entry still
+  publishes; the enclosing unit gains an edge to it. UNCONDITIONAL, deliberately: the obvious narrowing
+  ("charge unless provably dispatched in-scan") is unsound for this property, because a dispatch
+  elsewhere charges the DISPATCHING unit and never the enclosing one — measured on a class expression
+  whose member IS called two lines later and still lost its `Rand` at v0.39.0. Failure direction is
+  OVER-charge, the same over-approximation this engine already makes for every closure it does not mint.
+  ALIASES (`go: other.method`) are excluded: referencing a function is not calling it.
+
+  A/B, `bin/corpus-ab.py`, 47 real entries (the 7 standard TS corpus clones + 40 npm packages), key
+  `entry+package+fn+hash` over a multiset of wide row values:
+
+      v0.39.0 -> fix    ADDED 24    REMOVED 0    CHANGED 80     (inferred-only: +24 -0 ~10)
+      v0.38.3 -> fix    ADDED 131   REMOVED 0    CHANGED 1007   (inferred-only: +131 -0 ~13)
+      v0.38.3 -> v0.39.0 (baseline, held constant: corpus, entries, argv)
+                        ADDED 110   REMOVED 3    CHANGED 991
+
+  **REMOVED 0 against BOTH shipped arms, and no field on any changed row lost a value.** The baseline's
+  three removals are the shipped sin on published npm code and all three return:
+  `apollo-server-core#ApolloServerPluginLandingPageGraphQLPlayground` (lost its row and its
+  `invisible: [@apollographql/graphql-playground-html]` disclosure), `ajv-formats#src.limit.<module>`
+  (lost `invisible: [ajv]`), and `apollo-server-core#<structural>.requestDidStart` (drained by NESTED
+  structural literals minted inside it). REACH, instrumented (`CANDOR_R519_REACH=1`, counted by
+  `corpus-ab --mark`): **223 hits across 11 of 47 entries** — ajv 103, apollo-server-core 47, mongodb 32,
+  zod 11, hono 11.
+
+  Twenty-one of the 24 added rows are unchanged between v0.38.3 and v0.39.0 and so are NOT the shipped
+  regression: the same orphaning has been live for LOCAL structural implementors since PART 87 minted
+  them. Closing it is monotone-up against both arms, which is why it is closed here rather than filed.
+
 - **SOUNDNESS R520 — A USAGE ERROR CREATED A DIRECTORY TREE IN THE OPERATOR'S CWD, NAMED AFTER THE
   MISTYPED ARGUMENT.** `candor-ts nonexistent-target /also-bogus` exits 2 correctly and left
   `./nonexistent-target/.candor/report.refused.json` behind: the ⟨0.32⟩ refusal marker's
