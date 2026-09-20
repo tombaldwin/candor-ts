@@ -242,7 +242,29 @@ const noteRefusalTarget = (t)   => { if (refusalTarget === null) refusalTarget =
 const writeRefusalMarker = (why) => {
   if (!refusalPrefix) return;
   try {
-    fs.mkdirSync(path.dirname(refusalPrefix), { recursive: true });
+    // ⟨SOUNDNESS R520⟩ THE MARKER MAY CREATE ITS OWN `.candor`, AND NOT A TREE ABOVE IT.
+    //
+    // `recursive: true` made every refusal a `mkdir -p` of the prefix's WHOLE path, and that prefix is
+    // derived from the first bare token — so `candor-ts nonexistent-target /also-bogus` exited 2
+    // (correctly) and left `./nonexistent-target/.candor/report.refused.json` in the operator's cwd: a
+    // directory tree named after a TYPO. Found as litter in the candor umbrella's own checkout, by no
+    // gate. candor-java and candor-swift create nothing here, so this is two engines disagreeing with
+    // two and no clause has to move.
+    //
+    // The distinction the recursive form missed: ⟨0.28⟩'s fail-closed sink exists to REPLACE a previous
+    // run's document, so a later reader cannot mistake a stale report for a current one. A target that
+    // does not exist never held a report, so the write has nothing to fail closed OVER — it is pure
+    // side effect. Where the target DOES exist the marker still lands, `.candor` and all: CLI-1b's own
+    // control asserts that on a FRESH project, which is why this is not a blanket `existsSync` on the
+    // dirname — that spelling would mute the marker on exactly the case the rung is FOR.
+    //
+    // A bare non-recursive `mkdirSync` would encode the same rule (ENOENT into the catch below), but it
+    // would also throw EEXIST on the ordinary path, so both conditions are spelled out instead.
+    const markerDir = path.dirname(refusalPrefix);
+    if (!fs.existsSync(markerDir)) {
+      if (!fs.existsSync(path.dirname(markerDir))) return;   // nothing to fail closed OVER
+      fs.mkdirSync(markerDir);
+    }
     fs.writeFileSync(`${refusalPrefix}.refused.json`, JSON.stringify({
       candor: { spec: SPEC_VERSION }, refused: true,
       prefix: refusalPrefix, target: refusalTarget ?? ".", reason: String(why),

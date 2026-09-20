@@ -6761,6 +6761,42 @@ if (blk()) {
         `status=${r2.status}`);
 }
 
+// ── CLI-1c. a USAGE ERROR creates no directory tree in the operator's cwd ⟨SOUNDNESS R520⟩ ────────
+// `candor-ts nonexistent-target /also-bogus` exits 2 correctly and used to leave
+// `./nonexistent-target/.candor/report.refused.json` behind — a tree named after a TYPO, written by
+// the refusal marker's `mkdirSync(..., { recursive: true })`. Found as litter in the candor umbrella's
+// own checkout rather than by any gate. candor-java and candor-swift create nothing on this argv, so
+// the correct behaviour was already shipped in half the family and no clause moves.
+//
+// ⟨0.28⟩'s fail-closed sink exists to REPLACE a previous run's document; a target that never existed
+// never held one, so this write had nothing to fail closed OVER. Both halves are asserted here, because
+// suppressing the marker outright would trade a real disclosure for tidiness: CLI-1b's control above
+// already pins the fresh-project case (`.candor` is still created under a target that EXISTS), and the
+// second check below pins the same property through the R520 argv shape specifically.
+if (blk()) {
+  const d = project({ "src/a.ts": `export const f = 1;` });
+  const before = fs.readdirSync(d).sort();
+  const r = spawnSync("node", [path.join(HERE, "scan.mjs"), "nonexistent-target", "/also-bogus"],
+                      { encoding: "utf8", cwd: d });
+  check("a nonexistent target still refuses (exit 2)", r.status === 2, `status=${r.status}`);
+  check("…and creates NOTHING in the cwd — no directory named after the mistyped argument",
+        !fs.existsSync(path.join(d, "nonexistent-target"))
+        && JSON.stringify(fs.readdirSync(d).sort()) === JSON.stringify(before),
+        `cwd now: ${fs.readdirSync(d).sort().join(",")}`);
+
+  // The control for the direction this must NOT go: a refusal over an EXISTING target still gets its
+  // marker on a FRESH project, `.candor` created for it. A mute here would be a withdrawn disclosure.
+  // (The refusing token is an unknown flag rather than a second bogus positional because a second
+  // positional is this CLI's legacy `--out` prefix, not a target — `candor-ts . /also-bogus` dies on an
+  // UNCAUGHT EROFS from the sink writer rather than refusing, which is its own defect and not this row.)
+  const d2 = project({ "src/a.ts": `export const f = 1;` });
+  const r2 = spawnSync("node", [path.join(HERE, "scan.mjs"), ".", "--zzz-not-a-flag"],
+                       { encoding: "utf8", cwd: d2 });
+  check("…while an EXISTING target refusing on the same path still gets its marker (not a mute)",
+        r2.status === 2 && fs.existsSync(path.join(d2, ".candor", "report.refused.json")),
+        `status=${r2.status} tree=${fs.readdirSync(d2).sort().join(",")}`);
+}
+
 // ── CLI-2. --json + a CLEAN policy → pure JSON envelope on stdout, exit 0 (the gate passes) ───────
 // §3a already covers --json (envelope shape, no files) and --json + a VIOLATING policy (exit 1,
 // stderr-only violations). The missing leg is the clean-pass: a satisfied gate must stay exit 0 with

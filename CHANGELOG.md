@@ -8,6 +8,27 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **SOUNDNESS R520 — A USAGE ERROR CREATED A DIRECTORY TREE IN THE OPERATOR'S CWD, NAMED AFTER THE
+  MISTYPED ARGUMENT.** `candor-ts nonexistent-target /also-bogus` exits 2 correctly and left
+  `./nonexistent-target/.candor/report.refused.json` behind: the ⟨0.32⟩ refusal marker's
+  `mkdirSync(..., { recursive: true })` was a `mkdir -p` of the whole prefix path, and that prefix is
+  derived from the first bare token. Found as LITTER in the candor umbrella's own checkout, by no gate.
+  **candor-java and candor-swift create nothing on this argv**, so this is two engines disagreeing with
+  two and no clause moves.
+
+  The distinction the recursive form missed: ⟨0.28⟩'s fail-closed sink exists to REPLACE a previous
+  run's document so a stale report cannot be read as current. A target that never existed never held a
+  report, so the write had nothing to fail closed OVER. SPEC §3.1 states the direction explicitly — *"a
+  marker that is lost or deleted fails open… never worse"* — which is the half this suppresses; the
+  marker still lands wherever the target EXISTS, `.candor` created for it, and the fixture asserts that
+  control on a FRESH project so the fix cannot become a mute.
+
+  REVERT-TESTED, not reasoned: with `scan.mjs` at `acc169a` and this `test.mjs`, exactly ONE check goes
+  red — the one that pins the row — and both controls stay green. Corpus A/B over 197 real npm packages
+  (`bin/corpus-ab.py`, wide key): `ADDED 0  REMOVED 0  CHANGED 0` with **REACH 0** on a marker placed in
+  the changed branch — a ZERO-REACH A/B, not an inert change: a corpus of successful scans never reaches
+  a refusal path, so the fixture is the whole of the evidence.
+
 ## [0.39.0] — 2026-09-20
 
 - **⚠ SOUNDNESS R512 — A STRUCTURAL IMPLEMENTOR OF A FOREIGN ABSTRACTION IS R475'S SHAPE, ONE SPELLING
