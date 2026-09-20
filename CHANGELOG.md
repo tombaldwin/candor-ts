@@ -8,6 +8,76 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R512 — A STRUCTURAL IMPLEMENTOR OF A FOREIGN ABSTRACTION IS R475'S SHAPE, ONE SPELLING
+  OVER.** `registerStructuralImpl`'s climb filtered its contextual type to `projectFiles`, so
+
+      const crossterm: Backend = { size() { …net… } }    // Backend declared by a DEPENDENCY
+
+  registered nowhere and published NO `interfaceUnion` entry, while the byte-equivalent
+  `class Crossterm implements Backend { size() { …net… } }` published `iface#Backend.size -> ['Net']`
+  and reached the chained consumer. **MEASURED on a three-package chain byte-identical but for that one
+  line** (the consumer's `appSize` and the abstraction's package asserted identical across arms): the
+  consumer read `inferred: []`, `unresolved: false`, NO `invisible` — a purity claim under ⟨0.21⟩ — and
+  `deny Net appSize` exited **0** where the named arm exited **1**. The structural object literal is
+  idiomatic TypeScript, not an exotic case. Pre-existing; not widened by the ⟨0.39⟩ port.
+
+  The fix has two halves, and the second is the one that keeps it from trading the sin for a flood:
+
+  1. A foreign abstraction's structural implementor registers in `foreignInterfaceImpls` and its members
+     are minted, so obligation 2 publishes under the OWNER's prefix exactly as the nominal arm does. The
+     **adjacent** hole went with it — a foreign `implements` on a class EXPRESSION, which was local-only
+     too, and which `.name?.text` called "named" while its members are minted `<structural>.m`, so the
+     name lookup read nothing either.
+  2. **The union emitter now reads an unnamed implementor's member through its MINTED UNIT** — the same
+     `nodeName` lookup `localImplTargets` (obligation 3's local half) and the in-scan dispatch site have
+     always used — instead of conceding "no name, therefore `Unknown`". Implementors are split by what
+     can ANSWER for them (a ClassDeclaration through `localEffs`, everything else through its member
+     unit), and the blanket hedge survives only where a member genuinely cannot be read, decided per
+     MEMBER on the same `allResolved` condition. Without this, every package writing
+     `const plugin: SomeDepIface = { … }` would publish `dep#Iface.m -> ['Unknown']` whatever the
+     implementor does, handing an inherited hedge to all of its consumers — closing the silence by
+     flooding the other channel, which ⟨0.39⟩'s cost model forbids in both directions.
+
+  **THE KEY IS CHECKED AGAINST A REAL PACKAGE, and the platform surface mints none.** One predicate
+  (`isPublishableForeignIface`) now serves both arms, and it tests the FILE (`declIsNodeTypes`) rather
+  than the module NAME, because `declModule` derives `util`, `events` and `stream` out of `@types/node`
+  and npm ships real packages under all three. Calibrated by deleting the guard: the same fixture then
+  publishes `util#InspectContext.stylize`, a key no scan can ever answer. This family has shipped such a
+  key twice (rust `io#Write::write_all`, swift `DepLib#String.lowercased`).
+
+  **A/B OVER 524 REAL NPM PACKAGES** (`bin/corpus-ab.py`; PRE = `ee844f0`, POST = this change,
+  `--allow-js`, identical entries): **ADDED 387 · REMOVED 8 · CHANGED 46** (`inferred` key: +387 −8 ~15).
+  Of the 387 added rows, 337 are union entries and **all 337 are under a FOREIGN prefix that names a real
+  package present on disk and reachable from the publishing entry** — `ast-types` from `degenerator`,
+  `find-my-way` from `fastify`, `css-select` from `cheerio`, `jackspeak` from `glob`,
+  `apollo-server-plugin-base` from `apollo-server-core`; **zero** under a platform prefix. The other 50
+  are the newly minted structural member units.
+
+  **EVERY LOST ROW AND EVERY LOST EFFECT WAS TRACED TO A BODY**, and they are two mechanisms, both
+  precision gains rather than withdrawals:
+
+  · **Five dropped union entries** (`ajv#MakeMergeFuncArgs.mergeValues`, `mongodb#LogConvertible.toLog`,
+    `apollo-server-core#ResponseNamePath.child`/`.toArray`,
+    `apollo-server-core#InternalApolloServerPlugin.__internal_plugin_id__`) were the blanket
+    `hadUnnamed → ['Unknown']` hedge. Read from source, every implementor of each is genuinely pure —
+    `ResponseNamePath`'s are two named classes plus one object literal whose `toArray` throws and whose
+    `child` returns `this` — so the union is now empty and absence states the purity it really has.
+  · **Eight rows lost an effect to RE-ATTRIBUTION.** Minting a nested literal's members moves those
+    bodies out of the enclosing unit: `@apollo/utils.sortast`'s `sortAST` passes a `graphql` visitor
+    literal to `visit`, and its `Unknown` now sits on the sixteen visitor methods that actually perform
+    it rather than on `sortAST`, which only calls `visit`. **This is not new behaviour, it is the
+    existing behaviour reaching one more spelling**: a literal typed to a LOCAL interface has been
+    minted (and its enclosure uncharged) since PART 87 — measured on `ee844f0`, a factory returning a
+    locally-typed effectful literal is already ABSENT — and §4 ⟨0.39⟩ describes the precedent the same
+    way, charging a closure by containment and *"a passed abstraction implementor nothing"*. Every lost
+    effect was matched to the ADDED row that now carries it, and **no package-scope gate verdict moved**:
+    `deny Net`/`deny Unknown`/`deny Fs`/`deny Exec` over all six affected packages are byte-identical
+    pre and post (24 of 24 cells).
+
+  Determinism checked over three runs each on `apollo-server-core`, `degenerator` and `fastify`.
+  Two existing PART 87 rows moved their expectation from `['Unknown']` to `['Fs']` — the same property,
+  a stricter answer — and keep a not-pure/not-absent conjunct so the original defect still reds them.
+
 - **⚠ SPEC §4 ⟨0.39⟩ — THE CHAINED-DISPATCH UNION. candor-ts is the third engine to port it (SOUNDNESS
   R475, conformance PART 92).** The defect is a TOGGLE running the wrong way: a library whose public
   abstraction has ZERO local implementors gave a chained consumer a disclosed `Unknown`; adding ONE PURE

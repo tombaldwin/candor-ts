@@ -3466,6 +3466,27 @@ const interfaceImpls = new Map();  // InterfaceDeclaration node -> implementing 
 // every local dispatch. These entries are published (keyed under the OWNER's package) and joined; they
 // are not a local resolution universe.
 const foreignInterfaceImpls = new Map(); // foreign InterfaceDeclaration -> local implementing classes
+// ⟨SOUNDNESS R512⟩ Is this interface DECLARATION one a foreign union entry may be published under? ONE
+// predicate, shared by the nominal `implements` arm and the STRUCTURAL arm below, because two copies of
+// one key rule is how a second spelling gets invented (§4 forbids exactly that for this key).
+//
+// The PLATFORM typing test is `declIsNodeTypes`, not a name check, for the reason `recordDispatch`'s own
+// comment gives: `declModule` derives `events`, `stream` and `process` out of `@types/node` and npm ships
+// real packages under all three names, so a name-keyed test hands node's review to an unrelated package.
+// It is included HERE and not only at `recordDispatch` because the two sides must agree: `recordDispatch`
+// refuses to mint `events#EventEmitter.on` at a consumer, so an entry published under that key is one no
+// consumer can ever form — unjoinable wire noise, and noise in a soundness field is how a real value
+// stops being read.
+const isPublishableForeignIface = (d) => {
+  if (!d || !ts.isInterfaceDeclaration(d) || !d.name) return false;
+  if (projectFiles.has(path.resolve(d.getSourceFile().fileName))) return false; // the LOCAL arm owns this one
+  if (declIsNodeTypes(d)) return false;
+  const m = declModule(d);
+  // A nameable PACKAGE, and not our own under another spelling. `<es-lib>`/`<local>` mint no key; an
+  // absolute path fallback (a file no package.json claims) is not a namespace any consumer can form a
+  // hash in, and publishing under it would be the second spelling §4 forbids.
+  return !!m && !m.startsWith("<") && !m.startsWith("/") && m !== pkgName && m !== rootOwnerPkg;
+};
 // ⟨CARDINAL SIN FIX, caller-path scope⟩ ifaceQual ("mod.Iface") -> Set<callerQual> that GENUINELY
 // dispatched through that interface's own signature and had it resolved by CHA below — populated AT THE
 // RESOLUTION SITE (pass 2's interface-CHA arm), not reconstructed afterward from the flat callgraph.
@@ -3917,16 +3938,7 @@ for (const sf of sources) {
       const foreignInterfaceDecls = (typeExpr) => {
         const sym = checker.getSymbolAtLocation(typeExpr);
         const tgt = sym && sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
-        return (tgt?.declarations ?? []).filter((d) => {
-          if (!ts.isInterfaceDeclaration(d) || !d.name) return false;
-          const f = path.resolve(d.getSourceFile().fileName);
-          if (projectFiles.has(f)) return false;                 // the local arm above owns this one
-          const m = declModule(d);
-          // A nameable PACKAGE, and not our own under another spelling. `<es-lib>`/`<local>` mint no key;
-          // an absolute path fallback (a file no package.json claims) is not a namespace any consumer can
-          // form a hash in, and publishing under it would be the second spelling §4 forbids.
-          return !!m && !m.startsWith("<") && !m.startsWith("/") && m !== pkgName && m !== rootOwnerPkg;
-        });
+        return (tgt?.declarations ?? []).filter(isPublishableForeignIface);
       };
       const fClimbSeen = new Set();
       const fClimb = (iface) => {
@@ -4450,18 +4462,29 @@ function unwrapBind(node, depth = 0) {
 // check. Local-only, mirroring the nominal branch's own bound: a structural value arriving from outside
 // this scan's own source tree (an argument passed by an external caller, a dependency's own callback)
 // is no more visible here than an external nominal implementor already was.
-function localInterfaceDeclsOfType(t) {
-  const out = [];
+//
+// ⟨SOUNDNESS R512⟩ …and the FOREIGN half of the same climb. "Local-only, mirroring the nominal branch's
+// own bound" was true of the nominal branch when that sentence was written and stopped being true when
+// ⟨0.39⟩ gave the nominal branch a foreign arm: `class Crossterm implements dep.Backend` publishes a
+// union entry under `dep`, and `const x: dep.Backend = { size() { …net… } }` — the SAME package supplying
+// the SAME effectful implementor of the SAME foreign abstraction — published nothing at all, so a chained
+// consumer read `inferred: []` with no `invisible`, which under ⟨0.21⟩ is a purity claim. That is R475's
+// own shape one SPELLING over, and a structural object literal is idiomatic TypeScript rather than an
+// exotic case. The bound that survives is the one that was doing the work: an implementor arriving from
+// OUTSIDE this scan's own source tree is still invisible here. A foreign implementor DECLARED here is not.
+function interfaceDeclsOfType(t) {
+  const local = [], foreign = [];
   const consider = (ct) => {
     const sym = ct?.getSymbol?.() ?? ct?.symbol;
     for (const d of sym?.declarations ?? []) {
-      if (ts.isInterfaceDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName)) && !out.includes(d))
-        out.push(d);
+      if (!ts.isInterfaceDeclaration(d)) continue;
+      if (projectFiles.has(path.resolve(d.getSourceFile().fileName))) { if (!local.includes(d)) local.push(d); }
+      else if (isPublishableForeignIface(d)) { if (!foreign.includes(d)) foreign.push(d); }
     }
   };
-  if (!t) return out;
+  if (!t) return { local, foreign };
   if (t.isUnion?.()) { for (const ct of t.types) consider(ct); } else consider(t);
-  return out;
+  return { local, foreign };
 }
 function registerStructuralImpl(ifaceDecl, implNode, seen = new Set()) {
   if (seen.has(ifaceDecl)) return;
@@ -4479,6 +4502,28 @@ function registerStructuralImpl(ifaceDecl, implNode, seen = new Set()) {
       for (const d of tgt?.declarations ?? [])
         if (ts.isInterfaceDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName)))
           registerStructuralImpl(d, implNode, seen);
+    }
+  }
+}
+// ⟨SOUNDNESS R512⟩ The same registration for an abstraction this package does NOT own — into
+// `foreignInterfaceImpls`, NOT `interfaceImpls`, on that map's own stated grounds: these entries are
+// published under the OWNER's package and joined, they are not a local resolution universe, and a
+// `node_modules` declaration in the in-scan CHA universe would change what every local dispatch resolves
+// to. Super-interfaces are climbed on the nominal arm's argument: a dispatch resolves a member to
+// whichever interface DECLARES it, which may be a foreign super of a foreign sub.
+function registerForeignStructuralImpl(ifaceDecl, implNode, seen = new Set()) {
+  if (seen.has(ifaceDecl)) return;
+  seen.add(ifaceDecl);
+  if (!foreignInterfaceImpls.has(ifaceDecl)) foreignInterfaceImpls.set(ifaceDecl, []);
+  const arr = foreignInterfaceImpls.get(ifaceDecl);
+  if (!arr.includes(implNode)) arr.push(implNode);
+  for (const eh of ifaceDecl.heritageClauses ?? []) {
+    if (eh.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    for (const st of eh.types) {
+      let sym; try { sym = checker.getSymbolAtLocation(st.expression); } catch { sym = undefined; }
+      const tgt = sym && sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
+      for (const d of tgt?.declarations ?? [])
+        if (isPublishableForeignIface(d)) registerForeignStructuralImpl(d, implNode, seen);
     }
   }
 }
@@ -4517,8 +4562,11 @@ function isProvenIdentityReturn(decl, paramIdx) {
 // chain of calls.
 function contextualInterfaceDeclsFor(node, depth = 0) {
   let ct; try { ct = checker.getContextualType(node); } catch { ct = undefined; }
-  const direct = localInterfaceDeclsOfType(ct);
-  if (direct.length || depth >= 4) return direct;
+  const direct = interfaceDeclsOfType(ct);
+  // ⟨SOUNDNESS R512⟩ The climb continues while NEITHER partition answered. Keying it on the LOCAL list
+  // alone would stop the `Object.assign` / proven-identity-wrapper climb dead for a foreign abstraction,
+  // which is the same miss one level up.
+  if (direct.local.length || direct.foreign.length || depth >= 4) return direct;
   const p = node.parent;
   if (!p || !ts.isCallExpression(p) || !(p.arguments ?? []).includes(node)) return direct;
   const calleeText = p.expression.getText().replace(/\s+/g, "");
@@ -4594,8 +4642,9 @@ for (const sf of sources) {
     // never structurally satisfy an interface with any member on its own.
     if (ts.isObjectLiteralExpression(node) && node.properties.length > 0) {
       const decls = contextualInterfaceDeclsFor(node);
-      if (decls.length) {
-        for (const d of decls) registerStructuralImpl(d, node);
+      if (decls.local.length || decls.foreign.length) {
+        for (const d of decls.local) registerStructuralImpl(d, node);
+        for (const d of decls.foreign) registerForeignStructuralImpl(d, node);
         mintStructuralMembers(node);
       }
     } else if (ts.isClassExpression(node)) {
@@ -4604,17 +4653,25 @@ for (const sf of sources) {
       // registered nowhere at all (not even as a candidate, unlike the object-literal shape) and its
       // methods were never minted units either (`localName`'s method branch requires a ClassDeclaration
       // parent). Reuse the SAME climb/registration and member-minting as the object-literal shape.
+      // ⟨SOUNDNESS R512⟩ …and a FOREIGN `implements` on a class EXPRESSION registers under the OWNER, the
+      // same as the class DECLARATION arm already does. The audit boundary is deliberately drawn past the
+      // trigger: the row is about the object-literal spelling, and this branch is the identical hole one
+      // construct over — an anonymous class expression supplying a dependency's abstraction effectfully.
       let registeredAny = false;
       for (const h of node.heritageClauses ?? []) {
         if (h.token !== ts.SyntaxKind.ImplementsKeyword) continue;
         for (const t of h.types) {
           let sym; try { sym = checker.getSymbolAtLocation(t.expression); } catch { sym = undefined; }
           const tgt = sym && sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
-          for (const d of tgt?.declarations ?? [])
+          for (const d of tgt?.declarations ?? []) {
             if (ts.isInterfaceDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName))) {
               registerStructuralImpl(d, node);
               registeredAny = true;
+            } else if (isPublishableForeignIface(d)) {
+              registerForeignStructuralImpl(d, node);
+              registeredAny = true;
             }
+          }
         }
       }
       if (registeredAny) mintStructuralMembers(node);
@@ -9645,16 +9702,55 @@ function typingsInterfaceImpls() {
   // not be — record whether any implementor was dropped, so the emission loop below can force the SAME
   // honest-Unknown widening it already applies when CHA_FANOUT_LIMIT is exceeded, instead of a narrower
   // claim than the evidence supports.
+  //
+  // ⟨SOUNDNESS R512⟩ THE NAME IS NOT THE ONLY HANDLE, AND TREATING IT AS ONE OVER-HEDGED. The paragraph
+  // above is right that `localEffs` cannot answer for an implementor with no name; it is wrong that
+  // nothing can. `localImplTargets` — obligation 3's LOCAL half, in this same rung — already resolves a
+  // structural implementor's member PRECISELY, by finding the member node and reading `nodeName`, and the
+  // in-scan dispatch site has always done the same. So the emitter now splits implementors by what can
+  // ANSWER for them rather than by whether they have a name: a ClassDeclaration goes through `localEffs`
+  // as before, and everything else (object literal, class expression — named or not) through its minted
+  // member unit. `hadUnnamed`'s blanket Unknown survives, but only where the member really is
+  // unaccountable, which is the same `allResolved` condition the join and the dispatch site use.
+  //
+  // This is NOT a cosmetic tightening. Under the blanket rule, R512's fix would have made every package
+  // that writes `const plugin: SomeDepIface = { … }` — the idiomatic TS spelling, and the reason this row
+  // exists — publish `dep#Iface.member -> ['Unknown']` whether or not the implementor does anything,
+  // handing an inherited hedge to every consumer of it. ⟨0.39⟩'s cost model is explicit that nothing may
+  // move from disclosed to silent AND that no implementation may start hedging; closing the silence by
+  // flooding the other channel would have traded the sin for the thing the c3_pure_only control exists to
+  // catch. It also unblocks the NAMED class EXPRESSION, which `.name?.text` classified as named while its
+  // members are minted `<structural>.m` — so `localEffs` missed it and it contributed nothing at all.
   // ⟨0.39⟩ An arm is [ifaceDecl, implementing class NAMES, hadUnnamed, OWNING PACKAGE]. The fourth field
   // is obligation 2: a local abstraction's union is published under OUR package, a FOREIGN one's under
   // the package that declares it — fully qualified in that package's own entry-hash namespace, which is
   // the ⟨0.23⟩ `typeSurface` rule and NOT a new spelling. Everything downstream reads the owner off the
   // arm rather than assuming `pkgName`, because assuming it is what re-keys a dependency's abstraction
   // under ours and fabricates a key no consumer can resolve.
+  // ⟨SOUNDNESS R512⟩ A ClassDeclaration is the ONLY implementor kind `localEffs` can answer for: its
+  // members are minted under `${ClassName}.${member}`. Everything else `interfaceImpls` /
+  // `foreignInterfaceImpls` hold — object literals and class expressions, named or anonymous — has its
+  // members minted by `mintStructuralMembers` under `<structural>.${member}`, so a name lookup reads
+  // nothing. Split on the MECHANISM, not on `.name`.
+  const nominalName = (c) => (ts.isClassDeclaration(c) ? c.name?.text : undefined);
+  const splitImpls = (impls) => ({
+    names: impls.map(nominalName).filter(Boolean),
+    nodes: impls.filter((c) => !nominalName(c)),
+  });
+  // The minted unit for `member` on a structural implementor, or undefined when nothing was minted for it
+  // (a `.bind()` whose receiver cannot be pinned, a call result, a getter, an absent optional member).
+  // Same shape as `localImplTargets`, deliberately — one question, one answer.
+  const structuralMemberUnit = (container, m) => {
+    const memberNodes = container.members ?? container.properties ?? [];
+    const mn = memberNodes.find((x) =>
+      (ts.isMethodDeclaration(x) || ts.isPropertyDeclaration(x) || ts.isPropertyAssignment(x))
+      && x.name?.getText?.() === m);
+    return mn ? nodeName.get(mn) : undefined;
+  };
   const unionArms = [];
   for (const [ifaceDecl, implClasses] of interfaceImpls) {
-    const names = implClasses.map((c) => c.name?.text).filter(Boolean);
-    unionArms.push([ifaceDecl, names, names.length < implClasses.length, pkgName]);
+    const { names, nodes } = splitImpls(implClasses);
+    unionArms.push([ifaceDecl, names, nodes.length > 0, pkgName, nodes]);
   }
   const inScanClassesByName = new Map(); // iface NAME -> every class the in-scan arms register under it
   for (const [d, cls] of unionArms) {
@@ -9696,17 +9792,21 @@ function typingsInterfaceImpls() {
     const owner = arm[2] ?? pkgName;
     const inScan = owner === pkgName ? inScanClassesByName.get(n) : null;
     if (inScan && arm[1].every((c) => inScan.has(c))) continue;
-    unionArms.push([arm[0], arm[1], false, owner]);
+    unionArms.push([arm[0], arm[1], false, owner, []]);
   }
   // ⟨0.39⟩ obligation 2's arms, pushed LAST and deliberately AFTER `inScanClassesByName` was taken: a
   // foreign `Backend` and a local one are different keys under different prefixes, so neither may
   // suppress the other as "redundant" and neither may make the other's NAME ambiguous. Both mistakes run
   // in the withdrawal direction — a dropped union entry is a purity claim nobody made.
   for (const [ifaceDecl, implClasses] of foreignInterfaceImpls) {
+    // The registration sites already refuse every declaration `isPublishableForeignIface` rejects, so
+    // this is a belt-and-braces re-derivation of the SAME predicate rather than a second rule: an entry
+    // keyed under a namespace no package owns is the invented second spelling §4 forbids, and this
+    // family has now shipped that key twice (rust `io#Write::write_all`, swift `DepLib#String.lowercased`).
+    if (!isPublishableForeignIface(ifaceDecl)) continue;
     const ownerPkg = declModule(ifaceDecl);
-    if (!ownerPkg || ownerPkg.startsWith("<") || ownerPkg.startsWith("/")) continue;
-    const names = implClasses.map((c) => c.name?.text).filter(Boolean);
-    unionArms.push([ifaceDecl, names, names.length < implClasses.length, ownerPkg]);
+    const { names, nodes } = splitImpls(implClasses);
+    unionArms.push([ifaceDecl, names, nodes.length > 0, ownerPkg, nodes]);
   }
   // A TRUNCATED typings census refuses the PUBLICATION, and it has to be here rather than at the census.
   // Dropping the typings arm on its own lands the refusal on the EVIDENCE side — and the evidence is the
@@ -9737,14 +9837,16 @@ function typingsInterfaceImpls() {
     const n = ifaceDecl.name?.text;
     if (n) ifaceNameCounts.set(`${ownerPkg}#${n}`, (ifaceNameCounts.get(`${ownerPkg}#${n}`) ?? 0) + 1);
   }
-  for (const [ifaceDecl, implClasses, hadUnnamed, ownerPkg] of unionArms) {
+  for (const [ifaceDecl, implClasses, hadUnnamed, ownerPkg, implNodes = []] of unionArms) {
     const ifaceName = ifaceDecl.name?.text;
     // ⟨CARDINAL SIN FIX, structural-implementor gap⟩ `!implClasses.length` used to skip the arm outright
     // — correct when there are genuinely zero implementors, but an interface implemented ONLY
     // structurally (every implementor unnamed, `implClasses` empty, `hadUnnamed` true) would silently
     // publish NO union entry at all, which is a purity claim (SPEC §2 rule 3) this evidence does not
-    // support. `hadUnnamed` keeps the arm alive for that case so the `broad` forcing below can widen it
-    // to Unknown instead of the arm vanishing before `broad` is ever computed.
+    // support. `hadUnnamed` keeps the arm alive for that case so the emission loop below can answer for
+    // it at all, instead of the arm vanishing before anything is computed. ⟨SOUNDNESS R512⟩ what it then
+    // answers is the member's real effects where they can be read and a disclosed Unknown where they
+    // cannot — this predicate is unchanged, only what happens after it.
     if (!ifaceName || (!implClasses.length && !hadUnnamed)) continue;
     // Never guess which `I` a name means: two declarations of it, or a census that cannot prove there is
     // only one, are the same evidential position and take the same answer.
@@ -9770,9 +9872,14 @@ function typingsInterfaceImpls() {
     // key. What silence would cost is this report's own honesty — the producer's `deny E
     // Unknown[dispatch]`, any consumer without half 1's conjuncts, and the entry that is read as data
     // rather than joined. The named tests that fail on that mutation are the producer-side three.
-    // `hadUnnamed` widens the same way: a structural implementor this union cannot name is exactly as
-    // unaccountable as the (CHA_FANOUT_LIMIT + 1)th named one.
-    const broad = implClasses.length > CHA_FANOUT_LIMIT || hadUnnamed;
+    // `hadUnnamed` widens the same way — but only where the implementor really is unaccountable. See
+    // ⟨SOUNDNESS R512⟩ above: a structural implementor's member that resolves to a MINTED UNIT is
+    // accounted for exactly as precisely as a named class's, by the same `nodeName` lookup obligation 3's
+    // `localImplTargets` and the in-scan dispatch site both use, so the widening is decided per MEMBER
+    // (`unaccounted` below) and not per arm. The fan-out bound counts every implementor, named or not:
+    // once an unnamed one contributes real effects it has to be inside the bound that decides whether
+    // this hierarchy is open.
+    const overFanout = implClasses.length + implNodes.length > CHA_FANOUT_LIMIT;
 
     for (const member of ifaceDecl.members ?? []) {
       // Both spellings of an interface method (see the in-scan site): `run(): void` and
@@ -9784,11 +9891,25 @@ function typingsInterfaceImpls() {
       if (!member.name || !fnMember) continue;
       const m = member.name.getText();
       const infU = new Set(), blindU = new Set();
-      if (broad) infU.add("Unknown");
-      else for (const clsName of implClasses) {
-        const e = localEffs.get(`${clsName}.${m}`);
-        if (e) { for (const x of e.inferred) infU.add(x); for (const b of e.blind) blindU.add(b); }
+      // An implementor this arm holds but cannot read a member unit for — the `allResolved` condition,
+      // per member. A structural implementor with no minted unit for `m` (a `.bind()` whose receiver
+      // cannot be pinned, a call result, a getter, an absent optional member) is exactly as unaccountable
+      // as the (CHA_FANOUT_LIMIT + 1)th named one, and takes the same disclosed Unknown.
+      let unaccounted = false;
+      if (overFanout) infU.add("Unknown");
+      else {
+        for (const clsName of implClasses) {
+          const e = localEffs.get(`${clsName}.${m}`);
+          if (e) { for (const x of e.inferred) infU.add(x); for (const b of e.blind) blindU.add(b); }
+        }
+        for (const impl of implNodes) {
+          const u = structuralMemberUnit(impl, m);
+          if (!u) { unaccounted = true; infU.add("Unknown"); continue; }
+          for (const x of inferred.get(u) ?? []) infU.add(x);
+          for (const b of fns.get(u)?.blind ?? []) blindU.add(b);
+        }
       }
+      const broad = overFanout || unaccounted;
       if (infU.size === 0 && blindU.size === 0) continue; // pure across all impls — silence = purity
       const hash = dispatchKey(ownerPkg, ifaceName, m); // ⟨0.39⟩ the OWNER's namespace, not always ours
       if (emittedUnionHashes.has(hash)) continue;

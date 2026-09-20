@@ -15659,6 +15659,19 @@ stringify(e);
 // impls", the named implementor's silence hiding the unnamed one's effect. `hadUnnamed` forces the same
 // honest-Unknown widening CHA_FANOUT_LIMIT already applies, rather than a narrower claim than the
 // evidence supports.
+//
+// ⟨SOUNDNESS R512⟩ THE EXPECTATION MOVED HERE AND IN ROW 6, AND ONLY IN THE STRICTER DIRECTION:
+// `['Unknown']` → `['Fs']`. The property both rows were written to protect — an unnamed implementor's
+// effect may not be hidden by a named one's silence, and an only-structurally-implemented interface may
+// not vanish — is unchanged and still asserted. What moved is the ANSWER: the emitter now reads a
+// structural implementor's member through its MINTED UNIT (the same `nodeName` lookup `localImplTargets`
+// and the in-scan dispatch site already use) instead of conceding it cannot be named, so the union
+// carries the real `Fs` rather than a blanket hedge. Strictly better for every gate but one: plain `deny
+// Fs` now fires where only `deny Fs Unknown` did, and the gate that stops firing —
+// `deny E Unknown[dispatch]` — stops CORRECTLY, because nothing about this dispatch is unresolved any
+// more. Both rows keep an explicit not-pure/not-absent conjunct so a regression to the original defect
+// still reds them, and the accountability arm in the R512 block covers the member that genuinely cannot
+// be read.
 if (blk()) {
   const CHAIN = { ...process.env, CANDOR_WORKSPACE_CHAIN: "1" };
   const d = project({
@@ -15673,8 +15686,9 @@ export const messyStore: Store = { save(): void { fs.writeFileSync("/tmp/x", "y"
   spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8", env: CHAIN });
   const report = JSON.parse(fs.readFileSync(path.join(d, ".candor", "report.json"), "utf8"));
   const union = report.functions.find((e) => e.hash === "mixkit#Store.save");
-  check("⟨CARDINAL SIN FIX⟩ a pure NAMED implementor beside an effectful STRUCTURAL one publishes Unknown, not a silent pure/absent union",
-        union !== undefined && union.interfaceUnion === true && union.inferred.includes("Unknown"),
+  check("⟨CARDINAL SIN FIX⟩ a pure NAMED implementor beside an effectful STRUCTURAL one publishes the STRUCTURAL one's `Fs`, not a silent pure/absent union",
+        union !== undefined && union.interfaceUnion === true
+        && union.inferred.includes("Fs") && union.inferred.length > 0,
         JSON.stringify(report.functions.map((e) => [e.hash, e.inferred, e.interfaceUnion])));
 }
 
@@ -15694,8 +15708,9 @@ export const messyStore: Store = { save(): void { fs.writeFileSync("/tmp/x", "y"
   spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8", env: CHAIN });
   const report = JSON.parse(fs.readFileSync(path.join(d, ".candor", "report.json"), "utf8"));
   const union = report.functions.find((e) => e.hash === "structkit#Store.save");
-  check("⟨CARDINAL SIN FIX⟩ an interface implemented ONLY structurally still publishes a union entry (Unknown), instead of vanishing before `broad` is computed",
-        union !== undefined && union.interfaceUnion === true && union.inferred.includes("Unknown"),
+  check("⟨CARDINAL SIN FIX⟩ an interface implemented ONLY structurally still publishes a union entry (its real `Fs`), instead of vanishing before the arm is computed",
+        union !== undefined && union.interfaceUnion === true
+        && union.inferred.includes("Fs") && union.inferred.length > 0,
         JSON.stringify(report.functions.map((e) => [e.hash, e.inferred, e.interfaceUnion])));
 }
 
@@ -19917,6 +19932,167 @@ export function drive(s: Anything): void { s.save() }`,
         (entry(clrRep, "src.main.go")?.inferred ?? []).length === 0
         && (entry(clrRep, "src.main.go")?.calls ?? []).includes("src.a.A.save"),
         JSON.stringify(clrRep.functions));
+}
+
+// ── SOUNDNESS R512 — A STRUCTURAL IMPLEMENTOR OF A FOREIGN ABSTRACTION IS R475'S SHAPE, ONE SPELLING OVER ──
+//
+// `registerStructuralImpl`'s climb filtered its contextual type to `projectFiles`, so
+//
+//     const crossterm: Backend = { size() { …net… } }        // Backend declared by a DEPENDENCY
+//
+// registered NOWHERE and published NO `interfaceUnion` entry, while the byte-equivalent
+//
+//     class Crossterm implements Backend { size() { …net… } }
+//
+// published `ifz#Backend.size -> ['Net']` and reached the chained consumer. Same consumer, same
+// abstraction, same effect, same chain — only the SPELLING of the implementor differs, and a structural
+// object literal is idiomatic TypeScript rather than an exotic case. MEASURED on the released engine
+// before the fix, on a three-package chain byte-identical but for that line: the consumer's `appSize`
+// read `inferred: []`, `unresolved: false`, NO `invisible` — a purity claim under ⟨0.21⟩ — and `deny Net
+// appSize` exited 0 where the named arm exited 1.
+//
+// THE ROW'S OWN INSTRUCTION IS THAT THE FIXTURE CLOSING IT MUST ALSO PROVE THE NAMED FORM STILL WORKS,
+// or the fix trades one spelling for the other. So every arm below is generated from ONE source template
+// with ONE substitution, and the named arm is asserted beside the structural one rather than assumed.
+if (blk()) {
+  const ifaceSrc = `export interface Backend { size(): number }
+export class TestBackend implements Backend { size(): number { return 7 } }
+export function termSize(b: Backend): number { return b.size() }`;
+  const ifz = project({ "package.json": `{"name":"ifz5","version":"1.0.0"}`, "src/index.ts": ifaceSrc });
+  const ifzRep = `${scan(ifz).prefix}.json`;
+
+  // THE ONE SUBSTITUTION. Every arm's `effimpl` is this file with `IMPL` replaced; nothing else moves.
+  const SPELLING = {
+    named:      `export class Crossterm implements Backend { size(): number { SINK; return 0 } }
+export const crossterm: Backend = new Crossterm();`,
+    structural: `export const crossterm: Backend = { size(): number { SINK; return 0 } };`,
+    // The ADJACENT hole, included because an audit boundary drawn around its own trigger misses the next
+    // instance: a class EXPRESSION's `implements` clause was local-only too, and a named class expression
+    // is doubly invisible — `.name?.text` called it named while its members are minted `<structural>.m`,
+    // so the name lookup read nothing either.
+    classexpr:  `export const crossterm: Backend = new (class Ct implements Backend { size(): number { SINK; return 0 } })();`,
+    // THE FABRICATION GUARD (PART 92's `c3_pure_only`, one spelling over). A structural implementor that
+    // does NOTHING must leave the consumer pure AND unhedged. This arm is why the union reads a structural
+    // member's MINTED UNIT instead of conceding "no name, therefore Unknown": under the blanket rule every
+    // package writing `const plugin: SomeDepIface = { … }` would publish `dep#Iface.m -> ['Unknown']`
+    // whatever the implementor does, handing an inherited hedge to all of its consumers — closing the
+    // silence by flooding the other channel, which is the trade ⟨0.39⟩'s cost model forbids in both
+    // directions.
+    pure:       `export const crossterm: Backend = { size(): number { return 0 } };`,
+    // AND THE OTHER SIDE OF THAT LINE: a structural member nothing can be read for — a `.bind()` whose
+    // receiver cannot be pinned — is genuinely unaccountable and MUST hedge. Without this arm the guard
+    // above would pass for an engine that simply stopped disclosing.
+    opaque:     `declare const opaque: { size(): number };
+const holder: any = opaque;
+export const crossterm: Backend = { size: holder.size.bind(holder) };`,
+  };
+  const mkEff = (spelling) => project({
+    "package.json": `{"name":"effz5","version":"1.0.0","dependencies":{"ifz5":"1.0.0"}}`,
+    "node_modules/ifz5/package.json": `{"name":"ifz5","version":"1.0.0","main":"src/index.ts"}`,
+    "node_modules/ifz5/src/index.ts": ifaceSrc,
+    "src/index.ts": `import * as netm from "node:net";
+import { Backend } from "ifz5";
+${SPELLING[spelling].replace("SINK", `try { netm.connect(1, "h") } catch {}`)}`,
+  });
+  // The CONSUMER is byte-identical in every arm — it never mentions how the implementor was spelled.
+  const APP = `import { Backend, termSize } from "ifz5";
+export function appSize(b: Backend): number { return termSize(b) }
+export function appRun(): number { return appSize(crossterm) }`;
+  const armOf = (spelling) => {
+    const eff = mkEff(spelling);
+    const effRep = scan(eff).report;
+    const app = project({
+      "package.json": `{"name":"appz5","version":"1.0.0","dependencies":{"ifz5":"1.0.0","effz5":"1.0.0"}}`,
+      "node_modules/ifz5/package.json": `{"name":"ifz5","version":"1.0.0","main":"src/index.ts"}`,
+      "node_modules/ifz5/src/index.ts": ifaceSrc,
+      "node_modules/effz5/package.json": `{"name":"effz5","version":"1.0.0","main":"src/index.ts"}`,
+      "node_modules/effz5/src/index.ts": fs.readFileSync(path.join(eff, "src", "index.ts"), "utf8"),
+      "src/index.ts": `import { crossterm } from "effz5";
+${APP}`,
+    });
+    const deps = `${ifzRep} ${path.join(eff, ".candor", "report")}.json`;
+    spawnSync("node", [path.join(HERE, "scan.mjs"), app], { encoding: "utf8",
+      env: { ...process.env, CANDOR_DEPS: deps } });
+    const appRep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+    // THE GATE, because a field is not a verdict. Measured on the released engine: exit 0 on the
+    // structural arm and exit 1 on the named one, over the same program.
+    fs.writeFileSync(path.join(app, "policy.candor"), "deny Net appSize\n");
+    const g = spawnSync("node", [path.join(HERE, "scan.mjs"), app, "--policy", path.join(app, "policy.candor")],
+                        { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: deps } });
+    return { effRep, appRep, gate: g.status, union: effRep?.functions.find((e) => e.hash === "ifz5#Backend.size"),
+             row: entry(appRep, "src.index.appSize") };
+  };
+  const named = armOf("named"), structural = armOf("structural"), classexpr = armOf("classexpr");
+  const pure = armOf("pure"), opaque = armOf("opaque");
+  const shown = (a) => JSON.stringify([a.effRep?.functions.map((e) => [e.hash, e.inferred, e.interfaceUnion]), a.row]);
+
+  check("R512 CONTROL — THE NAMED FORM STILL WORKS: `class Crossterm implements Backend` publishes `ifz5#Backend.size -> ['Net']`",
+        named.union?.interfaceUnion === true && (named.union?.inferred ?? []).includes("Net"), shown(named));
+  check("R512 CONTROL — …and it still reaches the chained consumer (`appSize` carries Net)",
+        (named.row?.inferred ?? []).includes("Net"), shown(named));
+  check("R512: a STRUCTURAL implementor of a FOREIGN abstraction publishes the SAME key with the SAME effect",
+        structural.union?.interfaceUnion === true && (structural.union?.inferred ?? []).includes("Net"),
+        shown(structural));
+  check("R512: …and it reaches the chained consumer — `appSize` was ABSENT/pure before this fix",
+        (structural.row?.inferred ?? []).includes("Net"), shown(structural));
+  check("R512 (adjacent hole): a foreign `implements` on a CLASS EXPRESSION publishes and reaches the consumer too",
+        classexpr.union?.interfaceUnion === true && (classexpr.union?.inferred ?? []).includes("Net")
+        && (classexpr.row?.inferred ?? []).includes("Net"), shown(classexpr));
+  check("R512 FABRICATION GUARD: a PURE structural implementor publishes NO entry and the consumer gains neither an effect NOR a hedge",
+        pure.union === undefined
+        && (pure.row?.inferred ?? []).length === 0 && pure.row?.unresolved !== true, shown(pure));
+  check("R512 ACCOUNTABILITY: a structural member no unit can be read for hedges — disclosed `Unknown[dispatch:…]`, never silence",
+        (opaque.union?.inferred ?? []).includes("Unknown")
+        && (opaque.union?.unknownWhy ?? []).includes("dispatch:ifz5.Backend.size")
+        && (opaque.row?.inferred ?? []).includes("Unknown"), shown(opaque));
+
+  check("R512 GATE: `deny Net appSize` exits 1 on the structural arm exactly as it does on the named one — measured 0 vs 1 before",
+        named.gate === 1 && structural.gate === 1 && classexpr.gate === 1,
+        `named=${named.gate} structural=${structural.gate} classexpr=${classexpr.gate}`);
+  check("R512 GATE CONTROL: the PURE structural arm still gates clean at exit 0 — the fix adds no verdict it cannot justify",
+        pure.gate === 0, `pure=${pure.gate}`);
+  // A FOREIGN UNION ENTRY IS STILL NOT COVERAGE OF THE PACKAGE IT NAMES — asserted for the STRUCTURAL
+  // producer specifically, since that is the entry this row adds. Reading `ifz5#Backend.size` as "ifz5
+  // was analysed" would delete `invisible: [ifz5]` from every call into ifz5 nobody analysed, which is
+  // R475's own shape manufactured by R512's own fix.
+  const cons = project({
+    "package.json": `{"name":"consz5","version":"1.0.0","dependencies":{"ifz5":"1.0.0"}}`,
+    "node_modules/ifz5/package.json": `{"name":"ifz5","version":"1.0.0","main":"src/index.ts"}`,
+    "node_modules/ifz5/src/index.ts": ifaceSrc,
+    "src/index.ts": `import { TestBackend } from "ifz5";
+export function poke(): number { return new TestBackend().size() }`,
+  });
+  const structEff = mkEff("structural");
+  scan(structEff);
+  spawnSync("node", [path.join(HERE, "scan.mjs"), cons], { encoding: "utf8",
+    env: { ...process.env, CANDOR_DEPS: `${path.join(structEff, ".candor", "report")}.json` } });
+  const consRep = JSON.parse(fs.readFileSync(path.join(cons, ".candor", "report.json"), "utf8"));
+  check("R512: a STRUCTURAL producer's foreign union entry is NOT coverage — `ifz5` stays disclosed as invisible",
+        (entry(consRep, "src.index.poke")?.invisible ?? []).includes("ifz5"),
+        JSON.stringify(consRep.functions));
+
+  // THE PLATFORM SURFACE MINTS NO KEY, and the test is on the FILE (`declIsNodeTypes`), not the module
+  // NAME — `declModule` derives `util`, `events` and `stream` out of `@types/node` and npm ships real
+  // packages under all three. A key under a namespace no package owns is the invented second spelling §4
+  // forbids, and this family has now shipped one twice (rust `io#Write::write_all`, swift
+  // `DepLib#String.lowercased`), each time with a comment at the site claiming the value was filtered
+  // against the manifest — true of a neighbouring key and false of the new one.
+  const plat = project({
+    "package.json": `{"name":"platz5","version":"1.0.0"}`,
+    "src/index.ts": `import * as fs from "node:fs";
+import type { InspectOptionsStylized } from "node:util";
+export const opts: InspectOptionsStylized = {
+  stylize(text: string): string { fs.writeFileSync("/tmp/x", "y"); return text },
+};`,
+  });
+  const platRep = scan(plat).report;
+  check("R512: a structural implementor of an `@types/node` interface publishes NO union key — nothing can ever answer one",
+        !platRep.functions.some((e) => e.interfaceUnion === true && !e.hash.startsWith("platz5#")),
+        JSON.stringify(platRep.functions.map((e) => [e.hash, e.inferred, e.interfaceUnion])));
+  // …and the positive twin, so the row above cannot pass because nothing publishes at all: the same
+  // engine, same run shape, a REAL foreign package — which does publish.
+  check("R512 PLATFORM twin: the same engine DOES publish under a real dependency's prefix (the guard is not blanket silence)",
+        structural.union !== undefined, shown(structural));
 }
 
 // ── R507 / R497 — AN AMBIGUOUS FUNCTION SELECTOR IS REFUSED, NOT RESOLVED TO AN ARBITRARY ONE ──────
