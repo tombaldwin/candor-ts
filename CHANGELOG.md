@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.39.0] — 2026-09-20
+
 - **⚠ SOUNDNESS R512 — A STRUCTURAL IMPLEMENTOR OF A FOREIGN ABSTRACTION IS R475'S SHAPE, ONE SPELLING
   OVER.** `registerStructuralImpl`'s climb filtered its contextual type to `projectFiles`, so
 
