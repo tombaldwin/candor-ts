@@ -30,7 +30,7 @@ import { execFileSync } from "node:child_process";
 import os from "node:os";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText,
          reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules, fatalPolicyErrors, refusalVerdict, sortViolations,
-         netClassResolver, resolveReasonClasses } from "./policy.mjs";
+         netClassResolver, resolveReasonClasses, noteSyntheticHits } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade, canonicalDenySet, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents, writeStdoutSync, writeSinkAtomic, resolveSinkArtifact, isCandorConfigSink } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadEffects, hostLiteral,
@@ -1718,7 +1718,8 @@ const declaredButUninstalled = new Set();
 }
 // ⟨workspace chain⟩ --workspace: auto-discover the target's symlinked monorepo deps (a workspace link
 // points OUT of node_modules to the package's real source), scan each into `.candor/deps/` with
-// interface-CHA union entries (CANDOR_WORKSPACE_CHAIN), and feed that dir into the CANDOR_DEPS spec below —
+// interface-CHA union entries (⟨0.39⟩: always, no longer behind an env flag), and feed that dir into the
+// CANDOR_DEPS spec below —
 // so a cross-package call (`client.get()` into `@ukri-tfs/common`) discloses the sibling's effects instead
 // of reading pure. The candor-ts analog of rust `--deps`. The child scan is spawned WITHOUT --workspace, so
 // there is no re-discovery recursion. TRANSITIVE: a dep's calls into ITS OWN workspace deps must also
@@ -1817,7 +1818,7 @@ if (wantWorkspace) {
       for (const real of depPaths) {
         try {
           const out = execFileSync(process.execPath, [selfPath, real, "--json"],
-            { env: { ...process.env, CANDOR_WORKSPACE_CHAIN: "1", CANDOR_DEPS: workspaceDepsDir },
+            { env: { ...process.env, CANDOR_DEPS: workspaceDepsDir },
               maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
           // ⟨ownership, half 1⟩ ONE derivation, shared with `failedDepName`, and TOTAL. The sweep's rule is
           // "a file candor would have OVERWRITTEN on success is the file it removes on failure", which is
@@ -1914,7 +1915,7 @@ if (wantDepInits) {
     const file = depCacheFileName(depInitsDir, pkg);
     try {
       const out = execFileSync(process.execPath, [selfPath2, dir, "--json", "--allow-js"],
-        { env: { ...process.env, CANDOR_WORKSPACE_CHAIN: "1" },
+        { env: { ...process.env },
           maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
       fs.writeFileSync(file, out);
       answered.add(pkg); ownFiles.add(file);
@@ -2271,9 +2272,24 @@ const corruptDepPkgs = new Set();
         // package chained twice — is never clobbered by the bad one.
         if (!stale && entryCorruptKeys(e).length) continue;
         const hashPkg = e.hash.split("#")[0];
-        if (hashPkg) covers.add(hashPkg);
-        const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [], incomplete: new Set(), netIncomplete: false };
+        // ⟨0.39⟩ A FOREIGN UNION ENTRY IS NOT COVERAGE OF THE PACKAGE IT NAMES. Obligation 2 makes a
+        // package publish an `interfaceUnion` entry keyed under the abstraction's OWNER, so `effimpl`'s
+        // report now carries `iface#Backend.size` — and reading that as "iface was analyzed" would delete
+        // `invisible: [iface]` from every call into iface that nobody analysed. That is R475's OWN shape
+        // manufactured by R475's own fix: a disclosure removed by a mechanism added to stop disclosures
+        // being removed. One synthetic row about one member of somebody else's abstraction is a claim
+        // about that MEMBER, never about that package.
+        // Fail-CLOSED on a report with no `package`: a union entry then contributes no coverage at all,
+        // because nothing in the file proves the key is the producer's own. Withholding coverage costs a
+        // disclosure the consumer keeps (`invisible`, or half 1's `Unknown[dispatch:…]`); granting it
+        // wrongly costs one it loses, and only one of those two errors is recoverable.
+        if (hashPkg && !(e.interfaceUnion === true && hashPkg !== d.package)) covers.add(hashPkg);
+        const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [], incomplete: new Set(), netIncomplete: false, dispatch: new Set() };
         for (const x of stale ? ["Unknown"] : strs(e.inferred)) cell.inferred.add(x);
+        // ⟨0.39⟩ obligation 3's contributor list travels in the cell: which abstraction members this
+        // dependency unit dispatches on. A STALE report's are not read — its assertions are from a build
+        // this scan does not trust, and it is already downgraded to a bare Unknown above.
+        if (!stale) for (const k of strs(e.dispatchesOn)) cell.dispatch.add(k);
         // ⟨0.19⟩ THE REASON CLASS TRAVELS WITH THE UNKNOWN. Without this the join copied `inferred` and
         // `invisible` only, so a dependency's `Unknown[reflect:eval]` arrived at the consumer as a bare
         // Unknown and fell back to the generic `unresolved` — and `deny Net Unknown[reflect]`, a rule
@@ -2346,6 +2362,43 @@ const corruptDepPkgs = new Set();
         crossDeps.set(e.hash, cell);
       }
     } catch { console.error(`candor-ts: CANDOR_DEPS report could not be processed, skipped: ${f}`); }
+  }
+  // ⟨0.39⟩ OBLIGATION 3, THE CHAINED HALF: union, PER KEY, every chained entry carrying it. Resolved
+  // once here, over the whole loaded set, rather than at each call site — the contributors are exactly
+  // the reports already read, and a key's own cell may itself dispatch (`app` -> `middle::mid_size` ->
+  // `iface#Backend.size`), so this is a least fixpoint over `crossDeps` and not a single lookup.
+  //
+  // This adds a CONTRIBUTOR, not a resolution rule: ⟨0.25⟩'s ambiguous-key union already specifies how
+  // several reports' entries under one hash combine, and the loader above has been unioning them into
+  // one cell all along. What was missing is that `iface#termSize`'s cell had no way to reach
+  // `iface#Backend.size`'s, so an effectful implementor published by a THIRD package sat in the map
+  // unread while the consumer certified the dispatch pure.
+  {
+    const order = [...crossDeps.keys()];
+    let changed = true;
+    for (let round = 0; changed && round < 64; round++) {      // bounded: a chain deeper than this is a cycle
+      changed = false;
+      for (const k of order) {
+        const cell = crossDeps.get(k);
+        for (const target of [...cell.dispatch]) {
+          if (target === k) continue;                          // a member that dispatches on itself adds nothing
+          const src = crossDeps.get(target);
+          if (!src) continue;                                  // nobody published a union under that key — silence IS purity
+          const before = cell.inferred.size + cell.invisible.size + cell.why.size
+            + cell.incomplete.size + cell.dispatch.size;
+          for (const x of src.inferred) cell.inferred.add(x);
+          for (const b of src.invisible) cell.invisible.add(b);
+          for (const w of src.why) cell.why.add(w);
+          for (const v of src.incomplete) cell.incomplete.add(v);
+          for (const d2 of src.dispatch) cell.dispatch.add(d2);
+          for (const m of ["hosts", "cmds", "paths", "tables"])
+            for (const v of src[m]) if (!cell[m].includes(v)) cell[m].push(v);
+          if (src.netIncomplete && !cell.netIncomplete) { cell.netIncomplete = true; changed = true; }
+          if (cell.inferred.size + cell.invisible.size + cell.why.size
+              + cell.incomplete.size + cell.dispatch.size !== before) changed = true;
+        }
+      }
+    }
   }
   // A package chained TWICE — once fresh, once stale — is covered by the fresh report, so it is not a
   // stale-only package and must not pick up the disclosure below on top of a real answer.
@@ -2619,6 +2672,32 @@ function nearestPackageName(file) {
   }
   for (const d of seen) pkgNameCache.set(d, null);
   return null;
+}
+// ⟨0.39⟩ The nearest directory holding a `package.json`, at or above a file — the root `nearestPackageName`
+// found the name in. Used to spell a FOREIGN abstraction's `loc` in a report.
+function nearestPackageDir(file) {
+  let dir = path.dirname(file);
+  while (dir && dir !== path.dirname(dir)) {
+    try { if (fs.existsSync(path.join(dir, "package.json"))) return dir; } catch { /* keep climbing */ }
+    dir = path.dirname(dir);
+  }
+  return null;
+}
+// ⟨0.39⟩ WHERE a union entry's abstraction is declared. For a LOCAL one that is the ordinary
+// project-relative path. For a FOREIGN one `path.relative(rootDir, …)` produces a `../../..` chain out of
+// the tree — unreadable, and, worse, NOT REPRODUCIBLE: its length is a function of how deep the checkout
+// happens to sit, so two machines scanning the same sources emit different bytes and every
+// byte-comparison A/B and the chain-idempotence part read a difference that is not one. Spelled from the
+// OWNING package instead (`ifz/src/index.ts`), which is stable, readable, and says which package the
+// declaration belongs to — the same fact the hash already carries.
+function abstractionLoc(sf, line, character) {
+  const abs = path.resolve(sf.fileName);
+  const rel = path.relative(rootDir, abs);
+  if (!rel.startsWith("..")) return `${rel}:${line + 1}:${character + 1}`;
+  const owner = nearestPackageDir(abs);
+  const name = owner && nearestPackageName(abs);
+  const inside = owner ? path.relative(owner, abs) : path.basename(abs);
+  return `${name ? `${name}/` : ""}${inside}:${line + 1}:${character + 1}`;
 }
 // Does reaching this declaration CROSS A PACKAGE BOUNDARY the scan cannot see into? This is the gate on
 // every κ-ledger / `invisible` disclosure arm (the unmodeled-external-call, the `new ExternalClass()`, the
@@ -3381,6 +3460,12 @@ function isDynamicExportsDescriptor(call) {
 // `@Entity()` (naming-strategy-dependent) contributes nothing — never a guess.
 const entityTables = new Map();    // ClassDeclaration node -> table name
 const interfaceImpls = new Map();  // InterfaceDeclaration node -> implementing ClassDeclarations (CHA universe)
+// ⟨0.39⟩ obligation 2 — the SAME relation for an abstraction owned by a DEPENDENCY. Deliberately a
+// SECOND map rather than a widening of the one above: `interfaceImpls` is the in-scan dispatch site's CHA
+// universe, and a foreign declaration in it would put a `node_modules` interface into the resolution of
+// every local dispatch. These entries are published (keyed under the OWNER's package) and joined; they
+// are not a local resolution universe.
+const foreignInterfaceImpls = new Map(); // foreign InterfaceDeclaration -> local implementing classes
 // ⟨CARDINAL SIN FIX, caller-path scope⟩ ifaceQual ("mod.Iface") -> Set<callerQual> that GENUINELY
 // dispatched through that interface's own signature and had it resolved by CHA below — populated AT THE
 // RESOLUTION SITE (pass 2's interface-CHA arm), not reconstructed afterward from the flat callgraph.
@@ -3823,19 +3908,52 @@ for (const sf of sources) {
           for (const st of eh.types) for (const sdecl of localInterfaceDecls(st.expression)) climb(sdecl);
         }
       };
+      // ⟨0.39⟩ obligation 2: the same relation for an abstraction this package does NOT own. `class
+      // Crossterm implements iface.Backend` is the measured instance's shape — the effectful implementor
+      // lives in a THIRD package, neither the dispatching dependency nor the consumer, so a producer that
+      // covers only LOCAL abstractions misses it entirely and no consumer can ever learn of it. Super-
+      // interfaces are climbed on the same argument as the local arm: a dispatch resolves `base` to
+      // whichever interface DECLARES it, which may be a foreign super of a foreign sub.
+      const foreignInterfaceDecls = (typeExpr) => {
+        const sym = checker.getSymbolAtLocation(typeExpr);
+        const tgt = sym && sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
+        return (tgt?.declarations ?? []).filter((d) => {
+          if (!ts.isInterfaceDeclaration(d) || !d.name) return false;
+          const f = path.resolve(d.getSourceFile().fileName);
+          if (projectFiles.has(f)) return false;                 // the local arm above owns this one
+          const m = declModule(d);
+          // A nameable PACKAGE, and not our own under another spelling. `<es-lib>`/`<local>` mint no key;
+          // an absolute path fallback (a file no package.json claims) is not a namespace any consumer can
+          // form a hash in, and publishing under it would be the second spelling §4 forbids.
+          return !!m && !m.startsWith("<") && !m.startsWith("/") && m !== pkgName && m !== rootOwnerPkg;
+        });
+      };
+      const fClimbSeen = new Set();
+      const fClimb = (iface) => {
+        if (fClimbSeen.has(iface)) return;
+        fClimbSeen.add(iface);
+        if (!foreignInterfaceImpls.has(iface)) foreignInterfaceImpls.set(iface, []);
+        const arr = foreignInterfaceImpls.get(iface);
+        if (!arr.includes(node)) arr.push(node);
+        for (const eh of iface.heritageClauses ?? []) {
+          if (eh.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+          for (const st of eh.types) for (const sdecl of foreignInterfaceDecls(st.expression)) fClimb(sdecl);
+        }
+      };
       for (const h of node.heritageClauses ?? []) {
         if (h.token !== ts.SyntaxKind.ImplementsKeyword) continue;
         // Register under EVERY declaration of the interface symbol: a merged interface (two `interface
         // Store` blocks / module augmentation) resolves a method to whichever block declares it, and keying
         // only declarations[0] silently missed the others (/code-review).
         for (const t of h.types) for (const idecl of localInterfaceDecls(t.expression)) climb(idecl);
+        for (const t of h.types) for (const idecl of foreignInterfaceDecls(t.expression)) fClimb(idecl);
       }
       const ctorQual = `${mod}.${namespacePrefixOf(node)}${node.name.text}.constructor`;
       if (!fns.has(ctorQual)) {
         const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
         fns.set(ctorQual, { local: `${node.name.text}.constructor`, direct: new Set(), fsKinds: new Set(), edges: new Set(),
                             hosts: new Set(), tables: new Set(), cmds: new Set(), paths: new Set(),
-                            blind: new Set(), incomplete: new Set(), why: new Set(), entry: false,
+                            blind: new Set(), incomplete: new Set(), dispatch: new Set(), why: new Set(), entry: false,
                             loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}`,
                             endLine: sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1 });
       }
@@ -3910,7 +4028,7 @@ for (const sf of sources) {
       const nsp = namespacePrefixOf(node);
       const qual = isFunctionScoped(node) ? `${mod}.${nsp}${n}#${line + 1}:${character + 1}` : `${mod}.${nsp}${n}`;
       fns.set(qual, { local: n, direct: new Set(), fsKinds: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
-                      cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(), entry: false, isCjsExport,
+                      cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), dispatch: new Set(), why: new Set(), entry: false, isCjsExport,
                       loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}`,
                       endLine: sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1 });
       nodeName.set(node, qual);
@@ -4461,7 +4579,7 @@ function mintPositionalStructuralUnit(mod, sf, prop, name) {
     const { line, character } = sf.getLineAndCharacterOfPosition(prop.getStart());
     fns.set(qual, { local: `<structural>.${name}`, direct: new Set(), fsKinds: new Set(), edges: new Set(),
                     hosts: new Set(), tables: new Set(), cmds: new Set(), paths: new Set(), blind: new Set(),
-                    incomplete: new Set(), why: new Set(), entry: false,
+                    incomplete: new Set(), dispatch: new Set(), why: new Set(), entry: false,
                     loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}`,
                     endLine: sf.getLineAndCharacterOfPosition(prop.getEnd()).line + 1 });
   }
@@ -5122,7 +5240,7 @@ function moduleUnit(sf) {
   let rec = fns.get(qual);
   if (!rec) {
     rec = { local: qual, direct: new Set(), fsKinds: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
-            cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(),
+            cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), dispatch: new Set(), why: new Set(),
             entry: false, unitKind: "initializer",
             loc: `${path.relative(rootDir, sf.fileName)}:1:1`,
             endLine: sf.getLineAndCharacterOfPosition(sf.getEnd()).line + 1 };
@@ -5145,7 +5263,7 @@ function staticBlockUnit(node) {
   let rec = fns.get(qual);
   if (!rec) {
     rec = { local: "<static-init>", direct: new Set(), fsKinds: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
-            cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(),
+            cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), dispatch: new Set(), why: new Set(),
             entry: false, unitKind: "initializer",
             loc: `${path.relative(rootDir, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart()).line + 1}:1`,
             endLine: sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1 };
@@ -5170,7 +5288,7 @@ function decoratorArgUnit(callNode) {
   let rec = fns.get(qual);
   if (!rec) {
     rec = { local, direct: new Set(), fsKinds: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
-            cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), why: new Set(),
+            cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), dispatch: new Set(), why: new Set(),
             entry: false, unitKind: "initializer",
             loc: `${path.relative(rootDir, sf.fileName)}:${sf.getLineAndCharacterOfPosition(callNode.getStart()).line + 1}:1`,
             endLine: sf.getLineAndCharacterOfPosition(callNode.getEnd()).line + 1 };
@@ -5386,6 +5504,70 @@ function memberSigOf(decl) {
   return decl && (ts.isFunctionTypeNode(decl) || ts.isCallSignatureDeclaration(decl)) && decl.parent
     && (ts.isPropertySignature(decl.parent) || ts.isMethodSignature(decl.parent)) ? decl.parent : decl;
 }
+// ⟨0.39⟩ obligation 1, THE KEY. One derivation, used by every site that records a dispatch and by the
+// union emitter that publishes under it — because two spellings of one wire key is exactly the ⟨0.34⟩
+// drift the clause spends a paragraph forbidding, and §4 says an engine MUST NOT invent a second one.
+// The shape is the one ⟨0.23⟩ already fixes for this engine's entry hashes: `<owning package>#<Iface>.<member>`.
+const dispatchKey = (pkg, ifaceName, member) => `${pkg}#${ifaceName}.${member}`;
+// The interface member a resolved declaration dispatches THROUGH, or null. A method/property signature
+// on an INTERFACE only: that is precisely the universe `interfaceUnion` publishes under, so a key
+// recorded here is always a key a producer could answer. A call signature, a type-literal member and an
+// abstract class member deliberately mint nothing — a `dispatchesOn` value no union entry can ever carry
+// is wire noise, and noise in a soundness field is how a real one stops being read.
+function dispatchedInterfaceMember(decl) {
+  const sig = memberSigOf(decl);
+  if (!sig || !(ts.isMethodSignature(sig) || ts.isPropertySignature(sig))) return null;
+  if (!sig.parent || !ts.isInterfaceDeclaration(sig.parent) || !sig.parent.name) return null;
+  const m = sig.name?.getText?.();
+  return m ? { ifaceName: sig.parent.name.text, member: m } : null;
+}
+// Record a dispatch on an interface owned by `pkg`; returns the parts, or null. Called from the in-scan
+// bounded-CHA site (`pkgName`) and from both external-call arms (the dependency's name) — NOT gated on
+// what the CHA answered, because the toggle this rung closes runs between ZERO implementors and ONE, so
+// a field recorded only on the indeterminate branch is absent in exactly the arm that needs it.
+//
+// THE PLATFORM TYPE SURFACE IS EXCLUDED, and the test is on the FILE rather than the module name — the
+// same rule `nodeCoreUnreviewed`'s own comment states, and for the same reason: `declModule` derives
+// `events`, `buffer.buffer` and `process` out of `@types/node`, and npm ships real packages under those
+// names. The exclusion is not a precision preference: `@types/node` and the TypeScript lib are types
+// with no implementation any scan can analyse, so NO producer can ever publish a union under such a
+// key. A `dispatchesOn` value nothing can answer is noise, and noise in a soundness field is how a real
+// value stops being read. Measured before the exclusion: an over-charge control's genuinely-pure
+// function carried `dispatchesOn: [buffer.buffer#BufferConstructor.from, events#EventEmitter.emit,
+// events#EventEmitter.on, process#Process.cwd]` — four keys, zero of them answerable.
+function recordDispatch(rec, decl, pkg) {
+  if (!rec || !decl || !pkg) return null;
+  if (declIsNodeTypes(decl)) return null;
+  const d = dispatchedInterfaceMember(decl);
+  if (!d) return null;
+  const key = dispatchKey(pkg, d.ifaceName, d.member);
+  rec.dispatch.add(key);
+  return { key, pkg, ...d };
+}
+// ⟨0.39⟩ obligation 3, THE LOCAL HALF AT THE JOIN: "its own visible implementors". A key resolved
+// through a dependency may also be answered by a class in THIS scan — an application supplying its own
+// backend to a library is the ordinary shape of it, and it is the shape the clause's measured case has.
+// Bounded by the SAME `CHA_FANOUT_LIMIT` the in-scan dispatch site and the union emitter apply, and
+// hedged on the SAME completeness condition: an implementor whose member resolves to no unit leaves the
+// candidate set incomplete, and edging the rest while staying silent about it would drop its effects.
+function joinLocalImpls(rec, d) {
+  if (!rec || !d) return;
+  const { targets, allResolved, decls } = localImplTargets(d.key);
+  if (!targets.length) return;
+  // The name means two things here, so no implementor set can be attributed to this key — §4 ⟨0.24⟩'s
+  // `ambiguous:`, not `dispatch:`: the owner type is nameable, but WHICH declaration it names is not.
+  if (decls.size > 1) {
+    rec.direct.add("Unknown");
+    rec.why.add(`ambiguous:${d.pkg}.${d.ifaceName}.${d.member}`);
+    return;
+  }
+  if (targets.length > CHA_FANOUT_LIMIT || !allResolved) {
+    rec.direct.add("Unknown");
+    rec.why.add(dispatchWhy(`${d.pkg}.${d.ifaceName}`, d.member));
+    return;
+  }
+  for (const t of targets) rec.edges.add(t);
+}
 // Apply ONE chained-dependency entry to the calling unit. There is exactly one of these because there used
 // to be two, drifted: the CallExpression arm and the desugared-declaration arm each spelled the copy out,
 // and the ⟨0.19⟩ reason class was added to neither. That is the same root cause candor-java's `6ab26e4`
@@ -5393,7 +5575,70 @@ function memberSigOf(decl) {
 // is most of the fix there too. The dep's `invisible` travels as this call's own — the transitive
 // disclosure has to cross the package edge, or a sibling's SNS reach reads pure here — and so does its
 // `unknownWhy`, so `deny E Unknown[<class>]` keeps its scope one boundary along.
+// ⟨0.39⟩ OBLIGATION 3, THE LOCAL HALF: "its own visible implementors". A key the dependency dispatches
+// on may be answered by a class in THIS scan — the ordinary shape of an application supplying its own
+// backend to a library. Built once, lazily, because it needs pass 1's `nodeName` minting; keyed by the
+// same `pkg#Iface.member` string the wire uses, over BOTH registries (our own abstractions, in case a
+// dependency dispatches on one of ours, and the foreign ones obligation 2 publishes under).
+//
+// The contribution is an EDGE, not an effect set, and that is load-bearing: at the moment a dep hit is
+// applied the implementor's own transitive effects have not been computed yet (pass 3 does that), so
+// copying them here would copy whatever happened to be known and silently under-report. An edge flows
+// through the SAME least fixpoint every other call does.
+let localImplTargetsByKey = null;
+function localImplTargets(key) {
+  if (!localImplTargetsByKey) {
+    localImplTargetsByKey = new Map();
+    const add = (ownerPkg, ifaceDecl, implClasses) => {
+      const ifaceName = ifaceDecl.name?.text;
+      if (!ifaceName) return;
+      for (const member of ifaceDecl.members ?? []) {
+        const m = member.name?.getText?.();
+        if (!m) continue;
+        const k = dispatchKey(ownerPkg, ifaceName, m);
+        if (!localImplTargetsByKey.has(k))
+          localImplTargetsByKey.set(k, { targets: [], allResolved: true, decls: new Set() });
+        const cell = localImplTargetsByKey.get(k);
+        // NEVER GUESS WHICH `I` A NAME MEANS — the same guard the union EMITTER applies (`ifaceNameCounts`),
+        // applied to the JOIN, because the two must not answer one question differently. Two declarations
+        // of `Store` in one package both key `pkg#Store.save`, so unioning their implementors charges a
+        // caller that dispatches on one with effects only the OTHER's implementor performs. That is the
+        // cross-declaration fabrication this vein has produced confirmed instances of, and the emitter
+        // refuses it — a join that did not would resolve, in the consumer, exactly what the producer
+        // declined to publish. FOUND BY THE CORPUS A/B, not by a fixture: `apollo-server-core` is built to
+        // both `src` and `dist`, so `ApolloServerPlugin` has two declarations, the emitter published
+        // nothing for it, and this join was edging across both.
+        cell.decls.add(ifaceDecl);
+        for (const cls of implClasses) {
+          const memberNodes = cls.members ?? cls.properties ?? [];
+          const node = memberNodes.find((x) =>
+            (ts.isMethodDeclaration(x) || ts.isPropertyDeclaration(x) || ts.isPropertyAssignment(x))
+            && x.name?.getText?.() === m);
+          const t = node && nodeName.get(node);
+          // An implementor whose member is INHERITED from a base class, or otherwise not a minted unit,
+          // is genuinely unresolved — the same condition the in-scan CHA site calls `allResolved`.
+          if (!t) { cell.allResolved = false; continue; }
+          if (!cell.targets.includes(t)) cell.targets.push(t);
+        }
+      }
+    };
+    for (const [ifaceDecl, impls] of interfaceImpls) add(pkgName, ifaceDecl, impls);
+    for (const [ifaceDecl, impls] of foreignInterfaceImpls) {
+      const ownerPkg = declModule(ifaceDecl);
+      if (ownerPkg && !ownerPkg.startsWith("<") && !ownerPkg.startsWith("/")) add(ownerPkg, ifaceDecl, impls);
+    }
+  }
+  return localImplTargetsByKey.get(key) ?? { targets: [], allResolved: true, decls: new Set() };
+}
 function applyDepHit(rec, hit) {
+  // ⟨0.39⟩ The dispatched members travel with the hit — transitively, so a consumer of THIS report
+  // learns of a dispatch two packages down — and each one is joined against what this scan can see.
+  for (const k of hit.dispatch ?? []) {
+    rec.dispatch.add(k);
+    const [kp, rest] = [k.slice(0, k.indexOf("#")), k.slice(k.indexOf("#") + 1)];
+    const dot = rest.lastIndexOf(".");
+    if (dot > 0) joinLocalImpls(rec, { key: k, pkg: kp, ifaceName: rest.slice(0, dot), member: rest.slice(dot + 1) });
+  }
   for (const x of hit.inferred) rec.direct.add(x);
   for (const b of hit.invisible ?? []) rec.blind.add(b);
   for (const w of hit.why ?? []) rec.why.add(w);
@@ -5674,6 +5919,11 @@ function chargeExternalDecl(rec, decl, tailOverride) {
   // Owner-prefixed first (`Owner.member` — how the dep's own scan hashes a method), bare member as the
   // fallback (a CJS dist scan hashes a top-level export under its bare name). Identical to the call arm.
   const owner = nameDecl.parent?.name?.getText?.();
+  // ⟨0.39⟩ obligation 1, the DESUGARED half of the foreign arm — same call, same position, same reason as
+  // the CallExpression arm's. This function exists because that arm and this one drifted once already.
+  // …and obligation 3's local half on the SAME key, because a call that lands DIRECTLY on the
+  // abstraction member has that member as its key and this scan's own implementors of it are visible.
+  joinLocalImpls(rec, recordDispatch(rec, decl, pkg));
   const hit = tailOverride ? crossDeps.get(`${pkg}#${tailOverride}`)
     : member && ((owner ? crossDeps.get(`${pkg}#${owner}.${member}`) : undefined)
       ?? crossDeps.get(`${pkg}#${member}`));
@@ -7047,6 +7297,11 @@ function visitCalls(node) {
               let edged = false;
               if ((ts.isMethodSignature(sigDecl) || ts.isPropertySignature(sigDecl))
                   && sigDecl.parent && ts.isInterfaceDeclaration(sigDecl.parent)) {
+                // ⟨0.39⟩ obligation 1, LOCAL half. Recorded HERE — before the CHA is consulted — for the
+                // reason the clause gives: the sin's toggle runs between zero implementors and one, so
+                // recording only on the branch that could not resolve leaves the field absent in exactly
+                // the arm where absence is the purity claim that deletes the consumer's disclosure.
+                recordDispatch(rec, sigDecl, pkgName);
                 const impls = interfaceImpls.get(sigDecl.parent) ?? [];
                 if (impls.length > 0 && impls.length <= CHA_FANOUT_LIMIT) {
                   const member = sigDecl.name?.getText?.();
@@ -7648,6 +7903,15 @@ function visitCalls(node) {
             rec.why.add(`native:${kMod.replace(/^node:/, "")}.`
                         + `${isConstruction ? `new ${ctorClassName || ""}` : member}`);
           }
+          // ⟨0.39⟩ obligation 1, FOREIGN half — the MIDDLE-PACKAGE case (SOUNDNESS R504). A package that
+          // dispatches over a DEPENDENCY's abstraction owns neither the abstraction nor any implementor
+          // of it, so an obligation-1 pass scoped to interfaces the producer DECLARES leaves the chain
+          // one hop short and the consumer's row ABSENT — a purity claim. Recorded BEFORE the chained
+          // lookup below and independently of whether it hits: whether this run happened to be chained
+          // says nothing about what a consumer of THIS report will be able to see.
+          if (!eff && !mod.startsWith("<"))
+            joinLocalImpls(rec, recordDispatch(rec, decl,
+              mod.startsWith("@types/") ? mod.slice("@types/".length) : mod));
           // CANDOR_DEPS: an unclassified call into a package with a loaded sibling report inherits
           // that function's recorded transitive effects (+ literal surfaces) by `hash`.
           let inheritedFromDep = false;
@@ -9010,7 +9274,14 @@ const inferred = new Map([...fns.keys()].map((k) => [k, new Set(fns.get(k).direc
 // `fsKinds` joins the propagated surfaces: kinds TRAVEL the call graph (a caller that transitively only
 // writes IS a writer), and the "?" poison travels with them so a caller of an undetermined-kind function
 // inherits the SUPPRESSION rather than a half-answer. Pinned by conformance PART 31.
-for (const m of ["hosts", "tables", "cmds", "paths", "blind", "incomplete", "fsKinds"]) {
+// ⟨0.39⟩ `dispatch` rides this same sweep, and that is what satisfies obligation 1's "the member must
+// REACH the caller transitively". The clause permits either spelling — DIRECT members on the wire with
+// the consumer closing over the producer's `calls`, or the closure taken here — and taking it here is
+// free: the relation is a union over the same call graph the effects already traverse. (java had to take
+// the other route because JVM interfaces ARE how that platform dispatches and the closure could not be
+// serialised at all — `jooq` dead with 8 GB of heap. A TS package's interface surface is nothing like
+// that, and the corpus A/B is what says so here rather than the analogy.)
+for (const m of ["hosts", "tables", "cmds", "paths", "blind", "incomplete", "fsKinds", "dispatch"]) {
   const queue = [...fns.keys()];
   const queued = new Set(queue);
   for (let head = 0; head < queue.length; head++) {
@@ -9053,7 +9324,12 @@ for (const [name, rec] of fns) {
   const inf = [...inferred.get(name)].sort();
   // entry points stay visible even when pure; a BLIND fn stays too, so the honesty disclosure survives
   // on exactly the `inferred: []` fns that need it.
-  if (inf.length === 0 && !rec.entry && rec.blind.size === 0) continue;
+  // ⟨0.39⟩ …AND A DISPATCHING ROW STAYS EVEN WHEN IT IS OTHERWISE PURE. This is the clause's deliberate
+  // exception to §2 rule 3, and it is the whole left-hand side of the toggle: the row's ABSENCE was the
+  // purity claim that deleted a consumer's disclosure the moment the library acquired one pure
+  // implementor. A pure function that DISPATCHES is no longer a function about which there is nothing to
+  // say — absence keeps its meaning, but this row is no longer absent.
+  if (inf.length === 0 && !rec.entry && rec.blind.size === 0 && rec.dispatch.size === 0) continue;
   const entry = {
     fn: name,
     loc: rec.loc,
@@ -9074,6 +9350,11 @@ for (const [name, rec] of fns) {
   // `tour` falls back to these when the sidecar is empty (surface robustness — mirrors the Rust report, whose
   // entries carry `calls`); omitted when a fn has no outgoing edges to keep pure leaves lean.
   if (rec.edges.size) entry.calls = [...rec.edges].sort();
+  // ⟨0.39⟩ obligation 1: the abstraction members this unit dispatches on, transitively, in the OWNING
+  // package's entry-hash namespace (`pkg#Iface.member`) — the same key obligation 2 publishes a union
+  // under, so a consumer joins it with its ORDINARY `crossDeps` lookup and no per-engine rule. Sorted,
+  // because the wire is compared byte-for-byte by the chain-idempotence part and by every A/B.
+  if (rec.dispatch.size) entry.dispatchesOn = [...rec.dispatch].sort();
   if (inf.includes("Net") && rec.hosts.size) entry.hosts = [...rec.hosts].sort();
   // ⟨0.20⟩ Net destination-class (NET-DESTINATION-CLASS-DESIGN.md): the classes present in this fn's
   // transitive Net surface — exact host-literal match, fail-closed unknown-host on a masked surface (rec
@@ -9127,7 +9408,9 @@ for (const [name, rec] of fns) {
   else if (rec.isCjsExport) entry.unitKind = "export"; // spec 0.5 draft, informative — per-unit, not by name
   functions.push(entry);
 }
-// ⟨workspace-chain prototype — opt-in via CANDOR_WORKSPACE_CHAIN⟩ INTERFACE-CHA union entries for
+// ⟨0.23⟩, REQUIRED since ⟨0.39⟩ (it was opt-in via CANDOR_WORKSPACE_CHAIN until that rung; the env var
+// is gone, not kept as an alias for "on" — a flag that no longer changes anything is a flag the next
+// reader has to prove inert). INTERFACE-CHA union entries for
 // cross-package dispatch. A consumer of THIS package that calls an interface method (`ch.publish()` on an
 // imported `OutboundChannel`) resolves the call to the interface METHOD SIGNATURE — which has no body, so
 // no report entry, so the chain reads it pure even though every implementation reaches an effect. Emit a
@@ -9269,8 +9552,25 @@ function typingsInterfaceImpls() {
     const arr = byIface.get(idecl);
     if (!arr.includes(clsName)) arr.push(clsName);
   };
+  // ⟨0.39⟩ obligation 2, THE PUBLISHED-PACKAGE SHAPE. This used to keep only `inPkg` declarations, and
+  // the comment beside it read "an interface owned by another package is dropped rather than re-keyed
+  // under ours (its union belongs under ITS `pkg#` prefix)". The first half was right and the second half
+  // is now a REQUIREMENT rather than an aside: the entry belongs under the owner's prefix, so publish it
+  // there instead of dropping it. Dropping is what makes a `dist` package that implements a dependency's
+  // interface effectfully invisible to every consumer of that dependency — the measured R475 shape, in
+  // the packaging every npm dependency actually ships.
+  //
+  // The owner is derived from the FILE (`declModule`), never from the module specifier a typing imports:
+  // a name-based derivation is the cross-package leaf join this vein has produced confirmed fabrications
+  // with, and `declModule` answers from the path.
+  const ownerOfIface = (d) => {
+    const f = d.getSourceFile().fileName;
+    if (inPkg(f)) return pkgName;
+    const m = declModule(d);
+    return m && !m.startsWith("<") && !m.startsWith("/") && m !== pkgName && m !== rootOwnerPkg ? m : null;
+  };
   const ifaceDeclsOf = (typeExpr) => (deAlias(tck.getSymbolAtLocation(typeExpr))?.declarations ?? [])
-    .filter((d) => ts.isInterfaceDeclaration(d) && inPkg(d.getSourceFile().fileName));
+    .filter((d) => ts.isInterfaceDeclaration(d) && !!ownerOfIface(d));
   for (const root of roots) {
     const tsf = tprog.getSourceFile(root);
     const mod = tsf && tck.getSymbolAtLocation(tsf);
@@ -9301,10 +9601,16 @@ function typingsInterfaceImpls() {
       }
     }
   }
-  for (const [idecl, clsNames] of byIface) if (clsNames.length) out.push([idecl, clsNames]);
+  for (const [idecl, clsNames] of byIface) if (clsNames.length) out.push([idecl, clsNames, ownerOfIface(idecl)]);
   return { arms: out, truncated: false };
 }
-if (process.env.CANDOR_WORKSPACE_CHAIN) {
+// ⟨0.39⟩ NO LONGER GATED. `interfaceUnion` rode behind CANDOR_WORKSPACE_CHAIN while §2 ⟨0.23⟩ read
+// "gated/opt-in until a floor rung pins it". This is that rung, it is REQUIRED, and its absence is a
+// non-conformance — and the gate is precisely WHY the silent-purity toggle survived default scans: a
+// default scan of a library published no union entry, so a default scan of its consumer had nothing to
+// join. Keeping the env var as an alias for "on" was considered and refused: a flag that no longer
+// changes anything is a flag the next reader has to prove inert.
+{
   // rec.local -> {inferred:Set, blind:Set}, UNIONED over every unit sharing the tail rather than last-wins.
   // A dist package is routinely built twice (`dist/cjs/…/CucumberExpression.js` and `dist/esm/…` are the
   // same class), so a class name maps to several units; last-wins silently published ONE build's effects
@@ -9339,10 +9645,16 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
   // not be — record whether any implementor was dropped, so the emission loop below can force the SAME
   // honest-Unknown widening it already applies when CHA_FANOUT_LIMIT is exceeded, instead of a narrower
   // claim than the evidence supports.
+  // ⟨0.39⟩ An arm is [ifaceDecl, implementing class NAMES, hadUnnamed, OWNING PACKAGE]. The fourth field
+  // is obligation 2: a local abstraction's union is published under OUR package, a FOREIGN one's under
+  // the package that declares it — fully qualified in that package's own entry-hash namespace, which is
+  // the ⟨0.23⟩ `typeSurface` rule and NOT a new spelling. Everything downstream reads the owner off the
+  // arm rather than assuming `pkgName`, because assuming it is what re-keys a dependency's abstraction
+  // under ours and fabricates a key no consumer can resolve.
   const unionArms = [];
   for (const [ifaceDecl, implClasses] of interfaceImpls) {
     const names = implClasses.map((c) => c.name?.text).filter(Boolean);
-    unionArms.push([ifaceDecl, names, names.length < implClasses.length]);
+    unionArms.push([ifaceDecl, names, names.length < implClasses.length, pkgName]);
   }
   const inScanClassesByName = new Map(); // iface NAME -> every class the in-scan arms register under it
   for (const [d, cls] of unionArms) {
@@ -9379,9 +9691,22 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
   for (const arm of typings.arms) {
     const n = arm[0].name?.text;
     if (!n) continue;
-    const inScan = inScanClassesByName.get(n);
+    // ⟨0.39⟩ the SHADOW drop applies only to a LOCALLY-owned typings arm: the in-scan arm whose union it
+    // would duplicate is keyed under `pkgName`, so it can be a superset of nothing under another prefix.
+    const owner = arm[2] ?? pkgName;
+    const inScan = owner === pkgName ? inScanClassesByName.get(n) : null;
     if (inScan && arm[1].every((c) => inScan.has(c))) continue;
-    unionArms.push(arm);
+    unionArms.push([arm[0], arm[1], false, owner]);
+  }
+  // ⟨0.39⟩ obligation 2's arms, pushed LAST and deliberately AFTER `inScanClassesByName` was taken: a
+  // foreign `Backend` and a local one are different keys under different prefixes, so neither may
+  // suppress the other as "redundant" and neither may make the other's NAME ambiguous. Both mistakes run
+  // in the withdrawal direction — a dropped union entry is a purity claim nobody made.
+  for (const [ifaceDecl, implClasses] of foreignInterfaceImpls) {
+    const ownerPkg = declModule(ifaceDecl);
+    if (!ownerPkg || ownerPkg.startsWith("<") || ownerPkg.startsWith("/")) continue;
+    const names = implClasses.map((c) => c.name?.text).filter(Boolean);
+    unionArms.push([ifaceDecl, names, names.length < implClasses.length, ownerPkg]);
   }
   // A TRUNCATED typings census refuses the PUBLICATION, and it has to be here rather than at the census.
   // Dropping the typings arm on its own lands the refusal on the EVIDENCE side — and the evidence is the
@@ -9402,12 +9727,17 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
   if (typings.truncated)
     console.error(`candor-ts: this package's typings census exceeded ${TYPINGS_CENSUS_CAP} declaration files — `
       + `publishing NO interface-CHA union entries (an incomplete census cannot tell a colliding interface name from a unique one)`);
+  // ⟨0.39⟩ COUNTED PER KEY, not per bare NAME. The guard's question is "could a consumer forming this
+  // hash mean a different declaration" — and a hash carries the owning package, so `iface#Backend` and
+  // `effimpl#Backend` cannot be confused with one another however alike they read. Counting bare names
+  // once obligation 2 exists would refuse BOTH over a collision that the key itself already resolves,
+  // and a refusal is a withdrawn disclosure.
   const ifaceNameCounts = new Map();
-  for (const [ifaceDecl] of unionArms) {
+  for (const [ifaceDecl, , , ownerPkg] of unionArms) {
     const n = ifaceDecl.name?.text;
-    if (n) ifaceNameCounts.set(n, (ifaceNameCounts.get(n) ?? 0) + 1);
+    if (n) ifaceNameCounts.set(`${ownerPkg}#${n}`, (ifaceNameCounts.get(`${ownerPkg}#${n}`) ?? 0) + 1);
   }
-  for (const [ifaceDecl, implClasses, hadUnnamed] of unionArms) {
+  for (const [ifaceDecl, implClasses, hadUnnamed, ownerPkg] of unionArms) {
     const ifaceName = ifaceDecl.name?.text;
     // ⟨CARDINAL SIN FIX, structural-implementor gap⟩ `!implClasses.length` used to skip the arm outright
     // — correct when there are genuinely zero implementors, but an interface implemented ONLY
@@ -9418,7 +9748,13 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
     if (!ifaceName || (!implClasses.length && !hadUnnamed)) continue;
     // Never guess which `I` a name means: two declarations of it, or a census that cannot prove there is
     // only one, are the same evidential position and take the same answer.
-    if (ifaceNameCounts.get(ifaceName) > 1 || typings.truncated) continue;
+    // ⟨0.39⟩ …and a TRUNCATED census refuses only the keys it is evidence about. The census walks OUR
+    // package's `.d.ts` tree, so the declarations it failed to reach could each be a second local
+    // `Store`; none of them can be a second declaration inside a DEPENDENCY's namespace, which is where
+    // a foreign key lives. Letting our own truncation withdraw a foreign union entry would refuse on
+    // evidence that says nothing about it — and the owning package's own report publishes under that
+    // same key anyway, where ⟨0.25⟩'s per-key union combines the two.
+    if (ifaceNameCounts.get(`${ownerPkg}#${ifaceName}`) > 1 || (typings.truncated && ownerPkg === pkgName)) continue;
     // BOUNDED CHA — the same `CHA_FANOUT_LIMIT` the in-scan dispatch site applies. The union emitter
     // shipped without it, so the producer PUBLISHED what its own dispatch refuses to resolve: rxjs's
     // `Operator` has 70 implementers, sixteen of which reach Net, and rxjs's own `Observable.subscribe`
@@ -9454,7 +9790,7 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
         if (e) { for (const x of e.inferred) infU.add(x); for (const b of e.blind) blindU.add(b); }
       }
       if (infU.size === 0 && blindU.size === 0) continue; // pure across all impls — silence = purity
-      const hash = `${pkgName}#${ifaceName}.${m}`;
+      const hash = dispatchKey(ownerPkg, ifaceName, m); // ⟨0.39⟩ the OWNER's namespace, not always ours
       if (emittedUnionHashes.has(hash)) continue;
       // A REAL entry already claiming this hash used to SUPPRESS the union, and that was a silent
       // under-report — the candor-java sibling is `48a5f18`, whose argument transfers whole: publishing
@@ -9492,7 +9828,7 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
       emittedUnionHashes.add(hash);
       const sfIface = ifaceDecl.getSourceFile();
       const { line, character } = sfIface.getLineAndCharacterOfPosition(ifaceDecl.getStart());
-      const un = { fn: `${ifaceName}.${m}`, loc: `${path.relative(rootDir, sfIface.fileName)}:${line + 1}:${character + 1}`,
+      const un = { fn: `${ifaceName}.${m}`, loc: abstractionLoc(sfIface, line, character),
                    hash, inferred: [...infU].sort(), interfaceUnion: true };
       // The reason travels with the disclosure, spelled the way the CONSUMER of this entry spells the
       // same site (`dispatch:<pkg>.<Iface>.<member>`, half 1's form), so a `deny E Unknown[dispatch]` at
@@ -9508,7 +9844,7 @@ if (process.env.CANDOR_WORKSPACE_CHAIN) {
       // stays scoped to `broad`, and correctly: ⟨0.6⟩ requires `unknownWhy` on a DIRECT Unknown source, and
       // a union that inherited its Unknown from an implementer's body is not one.
       un.unresolved = infU.has("Unknown");
-      if (broad) un.unknownWhy = [`dispatch:${pkgName}.${ifaceName}.${m}`];
+      if (broad) un.unknownWhy = [`dispatch:${ownerPkg}.${ifaceName}.${m}`];
       if (blindU.size) un.invisible = [...blindU].sort();
       functions.push(un);
     }
@@ -10805,6 +11141,9 @@ if (policyPath !== null) {
       for (const name of fns.keys()) { const h = unitHash(name); if (h) gateHashByName.set(name, h); }
       const gateOut = evaluatePolicy(gatePolicy, functions, cg, incompleteMap, netPartners,
                                      null, null, null, gateHashByName);
+      // ⟨0.39⟩ the synthetic entries a rule matched — named, never scored. Same printer on both verdict
+      // routes, so §3.1's byte-equality with `gate --report` covers the note too.
+      noteSyntheticHits(gateOut);
       // ⟨0.27⟩ SPEC §4 — a rule that bound NO function is disclosed, never scored as satisfied. The exit
       // code is deliberately untouched: a zero-match rule is legitimate when one policy is shared across
       // repositories and a layer exists in only some of them, so refusal would make a shared policy

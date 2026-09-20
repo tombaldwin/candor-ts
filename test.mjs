@@ -1477,17 +1477,30 @@ exports.buildJob = () => ({}); exports.Plain = class {}; exports.Loud = class {}
   const crep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
   const why = (fn) => entry(crep, fn)?.unknownWhy ?? [];
   const unk = (fn) => (entry(crep, fn)?.inferred ?? []).includes("Unknown");
-  check("boundary: a chained dep's INTERFACE-typed receiver discloses instead of reading pure",
-        unk("src.m.useFetcher") && why("src.m.useFetcher").includes("dispatch:ifacekit.Fetcher.fetch"),
+  const eff = (fn) => (entry(crep, fn)?.inferred ?? []).includes("Fs");
+  const disp = (fn) => entry(crep, fn)?.dispatchesOn ?? [];
+  // ⟨0.39⟩ REWRITTEN, AND THE PROPERTY IS STRICTLY STRONGER THAN IT WAS. These four rows asserted a
+  // HEDGE (`Unknown[dispatch:…]`) because ⟨0.23⟩'s union entries were gated off by default, so the
+  // dependency's report answered nothing and half 1's unanswerable-key arm was the only voice. The rung
+  // un-gates them, so the dependency now ANSWERS the key with the concrete `Fs` its implementor really
+  // performs — a resolved answer in place of "we cannot say", which is the direction this family wants
+  // and the one candor-java recorded for the same change. Nothing is withdrawn: `deny Fs Unknown` still
+  // fires below (Fs is in the set), and the arm where NO union can answer keeps its hedge — that is
+  // `usePuller`, an ABSTRACT class member, which no `interfaceUnion` entry covers and which still reads
+  // `Unknown[dispatch:ifacekit.Base.pull]` two rows down. Keeping BOTH is the point: an engine that
+  // answered everywhere would have lost the disclosure, and one that hedged everywhere would have lost
+  // the answer.
+  check("boundary ⟨0.39⟩: a chained dep's INTERFACE-typed receiver RESOLVES to the union's concrete effect",
+        eff("src.m.useFetcher") && disp("src.m.useFetcher").includes("ifacekit#Fetcher.fetch"),
         JSON.stringify(crep.functions));
-  check("boundary: ...an ABSTRACT member of a chained dep's class likewise",
+  check("boundary: ...an ABSTRACT member of a chained dep's class STILL HEDGES — no union entry covers it",
         unk("src.m.usePuller") && why("src.m.usePuller").includes("dispatch:ifacekit.Base.pull"),
         JSON.stringify(entry(crep, "src.m.usePuller")));
-  check("boundary: ...and a FUNCTION-VALUED property signature (the call resolves to the function type)",
-        unk("src.m.useApi") && why("src.m.useApi").includes("dispatch:ifacekit.Api.load"),
+  check("boundary ⟨0.39⟩: ...and a FUNCTION-VALUED property signature resolves the same way",
+        eff("src.m.useApi") && disp("src.m.useApi").includes("ifacekit#Api.load"),
         JSON.stringify(entry(crep, "src.m.useApi")));
-  check("boundary: ...and on the DESUGARED path (a dep interface member passed by reference to a HOF)",
-        unk("src.m.useJob") && why("src.m.useJob").includes("dispatch:ifacekit.Job.run"),
+  check("boundary ⟨0.39⟩: ...and so does the DESUGARED path (a dep interface member passed to a HOF)",
+        eff("src.m.useJob") && disp("src.m.useJob").includes("ifacekit#Job.run"),
         JSON.stringify(entry(crep, "src.m.useJob")));
   // CONTROL 1 — KEYED-AND-MISSED. `Plain.label` is a CONCRETE method the dep scanned and found pure, so
   // its absence from the dep's report IS its answer (SPEC §2 rule 3). Disclosing here would be the false
@@ -7040,12 +7053,22 @@ if (blk()) {
   ] }));
   // app.cache.save comes FIRST among the callgraph keys, so the raw query "save" resolved to IT there.
   fs.writeFileSync(path.join(d, "dres.callgraph.json"), JSON.stringify({ "app.cache.save": [], "app.db.save": [] }));
+  // R507 SUPERSEDES THE FIRST HALF OF THIS ROW, and supersedes it by making the defect UNREACHABLE.
+  // The fixture is two `save`s — one in the report, one only in the graph — which is exactly an
+  // ambiguous selector, and `path` now refuses rather than resolving it twice over two name sets. The
+  // property the row was written for survives in the second arm: when the selector DOES resolve, the
+  // header and the chain still name the same function.
   const pthD = runQuery("path", "save", "Db", "--report", path.join(d, "dres"));
+  check("R507: `path` refuses the two-`save` selector rather than resolving it once per name set",
+        pthD.status === 2 && /names 2 functions/.test(pthD.stderr)
+          && /app\.cache\.save/.test(pthD.stderr) && /app\.db\.save/.test(pthD.stderr),
+        `status=${pthD.status} stdout=${JSON.stringify(pthD.stdout).slice(0, 200)} stderr=${JSON.stringify(pthD.stderr).slice(0, 240)}`);
+  const pthDx = runQuery("path", "app.db.save", "Db", "--report", path.join(d, "dres"));
   check("CLI path (human): header and chain resolve the SAME fn (report + callgraph name sets can't disagree)",
-        pthD.status === 0 && pthD.stdout.includes("how `app.db.save` comes to perform Db")
-          && /app\.db\.save {3}\[Db source @ db\.ts:1\]/.test(pthD.stdout)
-          && !/not statically traceable/.test(pthD.stdout),
-        `status=${pthD.status} stdout=${JSON.stringify(pthD.stdout).slice(0, 240)}`);
+        pthDx.status === 0 && pthDx.stdout.includes("how `app.db.save` comes to perform Db")
+          && /app\.db\.save {3}\[Db source @ db\.ts:1\]/.test(pthDx.stdout)
+          && !/not statically traceable/.test(pthDx.stdout),
+        `status=${pthDx.status} stdout=${JSON.stringify(pthDx.stdout).slice(0, 240)}`);
 
   // path (human) when the effect isn't performed → Rust's "does not perform  (inferred: [...])" wording,
   // exit 0 (an honest non-answer, NOT an error). `save` performs Db but not Net.
@@ -8346,10 +8369,18 @@ export function go(s: Store): void { s.save("a", "b"); }`,
   check("single-tree control: the same dispatch fails the same gate (exit 1)",
         scan(ctl, "--policy", path.join(ctl, "fs.pol")).r.status === 1);
 
-  // flag OFF: a default scan of the same package emits no union entry at all.
+  // ⟨0.39⟩ INVERTED, DELIBERATELY. This row asserted that a DEFAULT scan emits no union entry — the
+  // ⟨0.23⟩ opt-in posture, "gated until a floor rung pins it". ⟨0.39⟩ is that rung: `interfaceUnion` is
+  // REQUIRED and its absence is a non-conformance, and the gate is exactly WHY the silent-purity toggle
+  // survived default scans (a default scan of the library published nothing for a default scan of the
+  // consumer to join). The env var is gone rather than kept as an alias for "on".
   const off = scan(dep, "--allow-js");
-  check("without CANDOR_WORKSPACE_CHAIN a dist package emits NO union entry",
-        !off.report?.functions.some((e) => e.interfaceUnion), JSON.stringify(off.report?.functions.map((e) => e.hash)));
+  check("⟨0.39⟩ a DEFAULT scan of a dist package emits the union entry — the ⟨0.23⟩ gate is retired",
+        off.report?.functions.some((e) => e.interfaceUnion && e.hash === "depkit#Store.save"),
+        JSON.stringify(off.report?.functions.map((e) => e.hash)));
+  check("⟨0.39⟩ …and it is byte-identical to the arm that used to need the flag",
+        JSON.stringify(off.report?.functions) === JSON.stringify(ds.report?.functions),
+        JSON.stringify(off.report?.functions));
 
   // FABRICATION control: the interface belongs to ANOTHER package. Pairing by name is authoritative only
   // WITHIN a package; re-keying a foreign interface under ours is the leaf-name join this vein has been
@@ -8367,9 +8398,19 @@ exports.FileStore = FileStore;`,
 export declare class FileStore implements Store { save(k: string, v: string): void; }`,
   });
   const fr = chainScan(foreign, "--allow-js");
+  // ⟨0.39⟩ THE CONTROL SURVIVES AND ITS TWIN JOINS IT. The fabrication this row was written against is
+  // re-keying a FOREIGN interface under OUR prefix, and that is still forbidden — `depkit2#Store.save`
+  // would be a key a consumer of `depkit2` forms and a claim `depkit2` has no standing to make. What
+  // obligation 2 requires is the OTHER key: the union published under the owner's prefix, so the
+  // consumer's ordinary chained lookup resolves it. Both rows, because an engine that satisfied one by
+  // abandoning the other would have swapped this vein's fabrication for its silence.
   check("an interface owned by ANOTHER package is never re-keyed under this one (no cross-package name join)",
-        !fr.report?.functions.some((e) => e.hash.endsWith("#Store.save")),
+        !fr.report?.functions.some((e) => e.hash === "depkit2#Store.save"),
         JSON.stringify(fr.report?.functions.map((e) => e.hash)));
+  check("⟨0.39⟩ obligation 2: …and its union IS published under the OWNING package's prefix",
+        fr.report?.functions.some((e) => e.hash === "other#Store.save" && e.interfaceUnion === true
+                                         && (e.inferred ?? []).includes("Fs")),
+        JSON.stringify(fr.report?.functions.map((e) => [e.hash, e.inferred])));
 
   // THE SECOND FIXTURE (standing bar item 0): the arm must not COST anything. A package built to `dist`
   // keeps a `types` entry that is the generated SHADOW of the very source being scanned, so both arms carry
@@ -8882,10 +8923,22 @@ export function go(s: Store): void { s.save("a"); }`,
   const collideProd = spawnSync("node", [path.join(HERE, "scan.mjs"), collidekit, "--policy", path.join(collidekit, "net.pol")],
                                 { encoding: "utf8", env: { ...process.env, CANDOR_WORKSPACE_CHAIN: "1" } });
   const collideGate = `${collideProd.stdout}\n${collideProd.stderr}`;
-  check("…so the producer's own `deny Net` names the union, never the env-reading class",
-        /AS-EFF-006\] `Store\.save`/.test(collideGate)
-          && !/AS-EFF-006\] `src\.other\.Store\.save`/.test(collideGate),
-        collideGate.split("\n").filter((l) => l.includes("AS-EFF")).join(" | "));
+  // ⟨0.39⟩ REWRITTEN IN ONE HALF AND UNCHANGED IN THE OTHER. The load-bearing half is the NEGATIVE — the
+  // env-reading class that merely shares the interface's bare name must never be named as a Net violator,
+  // which is the whole reason this engine publishes the union as its own entry instead of merging it into
+  // the claimant. That half stands. The positive half used to require the SYNTHETIC row to be an
+  // AS-EFF-006 violation, and un-gating ⟨0.23⟩ made that a fabricated verdict in the producer's own gate
+  // (see policy.mjs's own measurement, and candor-java `Policy.java:778`, which found the identical flip):
+  // a bodiless declaration performs nothing. It is now DISCLOSED on stderr and not scored — and the
+  // implementor that really does reach the network IS scored, one row along, which is what makes skipping
+  // the synthetic row lose no reach.
+  check("…so the producer's own `deny Net` discloses the union and scores the real implementor, never the env-reading class",
+        /interfaceUnion entr/.test(collideGate)
+          && /`Store\.save` {2}\{ Net \}/.test(collideGate)
+          && !/AS-EFF-006\] `Store\.save`/.test(collideGate)
+          && /AS-EFF-006\] `src\.iface\.NetStore\.save`/.test(collideGate)
+          && !/`src\.other\.Store\.save`/.test(collideGate),
+        collideGate.split("\n").filter((l) => l.includes("AS-EFF") || l.includes("Store.save")).join(" | "));
 
   const collideApp = (pol) => {
     const app = project({
@@ -15521,9 +15574,17 @@ callThroughInterface(pureVal);
 `,
   });
   const { report: pureReport } = scan(pureD);
+  // ⟨0.39⟩ THE ASSERTION MOVED FROM *ABSENT* TO *PRESENT AND EMPTY*, and the property it tests is
+  // unchanged. Obligation 1 makes a DISPATCHING row survive even when it is otherwise pure — the
+  // deliberate exception to §2 rule 3, because that row's absence was the purity claim that deleted a
+  // chained consumer's disclosure. So `callThroughInterface` is now emitted with `inferred: []` and the
+  // member it dispatches on. "No fabricated effect, no blanket Unknown hedge" is still exactly what is
+  // checked; it is checked on the row rather than on the row's absence.
+  const pureCall = entry(pureReport, "src.app.callThroughInterface");
   check("OVER-CHARGE CONTROL: a PROVEN identity wrapper (`return x;`) over a genuinely pure implementor resolves fully pure — no fabricated effect, no blanket Unknown hedge",
-        entry(pureReport, "src.app.callThroughInterface") === undefined,
-        JSON.stringify(pureReport.functions.map((e) => e.fn)));
+        pureCall !== undefined && (pureCall.inferred ?? []).length === 0 && pureCall.unresolved !== true
+        && (pureCall.dispatchesOn ?? []).some((k) => k.endsWith("#Task.go")),
+        JSON.stringify(pureReport.functions.map((e) => [e.fn, e.inferred])));
 
   const effD = project({
     "src/app.ts": `import fs from "fs";
@@ -15580,9 +15641,15 @@ stringify(e);
 `,
   });
   const { report } = scan(d);
+  // ⟨0.39⟩ SCOPED TO REAL UNITS. Un-gating ⟨0.23⟩ makes the synthetic `interfaceUnion` row visible by
+  // default, and this fixture's sole implementor is STRUCTURAL — an object literal the wire has no class
+  // name to key on — so the published union for `Entry.state` is honestly `['Unknown']`. That is a
+  // statement about what a CONSUMER could resolve, not about a body this scan read: `stringify` itself
+  // resolves the dispatch precisely and carries nothing. This control is about fabricating an effect on
+  // the COERCION path, so it asks the question of the units, which is where a fabrication would land.
   check("OVER-CHARGE CONTROL: a structural implementor's PURE toString does not fabricate an effect once the coercion path can see `.properties`",
-        !report.functions.some((e) => (e.inferred ?? []).length > 0),
-        JSON.stringify(report.functions.map((e) => [e.fn, e.inferred])));
+        !report.functions.some((e) => !e.interfaceUnion && (e.inferred ?? []).length > 0),
+        JSON.stringify(report.functions.map((e) => [e.fn, e.inferred, e.interfaceUnion])));
 }
 
 // 5. The workspace-chain union's `implClasses.map((c) => c.name?.text).filter(Boolean)` silently drops
@@ -19715,6 +19782,202 @@ export function caller(s: string) { return go(s); }`,
   check("⟨R439⟩ CONTROL: arms that resolve OUTSIDE the analysed project add no Unknown (no double-report)",
         du == null || !(du.inferred ?? []).includes("Unknown"),
         `inferred=${JSON.stringify(du?.inferred)}`);
+}
+
+// ── ⟨0.39⟩ THE CHAINED-DISPATCH UNION, three obligations and the two controls ──────────────────────
+// SOUNDNESS R475, conformance PART 92. The defect is a TOGGLE running the wrong way: a library whose
+// public abstraction has ZERO local implementors gives a chained consumer a disclosed `Unknown`; add ONE
+// PURE implementor to that library and the consumer is SILENTLY CERTIFIED PURE. So adding a pure
+// implementation to a library REMOVED a disclosure from every consumer of it.
+//
+// PART 92 pins the three-package chain four-way. These rows pin the two things it does NOT reach, both
+// specific to this engine and both cheap to get wrong: the join against the CONSUMER'S OWN implementors
+// of a foreign abstraction, and the coverage question a foreign union entry must NOT answer.
+if (blk()) {
+  const ifaceSrc = `export interface Backend { size(): number }
+export class TestBackend implements Backend { size(): number { return 7 } }
+export function termSize(b: Backend): number { return b.size() }`;
+  const mkIface = () => project({ "package.json": `{"name":"ifz","version":"1.0.0"}`, "src/index.ts": ifaceSrc });
+  const ifz = mkIface();
+  const ifzRep = scan(ifz).report;
+  // OBLIGATION 1, and it is the exception to §2 rule 3 that makes the rest possible: `termSize` is
+  // OTHERWISE PURE (its only implementor returns 7), so before this rung it was absent from the report
+  // — and that absence is a purity claim, which is the toggle's left-hand side.
+  check("⟨0.39⟩ obligation 1: a PURE dispatching row is emitted, naming the member it dispatches on",
+        entry(ifzRep, "src.index.termSize")?.dispatchesOn?.join() === "ifz#Backend.size"
+        && (entry(ifzRep, "src.index.termSize")?.inferred ?? []).length === 0,
+        JSON.stringify(ifzRep?.functions));
+
+  // OBLIGATION 3, THE LOCAL HALF — "its own visible implementors". The CONSUMER supplies the effectful
+  // implementor of the dependency's abstraction; nothing in any chained report mentions it, so the union
+  // has to be taken against this scan's own classes or the effect never reaches `appSize`.
+  const mkApp = (implBody) => project({
+    "package.json": `{"name":"appz","version":"1.0.0","dependencies":{"ifz":"1.0.0"}}`,
+    "node_modules/ifz/package.json": `{"name":"ifz","version":"1.0.0","main":"src/index.ts"}`,
+    "node_modules/ifz/src/index.ts": ifaceSrc,
+    "src/index.ts": `import * as netm from "node:net";
+import { Backend, termSize } from "ifz";
+export class MyBackend implements Backend { size(): number { ${implBody} return 0 } }
+export function appSize(b: Backend): number { return termSize(b) }
+export function appRun(): number { return appSize(new MyBackend()) }`,
+  });
+  const runApp = (dir) => {
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), dir], { encoding: "utf8",
+      env: { ...process.env, CANDOR_DEPS: `${path.join(ifz, ".candor", "report")}.json` } });
+    const rp = path.join(dir, ".candor", "report.json");
+    return { r, report: fs.existsSync(rp) ? JSON.parse(fs.readFileSync(rp, "utf8")) : null };
+  };
+  const effApp = runApp(mkApp(`try { netm.connect(1, "h") } catch {}`));
+  check("⟨0.39⟩ obligation 3 (local): the CONSUMER's own implementor of a dependency's abstraction reaches the dispatching call",
+        (entry(effApp.report, "src.index.appSize")?.inferred ?? []).includes("Net"),
+        JSON.stringify(effApp.report?.functions));
+  // THE FABRICATION GUARD, and it is the row that makes the one above mean something: the SAME program
+  // with a PURE implementor must stay pure. An engine that unions indiscriminately — charging every
+  // consumer of a dispatching library for effects nobody implements — passes the row above and fails here.
+  const pureApp = runApp(mkApp(``));
+  check("⟨0.39⟩ FABRICATION GUARD: the same program with a PURE implementor gains nothing",
+        !(entry(pureApp.report, "src.index.appSize")?.inferred ?? []).includes("Net")
+        && !(entry(pureApp.report, "src.index.appSize")?.inferred ?? []).includes("Unknown"),
+        JSON.stringify(pureApp.report?.functions));
+
+  // OBLIGATION 2, AND THE COVERAGE QUESTION IT MUST NOT ANSWER. `effz` implements `ifz`'s FOREIGN
+  // abstraction, so it publishes `ifz#Backend.size` — a key in somebody else's namespace. Reading that
+  // as "ifz was analysed" would delete `invisible: [ifz]` from every call into ifz that nobody analysed,
+  // which is R475's OWN shape manufactured by R475's own fix.
+  const effz = project({
+    "package.json": `{"name":"effz","version":"1.0.0","dependencies":{"ifz":"1.0.0"}}`,
+    "node_modules/ifz/package.json": `{"name":"ifz","version":"1.0.0","main":"src/index.ts"}`,
+    "node_modules/ifz/src/index.ts": ifaceSrc,
+    "src/index.ts": `import * as netm from "node:net";
+import { Backend } from "ifz";
+export class Crossterm implements Backend { size(): number { try { netm.connect(1, "h") } catch {}; return 0 } }`,
+  });
+  const effzRep = scan(effz).report;
+  check("⟨0.39⟩ obligation 2: a FOREIGN abstraction's union is published under the OWNING package's prefix",
+        effzRep?.functions.some((e) => e.hash === "ifz#Backend.size" && e.interfaceUnion === true
+                                       && (e.inferred ?? []).includes("Net")),
+        JSON.stringify(effzRep?.functions.map((e) => [e.hash, e.inferred, e.interfaceUnion])));
+  const consumer = project({
+    "package.json": `{"name":"consz","version":"1.0.0","dependencies":{"ifz":"1.0.0"}}`,
+    "node_modules/ifz/package.json": `{"name":"ifz","version":"1.0.0","main":"src/index.ts"}`,
+    "node_modules/ifz/src/index.ts": ifaceSrc,
+    "src/index.ts": `import { TestBackend } from "ifz";
+export function poke(): number { return new TestBackend().size() }`,
+  });
+  const cr = spawnSync("node", [path.join(HERE, "scan.mjs"), consumer], { encoding: "utf8",
+    env: { ...process.env, CANDOR_DEPS: `${path.join(effz, ".candor", "report")}.json` } });
+  const crep = JSON.parse(fs.readFileSync(path.join(consumer, ".candor", "report.json"), "utf8"));
+  check("⟨0.39⟩ A FOREIGN UNION ENTRY IS NOT COVERAGE: chaining only `effz` leaves `ifz` disclosed as invisible",
+        (entry(crep, "src.index.poke")?.invisible ?? []).includes("ifz"),
+        `${JSON.stringify(crep.functions)} ${cr.stderr}`);
+
+  // NEVER GUESS WHICH `I` A NAME MEANS — the join's half of the guard the union EMITTER already had.
+  // FOUND BY THE CORPUS A/B, not by a fixture: two declarations of `Store` in one package both key
+  // `pkg#Store.save`, so a join that unions their implementors charges a caller dispatching on ONE with
+  // effects only the OTHER's implementor performs. The emitter refuses such a key; a join that resolved
+  // it would answer, in the consumer, exactly what the producer declined to publish.
+  //
+  // The dep report is hand-written because the shape needs a dependency that dispatches on OUR
+  // abstraction (the plugin shape), and its `candor.version` is read off a real scan — a report from a
+  // different build is STALE, its assertions are not trusted, and the arm would prove nothing.
+  const mkAmb = (secondName) => {
+    const dir = project({
+      "package.json": `{"name":"ambz","version":"1.0.0"}`,
+      "src/a.ts": `interface Store { save(): void }
+export class A implements Store { save(): void {} }`,
+      "src/b.ts": `import * as fs from "node:fs";
+interface ${secondName} { save(): void }
+export class B implements ${secondName} { save(): void { fs.writeFileSync("/x", "y") } }`,
+      "src/main.ts": `import { drive } from "libz";
+import { A } from "./a.js";
+export function go(): void { drive(new A()) }`,
+      "node_modules/libz/package.json": `{"name":"libz","version":"1.0.0","main":"src/index.ts"}`,
+      "node_modules/libz/src/index.ts": `export interface Anything { save(): void }
+export function drive(s: Anything): void { s.save() }`,
+    });
+    const ver = JSON.parse(fs.readFileSync(`${scan(ifz).prefix}.json`, "utf8")).candor;
+    const dep = path.join(dir, "dep.json");
+    fs.writeFileSync(dep, JSON.stringify({ candor: ver, package: "libz", analyzed: { count: 1 },
+      functions: [{ fn: "src.index.drive", loc: "src/index.ts:2:1", hash: "libz#drive", inferred: [],
+                    direct: [], unresolved: false, dispatchesOn: ["ambz#Store.save"] }] }));
+    spawnSync("node", [path.join(HERE, "scan.mjs"), dir], { encoding: "utf8",
+      env: { ...process.env, CANDOR_DEPS: dep } });
+    return JSON.parse(fs.readFileSync(path.join(dir, ".candor", "report.json"), "utf8"));
+  };
+  const ambRep = mkAmb("Store");
+  check("⟨0.39⟩ NEVER GUESS: two same-named local interfaces make the key AMBIGUOUS, and the join hedges rather than picking",
+        (entry(ambRep, "src.main.go")?.inferred ?? []).includes("Unknown")
+        && (entry(ambRep, "src.main.go")?.unknownWhy ?? []).includes("ambiguous:ambz.Store.save"),
+        JSON.stringify(ambRep.functions));
+  // THE DISCRIMINATOR. Rename the second interface and the SAME program resolves precisely — an edge to
+  // the pure implementor, no hedge, and crucially NO `Fs` from the other interface's implementor. Without
+  // this arm the row above would pass for an engine that hedged on every dispatch.
+  const clrRep = mkAmb("Store2");
+  check("⟨0.39⟩ NEVER GUESS, discriminator: rename it and the same join resolves PRECISELY — pure, and no `Fs` borrowed from the other interface",
+        (entry(clrRep, "src.main.go")?.inferred ?? []).length === 0
+        && (entry(clrRep, "src.main.go")?.calls ?? []).includes("src.a.A.save"),
+        JSON.stringify(clrRep.functions));
+}
+
+// ── R507 / R497 — AN AMBIGUOUS FUNCTION SELECTOR IS REFUSED, NOT RESOLVED TO AN ARBITRARY ONE ──────
+// The asymmetry IS the defect: `path` and `impact` have refused at exit 2 for ZERO matches for a long
+// time, while SEVERAL matches were answered silently. MEASURED on this engine against HEAD before the
+// fix, on the fixture below: `path resolveCredentials Exec --json` returned
+// `{"effect":"Exec","fn":"resolveCredentials","path":[]}` at exit 0 — "this function does not reach
+// Exec" — while `ProcessProvider.resolveCredentials` performs it DIRECTLY; and `impact
+// resolveCredentials` returned `fn: AnonProvider.resolveCredentials` with `affected:["useProc"]`, a
+// blast radius belonging to the other function attributed to this one. A negative is a claim in this
+// family, so a negative about a substituted subject is a fabricated claim.
+if (blk()) {
+  const d = project({
+    "package.json": `{"name":"r507","version":"1.0.0"}`,
+    "src/a.ts": `import { execSync } from "node:child_process";
+export class AnonProvider { resolveCredentials(): string { return "" } }
+export class ProcessProvider { resolveCredentials(): string { execSync("aws"); return "" } }
+export function useAnon(): string { return new AnonProvider().resolveCredentials() }
+export function useProc(): string { return new ProcessProvider().resolveCredentials() }`,
+  });
+  const { prefix } = scan(d);
+  const q = (...a) => spawnSync("node", [path.join(HERE, "query.mjs"), ...a, "--report", `${prefix}.json`],
+                                { encoding: "utf8" });
+  const both = /AnonProvider\.resolveCredentials[\s\S]*ProcessProvider\.resolveCredentials/;
+  for (const [verb, argv] of [["path", ["path", "resolveCredentials", "Exec"]],
+                              ["path --json", ["path", "resolveCredentials", "Exec", "--json"]],
+                              ["impact", ["impact", "resolveCredentials"]],
+                              ["impact --json", ["impact", "resolveCredentials", "--json"]]]) {
+    const r = q(...argv);
+    check(`R507: \`${verb}\` REFUSES an ambiguous selector at exit 2 and names the candidates`,
+          r.status === 2 && /names 2 functions/.test(r.stderr) && both.test(r.stderr)
+          && !/path\s*:/.test(r.stdout) && !/affectedCount/.test(r.stdout),
+          `status=${r.status} out=${r.stdout.slice(0, 200)} err=${r.stderr.slice(0, 200)}`);
+  }
+  // THE TWO CONTROLS THAT KEEP THE REFUSAL FROM BEING A BLUNT INSTRUMENT.
+  const exact = q("path", "src.a.ProcessProvider.resolveCredentials", "Exec", "--json");
+  check("R507 CONTROL: an EXACT name still answers — tier 3 beats every partial, so one answer is one answer",
+        exact.status === 0 && /"fn": "src\.a\.ProcessProvider\.resolveCredentials"/.test(exact.stdout),
+        `status=${exact.status} ${exact.stdout.slice(0, 200)}`);
+  const none = q("path", "zzz_no_such_fn", "Exec", "--json");
+  check("R507 CONTROL: ZERO matches keeps its own refusal and its own wording — the two outcomes stay distinguishable",
+        none.status === 2 && /no function matching/.test(none.stderr) && !/names \d+ functions/.test(none.stderr),
+        `status=${none.status} ${none.stderr.slice(0, 200)}`);
+  // THE VERB-SWEEP BOUNDARY, ASSERTED RATHER THAN ASSUMED. `show`/`callers`/`whatif` answer over the
+  // WHOLE best-tier set, so several matches WIDEN the answer rather than substituting a subject — and
+  // refusing there would reject a question they answer correctly today. `fix` picks, but PREFERS a tier
+  // match that performs the effect, so it cannot report "nothing to hoist" while a sibling performs it.
+  const callers = q("callers", "resolveCredentials", "--json");
+  check("R507 BOUNDARY: `callers` is left alone — many WIDENS its answer, and `of` names both subjects",
+        callers.status === 0 && both.test(callers.stdout),
+        `status=${callers.status} ${callers.stdout.slice(0, 200)}`);
+  const wi = q("whatif", "resolveCredentials", "Exec", "--json");
+  check("R507 BOUNDARY: …and so is `whatif` — its `affected` set is the UNION over every candidate",
+        wi.status === 0 && both.test(wi.stdout),
+        `status=${wi.status} ${wi.stdout.slice(0, 200)}`);
+  fs.writeFileSync(path.join(d, "p.pol"), "deny Exec\n");
+  const fx = q("fix", "resolveCredentials", "Exec", "--json", "--policy", path.join(d, "p.pol"));
+  check("R507 BOUNDARY: `fix` picks, but prefers the candidate that PERFORMS the effect — never a false `nothing to hoist`",
+        fx.status === 0 && /"fn": "src\.a\.ProcessProvider\.resolveCredentials"/.test(fx.stdout)
+        && /"crossing": true/.test(fx.stdout),
+        `status=${fx.status} ${fx.stdout.slice(0, 300)}`);
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);

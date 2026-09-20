@@ -8,6 +8,91 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ SPEC §4 ⟨0.39⟩ — THE CHAINED-DISPATCH UNION. candor-ts is the third engine to port it (SOUNDNESS
+  R475, conformance PART 92).** The defect is a TOGGLE running the wrong way: a library whose public
+  abstraction has ZERO local implementors gave a chained consumer a disclosed `Unknown`; adding ONE PURE
+  implementor to that library SILENTLY CERTIFIED the consumer pure. So **adding a pure implementation to
+  a library removed a disclosure from every consumer of it** — the ⟨0.21⟩ cardinal sin by a route no
+  single scan can see. This engine has a longer history with it than the others: ⟨0.23⟩ records that the
+  SILENT-PURE form was candor-ts-specific while the other three fell to a disclosed `Unknown`.
+
+  Three obligations, none separable, because the effectful implementor lives in a THIRD package —
+  neither the dispatching dependency nor the consumer:
+
+  1. `dispatchesOn` names the abstraction members a row dispatches on, **even when the row is otherwise
+     PURE** — the deliberate exception to §2 rule 3, because that row's ABSENCE was the purity claim.
+     Recorded at the in-scan bounded-CHA site and at both external-call arms (the MIDDLE-PACKAGE case,
+     SOUNDNESS R504: a package that dispatches over a DEPENDENCY's abstraction owns neither it nor any
+     implementor of it), and recorded WHATEVER the CHA answered — the toggle runs between zero
+     implementors and one, so a field recorded only on the indeterminate branch is absent in exactly the
+     arm that needs it. TRANSITIVE, carried by the same least fixpoint the effects already traverse.
+     The PLATFORM type surface is excluded on a FILE test (`@types/node`, the TypeScript lib): no scan
+     can publish a union under such a key, and a `dispatchesOn` value nothing can answer is noise.
+  2. A package implementing a **FOREIGN** abstraction publishes its `interfaceUnion` entry keyed under
+     the **OWNING** package — `ratatui_core#Backend.size`, not ours. No new spelling rule: it is the
+     ⟨0.23⟩ `typeSurface` rule, fully qualified in the owning package's own entry-hash namespace, so a
+     consumer resolves it with its ORDINARY `crossDeps` lookup. Both arms carry it — the in-scan
+     `implements` clause and the published-package shape read out of the typings, where the rule used to
+     be "an interface owned by another package is dropped". Live on real code: `puppeteer-core`
+     publishes `chromium-bidi#BidiTransport.sendMessage`, `apollo-server-core` publishes
+     `@apollo/utils.keyvaluecache#KeyValueCache.get`/`.set`.
+  3. The consumer unions per key — every chained entry carrying it (resolved as a least fixpoint over
+     `crossDeps`, since a key's own cell may itself dispatch) **plus its own visible implementors**, and
+     the latter as ordinary call EDGES so the effects flow through the same fixpoint rather than being
+     copied before they are computed. Bounded by the same `CHA_FANOUT_LIMIT`, hedged on the same
+     completeness condition, and refused outright when two same-named local interfaces claim one key —
+     the never-guess rule the union EMITTER already applied, now applied to the JOIN as well.
+
+  **`interfaceUnion` is NO LONGER GATED.** It rode behind `CANDOR_WORKSPACE_CHAIN` while §2 ⟨0.23⟩ read
+  "gated until a floor rung pins it". This is that rung, and the gate is exactly WHY the toggle survived
+  default scans: a default scan of the library published nothing for a default scan of the consumer to
+  join.
+
+  **A FOREIGN UNION ENTRY IS NOT COVERAGE OF THE PACKAGE IT NAMES** — reading `effimpl`'s
+  `iface#Backend.size` as "iface was analysed" would delete `invisible: [iface]` from every call into
+  iface that nobody analysed, which is R475's own shape manufactured by R475's own fix. Fail-CLOSED on a
+  report with no `package`: nothing there proves the key is the producer's own.
+
+  **AND UN-GATING CHANGED THE PRODUCER'S OWN GATE VERDICT, IN THE FABRICATION DIRECTION.** A synthetic
+  `interfaceUnion` entry is a BODILESS declaration and performs nothing, but it was being scored as an
+  AS-EFF-006 violation: measured, `deny Unknown` went exit 0 → 1 over a package whose own `stringify`
+  resolved its dispatch PRECISELY, the union's `Unknown` being an artifact of what the wire can name (a
+  structural implementor has no class name to key on). Such entries are now DISCLOSED on stderr and not
+  scored, on BOTH verdict routes (`scan --policy` and `gate --report`, §3.1 byte-equality), each
+  implementor still gated under its own entry. candor-java measured the identical flip.
+
+  **Measured over 524 real npm packages** (PRE = the released engine, POST = this change, `--allow-js`,
+  identical entries): `inferred` **ADDED 173 · REMOVED 0 · CHANGED 4**; wide value **CHANGED 2602**, of
+  which **2602 changed `dispatchesOn` and nothing else**. **ZERO rows lost anything** — not an effect,
+  not `invisible`, `incomplete`, `unknownWhy`, `netClass`, `calls` or the `unresolved` marker. The four
+  `inferred` gains are all `['Unknown'] → ['Clock','Unknown']` in `apollo-server-core` and are ground-
+  truthed to a body: `UnboundedCache implements KeyValueCache` (a FOREIGN abstraction) and its
+  `get`/`set` call `Date.now()`, so a real `Clock` that used to stop at the package edge now reaches
+  `processGraphQLRequest`, `runHttpQuery`, `processHTTPRequest` and `executeOperation`. Of the 173 added
+  rows, 149 are union entries (4 of them under a FOREIGN package's prefix) and 24 are pure dispatching
+  rows. 269 distinct `dispatchesOn` keys over 15,099 references, none of them platform.
+
+- **⚠ `path` and `impact` REFUSE an ambiguous function selector instead of answering about an arbitrary
+  one (SOUNDNESS R507, the class R497 closed in candor-java).** Note the asymmetry that IS the defect:
+  both verbs have refused at exit 2 when ZERO functions match for a long time — only MANY was answered
+  silently. MEASURED on this engine against the released build: over two classes both declaring
+  `resolveCredentials`, one of which runs `execSync`, `path resolveCredentials Exec --json` returned
+  `{"effect":"Exec","fn":"resolveCredentials","path":[]}` **at exit 0** — *this function does not reach
+  Exec* — and `impact resolveCredentials` returned `fn: AnonProvider.resolveCredentials` with
+  `affected: ["useProc"]`, a blast radius belonging to the other function attributed to this one. A
+  negative is a claim in this family, so a negative about a substituted subject is a fabricated claim.
+  Both now exit 2 and name every candidate, on the human channel, the `--json` channel and the MCP
+  tools. This engine already had R497's OTHER half — `matchTier` anchors on a `[.$#]` boundary — so an
+  EXACT match still resolves alone and is never counted as ambiguity.
+
+  **Verb-sweep boundary, stated.** The verbs taking a function selector are `show`, `callers`, `impact`,
+  `path`, `whatif` and `fix`. `show`/`callers`/`whatif` answer over the WHOLE best-tier set — several
+  matches WIDEN the answer rather than substituting a subject (`callers` and `whatif` both return every
+  candidate in `of`), so refusing there would reject a question they answer correctly; measured, not
+  assumed. `fix` picks, but PREFERS a tier match that performs the effect, so it cannot emit "nothing to
+  hoist" while a sibling performs it. All four are left alone deliberately and pinned as such.
+
+
 ## [0.38.3] — 2026-09-16
 
 - No engine change since 0.38.2 (R439, the condition-map silent under-report, shipped in that release).

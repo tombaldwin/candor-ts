@@ -344,6 +344,9 @@ const TOOLS = {
     // available to it. Fixed key sets, so the caveat spreads at the root and every pinned tool shape is
     // unchanged on a complete report (`completenessFields` → `{}`). These three certify nothing, so they
     // are on the descriptive side of the ⟨0.32⟩ boundary stated on `nestWithCaveat` below.
+    // SOUNDNESS R507 — see the dispatcher's `oneSubject` guard. `impact` answers about ONE function, so
+    // a selector naming several is REFUSED rather than silently resolved to an arbitrary one.
+    oneSubject: true,
     run: (a, p) => { const fns = loadReportLoud(p); return withCompleteness(p, capImpact(Q.impact(fns, graphOrReportEdges(p, fns), a.fn))); },
   },
   candor_where: {
@@ -361,6 +364,7 @@ const TOOLS = {
     schema: { type: "object", properties: { fn: { type: "string" }, effect: { type: "string" }, ...reportArg }, required: ["fn", "effect"] },
     // ⟨0.32⟩ see `candor_impact` above: `path: []` to an agent is *this function does not reach that
     // effect*, and a hop through an unread unit breaks the chain.
+    oneSubject: true,   // SOUNDNESS R507 — see `candor_impact` and the dispatcher's guard
     run: (a, p) => { const fns = loadReportLoud(p); return withCompleteness(p, Q.path(fns, graphOrReportEdges(p, fns), a.fn, a.effect)); },
   },
   candor_callers: {
@@ -914,6 +918,14 @@ function handle(msg) {
         const names = [...new Set([...Object.keys(Q.loadCallgraph(prefix)), ...loadReportLoud(prefix).map((e) => e.fn)])];
         if (Q.matches(names, args.fn).length === 0)
           return result(id, { content: [{ type: "text", text: `candor: no function matching \`${clip(args.fn)}\` in this report` }], isError: true });
+        // SOUNDNESS R507 — the OTHER half of the same resolution, and scoped to the tools that answer
+        // about ONE subject. `candor_show`/`candor_callers`/`candor_whatif` answer over the WHOLE
+        // best-tier set, so several matches WIDEN their answer rather than substituting a subject;
+        // `candor_path`/`candor_impact` take one and print a confident verdict about it. Refusing here
+        // rather than inside the verbs keeps the decision beside the zero-match guard it is the twin of.
+        const amb = t.oneSubject ? Q.ambiguousSelector(names, args.fn) : null;
+        if (amb)
+          return result(id, { content: [{ type: "text", text: `candor: \`${clip(args.fn)}\` names ${amb.length} functions in this report — refusing to answer about one of them. Re-run with the full name: ${amb.map((n) => clip(n)).join(", ")}` }], isError: true });
       }
       const out = t.run(args, prefix);
       // Minified, not pretty-printed: the consumer is an AGENT (it parses the JSON), so the indentation

@@ -670,6 +670,20 @@ export function refusalVerdict(spec, reason, unevaluated = null) {
  * ⟨0.24⟩ §3.3.1 requires every ordering to be locale-INDEPENDENT. `Array.prototype.sort` has been
  * stable since ES2019, so rows with an equal key keep their arrival order.
  */
+// ⟨0.23⟩/⟨0.39⟩ Say out loud, WITHOUT moving the verdict, which synthetic `interfaceUnion` entries a
+// rule matched. One printer, called from the two VERDICT routes (`scan --policy` and `gate --report`),
+// so §3.1's byte-equality between them covers the note as well as the rows.
+export function noteSyntheticHits(violations, err = console.error) {
+  const hits = violations?.syntheticHits ?? [];
+  if (!hits.length) return;
+  err(`candor-ts: note — ${hits.length} ⟨0.23⟩ interfaceUnion entr`
+    + (hits.length === 1 ? "y matches a policy rule and is NOT gated as a function"
+                         : "ies match a policy rule and are NOT gated as functions")
+    + ": the key names a BODILESS declaration, and the effects under it are the CHA union over "
+    + "implementors, each of which IS gated under its own entry.");
+  for (const h of hits) err(`    \`${h.fn}\`  { ${h.effects.join(", ")} }  would have matched  \`${h.rule}\``);
+}
+
 export function sortViolations(violations) {
   const c = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
   return violations.sort((a, b) =>
@@ -1066,6 +1080,11 @@ export function classFilterExcludes(r, entry, eff, reasonAcc, netClassOf, units 
 
 export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map(), partners = new Set(), netClasses = null, withhold = null, units = null, hashByName = null) {
   const out = [];
+  // ⟨0.39⟩ the synthetic `interfaceUnion` entries a rule MATCHED — carried on the returned array (a
+  // non-index property, so `length`, iteration and `JSON.stringify` are all untouched) rather than
+  // printed from here, because this function is also called for sub-evaluations that must stay silent.
+  const syntheticHits = [];
+  out.syntheticHits = syntheticHits;
   // `Llm` ⟨0.13⟩ reaches the SAME hosts surface as Net (an Llm host WAS captured as a Net host literal).
   const surfaces = { Net: "hosts", Llm: "hosts", Exec: "cmds", Fs: "paths", Db: "tables" };
   // §6.2 ⟨0.19⟩: `reasonClass` (all classes on the fn) rides an AS-EFF-006 Unknown violation; ⟨0.20⟩ `netClass`
@@ -1130,6 +1149,34 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
   // The gate's TEST and the class list it REPORTS both read it, so the two can't disagree about one function.
   const netClassOf = netClassResolver(incomplete, partners, netClasses, units);
   for (const f of functions) {
+    // ⟨0.23⟩/⟨0.39⟩ A SYNTHETIC `interfaceUnion` ENTRY IS NOT A UNIT, so it cannot PERFORM anything and
+    // must not become a violation ROW. Its `fn` names a BODILESS declaration (`Store.save` on an
+    // interface); the effects under it are the CHA union over implementors, published under that hash so
+    // a CHAINED CONSUMER's dispatch resolves across the scan boundary. Every effect it carries is
+    // already on an implementor's OWN entry in the same report — which IS a unit, and IS gated one loop
+    // iteration away.
+    //
+    // MEASURED HERE, not inherited from the reference engine's argument: over `interface Entry { state()
+    // }` with a single STRUCTURAL implementor, `deny Unknown` went exit 0 -> 1 the moment ⟨0.39⟩ un-gated
+    // the union — while the package's own `stringify` resolved the dispatch PRECISELY (a real `calls`
+    // edge to the structural member) and carried no Unknown at all. The union's Unknown is an artifact of
+    // what the WIRE can name (a structural implementor has no class name to key on), never a fact about
+    // a body this scan read, so gating on it is a fabricated violation in the producer's own verdict.
+    // candor-java measured the identical flip (`Policy.java:778`) and takes the identical course.
+    //
+    // DISCLOSED, NOT DROPPED: the hits are recorded on the returned array and printed by the verdict
+    // routes, because the one thing a reader of a chained dependency's report wants to know here is that
+    // the dependency publishes a dispatch surface reaching a denied effect.
+    if (f?.interfaceUnion === true) {
+      for (const r of pol.deny) {
+        if (r.scope && !scopeMatches(f.fn, r.scope)) continue;
+        const inf = Array.isArray(f.inferred) ? f.inferred : [];
+        const hits = r.effects.length === 0 ? inf.filter((e) => e !== "Unknown")
+                                            : inf.filter((e) => r.effects.includes(e));
+        if (hits.length) syntheticHits.push({ fn: f.fn, effects: hits.slice().sort(), rule: r.raw });
+      }
+      continue;
+    }
     // ⟨0.32⟩ the KEY identifies the unit; `f.fn` is the NAME, and the name is what a policy SCOPE matches
     // and what the verdict row prints (§3.3.1 byte-equality with `scan --policy` rests on it).
     const uk = unitKey(units, f);

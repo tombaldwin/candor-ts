@@ -196,7 +196,7 @@ function normFn(e) {
   // non-string in `unknownWhy` reaches `reasonClass()` and one in `hosts`/`netClass` reaches the ⟨0.20⟩
   // destination-class matcher.
   for (const k of ["unknownWhy", "netClass", "hosts", "cmds", "paths", "tables",
-                   "declared", "undeclared", "overdeclared"]) if (k in e) o[k] = arr(e[k]);
+                   "declared", "undeclared", "overdeclared", "dispatchesOn"]) if (k in e) o[k] = arr(e[k]);
   return o;
 }
 
@@ -215,8 +215,12 @@ function normFn(e) {
 // on, the ⟨0.19⟩/⟨0.20⟩ class fields it scopes with, and the `calls` edges the reason-class fixpoint runs
 // over. `loc`/`hash`/`unitKind`/`invisible`/`unresolved` are deliberately NOT here: no verdict reads them,
 // so refusing on them would be a spurious refusal on a report whose gate-relevant content is intact.
+// ⟨0.39⟩ `dispatchesOn` is a VERDICT key, not a diagnostic one: a chained consumer unions the effects
+// of every implementor published under each key it names, so a present-but-unparseable one coerced to
+// `[]` silently drops that union — an effect the consumer really reaches, gone, with no hedge. Exactly
+// the fail-OPEN direction this list exists to refuse.
 const VERDICT_STR_ARRAY_KEYS = ["inferred", "direct", "calls", "unknownWhy", "netClass", "hosts",
-                                "declared", "undeclared", "overdeclared"];
+                                "declared", "undeclared", "overdeclared", "dispatchesOn"];
 const isStrArray = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
 export function entryCorruptKeys(e) {
   if (!e || typeof e !== "object" || Array.isArray(e)) return ["<entry is not an object>"];
@@ -1380,6 +1384,29 @@ function matchTier(name, q) {
 export function matches(names, q) {
   const best = Math.max(0, ...names.map((n) => matchTier(n, q)));
   return best === 0 ? [] : names.filter((n) => matchTier(n, q) >= best);
+}
+
+/** SOUNDNESS R507/R497 — THE SELECTOR THAT NAMES SEVERAL FUNCTIONS, for the verbs that answer about ONE.
+ *
+ * Returns the distinct best-tier candidates when MORE THAN ONE survives, else null. The asymmetry it
+ * closes is the whole defect: `path` and `impact` ALREADY refuse at exit 2 when ZERO functions match —
+ * only MANY was answered silently, by taking `targets[0]` and printing a confident verdict about a
+ * function the caller did not ask about. Measured in candor-java on `auth-2.25.60`: `path
+ * resolveCredentials Exec` had FOURTEEN dot-anchored candidates and answered a confident negative about
+ * `AnonymousCredentialsProvider` while three of the fourteen perform `Exec`. A negative is a claim in
+ * this family; a negative about a substituted subject is a fabricated one.
+ *
+ * Anchoring is NOT this function's job and is already done: `matchTier` requires a `[.$#]` boundary
+ * before a suffix match (tier 2), so `ProfileCredentialsProvider` never matches inside
+ * `InstanceProfileCredentialsProvider` — that half of R497 is what candor-ts already had, and it is why
+ * an EXACT match (tier 3) still resolves alone and is never counted as ambiguity.
+ *
+ * DISTINCT names, because the verbs resolve over the union of the callgraph's keys and the report's
+ * `fn`s and one function is routinely in both — a duplicate is one subject, not two.
+ */
+export function ambiguousSelector(names, q) {
+  const m = [...new Set(matches(names, q))].sort(byCodePoint);
+  return m.length > 1 ? m : null;
 }
 
 // Exported for consumers that answer MANY caller-count questions over one loaded graph (the LSP

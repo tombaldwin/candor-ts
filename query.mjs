@@ -27,7 +27,7 @@ import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, d
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
          policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules,
          fatalPolicyErrors, refusalVerdict, sortViolations,
-         unanswerableScoped, wholePolicyUnanswerable, reportUnits } from "./policy.mjs";
+         unanswerableScoped, wholePolicyUnanswerable, reportUnits, noteSyntheticHits } from "./policy.mjs";
 import { hasReport, refusalMarkerFor, refusalSentence } from "./query-core.mjs";
 import { printAgents, writeStdoutSync, writeSinkAtomic, isCandorConfigSink } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
@@ -42,7 +42,7 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          containment as coreContainment, diff as coreDiff,
          where as coreWhere, map as coreMap, whatif as coreWhatif,
          fix as coreFix, fixGate as coreFixGate, unverified as coreUnverified,
-         matches as coreMatches, gainsCoverage, gainsCompletenessFields, parseClassFilter, ClassFilterError,
+         matches as coreMatches, ambiguousSelector, gainsCoverage, gainsCompletenessFields, parseClassFilter, ClassFilterError,
          loadReport, loadCallgraph, reportCallsGraph, loadGateReport, gateReportInputFiles,
          reportVersion, reportPackage,
          advisoryAnswer,
@@ -678,6 +678,19 @@ function renderPathHuman(fns, cg, fnQ, eff, hedge = false) {
     // No matching function at all — parity with Rust/Java's "no function matching" (stderr, exit 2).
     console.error(`candor-query path: no function matching '${fnQ}'`);
     process.exit(2);
+  }
+  // SOUNDNESS R507 — the human renderer's OWN resolution, refused on the same condition. The gate in the
+  // `path` case above resolves over the UNION of the callgraph keys and the report's `fn`s; this one
+  // resolves over the report alone, and the two name sets can put their best tier in different places
+  // (an exact callgraph key makes the union unambiguous while the report-only set still holds two
+  // suffix matches). Same helper, so the two cannot answer the question differently.
+  {
+    const ambH = ambiguousSelector(fns.map((e) => e.fn), fnQ);
+    if (ambH) {
+      console.error(`candor-ts-query path: '${fnQ}' names ${ambH.length} functions — refusing to answer `
+        + `about one of them. Re-run with the full name:\n  ${ambH.join("\n  ")}`);
+      process.exit(2);
+    }
   }
   const startEntry = fns.find((e) => e.fn === start);
   const inferred = startEntry?.inferred ?? [];
@@ -1725,6 +1738,20 @@ switch (cmd) {
     if (coreMatches(knownFnNames(impCg, impFns), q).length === 0) {
       console.error(`candor-ts-query impact: no function matching '${q}'`); process.exit(2);
     }
+    // SOUNDNESS R507, the same refusal on the verb that answers the OTHER direction — and here the
+    // substitution was HALF-hidden, which is worse than `path`'s. `coreImpact` walks the reverse graph
+    // from EVERY target (so `affectedCount` is a union over all of them) and then prints
+    // `fn: targets[0]`: a blast radius computed for several functions, attributed to one. A reader
+    // checking whether `save` is safe to change gets a count that may belong to a different `save`.
+    // See the `path` gate above for the asymmetry and for why one resolution decides both outcomes.
+    {
+      const amb = ambiguousSelector(knownFnNames(impCg, impFns), q);
+      if (amb) {
+        console.error(`candor-ts-query impact: '${q}' names ${amb.length} functions — refusing to answer `
+          + `about one of them. Re-run with the full name:\n  ${amb.join("\n  ")}`);
+        process.exit(2);
+      }
+    }
     // ⟨0.32⟩ `putAnswer`, not `put` — this verb had NO completeness reader at all (see `CALLERS_SOWHAT`
     // above for the measurement and the boundary). `affectedCount: 0` is the strongest claim in this
     // verb's vocabulary, and over a report whose own `excluded` names a class nothing opened it rests on
@@ -1994,6 +2021,27 @@ switch (cmd) {
     // graph" and "there is no such function" are three answers, not one.
     if (coreMatches(knownFnNames(cg, fns), fn).length === 0) {
       console.error(`candor-ts-query path: no function matching '${fn}'`); process.exit(2);
+    }
+    // SOUNDNESS R507 — …AND THE OTHER HALF OF THE SAME RESOLUTION: MANY. Note the asymmetry that IS the
+    // defect: this verb has refused at exit 2 for ZERO matches for a long time (the gate directly above),
+    // while SEVERAL matches were answered silently — `targets[0]`, an arbitrary one, printed as a
+    // confident verdict about a function the caller never named. Measured in candor-java on
+    // `auth-2.25.60`: `path resolveCredentials Exec` had FOURTEEN anchored candidates and returned a
+    // confident negative about `AnonymousCredentialsProvider` while three of the fourteen perform `Exec`.
+    // A negative is a claim in this family, so a negative about a substituted subject is a fabricated one
+    // — strictly worse than unhelpful.
+    //
+    // ONE RESOLUTION, TWO OUTCOMES: the same `knownFnNames` set and the same `matches` ladder decide
+    // zero and many, so the two cannot drift apart the way a second, parallel check would. Anchoring is
+    // already in `matchTier` (this engine has always had R497's first half), so an EXACT match resolves
+    // alone and is never refused.
+    {
+      const amb = ambiguousSelector(knownFnNames(cg, fns), fn);
+      if (amb) {
+        console.error(`candor-ts-query path: '${fn}' names ${amb.length} functions — refusing to answer `
+          + `about one of them. Re-run with the full name:\n  ${amb.join("\n  ")}`);
+        process.exit(2);
+      }
     }
     // ⟨0.32⟩ THE COMPLETENESS READER THIS VERB DID NOT HAVE (see `PATH_SOWHAT` above). `path: []` is the
     // determined negative here — *this function does not reach that effect* — and a hop through an unread
@@ -2500,6 +2548,8 @@ switch (cmd) {
     // fire AS-EFF-008 "no visible literal" on every report entry whose surface the wire does not carry.
     const gviol = evaluatePolicy(gwp.answerable,
                                  g.functions, {}, new Map(), new Set(), gnet, gwithhold, gunits);
+    // ⟨0.39⟩ see scan.mjs's twin — one printer, both verdict routes.
+    noteSyntheticHits(gviol);
     // Route the human output exactly as a scan does: to stderr whenever stdout carries the verdict
     // document, so `candor-ts-query gate … --json | jq` sees pure JSON.
     const gsay = (json || gateJsonPath === "-") ? (l) => console.error(l) : (l) => console.log(l);
