@@ -20240,6 +20240,96 @@ export function viaUntyped(): void { const o = { run(): void { Math.random() } }
           JSON.stringify(ur.functions.map((e) => [e.fn, e.inferred])));
 }
 
+// ── SOUNDNESS R531 — A CALL TO A FUNCTION-VALUED MEMBER OF AN UNTYPED OBJECT LITERAL WAS SILENT ────
+//
+// `const u = { roll: (n: number) => Math.random() * n }` has no contextual type, so it never reached
+// `mintStructuralMembers` and its members got no unit. `realDecl` then unwrapped `u.roll` straight to
+// the ArrowFunction, and the call walk waves an arrow through — *"its body is visible and already
+// walked lexically"*. TRUE OF THE ARROW'S LEXICAL OWNER, FALSE OF THE CALLER: the body's `Rand` sits on
+// `<module>`, the caller gets no edge, no effect and no `Unknown`, and so is ABSENT from `functions[]`
+// — SPEC §2 rule 3's affirmative purity claim over code this engine read and charged one unit over.
+//
+// NOT AN R519 REGRESSION: byte-identical on published v0.38.3, v0.39.0, v0.39.1 and at HEAD before this
+// fix. `deny Rand viaArrow` exits 0 while `deny Rand viaPlainFn` — the same body reached through an
+// ordinary function — exits 1, on one file, one package, no chain.
+//
+// THE SPELLING ASYMMETRY IS WHY IT SURVIVED: `{ roll(n){…} }` — method SHORTHAND on the SAME untyped
+// literal — is a MethodDeclaration, misses the arrow arm, and discloses an honest
+// `Unknown[callback:roll]`. One literal, two spellings, one loud and one silent; the loud one is what
+// anybody looking at this construct would have written first. The `method` arm below is therefore a
+// PRECISION row, not a soundness row: it moves `Unknown` -> the concrete effect.
+//
+// EVERY ARM IS ONE TEMPLATE WITH ONE SUBSTITUTION, with a PURE twin beside it — a fix that charged on
+// sight would pass the first half and fail the second.
+if (blk()) {
+  // Each SHAPE declares `u` and calls it from `viaArrow`. `SINK` is the only thing that varies between
+  // the effectful and pure runs.
+  const SHAPE = {
+    arrow:      `const u = { roll: (n: number): number => { SINK; return n } };`,
+    fnexpr:     `const u = { roll: function (n: number): number { SINK; return n } };`,
+    method:     `const u = { roll(n: number): number { SINK; return n } };`,
+    asConst:    `const u = { roll: (n: number): number => { SINK; return n } } as const;`,
+    exported:   `export const u = { roll: (n: number): number => { SINK; return n } };`,
+    nested:     `const outer = { inner: { roll: (n: number): number => { SINK; return n } } }; const u = outer.inner;`,
+    factory:    `function make() { return { roll: (n: number): number => { SINK; return n } } } const u = make();`,
+  };
+  const armOf = (shape, sink) => {
+    const dir = project({
+      "package.json": `{"name":"r531","version":"1.0.0"}`,
+      "src/index.ts": `${SHAPE[shape].replace("SINK", sink)}
+export function viaArrow(n: number): number { return u.roll(n) }
+function plain(n: number): number { SINK2; return n }
+export function viaPlainFn(n: number): number { return plain(n) }`.replace("SINK2", sink),
+    });
+    const { report } = scan(dir);
+    fs.writeFileSync(path.join(dir, "policy.candor"), "deny Rand viaArrow\n");
+    const g = spawnSync("node", [path.join(HERE, "scan.mjs"), dir, "--policy", path.join(dir, "policy.candor")],
+                        { encoding: "utf8" });
+    return { report, gate: g.status, row: entry(report, "src.index.viaArrow"),
+             control: entry(report, "src.index.viaPlainFn") };
+  };
+  for (const shape of Object.keys(SHAPE)) {
+    const eff = armOf(shape, `Math.random()`);
+    check(`R531 [${shape}]: the CALLER of a function-valued literal member carries its effect`,
+          (eff.row?.inferred ?? []).includes("Rand"),
+          JSON.stringify([eff.row, (eff.report?.functions ?? []).map((e) => [e.fn, e.inferred])]));
+    check(`R531 GATE [${shape}]: \`deny Rand viaArrow\` exits 1 — measured 0 on v0.38.3, v0.39.0 and v0.39.1`,
+          eff.gate === 1, `gate=${eff.gate} ${JSON.stringify(eff.row)}`);
+    // THE CONTROL THAT MAKES THE ROW ABOVE MEAN SOMETHING: the identical body reached through an
+    // ordinary function has ALWAYS been charged. Without it, an engine that lost both would look the
+    // same as one that fixed neither — and it is the arm that proves the fixture's SINK really performs
+    // Rand rather than the assertion passing on a typo.
+    check(`R531 CONTROL [${shape}]: the same body through a plain function was, and stays, charged`,
+          (eff.control?.inferred ?? []).includes("Rand"), JSON.stringify(eff.control));
+    // THE PURE TWIN. No fabrication: a literal member that does nothing must leave its caller ABSENT
+    // from `functions[]` — not merely un-Rand'd, and not hedged to `Unknown`. This is the arm that
+    // rejects the alternative fix (disclose `Unknown` at the call site whenever the arrow is not
+    // lexically inside the caller), which was measured to charge `Unknown` for `{ twice: (n) => n * 2 }`.
+    const pure = armOf(shape, `void 0`);
+    check(`R531 PRECISION [${shape}]: a PURE literal member leaves its caller absent — no row, no hedge`,
+          pure.row === undefined && pure.gate === 0,
+          `gate=${pure.gate} ${JSON.stringify(pure.report?.functions)}`);
+  }
+  // THE SHAPES THAT MUST NOT MOVE. Widening the mint reaches every object literal in the program, so
+  // the two positions where an ObjectLiteralExpression is NOT a value get their own rows. The
+  // destructuring-assignment target is not hypothetical: it is what went red on the first build of this
+  // fix, because the alias arm resolved `count: c.count` to the ACCESSOR unit and `enclosing()` then
+  // stopped there, moving the setter invocation off the function that performs it.
+  const guards = project({
+    "package.json": `{"name":"r531b","version":"1.0.0"}`,
+    "src/s.ts": `import * as fs from "node:fs";
+class C { #n = 0; get count() { return this.#n } set count(v: number) { fs.appendFileSync("/p", String(v)) } }
+export function destr(c: C) { ({ count: c.count } = { count: 7 }) }
+export function spread(c: C) { const o = { ...c, extra: 1 }; return o.extra }`,
+  });
+  const gr = scan(guards).report;
+  check("R531 GUARD: a destructuring-assignment TARGET literal still charges the setter to the assigning fn",
+        (entry(gr, "src.s.destr")?.inferred ?? []).includes("Fs"),
+        JSON.stringify(gr.functions.map((e) => [e.fn, e.inferred])));
+  check("R531 GUARD: a spread-only literal mints nothing and fabricates nothing",
+        entry(gr, "src.s.spread") === undefined, JSON.stringify(gr.functions.map((e) => [e.fn, e.inferred])));
+}
+
 // ── R507 / R497 — AN AMBIGUOUS FUNCTION SELECTOR IS REFUSED, NOT RESOLVED TO AN ARBITRARY ONE ──────
 // The asymmetry IS the defect: `path` and `impact` have refused at exit 2 for ZERO matches for a long
 // time, while SEVERAL matches were answered silently. MEASURED on this engine against HEAD before the

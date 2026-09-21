@@ -8,6 +8,96 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R531 — A CALL TO A FUNCTION-VALUED MEMBER OF AN UNTYPED OBJECT LITERAL WAS SILENT.**
+  A cardinal sin (silent under-report), **pre-existing and NOT an R519 regression**: byte-identical on
+  published v0.38.3, v0.39.0, v0.39.1 and at HEAD before this change.
+
+  `const u = { roll: (n: number) => Math.random() * n }` has no contextual type, so it never reached
+  `mintStructuralMembers` and its members got no unit. `realDecl` then unwrapped `u.roll` straight to the
+  ArrowFunction, and the call walk waves an arrow through — *"its body is visible and already walked
+  lexically"*. **True of the arrow's LEXICAL owner, false of the CALLER**: the body's `Rand` sits on
+  `<module>`, the caller gets no edge, no effect and no `Unknown`, and so is ABSENT from `functions[]` —
+  SPEC §2 rule 3's affirmative purity claim over a body this engine had read and charged one unit over.
+
+  MEASURED, one file, one package, no chain: `deny Rand src.index.A1` **exit 0** while
+  `deny Rand src.index.A8` — the same body reached through an ordinary function — exits 1, and the
+  envelope says `analyzed: {count: 15}` with no `unanalyzed`, so the absence is the strongest form of
+  the claim. Seven spellings: arrow and function-expression initializers, `as const`, a nested two-hop
+  literal, an exported literal, a factory-returned literal, and an untyped-parameter caller.
+
+  **THE SPELLING ASYMMETRY IS WHY IT SURVIVED.** `{ roll(n){…} }` — method SHORTHAND on the very same
+  untyped literal — is a MethodDeclaration, misses that arm, and discloses an honest
+  `Unknown[callback:roll]`. One literal, two spellings, one loud and one silent.
+
+  **THE FIX IS TWO HALVES AND NEITHER WORKS ALONE**: `mintStructuralMembers` now runs for every object
+  literal rather than only a contextually-typed one, and the call site resolves an arrow/function-
+  expression to the `nodeName` minted on the PROPERTY that holds it (resolution arrives at the
+  initializer; the mint is keyed one node up). Widening the mint alone leaves the sin open — measured.
+  **Minting is safe to widen only because ⟨R519⟩ made it ADDITIVE**: without the containment edge this
+  would have moved the body of every `{ onClick: () => … }` out of its enclosing function, which is
+  R519's own defect multiplied. The alias arm (`go: other.method`) is DELIBERATELY not widened —
+  `({ count: c.count } = { count: 7 })` is an object literal in destructuring-TARGET position, and
+  aliasing its property to the accessor unit moved a setter invocation off the function performing it
+  (test.mjs `[32]`, red on the first build of this fix).
+
+  **FAILURE DIRECTION: PRECISION-POSITIVE, not over-charge** — it resolves rather than hedges. The
+  method-shorthand spelling goes `Unknown` → the concrete effect, and a PURE member's caller stays
+  ABSENT (the pure twin beside every arm). The rejected alternative — disclose `Unknown` at the call
+  site whenever the arrow is not lexically inside the caller — closes the same silence and was measured
+  to charge `Unknown` to a caller of `{ twice: (n) => n * 2 }`: closing a silence by flooding the other
+  channel, the trade ⟨0.39⟩'s cost model forbids.
+
+  **A/B — `bin/corpus-ab.py`, 47 real entries** (7 TS corpus clones + 40 npm packages, the same list
+  R519 was measured on), PRE = **published candor-ts 0.39.1 from npm** (byte-identical to HEAD's
+  `scan.mjs`, checked), key entry+package+fn+hash over a multiset of wide row values:
+
+      v0.39.1 -> fix    ADDED 92    REMOVED 0    CHANGED 39    (inferred-only: +92 -0 ~1)
+
+  All 92 added rows are new `<structural>@<pos>.<member>` units. **No row lost an effect**: of the 39
+  changed rows, 12 lose a value from `direct` and gain it back through `calls` (the body is now its own
+  unit and reaches the enclosing one by the ⟨R519⟩ containment edge — `inferred` is untouched on every
+  one), 20 lose `callback:` reasons that now RESOLVE, and exactly one row changes `inferred`:
+  `bson#src.utils.web_byte_utils.webMathRandomBytes` goes `['Rand','Unknown']` → `['Rand']`.
+  **Ground-truthed from bson's source, not from candor**: that `Unknown` was
+  `webByteUtils.fromNumberArray(...)`, whose body is `return Uint8Array.from(array)` — genuinely pure.
+
+  **REACH, instrumented rather than inferred, and reported in BOTH directions because they differ.**
+  Post-arm probe (`CANDOR_R531_REACH=1`) on the branch that repairs the caller: **1 hit / 1 entry**.
+  So the same corpus was also instrumented on the PRE engine at the exact silent condition (an
+  arrow/function-expression call whose lexical owner is not the caller): **14 call sites across 7
+  callers in 3 published packages** — cheerio `src.api.traversing`, bson `src.parser.utils.isUint8Array`
+  and `src.extended_json.serializeDocument`, hono `Hono.route`/`Hono.dispatch`. Every one of those 14
+  resolves to a PURE member, so **no shipped verdict on this corpus moves**; the fixture is the whole of
+  the verdict evidence, and that is stated here rather than discovered later.
+
+  **AND THE AUDIT BOUNDARY IS WIDER THAN THE FIX — see SOUNDNESS R531b, reported and NOT closed here.**
+  Those 14 real sites are a DIFFERENT route to the same waiver: an arrow or function expression
+  *returned* from an IIFE or a factory and stored in a const (`const g = (() => (n) => …)(); g(n)`).
+  Its enclosing unit is the factory, not the caller, it is not an object-literal property, and this fix
+  does not reach it. MEASURED at HEAD after this change: `deny Rand src.index.C1` still **exit 0** while
+  the plain arrow-const twin `deny Rand src.index.C4` exits 1.
+
+  Gates: `npm test` (2896 assertions / 8 shards, + mcp 223, lsp 129, watch 16, probe, fuzz 25),
+  `npm run test:transitive-recall`, `ci/self-gate.sh`, `check.mjs` against candor-spec's
+  `expected.json`. The R531 block's 37 assertions were written FIRST and watched fail against the
+  published pre-fix engine — 15 red, including all 7 GATE rows.
+
+- **`check.mjs` COULD PASS VACUOUSLY, IN TWO WAYS.** Found by asking §H of the one checker in this repo
+  that CI runs against candor-spec's oracle: *what does it print when the thing it aggregates over is
+  EMPTY?* It printed `0 cases, 0 mismatch(es)` and exited **0** — indistinguishable from a full green
+  run — for any `expected.json` that parses but declares no non-`_` case. And it paired report rows to
+  oracle cases with `new Map(fns.map(…))` on the BARE LEAF NAME, so two units spelling one leaf silently
+  kept the last; the constructor form cannot see the collision it is performing. Both now REFUSE at
+  **exit 2** — a setup error, deliberately not 1, because a wrong oracle and a wrong engine want
+  different repairs.
+
+  CALIBRATED, with the red lines from the UNFIXED checker rather than a claim: `{}` as the oracle →
+  **old exit 0, new exit 2**; an oracle holding only `_`-prefixed keys → **old 0, new 2**; a NEAR-MISS
+  collision (a second `…sched` row carrying the SAME effects, so nothing downstream looks different) →
+  **old 0, new 2**. Controls: a real effect mismatch still exits **1** and prints `MISMATCH`, and the
+  live pair still reports `26 cases, 0 mismatch(es)` at exit 0. `Cases.ts` has **zero** duplicated leaf
+  names today, so the collision arm is latent, not live — stated rather than left to be assumed.
+
 ## [0.39.1] — 2026-09-21
 
 - ⚠ **SOUNDNESS R519 — MINTING A STRUCTURAL MEMBER MOVED ITS BODY OUT OF THE ENCLOSING UNIT, AND THE

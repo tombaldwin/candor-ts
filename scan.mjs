@@ -4608,7 +4608,18 @@ function contextualInterfaceDeclsFor(node, depth = 0) {
 // (ObjectLiteralExpression's `.properties` or a ClassExpression's `.members` — both walked generically,
 // same shape as the nominal branch's own `cls.members`). Position-keyed, like `decoratorArgUnit` /
 // `staticBlockUnit` above — two structural implementors in one file must not collide.
-function mintStructuralMembers(container) {
+// ⟨SOUNDNESS R531⟩ `bodiesOnly` — mint the members whose BODY is written here, and take no position on
+// the members that merely REFERENCE a function declared elsewhere. The alias arm at the bottom of this
+// function sets `nodeName` to an EXISTING unit, which makes `enclosing()` stop at that property; that is
+// right when the literal is a structural IMPLEMENTOR (a dispatch on the abstraction has to land
+// somewhere) and wrong for a bare literal in any other position. MEASURED, and it is not hypothetical:
+// `({ count: c.count } = { count: 7 })` parses as an ObjectLiteralExpression in DESTRUCTURING-TARGET
+// position, its `count: c.count` alias resolves to the accessor unit `C.count`, and the setter
+// invocation the assignment performs was then attributed to the ACCESSOR instead of to the function
+// containing the assignment — test.mjs `[32]` went red on the first build of this fix, which is the
+// only reason the arm is split. Body-minting cannot do that: a unit minted from a body it owns moves
+// no effect that was not already inside it.
+function mintStructuralMembers(container, bodiesOnly = false) {
   const sf = container.getSourceFile();
   const mod = moduleOf(sf);
   const members = container.properties ?? container.members ?? [];
@@ -4634,6 +4645,7 @@ function mintStructuralMembers(container) {
     // result, a conditional, an opaque holder), is left UNRESOLVED — `nodeName.has(prop)` stays false, so
     // the dispatch site's `allResolved` gate reads this implementor as incomplete and forces Unknown: the
     // disjunction's (b) arm, never silence.
+    if (bodiesOnly) continue; // ⟨R531⟩ see the header — aliasing is an implementor's privilege, not a literal's
     const bound = unwrapBind(init);
     const ref = bound ? bound.ref : ((ts.isIdentifier(init) || ts.isPropertyAccessExpression(init)) ? init : null);
     if (ref) {
@@ -4708,11 +4720,44 @@ for (const sf of sources) {
     // never structurally satisfy an interface with any member on its own.
     if (ts.isObjectLiteralExpression(node) && node.properties.length > 0) {
       const decls = contextualInterfaceDeclsFor(node);
-      if (decls.local.length || decls.foreign.length) {
-        for (const d of decls.local) registerStructuralImpl(d, node);
-        for (const d of decls.foreign) registerForeignStructuralImpl(d, node);
-        mintStructuralMembers(node);
-      }
+      for (const d of decls.local) registerStructuralImpl(d, node);
+      for (const d of decls.foreign) registerForeignStructuralImpl(d, node);
+      // ⟨SOUNDNESS R531⟩ MINT THE MEMBERS OF EVERY OBJECT LITERAL, not only of a contextually-typed one.
+      //
+      // Minting used to be gated on the literal matching some interface, because minting existed only to
+      // give a DISPATCH somewhere to land. But a minted unit is also the only thing a DIRECT call on the
+      // literal — `const u = { roll: (n) => Math.random() }; u.roll(n)` — can resolve to, and an untyped
+      // literal never reached here. The resolution then landed on the ARROW ITSELF, which the call site
+      // waves through as "already walked lexically" (see the `isArrowFunction` arm in the call walk): true
+      // of the arrow's LEXICAL owner, false of the CALLER. So the caller vanished from `functions[]`
+      // entirely — SPEC §2 rule 3's positive purity claim over a body this engine had read and charged
+      // one unit over.
+      //
+      // MEASURED at v0.38.3, v0.39.0, v0.39.1 and HEAD alike (so NOT an R519 regression): with
+      // `const a = { roll: (n: number) => Math.floor(Math.random() * n) }`, `function A1(n) { return
+      // a.roll(n) }` is ABSENT from `functions[]` and `deny Rand src.index.A1` exits 0 while
+      // `deny Rand src.index.A8` — the same body reached through a plain function — exits 1. Seven
+      // spellings: arrow and function-expression initializers, `as const`, a nested two-hop literal, an
+      // exported literal, a factory-returned literal, and the untyped-parameter caller.
+      //
+      // THE SPELLING ASYMMETRY IS THE TELL, and it is why this was invisible: `{ roll(n){…} }` — method
+      // SHORTHAND on the very same untyped literal — is a MethodDeclaration, not an arrow, so it misses
+      // that arm and discloses an honest `Unknown[callback:roll]`. One literal, two spellings, one loud
+      // and one silent.
+      //
+      // MINTING IS SAFE TO WIDEN ONLY BECAUSE ⟨R519⟩ MADE IT ADDITIVE. Before `mintPositionalStructuralUnit`
+      // gained its containment edge, extending minting to every literal would have MOVED the body of every
+      // `{ onClick: () => … }` out of its enclosing function — R519's own defect, multiplied. The
+      // containment edge is what makes this monotone-up: the enclosing unit keeps the charge, and the
+      // caller gains a unit to resolve to.
+      //
+      // FAILURE DIRECTION: PRECISION-POSITIVE, not over-charge. This resolves rather than hedges — the
+      // method-shorthand spelling goes `Unknown` -> the concrete effect, and a PURE member's caller stays
+      // ABSENT (asserted as the `P1`/pure twin in the R531 block). The rejected alternative was to disclose
+      // `Unknown` at the call site whenever the arrow is not lexically inside the caller; it closes the
+      // same silence and was MEASURED to charge `Unknown` to a caller of `{ twice: (n) => n * 2 }`, which
+      // is closing a silence by flooding the other channel — the trade ⟨0.39⟩'s cost model forbids.
+      mintStructuralMembers(node, !(decls.local.length || decls.foreign.length));
     } else if (ts.isClassExpression(node)) {
       // Explicit `implements` on an anonymous/named class EXPRESSION — the nominal branch above only
       // ever visits `ts.isClassDeclaration`, so `held = new (class implements Task { go(){…} })()`
@@ -7303,7 +7348,24 @@ function visitCalls(node) {
           }
         }
         if (mod === "<local>") {
-          const targetName = nodeName.get(decl);
+          // ⟨SOUNDNESS R531⟩ THE MINTED UNIT IS KEYED ON THE PROPERTY, AND RESOLUTION ARRIVES AT THE
+          // INITIALIZER. `mintStructuralMembers` sets `nodeName` on the PropertyAssignment/
+          // PropertyDeclaration, but `realDecl` unwraps `a.roll` straight to the ArrowFunction that
+          // initialises it — so the lookup above missed by exactly one node and the call fell into the
+          // arrow arm below, which charges the caller nothing. Widening the mint without this line
+          // leaves the sin open (measured: the R531 arms stayed ABSENT), so the two halves are one fix.
+          // Narrow by construction: only an arrow/function-expression sitting DIRECTLY in a property, and
+          // only a `nodeName` entry that already exists — no unit is invented here.
+          const mintedOnProp = nodeName.get(decl) ? undefined
+            : (((ts.isArrowFunction(decl) || ts.isFunctionExpression(decl)) && decl.parent
+                && (ts.isPropertyAssignment(decl.parent) || ts.isPropertyDeclaration(decl.parent)))
+               ? nodeName.get(decl.parent) : undefined);
+          // REACH PROBE, env-gated, same contract as ⟨R519⟩'s above: a byte-identical A/B over a corpus
+          // that cannot reach the changed branch is the most flattering number available and the least
+          // informative. `CANDOR_R531_REACH=1` makes THIS branch — the one that turns a silent caller
+          // into a charged one — announce itself so `bin/corpus-ab.py --mark` can count it.
+          if (mintedOnProp && process.env.CANDOR_R531_REACH) console.error(`R531-REACH ${owner} -> ${mintedOnProp}`);
+          const targetName = nodeName.get(decl) ?? mintedOnProp;
           if (targetName) {
             rec.edges.add(targetName); // (EDGE) — cross-FILE edges resolve the same way
             // Class-CHA fan-out: resolution landed on a base-class member that LOCAL subclasses
