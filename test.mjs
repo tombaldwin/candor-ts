@@ -5996,6 +5996,28 @@ if (blk()) {
         callersFrontier(cg, fns2, hier, "m.Sink.touch").possibleViaUnknownDispatch.length === 0, "");
   check("frontier: no hierarchy -> simple-name match over-lists (safe lower-bound direction)",
         callersFrontier(cg, fns2, {}, "m.Sink.touch").possibleViaUnknownDispatch.length === 1, "");
+  // ⟨0.39⟩ A SYNTHETIC `interfaceUnion` ENTRY IS NOT A POSSIBLE CALLER — it is the CHA union over an
+  // abstraction member's implementors, a bodiless declaration that cannot call anything. Un-gating ⟨0.23⟩
+  // made these entries DEFAULT rather than opt-in, and this arm keys on `dispatch:OWNER.M`, which such an
+  // entry carries by design, so it named the declaration beside the dispatcher.
+  //
+  // WRITTEN BECAUSE THE FIX (`1884ecb`) SHIPPED WITH NO TEST IN THIS REPO. The revert test was run rather
+  // than reasoned: with `if (f.interfaceUnion) continue` removed, the whole 2,896-assertion suite stayed
+  // GREEN — its only claimed coverage was candor-spec's four-way frontier differential, which is a
+  // different repo and a different instrument. NEAR-MISS by construction: the synthetic row is
+  // byte-identical to `m.Frontier.go` above except for the one field under test, so an implementation
+  // that filtered on anything else would still fail it.
+  const fnsU = [{ fn: "m.Base.run", unknownWhy: ["dispatch:m.Base.run"], interfaceUnion: true },
+                { fn: "m.Impl.run", unknownWhy: [] }];
+  const rU = callersFrontier(cg, fnsU, hier, "m.Sink.touch");
+  check("frontier: a synthetic interfaceUnion entry is NOT listed as a possible caller (it has no body)",
+        rU.possibleViaUnknownDispatch.length === 0, JSON.stringify(rU.possibleViaUnknownDispatch));
+  // …AND THE CONTROL, so the row above cannot pass because the frontier lists nothing at all: the same
+  // row WITHOUT the flag is a real unit and IS disclosed.
+  const fnsR = [{ fn: "m.Base.run", unknownWhy: ["dispatch:m.Base.run"] }, { fn: "m.Impl.run", unknownWhy: [] }];
+  check("frontier CONTROL: the same row without `interfaceUnion` is a real unit and IS disclosed",
+        callersFrontier(cg, fnsR, hier, "m.Sink.touch").possibleViaUnknownDispatch.length === 1,
+        JSON.stringify(callersFrontier(cg, fnsR, hier, "m.Sink.touch").possibleViaUnknownDispatch));
 }
 
 // ── frontier ⟨0.24⟩: a DOT-FREE `dispatch:` detail (§4 reserves it for a dispatch whose owner type could
