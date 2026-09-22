@@ -8,6 +8,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.39.2] — 2026-09-22
+
 - ⚠ **SOUNDNESS R531b — AN ARROW A CALL RESOLVES TO, THAT NO BINDING SITE EVER NAMED, WAS SILENT.**
   A cardinal sin (silent under-report), **pre-existing**: byte-identical on published v0.38.3, v0.39.0,
   v0.39.1 and at HEAD after the [[R531]] fix, so neither an R519 nor an R531 regression.
