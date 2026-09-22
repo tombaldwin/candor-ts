@@ -8,6 +8,69 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R531b — AN ARROW A CALL RESOLVES TO, THAT NO BINDING SITE EVER NAMED, WAS SILENT.**
+  A cardinal sin (silent under-report), **pre-existing**: byte-identical on published v0.38.3, v0.39.0,
+  v0.39.1 and at HEAD after the [[R531]] fix, so neither an R519 nor an R531 regression.
+
+  `const c = (() => (n: number) => Math.floor(Math.random() * n))(); function C(n) { return c(n) }` —
+  the checker resolves `c(n)` to the ARROW the IIFE returned, that arrow is nobody's initializer, so
+  `nodeName` has no entry and the call walk waves it through as *"its body is visible and already walked
+  lexically"*. True of the arrow's LEXICAL owner, **false of the CALLER**, which vanishes from
+  `functions[]` — SPEC §2 rule 3's affirmative purity claim. MEASURED on the published 0.39.1 engine:
+  `deny Rand src.lib.C1` **exit 0** while the byte-identical plain-`const` twin exits 1.
+
+  **FOUND IN REAL PUBLISHED CODE, NOT IN A FIXTURE**, and the 53-entry npm A/B moved real verdicts:
+  pino's `pino()` gains `Fs` through `createArgsNormalizer`'s returned `function normalizeArgs`
+  (ground-truthed from pino's own source: `normalizeArgs` → `buildSafeSonicBoom` → `new SonicBoom`), and
+  light-my-request's `Chain` gains `Net`+`Rand` through `Chain.prototype.end = function (…)` reached from
+  `process.nextTick(() => this.end())`. Also avvio's `Boot` (`Clock`,`Rand`) and three axios bin
+  functions (`Exec`).
+
+  **THE BOUNDARY IS THE WAIVER'S OWN CLAIM, NOT A LIST OF SPELLINGS** (§9 — an audit's boundary must not
+  be drawn around its trigger). A 30-spelling sweep on published v0.39.1 found **eight** silent:
+  IIFE→arrow, factory→arrow, IIFE→function-expression, a ternary selecting between two arrows,
+  `.bind()`, an array-literal element indexed at the call site, an arrow returned from a class method,
+  and an arrow round-tripped through a generic `id<T>(x: T): T`. All eight are one defect, because the
+  engine has one waiver; the fix keys on the PROPERTY ("resolution landed on an arrow/function-expression
+  no binding site minted"), so spellings nobody has written down are covered too — the corpus then
+  produced a ninth nobody had listed, `X.prototype.m = function (…)`.
+
+  **THE FIX**: a pre-pass resolves every CallExpression/TaggedTemplateExpression, and for a target that
+  is an un-unit'd arrow/function-expression in a project file mints a position-keyed `<callable>@N` unit
+  with ⟨R519⟩'s containment edge to its pre-mint attribution owner. **Not a blanket mint of every
+  closure**: an inline callback (`arr.map(x => …)`) is invoked by the CALLEE and resolved by no call in
+  this scan, and an IIFE written inside its own caller takes an explicit skip — there the waiver really
+  is true and the pre-fix engine was already right. Iterated to a FIXPOINT, because minting refines
+  `enclosing()` and a sibling's waiver can become false only after a container is minted.
+
+  **REMEDY (b) WAS BUILT AND MEASURED, NOT INHERITED FROM R531.** Disclosing `Unknown` at the call site
+  closes the silence in `functions[]` and **leaves `deny Rand C` at exit 0** — `Unknown` is not `Rand`, so
+  a scoped gate still passes over a real `Math.random()`. On the same 53 entries it recovered **zero**
+  concrete effects, charged `Unknown` to 63 previously-absent callers of which **24 resolve to provably
+  pure targets** (axios's `isStream`/`isThenable`/`toArray`/`isSpecCompliantForm`), and added a spurious
+  reason to 202 existing rows. Minting resolves where (b) hedges.
+
+  **A/B — 53 npm entries (7 corpus clones + 46 installed packages, `--allow-js`), PRE = HEAD before this
+  commit, POST = this commit: ADDED 121, REMOVED 0, CHANGED 248** (narrow `inferred` key: ADDED 121,
+  REMOVED 0, CHANGED 8). Removals audited in full: **the set is empty**, so no purity claim is
+  manufactured and no row lost an effect. Of the 248 changed, **8 gained a real effect and 0 gained
+  `Unknown`-only** — Unknown-gains and effect-gains counted separately on purpose, since merging them
+  hides a flood; the other 240 changed only `calls`/`unknownWhy`/`invisible` bookkeeping. Of the 121
+  added, 81 are the minted units (15 carrying a real effect) and 40 are callers that were previously
+  ABSENT. **REACH, both directions: the PRE engine instrumented at the silent condition reads 539 call
+  sites across 13 entries; the POST mint probe reads 111 across the same 13** (the PRE number counts call
+  SITES and the POST number counts distinct minted arrows — the larger one describes the defect).
+  `CANDOR_R531B_REACH=1` leaves the probe in the tree.
+
+  **CAUGHT BY AUDITING THE WIDE DIFF, NOT THE NARROW ONE**: the first build asked only
+  `nodeName.has(arrow)` and so minted a SECOND unit over a body ⟨R531⟩ had already minted — bson's
+  `src.extended_json.serializeDocument` went from calling `<structural>@10049.Binary` to calling
+  `<callable>@10057`, one body through two units, which is exactly the double count conformance PART 82
+  pins. `inferred` never moved; only the `calls` field did. The lookup is now spelled ONCE, as
+  `callTargetUnit`, shared by the pre-pass and the call walk.
+
+  Conformance PART 81, PART 82 (`count:1`, the R531 double-count pin) and PART 92 arm `c8` all unchanged.
+
 - ⚠ **SOUNDNESS R531 — A CALL TO A FUNCTION-VALUED MEMBER OF AN UNTYPED OBJECT LITERAL WAS SILENT.**
   A cardinal sin (silent under-report), **pre-existing and NOT an R519 regression**: byte-identical on
   published v0.38.3, v0.39.0, v0.39.1 and at HEAD before this change.

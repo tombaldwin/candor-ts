@@ -20416,6 +20416,102 @@ export function makesThing(): Thing { return new Thing() }`,
         JSON.stringify(rows));
 }
 
+// ── SOUNDNESS R531b — AN ARROW A CALL RESOLVES TO, THAT NO BINDING SITE EVER NAMED ────────────────
+//
+// [[R531]] closed the object-literal-PROPERTY route by minting the property. This is the same
+// `isArrowFunction` waiver one construct over, on a route with no property to key on:
+// `const c = (() => (n: number) => Math.random() * n)(); function C(n) { return c(n) }`. The checker
+// resolves `c(n)` to the ARROW the IIFE returned, that arrow is nobody's initializer, so `nodeName` has
+// no entry and the call walk waves it through as *"already walked lexically"* — true of the arrow's
+// LEXICAL owner (the module initializer) and false of the CALLER, which vanishes from `functions[]`.
+//
+// FOUND IN REAL PUBLISHED CODE, not in a fixture: all 14 silent sites the R531 reach probe recorded on
+// the 47-entry npm corpus were THIS shape, and the widened 53-entry A/B moved real verdicts — pino's
+// `pino()` gained `Fs` through `createArgsNormalizer`'s returned `function normalizeArgs`, and
+// light-my-request's `Chain` gained `Net` through `Chain.prototype.end = function (…)`.
+//
+// EIGHT SPELLINGS, ONE WAIVER. The sweep was deliberately not scoped to the IIFE that triggered the row
+// (§9): of 30 spellings measured on published v0.39.1, exactly these eight are silent, and they are one
+// defect because the engine has one waiver. So the arms below are the eight, each with a PURE twin that
+// must stay ABSENT and a plain-`const` CONTROL that was never silent.
+//
+// THE REJECTED ALTERNATIVE IS MEASURED HERE, NOT INHERITED. Remedy (b) — disclose `Unknown` at the call
+// site — was built and run: it closes the silence in `functions[]` and leaves `deny Rand C` AT EXIT 0,
+// because `Unknown` is not `Rand`. A scoped gate still passes over a real `Math.random()`. That is what
+// the GATE arm below pins, and it is why minting was chosen: only resolution makes the gate fire.
+if (blk()) {
+  const SHAPE = {
+    iifeArrow:   `const u = (() => (n: number): number => { SINK; return n })();`,
+    factory:     `function mk() { return (n: number): number => { SINK; return n } } const u = mk();`,
+    iifeFnExpr:  `const u = (function () { return function (n: number): number { SINK; return n } })();`,
+    ternary:     `const u = Date.now() > 0 ? (n: number): number => { SINK; return n } : (n: number): number => n;`,
+    bind:        `const u = (function (n: number): number { SINK; return n }).bind(null);`,
+    arrayElem:   `const arr = [(n: number): number => { SINK; return n }]; const u = arr[0];`,
+    methodRet:   `class K { make() { return (n: number): number => { SINK; return n } } } const u = new K().make();`,
+    genericId:   `function id<T>(x: T): T { return x } const u = id((n: number): number => { SINK; return n });`,
+  };
+  const armOf = (shape, sink) => {
+    const dir = project({
+      "package.json": `{"name":"r531b","version":"1.0.0"}`,
+      "src/index.ts": `${SHAPE[shape].replace("SINK", sink)}
+export function viaAnon(n: number): number { return u(n) }
+const plain = (n: number): number => { SINK2; return n };
+export function viaConstArrow(n: number): number { return plain(n) }`.replace("SINK2", sink),
+    });
+    const { report } = scan(dir);
+    fs.writeFileSync(path.join(dir, "policy.candor"), "deny Rand viaAnon\n");
+    const g = spawnSync("node", [path.join(HERE, "scan.mjs"), dir, "--policy", path.join(dir, "policy.candor")],
+                        { encoding: "utf8" });
+    return { report, gate: g.status, row: entry(report, "src.index.viaAnon"),
+             control: entry(report, "src.index.viaConstArrow"),
+             mod: entry(report, "src.index.<module>") };
+  };
+  for (const shape of Object.keys(SHAPE)) {
+    const eff = armOf(shape, `Math.random()`);
+    check(`R531b [${shape}]: the caller of an un-unit'd arrow carries its effect`,
+          (eff.row?.inferred ?? []).includes("Rand"),
+          JSON.stringify([eff.row, (eff.report?.functions ?? []).map((e) => [e.fn, e.inferred])]));
+    // THE ARM THAT REJECTS REMEDY (b). Disclosing `Unknown` here also makes the row appear, so a
+    // presence assertion alone cannot tell the two remedies apart — this one can: `Unknown` is not
+    // `Rand`, so the (b) build exits 0 on this exact policy (measured, on this exact fixture).
+    check(`R531b GATE [${shape}]: \`deny Rand viaAnon\` exits 1 — measured 0 on v0.38.3/v0.39.0/v0.39.1 AND on the Unknown-disclosing alternative`,
+          eff.gate === 1, `gate=${eff.gate} ${JSON.stringify(eff.row)}`);
+    check(`R531b CONTROL [${shape}]: the same body through a plain const arrow was, and stays, charged`,
+          (eff.control?.inferred ?? []).includes("Rand"), JSON.stringify(eff.control));
+    // ⟨R519⟩ CONTAINMENT, for a NON-PROPERTY parent. Minting must be an ADDITION: the unit that
+    // lexically owned the arrow's body keeps the effect. Without the edge this is R519 re-created one
+    // construct over, so it is asserted rather than assumed.
+    check(`R531b CONTAINMENT [${shape}]: the arrow's lexical owner keeps the effect the mint could have moved`,
+          (eff.mod?.inferred ?? []).includes("Rand"),
+          JSON.stringify(eff.report?.functions));
+    // THE PURE TWIN — no fabrication. A minted target that does nothing must leave its caller ABSENT,
+    // not hedged. (b) fails this arm too: it charges `Unknown` to a caller of a provably pure arrow,
+    // which is 24 of its 63 new rows on the 53-entry corpus.
+    const pure = armOf(shape, `void 0`);
+    check(`R531b PRECISION [${shape}]: a PURE anonymous target leaves its caller absent — no row, no hedge`,
+          pure.row === undefined && pure.gate === 0,
+          `gate=${pure.gate} ${JSON.stringify(pure.report?.functions)}`);
+  }
+  // THE SHAPES THAT MUST NOT MOVE — the waiver is TRUE for these, so nothing may be minted and nothing
+  // may change. An IIFE written inside the caller really has been walked into the caller, and an inline
+  // callback is invoked by the CALLEE and resolved by no call in this scan.
+  const quiet = project({
+    "package.json": `{"name":"r531bq","version":"1.0.0"}`,
+    "src/q.ts": `export function localIife(n: number): number { return (() => { Math.random(); return n })() }
+export function inlineCb(xs: number[]): number[] { return xs.map((x) => { Math.random(); return x }) }
+export function pureIife(n: number): number { return (() => n)() }`,
+  });
+  const qr = scan(quiet).report;
+  const anonUnits = (qr.functions ?? []).filter((e) => e.fn.includes("<callable>@"));
+  check("R531b QUIET: an IIFE inside its own caller mints nothing — the waiver is true there",
+        anonUnits.length === 0, JSON.stringify((qr.functions ?? []).map((e) => [e.fn, e.inferred])));
+  check("R531b QUIET: …and both callers keep exactly the effect they always had",
+        (entry(qr, "src.q.localIife")?.inferred ?? []).includes("Rand")
+        && (entry(qr, "src.q.inlineCb")?.inferred ?? []).includes("Rand")
+        && entry(qr, "src.q.pureIife") === undefined,
+        JSON.stringify((qr.functions ?? []).map((e) => [e.fn, e.inferred])));
+}
+
 // ── R507 / R497 — AN AMBIGUOUS FUNCTION SELECTOR IS REFUSED, NOT RESOLVED TO AN ARBITRARY ONE ──────
 // The asymmetry IS the defect: `path` and `impact` have refused at exit 2 for ZERO matches for a long
 // time, while SEVERAL matches were answered silently. MEASURED on this engine against HEAD before the

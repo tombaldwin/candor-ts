@@ -4671,6 +4671,25 @@ function mintStructuralMembers(container, bodiesOnly = false) {
     }
   }
 }
+/** ⟨SOUNDNESS R531⟩ THE MINTED UNIT IS KEYED ON THE PROPERTY, AND RESOLUTION ARRIVES AT THE
+ *  INITIALIZER. `mintStructuralMembers` sets `nodeName` on the PropertyAssignment/PropertyDeclaration,
+ *  but `realDecl` unwraps `a.roll` straight to the ArrowFunction that initialises it — so a plain
+ *  `nodeName.get(decl)` misses by exactly one node. Spelled ONCE, because ⟨R531b⟩'s pre-pass has to ask
+ *  the SAME question the call walk asks ("can this decl already be resolved to a unit?") and two
+ *  spellings of one fact is how this file has been bitten before (§G). MEASURED: the first build of
+ *  R531b asked only `nodeName.has(arrow)` and so minted a SECOND unit over a body R531 had already
+ *  minted — bson's `src.extended_json.serializeDocument` went from calling `<structural>@10049.Binary`
+ *  to calling `<callable>@10057`, one body through two units, which is exactly the double count
+ *  conformance PART 82 pins. Narrow by construction: only an arrow/fn-expression sitting DIRECTLY in a
+ *  property, and only a `nodeName` entry that already exists — no unit is invented here. */
+function callTargetUnit(decl) {
+  const direct = nodeName.get(decl);
+  if (direct) return direct;
+  if ((ts.isArrowFunction(decl) || ts.isFunctionExpression(decl)) && decl.parent
+      && (ts.isPropertyAssignment(decl.parent) || ts.isPropertyDeclaration(decl.parent)))
+    return nodeName.get(decl.parent);
+  return undefined;
+}
 function mintPositionalStructuralUnit(mod, sf, prop, name) {
   const qual = `${mod}.<structural>@${prop.getStart()}.${name}`;
   if (!fns.has(qual)) {
@@ -7387,18 +7406,11 @@ function visitCalls(node) {
           }
         }
         if (mod === "<local>") {
-          // ⟨SOUNDNESS R531⟩ THE MINTED UNIT IS KEYED ON THE PROPERTY, AND RESOLUTION ARRIVES AT THE
-          // INITIALIZER. `mintStructuralMembers` sets `nodeName` on the PropertyAssignment/
-          // PropertyDeclaration, but `realDecl` unwraps `a.roll` straight to the ArrowFunction that
-          // initialises it — so the lookup above missed by exactly one node and the call fell into the
-          // arrow arm below, which charges the caller nothing. Widening the mint without this line
-          // leaves the sin open (measured: the R531 arms stayed ABSENT), so the two halves are one fix.
-          // Narrow by construction: only an arrow/function-expression sitting DIRECTLY in a property, and
-          // only a `nodeName` entry that already exists — no unit is invented here.
-          const mintedOnProp = nodeName.get(decl) ? undefined
-            : (((ts.isArrowFunction(decl) || ts.isFunctionExpression(decl)) && decl.parent
-                && (ts.isPropertyAssignment(decl.parent) || ts.isPropertyDeclaration(decl.parent)))
-               ? nodeName.get(decl.parent) : undefined);
+          // ⟨SOUNDNESS R531⟩ the property mint is keyed one node ABOVE the arrow resolution lands on;
+          // `callTargetUnit` is that lookup, spelled once and shared with ⟨R531b⟩'s pre-pass (see its
+          // docstring). Widening the mint without this line leaves the sin open — measured: the R531
+          // arms stayed ABSENT — so the two halves are one fix.
+          const mintedOnProp = nodeName.get(decl) ? undefined : callTargetUnit(decl);
           // REACH PROBE, env-gated, same contract as ⟨R519⟩'s above: a byte-identical A/B over a corpus
           // that cannot reach the changed branch is the most flattering number available and the least
           // informative. `CANDOR_R531_REACH=1` makes THIS branch — the one that turns a silent caller
@@ -9000,6 +9012,112 @@ function visitCalls(node) {
     }
   }
   ts.forEachChild(node, visitCalls);
+}
+/** ⟨SOUNDNESS R531b⟩ AN ARROW A CALL RESOLVES TO, THAT NO BINDING SITE EVER NAMED.
+ *
+ * ⟨R531⟩ closed the OBJECT-LITERAL-PROPERTY route by minting the property. This is the same silence one
+ * construct over, and it has no property to key on: `const c = (() => (n: number) => Math.random()*n)();
+ * function C(n){ return c(n) }` — the checker resolves `c(n)` to the ARROW returned by the IIFE, that
+ * arrow is nobody's initializer, so `nodeName` has no entry and the call walk's last `else if` waves it
+ * through on the grounds that "its body is visible and already walked lexically". That is true of the
+ * arrow's LEXICAL owner (here the module initializer) and FALSE of the caller, which then vanishes from
+ * `functions[]` entirely — SPEC §2 rule 3's positive purity claim over a body this engine read and
+ * charged one unit over. MEASURED byte-identical on published v0.38.3, v0.39.0, v0.39.1 and HEAD, so
+ * pre-existing, not an R519/R531 regression; `deny Rand src.lib.C1` exits 0 while the same body reached
+ * through a plain `const c4 = (n) => …` exits 1.
+ *
+ * THE BOUNDARY IS THE WAIVER'S OWN CLAIM, NOT A LIST OF SPELLINGS. The audit was deliberately not drawn
+ * around the IIFE that triggered it: a sweep of twenty-three spellings on the published engine found the
+ * identical silence in EIGHT — IIFE→arrow, factory→arrow, IIFE→function-expression, a ternary selecting
+ * between two arrows, `.bind()`, an array-literal element indexed at the call site, an arrow returned
+ * from a class method, and an arrow round-tripped through a generic identity `id<T>(x: T): T`. They are
+ * one defect, because the engine has one waiver, and the general property is "resolution landed on an
+ * arrow/function-expression node that no binding site minted". So the condition here is that property —
+ * every spelling that produces it is covered, including ones nobody has written down yet.
+ *
+ * WHEN THE WAIVER IS TRUE WE DO NOTHING. `enclosing(fn.parent)` is the unit the arrow's body is ALREADY
+ * charged to; when that is the caller's own unit, the caller really has the effects and there is no
+ * silence to close — a plain `(() => { … })()` IIFE inside a function is exactly this, and minting it
+ * would add a report row for no gain. Skipping is safe in the direction that matters: the skipped case is
+ * the one where the pre-fix engine was already correct.
+ *
+ * (a) MINT, NOT (b) DISCLOSE `Unknown` — and this was measured, not inherited. R531's rejected
+ * alternative (charge the caller `Unknown` whenever the arrow is not lexically inside it) was measured to
+ * flood there, and a DIFFERENT route is not entitled to that result. Re-measured for this route on the
+ * 47-entry npm corpus: of the call sites reaching this branch, the overwhelming majority resolve to a
+ * PURE arrow, so (b) would charge `Unknown` to callers whose target this engine can see is pure —
+ * closing a silence by flooding the other channel, the trade ⟨0.39⟩'s cost model forbids. Minting
+ * RESOLVES instead: a pure target leaves the caller absent exactly as before, an effectful one charges
+ * the concrete effect.
+ *
+ * MINTING IS ADDITIVE ONLY BECAUSE OF ⟨R519⟩'s CONTAINMENT EDGE, AND THAT STILL HOLDS FOR A NON-PROPERTY
+ * PARENT — it was CHECKED, not assumed, because if it did not hold this would be R519 re-created. R519's
+ * edge is `enclosing(prop.parent) -> minted`; the only thing it needs of the parent is that `enclosing`
+ * can answer for it, and `enclosing` answers for ANY node (it falls through to `moduleUnit` at the
+ * SourceFile). Here the owner is read BEFORE `nodeName.set`, so it is the pre-mint attribution owner by
+ * construction, and the edge gives that owner everything the mint would otherwise have moved out of it.
+ * Asserted directly in test.mjs's R531b block (`viaEnclosing`): the module initializer keeps its `Rand`
+ * after the mint.
+ *
+ * FAILURE DIRECTION: PRECISION-POSITIVE, and additive. No effect is removed from any unit, so no firing
+ * gate can go green; the report gains one row per arrow some call actually resolves to. It is NOT a
+ * blanket mint of every closure — an inline callback (`arr.map(x => …)`) is invoked by the CALLEE, never
+ * resolved by a call in this scan, so it is not a candidate and stays charged to its lexical owner.
+ * ⟨R64⟩'s decorator-argument position, which is what PART 82 pins, is likewise untouched: TypeScript
+ * gives no way to name a decorator argument's closure, so no call resolves to one, and the only closure
+ * there that IS called — an IIFE — takes the waiver-true skip above. PART 82's `count:1` is asserted
+ * unchanged.
+ *
+ * FIXPOINT, because the predicate reads `enclosing` and minting REFINES it. Minting arrow B can change
+ * the owner of a call that resolves to a sibling arrow A from "the shared lexical owner" to B — at which
+ * point A's waiver is no longer true and A must be minted too, or B under-reports A's effects. One pass
+ * in document order is not enough to see that, and the monotonicity (owners only ever get finer, the
+ * candidate set only shrinks) makes the loop terminate in the number of candidates. */
+function mintCallTargetUnit(fn) {
+  const sf = fn.getSourceFile();
+  const local = `<callable>@${fn.getStart()}`;
+  const qual = `${moduleOf(sf)}.${local}`;
+  const owner = enclosing(fn.parent); // BEFORE the nodeName.set below — the PRE-mint attribution owner
+  if (!fns.has(qual)) {
+    const { line, character } = sf.getLineAndCharacterOfPosition(fn.getStart());
+    fns.set(qual, { local, direct: new Set(), fsKinds: new Set(), edges: new Set(), hosts: new Set(),
+                    tables: new Set(), cmds: new Set(), paths: new Set(), blind: new Set(),
+                    incomplete: new Set(), dispatch: new Set(), why: new Set(), entry: false,
+                    loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}`,
+                    endLine: sf.getLineAndCharacterOfPosition(fn.getEnd()).line + 1 });
+  }
+  nodeName.set(fn, qual);
+  // ⟨R519⟩ CONTAINMENT — minting is an ADDITION, never a MOVE. Same edge, same reason, non-property parent.
+  if (owner && owner !== qual) fns.get(owner)?.edges.add(qual);
+  // REACH PROBE, env-gated, same contract as ⟨R519⟩'s and ⟨R531⟩'s. "CHANGED 0" and "the branch never
+  // ran" print identically; `bin/corpus-ab.py --mark` counts this rather than anyone inferring it later.
+  if (process.env.CANDOR_R531B_REACH) console.error(`R531B-REACH ${owner} -> ${qual}`);
+  return qual;
+}
+{
+  const cands = [];
+  for (const sf of sources) (function findAnonCallTargets(n) {
+    if (ts.isCallExpression(n) || ts.isTaggedTemplateExpression(n)) {
+      let d; try { d = checker.getResolvedSignature(n)?.declaration; } catch { d = undefined; }
+      if (d && (ts.isArrowFunction(d) || ts.isFunctionExpression(d)) && d.body
+          && projectFiles.has(path.resolve(d.getSourceFile().fileName)))
+        cands.push({ call: n, fn: d });
+    }
+    ts.forEachChild(n, findAnonCallTargets);
+  })(sf);
+  for (let round = 0; round <= cands.length; round++) {
+    const mint = [];
+    for (const c of cands) {
+      // ASK THE AUTHORITY: anything the call walk can already resolve — including ⟨R531⟩'s
+      // property mint, which is keyed one node ABOVE this arrow — must not be minted again.
+      if (callTargetUnit(c.fn)) continue;
+      if (enclosing(c.fn.parent) === enclosing(c.call)) continue; // the waiver is TRUE here — already walked into the caller
+      mint.push(c.fn);
+    }
+    if (!mint.length) break;
+    mint.sort((a, b) => a.getStart() - b.getStart()); // outer before inner: a nested mint must see its container's unit
+    for (const fn of mint) if (!callTargetUnit(fn)) mintCallTargetUnit(fn);
+  }
 }
 for (const sf of sources) visitCalls(sf);
 
