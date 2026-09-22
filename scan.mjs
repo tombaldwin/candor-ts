@@ -4604,6 +4604,22 @@ function contextualInterfaceDeclsFor(node, depth = 0) {
   }
   return direct;
 }
+// ⟨R64⟩'s unit local, spelled ONCE. `ownedByDecoratorArgument` below and `decoratorArgUnit` itself are
+// its only two readers; a second literal spelling is a second thing to keep in step. Declared above
+// `walkStructural` rather than beside `decoratorArgUnit`, because that walk RUNS at this point in module
+// evaluation and a `const` declared further down would be in its temporal dead zone.
+const DECORATOR_ARG_LOCAL = "<decorator-arg>@";
+/** ⟨SOUNDNESS R531, conformance PART 82⟩ Is this node's attribution owner ⟨R64⟩'s synthesized
+ *  decorator-ARGUMENT unit? Asks `enclosing` — the authority — rather than re-deriving "am I inside a
+ *  decorator argument" from the AST: two paths computing one fact is how this file has been bitten
+ *  before, and `enclosing`'s own R64 climb is subtler than any restatement of it (it distinguishes an
+ *  effect embedded in the argument DATA from an unresolvable decorator FACTORY, and `prev`-vs-`p`
+ *  decides which). `enclosing` may CREATE that unit as a side effect; it is dropped from `functions[]`
+ *  when nothing effectful lands in it, which PART 82's own `ctrllit`/`ctrlpure` arms assert. */
+function ownedByDecoratorArgument(node) {
+  const owner = fns.get(enclosing(node));
+  return !!owner && typeof owner.local === "string" && owner.local.startsWith(DECORATOR_ARG_LOCAL);
+}
 // Mint (or ALIAS to an existing unit) every member of a structural implementor `container`
 // (ObjectLiteralExpression's `.properties` or a ClassExpression's `.members` — both walked generically,
 // same shape as the nominal branch's own `cls.members`). Position-keyed, like `decoratorArgUnit` /
@@ -4757,7 +4773,30 @@ for (const sf of sources) {
       // `Unknown` at the call site whenever the arrow is not lexically inside the caller; it closes the
       // same silence and was MEASURED to charge `Unknown` to a caller of `{ twice: (n) => n * 2 }`, which
       // is closing a silence by flooding the other channel — the trade ⟨0.39⟩'s cost model forbids.
-      mintStructuralMembers(node, !(decls.local.length || decls.foreign.length));
+      //
+      // ONE POSITION IS EXCLUDED, AND CONFORMANCE PART 82 IS WHY. ⟨R64⟩ already mints a unit for a
+      // closure embedded directly in a DECORATOR'S ARGUMENT DATA — `@Factory({ init: () => { … } })` is
+      // the literal example in `decoratorArgUnit`'s own docstring — and that unit exists precisely
+      // because there is no declaration anywhere else for the body to land on. Minting the property as
+      // well splits one non-callable piece of syntax into TWO reported units, and ⟨R519⟩'s containment
+      // edge then feeds the effect back up, so `deny Fs` scores the same `readFileSync` twice:
+      // PART 82 `defect-shape2-argclosure-gate` went `notok count:1` -> `notok count:2`. Fails closed
+      // either way, so it is a double count and not a soundness regression — but a count the family has
+      // pinned four-way is a contract.
+      //
+      // THE BOUND IS "NOT A BINDING SITE", NOT "MAKE PART 82 PASS". A decorator argument is an anonymous
+      // expression: TypeScript gives no way to name that literal, so no call site anywhere can ever
+      // resolve `init`, and the unit R531 mints to be resolved AGAINST can never be reached. Skipping it
+      // costs nothing and returns this position to exactly its pre-R531 behaviour, which was never
+      // silent — the body is charged to `<decorator-arg>@N` and the gate fires.
+      //
+      // THE NEIGHBOURS WERE CHECKED RATHER THAN ASSUMED, because an audit drawn around its own trigger
+      // is this project's most expensive habit. The other synthetic attribution units are `moduleUnit`
+      // and `staticBlockUnit`, and BOTH are real binding sites: `static { const u = { roll: () => … };
+      // u.roll() }` resolves, and so does the module-scope form that R531 was filed for. They are NOT
+      // excluded, and the R531 block asserts both still charge their caller.
+      const bodiesOnly = !(decls.local.length || decls.foreign.length);
+      if (!(bodiesOnly && ownedByDecoratorArgument(node))) mintStructuralMembers(node, bodiesOnly);
     } else if (ts.isClassExpression(node)) {
       // Explicit `implements` on an anonymous/named class EXPRESSION — the nominal branch above only
       // ever visits `ts.isClassDeclaration`, so `held = new (class implements Task { go(){…} })()`
@@ -5451,7 +5490,7 @@ function staticBlockUnit(node) {
 function decoratorArgUnit(callNode) {
   const sf = callNode.getSourceFile();
   const mod = moduleOf(sf);
-  const local = `<decorator-arg>@${callNode.getStart()}`;
+  const local = `${DECORATOR_ARG_LOCAL}${callNode.getStart()}`;
   const qual = `${mod}.${local}`;
   let rec = fns.get(qual);
   if (!rec) {

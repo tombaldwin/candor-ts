@@ -82,6 +82,36 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   `expected.json`. The R531 block's 37 assertions were written FIRST and watched fail against the
   published pre-fix engine — 15 red, including all 7 GATE rows.
 
+  **ONE POSITION IS EXCLUDED, AND CONFORMANCE PART 82 IS WHY.** The first build of this fix took
+  `defect-shape2-argclosure-gate` from `notok | count:1` to `notok | count:2` four-way. ⟨R64⟩ already
+  mints `<decorator-arg>@N` for a closure embedded in a decorator's ARGUMENT DATA — `@Factory({ init:
+  () => { … } })` is the literal example in `decoratorArgUnit`'s own docstring — so minting the property
+  as well split one non-callable piece of syntax into two units, and ⟨R519⟩'s containment edge fed the
+  effect back up: one `readFileSync`, two AS-EFF-006 rows. It fails closed either way, so a double count
+  rather than a soundness regression — but a count the family pins four-way is a contract.
+
+  **MEASURED, NOT RECONSTRUCTED.** The proposed mechanism was "the pre-existing mint is keyed on the
+  INITIALIZER while the new one is keyed on the PROPERTY, so `nodeName.has(prop)` asks the wrong node".
+  Instrumented at the fixture, that is **false**: `initHasUnit=false`, `propHasUnit=false` —
+  `decoratorArgUnit` keys on the decorator's CALL node and registers nothing in `nodeName` at all, so
+  the guard has no node to ask about and the proposed fix would have been inert. The carrier is the
+  containment edge: `<decorator-arg>@90` shows `direct: []` with `calls: ["…<structural>@100.init"]`.
+
+  The bound is **"a decorator argument is not a binding site"** — nothing can name that literal, so
+  nothing can ever resolve its members and the unit R531 mints to be resolved against is unreachable.
+  Skipping it returns that position to exactly its pre-R531 rows, which were never silent. **The
+  neighbours were checked rather than assumed**: `moduleUnit` and `staticBlockUnit` ARE binding sites
+  (`static { const u = { roll: () => … }; u.roll() }` resolves) and keep their mints; a literal bound to
+  a `const` and only then passed to a decorator is owned by the module, still mints, and still charges
+  its caller. Both are asserted. The one route that could name a member of a decorator-argument literal
+  — `{ a(){…}, b(){ (this as any).a() } }` — was measured: the mint did not resolve it either, so the
+  exclusion costs no resolution anywhere.
+
+  **RESIDUAL, PRE-EXISTING, REPORTED NOT FIXED**: the same double count is already live on the SHIPPED
+  engine for the class-expression spelling — `@UsePipes(new (class implements Pipe { run(){ fs… } })())`
+  reports `<structural>@N.run` AND `<decorator-arg>@M` on published v0.39.1, unchanged here. PART 82 has
+  no arm for it.
+
 - **`check.mjs` COULD PASS VACUOUSLY, IN TWO WAYS.** Found by asking §H of the one checker in this repo
   that CI runs against candor-spec's oracle: *what does it print when the thing it aggregates over is
   EMPTY?* It printed `0 cases, 0 mismatch(es)` and exited **0** — indistinguishable from a full green

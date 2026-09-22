@@ -20350,6 +20350,70 @@ export function spread(c: C) { const o = { ...c, extra: 1 }; return o.extra }`,
         JSON.stringify(gr.functions.map((e) => [e.fn, e.inferred])));
   check("R531 GUARD: a spread-only literal mints nothing and fabricates nothing",
         entry(gr, "src.s.spread") === undefined, JSON.stringify(gr.functions.map((e) => [e.fn, e.inferred])));
+
+  // ── THE DECORATOR-ARGUMENT EXCLUSION, AND THE THREE NEIGHBOURS THAT PROVE IT IS A BOUND AND NOT A
+  // PATCH. Conformance PART 82 `defect-shape2-argclosure-gate` went `notok count:1` -> `notok count:2`
+  // on the first build of R531: ⟨R64⟩ already mints `<decorator-arg>@N` for a closure embedded in a
+  // decorator's ARGUMENT DATA, R531 minted the property as well, and ⟨R519⟩'s containment edge fed the
+  // effect back up — one `readFileSync`, two units, two AS-EFF-006 rows. Fails closed either way, so a
+  // double count rather than a soundness regression; but a four-way-pinned count is a contract.
+  //
+  // The exclusion is keyed on "a decorator argument is NOT A BINDING SITE" — nothing can name that
+  // literal, so nothing can resolve its members — and the two other synthetic attribution units ARE
+  // binding sites and keep their mints. All four arms below are one file so the exclusion cannot be
+  // satisfied by simply minting less everywhere.
+  const dec = project({
+    "package.json": `{"name":"r531c","version":"1.0.0"}`,
+    "tsconfig.json": `{"compilerOptions":{"target":"ES2022","module":"commonjs","moduleResolution":"node","experimentalDecorators":true,"skipLibCheck":true},"include":["src"]}`,
+    "src/e.ts": `import fs from "node:fs";
+function Factory(_o: any) { return function (_t: any) {} }
+@Factory({ init: () => { fs.readFileSync("/etc/hosts") } })
+class Thing {}
+export function makesThing(): Thing { return new Thing() }
+export class S { static out = 0; static { const u = { roll: () => Math.floor(Math.random() * 9) }; S.out = u.roll() } }
+const cfg = { boom: () => { fs.readFileSync("/etc/passwd") } };
+@Factory(cfg)
+class Other {}
+export function usesCfg(): void { cfg.boom() }`,
+  });
+  const dr = scan(dec).report;
+  const rows = dr.functions.map((e) => [e.fn, e.inferred]);
+  const structuralIn = (needle) => dr.functions.filter((e) => e.fn.includes("<structural>") && e.fn.endsWith(needle));
+  // PART 82's own property, asserted here so the four-way suite is not the only thing that can catch it.
+  check("R531 PART-82: a decorator ARGUMENT literal mints NO member unit — one body, one unit",
+        structuralIn(".init").length === 0 && dr.functions.some((e) => e.fn.includes("<decorator-arg>")
+          && (e.inferred ?? []).includes("Fs")), JSON.stringify(rows));
+  // THE GATE ROW IS ITS OWN PROJECT, and the first version of it was VACUOUS — it scoped the policy to
+  // `makesThing`, which carries none of this, so it passed with AND without the exclusion. Caught by
+  // running the calibration rather than trusting it. This one is PART 82's `shape2` verbatim: the ONLY
+  // Fs in the program is the one inside the decorator argument, so the violation COUNT is the property,
+  // and a blanket `deny Fs` is what the conformance part uses.
+  const p82 = project({
+    "package.json": `{"name":"r531d","version":"1.0.0"}`,
+    "tsconfig.json": `{"compilerOptions":{"target":"ES2022","module":"commonjs","moduleResolution":"node","experimentalDecorators":true,"skipLibCheck":true},"include":["src"]}`,
+    "src/e.ts": `import fs from "node:fs";
+function Factory(_opts: any) { return function (_t: any) {} }
+@Factory({ init: () => { fs.readFileSync("/etc/hosts") } })
+class Thing {}
+export function makesThing(): Thing { return new Thing() }`,
+  });
+  fs.writeFileSync(path.join(p82, "deny-fs.policy"), "deny Fs\n");
+  spawnSync("node", [path.join(HERE, "scan.mjs"), p82, "--policy", path.join(p82, "deny-fs.policy"),
+                     "--gate-json", path.join(p82, "g.json")], { encoding: "utf8" });
+  const gj = JSON.parse(fs.readFileSync(path.join(p82, "g.json"), "utf8"));
+  check("R531 PART-82 GATE: blanket `deny Fs` is notok with exactly ONE violation — measured 2 pre-fix",
+        gj.ok === false && (gj.violations ?? []).length === 1,
+        `ok=${gj.ok} count=${(gj.violations ?? []).length} ${JSON.stringify((gj.violations ?? []).map((v) => v.fn))}`);
+  // NEIGHBOUR 1 — a STATIC BLOCK is a real binding site: `u.roll()` resolves there, so the mint stays.
+  check("R531 NEIGHBOUR: a static-init block still mints its literal's members (it IS a binding site)",
+        structuralIn(".roll").length === 1 && (entry(dr, "src.e.S.<static-init>")?.inferred ?? []).includes("Rand"),
+        JSON.stringify(rows));
+  // NEIGHBOUR 2 — a literal BOUND to a const and only then passed to a decorator is owned by the module,
+  // not by ⟨R64⟩'s unit, so R531 still applies to it and its caller is still charged. Without this arm
+  // the exclusion could be widened to "any literal reaching a decorator" and nothing would notice.
+  check("R531 NEIGHBOUR: a const-bound literal passed to a decorator still charges its CALLER",
+        (entry(dr, "src.e.usesCfg")?.inferred ?? []).includes("Fs") && structuralIn(".boom").length === 1,
+        JSON.stringify(rows));
 }
 
 // ── R507 / R497 — AN AMBIGUOUS FUNCTION SELECTOR IS REFUSED, NOT RESOLVED TO AN ARBITRARY ONE ──────
