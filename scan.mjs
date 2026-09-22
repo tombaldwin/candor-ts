@@ -9041,14 +9041,15 @@ function visitCalls(node) {
  * would add a report row for no gain. Skipping is safe in the direction that matters: the skipped case is
  * the one where the pre-fix engine was already correct.
  *
- * (a) MINT, NOT (b) DISCLOSE `Unknown` — and this was measured, not inherited. R531's rejected
- * alternative (charge the caller `Unknown` whenever the arrow is not lexically inside it) was measured to
- * flood there, and a DIFFERENT route is not entitled to that result. Re-measured for this route on the
- * 47-entry npm corpus: of the call sites reaching this branch, the overwhelming majority resolve to a
- * PURE arrow, so (b) would charge `Unknown` to callers whose target this engine can see is pure —
- * closing a silence by flooding the other channel, the trade ⟨0.39⟩'s cost model forbids. Minting
- * RESOLVES instead: a pure target leaves the caller absent exactly as before, an effectful one charges
- * the concrete effect.
+ * (a) MINT, NOT (b) DISCLOSE `Unknown` — and (b) was BUILT AND RUN for this route rather than inherited
+ * from R531's measurement of a different one. The decisive result is not the flood, it is that (b) does
+ * not close the gate: `Unknown` is not `Rand`, so `deny Rand C1` stays at EXIT 0 over a real
+ * `Math.random()` — measured on this file's own R531b fixture. The flood is real too, measured on the
+ * 53-entry npm corpus: (b) recovered ZERO concrete effects, charged `Unknown` to 63 previously-absent
+ * callers of which 24 resolve to targets this engine can SEE are pure (axios's `isStream`, `isThenable`,
+ * `toArray`, `isSpecCompliantForm`), and added a spurious reason to 202 existing rows. Minting RESOLVES
+ * instead: a pure target leaves the caller absent exactly as before (asserted by the R531b PRECISION
+ * arms), an effectful one charges the concrete effect and the scoped gate fires.
  *
  * MINTING IS ADDITIVE ONLY BECAUSE OF ⟨R519⟩'s CONTAINMENT EDGE, AND THAT STILL HOLDS FOR A NON-PROPERTY
  * PARENT — it was CHECKED, not assumed, because if it did not hold this would be R519 re-created. R519's
