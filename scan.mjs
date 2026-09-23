@@ -5862,6 +5862,67 @@ function joinIndexSignatureImpls(rec, decl, pkg, memberName) {
   for (const m of names)
     joinLocalImpls(rec, { key: dispatchKey(pkg, ifaceName, m), pkg, ifaceName, member: m });
 }
+// ⟨SOUNDNESS R558⟩ AN INTERFACE MEMBER NAMED AS A FIRST-CLASS VALUE IS A DISPATCH, and it invokes
+// exactly what the CALL spelling invokes. `[n].map(d.roll)` and `d.roll(n)` reach the same body through
+// the same abstraction; only the first desugars AWAY from the CallExpression arm, where every
+// obligation-3 join in this file lives. MEASURED at HEAD (`d46c098`) before this fix, one file, five
+// arms, the only variable being what the reference NAMES: `refPlain` (a plain function ref) `['Fs']`,
+// `refClass` (a CLASS member ref) `['Fs']`, `callDeclared` (the SAME interface member, CALLED) `['Fs']`
+// — and `refDeclared` / `refIndexed` ABSENT FROM `functions[]` ENTIRELY, which SPEC §2 rule 3 makes an
+// affirmative purity claim. `pure refDeclared` and `pure refIndexed` exited 0 over a body that writes
+// to disk; `pure refClass` / `pure refPlain` exited 1 over the identical body.
+//
+// A NEW ADDITIVE PREDICATE, NOT A WIDENING OF THE HOF-REF ARM'S OPACITY INDEX. That index answers "is
+// this holder caller-controlled" — a different question with a different right answer, and widening it
+// to admit a resolved signature would hand every resolved dependency function the opaque-callback
+// `Unknown`. This one asks only "does this reference name an abstract member some VISIBLE implementor
+// answers", and routes a yes through the SAME `recordDispatch` / `joinLocalImpls` /
+// `joinIndexSignatureImpls` the call site uses — never a second implementation of the join, which is
+// how the two would drift (§G). candor-rust fixed its half of this class — R549 mechanism B,
+// `xs.front().map(Buf::chunk)` — the same way in `186e854`, with a new predicate rather than a widened
+// index; the severities differed (rust lost only the KEY, ts lost the whole ROW) and the shape did not.
+//
+// `argIsCallable` is required, not decorative: `recordDispatch` accepts a PropertySignature, and a
+// non-function property named as a value (`xs.map(cfg.label)`) is DATA, not a dispatch — charging it
+// would fabricate its implementors' effects onto a caller that invokes nothing.
+function chargeMemberRefDispatch(rec, refExpr, d2) {
+  if (!rec || !d2 || !argIsCallable(refExpr)) return false;
+  const m = declModule(d2);
+  // ONLY `<local>` TAKES THIS PACKAGE'S NAME. Every other `<…>` pseudo-module is the platform type
+  // surface and is REFUSED, not renamed — `declIsNodeTypes` (the exclusion `recordDispatch` applies)
+  // tests `@types/node` and NOT the TypeScript ES lib, so the `!mod.startsWith("<")` guard at the
+  // CallExpression site is what has always kept the lib out, and a helper that derives its own key has
+  // to restate it. MEASURED, and this is why the corpus A/B is not optional: keying `<es-lib>` as
+  // `pkgName` published `typeorm#ArrayConstructor.isArray` on **530 typeorm rows** and 2 nest rows from
+  // `xs.some(Array.isArray)` — a key naming an interface typeorm does not own, that no producer could
+  // ever answer, which is precisely the wire noise `recordDispatch`'s own comment refuses and precisely
+  // candor-rust's R549 malformed-key class reproduced in a second engine. Nothing else in that A/B
+  // moved: it was 532 rows of `dispatchesOn` and zero of anything else.
+  const pkg = m === "<local>" ? pkgName
+    : !m || m.startsWith("<") ? null
+    : m.startsWith("@types/") ? m.slice("@types/".length) : m;
+  if (!pkg) return false;
+  // REACH PROBE, env-gated, same convention as `CANDOR_R519_REACH`/`CANDOR_R524_REACH` above: a
+  // byte-identical A/B over a corpus that cannot reach the changed branch is the most flattering
+  // number available and the least informative, and this family has mistaken one for evidence four
+  // times. `bin/corpus-ab.py --mark R558-REACH` COUNTS these instead of anyone inferring reach.
+  const probe = (kind) => {
+    if (process.env.CANDOR_R558_REACH) console.error(`R558-REACH ${kind} ${pkg} ${refExpr.getText().replace(/\s+/g, "").slice(0, 60)}`);
+  };
+  // the DECLARED-member spelling — the reference resolves to the interface's own signature.
+  const rd = recordDispatch(rec, d2, pkg);
+  if (rd) { probe("declared"); joinLocalImpls(rec, rd); return true; }
+  // the INDEX-SIGNATURE spelling — `i.roll` resolves to the `[k: string]: …` signature, which names no
+  // member, so the name comes from the REFERENCE site exactly as R524 shape (i) takes it from the call
+  // site. Measured, not assumed: `checker.getSymbolAtLocation(i.roll)` returns the `__index` symbol and
+  // its declaration IS the IndexSignature, which is the node `indexSignatureIface` already accepts.
+  if (indexSignatureIface(d2)) {
+    probe("indexsig");
+    joinIndexSignatureImpls(rec, d2, pkg, accessedMemberName(refExpr));
+    return true;
+  }
+  return false;
+}
 // Apply ONE chained-dependency entry to the calling unit. There is exactly one of these because there used
 // to be two, drifted: the CallExpression arm and the desugared-declaration arm each spelled the copy out,
 // and the ⟨0.19⟩ reason class was added to neither. That is the same root cause candor-java's `6ab26e4`
@@ -7405,6 +7466,13 @@ function visitCalls(node) {
             //  (3) CALLABILITY — `argIsCallable` (has a call signature, or `any`/`unknown`/unconstrained
             //      generic that COULD hold a function).
             if (!hofInvokesArg(calleeName, argIdx, node)) return;
+            // ⟨SOUNDNESS R558⟩ …and BEFORE the by-reference dependency charge below, without returning:
+            // a FOREIGN interface member named as a value needs BOTH the visible-implementor join and
+            // the `invisible`/ledger disclosure `chargeExternalDecl` already gives it, and the two
+            // answer different halves of the same call. For a LOCAL one this is the whole answer, and
+            // the opaque-callback branch further down declines it anyway (a MethodSignature is neither a
+            // project value holder nor `!d2`), so no existing verdict is displaced — only absence is.
+            chargeMemberRefDispatch(rec, a, d2);
             // The BY-REFERENCE dependency charge belongs BELOW guard (1), not above it. It was placed
             // first and returned early, so it ran at EVERY argument position: `xs.reduce(dep.merge,
             // dep.makeSeed)` and `promise.then(dep.onOk, dep.onErr)` charged the non-callback argument's
@@ -8252,17 +8320,41 @@ function visitCalls(node) {
           // one hop short and the consumer's row ABSENT — a purity claim. Recorded BEFORE the chained
           // lookup below and independently of whether it hits: whether this run happened to be chained
           // says nothing about what a consumer of THIS report will be able to see.
-          if (!eff && !mod.startsWith("<")) {
+          //
+          // ⟨SOUNDNESS R560⟩ NOT GATED ON `!eff`, AND THAT GUARD WAS THE WHOLE OF THE CARDINAL SIN.
+          // A κ WHOLE-MODULE rule answers for the package, and it fired on a call whose only link to the
+          // package is its TYPE — so the join that would have found the caller's OWN implementor never
+          // ran. MEASURED at `d46c098`, one file, one variable (where the interface is declared):
+          // `ev.save(n)` with `ev: DefaultEventsMap` (socket.io) and a LOCAL implementor that writes a
+          // file read `inferred:['Net']` — `deny Fs` EXIT 0 over the write, `deny Net` EXIT 1 over
+          // nothing dialling — while the local-interface twin `viaLocal` read `['Fs']` and gated
+          // correctly. `emitNoop`, an EMPTY body typed the same way, also read `['Net']`.
+          // §9 — THE BOUNDARY IS NOT DRAWN AROUND R560's TRIGGER: the row is written on the
+          // index-signature spelling, and the DECLARED-member spelling of a foreign interface
+          // (`TypedEventBroadcaster.emit`, a real socket.io interface with a named member) was measured
+          // to lose the same effect the same way. Both spellings are joined here, so both are closed.
+          // The engine already KNEW the answer in both — it published the union entry
+          // `TypedEventBroadcaster.emit -> ['Fs']` in the same report whose caller row said `['Net']`.
+          // Running the join unconditionally is PURELY ADDITIVE: `joinLocalImpls` only edges to units
+          // this scan minted or hedges `Unknown`, so κ's own charge is never removed by it. The
+          // FABRICATION half of R560 — κ's `Net` on a call that enters no package code — is NOT fixed
+          // here and is NOT the same defect: removing it is a NARROWING of a sound over-approximation
+          // and belongs to a ruling, not a patch. See the CHANGELOG entry for the measurement.
+          if (!mod.startsWith("<")) {
             const dpkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
+            // REACH PROBE for the ⟨R560⟩ half, env-gated, same convention as ⟨R519⟩/⟨R524⟩'s: the only
+            // branch this change ADDS is the one where κ already answered, so the probe fires there and
+            // nowhere else. `bin/corpus-ab.py --mark R560-REACH` counts it.
+            if (eff && process.env.CANDOR_R560_REACH)
+              console.error(`R560-REACH ${dpkg}.${member || "<computed>"} eff=${eff}`);
             joinLocalImpls(rec, recordDispatch(rec, decl, dpkg));
             // ⟨SOUNDNESS R524, shape (i)⟩ …and the INDEX-SIGNATURE spelling of the same dispatch, which
             // `recordDispatch` returns null for because there is no member name on the declaration to
-            // form a key from. Held to THIS arm on purpose: a CallExpression is the only site that has
-            // the receiver access in hand, and a member name is exactly what the site supplies and the
-            // declaration cannot. The DESUGARED arm (`chargeExternalDecl`, reached from the HOF-ref and
-            // coercion sites) is not fixed here and is not the same defect — `[n].map(h.roll)` is
-            // silent through an interface member in BOTH the local and the foreign arm, declared-member
-            // spelling included, which is a wider hole with its own mechanism.
+            // form a key from. A CallExpression is the only site that has the receiver access in hand,
+            // and a member name is exactly what the site supplies and the declaration cannot. The
+            // DESUGARED arm — `[n].map(h.roll)`, silent through an interface member in BOTH the local
+            // and the foreign arm — was a wider hole with its own mechanism; it is ⟨R558⟩ and is now
+            // closed at the HOF-ref site by `chargeMemberRefDispatch`, through these same two joins.
             joinIndexSignatureImpls(rec, decl, dpkg, accessedMemberName(node.expression));
           }
           // CANDOR_DEPS: an unclassified call into a package with a loaded sibling report inherits

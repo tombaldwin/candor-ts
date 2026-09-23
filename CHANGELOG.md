@@ -8,6 +8,78 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R558 — AN INTERFACE MEMBER PASSED AS A FIRST-CLASS VALUE EVAPORATED.** A cardinal sin
+  (silent under-report). `[n].map(d.roll)` and `d.roll(n)` invoke the same body through the same
+  abstraction; only the first desugars AWAY from the CallExpression arm, where every ⟨0.39⟩
+  obligation-3 join in this engine lives. The HOF-ref arm's opacity index answers a DIFFERENT question
+  ("is this holder caller-controlled") and declines a resolved MethodSignature, so the reference got no
+  edge, no `Unknown` and no disclosure — and the caller was ABSENT FROM `functions[]` ENTIRELY, which
+  SPEC §2 rule 3 makes an affirmative purity claim. Measured at `d46c098`, five arms in ONE file, the
+  only variable being what the reference NAMES: `refPlain` `['Fs']`, `refClass` `['Fs']`,
+  `callDeclared` (the SAME member, CALLED) `['Fs']` — `refDeclared` and `refIndexed` ABSENT.
+  `pure refDeclared` / `pure refIndexed` **exit 0 → 1** over a body that writes a file.
+  **The row's scope needed correcting, and the correction is in the test:** filed as "local AND foreign,
+  index-signature AND declared-member", it is true of THREE cells of the 2×2 — the FOREIGN
+  declared-member cell already resolved at HEAD (`resolveFnRefUnit` chases the local structural
+  implementor before the HOF-ref guards are reached). It is a CONTROL in the test, not a defect row,
+  because a check that passes with and without the fix reads as coverage and is not.
+  **Fix:** a NEW additive predicate, `chargeMemberRefDispatch` — not a widening of the opacity index,
+  which would hand every resolved dependency function the opaque-callback `Unknown`. It asks only
+  whether the reference names an abstract member some VISIBLE implementor answers, and routes a yes
+  through the SAME `recordDispatch` / `joinLocalImpls` / `joinIndexSignatureImpls` the call site uses,
+  never a second implementation of the join. candor-rust closed its half of this class the same day
+  (R549 mechanism B, `xs.front().map(Buf::chunk)`, `186e854`) with the same shape; the severities
+  differed — rust lost only the dispatch KEY and kept the row, ts lost the whole ROW.
+  **A defect the corpus A/B found and no fixture would have:** the first cut mapped every `<…>`
+  pseudo-module onto the scanned package's own name, so `xs.some(Array.isArray)` published
+  `<pkg>#ArrayConstructor.isArray` — a key naming an interface the package does not own, that no
+  producer could ever answer, on **530 typeorm rows and 2 nest rows** (and nothing else in the whole
+  diff). That is candor-rust's R549 malformed-key class reproduced in a second engine by a fix.
+  `declIsNodeTypes` tests `@types/node` and NOT the TypeScript ES lib, so the caller-side
+  `!mod.startsWith("<")` guard is what had always kept the lib out; only `<local>` now takes the
+  package name and every other `<…>` is refused. Pinned by CONTROL 4.
+
+- ⚠ **SOUNDNESS R560 — A κ WHOLE-MODULE RULE FIRED, SO THE IMPLEMENTOR JOIN NEVER RAN.** A cardinal sin.
+  κ's whole-module rules answer for a call INTO a package; they also fired on a call whose only link to
+  the package is its TYPE — a locally-built, locally-implemented value whose interface happens to be
+  declared in `node_modules` — and because ⟨0.39⟩ obligation 3's join sat behind `!eff`, κ's answer
+  SUPPRESSED the join that would have found the caller's own implementor. Measured at `d46c098` against
+  socket.io, one file, one variable (where the interface is declared): `ev.save(n)` with
+  `ev: DefaultEventsMap` and a LOCAL implementor that writes a file read `inferred:['Net']`, with
+  `deny Fs src.main.viaIdx` **exit 0** over the write, while the local-interface twin read `['Fs']` and
+  gated correctly. The engine already KNEW the answer — it published the union entry
+  `TypedEventBroadcaster.emit -> ['Fs']` in the same report whose caller row read `['Net']`.
+  **§9 — the boundary is not drawn around the row's trigger.** R560 is written on the index-signature
+  spelling; the DECLARED-member spelling of a foreign interface (`TypedEventBroadcaster.emit`, a real
+  socket.io interface with a named member) loses the same effect the same way. `deny Fs viaIdx` and
+  `deny Fs viaDecl` both **exit 0 → 1**.
+  **Fix:** drop the `!eff` gate on the obligation-3 join. Purely additive — `joinLocalImpls` only edges
+  to units this scan minted or hedges `Unknown`, so κ's own charge is never removed by it.
+  **Deliberately NOT done, and CONTROL 1 pins it:** κ's fabricated `Net` still stands. `deny Net` still
+  exits 1 over a function that dials nothing, including over an EMPTY body. Withdrawing it is a
+  NARROWING of a sound over-approximation on an unprovable property (does THIS receiver hold a value the
+  package produced?) and is non-additive across every consumer of every κ-classified package — a ruling,
+  not a patch.
+
+- **Calibration (§1b), both rows, in this commit.** RED-CHECKED by disabling each half separately:
+  commenting out the `chargeMemberRefDispatch` call reddens the three R558 defect rows, the wire row and
+  both R558 gates while every CONTROL (including `foreign/refDeclared`) stays green; restoring
+  `!eff &&` on the obligation-3 join reddens all four R560 rows while every R560 CONTROL and every R558
+  row stays green. Suite: **2997 passed, 0 failed (8 shards)**; `self-gate`, `test:transitive-recall`
+  and the fabrication/fuzz probes green.
+
+- **Over-charge control — `bin/corpus-ab.py`, 25 real TypeScript packages, 7,429 rows:**
+  `ADDED 0 / REMOVED 0 / CHANGED 0` on the WIDE key (every field), and 0 on `inferred`. Corpus: the
+  16-package ts set (axios, chalk, commander, execa, got, hono, husky, ky, ora, p-queue, remeda, ts-node,
+  zod, zustand, zx, …) plus typeorm, trpc server+client, type-fest, nest core/common/microservices,
+  mikro-orm core and apollo-server. **REACH, reported separately because an unchanged row is not
+  evidence the code ran:** the R560 branch fired **182 times across 12 entries** and changed nothing —
+  that is the over-charge control with real reach. The R558 branch fired **0 times**, so its A/B is
+  **SAFETY-ONLY** and is recorded as such: a grep of the same corpora finds no
+  interface-member-as-reference outside the platform type surface, and the evidence that the fix fires
+  is the fixture, where the gate flips 0 → 1 in three of four cells.
+
+
 - ⚠ **SOUNDNESS R524 (shape i) — A CALL THROUGH A *FOREIGN* INTERFACE'S INDEX SIGNATURE ANSWERED
   NOTHING, WHILE ITS IN-PROJECT TWIN DISCLOSED.** A cardinal sin (silent under-report), **pre-existing**
   — it predates ⟨0.39⟩ and the [[R519]] fix, and is not a regression of either. Two arms byte-identical

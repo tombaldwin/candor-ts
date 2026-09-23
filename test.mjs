@@ -20731,6 +20731,216 @@ ${CONSUMER}` };
         foreign.gate("pure viaPure") === 0, shown(foreign));
 }
 
+// ── SOUNDNESS R558 — AN INTERFACE MEMBER PASSED AS A FIRST-CLASS VALUE EVAPORATED ─────────────────
+//
+// `[n].map(d.roll)` and `d.roll(n)` invoke the same body through the same abstraction, and only the
+// second reaches the CallExpression arm where every obligation-3 join in this engine lives. The first
+// desugars to the HOF-ref arm, whose opacity index answers a DIFFERENT question ("is this holder
+// caller-controlled") and declines a resolved MethodSignature — so the reference got no edge, no
+// Unknown and no disclosure. The caller was then ABSENT FROM `functions[]` ENTIRELY, which SPEC §2
+// rule 3 makes an affirmative purity claim. MEASURED at `d46c098`, five arms in one file, the only
+// variable being what the reference NAMES:
+//
+//     refPlain   [n].map(plain)   -> ['Fs']   refClass  [n].map(c.roll) -> ['Fs']
+//     callDeclared d.roll(n)      -> ['Fs']   ← the SAME member, CALLED
+//     refDeclared [n].map(d.roll) -> ABSENT   refIndexed [n].map(i.roll) -> ABSENT
+//
+// and `pure refDeclared` / `pure refIndexed` EXITED 0 over a body that writes a file, while `pure
+// refClass` / `pure refPlain` exited 1 over the identical body. It is the ts spelling of a class
+// candor-rust closed the same day as R549 mechanism B (`xs.front().map(Buf::chunk)`, `186e854`); rust
+// lost only the dispatch KEY and kept the row, so ts's was the worse of the two.
+//
+// ⚠ THE ROW SAYS "LOCAL AND FOREIGN, INDEX-SIGNATURE AND DECLARED-MEMBER". MEASURED CELL BY CELL AT
+// `d46c098`, THAT IS TRUE OF THREE CELLS OF FOUR, and the fourth is the reason this paragraph exists —
+// a test that passes with AND without the fix reads as coverage and is not:
+//
+//                                LOCAL iface                 FOREIGN iface
+//     declared  [n].map(d.roll)  ABSENT — the sin            ['Fs'] — ALREADY RESOLVED
+//     indexsig  [n].map(i.roll)  ABSENT — the sin            [] (row present, empty) — the sin
+//
+// The foreign declared-member cell already worked, through `resolveFnRefUnit` chasing the local
+// structural implementor before the HOF-ref guards are ever reached. It is a CONTROL below, not a
+// defect row, and it is stated here so the next reader does not re-derive a defect that is not there.
+//
+// RED-CHECKED, by commenting out the `chargeMemberRefDispatch` call: the three DEFECT rows, the wire
+// row and both GATE rows go red; every CONTROL, including `foreign/refDeclared`, stays green.
+if (blk()) {
+  const IFACES = `export interface Declared { roll(n: number): number }
+export interface Indexed { [k: string]: (n: number) => number }
+export interface PureDeclared { roll(n: number): number }
+export interface Orphan { roll(n: number): number }`;
+  const CONSUMER = `import * as fsm from "node:fs";
+class Impl { roll(n: number): number { fsm.writeFileSync("/tmp/candor-r558", String(n)); return n } }
+export function plain(n: number): number { fsm.writeFileSync("/tmp/candor-r558", String(n)); return n }
+export const c = new Impl();
+export const d: Declared = { roll: (n) => { fsm.writeFileSync("/tmp/candor-r558", String(n)); return n } };
+export const i: Indexed  = { roll: (n) => { fsm.writeFileSync("/tmp/candor-r558", String(n)); return n } };
+export const p: PureDeclared = { roll: (n) => n + 1 };
+declare const orphan: Orphan;
+export function refPlain(n: number)    { return [n].map(plain) }
+export function refClass(n: number)    { return [n].map(c.roll) }
+export function callDeclared(n: number){ return d.roll(n) }
+export function refDeclared(n: number) { return [n].map(d.roll) }
+export function refIndexed(n: number)  { return [n].map(i.roll) }
+export function refPure(n: number)     { return [n].map(p.roll) }
+export function refOrphan(n: number)   { return [n].map(orphan.roll) }
+export function refEsLib(xs: unknown[]) { return xs.some(Array.isArray) }`;
+  const IMPORTS = { local: `./ifaces`, foreign: `depz8` };
+  const armOf = (where) => {
+    const files = { "package.json": `{"name":"appz8","version":"1.0.0"}`,
+                    "src/index.ts": `import { Declared, Indexed, PureDeclared, Orphan } from "${IMPORTS[where]}";\n${CONSUMER}` };
+    if (where === "local") files["src/ifaces.ts"] = IFACES;
+    else { files["node_modules/depz8/package.json"] = `{"name":"depz8","version":"1.0.0","types":"index.d.ts"}`;
+           files["node_modules/depz8/index.d.ts"] = IFACES; }
+    const dir = project(files);
+    const { report } = scan(dir);
+    const gate = (rule) => {
+      fs.writeFileSync(path.join(dir, "policy.candor"), `${rule}\n`);
+      return spawnSync("node", [path.join(HERE, "scan.mjs"), dir, "--policy", path.join(dir, "policy.candor")],
+                       { encoding: "utf8" }).status;
+    };
+    return { report, gate, row: (fn) => entry(report, `src.index.${fn}`) };
+  };
+  const local = armOf("local"), foreign = armOf("foreign");
+  const shown = (a) => JSON.stringify((a.report?.functions ?? []).map((e) => [e.fn, e.inferred, e.unknownWhy, e.dispatchesOn]));
+
+  // THE DEFECT — the THREE cells of the 2×2 that were silent at HEAD (see the table above; the fourth,
+  // `foreign/refDeclared`, already resolved and is CONTROL 1 below).
+  for (const [arm, fn, was] of [[local, "refDeclared", "ABSENT"], [local, "refIndexed", "ABSENT"],
+                                [foreign, "refIndexed", "an empty row"]])
+    check(`R558 [${arm === local ? "local" : "foreign"}/${fn}]: an interface member passed by REFERENCE carries its visible implementor's Fs — measured ${was} at HEAD`,
+          (arm.row(fn)?.inferred ?? []).includes("Fs"), shown(arm));
+  check("R558 GATE: `pure refDeclared` exits 1 — measured exit 0 at HEAD over a body that writes a file",
+        local.gate("pure refDeclared") === 1, shown(local));
+  check("R558 GATE: `pure refIndexed` exits 1 — measured exit 0 at HEAD over the same body",
+        local.gate("pure refIndexed") === 1, shown(local));
+
+  // CONTROL 1 — THE ARMS THAT ALREADY RESOLVED AND MUST NOT MOVE. They are what make the rows above a
+  // PURITY CLAIM rather than a whole-engine gap: same file, same body, same `.map()` call, different
+  // referent. `foreign/refDeclared` is in this list and NOT in the defect list because it was measured
+  // green at `d46c098` — asserting it as a defect row would be a check that cannot fail.
+  for (const arm of [["local", local], ["foreign", foreign]])
+    for (const fn of ["refPlain", "refClass", "callDeclared"])
+      check(`R558 CONTROL 1 [${arm[0]}/${fn}]: the plain-fn, class-member and CALLED-member arms are unmoved`,
+            (arm[1].row(fn)?.inferred ?? []).includes("Fs"), shown(arm[1]));
+  check("R558 CONTROL 1 [foreign/refDeclared]: the ONE cell of the 2×2 that already resolved at HEAD stays resolved",
+        (foreign.row("refDeclared")?.inferred ?? []).includes("Fs"), shown(foreign));
+  // …and the REFERENCE now answers with the same wire key the CALL does. One question, one answer.
+  check("R558 CONTROL 1 (wire): `refDeclared` publishes the same `dispatchesOn` key as `callDeclared`",
+        JSON.stringify(local.row("refDeclared")?.dispatchesOn ?? [])
+          === JSON.stringify(local.row("callDeclared")?.dispatchesOn ?? [])
+        && (local.row("refDeclared")?.dispatchesOn ?? []).length > 0, shown(local));
+
+  // CONTROL 2 — A PURE IMPLEMENTOR GAINS NOTHING. Without this every row above would pass for an engine
+  // that charged on sight of a member reference. The join contributes an EDGE, so the fixpoint answers.
+  for (const arm of [["local", local], ["foreign", foreign]])
+    check(`R558 CONTROL 2 [${arm[0]}]: a reference to a PURE interface member charges nothing and does not hedge`,
+          (arm[1].row("refPure")?.inferred ?? []).length === 0
+          && (arm[1].row("refPure")?.unknownWhy ?? []).length === 0, shown(arm[1]));
+
+  // CONTROL 3 — NO VISIBLE IMPLEMENTOR, NO NEW HEDGE. This is the position PART 92 c5/c10 pin, and
+  // widening it is the ecosystem-wide hedge ⟨0.39⟩ priced and declined at 2.60% of functions.
+  check("R558 CONTROL 3: a reference to a FOREIGN member with no visible implementor gains neither an effect nor a hedge",
+        (foreign.row("refOrphan")?.inferred ?? []).length === 0
+        && (foreign.row("refOrphan")?.unknownWhy ?? []).length === 0, shown(foreign));
+
+  // CONTROL 4 — THE PLATFORM TYPE SURFACE MINTS NO KEY, and this one is not hypothetical: the first cut
+  // of the fix mapped EVERY `<…>` pseudo-module onto this package's own name, and `xs.some(Array.isArray)`
+  // then published `appz8#ArrayConstructor.isArray` — a key naming an interface this package does not
+  // own, that no producer could ever answer. Found by the 25-package corpus A/B (530 typeorm rows + 2
+  // nest rows, and nothing else in the whole diff), not by any fixture, which is why it is pinned here.
+  // Same class as candor-rust's R549 malformed-key defect, reproduced in a second engine by a fix.
+  for (const arm of [["local", local], ["foreign", foreign]])
+    check(`R558 CONTROL 4 [${arm[0]}]: an ES-lib member reference (\`xs.some(Array.isArray)\`) mints NO dispatch key`,
+          !(arm[1].row("refEsLib")?.dispatchesOn ?? []).some((k) => /ArrayConstructor/.test(k)),
+          JSON.stringify((arm[1].report?.functions ?? []).map((e) => [e.fn, e.dispatchesOn])));
+}
+
+// ── SOUNDNESS R560 — A κ WHOLE-MODULE RULE FIRED, SO THE IMPLEMENTOR JOIN NEVER RAN ───────────────
+//
+// κ's whole-module rules answer for a call INTO a package. They also fired on a call whose only link
+// to the package is its TYPE — a locally-built, locally-implemented value whose interface happens to
+// be declared in `node_modules` — and because the ⟨0.39⟩ obligation-3 join sat behind `!eff`, κ's
+// answer SUPPRESSED the join that would have found the caller's own implementor. MEASURED at
+// `d46c098` against socket.io, one file, one variable (where the interface is declared):
+//
+//     ev.save(n), ev: DefaultEventsMap, LOCAL implementor that writes a file -> inferred ['Net']
+//       `deny Fs src.main.viaIdx`  EXIT 0  over the write        ← the cardinal sin, closed here
+//       `deny Net src.main.viaIdx` EXIT 1  over nothing dialling ← the fabrication, NOT closed here
+//     viaLocal, the local-interface twin, same body              -> inferred ['Fs'], gates correctly
+//
+// §9 — THE BOUNDARY IS NOT DRAWN AROUND THE ROW'S TRIGGER. R560 is written on the index-signature
+// spelling; the DECLARED-member spelling of a foreign interface (`TypedEventBroadcaster.emit`, a real
+// socket.io interface with a named member) was measured to lose the same effect the same way, and
+// `deny Fs viaDecl` went 0 -> 1. Both are pinned below. The engine already KNEW the answer in both: it
+// published the union entry `TypedEventBroadcaster.emit -> ['Fs']` in the same report whose caller row
+// read `['Net']`.
+//
+// WHAT IS DELIBERATELY NOT FIXED, and the controls say so: κ's `Net` still stands. Withdrawing it is a
+// NARROWING of a sound over-approximation on an unprovable property (does THIS receiver hold a value
+// the package produced?) — the F1 #5 shape this family has been burned by — and it is non-additive
+// across every consumer of every κ-classified package. That is a ruling, not a patch.
+//
+// RED-CHECKED: restore the `!eff &&` on the obligation-3 join and the four DEFECT/GATE rows below go
+// red while every CONTROL stays green.
+if (blk()) {
+  // `ws` is a κ WHOLE-MODULE Net rule (scan-core KAPPA_RULES, member regex `null`) — a real entry in
+  // the curated npm tier, vendored here as a types-only `.d.ts` so the fixture is hermetic. The point
+  // of the fixture is that NO CODE OF `ws` IS EVER CALLED in the three dispatch arms.
+  const dir = project({
+    "package.json": `{"name":"appz9","version":"1.0.0"}`,
+    "node_modules/ws/package.json": `{"name":"ws","version":"1.0.0","types":"index.d.ts"}`,
+    "node_modules/ws/index.d.ts": `export interface EventsMap { [k: string]: (n: number) => void }
+export interface Broadcast { emit(n: number): void }
+export interface PureMap { [k: string]: (n: number) => void }
+export declare function dial(url: string): void;`,
+    "src/index.ts": `import * as fsm from "node:fs";
+import type { EventsMap, Broadcast, PureMap } from "ws";
+import { dial } from "ws";
+export const ev: EventsMap  = { save: (n) => { fsm.writeFileSync("/tmp/candor-r560", String(n)) } };
+export function viaIdx(n: number): void { ev.save(n) }
+export const b: Broadcast   = { emit: (n) => { fsm.writeFileSync("/tmp/candor-r560", String(n)) } };
+export function viaDecl(n: number): void { b.emit(n) }
+export const q: PureMap     = { save: (_n) => {} };
+export function viaPure(n: number): void { q.save(n) }
+export function realNet(): void { dial("wss://example.invalid") }`,
+  });
+  const { report } = scan(dir);
+  const row = (fn) => entry(report, `src.index.${fn}`);
+  const gate = (rule) => {
+    fs.writeFileSync(path.join(dir, "policy.candor"), `${rule}\n`);
+    return spawnSync("node", [path.join(HERE, "scan.mjs"), dir, "--policy", path.join(dir, "policy.candor")],
+                     { encoding: "utf8" }).status;
+  };
+  const shown = JSON.stringify((report?.functions ?? []).map((e) => [e.fn, e.inferred, e.dispatchesOn]));
+
+  // THE DEFECT — both spellings of a foreign interface whose implementor is in THIS file.
+  for (const fn of ["viaIdx", "viaDecl"])
+    check(`R560 [${fn}]: a dispatch whose only link to a κ-classified package is its TYPE carries its visible implementor's Fs — measured absent at HEAD`,
+          (row(fn)?.inferred ?? []).includes("Fs"), shown);
+  check("R560 GATE: `deny Fs src.index.viaIdx` exits 1 — measured exit 0 at HEAD over a body that writes a file",
+        gate("deny Fs src.index.viaIdx") === 1, shown);
+  check("R560 GATE: `deny Fs src.index.viaDecl` exits 1 — the DECLARED-member spelling the row did not name",
+        gate("deny Fs src.index.viaDecl") === 1, shown);
+
+  // CONTROL 1 — κ'S OWN CHARGE IS NOT WITHDRAWN. The join is an ADDITION; a "fix" that closed the
+  // silence by deleting κ's answer would pass every row above and open the direction this one did not.
+  for (const fn of ["viaIdx", "viaDecl"])
+    check(`R560 CONTROL 1 [${fn}]: κ's whole-module Net is PRESERVED — the fabrication is a separate, unclosed question`,
+          (row(fn)?.inferred ?? []).includes("Net"), shown);
+  // CONTROL 2 — A REAL CALL INTO THE PACKAGE'S OWN CODE IS UNMOVED, and gains no dispatch key.
+  check("R560 CONTROL 2: a genuine call into `ws` keeps Net, gains no Fs, and mints no dispatch key",
+        (row("realNet")?.inferred ?? []).includes("Net")
+        && !(row("realNet")?.inferred ?? []).includes("Fs")
+        && (row("realNet")?.dispatchesOn ?? []).length === 0, shown);
+  // CONTROL 3 — A PURE IMPLEMENTOR GAINS NOTHING BEYOND κ's OWN ANSWER. Without this arm every row
+  // above would pass for an engine that charged Fs on sight of a foreign-typed dispatch.
+  check("R560 CONTROL 3: a PURE implementor adds no Fs — the join edges, it does not charge",
+        !(row("viaPure")?.inferred ?? []).includes("Fs"), shown);
+  check("R560 CONTROL 3 GATE: `deny Fs src.index.viaPure` exits 0",
+        gate("deny Fs src.index.viaPure") === 0, shown);
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
