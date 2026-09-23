@@ -6809,14 +6809,46 @@ if (blk()) {
   // The control for the direction this must NOT go: a refusal over an EXISTING target still gets its
   // marker on a FRESH project, `.candor` created for it. A mute here would be a withdrawn disclosure.
   // (The refusing token is an unknown flag rather than a second bogus positional because a second
-  // positional is this CLI's legacy `--out` prefix, not a target — `candor-ts . /also-bogus` dies on an
-  // UNCAUGHT EROFS from the sink writer rather than refusing, which is its own defect and not this row.)
+  // positional is this CLI's legacy `--out` prefix, not a target — see CLI-1d below for that shape.)
   const d2 = project({ "src/a.ts": `export const f = 1;` });
   const r2 = spawnSync("node", [path.join(HERE, "scan.mjs"), ".", "--zzz-not-a-flag"],
                        { encoding: "utf8", cwd: d2 });
   check("…while an EXISTING target refusing on the same path still gets its marker (not a mute)",
         r2.status === 2 && fs.existsSync(path.join(d2, ".candor", "report.refused.json")),
         `status=${r2.status} tree=${fs.readdirSync(d2).sort().join(",")}`);
+}
+
+// ── CLI-1d. an UNWRITABLE `--out` prefix REFUSES (exit 2) rather than crashing ⟨SOUNDNESS R522⟩ ──
+// `candor-ts . /also-bogus` used to die with an UNCAUGHT `EROFS` Node stack trace — exit 1, no usage
+// error, no refusal marker, no `refuseEarly` call at all — because the write of the primary report set
+// (`${outPrefix}.json`/`.callgraph.json`/`.locs.json`, scan.mjs's final `else` branch) had no try/catch
+// around it. `--out`/the legacy positional prefix is a VALID, VALID-LOOKING target; the crash only fires
+// after a full successful scan, at the very last step, which is why CLI-1c's `nonexistent-target` argv
+// shape (refused at parse time, before any write is attempted) could not have caught it.
+//
+// A permission-denied directory, not `/` — `/also-bogus` reproduces the exact SOUNDNESS row on a POSIX
+// machine but depends on the root filesystem being unwritable, which is true on macOS (SIP) and on an
+// unprivileged CI runner but NOT inside a root-run container. `chmod 555` on an ordinary scratch
+// directory reproduces the same EACCES without that assumption.
+if (blk()) {
+  const d = project({ "src/a.ts": `export const f = 1;` });
+  const ro = path.join(d, "ro");
+  fs.mkdirSync(ro);
+  fs.chmodSync(ro, 0o555);
+  let r;
+  try {
+    r = spawnSync("node", [path.join(HERE, "scan.mjs"), ".", path.join(ro, "out")],
+                  { encoding: "utf8", cwd: d });
+  } finally {
+    fs.chmodSync(ro, 0o755);   // so scratch's teardown rmSync can remove it either way
+  }
+  check("an unwritable --out prefix refuses (exit 2), not an uncaught crash",
+        r.status === 2, `status=${r.status} stderr=${r.stderr?.slice(0, 200)}`);
+  check("…the stderr line names the real cause, not a raw stack trace",
+        /could not write the report/.test(r.stderr) && !/at Object\.writeFileSync/.test(r.stderr),
+        `stderr=${r.stderr?.slice(0, 300)}`);
+  check("…and creates nothing inside the unwritable directory",
+        fs.readdirSync(ro).length === 0, `ro now: ${fs.readdirSync(ro).join(",")}`);
 }
 
 // ── CLI-2. --json + a CLEAN policy → pure JSON envelope on stdout, exit 0 (the gate passes) ───────

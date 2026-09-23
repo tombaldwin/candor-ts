@@ -8,6 +8,20 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R522 — an unwritable `--out`/legacy-positional prefix crashed with an UNCAUGHT `EROFS`
+  stack trace instead of refusing (exit 2).** `candor-ts . /also-bogus` (the legacy positional
+  out-prefix form) ran a full successful scan and then died in `writeAtomic` -> `writeSinkAtomic` ->
+  `fs.writeFileSync`, which had no try/catch around it — exit 1, no usage error, no refusal marker, a
+  raw Node stack trace on stderr. SPEC §3.3.1 makes an unwritable sink a usage-error exit 2 like any
+  other broken `--out`; a stack trace is neither a verdict nor a refusal, and a CI consumer reading exit
+  1 sees "the policy failed" rather than "the tool couldn't write its own report". Fixed: the primary
+  report-set write is now wrapped in a try/catch that calls the existing `refuseEarly` +
+  `process.exit(2)` path on failure, naming the real OS error. Calibration: reproduced pre-fix with
+  `EROFS` at `/also-bogus` (macOS root, read-only) and confirmed post-fix `exit 2` with a clean message
+  and no stack trace; a portable `chmod 555` regression control (CLI-1d in `test.mjs`) pins the same
+  property without depending on root-filesystem semantics, and a control run confirms an ordinary
+  writable `--out` still succeeds unchanged.
+
 ## [0.39.2] — 2026-09-22
 
 - ⚠ **SOUNDNESS R531b — AN ARROW A CALL RESOLVES TO, THAT NO BINDING SITE EVER NAMED, WAS SILENT.**

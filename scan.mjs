@@ -11064,21 +11064,40 @@ if (wantJson) {
   // `REPORT_STREAM_WRITTEN` OnceLock at the analog site (crates/candor-scan/src/scan.rs).
   reportStreamWritten = true;
 } else {
-  writeAtomic(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
-  writeAtomic(`${outPrefix}.callgraph.json`, JSON.stringify(cg, null, 1));
-  // ⟨verify⟩ ALL-FUNCTION SPAN index — the [start, end] line SPAN of EVERY analyzed fn, pure ones INCLUDED
-  // (the §2 report carries a start loc for effectful fns only). The dynamic honesty oracle (candor-ts-verify)
-  // maps a runtime effect site to its enclosing fn; it needs SPANS, not just starts, for two reasons: (1) a
-  // pure fn omitted from §2 has no anchor, so its effect would fold onto the nearest preceding effectful fn
-  // and its cardinal-sin escape would vanish (a silent MISS); (2) a start-only "nearest declaration below"
-  // rule misattributes a site that sits AFTER a nested fn but INSIDE the effectful outer fn to that nested
-  // (often pure) fn — manufacturing a FALSE violation (found corpus-testing a real app: an fs.readFileSync in
-  // a big `run()` bucketed onto a pure test-callback arrow declared earlier). With spans the oracle picks the
-  // INNERMOST fn whose [start,end] CONTAINS the site — correct in both cases. Format `{fn: {loc, end}}`;
-  // additive (no §2/callgraph consumer reads it); the oracle fails CLOSED (discloses) without it.
-  const locs = {};
-  for (const [name, rec] of fns) if (rec.loc) locs[name] = { loc: rec.loc, end: rec.endLine ?? null };
-  writeAtomic(`${outPrefix}.locs.json`, JSON.stringify(locs, null, 1));
+  // ⟨SOUNDNESS R522⟩ THIS WRITE CAN FAIL FOR ORDINARY REASONS — a read-only filesystem, an unwritable
+  // directory, a prefix with no parent at all — and until now none of them were caught. `writeAtomic`
+  // -> `writeSinkAtomic` -> `fs.writeFileSync` threw straight out of `main`, past every refusal plumbing
+  // in this file, as an UNCAUGHT exception: a raw Node stack trace on stderr and exit 1. SPEC §3.3.1
+  // makes a broken sink an exit-2 usage error like any other unwritable `--out`/`--gate-json`; a stack
+  // trace is neither a verdict nor a refusal, and a CI consumer parsing this run's exit code reads exit
+  // 1 as "the policy failed", not "the tool couldn't write its own report". Measured:
+  // `candor-ts . /also-bogus` (the legacy positional out-prefix, armed at parse time) died here with
+  // `EROFS: read-only file system, open '/also-bogus.json.<pid>.tmp'` and no exit-2 refusal at all.
+  //
+  // `refuseEarly` is safe to call this late: `armedGateSink`/`refusalPrefix` were latched during argv
+  // parsing, and `writeRefusalMarker` already fails OPEN on its own unwritable sink (see above) — so a
+  // `--gate-json`/marker write that fails for the SAME reason this one just did does not mask the cause.
+  try {
+    writeAtomic(`${outPrefix}.json`, JSON.stringify(envelope, null, 1));
+    writeAtomic(`${outPrefix}.callgraph.json`, JSON.stringify(cg, null, 1));
+    // ⟨verify⟩ ALL-FUNCTION SPAN index — the [start, end] line SPAN of EVERY analyzed fn, pure ones INCLUDED
+    // (the §2 report carries a start loc for effectful fns only). The dynamic honesty oracle (candor-ts-verify)
+    // maps a runtime effect site to its enclosing fn; it needs SPANS, not just starts, for two reasons: (1) a
+    // pure fn omitted from §2 has no anchor, so its effect would fold onto the nearest preceding effectful fn
+    // and its cardinal-sin escape would vanish (a silent MISS); (2) a start-only "nearest declaration below"
+    // rule misattributes a site that sits AFTER a nested fn but INSIDE the effectful outer fn to that nested
+    // (often pure) fn — manufacturing a FALSE violation (found corpus-testing a real app: an fs.readFileSync in
+    // a big `run()` bucketed onto a pure test-callback arrow declared earlier). With spans the oracle picks the
+    // INNERMOST fn whose [start,end] CONTAINS the site — correct in both cases. Format `{fn: {loc, end}}`;
+    // additive (no §2/callgraph consumer reads it); the oracle fails CLOSED (discloses) without it.
+    const locs = {};
+    for (const [name, rec] of fns) if (rec.loc) locs[name] = { loc: rec.loc, end: rec.endLine ?? null };
+    writeAtomic(`${outPrefix}.locs.json`, JSON.stringify(locs, null, 1));
+  } catch (e) {
+    console.error(`candor-ts: could not write the report to ${outPrefix} (${e.message}) — refusing (exit 2)`);
+    refuseEarly(`could not write the report to ${outPrefix}: ${e.message}`);
+    process.exit(2);
+  }
 }
 // Type-hierarchy sidecar (SPEC §4 / 0.7): each project class/interface (qualified `mod.Name`, matching
 // the `mod.Class.member` fn quals) -> its qualified direct supertypes/interfaces. Compact (O(types)),
