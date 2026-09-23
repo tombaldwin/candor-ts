@@ -8,6 +8,53 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R524 (shape i) — A CALL THROUGH A *FOREIGN* INTERFACE'S INDEX SIGNATURE ANSWERED
+  NOTHING, WHILE ITS IN-PROJECT TWIN DISCLOSED.** A cardinal sin (silent under-report), **pre-existing**
+  — it predates ⟨0.39⟩ and the [[R519]] fix, and is not a regression of either. Two arms byte-identical
+  but for WHERE `interface Handlers { [k: string]: (n: number) => number }` is declared:
+  in-project, `viaIndexed` read `inferred:['Unknown'] unresolved:true unknownWhy:['callback:…Handlers']`
+  — a disclosure; moved into `node_modules/dep/index.d.ts` it read `inferred:[] unresolved:false
+  invisible:['dep']` over a call whose implementor sits in the consumer's own file and writes to disk.
+  `deny Fs viaIndexed` **exit 0 → 1**, `pure viaIndexed` **exit 0 → 1**.
+  **Mechanism:** `dispatchedInterfaceMember` requires a Method/PropertySignature, so an INDEX SIGNATURE
+  minted no key and ⟨0.39⟩ obligation 3's local join (`joinLocalImpls`) was never asked; the foreign arm
+  fell through to `disclosureTail`'s `invisible` floor. The `invisible` was FALSE evidence: `dep` is a
+  types-only `.d.ts` with no code, no function of it is ever called, and chaining its report was measured
+  and does not help. ⟨0.35⟩ (SPEC.md:4655) already binds the answer — the caller's `inferred` must carry
+  a visible structural implementor's effects or `Unknown`, *"where a synthesised or structural implementor
+  is VISIBLE to the engine's own resolution"*, with no local-abstraction restriction.
+  **Fix:** `localImplTargets` now also indexes the member names a visible implementor supplies for an
+  interface whose only member is a function-typed index signature, and the external-call arm joins on the
+  member name the CALL SITE supplies (`joinIndexSignatureImpls`). Nothing is published on the wire:
+  `dispatchesOn` is a key a consumer joins against a published union, and no union entry can ever exist
+  for a key that names no member — that value would be the unanswerable noise `recordDispatch` refuses.
+  The join is an ADDITION to the `invisible` floor, never a replacement: every disclosure that fired
+  before still fires. Covered in FOUR call spellings — property access, string-literal element access,
+  numeric index signature, and the COMPUTED key (`h[k](n)`) that an index signature exists for, where
+  every member a visible implementor supplies is genuinely reachable and each is joined.
+  **Deliberately NOT done:** the foreign arm is not widened to hedge `Unknown` where no implementor is
+  visible — that is the position PART 92 arms c5/c10 pin, and the ecosystem-wide hedge ⟨0.39⟩ priced and
+  declined at 2.60% of functions. The LOCAL index-signature arm still hedges `Unknown[callback:…]`
+  unchanged (the other disjunct ⟨0.35⟩ allows); changing it would be a withdrawn disclosure.
+  **Calibration (§1b):** `test.mjs`'s R524 block generates both arms from one template with one
+  substitution. With `scan.mjs` reverted to HEAD and the block kept, **7 rows FAIL** — the four call
+  spellings and both gates and the "the edge really was taken" precision row — while all eleven control
+  rows stay green, which is the property they assert. Whole suite 2965 passed / 0 failed.
+  **A/B (`bin/corpus-ab.py`, never a fresh `ab.py`):** 16 entries, 1,742 rows, pre = worktree at
+  `a70e435`, post = this change, key `entry+package+fn+hash` over a multiset, value WIDE (every field):
+  **ADDED 0, REMOVED 0, CHANGED 6**, REACH 6 hits. The 15 real third-party TypeScript repos (axios,
+  chalk, commander, execa, got, hono, husky, ky, ora, p-queue, remeda, ts-node, zod, zustand, zx, each
+  with `node_modules` installed; ~3,400 analyzed units) are byte-identical AND contribute **zero reach**
+  — that arm is the over-charge control and nothing more, stated here rather than discovered later. All
+  six changed rows come from a RECALL harness built on three REAL, unmodified dependency declarations —
+  `@types/debug`'s `Formatters`, `ast-types`'s `VisitorMethods`, `socket.io`'s `DefaultEventsMap` — with
+  a hand-written consumer that both supplies the implementor and calls through it. Every changed row was
+  audited in full against its own source, not against candor's report: `renderO` `[]→['Fs']` (body is
+  `fs.writeFileSync`), `renderAny` (computed) `[]→['Fs']` reaching both members, `walkCall` `[]→['Exec']`
+  (body is `cp.execSync`), `walkAny` (computed) `[]→['Exec']`, and `renderJ`/`walkIdent` gaining the edge
+  while staying `inferred: []` because those members are pure — the no-spurious-charge control at real
+  declaration granularity. `invisible` is preserved on every post row; nothing was removed.
+
 - ⚠ **SOUNDNESS R522 — an unwritable `--out`/legacy-positional prefix crashed with an UNCAUGHT `EROFS`
   stack trace instead of refusing (exit 2).** `candor-ts . /also-bogus` (the legacy positional
   out-prefix form) ran a full successful scan and then died in `writeAtomic` -> `writeSinkAtomic` ->

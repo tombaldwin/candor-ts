@@ -20605,6 +20605,132 @@ export function useProc(): string { return new ProcessProvider().resolveCredenti
         `status=${fx.status} ${fx.stdout.slice(0, 300)}`);
 }
 
+// ── SOUNDNESS R524 (shape i) — A FOREIGN INTERFACE'S INDEX SIGNATURE ANSWERED NOTHING ─────────────
+//
+// `dispatchedInterfaceMember` requires a Method/PropertySignature, so an INDEX SIGNATURE minted no key
+// and ⟨0.39⟩ obligation 3's LOCAL join was never asked. The foreign arm then fell through to
+// `disclosureTail`'s `invisible` floor and read `inferred: [] unresolved: false invisible: ['dep']`
+// over a call whose implementor is IN THIS FILE and writes to disk. MEASURED at HEAD on two arms that
+// are byte-identical but for WHERE `interface Handlers { [k: string]: (n) => number }` is declared:
+//
+//     in-project   viaIndexed -> ['Unknown'] unresolved:true unknownWhy:['callback:…Handlers']
+//     node_modules viaIndexed -> []          unresolved:false invisible:['dep']     ← the silence
+//
+// ⟨0.35⟩ (SPEC.md:4655) already binds this: the caller's `inferred` must carry a visible structural
+// implementor's effects or `Unknown`, "where a synthesised or structural implementor is VISIBLE to the
+// engine's own resolution" — with no restriction to locally-declared abstractions. The `invisible` is
+// FALSE evidence here: `dep` is a types-only `.d.ts`, no function of it is ever called, and the effect
+// lives in the consumer's own body. Chaining `dep` was measured and does not help.
+//
+// The fix joins the LOCAL implementors of the index-signature key and publishes NOTHING on the wire (no
+// union entry can ever exist for a key that names no member — see `joinIndexSignatureImpls`). The four
+// controls below are what keep it narrow, and each of them was RED-checked by disabling the fix:
+// widening the foreign arm to hedge `Unknown` unconditionally would red PART 92 c5/c10 and re-buy the
+// in-crate hedge ⟨0.39⟩ declined at 2.60% of functions.
+if (blk()) {
+  // ONE abstraction source, used verbatim as a project file in one arm and as a dependency's `.d.ts` in
+  // the other. Nothing else differs between the arms — the consumer below is byte-identical in both.
+  const IFACES = `export interface Handlers { [k: string]: (n: number) => number }
+export interface PureHandlers { [k: string]: (n: number) => number }
+export interface Orphan { [k: string]: (n: number) => number }
+export interface ElemHandlers { [k: string]: (n: number) => number }
+export interface NumHandlers { [n: number]: (n: number) => number }
+export interface Declared { roll(n: number): number }`;
+  const CONSUMER = `import * as fsm from "node:fs";
+export const h: Handlers = { roll: (n) => { fsm.writeFileSync("/tmp/candor-r524", String(n)); return n } };
+export function viaIndexed(n: number): number { return h.roll(n) }
+export function viaComputed(k: string, n: number): number { return h[k](n) }
+export const d: Declared = { roll: (n) => { fsm.writeFileSync("/tmp/candor-r524", String(n)); return n } };
+export function viaDeclared(n: number): number { return d.roll(n) }
+declare const orphan: Orphan;
+export function viaNoImpl(n: number): number { return orphan.roll(n) }
+export const p: PureHandlers = { roll: (n) => n + 1 };
+export function viaPure(n: number): number { return p.roll(n) }
+export const he: ElemHandlers = { roll: (n) => { fsm.writeFileSync("/tmp/candor-r524", String(n)); return n } };
+export function viaElem(n: number): number { return he["roll"](n) }
+export const hn: NumHandlers = { 7: (n) => { fsm.writeFileSync("/tmp/candor-r524", String(n)); return n } };
+export function viaNum(n: number): number { return hn[7](n) }`;
+  const IMPORTS = { local: `./ifaces`, foreign: `depz7` };
+  const armOf = (where) => {
+    const files = { "package.json": `{"name":"appz7","version":"1.0.0"}`,
+                    "src/index.ts": `import { Handlers, PureHandlers, Orphan, ElemHandlers, NumHandlers, Declared } from "${IMPORTS[where]}";
+${CONSUMER}` };
+    if (where === "local") files["src/ifaces.ts"] = IFACES;
+    else { files["node_modules/depz7/package.json"] = `{"name":"depz7","version":"1.0.0","types":"index.d.ts"}`;
+           files["node_modules/depz7/index.d.ts"] = IFACES; }
+    const dir = project(files);
+    const { report } = scan(dir);
+    const gate = (rule) => {
+      fs.writeFileSync(path.join(dir, "policy.candor"), `${rule}\n`);
+      return spawnSync("node", [path.join(HERE, "scan.mjs"), dir, "--policy", path.join(dir, "policy.candor")],
+                       { encoding: "utf8" }).status;
+    };
+    return { report, gate, row: (fn) => entry(report, `src.index.${fn}`) };
+  };
+  const local = armOf("local"), foreign = armOf("foreign");
+  const shown = (a) => JSON.stringify((a.report?.functions ?? []).map((e) => [e.fn, e.inferred, e.unknownWhy, e.invisible]));
+
+  // THE DEFECT. `[]` at HEAD, in all three call spellings.
+  for (const [fn, why] of [["viaIndexed", "property access"], ["viaElem", "element access, string literal"],
+                           ["viaNum", "numeric index signature"], ["viaComputed", "COMPUTED key — the spelling an index signature exists for"]])
+    check(`R524 [${why}]: a call through a FOREIGN index signature carries its visible implementor's Fs — measured [] at HEAD`,
+          (foreign.row(fn)?.inferred ?? []).includes("Fs"), shown(foreign));
+  check("R524 GATE: `deny Fs viaIndexed` exits 1 on the foreign arm — measured exit 0 at HEAD over a body that writes a file",
+        foreign.gate("deny Fs viaIndexed") === 1, shown(foreign));
+  check("R524 GATE: …and so does the computed spelling",
+        foreign.gate("deny Fs viaComputed") === 1, shown(foreign));
+  // NOTHING THAT WAS DISCLOSED STOPS BEING DISCLOSED. The join is an ADDITION to the `invisible` floor,
+  // never a replacement for it — a fix that closed the silence by withdrawing the ledger's own voice
+  // would pass every row above and lose a channel ⟨0.21⟩ depends on.
+  check("R524: the κ-coverage `invisible: ['depz7']` disclosure is PRESERVED, not traded away",
+        (foreign.row("viaIndexed")?.invisible ?? []).includes("depz7"), shown(foreign));
+
+  // CONTROL 1 — THE DECLARED-MEMBER FOREIGN ARM ALREADY RESOLVED AND MUST NOT MOVE. It is the arm this
+  // fix is made to AGREE with: one question, two spellings, one answer.
+  check("R524 CONTROL 1: the DECLARED-member foreign arm still resolves to Fs and still records its wire key",
+        (foreign.row("viaDeclared")?.inferred ?? []).includes("Fs")
+        && (foreign.row("viaDeclared")?.dispatchesOn ?? []).includes("depz7#Declared.roll"), shown(foreign));
+  // …AND THE ASSERTION `joinIndexSignatureImpls` MAKES IN ITS OWN COMMENT, PINNED RATHER THAN BELIEVED:
+  // the index-signature arm mints NO wire key. An index signature names no member, so the union emitter
+  // (whose loop requires `member.name`) can never publish one — a `dispatchesOn` value nothing can
+  // answer is the noise `recordDispatch` refuses, and noise in a soundness field is how a real value
+  // stops being read. Asserted as an ABSENCE beside the PRESENCE above so the two cannot drift.
+  for (const fn of ["viaIndexed", "viaComputed", "viaElem", "viaNum", "viaPure"])
+    check(`R524 CONTROL 1 (wire) [${fn}]: the index-signature arm publishes NO \`dispatchesOn\` key — nothing could ever answer one`,
+          (foreign.row(fn)?.dispatchesOn ?? []).length === 0,
+          JSON.stringify((foreign.report?.functions ?? []).map((e) => [e.fn, e.dispatchesOn])));
+
+  // CONTROL 2 — THE LOCAL INDEX-SIGNATURE ARM HEDGES AND MUST KEEP HEDGING. Its `Unknown` is the OTHER
+  // disjunct ⟨0.35⟩ allows; this fix touches only the external-call path, and a change here would be a
+  // NARROWING (a withdrawn disclosure) dressed up as a precision gain.
+  for (const fn of ["viaIndexed", "viaComputed", "viaElem", "viaNum", "viaPure"])
+    check(`R524 CONTROL 2 [${fn}]: the LOCAL index-signature arm still discloses Unknown[callback:…], unchanged`,
+          (local.row(fn)?.inferred ?? []).includes("Unknown")
+          && (local.row(fn)?.unknownWhy ?? []).some((w) => w.startsWith("callback:")), shown(local));
+
+  // CONTROL 3 — A FOREIGN ABSTRACTION WITH NO VISIBLE IMPLEMENTOR MUST NOT START HEDGING. This is the
+  // position PART 92 arms c5/c10 PIN (`invisible=True, unknown=False`), and widening it is the
+  // ecosystem-wide hedge ⟨0.39⟩ priced and declined. `localImplTargets` forms no key for a name no
+  // implementor supplies, so the branch returns before it can say anything.
+  check("R524 CONTROL 3: a foreign index signature with NO visible implementor gains NEITHER an effect NOR a hedge",
+        (foreign.row("viaNoImpl")?.inferred ?? []).length === 0
+        && (foreign.row("viaNoImpl")?.unknownWhy ?? []).length === 0
+        && (foreign.row("viaNoImpl")?.invisible ?? []).includes("depz7"), shown(foreign));
+  check("R524 CONTROL 3 GATE: `deny Unknown viaNoImpl` still exits 0 — the fix buys no hedge it cannot justify",
+        foreign.gate("deny Unknown viaNoImpl") === 0, shown(foreign));
+
+  // CONTROL 4 — A PURE IMPLEMENTOR MUST NOT GAIN A SPURIOUS CHARGE. The join edges to the implementor's
+  // own minted unit and lets the fixpoint answer, so a pure member contributes a pure edge. Without
+  // this arm every row above would pass for an engine that charged on sight of an index signature.
+  check("R524 CONTROL 4: a foreign index signature whose only implementor is PURE charges nothing and does not hedge",
+        (foreign.row("viaPure")?.inferred ?? []).length === 0
+        && (foreign.row("viaPure")?.unknownWhy ?? []).length === 0, shown(foreign));
+  check("R524 CONTROL 4: …and the edge really was taken, so the empty row is precision and not silence",
+        (foreign.row("viaPure")?.calls ?? []).some((c) => c.endsWith(".roll")), shown(foreign));
+  check("R524 CONTROL 4 GATE: `pure viaPure` exits 0 on the foreign arm",
+        foreign.gate("pure viaPure") === 0, shown(foreign));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

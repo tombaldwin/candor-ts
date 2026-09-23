@@ -5794,6 +5794,74 @@ function joinLocalImpls(rec, d) {
   }
   for (const t of targets) rec.edges.add(t);
 }
+// ⟨SOUNDNESS R524, shape (i)⟩ The interface whose INDEX SIGNATURE a resolved declaration dispatches
+// THROUGH, or null. `interface Handlers { [k: string]: (n: number) => number }` is not a member
+// signature, so `dispatchedInterfaceMember` returns null for it — correctly, because an index signature
+// names no member and therefore mints no key any producer's `interfaceUnion` could ever publish under
+// (the emitter's own loop requires `member.name`). That is the right answer for the WIRE and the wrong
+// one for obligation 3's LOCAL half, which does not need a publishable key: the implementor is in THIS
+// scan and the member name is sitting at the call site. ⟨0.35⟩ (SPEC.md:4655) binds the caller's
+// `inferred` to a visible structural implementor's effects or `Unknown` "where a synthesised or
+// structural implementor is VISIBLE to the engine's own resolution", with no restriction to LOCALLY
+// declared abstractions — so moving `Handlers` into `node_modules` may not change the answer.
+// The checker resolves `h.roll(n)` to the index signature's FUNCTION TYPE, not to the signature, so
+// both spellings are accepted here for the same reason `memberSigOf` accepts both spellings of a member.
+function indexSignatureIface(decl) {
+  const sig = !decl ? null
+    : ts.isIndexSignatureDeclaration(decl) ? decl
+    : (decl.parent && ts.isIndexSignatureDeclaration(decl.parent) ? decl.parent : null);
+  if (!sig || !sig.parent || !ts.isInterfaceDeclaration(sig.parent) || !sig.parent.name) return null;
+  return sig.parent;
+}
+// The property name a CALL SITE accesses on its receiver — `h.roll(n)` and `h["roll"](n)` both name
+// `roll`. It has to come from the site because the resolved declaration has no name to give: that is
+// what an index signature IS. A computed, non-literal key (`h[k](n)`) names nothing and resolves
+// nothing — it is left exactly where it was rather than guessed at.
+function accessedMemberName(expr) {
+  if (!expr) return null;
+  if (ts.isPropertyAccessExpression(expr)) return expr.name?.text ?? null;
+  if (ts.isElementAccessExpression(expr) && expr.argumentExpression
+      && (ts.isStringLiteralLike(expr.argumentExpression) || ts.isNumericLiteral(expr.argumentExpression)))
+    return expr.argumentExpression.text;
+  return null;
+}
+// Obligation 3's LOCAL half for the index-signature spelling. Deliberately NOT `recordDispatch`: it
+// records nothing on the wire, because `dispatchesOn` is a key a CONSUMER is expected to be able to
+// join against a published union, and no union is ever published for an index signature. A value there
+// that nothing can answer is the noise `recordDispatch`'s own comment refuses, and noise in a soundness
+// field is how a real value stops being read. The JOIN is the whole of the fix.
+//
+// PURELY ADDITIVE: `joinLocalImpls` either edges to units this scan minted or hedges `Unknown`, and the
+// `invisible`/ledger disclosure downstream of this call site still runs either way. Nothing that was
+// disclosed before stops being disclosed.
+function joinIndexSignatureImpls(rec, decl, pkg, memberName) {
+  if (!rec || !decl || !pkg) return;   // NOT gated on `memberName`: null is the COMPUTED-key case below
+  if (declIsNodeTypes(decl)) return;   // the platform type surface — same exclusion as `recordDispatch`
+  const iface = indexSignatureIface(decl);
+  if (!iface) return;
+  // REACH PROBE, env-gated, same convention as `CANDOR_R519_REACH` above: a byte-identical A/B over a
+  // corpus that cannot reach the changed branch is the most flattering number available and the least
+  // informative. `bin/corpus-ab.py --mark R524-REACH` COUNTS these instead of anyone inferring reach.
+  if (process.env.CANDOR_R524_REACH) console.error(`R524-REACH ${pkg}#${iface.name.text}.${memberName ?? "<computed>"}`);
+  const ifaceName = iface.name.text;
+  // A COMPUTED key — `h[name](n)`, the idiomatic dispatch-table spelling and the one an index signature
+  // exists for — names no single member, so EVERY member a visible implementor supplies is genuinely
+  // reachable from it. Joining each is the same answer `joinLocalImpls` gives for a named one, applied
+  // to the whole reachable set; it is not a widening of the named case, and it charges nothing no
+  // visible implementor performs. The audit boundary is deliberately drawn past R524's own fixture,
+  // which uses a literal member: a rule that fired only on `h.roll(n)` would miss the spelling the
+  // construct is FOR. Bounded by the same `CHA_FANOUT_LIMIT` as every other CHA site here — a table
+  // too wide to enumerate is an open hierarchy and takes the disclosed Unknown, not silence.
+  const names = memberName ? [memberName] : indexSigMemberNames(pkg, ifaceName);
+  if (!names.length) return;
+  if (names.length > CHA_FANOUT_LIMIT) {
+    rec.direct.add("Unknown");
+    rec.why.add(dispatchWhy(`${pkg}.${ifaceName}`, memberName ?? undefined));
+    return;
+  }
+  for (const m of names)
+    joinLocalImpls(rec, { key: dispatchKey(pkg, ifaceName, m), pkg, ifaceName, member: m });
+}
 // Apply ONE chained-dependency entry to the calling unit. There is exactly one of these because there used
 // to be two, drifted: the CallExpression arm and the desugared-declaration arm each spelled the copy out,
 // and the ⟨0.19⟩ reason class was added to neither. That is the same root cause candor-java's `6ab26e4`
@@ -5812,15 +5880,20 @@ function joinLocalImpls(rec, d) {
 // copying them here would copy whatever happened to be known and silently under-report. An edge flows
 // through the SAME least fixpoint every other call does.
 let localImplTargetsByKey = null;
-function localImplTargets(key) {
+// ⟨SOUNDNESS R524, shape (i)⟩ `<pkg>#<Iface>` -> every member name a VISIBLE implementor of that
+// index-signature interface supplies. Built in the same pass and off the same evidence as the target
+// index above, because a COMPUTED key (`h[k]()`) names no single member and every one of them is then
+// genuinely reachable. Separate map rather than a widening of the one above: these are NAMES, not
+// targets, and the ambiguity/fan-out guards that decide a target set must not be answered from here.
+let indexSigNamesByIface = null;
+function ensureLocalImplIndex() {
   if (!localImplTargetsByKey) {
     localImplTargetsByKey = new Map();
+    indexSigNamesByIface = new Map();
     const add = (ownerPkg, ifaceDecl, implClasses) => {
       const ifaceName = ifaceDecl.name?.text;
       if (!ifaceName) return;
-      for (const member of ifaceDecl.members ?? []) {
-        const m = member.name?.getText?.();
-        if (!m) continue;
+      const push = (m) => {
         const k = dispatchKey(ownerPkg, ifaceName, m);
         if (!localImplTargetsByKey.has(k))
           localImplTargetsByKey.set(k, { targets: [], allResolved: true, decls: new Set() });
@@ -5846,7 +5919,33 @@ function localImplTargets(key) {
           if (!t) { cell.allResolved = false; continue; }
           if (!cell.targets.includes(t)) cell.targets.push(t);
         }
+      };
+      for (const member of ifaceDecl.members ?? []) {
+        const m = member.name?.getText?.();
+        if (m) push(m);
       }
+      // ⟨SOUNDNESS R524, shape (i)⟩ AN INDEX SIGNATURE DECLARES NO MEMBER, so the loop above indexes
+      // nothing for `interface Handlers { [k: string]: (n: number) => number }` and obligation 3's join
+      // had no key to answer on — which is the whole of R524's ts half. The member names such an
+      // interface can be dispatched on are not on the DECLARATION at all; they are whatever its
+      // implementors actually supply, so they are enumerated from the implementors. `push` is reused
+      // verbatim rather than copied: it re-scans every implementor for that name and marks
+      // `allResolved` false for any that cannot answer it, so an implementor set that disagrees about
+      // which keys exist hedges instead of resolving — the same fail-closed condition the declared-member
+      // arm already applies, reached the same way. A name no implementor supplies forms no key and is
+      // untouched (`localImplTargets` returns its empty cell, `joinLocalImpls` returns early), which is
+      // what keeps a foreign abstraction with NO visible implementor exactly where PART 92 c5/c10 pin it.
+      if ((ifaceDecl.members ?? []).some((m) => ts.isIndexSignatureDeclaration(m) && m.type && ts.isFunctionTypeNode(m.type)))
+        for (const cls of implClasses)
+          for (const x of cls.members ?? cls.properties ?? []) {
+            const m = (ts.isMethodDeclaration(x) || ts.isPropertyDeclaration(x) || ts.isPropertyAssignment(x))
+              && x.name?.getText?.();
+            if (!m) continue;
+            push(m);
+            const ik = `${ownerPkg}#${ifaceName}`;
+            if (!indexSigNamesByIface.has(ik)) indexSigNamesByIface.set(ik, new Set());
+            indexSigNamesByIface.get(ik).add(m);
+          }
     };
     for (const [ifaceDecl, impls] of interfaceImpls) add(pkgName, ifaceDecl, impls);
     for (const [ifaceDecl, impls] of foreignInterfaceImpls) {
@@ -5854,7 +5953,15 @@ function localImplTargets(key) {
       if (ownerPkg && !ownerPkg.startsWith("<") && !ownerPkg.startsWith("/")) add(ownerPkg, ifaceDecl, impls);
     }
   }
+}
+function localImplTargets(key) {
+  ensureLocalImplIndex();
   return localImplTargetsByKey.get(key) ?? { targets: [], allResolved: true, decls: new Set() };
+}
+// ⟨SOUNDNESS R524, shape (i)⟩ Every member name a visible implementor of `pkg#Iface` supplies.
+function indexSigMemberNames(pkg, ifaceName) {
+  ensureLocalImplIndex();
+  return [...(indexSigNamesByIface.get(`${pkg}#${ifaceName}`) ?? [])];
 }
 function applyDepHit(rec, hit) {
   // ⟨0.39⟩ The dispatched members travel with the hit — transitively, so a consumer of THIS report
@@ -8145,9 +8252,19 @@ function visitCalls(node) {
           // one hop short and the consumer's row ABSENT — a purity claim. Recorded BEFORE the chained
           // lookup below and independently of whether it hits: whether this run happened to be chained
           // says nothing about what a consumer of THIS report will be able to see.
-          if (!eff && !mod.startsWith("<"))
-            joinLocalImpls(rec, recordDispatch(rec, decl,
-              mod.startsWith("@types/") ? mod.slice("@types/".length) : mod));
+          if (!eff && !mod.startsWith("<")) {
+            const dpkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
+            joinLocalImpls(rec, recordDispatch(rec, decl, dpkg));
+            // ⟨SOUNDNESS R524, shape (i)⟩ …and the INDEX-SIGNATURE spelling of the same dispatch, which
+            // `recordDispatch` returns null for because there is no member name on the declaration to
+            // form a key from. Held to THIS arm on purpose: a CallExpression is the only site that has
+            // the receiver access in hand, and a member name is exactly what the site supplies and the
+            // declaration cannot. The DESUGARED arm (`chargeExternalDecl`, reached from the HOF-ref and
+            // coercion sites) is not fixed here and is not the same defect — `[n].map(h.roll)` is
+            // silent through an interface member in BOTH the local and the foreign arm, declared-member
+            // spelling included, which is a wider hole with its own mechanism.
+            joinIndexSignatureImpls(rec, decl, dpkg, accessedMemberName(node.expression));
+          }
           // CANDOR_DEPS: an unclassified call into a package with a loaded sibling report inherits
           // that function's recorded transitive effects (+ literal surfaces) by `hash`.
           let inheritedFromDep = false;
