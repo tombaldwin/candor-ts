@@ -20941,6 +20941,170 @@ export function realNet(): void { dial("wss://example.invalid") }`,
         gate("deny Fs src.index.viaPure") === 0, shown);
 }
 
+// ── SOUNDNESS R574 — R560's JOIN CHARGED A LOCAL IMPLEMENTOR TO A LIBRARY-OWNED RECEIVER ──────────
+//
+// R560 removed the `!eff` guard so a κ whole-module rule could no longer SUPPRESS the ⟨0.39⟩
+// obligation-3 join. That was right and is not reverted — its own rows and CONTROLS are the block
+// above and every one of them stays green. But it also ran the CHA join on every foreign call κ had
+// already answered, so a local implementor of the package's interface was charged to a call that
+// cannot reach it. MEASURED at `d534b62`, one file, `tsc` clean, `analyzed=6`, the only variable
+// being the receiver's PROVENANCE:
+//
+//     viaLib()  { const g = makeClient(); return g.fetchIt(u) }   ← the receiver is got's OWN object
+//       d46c098  ['Net']          d534b62  ['Exec','Net']   ← `Exec` is a local `class MyClient`
+//
+// ⚠ THE PREMISE NEEDED CORRECTING AND THE CORRECTION SHAPED THE FIX. The `Exec` is NOT peculiar to
+// κ-classified packages: measured at `d46c098`, the identical consumer against a NON-κ package
+// (`depq`) already read `['Exec']` on the same arm through this same join. So R560 widened the
+// SCOPE of the shipped ⟨0.35⟩/⟨0.39⟩ CHA over-approximation, not its KIND — which is why the answer
+// here is ⟨0.35⟩'s OTHER sanctioned branch (`Unknown` + `dispatch:`, "Both are sound; they differ
+// only in precision") and never a deletion. NARROWING PAST A FABRICATION INTO SILENCE WOULD CONVERT
+// AN OVER-REPORT INTO THE CARDINAL SIN. Every row that loses `Exec` below gains `Unknown`, a
+// `dispatch:` why and `unresolved: true`, and `deny Exec Unknown` on it goes **0 (d46c098) → 1**:
+// against the last shipped behaviour this is a NET GAIN in teeth, not a loss.
+//
+// The exclusion is a DENYLIST and CONTROL 1 is what stops it becoming an allowlist: only a `const`
+// bound to a ZERO-ARGUMENT call or `new` resolving into the same package is excluded. A factory that
+// RECEIVED an implementor, a `let`, a parameter and a property access all keep the full charge.
+//
+// RED-CHECKED (§1b): pass `false` instead of `!!ownProduct` to the two joins in scan.mjs — the six
+// DEFECT/NO-SILENCE rows and the GATE go red, every CONTROL stays green.
+if (blk()) {
+  const dir = project({
+    "package.json": `{"name":"appr574","version":"1.0.0"}`,
+    "node_modules/got/package.json": `{"name":"got","version":"1.0.0","types":"index.d.ts"}`,
+    "node_modules/got/index.d.ts": `export interface Gettable { fetchIt(u: string): string }
+export declare function makeClient(): Gettable;
+export declare function makeClientFrom(g: Gettable): Gettable;
+export declare function register(g: Gettable): void;
+export declare const Client: { new (): Gettable };
+export declare const holder: { inner: Gettable };`,
+    "src/index.ts": `import { Gettable, makeClient, makeClientFrom, register, Client, holder } from "got";
+import * as cp from "node:child_process";
+export class MyClient implements Gettable {
+  fetchIt(u: string): string { return String(cp.execSync(u)) }
+}
+export function aConstFactory(u: string) { const g = makeClient(); return g.fetchIt(u) }
+export function bDirect(u: string) { return makeClient().fetchIt(u) }
+export function cNewZero(u: string) { const g = new Client(); return g.fetchIt(u) }
+export function dFactoryWithArg(u: string) { const g = makeClientFrom(new MyClient()); return g.fetchIt(u) }
+export function eLet(u: string) { let g = makeClient(); return g.fetchIt(u) }
+export function fParam(g: Gettable, u: string) { return g.fetchIt(u) }
+export function gProp(u: string) { return holder.inner.fetchIt(u) }
+export function hRegistered(u: string) { register(new MyClient()); const g = makeClient(); return g.fetchIt(u) }`,
+  });
+  const { report } = scan(dir);
+  const row = (fn) => entry(report, `src.index.${fn}`);
+  const gate = (rule) => {
+    fs.writeFileSync(path.join(dir, "policy.candor"), `${rule}\n`);
+    return spawnSync("node", [path.join(HERE, "scan.mjs"), dir, "--policy", path.join(dir, "policy.candor")],
+                     { encoding: "utf8" }).status;
+  };
+  const shown = JSON.stringify((report?.functions ?? []).map((e) => [e.fn, e.inferred, e.unknownWhy]));
+
+  // THE DEFECT — three spellings of "the receiver is the package's own product": a const bound to a
+  // zero-arg factory, the same with no binding at all, and a zero-arg construction. The audit boundary
+  // is drawn past R574's own repro, which is only the first of the three (§9).
+  for (const fn of ["aConstFactory", "bDirect", "cNewZero"])
+    check(`R574 [${fn}]: a local implementor is NOT charged to a receiver the package produced — measured ['Exec','Net'] at d534b62`,
+          !(row(fn)?.inferred ?? []).includes("Exec"), shown);
+  // …AND NOT INTO SILENCE. This is the half that makes the three rows above a precision gain rather
+  // than a new cardinal sin, and it is asserted separately so a fix that merely DELETED the charge
+  // could not pass. ⟨0.35⟩ option (b), in full: the effect, the why kind, and `unresolved`.
+  for (const fn of ["aConstFactory", "bDirect", "cNewZero"])
+    check(`R574 NO SILENCE [${fn}]: what it stops charging it DISCLOSES — Unknown + dispatch: + unresolved`,
+          (row(fn)?.inferred ?? []).includes("Unknown")
+          && (row(fn)?.unknownWhy ?? []).includes("dispatch:got.Gettable.fetchIt")
+          && row(fn)?.unresolved === true, shown);
+  // THE GATE ROW HAS TO DISCRIMINATE, and the first spelling of it did not. `deny Exec Unknown` exits 1
+  // with the fix AND without it — the fabricated `Exec` satisfies it just as the replacement `Unknown`
+  // does — so it read as coverage of a change it could not see (§A). `deny Unknown` is the one that
+  // moves: 0 at d534b62 (a bare concrete charge, nothing disclosed) and 1 here. The non-discriminating
+  // pair is kept BELOW as a CONTROL, labelled as one, because what it asserts — that the row still has
+  // teeth under the policy a user denying Exec would actually write — is worth pinning even though it
+  // cannot fail.
+  check("R574 GATE: `deny Unknown src.index.aConstFactory` exits 1 — the hedge is REAL disclosure; measured exit 0 at d534b62 and at d46c098",
+        gate("deny Unknown src.index.aConstFactory") === 1, shown);
+  check("R574 GATE CONTROL (cannot discriminate, and says so): `deny Exec Unknown src.index.aConstFactory` still exits 1 — a user denying Exec is not told they are clean",
+        gate("deny Exec Unknown src.index.aConstFactory") === 1, shown);
+
+  // CONTROL 1 — THE DENYLIST IS NOT AN ALLOWLIST. Four sibling provenances, one variable each, all of
+  // which must KEEP the full CHA charge: a factory handed an implementor can hand it back; a `let` can
+  // be reassigned anywhere in scope; a parameter is supplied by the caller; and a property read off a
+  // package object proves nothing about what wrote it. Without these rows the exclusion would pass while
+  // swallowing every foreign dispatch κ touched — which is the cardinal-sin direction.
+  for (const fn of ["dFactoryWithArg", "eLet", "fParam", "gProp"])
+    check(`R574 CONTROL 1 [${fn}]: an UNPROVEN receiver provenance keeps the full implementor charge`,
+          (row(fn)?.inferred ?? []).includes("Exec"), shown);
+
+  // CONTROL 2 — κ's OWN ANSWER IS NOT WITHDRAWN. R560's open half (a fabricated `Net` on a call that
+  // enters no package code) is a RULING, not a patch, and this row is what stops a later narrowing
+  // taking it away as a side effect of narrowing something else. Every arm, moved or unmoved.
+  for (const fn of ["aConstFactory", "bDirect", "cNewZero", "dFactoryWithArg", "eLet", "fParam", "gProp", "hRegistered"])
+    check(`R574 CONTROL 2 [${fn}]: κ's whole-module Net is preserved`,
+          (row(fn)?.inferred ?? []).includes("Net"), shown);
+
+  // CONTROL 3 — THE NAMED RESIDUAL, PINNED RATHER THAN CLAIMED CLOSED. `register(new MyClient())` then
+  // a zero-arg `makeClient()` really can hand back the caller's own implementor, and this rule cannot
+  // see that. It is excluded, so the row is hedged and NOT charged `Exec` — the same answer d46c098
+  // gave, since the whole join sat behind `!eff`. It is here as an ASSUMPTION with teeth: `deny Exec
+  // Unknown` still fires, and the `dispatchesOn` key R560 added is still published, so a consumer
+  // joining that key against its own implementors recovers what this scan declined to assert.
+  check("R574 CONTROL 3 [hRegistered]: the global-registration residual is HEDGED, not charged — and stated as an assumption",
+        !(row("hRegistered")?.inferred ?? []).includes("Exec")
+        && (row("hRegistered")?.inferred ?? []).includes("Unknown"), shown);
+  check("R574 CONTROL 3 GATE: `deny Unknown src.index.hRegistered` exits 1 — the residual is DISCLOSED, not silent; it exited 0 at d46c098, where this shape was silent",
+        gate("deny Unknown src.index.hRegistered") === 1, shown);
+  check("R574 CONTROL 3 (wire): the dispatch key R560 added is still published on an excluded receiver",
+        (row("aConstFactory")?.dispatchesOn ?? []).includes("got#Gettable.fetchIt"), shown);
+
+  // CONTROL 4 — THE NON-κ TWIN IS BYTE-IDENTICAL, which is what makes the boundary a DECISION and not
+  // an oversight. Same file, same shapes, one variable: whether the package is κ-classified. The
+  // exclusion is confined to the branch R560 added, so nothing that existed before R560 can move —
+  // and `depq/aConstFactory` charging `Exec` is the measurement that proved the over-charge predates
+  // R560. If this row ever goes red, the exclusion has leaked into the `!eff` path.
+  const dir2 = project({
+    "package.json": `{"name":"appr574b","version":"1.0.0"}`,
+    "node_modules/depq/package.json": `{"name":"depq","version":"1.0.0","types":"index.d.ts"}`,
+    "node_modules/depq/index.d.ts": `export interface Gettable { fetchIt(u: string): string }
+export declare function makeClient(): Gettable;`,
+    "src/index.ts": `import { Gettable, makeClient } from "depq";
+import * as cp from "node:child_process";
+export class MyClient implements Gettable {
+  fetchIt(u: string): string { return String(cp.execSync(u)) }
+}
+export function aConstFactory(u: string) { const g = makeClient(); return g.fetchIt(u) }`,
+  });
+  const { report: rep2 } = scan(dir2);
+  const r2 = entry(rep2, "src.index.aConstFactory");
+  check("R574 CONTROL 4 [non-κ twin]: the UNCLASSIFIED package's identical arm is untouched — still ['Exec'], no Unknown",
+        (r2?.inferred ?? []).includes("Exec") && !(r2?.inferred ?? []).includes("Unknown"),
+        JSON.stringify((rep2?.functions ?? []).map((e) => [e.fn, e.inferred, e.unknownWhy])));
+
+  // CONTROL 5 — THE REACH PROBE COUNTS JOINS, NOT BRANCH ENTRIES. `R560-REACH` was published as "182
+  // hits across 12 entries — the over-charge control WITH real reach" while firing on BRANCH ENTRY,
+  // one line ABOVE `recordDispatch`. A file containing only `fs.writeFileSync` + `cp.execSync` emitted
+  // two such hits, both rejected one line later, neither able to change a row — so the figure could
+  // not distinguish 182 genuine joins from 182 node-core no-ops, and it was cited as if it could.
+  // Re-derived with the moved probe over the same 16-package corpus: 77 branch entries, **0 joins**.
+  // This row is the instrument's calibration and it is a GATE, not a note: a probe cited as reach must
+  // count the thing it is cited for ([[candor-oracle-disclosure-recall]] — calibrate the instrument).
+  const probeDir = project({
+    "package.json": `{"name":"appr574c","version":"1.0.0"}`,
+    "src/index.ts": `import * as fsm from "node:fs";
+import * as cp from "node:child_process";
+export function w(p: string) { fsm.writeFileSync(p, "x") }
+export function e(c: string) { return String(cp.execSync(c)) }`,
+  });
+  const probeRun = (d) => spawnSync("node", [path.join(HERE, "scan.mjs"), d], {
+    encoding: "utf8", env: { ...process.env, CANDOR_R560_REACH: "1" } });
+  const hits = (out) => (out.stderr.match(/R560-REACH/g) ?? []).length;
+  check("R574 CONTROL 5 [probe]: a node-core-only file emits ZERO R560-REACH hits — it emitted 2 at d534b62",
+        hits(probeRun(probeDir)) === 0, probeRun(probeDir).stderr.slice(0, 400));
+  check("R574 CONTROL 5 [probe]: …and a real join still counts, so the zero above is a measurement and not a dead probe",
+        hits(probeRun(dir)) > 0, probeRun(dir).stderr.slice(0, 400));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

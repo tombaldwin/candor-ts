@@ -5776,23 +5776,82 @@ function recordDispatch(rec, decl, pkg) {
 // Bounded by the SAME `CHA_FANOUT_LIMIT` the in-scan dispatch site and the union emitter apply, and
 // hedged on the SAME completeness condition: an implementor whose member resolves to no unit leaves the
 // candidate set incomplete, and edging the rest while staying silent about it would drop its effects.
-function joinLocalImpls(rec, d) {
-  if (!rec || !d) return;
+// ⟨SOUNDNESS R574⟩ THE RECEIVER'S VALUE IS THE PACKAGE'S OWN PRODUCT — returns the producing
+// expression, or null. `const g = makeClient(); g.fetchIt(u)` where `makeClient` is declared by `pkg`
+// and takes NO ARGUMENT: the package was handed nothing it could hand back, so the value it returned
+// is its own, and a LOCAL `class MyClient implements Gettable` is not a candidate at this site.
+//
+// IT IS A DENYLIST AND IT FAILS TOWARDS OVER-CHARGE. Only the provenance it can PROVE is excluded —
+// a `const` with a single declaration whose initializer is a zero-argument call or `new` resolving
+// into the same package. A parameter, a field, a `let`, a property access on a package object, or a
+// factory that RECEIVED an argument all fall through and keep the full CHA join. Widening it to an
+// allowlist of "receivers that look local" is the inversion this family has been burned by
+// ([[candor-denylist-over-allowlist]]); a missing exclusion here costs precision, a wrong one costs
+// silence.
+//
+// THE RESIDUAL, NAMED RATHER THAN ASSERTED AWAY: a zero-argument factory that returns an implementor
+// the caller registered EARLIER through a global registry (`register(new MyClient()); makeClient()`)
+// is genuinely a local implementor and is excluded here. That is not a new hole — it is exactly the
+// answer `d46c098` gave for the same shape, since the whole join sat behind `!eff` — and the
+// `dispatchesOn` key R560 added is published either way, so a consumer joining that key against its
+// own implementors still recovers it. This is an ASSUMPTION about zero-argument factories, not a
+// proof, and it is worded as one.
+function packageProducedReceiver(recvExpr, pkg) {
+  if (!recvExpr || !pkg) return null;
+  const unwrap = (x) => {
+    while (x && (ts.isAwaitExpression(x) || ts.isParenthesizedExpression(x) || ts.isNonNullExpression(x)
+                 || ts.isAsExpression(x))) x = x.expression;
+    return x;
+  };
+  let e = unwrap(recvExpr);
+  // ONE hop through a `const` binding. `const` and a SINGLE declaration deliberately: a `let`/`var`
+  // can be reassigned anywhere in the scope, and two declarations mean two answers — both are the
+  // open-slot shape ⟨R103⟩ already treats as an incomplete candidate set, so neither is provable here.
+  if (e && ts.isIdentifier(e)) {
+    const decls = checker.getSymbolAtLocation(e)?.declarations ?? [];
+    if (decls.length !== 1) return null;
+    const d = decls[0];
+    if (!ts.isVariableDeclaration(d) || !d.initializer) return null;
+    if (!(d.parent && ts.isVariableDeclarationList(d.parent) && (d.parent.flags & ts.NodeFlags.Const))) return null;
+    e = unwrap(d.initializer);
+  }
+  if (!e || !(ts.isCallExpression(e) || ts.isNewExpression(e))) return null;
+  if ((e.arguments?.length ?? 0) !== 0) return null;  // it was handed nothing, so it returned nothing of ours
+  const pd = checker.getResolvedSignature(e)?.declaration;
+  if (!pd) return null;
+  const pm = declModule(pd);
+  return (pm === pkg || (pm.startsWith("@types/") ? pm.slice("@types/".length) : pm) === pkg) ? e : null;
+}
+// ⟨SOUNDNESS R574⟩ RETURNS WHAT IT DID, so a reach probe can count JOINS rather than branch entries.
+// `null` = this key named no visible implementor and nothing was contributed; otherwise the outcome
+// kind (`edge` / `ambiguous` / `hedge`). Every caller may ignore it; the value exists because
+// `R560-REACH` was published as "182 hits across 12 entries — the over-charge control WITH real reach"
+// while firing on BRANCH ENTRY, one line before `recordDispatch` could reject the declaration. A file
+// containing only `fs.writeFileSync` + `cp.execSync` emitted two such hits that changed no row. A reach
+// probe cited as evidence must count the thing it is cited for.
+// `hedgeOnly` ⟨SOUNDNESS R574⟩: this key HAS visible implementors and the receiver provably is not one
+// of them, so take SPEC ⟨0.35⟩'s option (b) — `Unknown` with a `dispatch:` why — instead of option (a),
+// charging their effects. The clause makes the two equally sound and says so ("Both are sound; they
+// differ only in precision"). It is reached only when `targets.length > 0`, so it is exactly
+// co-extensive with the charge it replaces: where there is no implementor there is nothing to hedge.
+function joinLocalImpls(rec, d, hedgeOnly) {
+  if (!rec || !d) return null;
   const { targets, allResolved, decls } = localImplTargets(d.key);
-  if (!targets.length) return;
+  if (!targets.length) return null;
   // The name means two things here, so no implementor set can be attributed to this key — §4 ⟨0.24⟩'s
   // `ambiguous:`, not `dispatch:`: the owner type is nameable, but WHICH declaration it names is not.
   if (decls.size > 1) {
     rec.direct.add("Unknown");
     rec.why.add(`ambiguous:${d.pkg}.${d.ifaceName}.${d.member}`);
-    return;
+    return "ambiguous";
   }
-  if (targets.length > CHA_FANOUT_LIMIT || !allResolved) {
+  if (hedgeOnly || targets.length > CHA_FANOUT_LIMIT || !allResolved) {
     rec.direct.add("Unknown");
     rec.why.add(dispatchWhy(`${d.pkg}.${d.ifaceName}`, d.member));
-    return;
+    return hedgeOnly ? "hedge-foreign-receiver" : "hedge";
   }
   for (const t of targets) rec.edges.add(t);
+  return "edge";
 }
 // ⟨SOUNDNESS R524, shape (i)⟩ The interface whose INDEX SIGNATURE a resolved declaration dispatches
 // THROUGH, or null. `interface Handlers { [k: string]: (n: number) => number }` is not a member
@@ -5834,11 +5893,13 @@ function accessedMemberName(expr) {
 // PURELY ADDITIVE: `joinLocalImpls` either edges to units this scan minted or hedges `Unknown`, and the
 // `invisible`/ledger disclosure downstream of this call site still runs either way. Nothing that was
 // disclosed before stops being disclosed.
-function joinIndexSignatureImpls(rec, decl, pkg, memberName) {
-  if (!rec || !decl || !pkg) return;   // NOT gated on `memberName`: null is the COMPUTED-key case below
-  if (declIsNodeTypes(decl)) return;   // the platform type surface — same exclusion as `recordDispatch`
+// ⟨SOUNDNESS R574⟩ Returns its outcome for the same reason `joinLocalImpls` does — `null` when nothing
+// was contributed — so a reach probe counts joins rather than branch entries.
+function joinIndexSignatureImpls(rec, decl, pkg, memberName, hedgeOnly) {
+  if (!rec || !decl || !pkg) return null;  // NOT gated on `memberName`: null is the COMPUTED-key case below
+  if (declIsNodeTypes(decl)) return null;  // the platform type surface — same exclusion as `recordDispatch`
   const iface = indexSignatureIface(decl);
-  if (!iface) return;
+  if (!iface) return null;
   // REACH PROBE, env-gated, same convention as `CANDOR_R519_REACH` above: a byte-identical A/B over a
   // corpus that cannot reach the changed branch is the most flattering number available and the least
   // informative. `bin/corpus-ab.py --mark R524-REACH` COUNTS these instead of anyone inferring reach.
@@ -5853,14 +5914,16 @@ function joinIndexSignatureImpls(rec, decl, pkg, memberName) {
   // construct is FOR. Bounded by the same `CHA_FANOUT_LIMIT` as every other CHA site here — a table
   // too wide to enumerate is an open hierarchy and takes the disclosed Unknown, not silence.
   const names = memberName ? [memberName] : indexSigMemberNames(pkg, ifaceName);
-  if (!names.length) return;
+  if (!names.length) return null;
   if (names.length > CHA_FANOUT_LIMIT) {
     rec.direct.add("Unknown");
     rec.why.add(dispatchWhy(`${pkg}.${ifaceName}`, memberName ?? undefined));
-    return;
+    return "hedge";
   }
+  let out = null;
   for (const m of names)
-    joinLocalImpls(rec, { key: dispatchKey(pkg, ifaceName, m), pkg, ifaceName, member: m });
+    out = joinLocalImpls(rec, { key: dispatchKey(pkg, ifaceName, m), pkg, ifaceName, member: m }, hedgeOnly) ?? out;
+  return out;
 }
 // ⟨SOUNDNESS R558⟩ AN INTERFACE MEMBER NAMED AS A FIRST-CLASS VALUE IS A DISPATCH, and it invokes
 // exactly what the CALL spelling invokes. `[n].map(d.roll)` and `d.roll(n)` reach the same body through
@@ -8342,12 +8405,48 @@ function visitCalls(node) {
           // and belongs to a ruling, not a patch. See the CHANGELOG entry for the measurement.
           if (!mod.startsWith("<")) {
             const dpkg = mod.startsWith("@types/") ? mod.slice("@types/".length) : mod;
-            // REACH PROBE for the ⟨R560⟩ half, env-gated, same convention as ⟨R519⟩/⟨R524⟩'s: the only
-            // branch this change ADDS is the one where κ already answered, so the probe fires there and
-            // nowhere else. `bin/corpus-ab.py --mark R560-REACH` counts it.
-            if (eff && process.env.CANDOR_R560_REACH)
-              console.error(`R560-REACH ${dpkg}.${member || "<computed>"} eff=${eff}`);
-            joinLocalImpls(rec, recordDispatch(rec, decl, dpkg));
+            // REACH PROBE for the ⟨R560⟩ half, env-gated, same convention as ⟨R519⟩/⟨R524⟩'s.
+            // ⟨SOUNDNESS R574⟩ IT FIRED ON BRANCH ENTRY AND IS NOW FIRED ON THE JOIN'S OUTCOME. As
+            // published it sat HERE, above `recordDispatch`, so a file containing only
+            // `fs.writeFileSync` + `cp.execSync` emitted two hits — both rejected by `recordDispatch`
+            // one line later, both incapable of changing a row. The number it produced, "182 hits
+            // across 12 entries — the over-charge control WITH real reach", therefore could not
+            // distinguish 182 genuine joins from 182 node-core no-ops, and it was cited as if it
+            // could. A probe placed before the filter it is evidence FOR measures the filter's input.
+            // It now counts only outcomes that CONTRIBUTED to `rec` — an edge, an `ambiguous:` or a
+            // `dispatch:` hedge — and prints WHICH, so the next reader can bucket without re-running.
+            // ⟨SOUNDNESS R574⟩ …AND WHERE THE RECEIVER IS THE PACKAGE'S OWN PRODUCT, HEDGE INSTEAD OF
+            // CHARGING. Removing the `!eff` guard was right and is not reverted — but it also ran the
+            // CHA join on every foreign call κ had already answered, and a local implementor of the
+            // package's interface is then charged to a call that cannot reach it. MEASURED at
+            // `d534b62`, one file, `tsc` clean, `analyzed=6`, the only variable being the receiver's
+            // PROVENANCE: `viaLib()` — `const g = makeClient(); g.fetchIt(u)`, the receiver genuinely
+            // got's own object — read `['Net']` at `d46c098` and `['Exec','Net']` after, the `Exec`
+            // coming from a local `class MyClient implements Gettable` the call never reaches.
+            //
+            // THE BOUNDARY IS `eff` AND THAT IS A DECISION, NOT AN OVERSIGHT (§9). It is confined to
+            // the branch R560 ADDED, so nothing that existed before R560 can move: the `!eff` path is
+            // byte-identical. The asymmetry has a reason rather than a convenience — where κ answered,
+            // the package's OWN implementor is already charged by κ's rule, so declining a candidate
+            // the receiver provably is not loses nothing about the receiver; where κ did not answer,
+            // the CHA candidates are the only thing the engine knows about the call and declining them
+            // is SILENCE, which is the trade this family refuses. **MEASURED, so the asymmetry is
+            // priced and not assumed: at `d46c098` the identical consumer against a NON-κ package
+            // already read `['Exec']` on `viaLib` through this same join.** The over-charge is
+            // therefore the shipped ⟨0.35⟩/⟨0.39⟩ CHA over-approximation and R560 widened its SCOPE,
+            // not its KIND — which is why the answer here is ⟨0.35⟩'s other sanctioned branch and not
+            // a deletion.
+            //
+            // IT HEDGES, IT DOES NOT DELETE. `['Net','Unknown']` + `dispatch:got.Gettable.fetchIt`,
+            // not `['Net']`: narrowing past a fabrication into silence converts an over-report into
+            // the cardinal sin, and no row may lose an effect without gaining the disclosure that
+            // replaces it. `recordDispatch` still runs, so the wire key R560 added is still published
+            // and a consumer joining it against its own implementors recovers what this scan declined
+            // to assert.
+            const ownProduct = eff ? packageProducedReceiver(
+              (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))
+                ? node.expression.expression : null, dpkg) : null;
+            const rdOut = joinLocalImpls(rec, recordDispatch(rec, decl, dpkg), !!ownProduct);
             // ⟨SOUNDNESS R524, shape (i)⟩ …and the INDEX-SIGNATURE spelling of the same dispatch, which
             // `recordDispatch` returns null for because there is no member name on the declaration to
             // form a key from. A CallExpression is the only site that has the receiver access in hand,
@@ -8355,7 +8454,10 @@ function visitCalls(node) {
             // DESUGARED arm — `[n].map(h.roll)`, silent through an interface member in BOTH the local
             // and the foreign arm — was a wider hole with its own mechanism; it is ⟨R558⟩ and is now
             // closed at the HOF-ref site by `chargeMemberRefDispatch`, through these same two joins.
-            joinIndexSignatureImpls(rec, decl, dpkg, accessedMemberName(node.expression));
+            const isOut = joinIndexSignatureImpls(rec, decl, dpkg, accessedMemberName(node.expression), !!ownProduct);
+            const joined = rdOut ?? isOut;
+            if (eff && joined && process.env.CANDOR_R560_REACH)
+              console.error(`R560-REACH ${joined} ${dpkg}.${member || "<computed>"} eff=${eff}`);
           }
           // CANDOR_DEPS: an unclassified call into a package with a loaded sibling report inherits
           // that function's recorded transitive effects (+ literal surfaces) by `hash`.

@@ -8,6 +8,93 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R574 — R560's JOIN CHARGED A LOCAL IMPLEMENTOR TO A RECEIVER THE LIBRARY PRODUCED.** An
+  over-charge this repo introduced one day earlier. R560 removed the `!eff` guard so a κ whole-module
+  rule could no longer SUPPRESS the ⟨0.39⟩ obligation-3 join — that fixed a real cardinal sin and is
+  **not reverted**; its rows and CONTROLS are all still green. But it also ran the CHA join on every
+  foreign call κ had already answered, so a local implementor of the package's interface was charged
+  to a call that cannot reach it. Measured at `d534b62`, one file, `tsc` clean, `analyzed=6`, the only
+  variable being the receiver's PROVENANCE:
+
+      viaLib() { const g = makeClient(); return g.fetchIt(u) }   // receiver is got's OWN object
+        d46c098  inferred ['Net']        d534b62  inferred ['Exec','Net']
+
+  the `Exec` coming from a local `class MyClient implements Gettable` the call never reaches.
+  **The premise needed correcting, and the correction shaped the fix.** The `Exec` is not peculiar to
+  κ-classified packages: measured at `d46c098`, the identical consumer against a NON-κ package
+  (`depq`) already read `['Exec']` on the same arm through this same join. R560 widened the SCOPE of
+  the shipped ⟨0.35⟩/⟨0.39⟩ CHA over-approximation, not its KIND.
+  **Fix:** where the receiver's value is demonstrably the package's own product — a `const` with a
+  single declaration bound to a ZERO-ARGUMENT call or `new` resolving into that same package — the
+  join takes SPEC ⟨0.35⟩'s option **(b)**, `Unknown` + `dispatch:<pkg>.<Iface>.<member>` +
+  `unresolved: true`, instead of option (a), charging the implementors' effects. The clause makes the
+  two equally sound ("Both are sound; they differ only in precision"). **It hedges, it does not
+  delete:** narrowing past a fabrication into silence converts an over-report into the cardinal sin,
+  so no row loses an effect without gaining the disclosure that replaces it, and `recordDispatch`
+  still runs so the wire key R560 added is still published. Against the last shipped behaviour this is
+  a NET GAIN in teeth: `deny Unknown src.index.viaLib` **0 (d46c098) → 1**.
+  **The boundary is `eff`, and that is a decision (§9).** It is confined to the branch R560 ADDED, so
+  the `!eff` path is byte-identical and nothing that existed before R560 can move. The asymmetry has a
+  reason: where κ answered, the package's own implementor is already charged by κ's rule, so declining
+  a candidate the receiver provably is not loses nothing about the receiver; where κ did not answer,
+  the CHA candidates are the only thing the engine knows about the call and declining them is silence.
+  **It is a DENYLIST and it fails towards over-charge** — a factory that RECEIVED an implementor, a
+  `let`, a parameter and a property access on a package object all keep the full charge (CONTROL 1).
+  **The residual is named, not asserted away:** a zero-argument factory backed by a global registry
+  (`register(new MyClient()); makeClient()`) really can hand back the caller's implementor, and this
+  rule cannot see it. That case is hedged rather than charged — the same answer `d46c098` gave, since
+  the whole join sat behind `!eff` — and it is DISCLOSED (`deny Unknown` exits 1) rather than silent.
+  Stated as the assumption it is, and pinned by CONTROL 3.
+
+  **GROUND TRUTH BY EXECUTION, not by reading candor's own report.** A runnable `got` implementation
+  behind the same typings, `node run.cjs`, recording which body ran:
+
+      aConstFactory -> GOT_LIB       dFactoryWithArg -> LOCAL_MyClient
+      bDirect       -> GOT_LIB       fParam          -> LOCAL_MyClient
+      cNewZero      -> GOT_LIB_NEW   eLet            -> GOT_LIB (over-charge kept: `let` is reassignable)
+      hRegistered   -> GOT_LIB       gProp           -> GOT_LIB (over-charge kept: not proven)
+
+  Every arm whose `Exec` this change withdraws executes the LIBRARY's body and never reaches
+  `MyClient.fetchIt`; the two arms where the local implementor really does run are exactly the two
+  that keep the charge. Swapping the stub for a registry-backed `makeClient = () => registered ?? lib`
+  makes `hRegistered` execute `LOCAL_MyClient` — which is the residual above, demonstrated rather than
+  hypothesised.
+
+  **A/B — `bin/corpus-ab.py`, never a fresh `ab.py`.** 16 real TypeScript packages, 3,428 analyzed
+  units, 1,730 rows, key `entry+package+fn+hash` over a multiset, value WIDE (every field):
+
+      pre = d534b62 (HEAD)   ADDED 0  REMOVED 0  CHANGED 0     REACH 0
+      pre = d46c098 (base)   ADDED 0  REMOVED 0  CHANGED 0     REACH 0
+
+  **⚠ THIS A/B IS SAFETY-ONLY AND THAT IS WRITTEN DOWN HERE RATHER THAN DISCOVERED LATER (§E1).** The
+  corpus cannot reach the changed branch: the shape needs a LOCAL implementor of a FOREIGN interface
+  from a κ-classified package, and 16 real packages contain none. The same measurement prices R560
+  itself at zero on this corpus. **A recall hunt over REAL axios 1.7.2 typings, measured rather than
+  reasoned about** — `const c: AxiosInstance = axios.create(); c.get(u)` beside a local `AxiosAdapter`
+  implementor — gives 3 branch entries, **0 joins**, rows byte-identical: `axios.create()` does mint a
+  key (`axios#AxiosStatic.create`), but `c.get` resolves to `class Axios`'s own declaration and a
+  class member mints no dispatch key. The evidence for the change is the fixture A/B, which does reach it:
+  4 entries, 30 rows, **ADDED 0 REMOVED 0 CHANGED 6, REACH 13 hits across 3 entries** — six rows,
+  audited in FULL, one mechanism, `['Exec','Net'] → ['Net','Unknown']` with `unknownWhy:
+  ['dispatch:<pkg>.<Iface>.<member>']`, `unresolved: false → true`, `dispatchesOn` preserved. The wide
+  key also shows `incomplete: ['Exec']` leaving with the charge — correct, since an
+  incomplete-surface marker for an effect no longer charged is a disclosure about nothing — and
+  `netClass` untouched. **No row was removed and no row lost a disclosure.**
+
+- **INSTRUMENT — `R560-REACH` FIRED ON BRANCH ENTRY, AND THE NUMBER IT PRODUCED WAS CITED AS IF IT DID
+  NOT.** As published the probe sat one line ABOVE `recordDispatch`, so it counted the FILTER'S INPUT.
+  Demonstrated: a file containing only `fs.writeFileSync` + `cp.execSync` emits two hits, both
+  rejected one line later, neither able to change a row. So R560's *"182 hits across 12 entries — the
+  over-charge control WITH real reach"* could not distinguish 182 genuine joins from 182 node-core
+  no-ops. `joinLocalImpls` / `joinIndexSignatureImpls` now RETURN their outcome and the probe fires on
+  it, printing which (`edge` / `ambiguous` / `hedge` / `hedge-foreign-receiver`). **Re-derived over
+  the same 16-package corpus, one variable (probe placement), reports byte-identical: 77 branch
+  entries across 6 entries → 0 JOINS.** The honest number is much smaller than 182, and on this corpus
+  it is zero. A reach probe cited as evidence must count the thing it is cited for; a probe placed
+  before the filter it is evidence FOR measures the filter's input. Pinned by CONTROL 5, which is a
+  gate and not a note: the node-core file must emit zero AND a real join must still count, so a dead
+  probe cannot pass as a clean one.
+
 - ⚠ **SOUNDNESS R558 — AN INTERFACE MEMBER PASSED AS A FIRST-CLASS VALUE EVAPORATED.** A cardinal sin
   (silent under-report). `[n].map(d.roll)` and `d.roll(n)` invoke the same body through the same
   abstraction; only the first desugars AWAY from the CallExpression arm, where every ⟨0.39⟩
