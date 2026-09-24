@@ -8,6 +8,21 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **INSTRUMENT — `R524-REACH` AND `R558-REACH` HAD THE SAME DEFECT, FOUND BY GREPPING THE MECHANISM
+  RATHER THAN THE ROW (§9).** The audit boundary for R574's probe fix was deliberately not drawn around
+  its own trigger. Both of the other reach marks in this file also fired on BRANCH ENTRY: `R524-REACH`
+  whenever a foreign INDEX SIGNATURE resolved, `R558-REACH` whenever `recordDispatch` minted a key —
+  both of which happen whether or not any implementor is visible, i.e. whether or not a join occurs.
+  Measured on one file importing both spellings from a foreign package with NO local implementor of
+  either: **1 hit each, both rows EMPTY, no join.** **Neither PUBLISHED figure was wrong** — R524's
+  6 hits matched its 6 changed rows and R558's was 0 — so this is a LATENT instrument defect, recorded
+  as one and not upgraded to a wrong number. All three marks now go through ONE `probeJoinReach`
+  keyed on the join's returned outcome; three hand-placed call sites answering one question is the
+  drift §G forbids. **Inert to reports and measured to be so:** `bin/corpus-ab.py` over the same 16
+  packages, 1,730 rows, wide key — ADDED 0 REMOVED 0 CHANGED 0 — plus six fixtures byte-identical.
+  **Both directions are gated,** because a silent instrument and a correct zero are the same bytes: the
+  no-implementor file must emit ZERO and the with-implementor twin must still count.
+
 - ⚠ **SOUNDNESS R574 — R560's JOIN CHARGED A LOCAL IMPLEMENTOR TO A RECEIVER THE LIBRARY PRODUCED.** An
   over-charge this repo introduced one day earlier. R560 removed the `!eff` guard so a κ whole-module
   rule could no longer SUPPRESS the ⟨0.39⟩ obligation-3 join — that fixed a real cardinal sin and is

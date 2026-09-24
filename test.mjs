@@ -21103,6 +21103,53 @@ export function e(c: string) { return String(cp.execSync(c)) }`,
         hits(probeRun(probeDir)) === 0, probeRun(probeDir).stderr.slice(0, 400));
   check("R574 CONTROL 5 [probe]: …and a real join still counts, so the zero above is a measurement and not a dead probe",
         hits(probeRun(dir)) > 0, probeRun(dir).stderr.slice(0, 400));
+
+  // ── SOUNDNESS R583 — THE SAME PROBE DEFECT, FOUND BY GREPPING THE MECHANISM (§9) ────────────────
+  // The boundary is not drawn around R574's trigger. `R524-REACH` and `R558-REACH` fired on branch
+  // entry too: the first whenever a foreign INDEX SIGNATURE was resolved, the second whenever
+  // `recordDispatch` minted a key — both of which happen whether or not any implementor is visible.
+  // MEASURED on one file importing both spellings from a foreign package with NO local implementor of
+  // either: 1 hit each, both rows EMPTY, no join. NEITHER PUBLISHED FIGURE WAS WRONG — R524's 6 hits
+  // matched its 6 changed rows and R558's was 0 — so this is a LATENT instrument defect, recorded as
+  // one and not upgraded. All three marks now go through ONE `probeJoinReach`, because three hand-
+  // placed call sites answering one question is the drift §G forbids.
+  //
+  // BOTH DIRECTIONS ARE GATED, and the second is the one that stops this becoming a dead probe: a
+  // silent instrument and a correct zero are the same bytes.
+  const depzTypes = {
+    "node_modules/depz/package.json": `{"name":"depz","version":"1.0.0","types":"index.d.ts"}`,
+    "node_modules/depz/index.d.ts": `export interface Handlers { [k: string]: (n: number) => number }
+export interface Named { roll(n: number): number }
+export declare const h: Handlers;
+export declare const d: Named;`,
+  };
+  const CALLS = `export function callIdx(n: number) { return h.roll(n) }
+export function refNamed(n: number) { return [n].map(d.roll) }
+export function refIdx(n: number) { return [n].map(h.roll) }`;
+  const noImpl = project({ "package.json": `{"name":"appr583a","version":"1.0.0"}`, ...depzTypes,
+    "src/index.ts": `import { h, d } from "depz";\n${CALLS}` });
+  const withImpl = project({ "package.json": `{"name":"appr583b","version":"1.0.0"}`, ...depzTypes,
+    "src/index.ts": `import * as fsm from "node:fs";
+import { Handlers, Named, h, d } from "depz";
+export const mine: Handlers = { roll: (n) => { fsm.writeFileSync("/tmp/candor-r583", String(n)); return n } };
+export const named: Named = { roll: (n) => { fsm.writeFileSync("/tmp/candor-r583", String(n)); return n } };
+${CALLS}` });
+  const markHits = (d, envVar, mark) => {
+    const o = spawnSync("node", [path.join(HERE, "scan.mjs"), d],
+                        { encoding: "utf8", env: { ...process.env, [envVar]: "1" } });
+    return (o.stderr.match(new RegExp(mark, "g")) ?? []).length;
+  };
+  for (const [mark, envVar] of [["R524-REACH", "CANDOR_R524_REACH"], ["R558-REACH", "CANDOR_R558_REACH"]]) {
+    check(`R583 [${mark}]: a foreign dispatch with NO visible implementor emits ZERO hits — it emitted 1 at d534b62, over an EMPTY row`,
+          markHits(noImpl, envVar, mark) === 0, JSON.stringify(scan(noImpl).report?.functions ?? []));
+    check(`R583 [${mark}] NOT A DEAD PROBE: the same file WITH local implementors still counts`,
+          markHits(withImpl, envVar, mark) > 0, JSON.stringify(scan(withImpl).report?.functions ?? []));
+  }
+  // …and the joins really did happen in the second arm, so the hits above are counting something real.
+  check("R583 CONTROL: the with-implementor arm actually charges Fs through all three spellings",
+        ["callIdx", "refNamed", "refIdx"].every((fn) =>
+          (entry(scan(withImpl).report, `src.index.${fn}`)?.inferred ?? []).includes("Fs")),
+        JSON.stringify(scan(withImpl).report?.functions ?? []));
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);

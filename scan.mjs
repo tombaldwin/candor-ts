@@ -5829,6 +5829,17 @@ function packageProducedReceiver(recvExpr, pkg) {
 // while firing on BRANCH ENTRY, one line before `recordDispatch` could reject the declaration. A file
 // containing only `fs.writeFileSync` + `cp.execSync` emitted two such hits that changed no row. A reach
 // probe cited as evidence must count the thing it is cited for.
+// ⟨SOUNDNESS R583⟩ THE ONE PLACE A JOIN'S REACH IS COUNTED. §9 — the boundary is not drawn around
+// R574's trigger: `R560-REACH` fired on BRANCH ENTRY, and a grep of the MECHANISM rather than of the
+// row found `R524-REACH` and `R558-REACH` doing the same thing. Demonstrated on one file importing a
+// foreign index-signature interface and a foreign named member with NO local implementor of either:
+// both probes emit a hit, both rows come back EMPTY, and no join occurred. Neither published figure
+// was wrong — R524's 6 hits matched its 6 changed rows and R558's was 0 — so this is a LATENT
+// instrument defect, recorded as one rather than upgraded. Three probes answering one question from
+// three hand-placed call sites is the drift §G forbids; there is now one.
+const probeJoinReach = (mark, outcome, detail) => {
+  if (outcome && process.env[`CANDOR_${mark.split("-")[0]}_REACH`]) console.error(`${mark} ${outcome} ${detail}`);
+};
 // `hedgeOnly` ⟨SOUNDNESS R574⟩: this key HAS visible implementors and the receiver provably is not one
 // of them, so take SPEC ⟨0.35⟩'s option (b) — `Unknown` with a `dispatch:` why — instead of option (a),
 // charging their effects. The clause makes the two equally sound and says so ("Both are sound; they
@@ -5900,10 +5911,6 @@ function joinIndexSignatureImpls(rec, decl, pkg, memberName, hedgeOnly) {
   if (declIsNodeTypes(decl)) return null;  // the platform type surface — same exclusion as `recordDispatch`
   const iface = indexSignatureIface(decl);
   if (!iface) return null;
-  // REACH PROBE, env-gated, same convention as `CANDOR_R519_REACH` above: a byte-identical A/B over a
-  // corpus that cannot reach the changed branch is the most flattering number available and the least
-  // informative. `bin/corpus-ab.py --mark R524-REACH` COUNTS these instead of anyone inferring reach.
-  if (process.env.CANDOR_R524_REACH) console.error(`R524-REACH ${pkg}#${iface.name.text}.${memberName ?? "<computed>"}`);
   const ifaceName = iface.name.text;
   // A COMPUTED key — `h[name](n)`, the idiomatic dispatch-table spelling and the one an index signature
   // exists for — names no single member, so EVERY member a visible implementor supplies is genuinely
@@ -5923,6 +5930,7 @@ function joinIndexSignatureImpls(rec, decl, pkg, memberName, hedgeOnly) {
   let out = null;
   for (const m of names)
     out = joinLocalImpls(rec, { key: dispatchKey(pkg, ifaceName, m), pkg, ifaceName, member: m }, hedgeOnly) ?? out;
+  probeJoinReach("R524-REACH", out, `${pkg}#${ifaceName}.${memberName ?? "<computed>"}`);
   return out;
 }
 // ⟨SOUNDNESS R558⟩ AN INTERFACE MEMBER NAMED AS A FIRST-CLASS VALUE IS A DISPATCH, and it invokes
@@ -5969,19 +5977,20 @@ function chargeMemberRefDispatch(rec, refExpr, d2) {
   // byte-identical A/B over a corpus that cannot reach the changed branch is the most flattering
   // number available and the least informative, and this family has mistaken one for evidence four
   // times. `bin/corpus-ab.py --mark R558-REACH` COUNTS these instead of anyone inferring reach.
-  const probe = (kind) => {
-    if (process.env.CANDOR_R558_REACH) console.error(`R558-REACH ${kind} ${pkg} ${refExpr.getText().replace(/\s+/g, "").slice(0, 60)}`);
-  };
+  // ⟨SOUNDNESS R583⟩ counted on the JOIN'S OUTCOME, through the one shared probe, rather than on entry
+  // to the branch — see `probeJoinReach`. As written it fired whenever `recordDispatch` minted a key,
+  // which happens for every foreign interface member whether or not any implementor is visible.
+  const probe = (kind, outcome) =>
+    probeJoinReach("R558-REACH", outcome, `${kind} ${pkg} ${refExpr.getText().replace(/\s+/g, "").slice(0, 60)}`);
   // the DECLARED-member spelling — the reference resolves to the interface's own signature.
   const rd = recordDispatch(rec, d2, pkg);
-  if (rd) { probe("declared"); joinLocalImpls(rec, rd); return true; }
+  if (rd) { probe("declared", joinLocalImpls(rec, rd)); return true; }
   // the INDEX-SIGNATURE spelling — `i.roll` resolves to the `[k: string]: …` signature, which names no
   // member, so the name comes from the REFERENCE site exactly as R524 shape (i) takes it from the call
   // site. Measured, not assumed: `checker.getSymbolAtLocation(i.roll)` returns the `__index` symbol and
   // its declaration IS the IndexSignature, which is the node `indexSignatureIface` already accepts.
   if (indexSignatureIface(d2)) {
-    probe("indexsig");
-    joinIndexSignatureImpls(rec, d2, pkg, accessedMemberName(refExpr));
+    probe("indexsig", joinIndexSignatureImpls(rec, d2, pkg, accessedMemberName(refExpr)));
     return true;
   }
   return false;
@@ -8455,9 +8464,9 @@ function visitCalls(node) {
             // and the foreign arm — was a wider hole with its own mechanism; it is ⟨R558⟩ and is now
             // closed at the HOF-ref site by `chargeMemberRefDispatch`, through these same two joins.
             const isOut = joinIndexSignatureImpls(rec, decl, dpkg, accessedMemberName(node.expression), !!ownProduct);
-            const joined = rdOut ?? isOut;
-            if (eff && joined && process.env.CANDOR_R560_REACH)
-              console.error(`R560-REACH ${joined} ${dpkg}.${member || "<computed>"} eff=${eff}`);
+            // ⟨SOUNDNESS R583⟩ through the one shared probe, so the three reach marks in this file
+            // cannot drift again. `eff &&` because the branch R560 ADDED is the κ-answered one.
+            probeJoinReach("R560-REACH", eff && (rdOut ?? isOut), `${dpkg}.${member || "<computed>"} eff=${eff}`);
           }
           // CANDOR_DEPS: an unclassified call into a package with a loaded sibling report inherits
           // that function's recorded transitive effects (+ literal surfaces) by `hash`.
