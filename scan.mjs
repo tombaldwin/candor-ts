@@ -5895,6 +5895,29 @@ function accessedMemberName(expr) {
     return expr.argumentExpression.text;
   return null;
 }
+// ⟨SOUNDNESS R587⟩ The DECLARATION a value-reference slot names — an identifier, a property access, or
+// an ELEMENT ACCESS with a literal key. It exists because `checker.getSymbolAtLocation` returns
+// undefined for an element access (MEASURED on all four arms of the R587 fixture — `d["roll"]` and
+// `i["roll"]` alike), so `realDecl(getSymbolAtLocation(a))` silently answered nothing and every caller
+// of the element-access spelling fell out of `functions[]` entirely. The call path already learned
+// this once — the dynamic-slot arm looks the member up on the RECEIVER's type for exactly the same
+// reason, and its comment records that its own first draft asserted the opposite and was false. This
+// is the reference-position sibling of that lookup, in ONE place for the two sites that need it.
+//
+// A DECLARED member resolves through `getPropertyOfType`; an INDEX SIGNATURE has no property symbol at
+// all and resolves through `getIndexInfosOfType`, which is the node `indexSignatureIface` already
+// accepts. A genuinely dynamic key yields no name and therefore no declaration — nothing is guessed.
+function refSlotDecl(expr) {
+  if (!expr) return undefined;
+  if (!ts.isElementAccessExpression(expr)) return realDecl(checker.getSymbolAtLocation(expr));
+  const key = accessedMemberName(expr);
+  if (!key) return undefined;
+  let rt; try { rt = checker.getTypeAtLocation(expr.expression); } catch { return undefined; }
+  if (!rt) return undefined;
+  const prop = checker.getPropertyOfType(rt, key);
+  if (prop) return realDecl(prop);
+  return (checker.getIndexInfosOfType?.(rt) ?? []).map((i) => i.declaration).find(Boolean);
+}
 // Obligation 3's LOCAL half for the index-signature spelling. Deliberately NOT `recordDispatch`: it
 // records nothing on the wire, because `dispatchesOn` is a key a CONSUMER is expected to be able to
 // join against a published union, and no union is ever published for an index signature. A value there
@@ -5956,7 +5979,20 @@ function joinIndexSignatureImpls(rec, decl, pkg, memberName, hedgeOnly) {
 // `argIsCallable` is required, not decorative: `recordDispatch` accepts a PropertySignature, and a
 // non-function property named as a value (`xs.map(cfg.label)`) is DATA, not a dispatch — charging it
 // would fabricate its implementors' effects onto a caller that invokes nothing.
-function chargeMemberRefDispatch(rec, refExpr, d2) {
+//
+// ⟨SOUNDNESS R587⟩ THIS PREDICATE IS NOW THE WHOLE OF THE DESUGARED ANSWER, at three call sites rather
+// than one — the HOF-ref arm R558 built it for, the REFLECTIVE-INVOKE funnel (`fn.call`/`fn.apply`/
+// `Reflect.apply`), and the ELEMENT-ACCESS reference spelling. It answers "does this reference name an
+// abstract member some VISIBLE implementor answers", and that question does not change with the
+// syntax that reaches it. `hedgeOnly` is ⟨0.35⟩ option (b), threaded through from the caller rather
+// than re-decided here: only the reflective funnel passes it, and only on the CallExpression arm's own
+// ⟨R574⟩ condition (κ answered AND `packageProducedReceiver`). The HOF-ref site passes nothing and is
+// byte-identical to R558's. `mark` names WHICH site reached the join so the two changes can be priced
+// apart in one A/B run; it still goes through the single ⟨R583⟩ `probeJoinReach`, so it counts the
+// join's returned OUTCOME and not entry to a branch — the property that invalidated R560's published
+// reach figure. Three marks through one probe is what R583 left; this is a fourth name, not a fourth
+// probe.
+function chargeMemberRefDispatch(rec, refExpr, d2, hedgeOnly, mark = "R558-REACH") {
   if (!rec || !d2 || !argIsCallable(refExpr)) return false;
   const m = declModule(d2);
   // ONLY `<local>` TAKES THIS PACKAGE'S NAME. Every other `<…>` pseudo-module is the platform type
@@ -5981,16 +6017,16 @@ function chargeMemberRefDispatch(rec, refExpr, d2) {
   // to the branch — see `probeJoinReach`. As written it fired whenever `recordDispatch` minted a key,
   // which happens for every foreign interface member whether or not any implementor is visible.
   const probe = (kind, outcome) =>
-    probeJoinReach("R558-REACH", outcome, `${kind} ${pkg} ${refExpr.getText().replace(/\s+/g, "").slice(0, 60)}`);
+    probeJoinReach(mark, outcome, `${kind} ${pkg} ${refExpr.getText().replace(/\s+/g, "").slice(0, 60)}`);
   // the DECLARED-member spelling — the reference resolves to the interface's own signature.
   const rd = recordDispatch(rec, d2, pkg);
-  if (rd) { probe("declared", joinLocalImpls(rec, rd)); return true; }
+  if (rd) { probe("declared", joinLocalImpls(rec, rd, hedgeOnly)); return true; }
   // the INDEX-SIGNATURE spelling — `i.roll` resolves to the `[k: string]: …` signature, which names no
   // member, so the name comes from the REFERENCE site exactly as R524 shape (i) takes it from the call
   // site. Measured, not assumed: `checker.getSymbolAtLocation(i.roll)` returns the `__index` symbol and
   // its declaration IS the IndexSignature, which is the node `indexSignatureIface` already accepts.
   if (indexSignatureIface(d2)) {
-    probe("indexsig", joinIndexSignatureImpls(rec, d2, pkg, accessedMemberName(refExpr)));
+    probe("indexsig", joinIndexSignatureImpls(rec, d2, pkg, accessedMemberName(refExpr), hedgeOnly));
     return true;
   }
   return false;
@@ -7508,6 +7544,32 @@ function visitCalls(node) {
             // (would flood the overwhelming-majority `arr.forEach(x => …)` shape). It is not an id/property-
             // access anyway, so it skips the ref arm below; guarded explicitly for clarity.
             if (ts.isArrowFunction(a) || ts.isFunctionExpression(a)) return;
+            // ⟨SOUNDNESS R587⟩ THE ELEMENT-ACCESS SPELLING OF THE SAME REFERENCE. `[n].map(i["roll"])`
+            // and `[n].map(i.roll)` name the same member of the same interface and invoke the same
+            // body; only the second was admitted here, so the first got no edge, no Unknown and no
+            // disclosure and its caller was ABSENT from `functions[]` — SPEC §2 rule 3's affirmative
+            // purity claim, over a body ground-truthed by `node` to write a file. Measured at `6a639e6`
+            // in all four cells: `fElemRef`/`lElemRef`/`fdElemRef`/`ldElemRef` all ABSENT while
+            // `fRef`/`lRef` read `['Fs']`. `accessedMemberName` — written by R524 and already reading
+            // `h["roll"]` — is the proof the SPELLING was anticipated and only the GATE was not.
+            //
+            // ADMITTED FOR THE DISPATCH JOIN ONLY, and that boundary is a decision (§9 in the other
+            // direction). Letting an element access fall through to the arm's opaque-callback branch
+            // would hand a NEW `Unknown` to every `xs.map(fns[0])` whose holder resolves to nothing —
+            // an ecosystem-wide hedge widening, which is what ⟨0.39⟩ priced and declined at 2.60% of
+            // functions, and it is not what this row is about. So the join runs and the arm returns.
+            //
+            // THE SCOPE CLAIM, AND WHAT BACKS IT. For a NON-element access nothing below changes at
+            // all; for an element access the arm previously returned here doing nothing, so this can
+            // only ADD. That much is structural — but "adds only what it should" is not, and it is
+            // the half an assertion would hide (§K), so it is pinned by fixtures that would go red
+            // were it false: CONTROL 2 (a PURE implementor gains nothing), CONTROL 3 (no visible
+            // implementor gains neither an effect nor a hedge) and CONTROL 5 (a COMPUTED key resolves
+            // nothing), each on both element-access spellings and both declaration sites.
+            if (ts.isElementAccessExpression(a) && accessedMemberName(a)) {
+              chargeMemberRefDispatch(rec, a, refSlotDecl(a), false, "R587-REACH");
+              return;
+            }
             if (!ts.isIdentifier(a) && !ts.isPropertyAccessExpression(a)) return;
             const d2 = realDecl(checker.getSymbolAtLocation(a));
             const t = (d2 && nodeName.get(d2)) || resolveFnRefUnit(a); // pin direct fn OR a local alias chain
@@ -7585,8 +7647,15 @@ function visitCalls(node) {
           if ((m === "call" || m === "apply") && recvText !== "Reflect") invokedRef = recv;
           else if (recvText === "Reflect" && (m === "apply" || m === "construct"))
             invokedRef = (node.arguments ?? [])[0] ?? null;
-          if (invokedRef && (ts.isIdentifier(invokedRef) || ts.isPropertyAccessExpression(invokedRef))) {
-            const d2 = realDecl(checker.getSymbolAtLocation(invokedRef));
+          // ⟨SOUNDNESS R587⟩ …and the ELEMENT-ACCESS spelling of the invoked reference, on the same
+          // grounds as the HOF-ref arm above: `i["roll"].call(null, n)` invokes exactly what
+          // `i.roll.call(null, n)` invokes. Measured ABSENT at `6a639e6` in every cell
+          // (`fElemCall`/`lElemCall`/`fdElemCall`). Restricted to a LITERAL key by
+          // `accessedMemberName` — a computed `i[k].call(…)` names nothing and is left where it was
+          // rather than guessed at, which is the same line R524 drew.
+          if (invokedRef && (ts.isIdentifier(invokedRef) || ts.isPropertyAccessExpression(invokedRef)
+                             || (ts.isElementAccessExpression(invokedRef) && accessedMemberName(invokedRef)))) {
+            const d2 = refSlotDecl(invokedRef);
             // Resolve the receiver/arg0 to its function unit, FOLLOWING local-variable aliases
             // (`const m = effectful; m.call(…)`) — the direct-identifier form already landed on a minted
             // unit, but an aliased local var resolves to its VARIABLE decl (not a unit), which dropped the
@@ -7602,11 +7671,45 @@ function visitCalls(node) {
               // over-disclosure); an EFFECTFUL one (`fs.writeFileSync` → Fs, `dns.resolve` → Net) gets its effect.
               const kMod = d2 && declModule(d2);
               const kMember = d2?.name?.getText?.()
-                ?? (ts.isPropertyAccessExpression(invokedRef) ? invokedRef.name.text : ts.isIdentifier(invokedRef) ? invokedRef.text : null);
+                ?? (ts.isIdentifier(invokedRef) ? invokedRef.text : accessedMemberName(invokedRef));
               // SELF-NAME GUARD (see `isOwnPackageDecl`): the reflectively-invoked reference may be OUR
               // OWN package's own function, reached through its own `dist/*.d.ts` — never let κ answer
               // for it, same reasoning as the (CLASSIFY) arm.
               const kEff = kMod && kMember && !isOwnPackageDecl(d2) ? kappa(kMod, kMember) : null;
+              // ⟨SOUNDNESS R587⟩ THE DISPATCH JOIN, AT THE FUNNEL THAT HAD NEITHER HALF OF IT. This is
+              // the site R573 was filed on and it was silent in EIGHT spellings, not the two the row
+              // named. `chargeExternalDecl` below runs `joinLocalImpls(recordDispatch(…))` — obligation
+              // 3's DECLARED half — and never `joinIndexSignatureImpls`, so a foreign index signature
+              // reached `[]`; and `declIsLocal` keeps a LOCAL declaration out of that funnel entirely,
+              // so both local spellings (index-signature AND declared-member) reached nothing at all
+              // and their callers were ABSENT. Measured at `6a639e6`, one file, `tsc` clean, every body
+              // ground-truthed by `node` to write a file:
+              //
+              //     fCall/fApply/fReflect  []      lCall/lApply/lReflect   ABSENT
+              //     ldCall/ldApply         ABSENT  ← the LOCAL DECLARED half, which R573 does not name
+              //     fdCall/fdApply ['Fs']  fPlain/fdPlain/ldPlain ['Fs']   ← the controls
+              //
+              // and the local half is STRICTLY WORSE than its own baseline: `li.roll(n)` discloses
+              // `Unknown` (`deny Unknown` exit 1) and the identical body through `.call` is silent.
+              //
+              // §G — THE SAME PREDICATE THE HOF-REF ARM CALLS, not a third join. Adding
+              // `joinIndexSignatureImpls` to `chargeExternalDecl` (the remedy the review named) would
+              // close three of these eight: that function receives no call-site expression, so it
+              // cannot supply the member name an index signature has no declaration to give, and it is
+              // unreachable for every LOCAL arm. The question "does this reference name an abstract
+              // member some visible implementor answers" is one question and now has one implementation.
+              //
+              // ⟨R574⟩ IS CARRIED ACROSS RATHER THAN RE-DECIDED. Where κ answered AND the receiver is
+              // demonstrably the package's own product (`const g = makeClient(); g.fetchIt.call(…)`),
+              // this hedges — `Unknown` + `dispatch:` — exactly as the CallExpression arm does, on the
+              // same `packageProducedReceiver` test with the same `eff ?` gate. Without it this fix
+              // would reintroduce R574's fabricated concrete effect at a NEW site, which is how that
+              // class spread the first time.
+              const ownProduct = kEff && (ts.isPropertyAccessExpression(invokedRef) || ts.isElementAccessExpression(invokedRef))
+                ? packageProducedReceiver(invokedRef.expression,
+                    kMod?.startsWith("@types/") ? kMod.slice("@types/".length) : kMod)
+                : null;
+              chargeMemberRefDispatch(rec, invokedRef, d2, !!ownProduct, "R587-REACH");
               if (kEff) {
                 rec.direct.add(kEff);
                 if (kEff === "Unknown") rec.why.add(`reflect:${kMod.replace(/^node:/, "")}.${kMember}`);

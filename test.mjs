@@ -21152,6 +21152,244 @@ ${CALLS}` });
         JSON.stringify(scan(withImpl).report?.functions ?? []));
 }
 
+// ── SOUNDNESS R587 — THE REFLECTIVE-INVOKE FUNNEL AND THE ELEMENT-ACCESS REFERENCE ────────────────
+//
+// R573 as filed names five call spellings that report `inferred: []` or no row at all over a body
+// that provably writes a file. MEASURED CELL BY CELL at `6a639e6` — one file, `tsc` exit 0 with the
+// compile CHECKED by poisoning it (exit 2) and re-checking (exit 0), `analyzed.count` 31, every body
+// ground-truthed by RUNNING it under node 22 and watching the file appear — **the real set is
+// FIFTEEN, and the row's five are a subset**:
+//
+//                        PLAIN      HOF-ref   .call/.apply/Reflect.apply   ELEMENT-ACCESS ref/call
+//   foreign index-sig    ['Fs']     ['Fs']    []  []  []                   ABSENT  ABSENT
+//   local   index-sig    Unknown    ['Fs']    ABSENT ABSENT ABSENT         ABSENT  ABSENT
+//   foreign declared     ['Fs']     ['Fs']    ['Fs'] ['Fs']                ABSENT  ABSENT
+//   local   declared     ['Fs']     ['Fs']    ABSENT ABSENT               ABSENT
+//
+// THREE CAUSES, TWO SITES, and the remedy R573 names closes THREE OF THE FIFTEEN:
+//   (a) `chargeExternalDecl` runs `joinLocalImpls(recordDispatch(…))` and never
+//       `joinIndexSignatureImpls` → the three FOREIGN index-signature reflective arms read `[]`.
+//       This is the cause the row identifies, and adding the index-sig join THERE cannot fix the
+//       rest: that function receives no call-site expression, so it cannot supply the member name an
+//       index signature has no declaration to give.
+//   (b) `declIsLocal` keeps a LOCAL declaration out of that funnel altogether, so all five local
+//       reflective arms — index-signature AND declared-member, the latter not named by R573 at all —
+//       reached nothing and their callers were ABSENT from `functions[]`.
+//   (c) the HOF-ref arm and the reflective arm both gate on `isIdentifier || isPropertyAccess`, so
+//       every ELEMENT-ACCESS spelling was dropped before either join. `accessedMemberName` has read
+//       `h["roll"]` since R524 — the spelling was anticipated and only the GATE was not. And
+//       `checker.getSymbolAtLocation` returns undefined for an element access, so the obvious fix
+//       (widen the gate) silently does nothing: hence `refSlotDecl`.
+//
+// So the fix is `chargeMemberRefDispatch` — R558's own predicate — called from all three sites, and
+// NOT a fourth join (§G). The local half was STRICTLY WORSE than its own baseline before it:
+// `li.roll(n)` discloses `Unknown` and `deny Unknown` exits 1; the identical body through `.call`
+// was silent and the same rule exited 0.
+//
+// ONLY THE SCOPED POLICY FORM SEPARATES THESE ARMS (§F1). All four forms measured: blanket `deny Fs`,
+// `deny Unknown` and `deny Fs Unknown` exit 1 on EVERY arm both before and after, because the
+// structural implementor is independently reported — so a suite that gated on them would read as
+// coverage of a change it cannot see. The 30 scoped rows below are the ones that move, 0 → 1.
+//
+// RED-CHECKED (§1b) — see the CHANGELOG entry for the pasted failure.
+if (blk()) {
+  const IFACES = `export interface Indexed { [k: string]: (n: number) => number }
+export interface Declared { roll(n: number): number }
+export interface PureIdx { [k: string]: (n: number) => number }
+export interface Orphan { roll(n: number): number }
+export interface OrphanIdx { [k: string]: (n: number) => number }`;
+  const CONSUMER = `import * as fsm from "node:fs";
+export const i: Indexed  = { roll: (n) => { fsm.writeFileSync("/tmp/candor-r587", String(n)); return n } };
+export const d: Declared = { roll: (n) => { fsm.writeFileSync("/tmp/candor-r587", String(n)); return n } };
+export const p: PureIdx  = { roll: (n) => n + 1 };
+declare const orphan: Orphan;
+declare const orphanIdx: OrphanIdx;
+export function idxPlain(n: number)   { return i.roll(n) }
+export function idxRef(n: number)     { return [n].map(i.roll) }
+export function idxCall(n: number)    { return i.roll.call(null, n) }
+export function idxApply(n: number)   { return i.roll.apply(null, [n]) }
+export function idxReflect(n: number) { return Reflect.apply(i.roll, null, [n]) }
+export function idxElemRef(n: number) { return [n].map(i["roll"]) }
+export function idxElemCall(n: number){ return i["roll"].call(null, n) }
+export function decPlain(n: number)   { return d.roll(n) }
+export function decRef(n: number)     { return [n].map(d.roll) }
+export function decCall(n: number)    { return d.roll.call(null, n) }
+export function decApply(n: number)   { return d.roll.apply(null, [n]) }
+export function decElemRef(n: number) { return [n].map(d["roll"]) }
+export function decElemCall(n: number){ return d["roll"].call(null, n) }
+export function pureCall(n: number)   { return p.roll.call(null, n) }
+export function pureElemRef(n: number){ return [n].map(p["roll"]) }
+export function orphCall(n: number)   { return orphan.roll.call(null, n) }
+export function orphIdxCall(n: number){ return orphanIdx.roll.call(null, n) }
+export function orphIdxElem(n: number){ return [n].map(orphanIdx["roll"]) }
+export function esLibCall(xs: unknown[]) { return [].slice.call(xs) }
+export function nodeCoreCall(q: string)  { return fsm.writeFileSync.call(null, q, "x") }
+export function dynamicKey(k: string, n: number) { return i[k].call(null, n) }`;
+  const armOf = (where) => {
+    const files = { "package.json": `{"name":"appz9","version":"1.0.0"}`,
+                    "src/index.ts": `import { Indexed, Declared, PureIdx, Orphan, OrphanIdx } from "${where === "local" ? "./ifaces" : "depz9"}";\n${CONSUMER}` };
+    if (where === "local") files["src/ifaces.ts"] = IFACES;
+    else { files["node_modules/depz9/package.json"] = `{"name":"depz9","version":"1.0.0","types":"index.d.ts"}`;
+           files["node_modules/depz9/index.d.ts"] = IFACES; }
+    const dir = project(files);
+    const { report } = scan(dir);
+    const gate = (rule) => {
+      fs.writeFileSync(path.join(dir, "policy.candor"), `${rule}\n`);
+      return spawnSync("node", [path.join(HERE, "scan.mjs"), dir, "--policy", path.join(dir, "policy.candor")],
+                       { encoding: "utf8" }).status;
+    };
+    return { report, gate, row: (fn) => entry(report, `src.index.${fn}`),
+             shown: JSON.stringify((report?.functions ?? []).map((e) => [e.fn, e.inferred, e.unknownWhy, e.dispatchesOn])) };
+  };
+  const local = armOf("local"), foreign = armOf("foreign");
+
+  // A HOLLOWED FIXTURE PRINTS EXACTLY WHAT A SILENT ENGINE PRINTS (R242). Assert the judgement first,
+  // so every ABSENCE row below is a statement about a program that was actually analysed.
+  for (const [nm, arm] of [["local", local], ["foreign", foreign]])
+    check(`R587 [${nm}] the fixture judged something — an absence row over a hollow report is not evidence`,
+          (arm.report?.analyzed?.count ?? 0) > 0, JSON.stringify(arm.report?.analyzed ?? null));
+
+  // THE DEFECT — every reflective and element-access spelling, both declaration sites. The row set is
+  // what the measurement found, not what R573 listed: `decCall`/`decApply` are green on the FOREIGN
+  // arm at HEAD (they route through `chargeExternalDecl`'s declared join) and silent on the LOCAL one,
+  // so they are asserted per-arm rather than as one list — a row that passes with and without the fix
+  // reads as coverage and is not (§A).
+  const SILENT = { local: ["idxCall", "idxApply", "idxReflect", "idxElemRef", "idxElemCall",
+                           "decCall", "decApply", "decElemRef", "decElemCall"],
+                   foreign: ["idxCall", "idxApply", "idxReflect", "idxElemRef", "idxElemCall",
+                             "decElemRef", "decElemCall"] };
+  for (const [nm, arm] of [["local", local], ["foreign", foreign]])
+    for (const fn of SILENT[nm]) {
+      check(`R587 [${nm}/${fn}]: a reflective or element-access invoke carries its visible implementor's Fs — measured [] or ABSENT at 6a639e6`,
+            (arm.row(fn)?.inferred ?? []).includes("Fs"), arm.shown);
+      check(`R587 GATE [${nm}/${fn}]: \`pure src.index.${fn}\` exits 1 — measured exit 0 at 6a639e6 over a body that writes a file`,
+            arm.gate(`pure src.index.${fn}`) === 1, arm.shown);
+    }
+
+  // THE FOUR POLICY FORMS, PRINTED RATHER THAN ASSUMED (§F1). Three of the four cannot discriminate —
+  // they exited 1 before the fix and exit 1 after, because the structural implementor is independently
+  // reported. They are kept, LABELLED, because generalising from one form is how a sin gets called a
+  // limitation, and because a later change that broke them would be worth catching.
+  for (const rule of ["deny Fs", "deny Unknown", "deny Fs Unknown"])
+    check(`R587 FORM CONTROL (cannot discriminate, and says so): blanket \`${rule}\` exits 1 on this tree before AND after`,
+          local.gate(rule) === 1, local.shown);
+
+  // CONTROL 1 — THE SPELLINGS THAT ALREADY RESOLVED AND MUST NOT MOVE. Same file, same body, same
+  // member; only the syntax differs. Without these the rows above would pass for an engine that had
+  // simply started charging on sight of a member reference.
+  for (const [nm, arm] of [["local", local], ["foreign", foreign]])
+    for (const fn of ["idxPlain", "idxRef", "decPlain", "decRef"]) {
+      if (nm === "local" && fn === "idxPlain") continue;  // the disclosed-Unknown baseline, asserted below
+      check(`R587 CONTROL 1 [${nm}/${fn}]: the plain-call and HOF-ref spellings are unmoved`,
+            (arm.row(fn)?.inferred ?? []).includes("Fs"), arm.shown);
+    }
+  check("R587 CONTROL 1 [local/idxPlain]: the LOCAL index-signature baseline still discloses Unknown — the fix does not trade a disclosure away",
+        (local.row("idxPlain")?.inferred ?? []).includes("Unknown"), local.shown);
+  check("R587 CONTROL 1 [foreign/decCall]: the ONE reflective cell that already resolved at 6a639e6 stays resolved AND keeps its wire key",
+        (foreign.row("decCall")?.inferred ?? []).includes("Fs")
+        && (foreign.row("decCall")?.dispatchesOn ?? []).includes("depz9#Declared.roll"), foreign.shown);
+
+  // CONTROL 2 — A PURE IMPLEMENTOR GAINS NOTHING. The join contributes an EDGE, so the fixpoint
+  // answers; an engine that charged on sight would fail here and pass everything above.
+  for (const [nm, arm] of [["local", local], ["foreign", foreign]])
+    for (const fn of ["pureCall", "pureElemRef"])
+      check(`R587 CONTROL 2 [${nm}/${fn}]: a reference to a PURE implementor charges nothing and does not hedge`,
+            (arm.row(fn)?.inferred ?? []).length === 0 && (arm.row(fn)?.unknownWhy ?? []).length === 0, arm.shown);
+
+  // CONTROL 3 — NO VISIBLE IMPLEMENTOR, NO NEW HEDGE. This is the position PART 92 c5/c10 PIN, and
+  // widening it is the ecosystem-wide hedge ⟨0.39⟩ priced and declined at 2.60% of functions.
+  for (const [nm, arm] of [["local", local], ["foreign", foreign]])
+    for (const fn of ["orphCall", "orphIdxCall", "orphIdxElem"])
+      check(`R587 CONTROL 3 [${nm}/${fn}]: an abstraction with NO visible implementor gains neither an effect nor a hedge`,
+            (arm.row(fn)?.inferred ?? []).length === 0 && (arm.row(fn)?.unknownWhy ?? []).length === 0, arm.shown);
+
+  // CONTROL 4 — THE PLATFORM TYPE SURFACE AND κ'S OWN ANSWER. `[].slice.call(xs)` must stay pure and
+  // mint no key (R558's `<es-lib>` malformed-key defect, found by a corpus A/B and by no fixture);
+  // `fs.writeFileSync.call(…)` must keep κ's `Fs`. The join now runs BEFORE the κ arm, so "does the
+  // new call displace κ" is a live question and not a rhetorical one.
+  for (const [nm, arm] of [["local", local], ["foreign", foreign]]) {
+    check(`R587 CONTROL 4 [${nm}]: \`[].slice.call(xs)\` charges nothing and mints no dispatch key`,
+          (arm.row("esLibCall")?.inferred ?? []).length === 0
+          && (arm.row("esLibCall")?.dispatchesOn ?? []).length === 0, arm.shown);
+    check(`R587 CONTROL 4 [${nm}]: \`fs.writeFileSync.call(…)\` still takes κ's Fs`,
+          (arm.row("nodeCoreCall")?.inferred ?? []).includes("Fs"), arm.shown);
+  }
+
+  // CONTROL 5 — A COMPUTED KEY NAMES NOTHING AND IS NOT GUESSED AT, the same line R524 drew.
+  // `i[k].call(null, n)` must not resolve to the literal-key implementor.
+  for (const [nm, arm] of [["local", local], ["foreign", foreign]])
+    check(`R587 CONTROL 5 [${nm}]: a COMPUTED element-access key resolves no member — nothing is guessed`,
+          !(arm.row("dynamicKey")?.inferred ?? []).includes("Fs"), arm.shown);
+
+  // CONTROL 6 — ⟨R574⟩ IS CARRIED ACROSS, NOT RE-DECIDED. Where κ answered AND the receiver is
+  // demonstrably the package's own product, the reflective spelling must HEDGE exactly as the
+  // CallExpression spelling does — otherwise this fix reintroduces R574's fabricated concrete effect
+  // at a new site, which is how that class spread the first time. And the denylist must stay a
+  // denylist: a `let`, a parameter and a property access keep the full charge.
+  //
+  // THE REFERENCE ANSWER IS THE ENGINE'S OWN CALLEXPRESSION ARM, so each row holds ONE variable — the
+  // call spelling — and compares against what the identical receiver already answered at 6a639e6.
+  const r574 = project({
+    "package.json": `{"name":"appr587d","version":"1.0.0"}`,
+    "node_modules/got/package.json": `{"name":"got","version":"1.0.0","types":"index.d.ts"}`,
+    "node_modules/got/index.d.ts": `export interface Gettable { fetchIt(u: string): void }
+export declare function makeClient(): Gettable;
+export declare const holder: { inner: Gettable };`,
+    "src/index.ts": `import { Gettable, makeClient, holder } from "got";
+import * as cp from "node:child_process";
+export class MyClient implements Gettable { fetchIt(u: string) { cp.execSync(u) } }
+export function libPlain(u: string) { const g = makeClient(); g.fetchIt(u) }
+export function libCall(u: string)  { const g = makeClient(); g.fetchIt.call(g, u) }
+export function libElem(u: string)  { const g = makeClient(); g["fetchIt"].call(g, u) }
+export function letPlain(u: string) { let g = makeClient(); g.fetchIt(u) }
+export function letCall(u: string)  { let g = makeClient(); g.fetchIt.call(g, u) }
+export function parPlain(g: Gettable, u: string) { g.fetchIt(u) }
+export function parCall(g: Gettable, u: string)  { g.fetchIt.call(g, u) }
+export function propPlain(u: string) { holder.inner.fetchIt(u) }
+export function propCall(u: string)  { holder.inner.fetchIt.call(holder.inner, u) }`,
+  });
+  const { report: rep574 } = scan(r574);
+  const e574 = (fn) => entry(rep574, `src.index.${fn}`);
+  const shown574 = JSON.stringify((rep574?.functions ?? []).map((e) => [e.fn, e.inferred, e.unknownWhy, e.unresolved]));
+  for (const [plain, refl] of [["libPlain", "libCall"], ["libPlain", "libElem"],
+                               ["letPlain", "letCall"], ["parPlain", "parCall"], ["propPlain", "propCall"]])
+    check(`R587 CONTROL 6 [${refl}]: the reflective spelling answers exactly what \`${plain}\` already answered — one variable, the syntax`,
+          JSON.stringify((e574(refl)?.inferred ?? []).slice().sort())
+            === JSON.stringify((e574(plain)?.inferred ?? []).slice().sort()), shown574);
+  check("R587 CONTROL 6 [libCall]: …and that answer is the ⟨R574⟩ HEDGE — no fabricated Exec, and a real disclosure in its place",
+        !(e574("libCall")?.inferred ?? []).includes("Exec")
+        && (e574("libCall")?.inferred ?? []).includes("Unknown")
+        && (e574("libCall")?.unknownWhy ?? []).includes("dispatch:got.Gettable.fetchIt")
+        && e574("libCall")?.unresolved === true, shown574);
+  for (const fn of ["letCall", "parCall", "propCall"])
+    check(`R587 CONTROL 6 [${fn}]: the denylist stays a denylist — an UNPROVEN receiver provenance keeps the full implementor charge`,
+          (e574(fn)?.inferred ?? []).includes("Exec"), shown574);
+
+  // CONTROL 7 — THE REACH PROBE COUNTS JOINS, NOT BRANCH ENTRIES ⟨R583⟩. `R587-REACH` goes through the
+  // one shared `probeJoinReach` and fires on the join's RETURNED OUTCOME. Both directions, because a
+  // silent instrument and a correct zero are the same bytes — and because the corpus A/B for this fix
+  // counted ZERO joins against 42 branch entries, a distinction that only a probe placed here can make.
+  const markHits587 = (d) => {
+    const o = spawnSync("node", [path.join(HERE, "scan.mjs"), d],
+                        { encoding: "utf8", env: { ...process.env, CANDOR_R587_REACH: "1" } });
+    return (o.stderr.match(/R587-REACH/g) ?? []).length;
+  };
+  const noImpl587 = project({
+    "package.json": `{"name":"appr587e","version":"1.0.0"}`,
+    "node_modules/depz9/package.json": `{"name":"depz9","version":"1.0.0","types":"index.d.ts"}`,
+    "node_modules/depz9/index.d.ts": IFACES,
+    "src/index.ts": `import { Indexed, Declared } from "depz9";
+declare const i: Indexed;
+declare const d: Declared;
+export function a(n: number) { return i.roll.call(null, n) }
+export function b(n: number) { return [n].map(d["roll"]) }`,
+  });
+  check("R587 CONTROL 7 [probe]: a reflective invoke with NO visible implementor emits ZERO reach hits — it counts joins, not branch entries",
+        markHits587(noImpl587) === 0, JSON.stringify(scan(noImpl587).report?.functions ?? []));
+  check("R587 CONTROL 7 [probe] NOT A DEAD PROBE: the same shapes WITH a visible implementor still count",
+        markHits587(r574) > 0, "reach probe never fired on a tree whose joins really happen");
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

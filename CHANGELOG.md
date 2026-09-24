@@ -8,6 +8,106 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R587 (R573) — THE REFLECTIVE-INVOKE FUNNEL AND THE ELEMENT-ACCESS REFERENCE ANSWERED
+  NOTHING: FIFTEEN CALL SPELLINGS THAT PROVABLY WRITE A FILE, SILENT.** R573 is filed on five; the
+  measurement found fifteen, and **the remedy the row names closes three of them.**
+
+  MEASURED at `6a639e6`, one file, `tsc` exit 0 with the compile CHECKED rather than silenced (poison
+  it → exit 2, remove the poison → exit 0), `analyzed.count` 31, **every body ground-truthed by
+  RUNNING it under node 22.12 and watching the file appear** — all 25 arms wrote:
+
+                          PLAIN     HOF-ref   .call / .apply / Reflect.apply   ELEM-ACCESS ref, call
+      foreign index-sig   ['Fs']    ['Fs']    []      []      []               ABSENT   ABSENT
+      local   index-sig   Unknown   ['Fs']    ABSENT  ABSENT  ABSENT           ABSENT   ABSENT
+      foreign declared    ['Fs']    ['Fs']    ['Fs']  ['Fs']                   ABSENT   ABSENT
+      local   declared    ['Fs']    ['Fs']    ABSENT  ABSENT                   ABSENT
+
+  **Three causes, two sites.** (a) `chargeExternalDecl` runs `joinLocalImpls(recordDispatch(…))` and
+  never `joinIndexSignatureImpls`, so the three FOREIGN index-signature reflective arms read `[]` —
+  the cause R573 identifies. (b) `declIsLocal` keeps a LOCAL declaration out of that funnel entirely,
+  so all five local reflective arms — index-signature **and declared-member, which R573 does not name
+  at all** — reached nothing and their callers were ABSENT from `functions[]`, SPEC §2 rule 3's
+  affirmative purity claim. (c) both the HOF-ref arm and the reflective arm gate on
+  `isIdentifier || isPropertyAccess`, so every ELEMENT-ACCESS spelling was dropped before either join.
+
+  **R573's stated remedy — "have `chargeExternalDecl` join the index signature" — cannot close (b) or
+  (c), and is reported as a correction rather than followed.** That function receives no call-site
+  expression, so it cannot supply the member name an index signature has no declaration to give, and
+  it is unreachable for every local arm. The fix is `chargeMemberRefDispatch` — R558's own predicate,
+  which already routes through `recordDispatch` / `joinLocalImpls` / `joinIndexSignatureImpls` — called
+  from all three sites (§G: share, do not copy). **The local half was strictly worse than its own
+  baseline before this:** `li.roll(n)` discloses `Unknown` and `deny Unknown` exits 1, while the
+  identical body through `.call` was silent and the same rule exited 0.
+
+  `refSlotDecl` is why (c) is more than a widened gate: **`checker.getSymbolAtLocation` returns
+  undefined for an element access** — measured on all four arms, `d["roll"]` and `i["roll"]` alike — so
+  widening the gate alone silently does nothing. A DECLARED member resolves through
+  `getPropertyOfType`, an INDEX SIGNATURE only through `getIndexInfosOfType`. The call path had already
+  learned this once; its dynamic-slot arm does the same lookup and its comment records that its own
+  first draft asserted the opposite and was false.
+
+  **⟨R574⟩ IS CARRIED ACROSS, NOT RE-DECIDED.** Where κ answered and the receiver is demonstrably the
+  package's own product, the reflective spelling HEDGES (`Unknown` + `dispatch:` + `unresolved`)
+  exactly as the CallExpression arm does, on the same `packageProducedReceiver` test behind the same
+  `eff ?` gate. Without it this fix would have reintroduced R574's fabricated concrete effect at a new
+  site. CONTROL 6 holds ONE variable — the call spelling — and asserts each reflective arm equals what
+  its plain-call twin already answered: `libCall`/`libElem` hedge like `libPlain`; `letCall`,
+  `parCall`, `propCall` keep the full charge like theirs. The denylist stays a denylist.
+
+  **ONLY THE SCOPED POLICY FORM SEPARATES THESE ARMS (§F1), and all four were measured.** Blanket
+  `deny Fs`, `deny Unknown` and `deny Fs Unknown` exit 1 on every arm before and after, because the
+  structural implementor is independently reported — a suite gated on them would read as coverage of
+  a change it cannot see. The 30 scoped rows move: **`deny Fs src.index.<fn>` and `pure src.index.<fn>`
+  each 0 → 1 on all fifteen spellings.** The three blanket forms are kept as LABELLED
+  cannot-discriminate controls.
+
+  **A/B: `bin/corpus-ab.py`, 18 real TypeScript packages, 6,506 rows, wide key on every field —
+  ADDED 0 / REMOVED 0 / CHANGED 0. REACH 0, so that half is SAFETY-ONLY and is recorded as such, not
+  as a measured cost of zero** (corpus: axios, chalk, class-validator, execa, got, hono, ky, nest,
+  neverthrow, ora, remeda, socket.io, superjson, ts-pattern, typeorm, valibot, zod, zx; pre arm a
+  worktree at `6a639e6`, post arm this tree). The distinction R583 bought is what makes that honest:
+  a throwaway BRANCH-ENTRY probe measured **42 entries across 7 packages → 0 joins**, and a syntax
+  census found 71 `.call`/`.apply`/`Reflect.apply` sites in non-test `.ts` sources. So the shape is
+  present in real library code and the JOIN is not, because the join needs a VISIBLE implementor in
+  the same scan — **a consumer-side property that an 18-library corpus structurally cannot have.**
+  That is the same reason R558's reach was 0 and R524's only 6.
+
+  **RECALL HUNT, since the corpus could not reach it (§E1).** A consumer built against **socket.io
+  4.7.5's own `DefaultEventsMap`** — the real published `.d.ts`, an index signature, with the
+  application's own handler map as its implementor, `tsc` exit 0 with the compile checked, every body
+  executed under node and observed to write:
+
+      viaCall / viaApply / viaReflect   ['Net'] -> ['Fs','Net']      viaElemCall  ABSENT -> ['Fs','Net']
+      viaElemRef                        ABSENT -> ['Fs']             viaPlain / viaRef  unmoved
+      deny Fs src.index.<fn>            0 -> 1 on all five           R587-REACH  5 joins
+
+  (the `Net` is R560's open κ-fabrication half, a ruling not a patch, and it is unchanged here.)
+
+  **RED-CHECKED (§1b), and the controls discriminate.** With the three call sites disabled and the two
+  node-kind gates restored, `node test.mjs --parallel` exits 1 with **42 R587 rows red and all 29
+  CONTROL/FORM rows still green** — including `foreign/decCall`, the one reflective cell that already
+  resolved at HEAD, which is why the defect list is stated per-arm rather than as one list:
+
+      FAIL R587 [local/idxCall]: a reflective or element-access invoke carries its visible implementor's Fs — measured [] or ABSENT at 6a639e6
+      FAIL R587 GATE [local/idxCall]: `pure src.index.idxCall` exits 1 — measured exit 0 at 6a639e6 over a body that writes a file
+      FAIL R587 [local/decCall]: a reflective or element-access invoke carries its visible implementor's Fs — measured [] or ABSENT at 6a639e6
+      FAIL R587 [foreign/idxElemRef]: …
+      FAIL R587 CONTROL 6 [libCall]: …and that answer is the ⟨R574⟩ HEDGE — no fabricated Exec, and a real disclosure in its place
+      FAIL R587 CONTROL 7 [probe] NOT A DEAD PROBE: the same shapes WITH a visible implementor still count
+      test: 1 shard(s) did not report cleanly — treating the run as FAILED
+
+  Restored: **3052 passed, 0 failed.**
+
+  **NAMED RESIDUALS, not asserted away.** (i) An element access is admitted for the dispatch join
+  ONLY — letting it fall through to the HOF arm's opaque-callback branch would hand a new `Unknown` to
+  every `xs.map(fns[0])` whose holder resolves to nothing, which is the ecosystem-wide hedge ⟨0.39⟩
+  priced and declined at 2.60% of functions. That boundary is a decision, and it is a soundness gap in
+  the DISCLOSED direction, not a silent one. (ii) A COMPUTED key (`i[k].call(…)`) names no member and
+  resolves nothing — pinned by a control, the same line R524 drew, and socket.io's own
+  `this.sockets[fn].apply(…)` is a real instance of it. (iii) The HOF-ref site does not pass
+  `hedgeOnly`; that is R558's shipped behaviour, untouched here, and the R574 question has never been
+  asked of it.
+
 - **INSTRUMENT — `R524-REACH` AND `R558-REACH` HAD THE SAME DEFECT, FOUND BY GREPPING THE MECHANISM
   RATHER THAN THE ROW (§9).** The audit boundary for R574's probe fix was deliberately not drawn around
   its own trigger. Both of the other reach marks in this file also fired on BRANCH ENTRY: `R524-REACH`
