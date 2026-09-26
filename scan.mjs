@@ -6366,11 +6366,17 @@ const memberOwnerQual = (member) => {
 // here: the ledger's question is "did κ cover THIS call", and re-deriving the member from `decl` would
 // be a second spelling of it that could drift from the first (§G — where two paths compute one fact,
 // make them disagree; better still, do not have two).
-function disclosureTail(rec, decl, pkg, file, member) {
+// ⟨SOUNDNESS R697⟩ `kappaAnswered` — κ HAS a rule for this call, so the caller is reaching the funnel for
+// the arms κ's rule does not speak to. Only the LEDGER arm is κ's question ("did κ cover this call"), and
+// it is suppressed; the manifest, the unanswerable-KEY arm and the dynamic-re-export arm ask questions a
+// package-level κ rule cannot answer, and they run. Passed rather than re-derived from `kappaKnows(pkg,
+// member)` because κ was asked with `kMod`, which is NOT always `mod` (a construction asks about the
+// class's own module), and a second spelling of one fact is §G.
+function disclosureTail(rec, decl, pkg, file, member, kappaAnswered) {
   const declared = packageManifestEffects(file);
   if (declared !== null) { for (const e of declared) rec.direct.add(e); return; } // [] = declared pure
   const abstraction = unanswerableKey(decl);
-  if (!kappaKnows(pkg, member) && !depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
+  if (!kappaAnswered && !kappaKnows(pkg, member) && !depCoveredPkgs.has(pkg) && crossesPackageBoundary(file)) {
     unlistedSeen.set(pkg, (unlistedSeen.get(pkg) ?? 0) + 1);
     rec.blind.add(pkg);
     // ⟨0.21⟩ A package chained ONLY by a SELF-DECLARED-INCOMPLETE report reaches this arm because its
@@ -8571,10 +8577,54 @@ function visitCalls(node) {
             // cannot drift again. `eff &&` because the branch R560 ADDED is the κ-answered one.
             probeJoinReach("R560-REACH", eff && (rdOut ?? isOut), `${dpkg}.${member || "<computed>"} eff=${eff}`);
           }
-          // CANDOR_DEPS: an unclassified call into a package with a loaded sibling report inherits
-          // that function's recorded transitive effects (+ literal surfaces) by `hash`.
+          // CANDOR_DEPS: a call into a package with a loaded sibling report inherits that function's
+          // recorded transitive effects (+ literal surfaces) by `hash`.
+          //
+          // ⟨SOUNDNESS R696⟩ NOT GATED ON `!eff`, AND THAT GUARD WAS THE WHOLE OF THE CARDINAL SIN —
+          // the ts sibling of candor-java R685, where `crossDepJoin` was gated on `effect == null` so a
+          // member the classifier had a rule for never had the dependency's OWN published row read at
+          // all. Here it was κ: a κ rule for the package — a WHOLE-MODULE one in every measured case
+          // (`axios|got|node-fetch|undici|ws|socket.io|nodemailer`→Net, `winston|pino|bunyan|npmlog`→Log,
+          // `pg|mysql2|mongodb|…`→Db, `execa|cross-spawn|shelljs`→Exec, `fs-extra|glob|chokidar|…`→Fs) —
+          // made `eff` truthy for EVERY member of the package, so the chained entry under that exact
+          // hash was skipped and κ's one effect was published as the whole answer.
+          //
+          // MEASURED ON REAL CODE, one variable held apart: the corpus's real `got` 14.4.1 scanned into a
+          // report (`got#Request.flush -> ['Clock','Net','Unknown']`, `unresolved: true`, four reason
+          // classes), chained against a consumer doing `r.flush()`. Under the package's real name the
+          // consumer row read `['Net']` with `unresolved: false` and no reasons — `deny Clock src.m.go`
+          // and `deny Unknown src.m.go` BOTH exit 0. With the SAME report content renamed `gotx` so κ has
+          // no rule, the same consumer read `['Clock','Net','Unknown']`, `unresolved: true`, and both
+          // gates exit 1. The consumer was reading MORE CERTAINTY than the report it was handed, which is
+          // the one thing §2's chained join exists to prevent.
+          //
+          // And the one-tree control, which is what makes it a contradiction rather than a preference:
+          // eight shapes (plain method, dep-declared interface reached through the interface, `import
+          // type`, abstract member, callback property, generic constrained to a dep interface, index
+          // signature, bare function export) all read `['Exec']` with the dependency's body IN the scan
+          // and `['Log']` once split behind a chained report named `winston`. Same source, two answers,
+          // `deny Exec` exit 1 → exit 0, and `deny Exec Unknown` green too — no policy form caught it.
+          //
+          // PURELY ADDITIVE, which is why this is a patch and not a ruling: `applyDepHit` only ever calls
+          // `rec.*.add`, so κ's own charge is never removed and no row can lose an effect — the union the
+          // family's cross-dep rule asks for. `crossDeps.size > 0` still means an UNCHAINED scan is
+          // byte-identical; the newly reached set is exactly (chained ∧ κ answered ∧ the report carries
+          // the key). Distinct from the R574 hazard one branch up: THAT join guesses a LOCAL implementor
+          // of a foreign abstraction, where the receiver's provenance decides whether the candidate is
+          // reachable at all. This one reads the DEPENDENCY's own row for the very member the checker
+          // resolved, so a receiver the PACKAGE produced is exactly what the row is about.
+          // MEASURED rather than argued, because that is a safety assertion and this file's own §K rule
+          // says those are the lines to attack: with a dep declaring `Sink`, implementing it as an Exec
+          // `DepSink` returned from `makeSink()`, and the CONSUMER declaring its own Fs `LocalSink` for
+          // the same interface, `const s = makeSink(); s.write(x)` gains the dependency's `Exec` beside
+          // κ's `Log` and does NOT gain the consumer's `Fs`. Pinned in test.mjs §11h.
+          // THE BOUNDARY, stated rather than overclaimed: this join can still over-charge to the extent
+          // the DEPENDENCY's own ⟨0.39⟩ obligation-2 union entry over-approximates (a union naming an
+          // implementor from a third package that this receiver provably is not). That is inherited from
+          // the producer's row and is the same over-approximation the pre-R696 `!eff` path already
+          // accepted on every κ-silent package; the error direction is over-charge, never silence.
           let inheritedFromDep = false;
-          if (!eff && crossDeps.size > 0 && !mod.startsWith("<")) {
+          if (crossDeps.size > 0 && !mod.startsWith("<")) {
             const nameDecl = memberSigOf(decl); // a function-typed property names its member one level up
             let localTail = nameDecl.name ? nameDecl.name.getText() : null;
             const owner3 = nameDecl.parent && nameDecl.parent.name ? nameDecl.parent.name.getText() : null;
@@ -8596,7 +8646,23 @@ function visitCalls(node) {
             // fallback exactly the typed-consumer shape the chain targets never joined.
             const hit = localTail && (crossDeps.get(`${depMod}#${localTail}`)
               ?? (nameDecl.name ? crossDeps.get(`${depMod}#${nameDecl.name.getText()}`) : undefined));
-            if (hit) { inheritedFromDep = true; applyDepHit(rec, hit); }
+            if (hit) {
+              inheritedFromDep = true;
+              // ⟨SOUNDNESS R696⟩ REACH PROBE for the branch this row ADDED — the κ-answered one — and it
+              // counts the JOIN'S OUTCOME, not branch entry (R574/R583: a probe placed before the filter
+              // it is evidence for measures the filter's input). `eff &&` because the pre-R696 `!eff` path
+              // is byte-identical and cannot be what a reader is pricing. Env-gated, same convention as
+              // ⟨R519⟩/⟨R524⟩/⟨R560⟩'s: CANDOR_R696_REACH=1.
+              const before = eff ? `${rec.direct.size}/${rec.blind.size}/${rec.why.size}/${rec.incomplete.size}`
+                                 + `/${rec.hosts.size}/${rec.cmds.size}/${rec.paths.size}/${rec.tables.size}/${rec.dispatch.size}` : null;
+              applyDepHit(rec, hit);
+              if (eff) {
+                const after = `${rec.direct.size}/${rec.blind.size}/${rec.why.size}/${rec.incomplete.size}`
+                            + `/${rec.hosts.size}/${rec.cmds.size}/${rec.paths.size}/${rec.tables.size}/${rec.dispatch.size}`;
+                probeJoinReach("R696-REACH", after === before ? null : "contributed",
+                               `${depMod}#${localTail} eff=${eff} ${before}->${after}`);
+              }
+            }
           }
           // unmatched external = (OPAQUE): contributes nothing — the curated-κ caveat C1. The
           // κ-coverage LEDGER makes the caveat per-scan evidence instead of a doc footnote: count
@@ -8604,7 +8670,22 @@ function visitCalls(node) {
           // report covers (the argon2 lesson — the blind spot landed on exactly the call a
           // security review cared about). Builtins are excluded: κ's builtin coverage is the
           // bounded frontier, and an unlisted builtin (path, util) is known-pure, not blind.
-          if (!eff && !inheritedFromDep && !mod.startsWith("<")) {
+          //
+          // ⟨SOUNDNESS R697⟩ AND THIS ARM'S `!eff` WAS THE SECOND HALF OF THE SAME PREEMPTION. The
+          // unanswerable-KEY disclosure lives down this funnel, and κ's answer suppressed it: a call
+          // through a member of a CHAINED package whose report is silent under that key got
+          // `Unknown[dispatch:<pkg>.<Owner>.<member>]` when κ had no rule and NOTHING when it did.
+          // MEASURED, same report content both arms, only the package NAME differing so that κ matches:
+          // an `abstract act()` of a chained dep read `['Unknown'] why=['dispatch:depkit.Base.act']` and
+          // `deny Exec Unknown src.m.go` exit 1; named `winston` the row read `['Log']` and the same
+          // policy exit 0 — over a real `execSync`. Same for a dep-declared interface the dep does not
+          // implement (`Unknown[dispatch:depkit.Runner.run]` vs nothing). κ's rule says what the PACKAGE
+          // does; it never says WHICH IMPLEMENTATION runs behind an abstraction member, which is the only
+          // question this arm asks — so it is not κ's to answer and not κ's to silence.
+          // The LEDGER arm inside the funnel IS κ's question and stays suppressed (`kappaAnswered`).
+          // `!inheritedFromDep` is KEPT: where the chained report carried the key it answered, and R696
+          // above has already joined it.
+          if (!inheritedFromDep && !mod.startsWith("<")) {
             // The REAL package name first: a typed consumer of an untyped package resolves into
             // @types/<pkg>, and κ's tables/review lists hold the real name (/code-review: lodash
             // via @types/lodash was falsely disclosed — kappaKnows saw the unstripped name).
@@ -8615,7 +8696,7 @@ function visitCalls(node) {
             // already ran its own chained-dep lookup above (`inheritedFromDep`, with its constructor/
             // owner-prefix spelling), so it hands the tail an already-external, already-unmatched `decl`
             // rather than re-deriving the join.
-            disclosureTail(rec, decl, pkg, file, member);
+            disclosureTail(rec, decl, pkg, file, member, !!eff);
           }
         }
       }

@@ -8,6 +8,132 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R696 / R697 — κ PREEMPTED THE CHAINED DEPENDENCY REPORT: TWO `!eff` GUARDS, AND WHEREVER
+  THE CLASSIFIER HAD A RULE FOR THE PACKAGE, THE DEPENDENCY'S OWN PUBLISHED ROW WAS NEVER READ.** The ts
+  half of candor-spec **R692** — the cross-engine rule that *a consumer must never read MORE CERTAINTY than
+  the report it was handed, and a local answer must UNION with a chained row rather than replace or preempt
+  it.* Sibling of candor-java **R685** (`crossDepJoin` gated on `effect == null`) and candor-rust **R690**.
+  Both are in `scan.mjs`'s CallExpression arm:
+
+  - **R696 — the CANDOR_DEPS join** (`if (!eff && crossDeps.size > 0 …)`). κ's whole-module rules make this
+    the common case, not a corner: `axios|got|node-fetch|undici|ws|socket.io|nodemailer`→Net,
+    `winston|pino|bunyan|npmlog`→Log, `pg|mysql2|mongodb|ioredis|redis|sqlite3|knex`→Db,
+    `execa|cross-spawn|shelljs`→Exec, `fs-extra|graceful-fs|rimraf|glob|chokidar`→Fs. `eff` was truthy for
+    **every member** of every one of those, so the chained entry under that exact hash was skipped and κ's
+    one effect was published as the whole answer.
+  - **R697 — the unanswerable-KEY disclosure** (`if (!eff && !inheritedFromDep …) disclosureTail(…)`). Where
+    the chained report carried no entry for the key — an `abstract` member, an interface member with no
+    implementor in the dependency — the `Unknown[dispatch:<pkg>.<Owner>.<member>]` hedge fired when κ had no
+    rule and **nothing at all** when it did. κ's rule says what the PACKAGE does; it never says which
+    IMPLEMENTATION runs behind an abstraction member, which is the only question that arm asks.
+
+  **MEASURED ON REAL CODE, one variable held apart.** The corpus's real **got 14.4.1** scanned into a report
+  (`got#Request.flush → ['Clock','Net','Unknown']`, `unresolved: true`, four reason classes) and chained
+  against a consumer doing `r.flush()`:
+
+                                       src.m.go row                       deny Clock    deny Unknown
+      report named `gotx` (κ silent)   ['Clock','Net','Unknown'] unres:T   exit 1        exit 1
+      report named `got`  (κ → Net)    ['Net']                  unres:F   exit 0        exit 0
+
+  Byte-identical report content; only `package`/hash-prefix renamed so κ stops matching. The consumer was
+  publishing `unresolved: false` over a row whose producer published `unresolved: true`.
+
+  **AND THE ONE-TREE CONTROL, which is what makes it a contradiction rather than a preference** (the method
+  that settled java R685): measure one program as ONE TREE, then split it across a scan boundary and measure
+  again. Twelve shapes, each built twice from the *same* dependency source — vendored in-tree behind a
+  tsconfig `paths` mapping so the import specifier never changes, versus scanned alone with its `tsc -d`
+  declarations in the consumer's `node_modules` and chained. `deny Exec`, scoped to the consumer unit:
+
+      shape                                        ONE TREE   chained, κ-silent   chained, κ-covered (pre-fix)
+      plain class method                           ['Exec']   ['Exec']            ['Log']   ← exit 1 → 0
+      dep interface, dep impl, via the interface   ['Exec']   ['Exec']            ['Log']   ← exit 1 → 0
+      `import type` of the dep interface           ['Exec']   ['Exec']            ['Log']   ← exit 1 → 0
+      abstract class member                        ['Exec']   Unknown[dispatch:]  ['Log']   ← exit 1 → 0
+      callback property on a dep type              ['Exec']   ['Exec']            ['Log']   ← exit 1 → 0
+      generic constrained to a dep interface       ['Exec']   ['Exec']            ['Log']   ← exit 1 → 0
+      index signature on a dep type                Unknown    Unknown[callback:]  ['Log']   ← exit 1 → 0
+      bare function export                         ['Exec']   ['Exec']            ['Log']   ← exit 1 → 0
+      dep interface the dep does NOT implement     —          Unknown[dispatch:]  ['Log']   ← R697 only
+      constructor / implicit coercion / HOF-ref    ['Exec']   ['Exec']            ['Exec']  (immune)
+
+  Same source, two answers. **`deny Exec Unknown` was green too — no policy form caught it**, which is what
+  makes it the cardinal sin rather than a precision row. The three immune shapes go through
+  `chargeExternalDecl`, which was never `!eff`-gated. (The last R697 row has no meaningful ONE-TREE cell:
+  its consumer-side implementor is deliberately pure, so the decisive axis there is κ-silent vs κ-covered
+  *within* the split arm, with the chained report byte-identical but for its name.)
+
+  **AND THE SHAPE THAT MATTERS MOST IN PRACTICE IS THE `@types` ONE**, because κ's tables are keyed on the
+  RUNTIME name while a typed consumer resolves into `@types/<pkg>`: a `pg` dependency typed through
+  `@types/pg`, its report carrying `pg#Pool.query → ['Exec']`, read `['Db']` pre-fix and `['Db','Exec']`
+  after, `deny Exec src.m.go` exit 0 → 1. `tsc -p … --noEmit` exit 0 on the fixture (§E3 — a control
+  asserting an absence must compile and run first).
+
+  **PURELY ADDITIVE, and that is why it is a patch and not a ruling.** `applyDepHit` only ever calls
+  `rec.*.add`, so κ's own charge is never removed and no row can lose an effect — the union §2's chained
+  join asks for. `disclosureTail` takes a `kappaAnswered` flag rather than re-deriving
+  `kappaKnows(pkg, member)` (κ is asked with `kMod`, which is not always `mod`, and a second spelling of one
+  fact is §G), and the LEDGER arm — the one arm that IS κ's question — stays suppressed.
+
+  **THE BLAST RADIUS, AND THE ONE UNCHAINED CASE IT DOES INCLUDE.** R696 needs `crossDeps.size > 0` and
+  R697's disclosure arms need `depCoveredPkgs`, so a scan that chained nothing cannot reach either. But the
+  funnel's FIRST arm is the SPEC §5.1 `candorEffects` manifest, and that is read from the package's own
+  `package.json` whether or not anything was chained — so **"an unchained scan is byte-identical" would have
+  been an over-claim**, and it is corrected here rather than discovered later: a κ-covered package that
+  DECLARES effects κ's rule does not name now has that declaration unioned in, where κ's answer used to
+  discard it. That is the same preemption one arm over, so it is a gain; it is pinned in both directions
+  (a declared `['Fs']` is added beside κ's `Log`; a declared-pure `[]` does NOT remove κ's `Log`).
+
+  **OVER-CHARGE CONTROL, `bin/corpus-ab.py` (never a fresh `ab.py`), UNCHAINED** — the 7 real TypeScript
+  packages `bin/corpus.sh` drives for ts (axios chalk execa got hono zod zx), 620 rows, WIDE key, every
+  field: `ADDED 0  REMOVED 0  CHANGED 0`, identical on all four keys and on the narrow `inferred` key.
+  **REACH 0 hits, so THIS ARM IS SAFETY-ONLY and is recorded as such rather than as a measured cost of
+  zero** (§E1 — R79/R85/R87/R92 all returned byte-identical over corpora that could not reach the branch).
+  There is no ts roster that scans a κ-covered package into a report and chains it, so the reach evidence
+  has to come from the chained fixtures, and it does:
+
+  **REACH, instrumented on the changed branch and counted on the join's OUTCOME, not on branch entry**
+  (`CANDOR_R696_REACH=1`; R574/R583 — a probe placed before the filter it is evidence for measures the
+  filter's input). Real-got consumer: 1 contributing join, `1/0/0/0/0/0/0/0/0 → 3/0/4/1/0/0/0/0/0`, and
+  `corpus-ab.py` pair mode over that fixture reports `ADDED 0 REMOVED 0 CHANGED 1`, bucket 1 (*absent/pure →
+  CONCRETE effect, a scoped deny moves*) = 1 — **validated against the real gate rather than left as the
+  tool's prediction**: `deny Clock src.m.go` exit 0 → 1.
+
+  **PRICED on a real axios 1.7.2 consumer** (axios scanned to a report, chained, 7 hand-written consumer
+  units): `ADDED 0 REMOVED 0 CHANGED 6`, **bucket 3 (a CONCRETE effect LOST) = 0**. Six of seven rows gain
+  `Unknown` — pre-fix `['Net']`, post-fix `['Net','Unknown']` with `native:Axios.get`/`native:Axios.post`/…
+  inherited from axios's own rows, plus one `dispatch:axios.AxiosStatic.create` from R697. Those Unknowns are
+  **axios's own published answer** (`axios#Axios.get → ['Unknown']`, `unresolved: true`,
+  `why: ['native:Axios.get']`), so pre-fix the consumer was certifying what the dependency had declared
+  uncertain. The precision cost is real and it lands on chained scans of κ-covered packages; it is stated
+  per-fixture because no corpus measures that configuration.
+
+  **CALIBRATED (brief §1b).** Against pre-fix `scan.mjs` the four assertions that pin the fixes go RED —
+  `['Log']` where `Exec` is required, both gates exit 0 — while every control stays green, including the two
+  that guard the direction the change could over-reach in: a **CONCRETE** declared method of a covered
+  package gains no `Unknown` (SPEC §2 rule 3's purity claim is left intact), and the UNCHAINED arm still
+  reads `['Log']` alone. Post-fix: `test: 3122 passed, 0 failed (8 shards)`, `eslint` clean.
+
+  **AND THE SAFETY ASSERTION IN THE DIFF GOT A FIXTURE RATHER THAN A SENTENCE** (§E2/§K — the comment
+  explaining why something is safe is the highest-value line to attack; `assert-audit.sh` flagged this one).
+  The claim is that R574's hazard does not carry over: THAT join guesses a LOCAL implementor of a foreign
+  abstraction, where a receiver the package produced provably is not one, while this join reads the
+  DEPENDENCY's own row for the member the checker resolved. Discriminating fixture (test.mjs §11h): the dep
+  declares `Sink`, implements it as an `Exec` `DepSink` returned from `makeSink()`, and the consumer declares
+  its own `Fs` `LocalSink` for the same interface — `const s = makeSink(); s.write(x)` gains the dependency's
+  `Exec` beside κ's `Log` and does **not** gain the consumer's `Fs`. **The boundary, stated rather than
+  overclaimed:** this join can still over-charge to the extent the dependency's own ⟨0.39⟩ obligation-2
+  union over-approximates (a union naming a third package's implementor this receiver provably is not) —
+  inherited from the producer's row, identical to what the pre-R696 `!eff` path already accepted on every
+  κ-silent package, and an over-charge, never silence.
+
+  **WHY IT SURVIVED R560, which is the same finding one guard over.** `d534b62` removed `!eff` from the
+  obligation-3 LOCAL CHA join in this very `if` cascade and wrote *"NOT GATED ON `!eff`, AND THAT GUARD WAS
+  THE WHOLE OF THE CARDINAL SIN"* above it. The two sibling `!eff` guards — five and eighty-five lines below,
+  governing the CHAINED-boundary answers — were left. That commit even cites §9 (*the boundary is not drawn
+  around the row's trigger*) for a different axis, the index-signature-vs-declared-member SPELLING, while
+  the audit boundary it actually needed was *every other `!eff` in the same cascade*. One `grep -n '!eff'`
+  over the function.
+
 - ⚠ **SOUNDNESS R587 (R573) — THE REFLECTIVE-INVOKE FUNNEL AND THE ELEMENT-ACCESS REFERENCE ANSWERED
   NOTHING: FIFTEEN CALL SPELLINGS THAT PROVABLY WRITE A FILE, SILENT.** R573 is filed on five; the
   measurement found fifteen, and **the remedy the row names closes three of them.**

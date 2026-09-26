@@ -3509,6 +3509,198 @@ export function buy(): void { charge(100); }`,
         buy4?.inferred.includes("Net") && buy4?.hosts?.includes("api.stripe.com"), JSON.stringify(buy4));
 }
 
+// ── 11f. ⟨SOUNDNESS R696/R697⟩ κ MUST NOT PREEMPT THE CHAINED REPORT ───────────────────────────────
+// The ts half of candor-spec R692 (java R685 / rust R690): a consumer must never read MORE CERTAINTY
+// than the report it was handed, and a LOCAL answer must UNION with a chained row rather than replace or
+// preempt it. Two `!eff` guards in scan.mjs's CallExpression arm did exactly that — the CANDOR_DEPS join
+// (R696) and the unanswerable-key disclosure funnel (R697) — so wherever κ had a rule for the package,
+// the dependency's own published row for that exact hash was never read and the boundary hedge never
+// fired. κ's whole-module rules make that the COMMON case, not a corner: axios|got|node-fetch|undici|ws|
+// socket.io|nodemailer→Net, winston|pino|bunyan|npmlog→Log, pg|mysql2|mongodb|…→Db, execa|cross-spawn|
+// shelljs→Exec, fs-extra|glob|chokidar|…→Fs — every member of every one of those.
+//
+// THE ARMS DIFFER IN EXACTLY ONE THING: the dependency's package NAME, hence whether κ has a rule for it.
+// Same dep source, same emitted declarations, same consumer text, same chained report content. Measured
+// pre-fix: `['Exec']` κ-silent vs `['Log']` κ-covered, `deny Exec` exit 1 → exit 0, and `deny Exec
+// Unknown` green too — no policy form caught it.
+if (blk()) {
+  const depSrc = `import { execSync } from "node:child_process";
+export class Logger { info(m: string): void { execSync("/bin/echo " + m); } }
+export abstract class Base { abstract act(c: string): void; }
+export class DepImpl extends Base { act(c: string): void { execSync(c); } }
+export class Plain { label(): string { return "p"; } }`;
+  const dts = `export declare class Logger { info(m: string): void; }
+export declare abstract class Base { abstract act(c: string): void; }
+export declare class Plain { label(): string; }`;
+  // KSILENT: κ has no rule for this name. KCOVERED: `winston` is a κ WHOLE-MODULE rule → Log.
+  const arms = {};
+  for (const [label, PKG] of [["KSILENT", "r696kit"], ["KCOVERED", "winston"]]) {
+    const dep = project({ "package.json": `{"name":"${PKG}","version":"1.0.0"}`, "src/index.ts": depSrc });
+    const depScan = scan(dep);
+    const depRep = depScan.report;
+    // Same report content in both arms (only the hash prefix differs) — the premise the comparison rests on.
+    check(`R696 ${label}: the dependency publishes ${PKG}#Logger.info -> ['Exec']`,
+          depRep?.functions.some((e) => e.hash === `${PKG}#Logger.info` && e.inferred.includes("Exec")),
+          JSON.stringify(depRep?.functions.map((e) => [e.hash, e.inferred])));
+    // …and publishes NOTHING under the abstract member's key, which is what leaves R697's arm the only
+    // voice: `Base.act` has no body in any report, so a covered package's silence answers nothing.
+    check(`R696 ${label}: …and NO entry under ${PKG}#Base.act (the unanswerable key)`,
+          !depRep?.functions.some((e) => e.hash === `${PKG}#Base.act`),
+          JSON.stringify(depRep?.functions.map((e) => e.hash)));
+    const app = project({
+      "package.json": `{"name":"app","version":"1.0.0","dependencies":{"${PKG}":"1.0.0"}}`,
+      "src/m.ts": `import { Logger, Base, Plain } from "${PKG}";
+export function viaMethod(l: Logger): void { l.info("hi"); }
+export function viaAbstract(b: Base): void { b.act("/bin/echo hi"); }
+export function viaPlain(p: Plain): string { return p.label(); }`,
+      [`node_modules/${PKG}/package.json`]: `{"name":"${PKG}","version":"1.0.0","types":"dist/index.d.ts","main":"dist/index.js"}`,
+      [`node_modules/${PKG}/dist/index.d.ts`]: dts,
+      [`node_modules/${PKG}/dist/index.js`]: `exports.Logger = class {}; exports.Base = class {}; exports.DepImpl = class {}; exports.Plain = class {};`,
+    });
+    const depsArg = path.join(dep, ".candor", "report.json");
+    const runScan = (extraArgs = [], chain = true) => {
+      const env = { ...process.env };
+      if (chain) env.CANDOR_DEPS = depsArg; else delete env.CANDOR_DEPS;
+      const r = spawnSync("node", [path.join(HERE, "scan.mjs"), app, ...extraArgs], { encoding: "utf8", env });
+      return { r, report: JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8")) };
+    };
+    const gate = (text, chain = true) => {
+      fs.writeFileSync(path.join(app, "p.policy"), text);
+      return runScan(["--policy", path.join(app, "p.policy")], chain).r.status;
+    };
+    arms[label] = { app, depsArg, chained: runScan().report, unchained: runScan([], false).report, gate };
+  }
+  const eff = (arm, fn) => entry(arms[arm].chained, fn)?.inferred ?? [];
+  const why = (arm, fn) => entry(arms[arm].chained, fn)?.unknownWhy ?? [];
+
+  // ⟨R696⟩ the method the dependency DID publish a row for.
+  check("R696: the κ-SILENT consumer inherits the dep's Exec (the control — this always worked)",
+        eff("KSILENT", "src.m.viaMethod").includes("Exec"), JSON.stringify(eff("KSILENT", "src.m.viaMethod")));
+  check("R696: the κ-COVERED consumer inherits it TOO (was ['Log'] — the dep row was never read)",
+        eff("KCOVERED", "src.m.viaMethod").includes("Exec"), JSON.stringify(eff("KCOVERED", "src.m.viaMethod")));
+  check("R696: …and κ's own answer is NOT removed — the join is a UNION, never a replacement",
+        eff("KCOVERED", "src.m.viaMethod").includes("Log"), JSON.stringify(eff("KCOVERED", "src.m.viaMethod")));
+  check("R696: `deny Exec src.m.viaMethod` is exit 1 on the κ-COVERED arm (was exit 0 over a real execSync)",
+        arms.KCOVERED.gate("deny Exec src.m.viaMethod\n") === 1);
+
+  // ⟨R697⟩ the abstract member nobody published a row for — the hedge, not a charge.
+  check("R697: the κ-SILENT consumer hedges the abstract member (the control)",
+        eff("KSILENT", "src.m.viaAbstract").includes("Unknown")
+        && why("KSILENT", "src.m.viaAbstract").some((w) => w.startsWith("dispatch:")),
+        JSON.stringify(entry(arms.KSILENT.chained, "src.m.viaAbstract")));
+  check("R697: the κ-COVERED consumer hedges it TOO (κ's package rule had DELETED the disclosure)",
+        eff("KCOVERED", "src.m.viaAbstract").includes("Unknown")
+        && why("KCOVERED", "src.m.viaAbstract").some((w) => w.startsWith("dispatch:")),
+        JSON.stringify(entry(arms.KCOVERED.chained, "src.m.viaAbstract")));
+  check("R697: …and κ's Log survives beside the hedge (union, not replacement)",
+        eff("KCOVERED", "src.m.viaAbstract").includes("Log"), JSON.stringify(eff("KCOVERED", "src.m.viaAbstract")));
+  check("R697: `deny Exec Unknown src.m.viaAbstract` is exit 1 on the κ-COVERED arm (was exit 0)",
+        arms.KCOVERED.gate("deny Exec Unknown src.m.viaAbstract\n") === 1);
+
+  // NO FABRICATED UNCERTAINTY. `Plain.label` is a CONCRETE declared method — not an abstraction, and the
+  // covered package published no row for it, which under SPEC §2 rule 3 IS its purity claim. Neither fix
+  // may turn that into an Unknown, in either arm. This is the direction the R697 change could have
+  // over-reached in, so it is pinned rather than argued.
+  for (const a of ["KSILENT", "KCOVERED"]) {
+    check(`R697 control (${a}): a CONCRETE declared method of a covered package gains NO Unknown`,
+          !eff(a, "src.m.viaPlain").includes("Unknown"), JSON.stringify(entry(arms[a].chained, "src.m.viaPlain")));
+  }
+  // AN UNCHAINED SCAN IS UNTOUCHED — `crossDeps.size > 0` / `depCoveredPkgs` gate both fixes, so neither
+  // can move a scan that chained nothing. Pinned because it is the whole reason the blast radius is
+  // (chained ∧ κ answered ∧ the report carries the key) and not "every κ-covered call everywhere".
+  const uneff = (arm, fn) => entry(arms[arm].unchained, fn)?.inferred ?? [];
+  check("R696/R697: UNCHAINED, the κ-COVERED consumer still reads κ's answer alone (no Exec, no Unknown)",
+        uneff("KCOVERED", "src.m.viaMethod").join() === "Log"
+        && uneff("KCOVERED", "src.m.viaAbstract").join() === "Log",
+        JSON.stringify([uneff("KCOVERED", "src.m.viaMethod"), uneff("KCOVERED", "src.m.viaAbstract")]));
+}
+
+// ── 11g. ⟨SOUNDNESS R697, the ONE unchained case⟩ a κ-covered package's OWN §5.1 MANIFEST ──────────
+// `disclosureTail`'s FIRST arm is the SPEC §5.1 `candorEffects` manifest, and it reads the package's own
+// package.json whether or not anything was chained. So removing the `!eff` guard moves one thing on a scan
+// with NO `CANDOR_DEPS`: a κ-covered package that DECLARES effects κ's rule does not name now has that
+// declaration unioned in, where before κ's answer discarded it. That is the same preemption as R696/R697
+// one arm over — the package's own published statement about itself, overridden by a curated guess — so it
+// is a gain and not a side effect, but it is the reason "an unchained scan is byte-identical" would have
+// been an over-claim, and an unmeasured behaviour change is what this file exists to stop.
+//
+// Both directions are pinned: a manifest naming an effect κ misses must ADD it, and a `[]` (declared-pure)
+// manifest must NOT remove κ's own charge — `packageManifestEffects` returns early on `[]`, and an early
+// return that also dropped κ's answer would be a narrowing wearing a fix's clothes.
+if (blk()) {
+  const mk = (declared) => project({
+    "package.json": `{"name":"app","version":"1.0.0","dependencies":{"winston":"1.0.0"}}`,
+    "src/m.ts": `import { Logger } from "winston";
+export function go(l: Logger): void { l.info("hi"); }`,
+    // `winston` is a κ WHOLE-MODULE rule → Log. `candorEffects` is the package's own §5.1 declaration.
+    "node_modules/winston/package.json":
+      `{"name":"winston","version":"1.0.0","types":"index.d.ts","main":"index.js"`
+      + (declared === null ? "" : `,"candorEffects":${JSON.stringify(declared)}`) + `}`,
+    "node_modules/winston/index.d.ts": `export declare class Logger { info(m: string): void; }`,
+    "node_modules/winston/index.js": `exports.Logger = class {};`,
+  });
+  const effOf = (declared) => {
+    const d = mk(declared);
+    const { report } = scan(d);            // NO CANDOR_DEPS anywhere — this is the unchained path
+    return (entry(report, "src.m.go")?.inferred ?? []).slice().sort();
+  };
+  check("R697 manifest: no `candorEffects` — the κ-covered call still reads κ's answer alone",
+        effOf(null).join() === "Log", JSON.stringify(effOf(null)));
+  check("R697 manifest: a κ-covered package's DECLARED Fs is unioned in (κ's rule used to discard it)",
+        effOf(["Fs"]).join() === "Fs,Log", JSON.stringify(effOf(["Fs"])));
+  check("R697 manifest: a DECLARED-PURE `[]` manifest does NOT remove κ's own charge",
+        effOf([]).join() === "Log", JSON.stringify(effOf([])));
+}
+
+// ── 11h. ⟨SOUNDNESS R696, the R574 DIRECTION⟩ WHOSE ANSWER IS THE JOIN READING? ────────────────────
+// R574 is the reason the κ-answered branch one level up (⟨0.39⟩ obligation 1's LOCAL CHA join) hedges
+// instead of charging: that join guesses a LOCAL implementor of a foreign abstraction, and a receiver the
+// PACKAGE produced provably is not one, so charging it fabricates. R696 removes the same `!eff` guard from
+// a different join, and the claim in scan.mjs is that the hazard does NOT carry over — this join reads the
+// DEPENDENCY's own published row for the very member the checker resolved. That is an assertion about
+// safety, so it gets a fixture rather than a sentence (§E2, and §K: the comment explaining why something is
+// safe is the highest-value line in the file to attack).
+//
+// The discriminating fixture: the dependency declares `Sink`, implements it as `DepSink` (Exec) and hands
+// one back from `makeSink()`; the CONSUMER declares its own `LocalSink` implementing the same interface and
+// doing Fs. `viaLib`'s receiver is provably the package's product. If the join were reading local
+// implementors, `viaLib` would carry Fs. It must carry the dependency's Exec and NOT the consumer's Fs.
+if (blk()) {
+  const dep = project({
+    "package.json": `{"name":"winston","version":"1.0.0"}`,      // κ WHOLE-MODULE rule → Log
+    "src/index.ts": `import { execSync } from "node:child_process";
+export interface Sink { write(s: string): void; }
+export class DepSink implements Sink { write(s: string): void { execSync("/bin/echo " + s); } }
+export function makeSink(): Sink { return new DepSink(); }`,
+  });
+  const depScan = scan(dep);
+  check("R696 provenance: the dep publishes the ⟨0.39⟩ union entry winston#Sink.write -> ['Exec']",
+        depScan.report?.functions.some((e) => e.hash === "winston#Sink.write" && e.inferred.includes("Exec")),
+        JSON.stringify(depScan.report?.functions.map((e) => [e.hash, e.inferred])));
+  const app = project({
+    "package.json": `{"name":"app","version":"1.0.0","dependencies":{"winston":"1.0.0"}}`,
+    "src/m.ts": `import { Sink, makeSink } from "winston";
+import * as fsm from "node:fs";
+class LocalSink implements Sink { write(s: string): void { fsm.writeFileSync("/tmp/candor-r696-control", s); } }
+export function viaLib(): void { const s = makeSink(); s.write("x"); }
+export function mk(): Sink { return new LocalSink(); }`,
+    "node_modules/winston/package.json": `{"name":"winston","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/winston/index.d.ts": `export declare interface Sink { write(s: string): void; }
+export declare class DepSink implements Sink { write(s: string): void; }
+export declare function makeSink(): Sink;`,
+    "node_modules/winston/index.js": `exports.DepSink = class {}; exports.makeSink = function () {};`,
+  });
+  spawnSync("node", [path.join(HERE, "scan.mjs"), app], { encoding: "utf8",
+            env: { ...process.env, CANDOR_DEPS: path.join(dep, ".candor", "report.json") } });
+  const rep = JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8"));
+  const e = (entry(rep, "src.m.viaLib")?.inferred) ?? [];
+  check("R696 provenance: the DEPENDENCY's own Exec reaches a receiver the package produced (κ answered Log)",
+        e.includes("Exec") && e.includes("Log"), JSON.stringify(entry(rep, "src.m.viaLib")));
+  check("R696 provenance: …and the CONSUMER's own implementor's Fs is NOT charged to it — this join reads "
+        + "the dependency's row, never a local implementor (the R574 hazard does not carry over)",
+        !e.includes("Fs"), JSON.stringify(entry(rep, "src.m.viaLib")));
+}
+
 // ── 11d. the TRUST-MARKER INVARIANT holds over every entry every scan writes ──────────────────────
 // `e66f29e` shipped a union entry carrying `inferred:['Unknown']` with `unresolved` absent — a TIER-1
 // marker reading FALSE on an entry that was not resolved, live on all seven of rxjs's unions. Two
