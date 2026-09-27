@@ -19891,7 +19891,16 @@ export async function f(h: string): Promise<void> {
 // behavioural test: a rule stated once and then silently copied, or a single rule nothing asks any more.
 // Both keep the suite green. Each carries a VACUITY FLOOR so the census cannot pass by failing to find
 // the source it asserts about.
-{
+//
+// SOUNDNESS R702 — THIS BLOCK WAS `{`, NOT `if (blk()) {`, AND THAT IS THE WHOLE OF THAT ROW. An ungated
+// top-level block is not skipped by any shard, so it runs in ALL of them: its 7 assertions (6 `check`
+// sites, one of them in a 2-iteration loop) landed 4× in a 4-shard run and `ci/shard-check.sh` reported
+// `shards ran 3094 assertions, unsharded runs 3073` — a delta of exactly +21 = 7 × 3. MEASURED by diffing
+// the per-shard `ok` names: 7 names appear in all four shards and NOTHING is missing from any of them, so
+// the direction was DOUBLING and not loss. That matters because shard-check's own message leads with
+// "a block is claimed by no shard", which is the opposite failure and the one anybody reading the red
+// would have gone looking for. The gate below pins the invariant so the next one cannot be written.
+if (blk()) {
   const src = (f) => fs.readFileSync(new URL(f, import.meta.url), "utf8");
   const core = src("./scan-core.mjs"), qcore = src("./query-core.mjs"), scanSrc = src("./scan.mjs");
   const count = (h, n) => h.split(n).length - 1;
@@ -19937,6 +19946,66 @@ export async function f(h: string): Promise<void> {
   check("HYGIENE: isReport derives from the reserved set rather than chaining endsWith calls — the chain was missing `layerreach` and called a real candor-rust sidecar a REPORT",
         /RESERVED_SIDECAR_SEGMENTS\.some\(/.test(qcore) && !/endsWith\(".calibrated.json"\)/.test(qcore),
         "isReport still restates the segment list");
+}
+
+// ======================================================================================================
+// SHARD HYGIENE — SOUNDNESS R702. EVERY ASSERTION LIVES INSIDE AN `if (blk())` GATE.
+//
+// `blk()` hands out a running index and a shard runs the blocks whose index is its own; a block that
+// never CALLS it is therefore claimed by every shard at once. That is not a lost assertion — nothing
+// goes missing — but the sum stops matching the unsharded run, `ci/shard-check.sh` goes red, and its
+// message leads with "a block is claimed by no shard", which is the other direction. R702 sat open
+// because the number (+21) looked like a filter bug and was a missing three characters.
+//
+// WHY THIS IS HERE AND NOT ONLY IN `ci/shard-check.sh`. That script runs the suite N+1 times (~25
+// minutes at this block count) and is in NO workflow, which is how it rotted past the 175 blocks its own
+// comment records. This block is the same invariant for ~1s inside `npm test`, which CI does run. It does
+// not replace shard-check: shard-check still covers a modulus error in `blk()` itself and any drift
+// between what the shards claim and what one process runs. It covers the case that actually happened.
+//
+// PARSED, NOT PATTERN-MATCHED, for the reason the SHARDING comment at the top of this file records: the
+// first block census used a regex for `{` at column 0, desynced on backticks, and counted 96 of 175.
+if (blk()) {
+  // `typescript` is a dependency of this engine (scan.mjs is built on it) but test.mjs does not otherwise
+  // need it, so it is imported here rather than at the top — this is the only block that parses source.
+  const tsmod = (await import("typescript")).default;
+  const selfSrc = fs.readFileSync(new URL("./test.mjs", import.meta.url), "utf8");
+  const selfSf = tsmod.createSourceFile("test.mjs", selfSrc, tsmod.ScriptTarget.Latest, true,
+                                        tsmod.ScriptKind.JS);
+  const lineOf = (n) => selfSf.getLineAndCharacterOfPosition(n.getStart()).line + 1;
+  const isGate = (s) => tsmod.isIfStatement(s) && tsmod.isCallExpression(s.expression)
+    && tsmod.isIdentifier(s.expression.expression) && s.expression.expression.text === "blk";
+  const callsNamed = (node, name) => {
+    let n = 0;
+    const walk = (x) => { if (tsmod.isCallExpression(x) && tsmod.isIdentifier(x.expression)
+                              && x.expression.text === name) n++; tsmod.forEachChild(x, walk); };
+    walk(node);
+    return n;
+  };
+  let gates = 0, blkCalls = 0;
+  const bareBlocks = [], ungatedAsserts = [];
+  for (const s of selfSf.statements) {
+    blkCalls += callsNamed(s, "blk");
+    if (isGate(s)) { gates++; continue; }
+    // A BARE top-level block is the precise shape of R702 — it is what a test block looks like with its
+    // gate deleted, and nothing else in this file is written that way.
+    if (tsmod.isBlock(s)) bareBlocks.push(`line ${lineOf(s)}`);
+    const n = callsNamed(s, "check");
+    if (n) ungatedAsserts.push(`${tsmod.SyntaxKind[s.kind]} at line ${lineOf(s)} (${n} check call(s))`);
+  }
+  // VACUITY FLOOR. A parse that found nothing would satisfy every assertion below by having no statement
+  // to object to — the same hole the SOURCE-HYGIENE census above opens with.
+  check("SHARD HYGIENE vacuity floor: test.mjs parses and at least 200 top-level `if (blk())` gates are found",
+        gates >= 200, `parsed ${selfSf.statements.length} top-level statements, found ${gates} gate(s)`);
+  check("SHARD HYGIENE: NO bare top-level `{ … }` block — an ungated block runs in EVERY shard, so the shard sum exceeds the unsharded run and `ci/shard-check.sh` blames a LOST block (R702: one census block put 7 assertions in all 4 shards, +21)",
+        bareBlocks.length === 0, `bare top-level block(s) at ${bareBlocks.join(", ")} — change \`{\` to \`if (blk()) {\``);
+  check("SHARD HYGIENE: every `check(` call is lexically inside a gate — a top-level helper that asserts is reached from a gated block and must not assert at load",
+        ungatedAsserts.length === 0, ungatedAsserts.join("; "));
+  // The mirror direction: a `blk()` called anywhere but as a gate's condition advances the index without
+  // claiming a block, so every LATER block changes shard, and the sum still balances. shard-check cannot
+  // see that (it compares totals) and neither can the two assertions above.
+  check("SHARD HYGIENE: every `blk()` call IS a gate condition — one called anywhere else advances the index and silently moves which shard claims every block after it",
+        blkCalls === gates, `${blkCalls} blk() call(s) against ${gates} gate(s)`);
 }
 
 

@@ -8,6 +8,25 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **SOUNDNESS R702 (instrument) — `ci/shard-check.sh` WAS RED BECAUSE ONE TOP-LEVEL BLOCK WAS `{` INSTEAD
+  OF `if (blk()) {`.** No report bytes and no gate verdict move; this is the test harness. The row recorded
+  4 shards running **3,094** assertions against **3,073** unsharded, a delta of **+21**, and read it as a
+  filter bug. It is the OPPOSITE direction: a block that never calls `blk()` is claimed by no shard's
+  filter and therefore runs in **every** shard. **Measured by diffing the per-shard `ok` names rather than
+  the totals** — 7 names appear in all four shards, 0 names are missing from all four, and 7 × 3 = 21 closes
+  the arithmetic exactly. The block was the SOURCE-HYGIENE CENSUS (6 `check` sites, one in a 2-iteration
+  loop = 7 assertions). shard-check's own message leads with *"a block is claimed by no shard"*, which is why
+  the number looked like a lost block for as long as it did.
+
+  **A NEW `npm test` GATE, because shard-check costs ~25 minutes and is in no workflow.** Four assertions
+  parse `test.mjs` with `ts.createSourceFile` (never a regex — the SHARDING comment records a `{`-at-column-0
+  census that desynced on backticks and counted 96 of 175) and assert: no bare top-level block, every
+  `check(` call lexically inside a gate, every `blk()` call IS a gate condition (the mirror direction, where
+  the totals still balance and shard-check is blind), and a vacuity floor of ≥200 gates found. Calibrated by
+  injecting a bare block and a stray `blk()`: **3 FAIL, exit 1**, with the vacuity floor staying green, which
+  is the property it asserts. This does not retire `ci/shard-check.sh` — that still covers a modulus error
+  inside `blk()` itself — it covers the case that actually happened, in ~1s, in the suite CI runs.
+
 - ⚠ **SOUNDNESS R696 / R697 — κ PREEMPTED THE CHAINED DEPENDENCY REPORT: TWO `!eff` GUARDS, AND WHEREVER
   THE CLASSIFIER HAD A RULE FOR THE PACKAGE, THE DEPENDENCY'S OWN PUBLISHED ROW WAS NEVER READ.** The ts
   half of candor-spec **R692** — the cross-engine rule that *a consumer must never read MORE CERTAINTY than
