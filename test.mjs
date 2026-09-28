@@ -21651,6 +21651,149 @@ export function b(n: number) { return [n].map(d["roll"]) }`,
         markHits587(r574) > 0, "reach probe never fired on a tree whose joins really happen");
 }
 
+// ── SOUNDNESS R521 — NEITHER STRUCTURAL-IMPLEMENTOR WALKER CROSSED THE LOCAL/FOREIGN BOUNDARY ─────
+//
+// `interface LocalSub extends dep.MethodShaped {}` fell BETWEEN the two climbers. Each filtered its
+// super-interfaces to its OWN side — the nominal `climb` and `registerStructuralImpl` to `projectFiles`,
+// `fClimb` and `registerForeignStructuralImpl` to `isPublishableForeignIface` — so an implementor of
+// `LocalSub` registered under `LocalSub` and NOWHERE ELSE. Nothing was published under
+// `depiface#MethodShaped.run` and, more to the point, nothing was JOINED under it either: ⟨0.39⟩
+// obligation 3's LOCAL join (`joinLocalImpls` ← `localImplTargetsByKey` ← `ensureLocalImplIndex`, which
+// reads `foreignInterfaceImpls`) had no key to answer on. A local dispatch on the FOREIGN type then read
+// PURE over a body this same scan had already charged `Fs`.
+//
+// MEASURED at HEAD (v0.39.2) on the one-variable pair below, UNCHAINED — and the chaining case matters
+// enough to be pinned: with the dependency CHAINED, ⟨0.39⟩ half 1 does disclose
+// `Unknown[dispatch:depiface.MethodShaped.run]`, so the TOTAL silence the row reported was the UNCHAINED
+// condition, where the only disclosure is `invisible: [depiface]` and ⟨0.30⟩ rules that non-gating.
+// Either way `deny Fs src.index.entry` read exit 0 where the direct spelling read 1.
+//
+//   UNCHAINED, HEAD:  impl: LocalSub    callFor []   entry []   deny Fs entry 0   pure entry 0
+//   UNCHAINED, HEAD:  impl: MethodShaped callFor ['Fs'] entry ['Fs'] deny Fs entry 1   pure entry 1
+//
+// EXECUTED GROUND TRUTH, not analysis: each effectful arm's `entry()` was compiled with the repo's own
+// tsc and run, and each one wrote the file. The pure arm wrote nothing.
+//
+// EVERY ARM IS GENERATED FROM ONE TEMPLATE WITH ONE SUBSTITUTION, and the DIRECT spelling is asserted
+// beside the others rather than assumed, because a fix that traded one spelling for the other would
+// otherwise measure green.
+if (blk()) {
+  const DEPIFACE = `export interface MethodShaped { run(): void }
+export class PureShaped implements MethodShaped { run(): void { /* nothing */ } }`;
+  const SINK = `fs.writeFileSync("/tmp/candor-r521-sink", "x")`;
+  const SPELLING = {
+    // THE CONTROL: the abstraction named DIRECTLY. One token different from `structural` below.
+    direct:     `export const impl: MethodShaped = { run(): void { ${SINK} } };`,
+    // THE ROW'S OWN SHAPE: a LOCAL interface extending the FOREIGN one, satisfied structurally.
+    structural: `export interface LocalSub extends MethodShaped {}
+export const impl: LocalSub = { run(): void { ${SINK} } };`,
+    // …and satisfied NOMINALLY. The row measured BOTH spellings silent, so both are pinned.
+    nominal:    `export interface LocalSub extends MethodShaped {}
+export class Impl implements LocalSub { run(): void { ${SINK} } }
+export const impl: LocalSub = new Impl();`,
+    // TWO LOCAL HOPS before the boundary — the climb has to be transitive, not just one level deep.
+    // Without this arm a fix that special-cased the immediate super would pass.
+    twohop:     `export interface LocalMid extends MethodShaped {}
+export interface LocalSub extends LocalMid {}
+export const impl: LocalSub = { run(): void { ${SINK} } };`,
+    // THE FABRICATION GUARD (R512's, one spelling over): a PURE implementor reached across the boundary
+    // must leave the caller pure AND unhedged, and must publish NO union entry. Without it this row could
+    // be "closed" by charging Unknown at every dispatch on a foreign abstraction, which closes a silence
+    // by flooding the other channel — the trade ⟨0.39⟩'s cost model forbids.
+    pure:       `export interface LocalSub extends MethodShaped {}
+export const impl: LocalSub = { run(): void { /* nothing */ } };`,
+  };
+  const depOnly = project({ "package.json": `{"name":"msz1","version":"1.0.0"}`, "src/index.ts": DEPIFACE });
+  const depRep = `${scan(depOnly).prefix}.json`;
+  const appOf = (spelling) => project({
+    "package.json": `{"name":"appmsz1","version":"1.0.0","dependencies":{"msz1":"1.0.0"}}`,
+    "node_modules/msz1/package.json": `{"name":"msz1","version":"1.0.0","main":"src/index.ts"}`,
+    "node_modules/msz1/src/index.ts": DEPIFACE,
+    // The DISPATCH and its CALLER are byte-identical in every arm — neither mentions how the implementor
+    // was spelled, and the caller is asserted separately because a sibling fix in another engine fired on
+    // the enclosing scope by prefix while the caller itself stayed silent.
+    "src/index.ts": `import * as fs from "node:fs";
+import { MethodShaped } from "msz1";
+${SPELLING[spelling]}
+export function callFor(m: MethodShaped): void { m.run() }
+export function entry(): void { callFor(impl) }`,
+  });
+  const gateOf = (dir, rule, deps) => {
+    fs.writeFileSync(path.join(dir, "policy.candor"), `${rule}\n`);
+    const env = deps ? { ...process.env, CANDOR_DEPS: deps } : process.env;
+    return spawnSync("node", [path.join(HERE, "scan.mjs"), dir, "--policy", path.join(dir, "policy.candor")],
+                     { encoding: "utf8", env }).status;
+  };
+  const armOf = (spelling) => {
+    const d = appOf(spelling);
+    spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8" });
+    const rep = JSON.parse(fs.readFileSync(path.join(d, ".candor", "report.json"), "utf8"));
+    // …and the CHAINED condition, because "which chaining case was it" changes what closing this means.
+    spawnSync("node", [path.join(HERE, "scan.mjs"), d], { encoding: "utf8", env: { ...process.env, CANDOR_DEPS: depRep } });
+    const chained = JSON.parse(fs.readFileSync(path.join(d, ".candor", "report.json"), "utf8"));
+    return {
+      dir: d, rep, chained,
+      union: rep.functions.find((e) => e.hash === "msz1#MethodShaped.run"),
+      callFor: entry(rep, "src.index.callFor"), entryRow: entry(rep, "src.index.entry"),
+      cCallFor: entry(chained, "src.index.callFor"), cEntry: entry(chained, "src.index.entry"),
+      gEntry: gateOf(d, "deny Fs src.index.entry"), gCallFor: gateOf(d, "deny Fs src.index.callFor"),
+      gPure: gateOf(d, "pure src.index.entry"),
+      gEntryChained: gateOf(d, "deny Fs src.index.entry", depRep),
+    };
+  };
+  const direct = armOf("direct"), structural = armOf("structural"), nominal = armOf("nominal");
+  const twohop = armOf("twohop"), pureArm = armOf("pure");
+  const shown = (a) => JSON.stringify([a.rep.functions.map((e) => [e.hash, e.inferred, e.invisible, e.interfaceUnion]),
+                                       a.callFor, a.entryRow, [a.gEntry, a.gCallFor, a.gPure, a.gEntryChained]]);
+  const charged = (row) => (row?.inferred ?? []).includes("Fs");
+
+  check("R521 CONTROL — the DIRECT spelling still resolves: `impl: MethodShaped` charges Fs to the dispatching unit AND its caller",
+        charged(direct.callFor) && charged(direct.entryRow), shown(direct));
+  check("R521 CONTROL — …and it still publishes `msz1#MethodShaped.run -> ['Fs']` (⟨0.39⟩ obligation 2 intact)",
+        direct.union?.interfaceUnion === true && charged(direct.union), shown(direct));
+  for (const [name, a] of [["structural", structural], ["nominal", nominal], ["twohop", twohop]])
+    check(`R521 [${name}]: a local interface EXTENDING a foreign one reaches the SAME answer as the direct spelling — dispatching unit AND caller`,
+          charged(a.callFor) && charged(a.entryRow), shown(a));
+  for (const [name, a] of [["structural", structural], ["nominal", nominal], ["twohop", twohop]])
+    check(`R521 [${name}] GATE: \`deny Fs\` exits 1 on BOTH the dispatching unit and its caller — measured 0/0 at HEAD over code that provably writes`,
+          a.gEntry === 1 && a.gCallFor === 1 && a.gPure === 1 && a.gEntryChained === 1,
+          `entry=${a.gEntry} callFor=${a.gCallFor} pure=${a.gPure} chained=${a.gEntryChained} (direct: ${direct.gEntry}/${direct.gCallFor}/${direct.gPure}/${direct.gEntryChained})`);
+  check("R521 [twohop]: the climb is TRANSITIVE — two LOCAL super-interfaces before the boundary still publish the foreign key",
+        twohop.union?.interfaceUnion === true && charged(twohop.union), shown(twohop));
+  check("R521 FABRICATION GUARD: a PURE implementor across the boundary publishes NO entry and gives the caller neither an effect NOR a hedge",
+        pureArm.union === undefined && (pureArm.entryRow?.inferred ?? []).length === 0
+        && pureArm.entryRow?.unresolved !== true && pureArm.gEntry === 0 && pureArm.gPure === 0, shown(pureArm));
+  // THE DISCLOSURE THAT MUST SURVIVE — [[R764]]'s direction, asserted on the PRODUCER's own report:
+  // `msz1` is not analysed here, so the caller still says so. A fix that resolved the dispatch by
+  // deleting `invisible` would be trading one silence for another.
+  for (const [name, a] of [["structural", structural], ["nominal", nominal], ["twohop", twohop], ["direct", direct]])
+    check(`R521 [${name}]: …and the κ-coverage disclosure SURVIVES — an unanalysed \`msz1\` is still reported \`invisible\``,
+          (a.entryRow?.invisible ?? []).includes("msz1"), shown(a));
+  // THE CHAINING CASE, PINNED IN BOTH DIRECTIONS. Chained, ⟨0.39⟩ half 1's hedge fires whatever the
+  // spelling — that arm was NEVER broken, which is why this row needed no second fix — and now the
+  // concrete effect arrives beside it instead of instead of nothing.
+  check("R521 CHAINED: with `msz1` covered, the dispatch hedge fires on every spelling (⟨0.39⟩ half 1 was never the defect)",
+        [direct, structural, nominal, twohop, pureArm].every((a) => (a.cCallFor?.unknownWhy ?? []).includes("dispatch:msz1.MethodShaped.run")),
+        JSON.stringify([direct.cCallFor, structural.cCallFor, nominal.cCallFor, twohop.cCallFor, pureArm.cCallFor]));
+  check("R521 CHAINED: …and the concrete Fs now arrives BESIDE that hedge, on the caller too — `['Fs','Unknown']`, not `['Unknown']`",
+        [structural, nominal, twohop].every((a) => charged(a.cCallFor) && charged(a.cEntry))
+        && charged(direct.cCallFor) && charged(direct.cEntry),
+        JSON.stringify([structural.cEntry, nominal.cEntry, twohop.cEntry, direct.cEntry]));
+  // THE REACH PROBE IS CALIBRATED HERE, NOT TRUSTED. It must fire on the hand-off arms and NOT on the
+  // direct spelling, which registers through the direct heritage path and needs no hand-off at all — a
+  // probe that fires on both counts branch entries, which is R574/R583's defect.
+  const reachHits = (dir) => {
+    const o = spawnSync("node", [path.join(HERE, "scan.mjs"), dir],
+                        { encoding: "utf8", env: { ...process.env, CANDOR_R521_REACH: "1" } });
+    return (o.stderr.match(/R521-REACH/g) ?? []).length;
+  };
+  check("R521 [probe]: the hand-off reach probe fires on every arm that crosses the boundary through a local super",
+        [structural, nominal, twohop, pureArm].every((a) => reachHits(a.dir) > 0),
+        JSON.stringify([structural, nominal, twohop, pureArm].map((a) => reachHits(a.dir))));
+  check("R521 [probe] NOT A BRANCH COUNTER: it is SILENT on the DIRECT spelling, which registers with no hand-off",
+        reachHits(direct.dir) === 0, `direct=${reachHits(direct.dir)}`);
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

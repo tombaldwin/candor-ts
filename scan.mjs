@@ -3509,6 +3509,22 @@ const isPublishableForeignIface = (d) => {
   // hash in, and publishing under it would be the second spelling §4 forbids.
   return !!m && !m.startsWith("<") && !m.startsWith("/") && m !== pkgName && m !== rootOwnerPkg;
 };
+// ⟨SOUNDNESS R521⟩ THE ONE PLACE THE BOUNDARY HAND-OFF'S REACH IS COUNTED, and it counts the
+// REGISTRATION rather than the branch entry — R574/R583's lesson, which cost this family three probes
+// that fired one line before the work they were cited for could be rejected. `walk` is called
+// unconditionally; the probe fires only when the implementor really was newly recorded under `ifaceDecl`,
+// so a super already reached by the direct heritage path (the `seen`/`*ClimbSeen` guards) counts zero.
+// `CANDOR_R521_REACH=1` makes each such registration announce itself so `bin/corpus-ab.py --mark` can
+// COUNT them instead of anyone inferring reach from an unchanged row — a byte-identical A/B over a corpus
+// that never reaches the branch is the most flattering number available and the least informative.
+const handoffCount = (d) => (interfaceImpls.get(d)?.length ?? 0) + (foreignInterfaceImpls.get(d)?.length ?? 0);
+function probeHandoff(kind, ifaceDecl, walk) {
+  if (!process.env.CANDOR_R521_REACH) { walk(ifaceDecl); return; }
+  const before = handoffCount(ifaceDecl);
+  walk(ifaceDecl);
+  if (handoffCount(ifaceDecl) > before)
+    console.error(`R521-REACH ${kind} ${declModule(ifaceDecl) ?? "?"}#${ifaceDecl.name?.text ?? "?"}`);
+}
 // ⟨CARDINAL SIN FIX, caller-path scope⟩ ifaceQual ("mod.Iface") -> Set<callerQual> that GENUINELY
 // dispatched through that interface's own signature and had it resolved by CHA below — populated AT THE
 // RESOLUTION SITE (pass 2's interface-CHA arm), not reconstructed afterward from the flat callgraph.
@@ -3948,7 +3964,22 @@ for (const sf of sources) {
         registerImpl(iface);
         for (const eh of iface.heritageClauses ?? []) {
           if (eh.token !== ts.SyntaxKind.ExtendsKeyword) continue;
-          for (const st of eh.types) for (const sdecl of localInterfaceDecls(st.expression)) climb(sdecl);
+          for (const st of eh.types) {
+            for (const sdecl of localInterfaceDecls(st.expression)) climb(sdecl);
+            // ⟨SOUNDNESS R521⟩ …AND THE HAND-OFF ACROSS THE BOUNDARY, WHICH NEITHER CLIMBER MADE. Each
+            // climber filtered its supers to its OWN side — this one to `projectFiles`, `fClimb` below to
+            // `isPublishableForeignIface` — so `interface LocalSub extends dep.MethodShaped` fell BETWEEN
+            // them: `class Impl implements LocalSub` registered under `LocalSub` only, nothing was ever
+            // registered under `depiface#MethodShaped.run`, and a local dispatch on the FOREIGN type
+            // (`function callFor(m: MethodShaped) { m.run() }`) had no key for ⟨0.39⟩ obligation 3's local
+            // join to answer on. MEASURED at HEAD on a one-variable pair: with `impl` annotated `LocalSub`,
+            // `src.index.callFor` and `src.index.entry` both read `inferred: []` and `deny Fs
+            // src.index.entry` exited 0 over a body that provably writes the file; annotating the SAME
+            // object `MethodShaped` (the direct spelling, one token) charged `['Fs']` and exited 1.
+            // A super is reached by whichever walker OWNS its declaration, not by whichever one started —
+            // the two `seen` sets are separate, so the mutual recursion terminates on the first revisit.
+            for (const sdecl of foreignInterfaceDecls(st.expression)) probeHandoff("nominal", sdecl, fClimb);
+          }
         }
       };
       // ⟨0.39⟩ obligation 2: the same relation for an abstraction this package does NOT own. `class
@@ -3971,6 +4002,21 @@ for (const sf of sources) {
         if (!arr.includes(node)) arr.push(node);
         for (const eh of iface.heritageClauses ?? []) {
           if (eh.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+          // ⟨SOUNDNESS R521⟩ AND THE MIRROR DIRECTION IS DELIBERATELY *NOT* HERE — §9 says state the
+          // boundary and justify it, not that every widening is free. A foreign interface whose super is
+          // declared in THIS project would register only under the foreign key, so the symmetric hand-off
+          // (`localInterfaceDecls(st.expression)` -> `climb`) looks like the same one-line fix. It was
+          // written, MEASURED over the 28-repo pinned TS roster, and REMOVED, because its only reach on
+          // real code is a shape it answers WRONGLY: rollup's `src/rollup/types.d.ts` carries
+          // `declare module 'estree' { interface BaseClass { … } }`, so `BaseClass` has TWO declarations
+          // of ONE dependency-owned interface and the local one is a project file. Registering an
+          // implementor under it mints `rollup#BaseClass.<m>` — our package's key for an abstraction
+          // `estree` owns, the "invented second spelling" `isPublishableForeignIface`'s own comment
+          // refuses at length, and a key no consumer can ever form. It also buys nothing: the FOREIGN
+          // declaration of that same merged interface is registered by the existing filter, so the
+          // owner-keyed answer is already present. The residual it leaves is a `node_modules` package
+          // importing a project interface, which nothing in the roster does — recorded as a latent gap
+          // rather than closed by a widening whose one measured instance was mis-keyed.
           for (const st of eh.types) for (const sdecl of foreignInterfaceDecls(st.expression)) fClimb(sdecl);
         }
       };
@@ -4521,9 +4567,18 @@ function registerStructuralImpl(ifaceDecl, implNode, seen = new Set()) {
     for (const st of eh.types) {
       let sym; try { sym = checker.getSymbolAtLocation(st.expression); } catch { sym = undefined; }
       const tgt = sym && sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
-      for (const d of tgt?.declarations ?? [])
-        if (ts.isInterfaceDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName)))
-          registerStructuralImpl(d, implNode, seen);
+      for (const d of tgt?.declarations ?? []) {
+        if (!ts.isInterfaceDeclaration(d)) continue;
+        if (projectFiles.has(path.resolve(d.getSourceFile().fileName))) registerStructuralImpl(d, implNode, seen);
+        // ⟨SOUNDNESS R521⟩ …and the FOREIGN super of a LOCAL interface, the structural spelling of the
+        // hand-off the nominal climber above now makes. `const impl: LocalSub = { run(){ …fs… } }` where
+        // `interface LocalSub extends dep.MethodShaped` registered under `LocalSub` and NOWHERE ELSE, so
+        // nothing was published or joined under `depiface#MethodShaped.run`. The `seen` set is SHARED
+        // across the hand-off (passed through, not re-created), so a diamond reached from both sides visits
+        // each declaration once and the mutual recursion terminates.
+        else if (isPublishableForeignIface(d))
+          probeHandoff("structural", d, (x) => registerForeignStructuralImpl(x, implNode, seen));
+      }
     }
   }
 }
@@ -4544,6 +4599,10 @@ function registerForeignStructuralImpl(ifaceDecl, implNode, seen = new Set()) {
     for (const st of eh.types) {
       let sym; try { sym = checker.getSymbolAtLocation(st.expression); } catch { sym = undefined; }
       const tgt = sym && sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
+      // ⟨SOUNDNESS R521⟩ NO mirror hand-off to `registerStructuralImpl` here, for the reason the nominal
+      // climber's own comment gives in full: measured over the pinned TS roster, the only shape that
+      // reaches it is a project-file MODULE AUGMENTATION of a dependency's interface, where the key it
+      // would mint names the wrong owner and the foreign declaration already answers.
       for (const d of tgt?.declarations ?? [])
         if (isPublishableForeignIface(d)) registerForeignStructuralImpl(d, implNode, seen);
     }
