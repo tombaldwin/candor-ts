@@ -2,11 +2,33 @@
 
 All notable changes to candor-ts are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/) and the family convention (candor-rust's
-CHANGELOG): candor is pre-1.0, so minor versions may include behavioural changes — always in the
+CHANGELOG): candor is pre-1.0 and the version tracks the spec: X.Y is the spec rung, and a **patch (X.Y.Z)
+adds no rung but can and routinely does change gate verdicts** — read every ⚠ entry before bumping
+a pin. Behavioural changes are always in the
 soundness-increasing direction (the §4 trust contract) — and a **⚠** marks an entry that affects
 report bytes or gate verdicts (regenerate baselines / expect verdict changes across it).
 
 ## Unreleased
+
+**Upgrading from 0.39.2 — gates that can flip:**
+- ⚠ STRICTER: a module or function that applies a LOCAL decorator, or contains a `static {}` block, now
+  carries that code's effects (R782/R785) — `deny Fs <module>`, `deny Fs <fn>` and layer gates such as
+  `deny Fs src.domain` can go 0 → 1. On a codebase that defines its own decorators (NestJS's own repo:
+  +2.0% `Unknown`), `deny Unknown <module>` can also flip.
+- ⚠ STRICTER: `fs-extra`'s two-path verbs and promisified node verbs (`promisify(fs.copyFile)`,
+  `promisify(dns.lookup)`, `promisify(crypto.generateKeyPair)`) are now read correctly, so a masking
+  `allow Fs`/`allow Net` rule can go 0 → 1 and `deny Rand` can go 0 → 1 (R800/R801).
+- LOOSER, correctly: an `allow Fs` rule over a function that writes one allowed path and then uses an
+  fd through a promisified verb (`fse.write(fd, …)`) no longer fails (R801).
+- ⚠ STRICTER: a local interface extending a DEPENDENCY's interface now reaches that dependency's
+  implementors (R521), so `deny <E>` over a call through `LocalSub` can go 0 → 1.
+
+- ⚠ **SOUNDNESS R521 — A LOCAL INTERFACE EXTENDING A DEPENDENCY'S INTERFACE NOW REACHES THAT DEPENDENCY'S
+  IMPLEMENTORS** (`fc5007e`). Neither structural-implementor walker crossed the local/foreign boundary, so
+  `interface LocalSub extends dep.MethodShaped` published nothing and a call through `LocalSub` read pure over
+  code that performs the effect. The climbers now hand a publishable foreign super to the foreign walker.
+  EXECUTED on a hand-built dependency and on real `@apollo/server` typings: `deny Fs` 0 → 1 on the
+  dispatching unit and its caller; a pure-bodied `LocalSub` stays pure.
 
 - ⚠ **SOUNDNESS R782 + R785 — CLASS-DEFINITION-TIME WORK IS NOW WIRED FROM THE UNIT THAT EVALUATES THE CLASS.**
   A decorator application, a decorator argument and a `static {}` block run when the enclosing body reaches
@@ -15,8 +37,10 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   gate `deny Fs src.domain` exited 0 over an `infra` decorator applied to a `domain` class. A new edge pass
   (after `visitCalls`) adds, from `enclosing(cls.parent)` — OUTSIDE the whole class, so a method decorator is
   never charged to `X.constructor` (`174f3cb`'s fabrication) — an edge to the decorator's own application,
-  the factory call, the `<decorator-arg>@N` unit and every `<static-init>` unit; LOCAL BODIED targets only,
-  so an external decorator stays R64 shape 3. EXECUTED ground truth, gates on unit AND caller, red on
+  the factory call, the `<decorator-arg>@N` unit and every `<static-init>` unit; LOCAL BODIED targets only.
+  **Still open:** a decorator imported from a package is still not charged to the module (SOUNDNESS R64
+  shape 3), and static field initialisers, `extends mixin()` heritage and computed member keys are
+  unmeasured (R815). EXECUTED ground truth, gates on unit AND caller, red on
   `fc5007e` and green here. **Verdicts move:** conformance PART 81 `defect-anon-direct-gate` and
   `ctrl-named-untouched-gate`, and PART 82 `defect-shape1/2-*-gate`, go `count:1` → `count:2` (`<module>`
   now carries the effect). Corpus A/B (`bin/corpus-ab.py`, 28-entry pinned ts roster, pre = the R801 build):

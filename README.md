@@ -167,7 +167,8 @@ content-hash gate is its first increment).
 
 ## Trust contract (spec §4)
 
-Anything candor-ts can't resolve is `Unknown`, never silently pure: a function-valued parameter or
+Anything candor-ts can't resolve is designed to read `Unknown`, never silently pure — known open gaps
+are listed in candor-spec's SOUNDNESS.md (e.g. R780, R803, R804): a function-valued parameter or
 field being called, an `any`-typed callee, resolution landing on a type rather than a body.
 
 An **uncurated dependency** can opt out of `Unknown`/silent-pure by **declaring its effects** in its
@@ -184,7 +185,7 @@ literal is never a claim of absence.
 ## Cross-engine consistency — machine-checked
 
 candor-ts is one of the **four code engines** (with the reference engine candor-java, the Rust
-engines, and candor-swift) held together by the spec's **16-part conformance suite**: the shared
+engines, and candor-swift) held together by the spec's **cross-engine conformance suite**: the shared
 effect-set oracle, the §6.2 policy-grammar battery (including `allow Db`), the §3.1 query-shape
 and match-ladder checks, the gate exit-code contracts, and the newer parts up through the
 pure-vs-Unknown ruling (PART 16) — the engines must answer identically, on every push to the spec.
@@ -219,7 +220,7 @@ read the Rust source".
 
 ## Status
 
-0.30.0, speaking candor-spec 0.39: the analysis core, the gate (`--policy` / `--gate-json` /
+Speaking candor-spec 0.39 (the package version is in `package.json`): the analysis core, the gate (`--policy` / `--gate-json` /
 `.candor/config`), the full §3.1 query surface (including `containment`, `blindspots`, the
 `--include-unknown` dispatch frontier, and ⟨0.24⟩ `gate --report` — the gate applied to an EXISTING
 report, byte-equivalent to `scan --policy`'s verdict), the MCP server, the LSP server, and the watch loop are
