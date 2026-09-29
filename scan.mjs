@@ -3201,6 +3201,79 @@ if (R416_HITS) process.on("exit", () => {
   if (total) process.stderr.write(`R416PROBE total=${total}`
     + rows.map(([k, n]) => ` ${k}=${n}`).join("") + "\n");
 });
+// SOUNDNESS R800 — WHICH POSITIONS ARE PATHS IS A FACT ABOUT THE SIGNATURE, SO ASK THE SIGNATURE.
+// `FS_TWO_PATH_MEMBERS` above is a hand-kept list of node's names, and it was the only place the engine
+// learned that a call has a SECOND path. `fs-extra` is κ whole-module `Fs` — the engine chose to model
+// it — and none of its twelve two-path verbs (`copy`/`copySync`, `move`/`moveSync`, `ensureLink`/
+// `ensureSymlink`, `createLink`/`createSymlink` and their Sync twins) is on the list, so a literal source
+// made the call `complete` and `allow Fs in <fn> <src-literal>` certified a copy to a caller-supplied
+// destination. EXECUTED: the copy moved the payload, `moveSync` removed the source, the links were real.
+//
+// The checker already knows: in @types/node AND @types/fs-extra every two-path operation declares its
+// first two parameters with a PATH type (`PathLike`, `string | URL`, or plain `string`), and no other
+// `Fs` operation does — a data/options/mode/uid second parameter is a union with Buffer/encoding/object
+// members, a number, or `any`. MEASURED by enumerating every callable export of `fs` and `fs-extra`
+// (230) and applying this predicate: it reproduces `FS_TWO_PATH_MEMBERS` EXACTLY on node (10 of 10, 0
+// extra) and adds exactly the twelve fs-extra verbs above, nothing else. The list is KEPT as a floor
+// (an unresolved or `any`-typed call still gets node's names), and the two are OR-ed, so this can only
+// make a call need MORE captured positions — fail-closed if the predicate ever over-reaches — and never
+// fewer. It also closes R801's first arm independently of the token fix below: `promisify(fs.copyFile)`
+// resolves to `copyFile.__promisify__(src: PathLike, dst: PathLike)`, which this reads by TYPE.
+const isPathParamType = (t) => {
+  if (!t) return false;
+  const parts = (t.isUnion?.() ? t.types : [t])
+    .filter((x) => !(x.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null)));
+  if (parts.length === 0) return false;
+  if (t.aliasSymbol?.name === "PathLike") return true;
+  let sawString = false;
+  for (const x of parts) {
+    if (x.flags & ts.TypeFlags.String) { sawString = true; continue; }
+    const n = x.symbol?.name ?? x.aliasSymbol?.name;
+    if (n === "URL" || n === "Buffer" || n === "PathLike") continue;
+    return false;
+  }
+  return sawString;
+};
+// `CANDOR_R801_HITS=1` — the R416 reach counter, same discipline (prints ONLY when non-zero): `tok:<verb>`
+// counts a `__promisify__` token recovered to its verb, `two:<member>` a call the signature made two-path
+// that `FS_TWO_PATH_MEMBERS` did not name. A byte-identical A/B means nothing until these are non-zero.
+const R801_HITS = process.env.CANDOR_R801_HITS ? new Map() : null;
+const r801Hit = (k) => { if (R801_HITS) R801_HITS.set(k, (R801_HITS.get(k) ?? 0) + 1); };
+if (R801_HITS) process.on("exit", () => {
+  const rows = [...R801_HITS].sort();
+  const total = rows.reduce((a, [, n]) => a + n, 0);
+  if (total) process.stderr.write(`R801PROBE total=${total}` + rows.map(([k, n]) => ` ${k}=${n}`).join("") + "\n");
+});
+function signatureHasTwoPaths(node) {
+  let sig;
+  try { sig = checker.getResolvedSignature(node); } catch { return false; }
+  const ps = sig?.getParameters?.() ?? [];
+  if (ps.length < 2) return false;
+  const ty = (p) => checker.getTypeOfSymbolAtLocation(p, node);
+  return isPathParamType(ty(ps[0])) && isPathParamType(ty(ps[1]));
+}
+// SOUNDNESS R801 — THE MEMBER TOKEN IS THE VERB, NOT THE NAME TYPESCRIPT'S DECLARATION MERGING CHOSE.
+// @types/node declares a promisified overload as `namespace copyFile { function __promisify__(…) }`
+// (72 of them: fs, dns, child_process, crypto, zlib), and `fs-extra`'s `copyFile`/`writeFile`/`write`/…
+// re-exports are typed `typeof fs.copyFile.__promisify__ & …`. A call through either spelling resolves
+// to a declaration NAMED `__promisify__`, so the module stayed right while EVERY member-keyed table
+// missed: `FS_TWO_PATH_MEMBERS` (silent — R800's `fse.copyFile`), `NET_ESTABLISHING` (a masking bypass —
+// `promisify(dns.resolve)(host)` beside a benign fetch certified the resolver's host), `FS_USE_VERBS` (a
+// FALSE FAILURE — `fse.write(fd, …)` hedged a fully-captured surface), and κ's own member regexes
+// (`promisify(crypto.generateKeyPair)` matched no `generateKey…` rule and the crypto floor reviews every
+// other member pure — SILENT Rand). No table was wrong; the token was. So the fix is at the ONE place the
+// token is minted, which every table reads, rather than a fifth copy of `__promisify__` in four lists.
+// The verb is recoverable one node up: the namespace the declaration sits in.
+function declMemberToken(decl, name) {
+  if (name !== "__promisify__") return name;
+  for (let p = decl?.parent; p; p = p.parent) {
+    if (ts.isModuleBlock(p) || ts.isVariableDeclarationList(p) || ts.isVariableStatement(p)
+        || ts.isVariableDeclaration(p) || ts.isTypeLiteralNode(p) || ts.isFunctionTypeNode(p)) continue;
+    if (ts.isModuleDeclaration(p) && ts.isIdentifier(p.name)) { r801Hit(`tok:${p.name.text}`); return p.name.text; }
+    break;
+  }
+  return name;
+}
 function fsPathLiteral(node, member) {
   const args = node.arguments ?? [];
   const at = (i) => {
@@ -3212,7 +3285,9 @@ function fsPathLiteral(node, member) {
     return c;
   };
   const a0 = at(0);
-  const needsTwo = FS_TWO_PATH_MEMBERS.has(member);
+  const listed = FS_TWO_PATH_MEMBERS.has(member);
+  const needsTwo = listed || signatureHasTwoPaths(node);
+  if (needsTwo && !listed) r801Hit(`two:${member}`);
   const a1 = needsTwo ? at(1) : null;
   const complete = a0 !== null && (!needsTwo || a1 !== null);
   // EVERY literal path position, not just the first. Publishing position 0 and calling a
@@ -8327,7 +8402,7 @@ function visitCalls(node) {
             : (isConnectingCtor(declaredCtorClassName(decl)) ? declaredCtorClassName(decl) : ctorClassName);
           const member = isConnectingCtor(ctorRuleName) ? ctorRuleName
             : isConstruction ? "new"
-            : (decl.name ? decl.name.getText() : bindingName(decl));
+            : declMemberToken(decl, decl.name ? decl.name.getText() : bindingName(decl)); // R801
           // ⟨0.32⟩ THE MODULE κ IS READ AGAINST — `mod` for everything except a construction whose
           // constructor came from somewhere else, which is re-keyed onto the CLASS's own module.
           //
@@ -9555,7 +9630,7 @@ function visitCalls(node) {
         // call gets (never silent-pure). A pure builtin tag (String.raw, from the TS lib, not node_modules) adds
         // nothing — no fabrication.
         const mod = declModule(decl);
-        const member = decl.name ? decl.name.getText() : "";
+        const member = declMemberToken(decl, decl.name ? decl.name.getText() : ""); // R801 — same token
         // SELF-NAME GUARD (see `isOwnPackageDecl`): an external-looking tag may be OUR OWN package's
         // own function, reached through its own `dist/*.d.ts` — never let κ answer for it. `mod` stays
         // whatever `declModule` computed, so the ledger below (already keyed on

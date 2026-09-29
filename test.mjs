@@ -20070,6 +20070,92 @@ export function notPathShaped(): void { const n = "data"; fsm.writeFileSync(n, "
         paths("notPathShaped").length === 0 && incFs("notPathShaped"), JSON.stringify(row("notPathShaped")));
 }
 
+// ── SOUNDNESS R800 + R801: A MEMBER-KEYED TABLE IS ONLY AS GOOD AS THE NAME THE CHECKER HANDS IT ──────
+//
+// R801: every promisified overload in @types/node is `namespace <verb> { function __promisify__(…) }`,
+// and fs-extra's `copyFile`/`write`/… are typed through it, so the member token read `__promisify__` and
+// every member table missed — in THREE directions (two silences and a false failure) plus κ's own member
+// regexes (a fourth: `promisify(crypto.generateKeyPair)` read PURE). R800: `FS_TWO_PATH_MEMBERS` knew no
+// fs-extra verb, so a literal source certified a copy to a caller-supplied destination. All EXECUTED in
+// the fixing lane; the declarations below are VENDORED VERBATIM from @types/fs-extra 11 (the lines this
+// exercises), so the checker hands the engine the same signatures a real install does.
+if (blk()) {
+  const d = project({
+    "node_modules/fs-extra/package.json": `{"name":"fs-extra","version":"11.3.0","main":"index.js","types":"index.d.ts"}`,
+    "node_modules/fs-extra/index.js": `module.exports = require("fs");`,
+    "node_modules/fs-extra/index.d.ts": `import * as fs from "fs";
+export * from "fs";
+export function copy(src: string, dest: string, options?: object): Promise<void>;
+export function copySync(src: string, dest: string, options?: object): void;
+export function moveSync(src: string, dest: string, options?: object): void;
+export function ensureSymlink(src: string, dest: string, type?: fs.symlink.Type): Promise<void>;
+export function ensureLink(src: string, dest: string): Promise<void>;
+export function outputFileSync(file: string, data: string | NodeJS.ArrayBufferView, options?: fs.WriteFileOptions): void;
+export const copyFile: typeof fs.copyFile.__promisify__ & typeof fs.copyFile;
+export const write: typeof fs.write.__promisify__ & typeof fs.write;`,
+    "src/m.ts": `import fse from "fs-extra";
+import * as fs from "node:fs";
+import * as dns from "node:dns";
+import * as crypto from "node:crypto";
+import { promisify } from "node:util";
+export function feCopySync(d: string) { fse.copySync("/tmp/r800/src", d); }
+export async function feCopy(d: string) { await fse.copy("/tmp/r800/src", d); }
+export function feMoveSync(d: string) { fse.moveSync("/tmp/r800/src", d); }
+export async function feEnsureSymlink(d: string) { await fse.ensureSymlink("/tmp/r800/src", d); }
+export async function feEnsureLink(d: string) { await fse.ensureLink("/tmp/r800/src", d); }
+export async function feCopyFile(d: string) { await fse.copyFile("/tmp/r800/src", d); }
+export async function nodePromCopyFile(d: string) { await promisify(fs.copyFile)("/tmp/r800/src", d); }
+export function feBothLit() { fse.copySync("/tmp/r800/src", "/tmp/r800/dst"); }
+export function feOutput(data: string) { fse.outputFileSync("/tmp/r800/src", data); }
+export function nodeWrite(data: string) { fs.writeFileSync("/tmp/r800/src", data); }
+export function nodeCopySync(d: string) { fs.copyFileSync("/tmp/r800/src", d); }
+export async function pDns(h: string) { dns.lookup("api.stripe.com", () => {}); return await promisify(dns.lookup)(h); }
+export async function feFdWrite(fd: number) { fs.writeFileSync("/tmp/r801/benign", "x"); await fse.write(fd, "y"); }
+export async function nodeFdWrite(fd: number) { fs.writeFileSync("/tmp/r801/benign", "x"); fs.write(fd, "y", () => {}); }
+export async function pKeyPair() { return await promisify(crypto.generateKeyPair)("ed25519", {}); }
+export async function callsFeCopySync(d: string) { feCopySync(d); }`,
+    "copy.pol": "allow Fs in src.m.feCopySync /tmp/r800/src\n",
+    "copycaller.pol": "allow Fs in src.m.callsFeCopySync /tmp/r800/src\n",
+    "fd.pol": "allow Fs in src.m.feFdWrite /tmp/r801/benign\n",
+    "dns.pol": "allow Net in src.m.pDns api.stripe.com\n",
+    "rand.pol": "deny Rand src.m.pKeyPair\n",
+  });
+  const { report } = scan(d);
+  const row = (fn) => (report.functions ?? []).find((e) => e.fn === `src.m.${fn}`);
+  const inc = (fn, e) => (row(fn)?.incomplete ?? []).includes(e);
+  for (const fn of ["feCopySync", "feCopy", "feMoveSync", "feEnsureSymlink", "feEnsureLink"])
+    check(`R800: fs-extra \`${fn}\` with a literal SOURCE and a runtime DESTINATION marks \`incomplete: ["Fs"]\` — the signature's two path parameters, not a hand-kept name list, say the second position is a path`,
+          inc(fn, "Fs"), JSON.stringify(row(fn)));
+  check("R801: fs-extra's PROMISIFIED `copyFile` (`typeof fs.copyFile.__promisify__`) is two-path too",
+        inc("feCopyFile", "Fs"), JSON.stringify(row("feCopyFile")));
+  check("R801: …and so is node's own `promisify(fs.copyFile)` — not an fs-extra quirk",
+        inc("nodePromCopyFile", "Fs"), JSON.stringify(row("nodePromCopyFile")));
+  check("R800: with BOTH paths literal, fs-extra `copySync` publishes BOTH — the defect `fsPathLiteral`'s own comment records as fixed for `copyFileSync`",
+        (row("feBothLit")?.paths ?? []).includes("/tmp/r800/dst") && !inc("feBothLit", "Fs"), JSON.stringify(row("feBothLit")));
+  check("R800 CONTROL (the node twin, revert-invariant): `fs.copyFileSync(lit, runtime)` was already incomplete",
+        inc("nodeCopySync", "Fs"), JSON.stringify(row("nodeCopySync")));
+  check("R800 OVER-CHARGE CONTROL: a single-path verb whose SECOND parameter is DATA stays complete — `outputFileSync(lit, data)` (param 1 is `string | ArrayBufferView`, not a path type)",
+        !inc("feOutput", "Fs") && !inc("nodeWrite", "Fs"), JSON.stringify([row("feOutput"), row("nodeWrite")]));
+  check("R801: `promisify(dns.lookup)(host)` marks `incomplete: [\"Net\"]` — `NET_ESTABLISHING` now sees `lookup`, not `__promisify__`",
+        inc("pDns", "Net"), JSON.stringify(row("pDns")));
+  check("R801 (the false failure): fs-extra's fd `write` is a USE-verb — no `incomplete` over a surface whose only path is captured",
+        (row("feFdWrite")?.paths ?? []).includes("/tmp/r801/benign") && !inc("feFdWrite", "Fs"), JSON.stringify(row("feFdWrite")));
+  check("R801 CONTROL (revert-invariant): node's own `fs.write(fd, …)` twin reads the same",
+        !inc("nodeFdWrite", "Fs"), JSON.stringify(row("nodeFdWrite")));
+  check("R801 (κ's own member regex): `promisify(crypto.generateKeyPair)` is Rand, not pure",
+        (row("pKeyPair")?.inferred ?? []).includes("Rand"), JSON.stringify(row("pKeyPair")));
+  const gate = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
+  check("R800 GATE, unit: `allow Fs in src.m.feCopySync /tmp/r800/src` exits 1 (was 0 — certified a copy to anywhere)",
+        gate("copy.pol") === 1, "");
+  check("R800 GATE, caller: …and its CALLER's gate exits 1 too",
+        gate("copycaller.pol") === 1, "");
+  check("R801 GATE: `allow Net in src.m.pDns api.stripe.com` exits 1 (was 0 — the benign literal masked the resolver's host)",
+        gate("dns.pol") === 1, "");
+  check("R801 GATE (the false failure, other direction): `allow Fs in src.m.feFdWrite /tmp/r801/benign` exits 0 (was 1)",
+        gate("fd.pol") === 0, "");
+  check("R801 GATE: `deny Rand src.m.pKeyPair` exits 1 (was 0)", gate("rand.pol") === 1, "");
+}
+
 // ── ⟨R439⟩ SUBPATH-IMPORT CONDITION MAPS. `"imports": {"#impl": {"node":"./a.js","browser":"./b.js"}}`
 // resolves to exactly ONE arm — whichever the tsconfig's conditions pick — so a call through it edges
 // into that arm only, and a caller whose effects arrive through the OTHER arm reads SILENT-PURE: absent

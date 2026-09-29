@@ -8,6 +8,21 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R800 + R801 — A MEMBER TABLE IS ONLY AS GOOD AS THE TOKEN IT IS HANDED.** (R801) Every
+  promisified overload in @types/node is `namespace <verb> { function __promisify__ }` and fs-extra types
+  its `copyFile`/`write`/… through it, so the member token read `__promisify__` and every member-keyed table
+  missed: `FS_TWO_PATH_MEMBERS` (silent), `NET_ESTABLISHING` (`promisify(dns.lookup)(h)` beside a benign
+  literal certified `allow Net`), `FS_USE_VERBS` (a FALSE FAILURE on `fse.write(fd)`), and κ's own member
+  regexes (`promisify(crypto.generateKeyPair)` read PURE — a fourth direction the row did not name).
+  `declMemberToken` recovers the verb from the enclosing namespace at the ONE site the token is minted.
+  (R800) Which positions are paths is now read from the resolved SIGNATURE (first two parameters both
+  path-typed: `PathLike`, `string | URL`, `string`), OR-ed with the kept list; enumerated over all 230
+  callable `fs`/`fs-extra` exports it reproduces the node list exactly (10/10, 0 extra) and adds exactly
+  fs-extra's 12 two-path verbs. Corpus A/B (pre = `fc5007e`): ADDED 0, REMOVED 0, CHANGED 3 (rxjs rows
+  gaining `fs:["write"]` from a promisified `writeFile`, audited genuine); REACH 7 token recoveries on 3
+  entries; the two-path arm reached **0** — fs-extra is imported only by `pnpm` and `xstate/examples`,
+  neither dependency-installed (R767) — so that half is SAFETY-ONLY on this corpus and rests on the fixtures.
+
 - **SOUNDNESS R702 (instrument) — `ci/shard-check.sh` WAS RED BECAUSE ONE TOP-LEVEL BLOCK WAS `{` INSTEAD
   OF `if (blk()) {`.** No report bytes and no gate verdict move; this is the test harness. The row recorded
   4 shards running **3,094** assertions against **3,073** unsharded, a delta of **+21**, and read it as a
