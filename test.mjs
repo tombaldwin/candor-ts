@@ -2727,9 +2727,18 @@ if (blk()) {
           && entry(report, "src.reach.work")?.inferred.includes("Net"), JSON.stringify(report.functions));
   check("a PURE top-level does NOT gain a <module> unit (pure units omitted)",
         entry(report, "src.pure.<module>") == null, JSON.stringify(report.functions));
-  check("a DECORATOR application (@factory()) is NOT attributed to <module> (load-time, factory owns it)",
-        entry(report, "src.dec.<module>") == null && entry(report, "src.dec.factory")?.inferred.includes("Net"),
+  // SOUNDNESS R782 REVERSED THIS ROW, and it had been pinning the sin: a decorator application runs at
+  // module load, so ⟨0.14⟩ puts it on `<module>` — by an EDGE to the factory, which still OWNS the effect
+  // (its own `direct`), so nothing is duplicated and the decorated class/its callers stay clean.
+  check("R782: a DECORATOR application (@factory()) reaches <module> by an EDGE — load-time work is the module's; the factory still owns it directly",
+        (entry(report, "src.dec.<module>")?.inferred ?? []).includes("Net")
+          && (entry(report, "src.dec.<module>")?.direct ?? []).length === 0
+          && (entry(report, "src.dec.<module>")?.calls ?? []).includes("src.dec.factory")
+          && entry(report, "src.dec.factory")?.inferred.includes("Net"),
         JSON.stringify(report.functions));
+  check("R785: a top-level class's `static {}` block reaches <module> by an EDGE to its <static-init> unit",
+        (entry(report, "src.sb.<module>")?.calls ?? []).includes("src.sb.C.<static-init>")
+          && (entry(report, "src.sb.<module>")?.inferred ?? []).includes("Net"), JSON.stringify(report.functions));
 }
 
 
@@ -5952,6 +5961,85 @@ exports.ExternalDecorator = function () { fs.readFileSync("/etc/r64-shape3"); re
   const { report } = scan(d);
   check("R64 shape 3 (KNOWN OPEN GAP, not fixed here): the external decorator's effect is still silent",
         report.functions.length === 0, JSON.stringify(report.functions));
+}
+
+// ── SOUNDNESS R782 + R785: CLASS-DEFINITION-TIME WORK IS PERFORMED BY THE UNIT THAT EVALUATES THE CLASS ──
+// A decorator application, a decorator argument and a `static {}` block all run when the enclosing body
+// reaches the class — `<module>` at top level, `mk` for a class declared in `mk`. Each was a ROOT unit
+// nothing edged to, so `deny Fs src.m.<module>` / `deny Fs src.m.mk` / its caller / a cross-LAYER gate
+// all exited 0 over code that writes (EXECUTED in the fixing lane: import writes once, `mk()` writes per
+// call). The fix is an EDGE pass from `enclosing(cls.parent)` — outside the whole class, so a method
+// decorator is never charged to `X.constructor` (`174f3cb`'s fabrication) — to LOCAL BODIED targets only.
+if (blk()) {
+  const d = project({
+    "src/m.ts": `import fs from "node:fs";
+export function Deco(_t: any, ..._r: any[]): any { fs.appendFileSync("/tmp/r782/w", "d"); }
+export function F(_v: any) { return (_t: any) => {}; }
+export function Fac(_n: string) { fs.appendFileSync("/tmp/r782/w", "f"); return (_t: any) => {}; }
+export function mkDeco() { @Deco class Y {} return Y; }
+export function mkFactory() { @Fac("u") class Y {} return Y; }
+export function mkArg() { @F(fs.appendFileSync("/tmp/r782/w", "a")) class Y {} return Y; }
+export function mkStatic() { class Y { static { fs.appendFileSync("/tmp/r782/w", "s"); } } return Y; }
+export function mkNested() { class A { static { class B { static { fs.appendFileSync("/tmp/r782/w", "n"); } } } } return A; }
+export class Outer { m() { @Deco class B {} return B; } }
+export function callsMkDeco() { return mkDeco(); }
+export function callsMkStatic() { return mkStatic(); }`,
+    "src/top.ts": `import { Deco } from "./m.js";
+export class X { @Deco m() { return 1; } constructor() {} }
+export function useX() { return new X().m(); }`,
+    "src/infra/audit.ts": `import fs from "node:fs";
+export function Audited(_t: any) { fs.readFileSync("/etc/hosts"); }`,
+    "src/domain/account.ts": `import { Audited } from "../infra/audit.js";
+@Audited
+export class Account {}`,
+    "src/pure/p.ts": `export function PureDeco(_t: any) { return undefined; }
+@PureDeco
+export class P {}
+export function mkPure() { @PureDeco class Q {} return Q; }`,
+    "mk.pol": "deny Fs src.m.mkDeco\n",
+    "caller.pol": "deny Fs src.m.callsMkDeco\n",
+    "static.pol": "deny Fs src.m.mkStatic\n",
+    "staticcaller.pol": "deny Fs src.m.callsMkStatic\n",
+    "domain.pol": "deny Fs src.domain\n",
+    "usex.pol": "deny Fs src.m.useX\n",
+  });
+  const { report } = scan(d);
+  const inf = (fn) => entry(report, fn)?.inferred ?? [];
+  for (const fn of ["mkDeco", "mkFactory", "mkArg", "mkStatic", "mkNested", "Outer.m", "callsMkDeco", "callsMkStatic"])
+    check(`R782/R785: \`src.m.${fn}\` carries the Fs its class definition performs — it read PURE before, while writing on every call`,
+          inf(`src.m.${fn}`).includes("Fs"), JSON.stringify(entry(report, `src.m.${fn}`)));
+  check("R782: a METHOD decorator at top level is charged to the file's `<module>`, the unit that evaluates the class",
+        inf("src.top.<module>").includes("Fs"), JSON.stringify(report.functions.map((f) => f.fn)));
+  check("R782 FABRICATION CONTROL (constraint 1): …and NOT to `X.constructor`, `X.m`, or a caller that constructs X — the climb starts outside the whole class",
+        noEffectCharged(report, "src.top.X.constructor") && noEffectCharged(report, "src.top.X.m")
+          && noEffectCharged(report, "src.top.useX"), JSON.stringify(report.functions));
+  check("R782 CROSS-LAYER: the domain file that applies an infra decorator is charged — the README's layer gate shape",
+        inf("src.domain.account.<module>").includes("Fs"), JSON.stringify(report.functions.map((f) => f.fn)));
+  check("R782 OVER-CHARGE CONTROL: a PURE local decorator mints nothing and charges nothing",
+        noEffectCharged(report, "src.pure.p.<module>") && noEffectCharged(report, "src.pure.p.mkPure"),
+        JSON.stringify(report.functions));
+  const gate = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
+  check("R782 GATE, unit: `deny Fs src.m.mkDeco` exits 1 (was 0)", gate("mk.pol") === 1, "");
+  check("R782 GATE, caller: `deny Fs src.m.callsMkDeco` exits 1 (was 0)", gate("caller.pol") === 1, "");
+  check("R785 GATE, unit: `deny Fs src.m.mkStatic` exits 1 (was 0)", gate("static.pol") === 1, "");
+  check("R785 GATE, caller: `deny Fs src.m.callsMkStatic` exits 1 (was 0)", gate("staticcaller.pol") === 1, "");
+  check("R782 GATE, cross-layer: `deny Fs src.domain` exits 1 (was 0)", gate("domain.pol") === 1, "");
+  check("R782 GATE FABRICATION CONTROL: `deny Fs src.m.useX` stays exit 0 — constructing a class with a decorated method performs nothing",
+        gate("usex.pol") === 0, "");
+}
+// R782 constraint 2, pinned: an EXTERNAL decorator is still R64 shape 3 (open, priced elsewhere) — the
+// wiring pass reaches only local bodied units, so it must not start disclosing framework decorators.
+if (blk()) {
+  const d = project({
+    "src/h.ts": `import { ExternalDecorator } from "extlib";
+export function mk() { @ExternalDecorator() class Y {} return Y; }`,
+    "node_modules/extlib/package.json": `{"name":"extlib","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/extlib/index.d.ts": `export declare function ExternalDecorator(): ClassDecorator;`,
+    "node_modules/extlib/index.js": `exports.ExternalDecorator = function () { return function (t) {}; };`,
+  });
+  const { report } = scan(d);
+  check("R782 constraint 2: an external decorator inside `mk` adds nothing to `mk` (R64 shape 3 unchanged)",
+        !entry(report, "src.h.mk") && !entry(report, "src.h.<module>"), JSON.stringify(report.functions));
 }
 
 // a fn-reference passed to a STORE/compare/log sink (not an invoking HOF) must NOT fabricate its effect
@@ -20780,8 +20868,14 @@ export function makesThing(): Thing { return new Thing() }`,
   spawnSync("node", [path.join(HERE, "scan.mjs"), p82, "--policy", path.join(p82, "deny-fs.policy"),
                      "--gate-json", path.join(p82, "g.json")], { encoding: "utf8" });
   const gj = JSON.parse(fs.readFileSync(path.join(p82, "g.json"), "utf8"));
-  check("R531 PART-82 GATE: blanket `deny Fs` is notok with exactly ONE violation — measured 2 pre-fix",
-        gj.ok === false && (gj.violations ?? []).length === 1,
+  // SOUNDNESS R782 made the blanket count 2 AGAIN, for a different and correct reason: `<module>` now
+  // inherits the decorator argument's effect by an edge (it runs at load). So the property is asserted on
+  // the NAMES, not the count: exactly the `<decorator-arg>` unit and `<module>` — never a `<structural>`
+  // member unit, which is what R531's pre-fix second violation was.
+  const vfns = (gj.violations ?? []).map((v) => v.fn);
+  check("R531 PART-82 GATE: blanket `deny Fs` is notok on exactly the `<decorator-arg>` unit and (R782) `<module>` — no `<structural>` member violation (measured pre-R531)",
+        gj.ok === false && vfns.length === 2 && vfns.some((f) => f.includes("<decorator-arg>"))
+          && vfns.some((f) => f.endsWith(".<module>")) && !vfns.some((f) => f.includes("<structural>")),
         `ok=${gj.ok} count=${(gj.violations ?? []).length} ${JSON.stringify((gj.violations ?? []).map((v) => v.fn))}`);
   // NEIGHBOUR 1 — a STATIC BLOCK is a real binding site: `u.roll()` resolves there, so the mint stays.
   check("R531 NEIGHBOUR: a static-init block still mints its literal's members (it IS a binding site)",

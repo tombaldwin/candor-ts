@@ -5614,12 +5614,16 @@ function moduleUnit(sf) {
 // `C.constructor` unit, so a static-init effect was MISLABELED as the instance ctor (and carried no
 // unitKind). Mint it as its own unit, lazily, mirroring `moduleUnit`. (An anonymous class expression's
 // static block keys under `<anonymous>`; there is at most one static-init unit per class name.)
-function staticBlockUnit(node) {
+// The qual alone, WITHOUT minting — R782/R785's wiring pass asks "does this block's unit exist?" and must
+// not create an empty one to find out. One derivation for both, so the two cannot spell it differently.
+function staticBlockQual(node) {
   const cls = node.parent;
-  const sf = node.getSourceFile();
-  const mod = moduleOf(sf);
   const cname = (ts.isClassDeclaration(cls) || ts.isClassExpression(cls)) && cls.name ? cls.name.text : "<anonymous>";
-  const qual = `${mod}.${cname}.<static-init>`;
+  return `${moduleOf(node.getSourceFile())}.${cname}.<static-init>`;
+}
+function staticBlockUnit(node) {
+  const sf = node.getSourceFile();
+  const qual = staticBlockQual(node);
   let rec = fns.get(qual);
   if (!rec) {
     rec = { local: "<static-init>", direct: new Set(), fsKinds: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
@@ -9759,6 +9763,94 @@ function mintCallTargetUnit(fn) {
   }
 }
 for (const sf of sources) visitCalls(sf);
+
+// ---- pass 2a′: CLASS-DEFINITION-TIME WORK IS WIRED FROM THE UNIT THAT EVALUATES THE CLASS ----------------
+// SOUNDNESS R782 + R785. A JS class definition is EAGER and INLINE: `@Deco class Y {}` calls `Deco` —
+// and a `static { … }` block runs — at the moment the enclosing body reaches that statement, once per
+// evaluation. So the unit that EVALUATES the class performs that work: `<module>` for a top-level class,
+// `mk` for `function mk() { @Deco class Y {} return Y }`, `A.m` for a class declared inside a method.
+// ⟨0.14⟩ (SPEC §2, the initializer unit) already rules module top-level code in scope. Before this pass
+// every piece of it was a ROOT: `Deco` was reported as its own unit (correctly) and NOTHING edged to it,
+// `X.<static-init>` and `<decorator-arg>@N` were minted and never reached. MEASURED (EXECUTED — the
+// compiled module writes its witness on import, `mk` writes on every call): `deny Fs src.m.<module>`,
+// `deny Fs src.m.mk`, `deny Fs src.m.caller` and the README's own layer gate `deny Fs src.domain` over an
+// `infra` decorator applied to a `domain` class ALL exited 0, while the identical effect as a plain
+// statement exited 1. `staticBlockUnit` copied java's `<clinit>` shape, which is right on the JVM (class
+// init is lazy and JVM-triggered) and wrong here.
+//
+// THIS IS AN EDGE PASS, NOT A CHANGE TO `enclosing`, and that is the point of both constraints R782 names:
+//  (1) The evaluating unit is `enclosing(cls.parent)` — the climb starts OUTSIDE the whole decorated class.
+//      One node up from a METHOD decorator is the ClassDeclaration, which `nodeName` maps to
+//      `X.constructor`; continuing the climb from the Decorator would FABRICATE the decorator's effects
+//      onto the constructor and every `new X()` — exactly what `174f3cb`'s Decorator guard removed. The
+//      guard in `enclosing` is untouched, so no call inside a decorator moves; this pass only ADDS edges.
+//  (2) Only to a LOCAL, BODIED unit. An external decorator (`@Injectable()`, `@Entity()`) is R64 shape 3 —
+//      wiring it would put the κ ledger's `Unknown`/`invisible` on `<module>` in every framework file, a
+//      priced disclosure question filed elsewhere — and a body-less local declaration is the same: no body
+//      this scan can see. A `<decorator-arg>@N` / `<static-init>` / anonymous `<decorator>@N` unit is by
+//      construction local and bodied (it exists only because something in it was attributed there).
+// Targets, per decorator: the decorator's own APPLICATION (the value it evaluates to is CALLED with the
+// target — the resolved signature of the Decorator node itself), the factory CALL when the expression is
+// one (`@F("u")` calls `F`; the closure it returns is attributed to `F` lexically), and that call's
+// argument unit. Per class: every `static {}` block's unit. Classes are processed INNERMOST FIRST, so a
+// class defined inside an outer class's static block wires into that block's unit before the outer class
+// wires the block — no second sweep needed. `<module>` is minted only when there is something to edge.
+// `CANDOR_R782_HITS=1` counts each edge added (`deco`/`arg`/`static`), printed only when non-zero.
+{
+  const R782_HITS = process.env.CANDOR_R782_HITS ? new Map() : null;
+  const hit = (k) => { if (R782_HITS) R782_HITS.set(k, (R782_HITS.get(k) ?? 0) + 1); };
+  if (R782_HITS) process.on("exit", () => {
+    const rows = [...R782_HITS].sort();
+    const total = rows.reduce((a, [, n]) => a + n, 0);
+    if (total) process.stderr.write(`R782PROBE total=${total}` + rows.map(([k, n]) => ` ${k}=${n}`).join("") + "\n");
+  });
+  const hasBody = (d) => !!d && !!d.body
+    && (ts.isFunctionDeclaration(d) || ts.isMethodDeclaration(d) || ts.isArrowFunction(d)
+        || ts.isFunctionExpression(d) || ts.isGetAccessorDeclaration(d) || ts.isSetAccessorDeclaration(d));
+  const localBodiedUnit = (callLike) => {
+    let d;
+    try { d = checker.getResolvedSignature(callLike)?.declaration; } catch { d = undefined; }
+    if (!d || !declIsLocal(d) || !hasBody(d)) return undefined;
+    return callTargetUnit(d);
+  };
+  const decoratedClass = (dec) => {
+    for (let p = dec.parent; p; p = p.parent)
+      if (ts.isClassDeclaration(p) || ts.isClassExpression(p)) return p;
+    return undefined;
+  };
+  const classes = [];
+  for (const sf of sources) (function findClasses(n) {
+    if (ts.isClassDeclaration(n) || ts.isClassExpression(n)) classes.push(n);
+    ts.forEachChild(n, findClasses);
+  })(sf);
+  // Document order is outer-before-inner; reversed, every nested class precedes its container.
+  for (const cls of classes.reverse()) {
+    const targets = [];
+    const add = (q, k) => { if (q && fns.has(q)) targets.push([q, k]); };
+    const decorators = [];
+    (function findDecorators(n) {
+      if (n !== cls && (ts.isClassDeclaration(n) || ts.isClassExpression(n))) return; // its own pass
+      if (ts.isDecorator(n) && decoratedClass(n) === cls) decorators.push(n);
+      ts.forEachChild(n, findDecorators);
+    })(cls);
+    for (const dec of decorators) {
+      add(localBodiedUnit(dec), "deco");                         // the application
+      let e = dec.expression;
+      while (ts.isParenthesizedExpression(e)) e = e.expression;
+      if (ts.isCallExpression(e)) {
+        add(localBodiedUnit(e), "deco");                         // the factory call
+        add(`${moduleOf(e.getSourceFile())}.${DECORATOR_ARG_LOCAL}${e.getStart()}`, "arg");
+      }
+    }
+    for (const m of cls.members ?? [])
+      if (ts.isClassStaticBlockDeclaration(m)) add(staticBlockQual(m), "static");
+    if (!targets.length) continue;
+    const from = enclosing(cls.parent);
+    const rec = from && fns.get(from);
+    if (!rec) continue;
+    for (const [q, k] of targets) if (q !== from && !rec.edges.has(q)) { rec.edges.add(q); hit(k); }
+  }
+}
 
 // ---- pass 2b: callback-flow resolution (the callback_named move) ----------------------------------
 // A fn invoking its parameter i resolves to the named target(s) actually passed. Three shapes:

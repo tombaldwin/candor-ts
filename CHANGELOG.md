@@ -8,6 +8,26 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **SOUNDNESS R782 + R785 — CLASS-DEFINITION-TIME WORK IS NOW WIRED FROM THE UNIT THAT EVALUATES THE CLASS.**
+  A decorator application, a decorator argument and a `static {}` block run when the enclosing body reaches
+  the class — eagerly, inline, once per evaluation — but each was a ROOT unit nothing edged to.
+  `function mk() { @Deco class Y {} return Y }` read PURE while writing on every call, and the README's layer
+  gate `deny Fs src.domain` exited 0 over an `infra` decorator applied to a `domain` class. A new edge pass
+  (after `visitCalls`) adds, from `enclosing(cls.parent)` — OUTSIDE the whole class, so a method decorator is
+  never charged to `X.constructor` (`174f3cb`'s fabrication) — an edge to the decorator's own application,
+  the factory call, the `<decorator-arg>@N` unit and every `<static-init>` unit; LOCAL BODIED targets only,
+  so an external decorator stays R64 shape 3. EXECUTED ground truth, gates on unit AND caller, red on
+  `fc5007e` and green here. **Verdicts move:** conformance PART 81 `defect-anon-direct-gate` and
+  `ctrl-named-untouched-gate`, and PART 82 `defect-shape1/2-*-gate`, go `count:1` → `count:2` (`<module>`
+  now carries the effect). Corpus A/B (`bin/corpus-ab.py`, 28-entry pinned ts roster, pre = the R801 build):
+  ADDED 111, REMOVED 0, CHANGED 42, no element lost in any changed row; REACH 1,487 edges (nest 1,389,
+  rxjs 88, socket.io 8, vitest 2). Buckets: 3 rows gain a CONCRETE effect (nest `tcp-tls` controller
+  `<module>` Fs — a `@Client({ … fs.readFileSync(ca) })` argument; two nest `app.module` `<module>`s
+  Clock/Env inherited from `ClientsModule.registerAsync` in a `@Module` argument — all three edges traced to
+  class-definition-time evaluation); 113 rows newly carry `Unknown` = **0.29% of 39,396 analysed units**
+  (nest 110 of 5,448 = 2.0%, because nest's own decorators are LOCAL in its own repo; the dominant reason is
+  `Inject`/`Optional`'s pre-existing `callback:opaque-iterable`).
+
 - ⚠ **SOUNDNESS R800 + R801 — A MEMBER TABLE IS ONLY AS GOOD AS THE TOKEN IT IS HANDED.** (R801) Every
   promisified overload in @types/node is `namespace <verb> { function __promisify__ }` and fs-extra types
   its `copyFile`/`write`/… through it, so the member token read `__promisify__` and every member-keyed table
