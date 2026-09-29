@@ -18,10 +18,21 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 - ⚠ STRICTER: `fs-extra`'s two-path verbs and promisified node verbs (`promisify(fs.copyFile)`,
   `promisify(dns.lookup)`, `promisify(crypto.generateKeyPair)`) are now read correctly, so a masking
   `allow Fs`/`allow Net` rule can go 0 → 1 and `deny Rand` can go 0 → 1 (R800/R801).
-- LOOSER, correctly: an `allow Fs` rule over a function that writes one allowed path and then uses an
-  fd through a promisified verb (`fse.write(fd, …)`) no longer fails (R801).
+- ⚠ LOOSER, correctly: an `allow Fs` rule over a function that writes one allowed path and then uses an
+  fd through a promisified verb (`fse.write(fd, …)`) no longer fails (R801) — the same answer 0.39.2
+  already gave the plain `fs.write(fd)` spelling.
 - ⚠ STRICTER: a local interface extending a DEPENDENCY's interface now reaches that dependency's
   implementors (R521), so `deny <E>` over a call through `LocalSub` can go 0 → 1.
+- ⚠ STRICTER, with a CHAINED dependency report: κ no longer pre-empts the dependency's own answer
+  (R696/R697), so `deny Exec` (and any effect the dependency performs) can go 0 → 1.
+- ⚠ STRICTER: reflective invokes and element-access references reach their target (R587) — scoped
+  `deny Fs <fn>` and `pure <fn>` can go 0 → 1 across the fifteen spellings that entry lists.
+- ⚠ STRICTER: an interface member passed as a value (R558), a κ whole-module rule that used to stop the
+  implementor join (R560), and a call through a foreign interface's index signature (R524) now carry
+  their implementors' effects or `Unknown` — `deny <E>` and `deny Unknown` can go 0 → 1.
+- ⚠ STRICTER: a local implementor reached through a receiver a LIBRARY produced is disclosed as
+  `Unknown` (`dispatch:`) rather than charged (R574) — against 0.39.2, where no join ran there at all,
+  `deny Unknown <fn>` can go 0 → 1.
 
 - ⚠ **SOUNDNESS R521 — A LOCAL INTERFACE EXTENDING A DEPENDENCY'S INTERFACE NOW REACHES THAT DEPENDENCY'S
   IMPLEMENTORS** (`fc5007e`). Neither structural-implementor walker crossed the local/foreign boundary, so
@@ -498,7 +509,7 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   minted no key and ⟨0.39⟩ obligation 3's local join (`joinLocalImpls`) was never asked; the foreign arm
   fell through to `disclosureTail`'s `invisible` floor. The `invisible` was FALSE evidence: `dep` is a
   types-only `.d.ts` with no code, no function of it is ever called, and chaining its report was measured
-  and does not help. ⟨0.35⟩ (SPEC.md:4655) already binds the answer — the caller's `inferred` must carry
+  and does not help. ⟨0.35⟩ (SPEC.md:4661, scope paragraph :4698) already binds the answer — the caller's `inferred` must carry
   a visible structural implementor's effects or `Unknown`, *"where a synthesised or structural implementor
   is VISIBLE to the engine's own resolution"*, with no local-abstraction restriction.
   **Fix:** `localImplTargets` now also indexes the member names a visible implementor supplies for an
@@ -537,8 +548,9 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   stack trace instead of refusing (exit 2).** `candor-ts . /also-bogus` (the legacy positional
   out-prefix form) ran a full successful scan and then died in `writeAtomic` -> `writeSinkAtomic` ->
   `fs.writeFileSync`, which had no try/catch around it — exit 1, no usage error, no refusal marker, a
-  raw Node stack trace on stderr. SPEC §3.3.1 makes an unwritable sink a usage-error exit 2 like any
-  other broken `--out`; a stack trace is neither a verdict nor a refusal, and a CI consumer reading exit
+  raw Node stack trace on stderr. The family answers a broken `--out` with a usage error, exit 2 — SPEC
+  states that for a `--`-prefixed sink value (:4024) and not, in so many words, for an unwritable path, so
+  this applies the family's convention rather than a clause; a stack trace is neither a verdict nor a refusal, and a CI consumer reading exit
   1 sees "the policy failed" rather than "the tool couldn't write its own report". Fixed: the primary
   report-set write is now wrapped in a try/catch that calls the existing `refuseEarly` +
   `process.exit(2)` path on failure, naming the real OS error. Calibration: reproduced pre-fix with
