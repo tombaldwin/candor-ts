@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.39.3] — 2026-09-30
+
 **Upgrading from 0.39.2 — gates that can flip:**
 - ⚠ STRICTER: a module or function that applies a LOCAL decorator, or contains a `static {}` block, now
   carries that code's effects (R782/R785) — `deny Fs <module>`, `deny Fs <fn>` and layer gates such as
