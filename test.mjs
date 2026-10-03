@@ -3551,11 +3551,16 @@ export declare class Plain { label(): string; }`;
     check(`R696 ${label}: the dependency publishes ${PKG}#Logger.info -> ['Exec']`,
           depRep?.functions.some((e) => e.hash === `${PKG}#Logger.info` && e.inferred.includes("Exec")),
           JSON.stringify(depRep?.functions.map((e) => [e.hash, e.inferred])));
-    // …and publishes NOTHING under the abstract member's key, which is what leaves R697's arm the only
-    // voice: `Base.act` has no body in any report, so a covered package's silence answers nothing.
-    check(`R696 ${label}: …and NO entry under ${PKG}#Base.act (the unanswerable key)`,
-          !depRep?.functions.some((e) => e.hash === `${PKG}#Base.act`),
-          JSON.stringify(depRep?.functions.map((e) => e.hash)));
+    // …and publishes no REAL entry under the abstract member's key, which is what leaves R697's arm the
+    // only voice: `Base.act` has no body in any report, so a covered package's silence answers nothing.
+    // ⟨SOUNDNESS R867⟩ It DOES now publish the override UNION there (`DepImpl.act` overrides it), marked
+    // `interfaceUnion` — and the R697 assertions below are what prove that union-only hit did NOT take the
+    // hedge's place (`unionOnlyClassHit`): every one of them passes with the union present.
+    check(`R696 ${label}: …and NO REAL entry under ${PKG}#Base.act (the unanswerable key) — only R867's override union`,
+          !depRep?.functions.some((e) => e.hash === `${PKG}#Base.act` && e.interfaceUnion !== true)
+          && depRep?.functions.some((e) => e.hash === `${PKG}#Base.act` && e.interfaceUnion === true
+                                     && e.inferred.includes("Exec")),
+          JSON.stringify(depRep?.functions.map((e) => [e.hash, e.interfaceUnion])));
     const app = project({
       "package.json": `{"name":"app","version":"1.0.0","dependencies":{"${PKG}":"1.0.0"}}`,
       "src/m.ts": `import { Logger, Base, Plain } from "${PKG}";
@@ -21972,6 +21977,204 @@ export function entry(): void { callFor(impl) }`,
         JSON.stringify([structural, nominal, twohop, pureArm].map((a) => reachHits(a.dir))));
   check("R521 [probe] NOT A BRANCH COUNTER: it is SILENT on the DIRECT spelling, which registers with no hand-off",
         reachHits(direct.dir) === 0, `direct=${reachHits(direct.dir)}`);
+}
+
+// ── ⟨SOUNDNESS R867⟩ A CHAINED DEPENDENCY'S OWN SUBCLASS OVERRIDES (conformance PART 94) ───────────────
+// `class BaseO { m(){ Fs } }  class SubO extends BaseO { m(){ Env } }` in a dependency; `viaTyped(b: BaseO)
+// { b.m() }` in the consumer, executed with a SubO. Measured at HEAD before the fix: one tree read
+// `['Env','Fs']`; chained, the same source read `['Fs']` and `deny Env` / `deny Env Unknown` BOTH exited 0
+// on the unit AND on its caller. Every arm below is a one-variable fixture: the consumer text is shared
+// between the override dependency and the sibling (`n`, not `m`) control, and only the dependency moves.
+// The dependency is handed to the consumer the way npm publishes it — a `.d.ts` in node_modules that does
+// not even declare `SubO` (it is not exported) — so the consumer cannot see the override by any route but
+// the chained report.
+if (blk()) {
+  const FS = `fs.existsSync("/tmp")`, ENV = `void process.env.HOME`;
+  const depOf = (name, body) => project({ "package.json": `{"name":"${name}","version":"1.0.0"}`, "src/index.ts": body });
+  const consumer = (deps, src) => {
+    const files = {
+      "package.json": JSON.stringify({ name: "app", version: "1.0.0", dependencies: Object.fromEntries(deps.map(([n]) => [n, "1.0.0"])) }),
+      "src/index.ts": src,
+    };
+    for (const [n, dts] of deps) {
+      files[`node_modules/${n}/package.json`] = `{"name":"${n}","version":"1.0.0","types":"index.d.ts","main":"index.js"}`;
+      files[`node_modules/${n}/index.d.ts`] = dts;
+      files[`node_modules/${n}/index.js`] = "";
+    }
+    return project(files);
+  };
+  const run = (app, depReports, policy) => {
+    const env = { ...process.env };
+    delete env.CANDOR_POLICY;
+    if (depReports.length) env.CANDOR_DEPS = depReports.join(" "); else delete env.CANDOR_DEPS;
+    const extra = [];
+    if (policy) { fs.writeFileSync(path.join(app, "r867.policy"), policy); extra.push("--policy", path.join(app, "r867.policy")); }
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), app, ...extra], { encoding: "utf8", env });
+    return { status: r.status, stderr: r.stderr,
+             report: JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8")) };
+  };
+  const rep = (d) => path.join(d, ".candor", "report.json");
+  const inf = (r, fn) => entry(r.report, fn)?.inferred ?? [];
+  const unionRows = (r) => (r?.functions ?? []).filter((e) => e.interfaceUnion === true);
+
+  const BASE_DTS = `export declare class BaseO { m(): void; }\nexport declare function mkO(): BaseO;\n`;
+  const APP = `import { BaseO, mkO } from "dep";
+export function viaTyped(b: BaseO): void { b.m(); }
+export function viaChain(): void { mkO().m(); }
+export function viaBound(): void { const b = mkO(); b.m(); }
+export function caller(): void { viaTyped(mkO()); }`;
+  const FNS = ["src.index.viaTyped", "src.index.viaChain", "src.index.viaBound", "src.index.caller"];
+  const depO = depOf("dep", `import * as fs from "node:fs";
+export class BaseO { m(): void { ${FS}; } }
+class SubO extends BaseO { m(): void { ${ENV}; } }
+export function mkO(): BaseO { return new SubO(); }`);
+  const depK = depOf("dep", `import * as fs from "node:fs";
+export class BaseO { m(): void { ${FS}; } }
+class SubO extends BaseO { n(): void { ${ENV}; } }
+export function mkO(): BaseO { return new SubO(); }`);
+  const sO = scan(depO), sK = scan(depK);
+  check("R867 PRODUCER: the override dependency publishes `dep#BaseO.m` as a union over BaseO.m AND SubO.m — ['Env','Fs']",
+        unionRows(sO.report).some((e) => e.hash === "dep#BaseO.m" && JSON.stringify(e.inferred) === '["Env","Fs"]'),
+        JSON.stringify(sO.report?.functions));
+  check("R867 PRODUCER CONTROL: the sibling dependency (SubO declares `n`, inherits `m`) publishes NO union row at all",
+        unionRows(sK.report).length === 0, JSON.stringify(sK.report?.functions));
+  const appO = consumer([["dep", BASE_DTS]], APP), appK = consumer([["dep", BASE_DTS]], APP);
+  const cO = run(appO, [rep(depO)]), cK = run(appK, [rep(depK)]);
+  check("R867: chained, every consumer arm (typed / factory-chained / factory-bound) AND the caller carries the override's Env",
+        FNS.every((fn) => inf(cO, fn).includes("Env") && inf(cO, fn).includes("Fs")),
+        JSON.stringify(FNS.map((fn) => [fn, inf(cO, fn)])));
+  for (const fn of ["src.index.viaTyped", "src.index.caller"]) {
+    check(`R867 GATE: \`deny Env ${fn}\` exits 1 chained (was 0 over a program that reads the environment)`,
+          run(appO, [rep(depO)], `deny Env ${fn}\n`).status === 1);
+    check(`R867 GATE: \`deny Env Unknown ${fn}\` exits 1 chained (was 0)`,
+          run(appO, [rep(depO)], `deny Env Unknown ${fn}\n`).status === 1);
+    check(`R867 CONTROL GATE: over the sibling dependency \`deny Env Unknown ${fn}\` stays 0 — no effect and no hedge`,
+          run(appK, [rep(depK)], `deny Env Unknown ${fn}\n`).status === 0);
+    check(`R867 CARRIER: \`deny Fs ${fn}\` fires on the control too — the chain and the scope reached the row`,
+          run(appK, [rep(depK)], `deny Fs ${fn}\n`).status === 1);
+  }
+  check("R867 CONTROL: no consumer arm gains Env or Unknown over the sibling dependency",
+        FNS.every((fn) => !inf(cK, fn).includes("Env") && !inf(cK, fn).includes("Unknown")),
+        JSON.stringify(FNS.map((fn) => [fn, inf(cK, fn)])));
+
+  // MULTI-LEVEL — the union is TRANSITIVE. `classOverrides` keeps nearest-ancestor edges only, so a lookup
+  // on Base.m sees Mid.m and never Leaf.m; distinct effects per level so no mechanism can mask another.
+  const depM = depOf("dep", `import * as fs from "node:fs";
+import * as cp from "node:child_process";
+export class Base { m(): void { ${FS}; } }
+export class Mid extends Base { m(): void { cp.execSync("true"); } }
+export class Leaf extends Mid { m(): void { ${ENV}; } }`);
+  const sM = scan(depM);
+  check("R867 MULTI-LEVEL: `dep#Base.m`'s union reaches the GRAND-subclass — ['Env','Exec','Fs']",
+        unionRows(sM.report).some((e) => e.hash === "dep#Base.m" && JSON.stringify(e.inferred) === '["Env","Exec","Fs"]'),
+        JSON.stringify(unionRows(sM.report)));
+
+  // TWO CLASSES SHARING A NAME in different modules share the `pkg#Foo.m` key — both hierarchies' overrides
+  // must reach it, not whichever the emitter met first.
+  const depN = project({ "package.json": `{"name":"dep","version":"1.0.0"}`,
+    "src/a.ts": `import * as fs from "node:fs";
+export class Foo { m(): void { ${FS}; } }
+export class SubA extends Foo { m(): void { ${ENV}; } }`,
+    "src/b.ts": `import * as fs from "node:fs";
+import * as cp from "node:child_process";
+export class Foo { m(): void { ${FS}; } }
+export class SubB extends Foo { m(): void { cp.execSync("true"); } }` });
+  const sN = scan(depN);
+  check("R867 NAME COLLISION: `dep#Foo.m` carries BOTH same-named hierarchies' overrides — ['Env','Exec','Fs']",
+        unionRows(sN.report).filter((e) => e.hash === "dep#Foo.m").length === 1
+        && JSON.stringify(unionRows(sN.report).find((e) => e.hash === "dep#Foo.m")?.inferred) === '["Env","Exec","Fs"]',
+        JSON.stringify(unionRows(sN.report)));
+
+  // A SECOND CHAINED DEPENDENCY overrides the first one's class: obligation 2's leg, keyed under the OWNER.
+  const dep2 = depOf("dep2", `import { BaseO } from "dep";
+export class Sub2 extends BaseO { m(): void { ${ENV}; } }
+export function mk2(): BaseO { return new Sub2(); }`);
+  fs.mkdirSync(path.join(dep2, "node_modules", "dep"), { recursive: true });
+  fs.writeFileSync(path.join(dep2, "node_modules", "dep", "package.json"), `{"name":"dep","version":"1.0.0","types":"index.d.ts","main":"index.js"}`);
+  fs.writeFileSync(path.join(dep2, "node_modules", "dep", "index.d.ts"), BASE_DTS);
+  fs.writeFileSync(path.join(dep2, "node_modules", "dep", "index.js"), "");
+  const s2 = scan(dep2);
+  check("R867 FOREIGN: a package overriding a DEPENDENCY's class publishes the union under the OWNER's key — `dep#BaseO.m` -> ['Env']",
+        unionRows(s2.report).some((e) => e.hash === "dep#BaseO.m" && JSON.stringify(e.inferred) === '["Env"]'),
+        JSON.stringify(s2.report?.functions));
+  const depPlain = depOf("dep", `import * as fs from "node:fs";
+export class BaseO { m(): void { ${FS}; } }
+export function mkO(): BaseO { return new BaseO(); }`);
+  scan(depPlain);
+  const app2 = consumer([["dep", BASE_DTS], ["dep2", `import { BaseO } from "dep";\nexport declare function mk2(): BaseO;\n`]],
+    `import { BaseO } from "dep";\nexport function viaTyped(b: BaseO): void { b.m(); }`);
+  const both = run(app2, [rep(depPlain), rep(s2.report ? dep2 : dep2)]);
+  check("R867 FOREIGN: chained onto BOTH, the consumer carries dep's own Fs AND dep2's override Env",
+        JSON.stringify(inf(both, "src.index.viaTyped")) === '["Env","Fs"]', JSON.stringify(entry(both.report, "src.index.viaTyped")));
+  // THE FLOOR, R764's shape: with ONLY dep2 chained, `dep` is analysed by nobody — the union row must ADD
+  // dep2's Env without deleting the owner's `invisible: ["dep"]`, which is the disclosure that dep's own
+  // body (Fs, here) was never read.
+  const only2 = run(app2, [rep(dep2)]);
+  check("R867 FLOOR: chained onto dep2 ONLY, the union adds Env AND `invisible: [\"dep\"]` survives (a union-only hit is not coverage)",
+        inf(only2, "src.index.viaTyped").includes("Env") && (entry(only2.report, "src.index.viaTyped")?.invisible ?? []).includes("dep"),
+        JSON.stringify(entry(only2.report, "src.index.viaTyped")));
+
+  // THE CONSUMER'S OWN OVERRIDE of a dependency class — obligation 3's local half, for classes. Chained or
+  // not: it is this scan's own body, and unchained the owner's `invisible` must survive beside it.
+  const appOwn = consumer([["dep", BASE_DTS]], `import { BaseO } from "dep";
+class Mine extends BaseO { m(): void { ${ENV}; } }
+export function viaTyped(b: BaseO): void { b.m(); }
+export function caller(): void { viaTyped(new Mine()); }`);
+  const own = run(appOwn, [rep(depPlain)]), ownU = run(appOwn, []);
+  check("R867 OWN: chained, the consumer's own `Mine.m` override reaches a `BaseO`-typed dispatch AND its caller",
+        ["src.index.viaTyped", "src.index.caller"].every((fn) => inf(own, fn).includes("Env") && inf(own, fn).includes("Fs")),
+        JSON.stringify(own.report.functions));
+  check("R867 OWN GATE: `deny Env src.index.caller` exits 1 chained (was 0)",
+        run(appOwn, [rep(depPlain)], "deny Env src.index.caller\n").status === 1);
+  check("R867 OWN, UNCHAINED: Env is charged AND `invisible: [\"dep\"]` survives — the fan-out only adds",
+        inf(ownU, "src.index.viaTyped").includes("Env") && (entry(ownU.report, "src.index.viaTyped")?.invisible ?? []).includes("dep"),
+        JSON.stringify(entry(ownU.report, "src.index.viaTyped")));
+  // …and RECEIVER-SCOPED: a receiver statically typed as a DIFFERENT local subclass cannot hold a `Mine`.
+  const appScoped = consumer([["dep", BASE_DTS]], `import { BaseO } from "dep";
+class Mine extends BaseO { m(): void { ${ENV}; } }
+class Other extends BaseO { }
+export function viaOther(o: Other): void { o.m(); }
+export function keep(): BaseO { return new Mine(); }`);
+  const sc = run(appScoped, [rep(depPlain)]);
+  check("R867 OWN PRECISION: `o: Other` (a sibling of Mine) is NOT charged Mine's Env — only BaseO's own Fs",
+        JSON.stringify(inf(sc, "src.index.viaOther")) === '["Fs"]', JSON.stringify(entry(sc.report, "src.index.viaOther")));
+
+  // `super.m()` IS NOT A DISPATCH. Both spellings name the base body only; a fan-out there charges an override
+  // the program cannot reach (measured on socket.io-client's `super.emit.apply(this, args)`).
+  const appSuper = consumer([["dep", BASE_DTS]], `import { BaseO } from "dep";
+export class Mine extends BaseO { m(): void { ${ENV}; } viaSuper(): void { super.m(); } viaApply(): void { super.m.apply(this, []); } }`);
+  const sup = run(appSuper, [rep(depPlain)]);
+  check("R867 SUPER: `super.m()` and `super.m.apply(…)` reach BaseO's own body only — no Env from Mine's override",
+        ["src.index.Mine.viaSuper", "src.index.Mine.viaApply"].every((fn) => !inf(sup, fn).includes("Env") && inf(sup, fn).includes("Fs")),
+        JSON.stringify(sup.report.functions));
+
+  // ABSTRACT BASE: the union ADDS the implementor's Env and the ⟨0.39⟩ half-1 hedge stays (the floor).
+  const depA = depOf("dep", `export abstract class BaseA { abstract m(): void; }
+class SubA extends BaseA { m(): void { ${ENV}; } }
+export function mkA(): BaseA { return new SubA(); }`);
+  scan(depA);
+  const appA = consumer([["dep", `export declare abstract class BaseA { abstract m(): void; }\nexport declare function mkA(): BaseA;\n`]],
+    `import { BaseA } from "dep";\nexport function viaAbs(b: BaseA): void { b.m(); }`);
+  const ab = run(appA, [rep(depA)]);
+  check("R867 ABSTRACT: chained, the abstract dispatch carries the implementor's Env AND keeps `Unknown[dispatch:…]`",
+        inf(ab, "src.index.viaAbs").includes("Env") && inf(ab, "src.index.viaAbs").includes("Unknown")
+        && (entry(ab.report, "src.index.viaAbs")?.unknownWhy ?? []).some((w) => w.startsWith("dispatch:")),
+        JSON.stringify(entry(ab.report, "src.index.viaAbs")));
+
+  // NOT AN OVERRIDE: `#private` names and statics must not union.
+  const depP = depOf("dep", `import * as fs from "node:fs";
+export class BaseH { #p(): void { ${FS}; } run(): void { this.#p(); } static s(): void { ${FS}; } }
+export class SubH extends BaseH { #p(): void { ${ENV}; } go(): void { this.#p(); } static s(): void { ${ENV}; } }`);
+  const sP = scan(depP);
+  check("R867 PRIVATE/STATIC: no union row is published under a `#private` or a static member's key",
+        !unionRows(sP.report).some((e) => /#BaseH\.(#p|s)$/.test(e.hash)), JSON.stringify(unionRows(sP.report)));
+
+  // THE REACH PROBE IS CALIBRATED, NOT TRUSTED: it fires on the producer that publishes, and is silent on
+  // the control that publishes nothing.
+  const probe = (d) => (spawnSync("node", [path.join(HERE, "scan.mjs"), d],
+    { encoding: "utf8", env: { ...process.env, CANDOR_R867_REACH: "1" } }).stderr.match(/R867-REACH publish/g) ?? []).length;
+  check("R867 [probe]: `publish` fires on the override dependency and is SILENT on the sibling control",
+        probe(depO) === 1 && probe(depK) === 0, `o=${probe(depO)} k=${probe(depK)}`);
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);

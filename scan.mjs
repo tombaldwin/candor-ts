@@ -2308,6 +2308,9 @@ const corruptDepPkgs = new Set();
         if (hashPkg && !(e.interfaceUnion === true && hashPkg !== d.package)) covers.add(hashPkg);
         const cell = crossDeps.get(e.hash) ?? { inferred: new Set(), invisible: new Set(), why: new Set(), hosts: [], cmds: [], paths: [], tables: [], incomplete: new Set(), netIncomplete: false, dispatch: new Set() };
         for (const x of stale ? ["Unknown"] : strs(e.inferred)) cell.inferred.add(x);
+        // ⟨SOUNDNESS R867⟩ Did a REAL unit answer under this key, or only synthetic union rows? A class
+        // method's own body is the real row; the override union beside it is not. See `unionOnlyClassHit`.
+        if (e.interfaceUnion !== true) cell.real = true;
         // ⟨0.39⟩ obligation 3's contributor list travels in the cell: which abstraction members this
         // dependency unit dispatches on. A STALE report's are not read — its assertions are from a build
         // this scan does not trust, and it is already downgraded to a bare Unknown above.
@@ -3630,6 +3633,24 @@ const CHA_FANOUT_LIMIT = 12;
 const TYPINGS_CENSUS_CAP = 128;
 const classOverrides = new Map();// base-method MemberDeclaration node -> overriding subclass member nodes (class-CHA)
 const classDescendants = new Map();// base ClassDeclaration -> transitive LOCAL subclass ClassDeclarations (coercion-CHA)
+// ⟨SOUNDNESS R867⟩ The class-CHA relation ACROSS the package boundary: a FOREIGN class METHOD declaration
+// (a dependency's `class BaseO { m() }`, reached through its source or its `.d.ts`) -> the LOCAL method
+// declarations that override it. `classOverrides` stops at the first `extends` that leaves the project
+// (`localBaseClassOf`), so `class Mine extends dep.BaseO { m(){…} }` registered NOWHERE — and a call on a
+// `BaseO`-typed receiver resolved to the dependency's own body alone, while the override that actually runs
+// was this scan's own code. Registered under EVERY foreign ancestor that declares the name (a consumer's call
+// resolves to whichever one its receiver's type finds first), and under every overload declaration of it.
+// Two readers: the in-scan dispatch site's fan-out (`foreignOverrideFanOut`, the consumer's OWN implementors)
+// and the producer's union emitter (published under the OWNER's key, for a consumer chained onto us).
+const foreignClassOverrides = new Map(); // foreign MethodDeclaration -> local overriding MethodDeclarations
+// The method kinds the R867 override relation is defined over: an INSTANCE method with an ordinary name.
+// A `#private` method is not overridable — `SubH.#p` and `BaseH.#p` are two unrelated private names, and
+// `BaseH.run()`'s `this.#p()` can only ever reach BaseH's — so unioning them by spelling is a fabrication.
+// A STATIC method is not reached by instance dispatch, and `localName` hashes it under the SAME `Cls.m` tail,
+// so letting one register would publish a static body under an instance key.
+const isOverridableMethod = (m) => !!m && ts.isMethodDeclaration(m) && !!m.name
+  && !ts.isPrivateIdentifier(m.name)
+  && !(ts.getCombinedModifierFlags(m) & ts.ModifierFlags.Static);
 // `Object.defineProperty(target, key, { get/set })` runtime accessors (the silent-pure defineProperty
 // hole): the TS checker types `target.key` as a plain DATA property (defineProperty is a runtime
 // construct), so `accessorsAt` finds no get-accessor and the forcing site `target.key` reads
@@ -3658,6 +3679,42 @@ function localBaseClassOf(cls) {
     if (bd && projectFiles.has(path.resolve(bd.getSourceFile().fileName))) return bd;
   }
   return null;
+}
+// ⟨SOUNDNESS R867⟩ `extends X` resolved to X's ClassDeclaration WHEREVER it lives — the project, a
+// dependency's source, or its `.d.ts`. `localBaseClassOf` above answers only the project half on purpose
+// (its readers build an in-scan resolution universe); this one exists to step ACROSS the boundary.
+function anyBaseClassOf(cls) {
+  for (const h of cls.heritageClauses ?? []) {
+    if (h.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    const t = h.types?.[0];
+    if (!t) continue;
+    let sym;
+    try {
+      sym = checker.getSymbolAtLocation(t.expression);
+      if (sym && sym.flags & ts.SymbolFlags.Alias) sym = checker.getAliasedSymbol(sym);
+    } catch { return null; }
+    return (sym?.declarations ?? []).find((d) => ts.isClassDeclaration(d)) ?? null;
+  }
+  return null;
+}
+// ⟨SOUNDNESS R867⟩ Every override reachable DOWN the class-CHA relation from `seeds`, transitively —
+// `Base.m` <- `Mid.m` <- `Leaf.m`. `classOverrides` registers each override under its NEAREST declaring
+// ancestor only, so a single lookup on `Base.m` sees `Mid.m` and never `Leaf.m`, though a `Base`-typed
+// receiver can hold a `Leaf`. Method kinds only (`isOverridableMethod`); bounded so a cyclic or enormous
+// hierarchy cannot run away — every caller treats a closure past `CHA_FANOUT_LIMIT` as too wide to
+// enumerate, so stopping a little past it loses nothing a caller could use.
+function overrideClosure(seeds) {
+  const out = [], seen = new Set();
+  const q = [...seeds];
+  while (q.length && out.length <= CHA_FANOUT_LIMIT + 1) {
+    const m = q.shift();
+    if (seen.has(m)) continue;
+    seen.add(m);
+    if (!isOverridableMethod(m)) continue;
+    out.push(m);
+    for (const o of classOverrides.get(m) ?? []) q.push(o);
+  }
+  return out;
 }
 // Is `cls` in the subtree rooted at `root` (i.e. cls === root, or cls transitively `extends` root
 // through LOCAL classes)? Used to scope a base-member override fan-out to the RECEIVER's static type
@@ -4312,7 +4369,12 @@ for (const { mod, name, ident } of exportAliasCandidates) {
           // one accessor-kind/method on a class, so the first match up the chain is the override
           // target). Stop after the first ancestor declares the name: that is the unit a base-typed
           // dispatch lands on; higher ancestors are reached transitively via their own override edges.
-          let base = baseClassOf(node), guard = 0;
+          // ⟨SOUNDNESS R867⟩ THAT LAST CLAUSE IS FALSE FOR THE IN-SCAN DISPATCH SITE, measured: with
+          // `Base.m` <- `Mid.m` <- `Leaf.m`, a `Base`-typed `b.m()` edges to `Mid.m`'s UNIT, whose body
+          // does not call `Leaf.m`, so Leaf's effect never reaches the caller (EXECUTED: the program reads
+          // the environment; one tree reads `['Exec','Fs']`). The R867 readers walk `overrideClosure`; the
+          // in-scan site below still takes this one-level list. Reported, not changed here.
+          let base = baseClassOf(node), guard = 0, foundLocal = false;
           while (base && guard++ < 64) {
             const ancestor = (base.members ?? []).find((x) => memberName(x) === name
               && (ts.isMethodDeclaration(x) === ts.isMethodDeclaration(m))
@@ -4321,9 +4383,28 @@ for (const { mod, name, ident } of exportAliasCandidates) {
             if (ancestor) {
               if (!classOverrides.has(ancestor)) classOverrides.set(ancestor, []);
               classOverrides.get(ancestor).push(m);
+              foundLocal = true;
               break;
             }
             base = baseClassOf(base);
+          }
+          // ⟨SOUNDNESS R867⟩ …and past the last LOCAL ancestor, into the dependency the chain leaves the
+          // project through. Only where no local ancestor declares the name: a local declaration is the
+          // nearest override target, and it reaches the foreign one through its OWN registration here.
+          if (!foundLocal && isOverridableMethod(m)) {
+            let top = node;
+            for (let b = localBaseClassOf(top), g = 0; b && g++ < 64; b = localBaseClassOf(b)) top = b;
+            const seenF = new Set();
+            for (let fc = anyBaseClassOf(top), g = 0; fc && g++ < 64 && !seenF.has(fc); fc = anyBaseClassOf(fc)) {
+              seenF.add(fc);
+              if (projectFiles.has(path.resolve(fc.getSourceFile().fileName))) break; // not foreign after all
+              for (const fm of fc.members ?? []) {
+                if (!isOverridableMethod(fm) || fm.name.getText() !== name) continue;
+                if (!foreignClassOverrides.has(fm)) foreignClassOverrides.set(fm, []);
+                const arr = foreignClassOverrides.get(fm);
+                if (!arr.includes(m)) arr.push(m);
+              }
+            }
           }
         }
       }
@@ -5227,6 +5308,67 @@ function accessorOverrideFanOut(rec, decl, recvExpr) {
   if (!allResolved) {
     rec.direct.add("Unknown");                       // an override we could not name is not a pure one
     rec.why.add(dispatchWhy(ownerQual(decl), decl.name?.getText?.()));
+  }
+}
+// ⟨SOUNDNESS R867⟩ THE CONSUMER'S OWN IMPLEMENTORS OF A DEPENDENCY'S CLASS METHOD. A call that resolves to a
+// FOREIGN class method (`b.m()`, `b: dep.BaseO`) used to read that dependency's body alone — joined from
+// its chained report, or disclosed through the κ ledger — while `class Mine extends dep.BaseO { m(){…} }`
+// in THIS scan is a body the receiver can hold and the engine can see. SPEC §4 ⟨0.39⟩ names it in so many
+// words: "every implementor VISIBLE TO THE CONSUMER — its own and any chained report's". Measured before
+// this existed: whole-tree `viaTyped` read `['Env','Fs']`; chained, the same source read `['Fs']` and `deny
+// Env` exited 0.
+//
+// The local method path's fan-out, verbatim in its rules: transitive (`overrideClosure`), scoped to the
+// RECEIVER's static-class subtree when the receiver pins one (here through `anyBaseClassOf`, because the
+// root may itself be a dependency class), bounded by `CHA_FANOUT_LIMIT`, and an override this scan minted
+// no unit for DISCLOSES rather than vanishing. PURELY ADDITIVE: edges and a disclosure only, never a removal,
+// so every answer the dependency's own row or the ledger already gave survives unchanged beside it.
+function inSubtreeAny(cls, root) {
+  let cur = cls;
+  for (let g = 0; cur && g < 64; g++) {
+    if (cur === root) return true;
+    cur = anyBaseClassOf(cur);
+  }
+  return false;
+}
+function foreignOverrideFanOut(rec, decl, recvExpr) {
+  if (!rec || !decl || foreignClassOverrides.size === 0) return;
+  const seeds = foreignClassOverrides.get(decl);
+  if (!seeds || seeds.length === 0) return;
+  // `super.m()` / `super.m.apply(…)` is NOT a dispatch: it names the base body and nothing else. Measured on
+  // socket.io-client before this guard: `Socket.emitEvent`'s `super.emit.apply(this, args)` gained an edge
+  // into Socket's OWN `emit` override — a call the program cannot make there.
+  if (recvExpr && recvExpr.kind === ts.SyntaxKind.SuperKeyword) return;
+  let overrides = overrideClosure(seeds);
+  if (recvExpr && overrides.length <= CHA_FANOUT_LIMIT) {
+    let rootClass = null;
+    try {
+      const rt = checker.getTypeAtLocation(recvExpr);
+      rootClass = (rt?.symbol?.declarations ?? []).find((d) => ts.isClassDeclaration(d)) ?? null;
+    } catch { rootClass = null; }
+    // A receiver we cannot pin to ONE class (a union, an interface, `any`, a type parameter) keeps the full
+    // set — the soundness-preserving fallback every other fan-out site takes.
+    if (rootClass) overrides = overrides.filter((om) =>
+      ts.isClassDeclaration(om.parent) && inSubtreeAny(om.parent, rootClass));
+  }
+  if (overrides.length === 0) return;
+  if (process.env.CANDOR_R867_REACH) console.error(`R867-REACH consumer-own ${declModule(decl)}#${decl.parent?.name?.getText?.()}.${decl.name?.getText?.()} n=${overrides.length}`);
+  const why = () => dispatchWhy(
+    decl.parent?.name ? `${declModule(decl)}.${decl.parent.name.getText()}` : null, decl.name?.getText?.());
+  if (overrides.length > CHA_FANOUT_LIMIT) {
+    rec.direct.add("Unknown");                       // override family too wide to enumerate soundly
+    rec.why.add(why());
+    return;
+  }
+  let allResolved = true;
+  for (const om of overrides) {
+    const ot = nodeName.get(om);
+    if (ot) rec.edges.add(ot);                       // (EDGE) into each local override — effects propagate
+    else allResolved = false;
+  }
+  if (!allResolved) {
+    rec.direct.add("Unknown");                       // an override we could not name is not a pure one
+    rec.why.add(why());
   }
 }
 function recordAccessorHit(owner, hit, label, recvExpr = null) {
@@ -6555,7 +6697,7 @@ function disclosureTail(rec, decl, pkg, file, member, kappaAnswered) {
 // nothing and adds nothing, and a chained report that omits the entry is making its purity claim (SPEC §2
 // rule 3). `tailOverride` names the dep report's local tail explicitly when the declaration cannot supply
 // it — a CONSTRUCTOR has no `name`, and the producer hashed it as `<Class>.constructor`.
-function chargeExternalDecl(rec, decl, tailOverride) {
+function chargeExternalDecl(rec, decl, tailOverride, recvExpr = null) {
   if (!rec || !decl) return;
   const mod = declModule(decl);
   if (!mod || mod.startsWith("<")) return;             // project source / the ES lib — not a package reach
@@ -6573,8 +6715,31 @@ function chargeExternalDecl(rec, decl, tailOverride) {
   const hit = tailOverride ? crossDeps.get(`${pkg}#${tailOverride}`)
     : member && ((owner ? crossDeps.get(`${pkg}#${owner}.${member}`) : undefined)
       ?? crossDeps.get(`${pkg}#${member}`));
-  if (hit) { applyDepHit(rec, hit); return; }
+  foreignOverrideFanOut(rec, decl, recvExpr);   // ⟨SOUNDNESS R867⟩ this scan's own overrides — see the call arm
+  if (hit) {
+    applyDepHit(rec, hit);
+    if (!unionOnlyClassHit(decl, hit)) return;  // ⟨SOUNDNESS R867⟩ …else the no-hit tail runs as well
+  }
   disclosureTail(rec, decl, pkg, decl.getSourceFile().fileName, member);
+}
+// ⟨SOUNDNESS R867⟩ THE FLOOR UNDER THE OVERRIDE UNION. Before R867 a chained key with no real row MISSED, and
+// the miss is what produced two disclosures: an `abstract` member's `Unknown[dispatch:<pkg>.<Owner>.<m>]`
+// (half 1's unanswerable key), and — when the owner itself is not chained and only a THIRD package published
+// an override union under its key — the owner's `invisible: [<pkg>]`. A cell built ONLY from union rows now
+// HITS, and taking the hit as the whole answer would delete both: R764's shape, a mechanism that makes reports
+// better making silence cheaper (SPEC.md ⟨0.39⟩). So for a CLASS METHOD whose cell no real unit answered, the
+// union's effects are ADDED and the no-hit tail runs exactly as it did before — the released behaviour is the
+// floor and this only adds. Interface-member hits are untouched (`isClassMethodDecl` is false for a
+// signature), so every ⟨0.39⟩ obligation-2 join keeps its shipped behaviour byte-for-byte. Residual, stated:
+// a class method that ALSO merges with an interface declaration of the same name, hit only by that
+// interface's union, now takes the tail too — additive, a disclosure gained and nothing removed.
+function isClassMethodDecl(decl) {
+  return !!decl && ts.isMethodDeclaration(decl) && !!decl.parent && ts.isClassDeclaration(decl.parent);
+}
+function unionOnlyClassHit(decl, hit) {
+  const r = !!hit && !hit.real && isClassMethodDecl(decl);
+  if (r && process.env.CANDOR_R867_REACH) console.error(`R867-REACH union-only-hit ${declModule(decl)}#${decl.parent?.name?.getText?.()}.${decl.name?.getText?.()}`);
+  return r;
 }
 
 // ---- implicit VALUE-COERCION desugaring (the silent-pure holes where the JS coercion protocol calls a
@@ -7757,7 +7922,11 @@ function visitCalls(node) {
             // effects to the caller. `argIsCallable` does not save it — a seed object typed `any`, or a
             // dep VALUE with a call signature, passes. Guard (1) exists for exactly this shape and its own
             // comment names the case (`path.reduce(fn, obj)`); the new arm simply ran before it.
-            if (d2 && !declIsLocal(d2) && argIsCallable(a)) { chargeExternalDecl(rec, d2); return; }
+            if (d2 && !declIsLocal(d2) && argIsCallable(a)) {
+              chargeExternalDecl(rec, d2, null,
+                (ts.isPropertyAccessExpression(a) || ts.isElementAccessExpression(a)) ? a.expression : null);
+              return;
+            }
             // A value holder the CALLER controls (a project param / local var / binding element) is genuinely
             // opaque. A holder declared in a LIB/dep file — the global `Boolean`/`String`/`Number` constructors
             // (`declare var Boolean: BooleanConstructor` in lib.es5.d.ts) or an imported dep binding — is a known
@@ -7873,7 +8042,8 @@ function visitCalls(node) {
               // of the HOF-ref arm's own `chargeExternalDecl(rec, d2)` call. Without this the invoke was
               // NEITHER edged, NOR κ-classified, NOR disclosed — silent-pure on a call that unquestionably
               // runs caller-reachable code, the same shape as the two cardinal sins this funnel closes.
-              else if (d2 && !declIsLocal(d2)) chargeExternalDecl(rec, d2);
+              else if (d2 && !declIsLocal(d2)) chargeExternalDecl(rec, d2, null,
+                (ts.isPropertyAccessExpression(invokedRef) || ts.isElementAccessExpression(invokedRef)) ? invokedRef.expression : null);
             }
           }
           // EXPLICIT iterator force: `it.next()` / `it.return()` / `it.throw()` on an OPAQUE iterator
@@ -8761,6 +8931,11 @@ function visitCalls(node) {
           // implementor from a third package that this receiver provably is not). That is inherited from
           // the producer's row and is the same over-approximation the pre-R696 `!eff` path already
           // accepted on every κ-silent package; the error direction is over-charge, never silence.
+          // ⟨SOUNDNESS R867⟩ this scan's OWN overrides of the dependency class method the call resolved to —
+          // chained or not, because they are this scan's bodies and need no report to be seen.
+          if (!mod.startsWith("<"))
+            foreignOverrideFanOut(rec, decl, (ts.isPropertyAccessExpression(node.expression)
+              || ts.isElementAccessExpression(node.expression)) ? node.expression.expression : null);
           let inheritedFromDep = false;
           if (crossDeps.size > 0 && !mod.startsWith("<")) {
             const nameDecl = memberSigOf(decl); // a function-typed property names its member one level up
@@ -8785,7 +8960,11 @@ function visitCalls(node) {
             const hit = localTail && (crossDeps.get(`${depMod}#${localTail}`)
               ?? (nameDecl.name ? crossDeps.get(`${depMod}#${nameDecl.name.getText()}`) : undefined));
             if (hit) {
-              inheritedFromDep = true;
+              // ⟨SOUNDNESS R867⟩ A hit made ONLY of class-override union rows answers what the OVERRIDES do,
+              // never what the key's own body does — so it must not stand in for the no-hit path below,
+              // which is where an abstract member's `Unknown[dispatch:…]` and an unchained owner's
+              // `invisible` come from. See `unionOnlyClassHit`.
+              inheritedFromDep = !unionOnlyClassHit(decl, hit);
               // ⟨SOUNDNESS R696⟩ REACH PROBE for the branch this row ADDED — the κ-answered one — and it
               // counts the JOIN'S OUTCOME, not branch entry (R574/R583: a probe placed before the filter
               // it is evidence for measures the filter's input). `eff &&` because the pre-R696 `!eff` path
@@ -10985,6 +11164,115 @@ function typingsInterfaceImpls() {
       if (blindU.size) un.invisible = [...blindU].sort();
       functions.push(un);
     }
+  }
+  // ⟨SOUNDNESS R867⟩ THE CLASS-OVERRIDE UNION — the same entry, for a CLASS method a subclass overrides.
+  //
+  // THE DEFECT. `class BaseO { m(){ Fs } }  class SubO extends BaseO { m(){ Env } }` in a dependency, and a
+  // consumer's `f(b: BaseO){ b.m() }`. One tree, the in-scan fan-out above edges `b.m()` into SubO's override
+  // and `f` reads `['Env','Fs']`. Split behind a chained report, the consumer resolves `b.m()` to `BaseO.m`,
+  // joins `dep#BaseO.m` — the base's OWN body, `['Fs']` — and `deny Env` and `deny Env Unknown` both exit 0
+  // over a program that reads the environment (EXECUTED). Chaining did not fail to improve the answer; it
+  // DELETED an effect the engine's own unchained analysis attributes, which is what ⟨0.39⟩ (SPEC §4) forbids:
+  // "every implementor visible to the consumer — its own and any chained report's". The bounded-CHA
+  // paragraph that clause answers lists "a Swift protocol/class" and "a JVM interface/supertype" beside the
+  // TS interface, so an overriding subclass is an implementor in exactly the sense `interfaceUnion` serves.
+  //
+  // WHY A PRODUCER ROW AND NOT A CONSUMER WALK OF `.hierarchy.json`. The sidecar carries the edges, but
+  // ⟨0.24⟩ rules an ABSENT sidecar equivalent to an empty one, and `--dep-inits` writes the report alone —
+  // so a consumer-side walk would go silent exactly where the sidecar is missing, with nothing to say so.
+  // The producer is the one party that sees every subclass (a non-exported `SubO` is in no `.d.ts`), and
+  // the row rides the report the consumer already trusts under §2.1.
+  //
+  // WHAT IS PUBLISHED, and the three ways it is bounded:
+  //   · KEY: the overridden method's OWN hash — `pkg#BaseO.m`, the one a consumer's ordinary chained lookup
+  //     forms (`localName`'s `Cls.m` tail). No new spelling. For a FOREIGN base (`class Sub2 extends
+  //     dep.BaseO`), the OWNER's namespace — obligation 2's rule, `dep#BaseO.m` — so the consumer's per-key
+  //     union (⟨0.25⟩) folds it into the owner's own row with no special case, and the loader's ⟨0.39⟩ guard
+  //     already refuses to read a foreign-keyed union row as coverage of the owner.
+  //   · VALUE: the base body (local case only — a foreign base's body is not ours to speak for) plus EVERY
+  //     override down the hierarchy, transitively (`overrideClosure` — `classOverrides` holds nearest-
+  //     ancestor edges only, so a single lookup misses a grand-subclass).
+  //   · `interfaceUnion: true`: it is a CHA union over implementors and not a unit, so the producer's own
+  //     gate notes it rather than gating it (policy.mjs), `query` skips it as a caller, and `analyzed` is
+  //     untouched — every consequence that flag already has is the right one here.
+  //   Instance methods with ordinary names only (`isOverridableMethod`): `#private` names do not override,
+  //   and a static shares the instance key's spelling. Past `CHA_FANOUT_LIMIT`, or with an override this scan
+  //   minted no unit for, it publishes `Unknown` + `dispatch:` rather than a guess. And it is DROPPED when it
+  //   would add nothing to the real rows already under that key, so a report with no effectful override is
+  //   byte-identical to one produced before this existed.
+  //
+  // THE OVER-APPROXIMATION IT ACCEPTS, named: the key is the DECLARING class's, so a consumer whose receiver
+  // is statically a non-overriding subclass (`b: Mid2`, `Mid2 extends Base` declares no `m`) resolves to
+  // `Base.m` and inherits the overrides of Mid2's SIBLINGS too. The in-scan site narrows that by receiver
+  // subtree; across the wire there is no key for "Base.m as seen from Mid2". Over-charge, never silence.
+  {
+    const realEff = new Map();   // hash -> {inf:Set, blind:Set} over every REAL row under it (all collisions)
+    for (const e of functions) {
+      if (e.interfaceUnion === true || !e.hash) continue;
+      const c = realEff.get(e.hash) ?? { inf: new Set(), blind: new Set() };
+      for (const x of e.inferred ?? []) c.inf.add(x);
+      for (const b of e.invisible ?? []) c.blind.add(b);
+      realEff.set(e.hash, c);
+    }
+    // ACCUMULATED PER KEY, then emitted once. Two classes sharing a NAME in different modules share the
+    // `pkg#Cls.m` key (the hash carries no module path), and a consumer's per-key union already folds their
+    // real rows together; emitting the FIRST class's override union and skipping the second would drop the
+    // second hierarchy's overrides from the one key a consumer of it can form.
+    const acc = new Map();   // hash -> {fnName, locDecl, inf:Set, blind:Set, broad, unaccounted, whyOwner, member}
+    const emitOverrideUnion = (hash, fnName, locDecl, bodies, nOverrides, whyOwner, member) => {
+      const c = acc.get(hash) ?? { fnName, locDecl, inf: new Set(), blind: new Set(), broad: false,
+                                   unaccounted: false, whyOwner, member };
+      acc.set(hash, c);
+      if (nOverrides > CHA_FANOUT_LIMIT) { c.broad = true; c.inf.add("Unknown"); return; }
+      for (const b of bodies) {
+        const u = nodeName.get(b);
+        if (!u) { c.unaccounted = true; c.inf.add("Unknown"); continue; }
+        for (const x of inferred.get(u) ?? []) c.inf.add(x);
+        for (const bl of fns.get(u)?.blind ?? []) c.blind.add(bl);
+      }
+    };
+    const flushOverrideUnions = () => {
+      for (const [hash, c] of [...acc].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
+        const { inf: infU, blind: blindU, broad, unaccounted } = c;
+        if (infU.size === 0 && blindU.size === 0) continue;          // pure across every body — silence = purity
+        const claimed = realEff.get(hash);
+        if (claimed && !broad && !unaccounted
+            && [...infU].every((x) => claimed.inf.has(x)) && [...blindU].every((b) => claimed.blind.has(b))) continue;
+        const sf = c.locDecl.getSourceFile();
+        const { line, character } = sf.getLineAndCharacterOfPosition(c.locDecl.getStart());
+        const un = { fn: c.fnName, loc: abstractionLoc(sf, line, character), hash,
+                     inferred: [...infU].sort(), interfaceUnion: true };
+        un.unresolved = infU.has("Unknown");
+        if (broad || unaccounted) un.unknownWhy = [`dispatch:${c.whyOwner}.${c.member}`];
+        if (blindU.size) un.invisible = [...blindU].sort();
+        if (process.env.CANDOR_R867_REACH) console.error(`R867-REACH publish ${hash} ${JSON.stringify(un.inferred)}`);
+        functions.push(un);
+      }
+    };
+    // LOCAL bases: every method some local subclass overrides.
+    for (const base of classOverrides.keys()) {
+      if (!isOverridableMethod(base) || !ts.isClassDeclaration(base.parent) || !base.parent.name) continue;
+      const cls = base.parent.name.text, m = base.name.getText();
+      const overrides = overrideClosure(classOverrides.get(base) ?? []);
+      if (!overrides.length) continue;
+      emitOverrideUnion(dispatchKey(pkgName, cls, m), `${cls}.${m}`, base, [base, ...overrides],
+                        overrides.length, `${pkgName}.${cls}`, m);
+    }
+    // FOREIGN bases: obligation 2's leg — published under the owner, carrying only OUR overrides.
+    for (const [fm, seeds] of foreignClassOverrides) {
+      if (!ts.isClassDeclaration(fm.parent) || !fm.parent.name) continue;
+      if (projectFiles.has(path.resolve(fm.getSourceFile().fileName)) || declIsNodeTypes(fm)) continue;
+      const owner = declModule(fm);
+      // A nameable PACKAGE that is not our own under another spelling — `isPublishableForeignIface`'s test.
+      if (!owner || owner.startsWith("<") || owner.startsWith("/") || owner === pkgName || owner === rootOwnerPkg) continue;
+      const ownerPkg = owner.startsWith("@types/") ? owner.slice("@types/".length) : owner;
+      const cls = fm.parent.name.text, m = fm.name.getText();
+      const overrides = overrideClosure(seeds);
+      if (!overrides.length) continue;
+      emitOverrideUnion(dispatchKey(ownerPkg, cls, m), `${cls}.${m}`, fm, overrides, overrides.length,
+                        `${ownerPkg}.${cls}`, m);
+    }
+    flushOverrideUnions();
   }
 }
 // ---- the TRUST-MARKER INVARIANT, checked over every entry before anything is written ----------------

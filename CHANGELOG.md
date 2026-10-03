@@ -10,6 +10,25 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ STRICTER, with a CHAINED dependency report: a call on a dependency's NON-FINAL class now carries the
+  overrides in that dependency's own subclasses (SOUNDNESS R867, conformance PART 94). `f(b: BaseO) {
+  b.m() }`, executed with the dependency's `SubO` whose `m` reads the environment, read only `BaseO.m`'s
+  `['Fs']` once chained — `deny Env` and `deny Env Unknown` both exited 0 on the unit and on its caller,
+  while the same source scanned as one tree read `['Env','Fs']`. A producer now publishes, under the
+  overridden method's own key (`pkg#BaseO.m`), an `interfaceUnion: true` row over the base body and EVERY
+  override down the hierarchy, transitively; a package overriding a DEPENDENCY's class publishes its
+  overrides under the OWNER's key (`dep#BaseO.m`), as ⟨0.39⟩ obligation 2 does for interfaces. Instance
+  methods only — `#private` names and statics never union. Past 12 overrides, or with one this scan could
+  not name, the row is `Unknown` + `dispatch:` rather than a guess. Expect `deny <E>` over such a call to go
+  0 → 1, on the caller too. Producer side: a report gains these rows (166 over the 28-entry pinned roster,
+  0 real rows changed, 0 removed); they are noted, never gated, at the producer.
+- ⚠ STRICTER, chained or not: a call resolving to a dependency's class method now also reaches THIS scan's
+  own overrides of it (`class Mine extends dep.BaseO { m(){…} }`), scoped to the receiver's static class and
+  never through `super.m()`. Unchained, the owner's `invisible` disclosure stays beside the new effect.
+- Not weaker anywhere: where a chained key is answered ONLY by such union rows (an `abstract` member, or an
+  owner that is not itself chained), the pre-existing `Unknown[dispatch:…]` / `invisible: [owner]` is kept
+  and the union's effects are added beside it.
+
 ## [0.39.3] — 2026-09-30
 
 **Upgrading from 0.39.2 — gates that can flip:**
