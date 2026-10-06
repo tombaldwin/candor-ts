@@ -3703,18 +3703,136 @@ function anyBaseClassOf(cls) {
 // receiver can hold a `Leaf`. Method kinds only (`isOverridableMethod`); bounded so a cyclic or enormous
 // hierarchy cannot run away — every caller treats a closure past `CHA_FANOUT_LIMIT` as too wide to
 // enumerate, so stopping a little past it loses nothing a caller could use.
+//
+// ⟨SOUNDNESS R871/R872⟩ Now the R867 KEY's view of `overrideDescent` below rather than a second walk of the
+// same index: the seeds and everything under them, kept to the method kinds the key is defined over.
 function overrideClosure(seeds) {
-  const out = [], seen = new Set();
-  const q = [...seeds];
-  while (q.length && out.length <= CHA_FANOUT_LIMIT + 1) {
+  const out = [];
+  for (const s of seeds) {
+    for (const m of [s, ...overrideDescent(s)]) {
+      if (isOverridableMethod(m) && !out.includes(m)) out.push(m);
+      if (out.length > CHA_FANOUT_LIMIT + 1) return out;
+    }
+  }
+  return out;
+}
+// ⟨SOUNDNESS R871/R872⟩ THE ONE ANSWER TO "WHICH LOCAL BODIES CAN A DISPATCH THAT RESOLVED TO `decl` RUN?"
+//
+// The question had five readers and they disagreed inside one report. The in-scan class arm and the
+// accessor arm took `classOverrides.get(decl)` — ONE level, because that index registers each override under
+// its NEAREST declaring ancestor — so `Base.m <- Mid.m <- Leaf.m` gave a `Base`-typed `b.m()` an edge to
+// `Mid.m` and never to `Leaf.m` (R871). The in-scan interface arm, obligation 3's local join, the producer's
+// interface union and the coercion CHA took the implementor's OWN member and never descended at all, so
+// `BaseO implements I` + `SubO extends BaseO { m(){…} }` gave an `I`-typed `i.m()` the base body alone (R872)
+// — while the R867 producer union beside them walked the closure and published the right answer in the same
+// report. Measured on nest: `AbstractHttpAdapter.reply`'s union row carried Clock/Env/Unknown and
+// `RouterResponseController.apply`, which dispatches `HttpServer.reply`, read `inferred: []`.
+//
+// So every reader asks these two functions instead of spelling its own walk:
+//   · `overrideDescent(decl)` — every override BELOW `decl`, transitively, any member kind `classOverrides`
+//     indexes (method, accessor, property). Unscoped and cached; scoping is the caller's question.
+//   · `memberDispatchBodies(decl, rootClass)` — that descent scoped to the RECEIVER's subtree, which is
+//     what keeps a `Mid`-typed receiver free of a SIBLING's override (`Side.m` is not in `Mid`'s subtree).
+// A FAN-OUT BOUND IS NOT DECIDED HERE. Each reader keeps the bound it had, over the count it had (the in-scan
+// interface arm bounds IMPLEMENTORS, the class arm bounds overrides), because moving a bound onto the larger
+// transitive count would turn edges that exist today into a bare `Unknown` — and `deny Fs` does not fire on
+// `Unknown`. Descent only ADDS bodies. The one thing this change REMOVES is the super-receiver fan-out
+// (`isSuperReceiver` below), and that removal was measured rather than assumed: over the pinned 28-entry ts
+// roster every one of the 264 edges it drops sits in a unit containing `super.<that member>` (an auditor that
+// flagged 6,225 of 6,590 non-super edges when pointed at them), and with the guard disabled the same A/B
+// loses nothing on any field.
+const overrideDescentCache = new Map();
+function overrideDescent(decl) {
+  let out = overrideDescentCache.get(decl);
+  if (out) return out;
+  out = [];
+  const seen = new Set([decl]);
+  const q = [...(classOverrides.get(decl) ?? [])];
+  while (q.length) {
     const m = q.shift();
     if (seen.has(m)) continue;
     seen.add(m);
-    if (!isOverridableMethod(m)) continue;
     out.push(m);
     for (const o of classOverrides.get(m) ?? []) q.push(o);
   }
+  overrideDescentCache.set(decl, out);
   return out;
+}
+function memberDispatchBodies(decl, rootClass) {
+  const all = overrideDescent(decl);
+  if (!rootClass || all.length === 0) return all;
+  return all.filter((om) => ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass));
+}
+// The LOCAL class a receiver expression's static type pins, or null (a union, an interface, `any`, a foreign
+// type) — the condition under which every fan-out site narrows to a subtree. One definition, read by the
+// class arm and the accessor arm, which each carried a copy.
+function localReceiverClass(recvExpr) {
+  if (!recvExpr) return null;
+  const rt = checker.getTypeAtLocation(recvExpr);
+  return (rt?.symbol?.declarations ?? []).find((d) =>
+    ts.isClassDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName))) ?? null;
+}
+// `super.m()` NAMES a body; it does not dispatch. R867's consumer fan-out already refuses it (measured on
+// socket.io-client); the in-scan arms did not, which was harmless while they were one level deep — the one
+// override in `super`'s subtree was, in the common shape, the calling method itself — and is a fabrication
+// once descent is transitive: `Leaf.m(){ super.m() }` would gain `Deep.m`'s effects, a body `super.m()` can
+// never reach.
+const isSuperReceiver = (recvExpr) => !!recvExpr && recvExpr.kind === ts.SyntaxKind.SuperKeyword;
+// REACH PROBE (`CANDOR_R871_REACH=1`), counted where a body the one-level / own-member readers never named is
+// actually ADDED, or where the super guard actually suppresses a non-empty set — never on branch entry
+// (R574/R583). For `bin/corpus-ab.py --mark R871-REACH`.
+const probeR871 = (kind, decl, n) => {
+  if (process.env.CANDOR_R871_REACH && n > 0)
+    console.error(`R871-REACH ${kind} ${decl?.parent?.name?.getText?.() ?? "?"}.${decl?.name?.getText?.() ?? "?"} n=${n}`);
+};
+// Every body an INTERFACE dispatch can run through implementor `impl`: the member `impl` itself supplies,
+// then every override of it in `impl`'s subtree. `null` when `impl` supplies no such member — the
+// `allResolved = false` condition each reader already had, kept exactly (an inherited member is not
+// resolved here). The member kinds are the ones the readers always matched: a method, a property (`m = () =>
+// …`) and an object literal's property assignment. Shared by the in-scan interface arm, obligation 3's local
+// join and the producer's interface union, which had three copies of the lookup and none of the descent.
+//
+// ⟨SOUNDNESS R872, inherited half⟩ …OR THE MEMBER IT INHERITS FROM A LOCAL ANCESTOR. `class ImplX extends BaseX
+// implements I {}` runs `BaseX.m` for an `I`-typed `i.m()`; the three readers each looked only at `ImplX`'s own
+// members, and answered the miss three different ways. The in-scan arm and the join called it UNRESOLVED and
+// disclosed `Unknown[dispatch:…]`; the producer's union looked the name `ImplX.m` up in `localEffs`, found
+// nothing, and contributed NOTHING — so a published `pkg#I.m` beside an effectful sibling implementor claimed
+// that sibling's effects as the whole answer, and a chained consumer's `deny Fs` and `deny Unknown` both
+// exited 0 over a program that writes (EXECUTED). The nearest declaration up the LOCAL `extends` chain is the
+// body that runs, and the overrides of it inside `impl`'s own subtree are the rest. The walk stops at the
+// first ancestor declaring the name in ANY instance kind — a getter there shadows a method further up — and
+// that declaration must be one the readers can edge to, or the answer stays `null`. It also stops where the
+// chain leaves the project: a dependency base is a body this scan does not hold.
+function implMemberBodies(impl, member) {
+  const memberNodes = impl.members ?? impl.properties ?? [];
+  const own = memberNodes.find((x) =>
+    (ts.isMethodDeclaration(x) || ts.isPropertyDeclaration(x) || ts.isPropertyAssignment(x))
+    && x.name?.getText?.() === member);
+  if (own) return [own, ...(ts.isClassDeclaration(impl) ? memberDispatchBodies(own, impl) : [])];
+  if (!ts.isClassDeclaration(impl)) return null;
+  for (let anc = localBaseClassOf(impl), g = 0; anc && g++ < 64; anc = localBaseClassOf(anc)) {
+    const decl = (anc.members ?? []).find((x) => x.name?.getText?.() === member
+      && !ts.isConstructorDeclaration(x) && !(ts.getCombinedModifierFlags(x) & ts.ModifierFlags.Static));
+    if (!decl) continue;
+    if (!(ts.isMethodDeclaration(decl) || ts.isPropertyDeclaration(decl))) return null;
+    return [decl, ...memberDispatchBodies(decl, impl)];
+  }
+  return null;
+}
+// Does `impl` declare `member` NOWHERE it could have come from — no own member and an `extends` chain that is
+// local all the way up with no ancestor naming it? Only then is an OPTIONAL interface member provably absent at
+// runtime for this implementor, so a union may treat it as contributing nothing rather than as unaccounted.
+function provablyLacksMember(impl, member) {
+  if (!ts.isClassDeclaration(impl)) return false;
+  for (let c = impl, g = 0; c && g++ < 64; ) {
+    if ((c.members ?? []).some((x) => x.name?.getText?.() === member)) return false;
+    const ext = (c.heritageClauses ?? []).some((h) => h.token === ts.SyntaxKind.ExtendsKeyword);
+    if (!ext) return true;                          // top of a fully local chain
+    const b = localBaseClassOf(c);
+    if (!b) return false;                           // the chain leaves the project (or cannot be resolved)
+    c = b;
+  }
+  return false;
 }
 // Is `cls` in the subtree rooted at `root` (i.e. cls === root, or cls transitively `extends` root
 // through LOCAL classes)? Used to scope a base-member override fan-out to the RECEIVER's static type
@@ -4372,8 +4490,9 @@ for (const { mod, name, ident } of exportAliasCandidates) {
           // ⟨SOUNDNESS R867⟩ THAT LAST CLAUSE IS FALSE FOR THE IN-SCAN DISPATCH SITE, measured: with
           // `Base.m` <- `Mid.m` <- `Leaf.m`, a `Base`-typed `b.m()` edges to `Mid.m`'s UNIT, whose body
           // does not call `Leaf.m`, so Leaf's effect never reaches the caller (EXECUTED: the program reads
-          // the environment; one tree reads `['Exec','Fs']`). The R867 readers walk `overrideClosure`; the
-          // in-scan site below still takes this one-level list. Reported, not changed here.
+          // the environment; one tree reads `['Exec','Fs']`). ⟨R871⟩ Every reader now walks the index through
+          // `overrideDescent`, so the nearest-ancestor registration is the right shape for an INDEX; it was
+          // only ever wrong as an ANSWER, read one level deep.
           let base = baseClassOf(node), guard = 0, foundLocal = false;
           while (base && guard++ < 64) {
             const ancestor = (base.members ?? []).find((x) => memberName(x) === name
@@ -5279,29 +5398,31 @@ function definePropForceTarget(propNode, kind /* "get" | "set" */) {
 // past `CHA_FANOUT_LIMIT`, or with any override not minted as a unit, it DISCLOSES rather than silently
 // dropping what it could not enumerate. A base accessor no subclass overrides has no index entry, so
 // today's answer is preserved byte-for-byte there.
+// ⟨SOUNDNESS R871⟩ The same one-level read as the method arm, with the same consequence one member kind over:
+// `Base get v <- Mid get v <- Leaf get v`, a `Base`-typed `b.v` reached `Mid`'s getter and never `Leaf`'s
+// (EXECUTED: the caller was ABSENT over a real write). Bodies from `memberDispatchBodies`; the bound stays on
+// the one-level scoped count, and a transitive set past it also discloses — the method arm's rule verbatim.
 function accessorOverrideFanOut(rec, decl, recvExpr) {
   const allOverrides = classOverrides.get(decl);
   if (!allOverrides || allOverrides.length === 0) return;
-  let overrides = allOverrides;
-  if (recvExpr) {
-    const rt = checker.getTypeAtLocation(recvExpr);
-    const rootClass = (rt?.symbol?.declarations ?? []).find((d) =>
-      ts.isClassDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName)));
-    // SOUNDNESS-PRESERVING FALLBACK, the method path's verbatim: a receiver we cannot pin to a LOCAL
-    // class (a union, an interface, `any`, an external type) keeps the FULL override set.
-    if (rootClass) overrides = allOverrides.filter((om) =>
-      ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass));
-  }
+  if (isSuperReceiver(recvExpr)) { probeR871("super-accessor", decl, allOverrides.length); return; } // `super.v` names one accessor; it does not dispatch
+  // SOUNDNESS-PRESERVING FALLBACK, the method path's verbatim: a receiver we cannot pin to a LOCAL
+  // class (a union, an interface, `any`, an external type) keeps the FULL override set.
+  const rootClass = localReceiverClass(recvExpr);
+  const direct = rootClass ? allOverrides.filter((om) =>
+    ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass)) : allOverrides;
+  const overrides = memberDispatchBodies(decl, rootClass);
+  if (direct.length <= CHA_FANOUT_LIMIT) probeR871("accessor", decl, overrides.length - direct.length);
   if (overrides.length === 0) return;
   const ownerQual = (d) => (d.parent?.name
     ? `${moduleOf(d.parent.getSourceFile())}.${namespacePrefixOf(d.parent)}${d.parent.name.getText()}`
     : null);
-  if (overrides.length > CHA_FANOUT_LIMIT) {
+  if (direct.length > CHA_FANOUT_LIMIT) {
     rec.direct.add("Unknown");                       // override family too wide to enumerate soundly
     rec.why.add(dispatchWhy(ownerQual(decl), decl.name?.getText?.()));
     return;
   }
-  let allResolved = true;
+  let allResolved = overrides.length <= CHA_FANOUT_LIMIT;
   const targets = [];
   for (const om of overrides) { const ot = nodeName.get(om); if (ot) targets.push(ot); else allResolved = false; }
   for (const ot of targets) rec.edges.add(ot);       // (EDGE) into each override — effects propagate
@@ -6127,7 +6248,7 @@ const probeJoinReach = (mark, outcome, detail) => {
 // co-extensive with the charge it replaces: where there is no implementor there is nothing to hedge.
 function joinLocalImpls(rec, d, hedgeOnly) {
   if (!rec || !d) return null;
-  const { targets, allResolved, decls } = localImplTargets(d.key);
+  const { targets, extra, extraUnresolved, allResolved, decls } = localImplTargets(d.key);
   if (!targets.length) return null;
   // The name means two things here, so no implementor set can be attributed to this key — §4 ⟨0.24⟩'s
   // `ambiguous:`, not `dispatch:`: the owner type is nameable, but WHICH declaration it names is not.
@@ -6142,6 +6263,11 @@ function joinLocalImpls(rec, d, hedgeOnly) {
     return hedgeOnly ? "hedge-foreign-receiver" : "hedge";
   }
   for (const t of targets) rec.edges.add(t);
+  for (const t of extra) rec.edges.add(t);           // ⟨R872⟩ the implementors' overrides — see the index
+  if (extraUnresolved) {
+    rec.direct.add("Unknown");
+    rec.why.add(dispatchWhy(`${d.pkg}.${d.ifaceName}`, d.member));
+  }
   return "edge";
 }
 // ⟨SOUNDNESS R524, shape (i)⟩ The interface whose INDEX SIGNATURE a resolved declaration dispatches
@@ -6345,7 +6471,7 @@ function ensureLocalImplIndex() {
       const push = (m) => {
         const k = dispatchKey(ownerPkg, ifaceName, m);
         if (!localImplTargetsByKey.has(k))
-          localImplTargetsByKey.set(k, { targets: [], allResolved: true, decls: new Set() });
+          localImplTargetsByKey.set(k, { targets: [], extra: [], allResolved: true, decls: new Set() });
         const cell = localImplTargetsByKey.get(k);
         // NEVER GUESS WHICH `I` A NAME MEANS — the same guard the union EMITTER applies (`ifaceNameCounts`),
         // applied to the JOIN, because the two must not answer one question differently. Two declarations
@@ -6358,15 +6484,26 @@ function ensureLocalImplIndex() {
         // nothing for it, and this join was edging across both.
         cell.decls.add(ifaceDecl);
         for (const cls of implClasses) {
-          const memberNodes = cls.members ?? cls.properties ?? [];
-          const node = memberNodes.find((x) =>
-            (ts.isMethodDeclaration(x) || ts.isPropertyDeclaration(x) || ts.isPropertyAssignment(x))
-            && x.name?.getText?.() === m);
-          const t = node && nodeName.get(node);
+          // ⟨SOUNDNESS R872⟩ `implMemberBodies` — the implementor's own member AND its overrides below it,
+          // the in-scan arm's answer. The FAN-OUT bound `joinLocalImpls` applies reads `targets`, which
+          // stays the implementors' own members exactly as before; the overrides ride in `extra`, so a
+          // descent can add edges but can never push a key that edges today over the bound into a hedge.
+          const bodies = implMemberBodies(cls, m);
+          const t = bodies && nodeName.get(bodies[0]);
           // An implementor whose member is INHERITED from a base class, or otherwise not a minted unit,
           // is genuinely unresolved — the same condition the in-scan CHA site calls `allResolved`.
           if (!t) { cell.allResolved = false; continue; }
           if (!cell.targets.includes(t)) cell.targets.push(t);
+          probeR871("join", bodies[0], bodies.length - 1);
+          if (bodies[0].parent !== cls) probeR871("join-inherited", bodies[0], 1);
+          for (const b of bodies.slice(1)) {
+            const bt = nodeName.get(b);
+            // An override this scan minted no unit for is a hedge BESIDE the edges, never instead of them:
+            // `allResolved = false` would turn the whole key into a bare `Unknown` and drop edges that exist
+            // without the descent.
+            if (!bt) { cell.extraUnresolved = true; continue; }
+            if (!cell.extra.includes(bt)) cell.extra.push(bt);
+          }
         }
       };
       for (const member of ifaceDecl.members ?? []) {
@@ -6405,7 +6542,7 @@ function ensureLocalImplIndex() {
 }
 function localImplTargets(key) {
   ensureLocalImplIndex();
-  return localImplTargetsByKey.get(key) ?? { targets: [], allResolved: true, decls: new Set() };
+  return localImplTargetsByKey.get(key) ?? { targets: [], extra: [], allResolved: true, decls: new Set() };
 }
 // ⟨SOUNDNESS R524, shape (i)⟩ Every member name a visible implementor of `pkg#Iface` supplies.
 function indexSigMemberNames(pkg, ifaceName) {
@@ -6797,7 +6934,14 @@ function coercionChaClasses(part) {
   const sym = part.getSymbol?.() ?? part.aliasSymbol;
   for (const d of sym?.declarations ?? []) {
     if (!declIsLocal(d)) continue;
-    if (ts.isInterfaceDeclaration(d)) for (const c of interfaceImpls.get(d) ?? []) { if (!out.includes(c)) out.push(c); }
+    // ⟨SOUNDNESS R872⟩ …and every LOCAL SUBCLASS of an implementor: `SubO extends BaseO` is an `I` at runtime
+    // although only `BaseO` carries the `implements` clause, so its `toString` is a body `${i}` can run.
+    // `localClassMember` resolves each to its nearest declaration, so a subclass that declares nothing adds
+    // nothing new.
+    if (ts.isInterfaceDeclaration(d)) for (const c of interfaceImpls.get(d) ?? []) {
+      for (const x of [c, ...(ts.isClassDeclaration(c) ? classDescendants.get(c) ?? [] : [])])
+        if (!out.includes(x)) out.push(x);
+    }
     else if (ts.isClassDeclaration(d)) for (const c of classDescendants.get(d) ?? []) { if (!out.includes(c)) out.push(c); }
   }
   return out;
@@ -6901,7 +7045,7 @@ function coercionTargets(expr, names, withPrimitive, outExternal) {
       // can be any subclass at runtime. Reuse the ordinary-dispatch override index.
       for (const n of names) {
         const md = declOfSym(part.getProperty(n));
-        if (md) for (const ov of classOverrides.get(md) ?? []) push(ov);
+        if (md) for (const ov of overrideDescent(md)) push(ov);   // ⟨R871⟩ transitively — see `overrideDescent`
       }
       // ELEMENT recursion. Stringifying an ARRAY is not a leaf: `Array.prototype.toString` delegates to
       // `join`, which coerces EVERY ELEMENT — so `` `${entries}` ``/`entries.join(", ")`/`String(entries)`
@@ -8107,19 +8251,27 @@ function visitCalls(node) {
               // pinned to a LOCAL class (no property access, a union/interface/`any` receiver, an
               // external/unresolved type), we do NOT narrow — the full override set is kept, exactly
               // the pre-precision behavior, so we never silently drop an effect we can't rule out.
-              let overrides = allOverrides;
+              //
+              // ⟨SOUNDNESS R871⟩ …AND TRANSITIVELY. `allOverrides` is the NEAREST-ancestor index, so with
+              // `Base.m <- Mid.m <- Leaf.m` it holds `Mid.m` alone and a `Base`-typed `b.m()` never reached
+              // `Leaf.m` — EXECUTED, the caller read pure over a real write while the producer's own
+              // `Base.m` union row, in the same report, carried it. The bodies now come from
+              // `memberDispatchBodies`, the one answer every reader asks. The BOUND is still decided on the
+              // count it was decided on (`direct`, today's one-level scoped set), so no edge that exists
+              // today turns into a bare `Unknown`; a transitive set past it ALSO discloses, which is what
+              // the producer's own union says about the same hierarchy. A `super.m()` names one body and
+              // fans out to nothing (see `isSuperReceiver`).
               const recvExpr = (ts.isPropertyAccessExpression(node.expression)
                 || ts.isElementAccessExpression(node.expression)) ? node.expression.expression : null;
-              if (recvExpr) {
-                const rt = checker.getTypeAtLocation(recvExpr);
-                const rootClass = (rt?.symbol?.declarations ?? []).find((d) =>
-                  ts.isClassDeclaration(d) && projectFiles.has(path.resolve(d.getSourceFile().fileName)));
-                if (rootClass) overrides = allOverrides.filter((om) =>
-                  ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass));
-              }
+              const rootClass = localReceiverClass(recvExpr);
+              const direct = rootClass ? allOverrides.filter((om) =>
+                ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass)) : allOverrides;
+              const overrides = isSuperReceiver(recvExpr) ? [] : memberDispatchBodies(decl, rootClass);
+              if (isSuperReceiver(recvExpr)) probeR871("super-call", decl, direct.length);
+              else if (direct.length <= CHA_FANOUT_LIMIT) probeR871("class", decl, overrides.length - direct.length);
               if (overrides.length > 0) {
-                if (overrides.length <= 12) {
-                  let allResolved = true;
+                if (direct.length <= CHA_FANOUT_LIMIT) {
+                  let allResolved = overrides.length <= CHA_FANOUT_LIMIT;
                   const oTargets = [];
                   for (const om of overrides) {
                     const ot = nodeName.get(om);
@@ -8194,7 +8346,7 @@ function visitCalls(node) {
               // the property as the OWNER and losing the member entirely, which is not a name the
               // dispatch-frontier can resolve against the hierarchy sidecar.
               const sigDecl = memberSigOf(decl);
-              let edged = false;
+              let edged = false, descentUnresolved = false;
               if ((ts.isMethodSignature(sigDecl) || ts.isPropertySignature(sigDecl))
                   && sigDecl.parent && ts.isInterfaceDeclaration(sigDecl.parent)) {
                 // ⟨0.39⟩ obligation 1, LOCAL half. Recorded HERE — before the CHA is consulted — for the
@@ -8213,13 +8365,25 @@ function visitCalls(node) {
                     // the structural-implementor pass above. A PropertyAssignment (`go: () => …`) is the
                     // object-literal spelling `ts.isMethodDeclaration`/`ts.isPropertyDeclaration` alone
                     // don't match; accepted here alongside them.
-                    const memberNodes = cls.members ?? cls.properties ?? [];
-                    const m = memberNodes.find((x) =>
-                      (ts.isMethodDeclaration(x) || ts.isPropertyDeclaration(x) || ts.isPropertyAssignment(x))
-                      && x.name?.getText?.() === member);
-                    const t = m && nodeName.get(m);
-                    if (t) targets.push(t);
-                    else allResolved = false;
+                    // ⟨SOUNDNESS R872⟩ …AND EVERY OVERRIDE OF IT BELOW THE IMPLEMENTOR. `class SubO extends BaseO`
+                    // carries no `implements` clause, so it is in no `interfaceImpls` list, and this arm took
+                    // `BaseO.m` as the whole answer: an `I`-typed `i.m()` read `inferred: []` over a SubO that
+                    // writes (EXECUTED), and nest's `RouterResponseController.apply` read `[]` over the
+                    // `ExpressAdapter.reply` its `HttpServer`-typed receiver really reaches. The implementor
+                    // count above is still the bound; descent adds bodies inside it.
+                    const bodies = implMemberBodies(cls, member);
+                    if (!bodies) { allResolved = false; continue; }
+                    probeR871("iface", bodies[0], bodies.length - 1);
+                    if (bodies[0].parent !== cls) probeR871("iface-inherited", bodies[0], 1);
+                    for (const [bi, b] of bodies.entries()) {
+                      const t = nodeName.get(b);
+                      if (t) { if (!targets.includes(t)) targets.push(t); }
+                      // The implementor's own (or inherited) member decides `allResolved`, as it always did —
+                      // and with it whether this caller is recorded as a genuine dispatcher below. An unnamed
+                      // OVERRIDE under it discloses beside the edges and changes neither.
+                      else if (bi === 0) allResolved = false;
+                      else descentUnresolved = true;
+                    }
                   }
                   for (const t of targets) rec.edges.add(t);
                   edged = targets.length > 0 && allResolved;
@@ -8235,7 +8399,7 @@ function visitCalls(node) {
                   }
                 }
               }
-              if (!edged) {
+              if (!edged || descentUnresolved) {
                 rec.direct.add("Unknown");
                 // QUALIFIED owner (module.Type), matching the `mod.Class.member` fn quals so the
                 // dispatch-frontier (callers --include-unknown) can resolve overrides against the
@@ -10435,6 +10599,10 @@ function resolveDepEntryKey(pkg, subpath) {
 // `Mid.hook` — no body — and charged `Base.hook` Unknown even though `Impl.hook` is the sole concrete
 // implementation and fully analyzed. The two-level fixture could not see it, which is also why the
 // measured corpus deltas characterise one-level hierarchies only.
+// ⟨SOUNDNESS R871⟩ THE PRECONDITION BELOW IS NOW MET AND THIS IS STILL ONE LEVEL, ON PURPOSE: the dispatch-site
+// fan-out is transitive (`memberDispatchBodies`), so Impl's effect does reach the caller. Making this climb
+// transitive too would REMOVE `Base.hook`'s compensating Unknown — a removal-direction change that needs its
+// own accounting, so it is left for its own row rather than folded into a traversal fix.
 // DIRECT overrides only — the transitive climb was REVERTED, and the reason is worth keeping. Climbing
 // removed the base member's Unknown for `Base → Mid (re-declares abstract) → Impl`, but the dispatch-site
 // fan-out (see `classOverrides` at the call site) is still ONE level, so nothing then carried Impl's
@@ -10943,9 +11111,15 @@ function typingsInterfaceImpls() {
     return mn ? nodeName.get(mn) : undefined;
   };
   const unionArms = [];
+  // ⟨SOUNDNESS R872⟩ The sixth field is the NAMED implementor CLASS NODES, so the emitter can descend from
+  // each one's member into the overrides below it (`implMemberBodies`). `localEffs` answers by NAME and so
+  // can only ever see `${Cls}.${m}` — the implementor's own body — and a `class SubO extends BaseO` that
+  // overrides it carries no `implements` clause and is in no arm. The typings arm has names only (a `.d.ts`
+  // class has no bodies to descend into) and carries none.
+  const namedImplNodes = (impls) => impls.filter((c) => !!nominalName(c));
   for (const [ifaceDecl, implClasses] of interfaceImpls) {
     const { names, nodes } = splitImpls(implClasses);
-    unionArms.push([ifaceDecl, names, nodes.length > 0, pkgName, nodes]);
+    unionArms.push([ifaceDecl, names, nodes.length > 0, pkgName, nodes, namedImplNodes(implClasses)]);
   }
   const inScanClassesByName = new Map(); // iface NAME -> every class the in-scan arms register under it
   for (const [d, cls] of unionArms) {
@@ -10987,7 +11161,7 @@ function typingsInterfaceImpls() {
     const owner = arm[2] ?? pkgName;
     const inScan = owner === pkgName ? inScanClassesByName.get(n) : null;
     if (inScan && arm[1].every((c) => inScan.has(c))) continue;
-    unionArms.push([arm[0], arm[1], false, owner, []]);
+    unionArms.push([arm[0], arm[1], false, owner, [], []]);
   }
   // ⟨0.39⟩ obligation 2's arms, pushed LAST and deliberately AFTER `inScanClassesByName` was taken: a
   // foreign `Backend` and a local one are different keys under different prefixes, so neither may
@@ -11001,7 +11175,7 @@ function typingsInterfaceImpls() {
     if (!isPublishableForeignIface(ifaceDecl)) continue;
     const ownerPkg = declModule(ifaceDecl);
     const { names, nodes } = splitImpls(implClasses);
-    unionArms.push([ifaceDecl, names, nodes.length > 0, ownerPkg, nodes]);
+    unionArms.push([ifaceDecl, names, nodes.length > 0, ownerPkg, nodes, namedImplNodes(implClasses)]);
   }
   // A TRUNCATED typings census refuses the PUBLICATION, and it has to be here rather than at the census.
   // Dropping the typings arm on its own lands the refusal on the EVIDENCE side — and the evidence is the
@@ -11032,7 +11206,7 @@ function typingsInterfaceImpls() {
     const n = ifaceDecl.name?.text;
     if (n) ifaceNameCounts.set(`${ownerPkg}#${n}`, (ifaceNameCounts.get(`${ownerPkg}#${n}`) ?? 0) + 1);
   }
-  for (const [ifaceDecl, implClasses, hadUnnamed, ownerPkg, implNodes = []] of unionArms) {
+  for (const [ifaceDecl, implClasses, hadUnnamed, ownerPkg, implNodes = [], namedNodes = []] of unionArms) {
     const ifaceName = ifaceDecl.name?.text;
     // ⟨CARDINAL SIN FIX, structural-implementor gap⟩ `!implClasses.length` used to skip the arm outright
     // — correct when there are genuinely zero implementors, but an interface implemented ONLY
@@ -11096,6 +11270,29 @@ function typingsInterfaceImpls() {
         for (const clsName of implClasses) {
           const e = localEffs.get(`${clsName}.${m}`);
           if (e) { for (const x of e.inferred) infU.add(x); for (const b of e.blind) blindU.add(b); }
+        }
+        // ⟨SOUNDNESS R872⟩ …and every override below a named implementor's own member — the bodies the
+        // in-scan dispatch site now edges to, so the report a consumer joins says what the producer's own
+        // dispatch says. The implementor's own body is `localEffs`'s above (index 0, skipped here).
+        for (const cls of namedNodes) {
+          const bodies = implMemberBodies(cls, m);
+          // ⟨R872, inherited half⟩ an implementor with NO body for `m` is not a pure one — the in-scan arm has
+          // always called it unresolved — unless the member is OPTIONAL and provably absent on this class.
+          if (!bodies) {
+            if (!(member.questionToken && provablyLacksMember(cls, m))) { unaccounted = true; infU.add("Unknown"); }
+            continue;
+          }
+          probeR871("union", bodies[0], bodies.length - 1);
+          // The implementor's OWN body is answered by `localEffs` above, by name; an INHERITED one is not under
+          // that name and is read here like the rest.
+          const fromLocalEffs = bodies[0].parent === cls ? 1 : 0;
+          if (!fromLocalEffs) probeR871("union-inherited", bodies[0], 1);
+          for (const b of bodies.slice(fromLocalEffs)) {
+            const u = nodeName.get(b);
+            if (!u) { unaccounted = true; infU.add("Unknown"); continue; }
+            for (const x of inferred.get(u) ?? []) infU.add(x);
+            for (const bl of fns.get(u)?.blind ?? []) blindU.add(bl);
+          }
         }
         for (const impl of implNodes) {
           const u = structuralMemberUnit(impl, m);

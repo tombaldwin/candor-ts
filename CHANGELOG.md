@@ -10,6 +10,40 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ STRICTER: a dispatch now reaches EVERY override below the body it resolved to, not one level of them
+  (SOUNDNESS R871, R872). Five readers answered "which bodies can `x.m()` run?" separately and disagreed in
+  one report; they now share one answer (`overrideDescent` / `memberDispatchBodies` / `implMemberBodies`).
+  R871: `Base.m <- Mid.m <- Leaf.m`, a `Base`-typed `b.m()` never reached `Leaf.m` (methods AND accessors).
+  R872: `BaseO implements I` + `SubO extends BaseO` overriding `m` — an `I`-typed `i.m()` read `inferred: []`
+  in the in-scan arm, in obligation 3's local join, in the producer's published `pkg#I.m` union (so a CHAINED
+  consumer lost the effect too) and in the coercion CHA (`${i}` running SubO's `toString`). All EXECUTED, all
+  at `deny <E>` exit 0 before. Real code: 8 nest units read `[]` on core dispatch paths —
+  `RouterResponseController.apply` now carries the `ExpressAdapter`/`FastifyAdapter.reply` Clock/Env (its
+  `deny Env` and `deny Unknown` go 0 → 1), `NestApplication.createServer` gains Net. Receiver-subtree scoping
+  is unchanged (a `Mid`-typed receiver never reaches a sibling's override). Each reader keeps the fan-out
+  bound it had, over the count it had, so no edge that exists today becomes a bare `Unknown`; a class family
+  whose TRANSITIVE size passes 12 now also discloses `Unknown[dispatch:…]` beside its edges.
+  Over the pinned 28-entry roster: 561 rows gain an effect (531 gain only Net — 524 in rxjs — every one already
+  carrying `Unknown`), 28 `interfaceUnion` rows are added, 3 union rows are dropped because the real row under
+  the same key now carries everything they did, and 25 rows gain a `dispatch:` reason.
+- ⚠ STRICTER for a chained consumer, and a hedge resolved in-scan: an interface implementor whose member is
+  INHERITED (`class ImplX extends BaseX implements I {}`) now answers with the inherited body and the overrides
+  of it in its own subtree (SOUNDNESS R872, inherited half). The producer's published `pkg#I.m` union used to
+  contribute NOTHING for such an implementor, so beside an effectful sibling it claimed the sibling's effects
+  as the whole answer — a chained consumer's `deny Fs` and `deny Unknown` both exited 0 over a program that
+  writes (EXECUTED). In-scan, the same implementor was a disclosed `Unknown[dispatch:…]`; it now resolves.
+  Where no body can be named (a dependency base, a mixin heritage) the hedge stays, and the producer's union
+  now discloses it too; an OPTIONAL member a fully-local implementor provably lacks contributes nothing.
+  Expect `deny Unknown` 1 → 0 where the hedge was the only `Unknown`: over the pinned roster 6 rows (rollup's
+  `addExportedVariables` family), all resolved to genuinely pure bodies; 241 `dispatch:` reasons are withdrawn,
+  every one now answered by an edge into a body of that member; 10 union rows are added (one, xstate's
+  merged-declaration `SimulatedClock.start`, is a new `Unknown`), 2 Unknown-only union rows are withdrawn.
+- Fewer fabrications: `super.m()` / `super.v` no longer fan out to overrides. `super` names one body; the
+  in-scan arms charged the caller with every override in `super`'s subtree, including a SIBLING class's —
+  socket.io's uWS `Polling.onClose` (`super.onClose()`) was charged the HTTP `Polling.onClose`'s Net. Over the
+  roster this removes 264 call edges in 103 units, every one sitting on a `super.<member>` site; 8 rows lose
+  a concrete effect they could not perform. Expect `deny <E>` over such a unit to go 1 → 0.
+
 - ⚠ STRICTER, with a CHAINED dependency report: a call on a dependency's NON-FINAL class now carries the
   overrides in that dependency's own subclasses (SOUNDNESS R867, conformance PART 94). `f(b: BaseO) {
   b.m() }`, executed with the dependency's `SubO` whose `m` reads the environment, read only `BaseO.m`'s
