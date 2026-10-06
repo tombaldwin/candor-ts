@@ -8346,7 +8346,7 @@ function visitCalls(node) {
               // the property as the OWNER and losing the member entirely, which is not a name the
               // dispatch-frontier can resolve against the hierarchy sidecar.
               const sigDecl = memberSigOf(decl);
-              let edged = false;
+              let edged = false, descentUnresolved = false;
               if ((ts.isMethodSignature(sigDecl) || ts.isPropertySignature(sigDecl))
                   && sigDecl.parent && ts.isInterfaceDeclaration(sigDecl.parent)) {
                 // ⟨0.39⟩ obligation 1, LOCAL half. Recorded HERE — before the CHA is consulted — for the
@@ -8375,10 +8375,14 @@ function visitCalls(node) {
                     if (!bodies) { allResolved = false; continue; }
                     probeR871("iface", bodies[0], bodies.length - 1);
                     if (bodies[0].parent !== cls) probeR871("iface-inherited", bodies[0], 1);
-                    for (const b of bodies) {
+                    for (const [bi, b] of bodies.entries()) {
                       const t = nodeName.get(b);
                       if (t) { if (!targets.includes(t)) targets.push(t); }
-                      else allResolved = false;
+                      // The implementor's own (or inherited) member decides `allResolved`, as it always did —
+                      // and with it whether this caller is recorded as a genuine dispatcher below. An unnamed
+                      // OVERRIDE under it discloses beside the edges and changes neither.
+                      else if (bi === 0) allResolved = false;
+                      else descentUnresolved = true;
                     }
                   }
                   for (const t of targets) rec.edges.add(t);
@@ -8395,7 +8399,7 @@ function visitCalls(node) {
                   }
                 }
               }
-              if (!edged) {
+              if (!edged || descentUnresolved) {
                 rec.direct.add("Unknown");
                 // QUALIFIED owner (module.Type), matching the `mod.Class.member` fn quals so the
                 // dispatch-frontier (callers --include-unknown) can resolve overrides against the
