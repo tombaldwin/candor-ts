@@ -22177,6 +22177,157 @@ export class SubH extends BaseH { #p(): void { ${ENV}; } go(): void { this.#p();
         probe(depO) === 1 && probe(depK) === 0, `o=${probe(depO)} k=${probe(depK)}`);
 }
 
+// ── ⟨SOUNDNESS R871/R872⟩ ONE ANSWER TO "WHICH BODIES CAN `x.m()` RUN?" ─────────────────────────────────────
+// Five readers of one relation disagreed in one report: the in-scan class and accessor arms read ONE level of
+// `classOverrides` (R871: `Base.m <- Mid.m <- Leaf.m`, a `Base`-typed `b.m()` never reached Leaf), and the
+// in-scan interface arm, obligation 3's join, the producer's interface union and the coercion CHA took the
+// implementor's own member and never descended (R872: `BaseO implements I`, `SubO extends BaseO` overrides
+// `m`, an `I`-typed `i.m()` read `[]`). Every case below was EXECUTED (the program writes the file) and every
+// one read pure or absent at `2fa4699`, with the gate at exit 0. Names are chosen so no scope prefixes another.
+if (blk()) {
+  const W = `fs.writeFileSync("/tmp/x", "x")`, ENV = `void process.env.HOME`;
+  const SRC = `import * as fs from "node:fs";
+export class BaseK1 { m(): void { } }
+export class MidK1 extends BaseK1 { override m(): void { } }
+export class LeafK1 extends MidK1 { override m(): void { ${W}; } }
+export class SideK1 extends BaseK1 { override m(): void { ${ENV}; } }
+export function qViaBase(b: BaseK1) { b.m(); }
+export function qViaMid(b: MidK1) { b.m(); }
+export function qViaSide(b: SideK1) { b.m(); }
+export interface IK2 { m(): void }
+export class BaseOK2 implements IK2 { m(): void { } }
+export class SubOK2 extends BaseOK2 { override m(): void { ${W}; } }
+export function rViaIface(i: IK2) { i.m(); }
+export interface IK3 { m(): void }
+export class AK3 implements IK3 { m(): void { } }
+export class BK3 extends AK3 { }
+export class CK3 extends BK3 { override m(): void { ${W}; } }
+export function sViaIface(i: IK3) { i.m(); }
+export class BaseK4 { get v(): number { return 1; } }
+export class MidK4 extends BaseK4 { override get v(): number { return 2; } }
+export class LeafK4 extends MidK4 { override get v(): number { ${W}; return 3; } }
+export function tViaBase(b: BaseK4) { return b.v; }
+export class BaseK5 { m(): void { } }
+export class MidK5 extends BaseK5 { override m(): void { } }
+export class LeafK5 extends MidK5 { override m(): void { super.m(); } }
+export class DeepK5 extends LeafK5 { override m(): void { ${ENV}; } }
+export interface IK7 { tag(): string }
+export class BaseK7 implements IK7 { tag(): string { return "a"; } toString(): string { return "a"; } }
+export class SubK7 extends BaseK7 { override toString(): string { ${W}; return "b"; } }
+export function vViaIface(i: IK7) { return \`\${i}\`; }`;
+  const d = project({ "package.json": `{"name":"va","version":"1.0.0"}`, "src/a.ts": SRC });
+  const { report } = scan(d);
+  const inf = (fn) => entry(report, `src.a.${fn}`)?.inferred ?? [];
+  const gate = (pol) => { const pf = path.join(d, "r871.policy"); fs.writeFileSync(pf, pol + "\n"); return scan(d, "--policy", pf).r.status; };
+  check("R871: a `Base`-typed `b.m()` reaches the GRAND-subclass override (`Leaf.m`, Fs) and keeps the sibling's Env",
+        inf("qViaBase").includes("Fs") && inf("qViaBase").includes("Env"), JSON.stringify(inf("qViaBase")));
+  check("R871 GATE: `deny Fs src.a.qViaBase` exits 1 (was 0 over a program that writes)", gate("deny Fs src.a.qViaBase") === 1);
+  check("R871 SCOPING: a `Mid`-typed receiver reaches Leaf's Fs and NOT the sibling Side's Env",
+        inf("qViaMid").includes("Fs") && !inf("qViaMid").includes("Env"), JSON.stringify(inf("qViaMid")));
+  check("R871 SCOPING: a `Side`-typed receiver reaches Env and never Leaf's Fs",
+        inf("qViaSide").includes("Env") && !inf("qViaSide").includes("Fs"), JSON.stringify(inf("qViaSide")));
+  check("R871 SCOPING GATE: `deny Fs src.a.qViaSide` stays 0", gate("deny Fs src.a.qViaSide") === 0);
+  check("R871 ACCESSOR: a `Base`-typed `b.v` reaches the grand-subclass getter (Fs)", inf("tViaBase").includes("Fs"),
+        JSON.stringify(inf("tViaBase")));
+  check("R872: an `I`-typed `i.m()` reaches the implementor's SUBCLASS override (Fs)", inf("rViaIface").includes("Fs"),
+        JSON.stringify(inf("rViaIface")));
+  check("R872 GATE: `deny Fs src.a.rViaIface` exits 1 (was 0, with `inferred: []`)", gate("deny Fs src.a.rViaIface") === 1);
+  check("R872: …through a non-overriding middle class (`AK3 <- BK3 <- CK3`)", inf("sViaIface").includes("Fs"),
+        JSON.stringify(inf("sViaIface")));
+  check("R872 PRODUCER: the interface union rows `IK2.m` and `IK3.m` carry the subclass override's Fs",
+        ["IK2.m", "IK3.m"].every((fn) => report.functions.some((e) => e.interfaceUnion === true && e.fn === fn && e.inferred.includes("Fs"))),
+        JSON.stringify(report.functions.filter((e) => e.interfaceUnion)));
+  check("R872 COERCION: `${i}` on an `I`-typed value runs the implementor subclass's `toString` (Fs)",
+        inf("vViaIface").includes("Fs"), JSON.stringify(inf("vViaIface")));
+  check("R871 SUPER GUARD: `super.m()` names Mid's body only — `LeafK5.m` gains no Env from `DeepK5.m`",
+        !inf("LeafK5.m").includes("Env"), JSON.stringify(entry(report, "src.a.LeafK5.m")));
+  // THE PROBE IS CALIBRATED: it fires where a body the old readers never named is added, and is silent on a
+  // tree whose every dispatch the one-level reader already answered.
+  const probe = (dir) => (spawnSync("node", [path.join(HERE, "scan.mjs"), dir],
+    { encoding: "utf8", env: { ...process.env, CANDOR_R871_REACH: "1" } }).stderr.match(/R871-REACH (class|iface|accessor) /g) ?? []).length;
+  const ctl = project({ "package.json": `{"name":"vc","version":"1.0.0"}`, "src/a.ts": `import * as fs from "node:fs";
+export class BaseC { m(): void { } }
+export class SubC extends BaseC { override m(): void { ${W}; } }
+export function viaC(b: BaseC) { b.m(); }` });
+  check("R871 [probe]: fires on the multi-level / implementor-subclass tree and is SILENT on a one-level control",
+        probe(d) >= 4 && probe(ctl) === 0, `d=${probe(d)} ctl=${probe(ctl)}`);
+  // THE BOUND IS NOT MOVED ONTO THE TRANSITIVE COUNT: 2 direct overrides with 7 subclasses each (16 bodies).
+  // Today's 2 edges stay edges — `deny Fs` must still fire — and the family past the bound also discloses.
+  const wide = [`import * as fs from "node:fs";`, `export class BaseW { m(): void { } }`];
+  for (const mid of ["MA", "MB"]) {
+    wide.push(`export class ${mid} extends BaseW { override m(): void { ${mid === "MA" ? W : ""}; } }`);
+    for (let i = 0; i < 7; i++) wide.push(`export class ${mid}L${i} extends ${mid} { override m(): void { } }`);
+  }
+  wide.push(`export function viaWide(b: BaseW) { b.m(); }`);
+  const dw = project({ "package.json": `{"name":"vw","version":"1.0.0"}`, "src/a.ts": wide.join("\n") });
+  const ew = entry(scan(dw).report, "src.a.viaWide");
+  check("R871 BOUND: a 16-body family under 2 direct overrides keeps the edges (Fs) AND discloses `Unknown[dispatch:…BaseW.m]`",
+        (ew?.inferred ?? []).includes("Fs") && (ew?.unknownWhy ?? []).some((w) => /^dispatch:.*BaseW\.m$/.test(w)), JSON.stringify(ew));
+
+  // CHAINED (the producer half): a dependency's `IDep` has a pure direct implementor whose SUBCLASS writes, and a
+  // second implementor reading the environment. Before: the published `depk#IDep.m` union read `['Env']`, so a
+  // consumer dispatching `IDep.m` lost the Fs and `deny Fs` AND `deny Unknown` both exited 0.
+  const dep = project({ "package.json": `{"name":"depk","version":"1.0.0"}`, "src/index.ts": `import * as fs from "node:fs";
+export interface IDep { m(): void }
+export class BaseD implements IDep { m(): void { } }
+class SubD extends BaseD { override m(): void { ${W}; } }
+export class OtherD implements IDep { m(): void { ${ENV}; } }
+export function mkD(): IDep { return new SubD(); }` });
+  scan(dep);
+  const app = project({
+    "package.json": `{"name":"appk","version":"1.0.0","dependencies":{"depk":"1.0.0"}}`,
+    "src/index.ts": `import { IDep, mkD } from "depk";\nexport function viaDepI(i: IDep): void { i.m(); }\nexport function callerDepI(): void { viaDepI(mkD()); }`,
+    "node_modules/depk/package.json": `{"name":"depk","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/depk/index.d.ts": `export interface IDep { m(): void; }\nexport declare class BaseD implements IDep { m(): void; }\nexport declare class OtherD implements IDep { m(): void; }\nexport declare function mkD(): IDep;\n`,
+    "node_modules/depk/index.js": "",
+  });
+  const runApp = (pol) => {
+    const env = { ...process.env, CANDOR_DEPS: path.join(dep, ".candor", "report.json") };
+    delete env.CANDOR_POLICY;
+    const extra = [];
+    if (pol) { fs.writeFileSync(path.join(app, "r872.policy"), pol + "\n"); extra.push("--policy", path.join(app, "r872.policy")); }
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), app, ...extra], { encoding: "utf8", env });
+    return { status: r.status, report: JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8")) };
+  };
+  const ca = runApp(null);
+  check("R872 CHAINED: the consumer's `IDep.m` dispatch AND its caller carry the implementor subclass's Fs beside OtherD's Env",
+        ["src.index.viaDepI", "src.index.callerDepI"].every((fn) => {
+          const i = entry(ca.report, fn)?.inferred ?? []; return i.includes("Fs") && i.includes("Env"); }),
+        JSON.stringify(ca.report.functions));
+  check("R872 CHAINED GATE: `deny Fs src.index.callerDepI` exits 1 (was 0)", runApp("deny Fs src.index.callerDepI").status === 1);
+
+  // OBLIGATION 3's JOIN: an override with no unit (`declare m`) is a hedge BESIDE the implementor's edge, never
+  // instead of it. The first cut of this fix set the join's `allResolved` false for it, which turns the whole key
+  // into a bare `Unknown` — `PB.m`'s Fs, edged before the descent existed, vanished and `deny Fs` went 1 -> 0.
+  // EXECUTED: `runIt(new PS())` writes. The corpus A/B could not see it (no such shape in the roster).
+  const depJ = project({ "package.json": `{"name":"depj","version":"1.0.0"}`,
+    "src/index.ts": `export interface IP { m(): void }\nexport function runIt(p: IP): void { p.m(); }` });
+  scan(depJ);
+  const appJ = project({
+    "package.json": `{"name":"appj","version":"1.0.0","dependencies":{"depj":"1.0.0"}}`,
+    "src/index.ts": `import * as fs from "node:fs";
+import { IP, runIt } from "depj";
+export class PB implements IP { m = (): void => { ${W}; }; }
+export class PS extends PB { declare m: () => void; }
+export function goJoin(): void { runIt(new PS()); }`,
+    "node_modules/depj/package.json": `{"name":"depj","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/depj/index.d.ts": `export interface IP { m(): void; }\nexport declare function runIt(p: IP): void;\n`,
+    "node_modules/depj/index.js": "",
+  });
+  const runJ = (pol) => {
+    const env = { ...process.env, CANDOR_DEPS: path.join(depJ, ".candor", "report.json") };
+    delete env.CANDOR_POLICY;
+    const extra = [];
+    if (pol) { fs.writeFileSync(path.join(appJ, "j.policy"), pol + "\n"); extra.push("--policy", path.join(appJ, "j.policy")); }
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), appJ, ...extra], { encoding: "utf8", env });
+    return { status: r.status, report: JSON.parse(fs.readFileSync(path.join(appJ, ".candor", "report.json"), "utf8")) };
+  };
+  const gj = entry(runJ(null).report, "src.index.goJoin");
+  check("R872 JOIN: an unnamed override hedges BESIDE the implementor's edge — goJoin keeps PB.m's Fs and adds Unknown",
+        (gj?.inferred ?? []).includes("Fs") && (gj?.inferred ?? []).includes("Unknown"), JSON.stringify(gj));
+  check("R872 JOIN GATE: `deny Fs src.index.goJoin` stays 1", runJ("deny Fs src.index.goJoin").status === 1);
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
