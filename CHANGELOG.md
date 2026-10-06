@@ -26,6 +26,18 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   Over the pinned 28-entry roster: 561 rows gain an effect (531 gain only Net — 524 in rxjs — every one already
   carrying `Unknown`), 28 `interfaceUnion` rows are added, 3 union rows are dropped because the real row under
   the same key now carries everything they did, and 25 rows gain a `dispatch:` reason.
+- ⚠ STRICTER for a chained consumer, and a hedge resolved in-scan: an interface implementor whose member is
+  INHERITED (`class ImplX extends BaseX implements I {}`) now answers with the inherited body and the overrides
+  of it in its own subtree (SOUNDNESS R872, inherited half). The producer's published `pkg#I.m` union used to
+  contribute NOTHING for such an implementor, so beside an effectful sibling it claimed the sibling's effects
+  as the whole answer — a chained consumer's `deny Fs` and `deny Unknown` both exited 0 over a program that
+  writes (EXECUTED). In-scan, the same implementor was a disclosed `Unknown[dispatch:…]`; it now resolves.
+  Where no body can be named (a dependency base, a mixin heritage) the hedge stays, and the producer's union
+  now discloses it too; an OPTIONAL member a fully-local implementor provably lacks contributes nothing.
+  Expect `deny Unknown` 1 → 0 where the hedge was the only `Unknown`: over the pinned roster 6 rows (rollup's
+  `addExportedVariables` family), all resolved to genuinely pure bodies; 241 `dispatch:` reasons are withdrawn,
+  every one now answered by an edge into a body of that member; 10 union rows are added (one, xstate's
+  merged-declaration `SimulatedClock.start`, is a new `Unknown`), 2 Unknown-only union rows are withdrawn.
 - Fewer fabrications: `super.m()` / `super.v` no longer fan out to overrides. `super` names one body; the
   in-scan arms charged the caller with every override in `super`'s subtree, including a SIBLING class's —
   socket.io's uWS `Polling.onClose` (`super.onClose()`) was charged the HTTP `Polling.onClose`'s Net. Over the

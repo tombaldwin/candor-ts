@@ -3791,13 +3791,48 @@ const probeR871 = (kind, decl, n) => {
 // resolved here). The member kinds are the ones the readers always matched: a method, a property (`m = () =>
 // …`) and an object literal's property assignment. Shared by the in-scan interface arm, obligation 3's local
 // join and the producer's interface union, which had three copies of the lookup and none of the descent.
+//
+// ⟨SOUNDNESS R872, inherited half⟩ …OR THE MEMBER IT INHERITS FROM A LOCAL ANCESTOR. `class ImplX extends BaseX
+// implements I {}` runs `BaseX.m` for an `I`-typed `i.m()`; the three readers each looked only at `ImplX`'s own
+// members, and answered the miss three different ways. The in-scan arm and the join called it UNRESOLVED and
+// disclosed `Unknown[dispatch:…]`; the producer's union looked the name `ImplX.m` up in `localEffs`, found
+// nothing, and contributed NOTHING — so a published `pkg#I.m` beside an effectful sibling implementor claimed
+// that sibling's effects as the whole answer, and a chained consumer's `deny Fs` and `deny Unknown` both
+// exited 0 over a program that writes (EXECUTED). The nearest declaration up the LOCAL `extends` chain is the
+// body that runs, and the overrides of it inside `impl`'s own subtree are the rest. The walk stops at the
+// first ancestor declaring the name in ANY instance kind — a getter there shadows a method further up — and
+// that declaration must be one the readers can edge to, or the answer stays `null`. It also stops where the
+// chain leaves the project: a dependency base is a body this scan does not hold.
 function implMemberBodies(impl, member) {
   const memberNodes = impl.members ?? impl.properties ?? [];
   const own = memberNodes.find((x) =>
     (ts.isMethodDeclaration(x) || ts.isPropertyDeclaration(x) || ts.isPropertyAssignment(x))
     && x.name?.getText?.() === member);
-  if (!own) return null;
-  return [own, ...(ts.isClassDeclaration(impl) ? memberDispatchBodies(own, impl) : [])];
+  if (own) return [own, ...(ts.isClassDeclaration(impl) ? memberDispatchBodies(own, impl) : [])];
+  if (!ts.isClassDeclaration(impl)) return null;
+  for (let anc = localBaseClassOf(impl), g = 0; anc && g++ < 64; anc = localBaseClassOf(anc)) {
+    const decl = (anc.members ?? []).find((x) => x.name?.getText?.() === member
+      && !ts.isConstructorDeclaration(x) && !(ts.getCombinedModifierFlags(x) & ts.ModifierFlags.Static));
+    if (!decl) continue;
+    if (!(ts.isMethodDeclaration(decl) || ts.isPropertyDeclaration(decl))) return null;
+    return [decl, ...memberDispatchBodies(decl, impl)];
+  }
+  return null;
+}
+// Does `impl` declare `member` NOWHERE it could have come from — no own member and an `extends` chain that is
+// local all the way up with no ancestor naming it? Only then is an OPTIONAL interface member provably absent at
+// runtime for this implementor, so a union may treat it as contributing nothing rather than as unaccounted.
+function provablyLacksMember(impl, member) {
+  if (!ts.isClassDeclaration(impl)) return false;
+  for (let c = impl, g = 0; c && g++ < 64; ) {
+    if ((c.members ?? []).some((x) => x.name?.getText?.() === member)) return false;
+    const ext = (c.heritageClauses ?? []).some((h) => h.token === ts.SyntaxKind.ExtendsKeyword);
+    if (!ext) return true;                          // top of a fully local chain
+    const b = localBaseClassOf(c);
+    if (!b) return false;                           // the chain leaves the project (or cannot be resolved)
+    c = b;
+  }
+  return false;
 }
 // Is `cls` in the subtree rooted at `root` (i.e. cls === root, or cls transitively `extends` root
 // through LOCAL classes)? Used to scope a base-member override fan-out to the RECEIVER's static type
@@ -6460,6 +6495,7 @@ function ensureLocalImplIndex() {
           if (!t) { cell.allResolved = false; continue; }
           if (!cell.targets.includes(t)) cell.targets.push(t);
           probeR871("join", bodies[0], bodies.length - 1);
+          if (bodies[0].parent !== cls) probeR871("join-inherited", bodies[0], 1);
           for (const b of bodies.slice(1)) {
             const bt = nodeName.get(b);
             // An override this scan minted no unit for is a hedge BESIDE the edges, never instead of them:
@@ -8338,6 +8374,7 @@ function visitCalls(node) {
                     const bodies = implMemberBodies(cls, member);
                     if (!bodies) { allResolved = false; continue; }
                     probeR871("iface", bodies[0], bodies.length - 1);
+                    if (bodies[0].parent !== cls) probeR871("iface-inherited", bodies[0], 1);
                     for (const b of bodies) {
                       const t = nodeName.get(b);
                       if (t) { if (!targets.includes(t)) targets.push(t); }
@@ -11234,9 +11271,19 @@ function typingsInterfaceImpls() {
         // in-scan dispatch site now edges to, so the report a consumer joins says what the producer's own
         // dispatch says. The implementor's own body is `localEffs`'s above (index 0, skipped here).
         for (const cls of namedNodes) {
-          const bodies = implMemberBodies(cls, m) ?? [];
+          const bodies = implMemberBodies(cls, m);
+          // ⟨R872, inherited half⟩ an implementor with NO body for `m` is not a pure one — the in-scan arm has
+          // always called it unresolved — unless the member is OPTIONAL and provably absent on this class.
+          if (!bodies) {
+            if (!(member.questionToken && provablyLacksMember(cls, m))) { unaccounted = true; infU.add("Unknown"); }
+            continue;
+          }
           probeR871("union", bodies[0], bodies.length - 1);
-          for (const b of bodies.slice(1)) {
+          // The implementor's OWN body is answered by `localEffs` above, by name; an INHERITED one is not under
+          // that name and is read here like the rest.
+          const fromLocalEffs = bodies[0].parent === cls ? 1 : 0;
+          if (!fromLocalEffs) probeR871("union-inherited", bodies[0], 1);
+          for (const b of bodies.slice(fromLocalEffs)) {
             const u = nodeName.get(b);
             if (!u) { unaccounted = true; infU.add("Unknown"); continue; }
             for (const x of inferred.get(u) ?? []) infU.add(x);

@@ -5499,8 +5499,27 @@ export function handle(store: Store): void { store.save("x"); }`,
   });
   const { report } = scan(d);
   const h = entry(report, "src.a.handle");
-  check("a partially-resolved interface dispatch keeps honest Unknown",
-        h?.inferred.includes("Unknown"), JSON.stringify(h));
+  // ⟨SOUNDNESS R872, inherited half⟩ The property this pins is "no silent drop", and it used to be met by a
+  // HEDGE because nothing could name the inherited body. `implMemberBodies` now names it (`Base.save`, the
+  // body that runs for a `PgStore`), so the effect itself is charged and the hedge is gone — a resolution,
+  // measured over the pinned roster as 6 rows losing `Unknown`, all classified C1 (resolved to genuinely pure
+  // bodies) by a classifier seeded to find a C3. The hedge is still required where the inherited body cannot
+  // be named — the mixin arm below.
+  check("a partially-resolved interface dispatch does not drop the inherited implementor — Base.save's Fs is charged",
+        h?.inferred.includes("Fs") && h?.calls?.includes("src.s.Base.save"), JSON.stringify(h));
+  const dm = project({
+    "src/s.ts": `import * as fsm from "node:fs";
+export interface Store { save(q: string): void; }
+export class Base { save(q: string): void { fsm.writeFileSync("/d", q); } }
+const Mixin = <T extends new (...a: any[]) => object>(B: T) => class extends B {};
+export class PgStore extends Mixin(Base) implements Store {}
+export class MemStore implements Store { save(q: string): void { /* pure */ } }`,
+    "src/a.ts": `import { Store } from "./s.js";
+export function handle(store: Store): void { store.save("x"); }`,
+  });
+  const hm = entry(scan(dm).report, "src.a.handle");
+  check("…and an implementor whose `save` comes through a MIXIN heritage (no nameable body) keeps honest Unknown",
+        hm?.inferred.includes("Unknown"), JSON.stringify(hm));
 }
 if (blk()) {
   // (d) merged interface declarations: the impl registers under BOTH blocks
@@ -22326,6 +22345,74 @@ export function goJoin(): void { runIt(new PS()); }`,
   check("R872 JOIN: an unnamed override hedges BESIDE the implementor's edge — goJoin keeps PB.m's Fs and adds Unknown",
         (gj?.inferred ?? []).includes("Fs") && (gj?.inferred ?? []).includes("Unknown"), JSON.stringify(gj));
   check("R872 JOIN GATE: `deny Fs src.index.goJoin` stays 1", runJ("deny Fs src.index.goJoin").status === 1);
+}
+
+// ── ⟨SOUNDNESS R872, inherited half⟩ AN IMPLEMENTOR WHOSE MEMBER IS INHERITED ─────────────────────────────────
+// `class ImplX extends BaseX implements I {}` runs `BaseX.m`. The in-scan arm and obligation 3's join called that
+// unresolved (`Unknown[dispatch:…]`); the producer's `pkg#I.m` union contributed NOTHING for it, so beside an
+// effectful sibling implementor the published row claimed the sibling's effects as the whole answer and a chained
+// consumer's `deny Fs` AND `deny Unknown` both exited 0 (EXECUTED). All three now resolve it to the inherited body.
+if (blk()) {
+  const W = `fs.writeFileSync("/tmp/x", "x")`, ENV = `void process.env.HOME`;
+  const DEP = `import * as fs from "node:fs";
+export interface IDep { m(): void }
+class BaseX { m(): void { ${W}; } }
+export class ImplX extends BaseX implements IDep { }
+export class OtherD implements IDep { m(): void { ${ENV}; } }
+export function mkD(): IDep { return new ImplX(); }`;
+  const dep = project({ "package.json": `{"name":"depi","version":"1.0.0"}`, "src/index.ts": DEP });
+  const sd = scan(dep);
+  const un = sd.report.functions.find((e) => e.interfaceUnion === true && e.hash === "depi#IDep.m");
+  check("R872 INHERITED PRODUCER: `depi#IDep.m` carries the inherited `BaseX.m`'s Fs beside OtherD's Env",
+        !!un && un.inferred.includes("Fs") && un.inferred.includes("Env"), JSON.stringify(un));
+  const app = project({
+    "package.json": `{"name":"appi","version":"1.0.0","dependencies":{"depi":"1.0.0"}}`,
+    "src/index.ts": `import { IDep, mkD } from "depi";\nexport function viaInh(i: IDep): void { i.m(); }\nexport function callInh(): void { viaInh(mkD()); }`,
+    "node_modules/depi/package.json": `{"name":"depi","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/depi/index.d.ts": `export interface IDep { m(): void; }\ndeclare class BaseX { m(): void; }\nexport declare class ImplX extends BaseX implements IDep {}\nexport declare class OtherD implements IDep { m(): void; }\nexport declare function mkD(): IDep;\n`,
+    "node_modules/depi/index.js": "",
+  });
+  const runApp = (pol) => {
+    const env = { ...process.env, CANDOR_DEPS: path.join(dep, ".candor", "report.json") };
+    delete env.CANDOR_POLICY;
+    const extra = [];
+    if (pol) { fs.writeFileSync(path.join(app, "inh.policy"), pol + "\n"); extra.push("--policy", path.join(app, "inh.policy")); }
+    return spawnSync("node", [path.join(HERE, "scan.mjs"), app, ...extra], { encoding: "utf8", env }).status;
+  };
+  check("R872 INHERITED CHAINED GATE: `deny Fs src.index.callInh` exits 1 (was 0, beside a union that read ['Env'])",
+        runApp("deny Fs src.index.callInh") === 1);
+  // In-scan: the hedge becomes the inherited body — and a SUBCLASS of the implementor overriding it is reached too.
+  const d = project({ "package.json": `{"name":"vi","version":"1.0.0"}`, "src/a.ts": `import * as fs from "node:fs";
+export interface IK6 { m(): void }
+export class BaseK6 { m(): void { } }
+export class ImplK6 extends BaseK6 implements IK6 { }
+export class SubK6 extends ImplK6 { override m(): void { ${W}; } }
+export class SideK6 extends BaseK6 { override m(): void { ${ENV}; } }
+export function uViaIface(i: IK6) { i.m(); }
+export interface IOpt { m?(): void; n(): void }
+export class NoM implements IOpt { n(): void { } }
+export class HasM implements IOpt { m(): void { ${ENV}; } n(): void { } }` });
+  const r = scan(d).report;
+  const u = entry(r, "src.a.uViaIface");
+  check("R872 INHERITED IN-SCAN: `i.m()` resolves through ImplK6's inherited BaseK6.m to SubK6's Fs, with no hedge left",
+        (u?.inferred ?? []).includes("Fs") && !(u?.inferred ?? []).includes("Unknown"), JSON.stringify(u));
+  check("R872 INHERITED SCOPING: the inherited body's overrides are scoped to the implementor — SideK6's Env is not reached",
+        !(u?.inferred ?? []).includes("Env"), JSON.stringify(u));
+  const opt = r.functions.find((e) => e.interfaceUnion === true && e.fn === "IOpt.m");
+  check("R872 INHERITED OPTIONAL: an OPTIONAL member a fully-local implementor provably lacks is not a hedge — `IOpt.m` is ['Env']",
+        !!opt && JSON.stringify(opt.inferred) === '["Env"]', JSON.stringify(opt));
+  // A FOREIGN base the scan cannot read stays unaccounted, in the producer as it always was in-scan.
+  const df = project({ "package.json": `{"name":"vf","version":"1.0.0","dependencies":{"basepkg":"1.0.0"}}`,
+    "src/a.ts": `import { ForeignBase } from "basepkg";
+import * as fs from "node:fs";
+export interface IF { m(): void }
+export class ImplF extends ForeignBase implements IF { }
+export class OtherF implements IF { m(): void { ${W}; } }`,
+    "node_modules/basepkg/package.json": `{"name":"basepkg","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/basepkg/index.d.ts": `export declare class ForeignBase { m(): void; }\n`, "node_modules/basepkg/index.js": "" });
+  const uf = scan(df).report.functions.find((e) => e.interfaceUnion === true && e.fn === "IF.m");
+  check("R872 INHERITED FOREIGN: an implementor inheriting `m` from a DEPENDENCY base makes the union disclose Unknown, not claim ['Fs']",
+        !!uf && uf.inferred.includes("Fs") && uf.inferred.includes("Unknown"), JSON.stringify(uf));
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
