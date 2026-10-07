@@ -6012,6 +6012,12 @@ function recordConformer(c, t) {
   }
   if (ts.isClassDeclaration(t)) {
     if (c.kind === "class" && classInSubtree(c.node, t)) return false;   // nominal: the subtree already answers
+    // R958 — an ASSERTED downcast (`base as Sub`, the target inside the conformer's own subtree) names no new
+    // conformer: the receiver's class arm answers `Sub`'s subtree. Scoped to an ASSERTION on purpose. Without one,
+    // `f(new Base())` into `f(s: Sub)` passed the checker's own (structural) check and the value really IS a
+    // `Base` — refusing that would drop the body that runs. MEASURED: the guard unscoped is load-bearing (a
+    // structurally identical `Base` IS assignable to `Sub`), so its scope decides which of the two it decides.
+    if (c.kind === "class" && conversionViaAssertion && classInSubtree(t, c.node)) return false;
     let added = false;
     for (const anc of localAncestorsAndSelf(t)) added = pushUnique(classConformers, anc, c.node) || added;
     if (c.kind === "lit") mintStructuralMembers(c.node, true);
@@ -6083,6 +6089,13 @@ function isConversionPosition(n) {
   if (ts.isPropertyAssignment(p) && p.initializer === n) return true;
   return false;
 }
+// R958 — the value under an assertion chain: parentheses, `as`, `<T>`, `!` and `satisfies` change no runtime value.
+let conversionViaAssertion = false;   // set while `convert` records a source read THROUGH an assertion
+function peelAssertions(e) {
+  while (e && (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression(e)
+               || ts.isNonNullExpression(e) || ts.isSatisfiesExpression?.(e))) e = e.expression;
+  return e;
+}
 // R82 / PART 87: is the conversion's SOURCE type a fact about the VALUE, or only about a generic signature? A
 // call whose declared return type mentions one of its own type parameters (`wrap<T>(x: T): T`) hands back
 // whatever type the ARGUMENT had, and that signature proves assignability, never that the value IS the
@@ -6118,21 +6131,36 @@ function conversionSourceTracked(e, depth = 0) {
 }
 const CONFORMER_REACH = process.env.CANDOR_CONFORMER_REACH ? (k, n) => console.error(`CONFORMER-REACH ${k} ${n}`) : null;
 for (const sf of sources) {
+  const convert = (src, tt, at, kind) => {
+    if (!tt || !conversionSourceTracked(src)) return;
+    let st; try { st = checker.getTypeAtLocation(src); } catch { st = undefined; }
+    conversionViaAssertion = kind !== "conversion";
+    try {
+      if (!CONFORMER_REACH) { recordConversion(st, tt); return; }
+      const count = () => [...interfaceImpls.values(), ...foreignInterfaceImpls.values(), ...classConformers.values(),
+                           ...depConformers.values()].reduce((a, x) => a + x.length, 0);
+      const before = count();
+      recordConversion(st, tt);
+      if (count() > before) CONFORMER_REACH(kind, `${path.relative(rootDir, sf.fileName)}:${at.getStart()}`);
+    } finally { conversionViaAssertion = false; }
+  };
   (function walkConversions(node) {
-    if (ts.isExpression(node) && !ts.isSpreadElement(node) && isConversionPosition(node) && conversionSourceTracked(node)) {
-      let tt, st;
-      try { tt = checker.getContextualType(node); } catch { tt = undefined; }
-      if (tt) {
-        try { st = checker.getTypeAtLocation(node); } catch { st = undefined; }
-        if (CONFORMER_REACH) {
-          const before = [...interfaceImpls.values(), ...foreignInterfaceImpls.values(), ...classConformers.values(), ...depConformers.values()]
-            .reduce((a, x) => a + x.length, 0);
-          recordConversion(st, tt);
-          const after = [...interfaceImpls.values(), ...foreignInterfaceImpls.values(), ...classConformers.values(), ...depConformers.values()]
-            .reduce((a, x) => a + x.length, 0);
-          if (after > before) CONFORMER_REACH("conversion", `${path.relative(rootDir, sf.fileName)}:${node.getStart()}`);
-        } else recordConversion(st, tt);
-      }
+    if (ts.isExpression(node) && !ts.isSpreadElement(node) && isConversionPosition(node)) {
+      let tt; try { tt = checker.getContextualType(node); } catch { tt = undefined; }
+      // R958 — ASSERTION LOOK-THROUGH: the source of a conversion is the value UNDER any assertion chain
+      // (`x as any`, `x as unknown as I`, `<I>x`), whose own checker type names the conformer; the assertion's
+      // type is a claim about it, not a different value. Only an UPCAST registers — `conversionTargets` keeps a
+      // target constituent only when the inner type is assignable to it, and `recordConformer` refuses a class
+      // whose own subtree holds the target (a DOWNCAST, which CHA already answers from the subtree).
+      const inner = peelAssertions(node);
+      convert(inner, tt, node, inner === node ? "conversion" : "assertion-arg");
+    }
+    // …and an assertion is itself a conversion of its operand to the asserted type, wherever it sits.
+    if ((ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) && node.type
+        && !(ts.isTypeReferenceNode(node.type) && node.type.typeName.getText() === "const")
+        && node.type.kind !== ts.SyntaxKind.AnyKeyword && node.type.kind !== ts.SyntaxKind.UnknownKeyword) {
+      let tt; try { tt = checker.getTypeFromTypeNode(node.type); } catch { tt = undefined; }
+      convert(peelAssertions(node.expression), tt, node, "assertion");
     }
     ts.forEachChild(node, walkConversions);
   })(sf);

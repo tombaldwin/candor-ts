@@ -10,6 +10,20 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ STRICTER: **the conformer pass looks through assertions — upcasts only** (SOUNDNESS R958, the resolution the review
+  chose over the open-world hedge). A value under `x as any`, `x as unknown as I` or `<I>x` keeps the checker type of
+  what it IS, and that names the conformer; each EXECUTED arm (a local class through `as any` at an argument, through
+  `as unknown as I` then a dispatch on the variable, through `<I>x`, and through `as any` into a CLASS-typed slot)
+  wrote its marker while `deny Fs` exited 0 at the dispatcher and at the entry. An assertion is also read as a
+  conversion of its operand to the asserted type wherever it sits. Only an UPCAST registers: a target constituent is
+  kept only if the inner type is assignable to it, and an asserted DOWNCAST (`base as Sub`) registers no supertype —
+  measured load-bearing, because a structurally identical `Base` IS assignable to `Sub`. That guard is scoped to
+  assertions: the same `Base` passed into a `Sub` slot WITHOUT one passed the checker and really is a `Base`, and
+  stays a conformer. NOTE the executed downcast fixture writes too (the value is a real `Base`); declining it is the
+  review's precision ruling, not a soundness proof. Corpus A/B (28-entry roster): CHANGED 2 (xstate: the `atom`
+  literal returned `as unknown as Atom<T>` now answers the store's `get` dispatch), 0 added, 0 removed, `inferred`
+  unchanged; reach 56 registrations through assertions in 11 entries (typeorm 38).
+
 - ⚠ STRICTER: **a callee that can hold more than one function calls every one of them** (SOUNDNESS R955). The call
   walk resolved ONE declaration per call, and for a choice of functions the checker's union put first whichever TYPE
   was created first — so `(c ? fb : fa)(p)` edged `fa` only when `fa` was declared first, an arrow-const pair edged

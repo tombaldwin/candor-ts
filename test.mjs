@@ -20674,6 +20674,23 @@ if (blk()) {
     check(`R955 CONTROL: a choice between PURE functions charges nothing — \`${fn}\``, noEffectCharged(report, `src.a.${fn}`) && gate(fn) === 0);
 }
 
+// ── R958: ASSERTION LOOK-THROUGH IN THE CONFORMER PASS — UPCASTS ONLY ─────────────────────────────────────────────
+// A value under `as any`, `as unknown as I` or `<I>` keeps the checker type of what it IS, and that names the
+// conformer: each arm below was EXECUTED (its marker written) and `deny Fs` exited 0 at the base. The DOWNCAST
+// control was written first: `bO as SubO` (a nominal supertype asserted down to its subclass) registers nothing.
+// Measured: the downcast guard is load-bearing — a structurally identical Base IS assignable to Sub — and it is
+// scoped to ASSERTIONS, because the same value passed WITHOUT one (`dP(bP)`) is a checker-passed conversion of a
+// value that really is a Base. A string under `as any` names nothing.
+if (blk()) {
+  const d = project({ "src/a.ts": "import * as fs from \"node:fs\";\n// DOWNCAST CONTROL, written first: a nominal supertype asserted DOWN to its subclass must not become a conformer of it\nexport class BaseO { m(): void { fs.writeFileSync(\"/tmp/candor-ts-r956-o\", \"x\"); } }\nexport class SubO extends BaseO { m(): void { } }\nexport function dO(s: SubO) { s.m(); }\nconst bO: BaseO = new BaseO();\nexport function rO() { dO(bO as SubO); }\n// `as any` at the argument: the inner type names the conformer\nexport interface SinkA { m(): void }\nexport class PureA implements SinkA { m(): void { } }\nexport function dA(i: SinkA) { i.m(); }\nclass LwA { m(): void { fs.writeFileSync(\"/tmp/candor-ts-r956-a\", \"x\"); } }\nconst wA = new LwA();\nexport function rA() { dA(wA as any); }\n// `as unknown as Sink`, then a dispatch on the variable\nexport interface SinkB { m(): void }\nexport class PureB implements SinkB { m(): void { } }\nclass LwB { m(): void { fs.writeFileSync(\"/tmp/candor-ts-r956-b\", \"x\"); } }\nconst wB = new LwB();\nconst sB = wB as unknown as SinkB;\nexport function rB() { sB.m(); }\n// angle-bracket assertion at the argument\nexport interface SinkC { m(): void }\nexport class PureC implements SinkC { m(): void { } }\nexport function dC(i: SinkC) { i.m(); }\nclass LwC { m(): void { fs.writeFileSync(\"/tmp/candor-ts-r956-c\", \"x\"); } }\nconst wC = new LwC();\nexport function rC() { dC(<SinkC>wC); }\n// an upcast to a CLASS type through `as any`\nexport class BaseE { m(): void { } }\nexport function dE(s: BaseE) { s.m(); }\nclass LwE { m(): void { fs.writeFileSync(\"/tmp/candor-ts-r956-e\", \"x\"); } }\nconst wE = new LwE();\nexport function rE() { dE(wE as any); }\n// CONTROL: `as any` over a value whose type names nothing (a string) registers nothing\nexport interface SinkZ { m(): void }\nexport class PureZ implements SinkZ { m(): void { } }\nexport function dZ(i: SinkZ) { i.m(); }\nexport function rZ(s: string) { dZ(s as any); }\n// CONTROL beside the downcast: WITHOUT an assertion a structurally identical Base passed the checker into a Sub\n// slot, and the value really is a Base \u2014 it stays a conformer (the R954 behaviour).\nexport class BaseP { m(): void { fs.writeFileSync(\"/tmp/candor-ts-r956-p\", \"x\"); } }\nexport class SubP extends BaseP { m(): void { } }\nexport function dP(s: SubP) { s.m(); }\nconst bP = new BaseP();\nexport function rP() { dP(bP); }\n" });
+  const { report } = scan(d);
+  const gate = (fn) => { fs.writeFileSync(path.join(d, "p.pol"), `deny Fs src.a.${fn}\n`); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  for (const fn of ["dA", "rA", "rB", "dC", "rC", "dE", "rE", "dP", "rP"])
+    check(`R958: \`deny Fs src.a.${fn}\` fires — the conformer under the assertion (or the checker-passed Base) is a candidate`, gate(fn) === 1, JSON.stringify(entry(report, `src.a.${fn}`)));
+  for (const fn of ["dO", "rO", "dZ", "rZ"])
+    check(`R958 CONTROL: \`deny Fs src.a.${fn}\` stays 0 — an asserted DOWNCAST registers no supertype; \`as any\` over a string names nothing`, gate(fn) === 0, JSON.stringify(entry(report, `src.a.${fn}`)));
+}
+
 // ======================================================================================================
 // SOURCE-HYGIENE CENSUS — ported from candor-java's SourceHygieneTest (BACKLOG item 3).
 //
