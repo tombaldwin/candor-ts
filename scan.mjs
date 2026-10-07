@@ -37,7 +37,7 @@ import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadE
          tablesInSql, modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf,
          partnerFor, CLOCK_READING_PERFORMANCE_MEMBERS, CLOCK_READING_PROCESS_MEMBERS,
          CLOCK_READING_CONSOLE_MEMBERS, CONNECTING_WEB_CTORS,
-         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, FS_USE_VERBS,
+         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, NET_REQUEST_NAMED, FS_USE_VERBS,
          EXEC_USE_VERBS, RESERVED_SIDECAR_SEGMENTS } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
@@ -3407,6 +3407,79 @@ function literalHeadHostUrl(expr) {
   }
   return null;
 }
+// SOUNDNESS R802 — A DETERMINED URL OBJECT IS A DETERMINED LOCATOR. `fetch(new URL("https://h/x"))`,
+// `fetch(new Request("https://h/x"))` and `const u = new URL("https://h/x"); fetch(u)` name their host as
+// surely as the string does (SPEC §2 ⟨0.37⟩: "DETERMINED" IS A PROPERTY OF THE VALUE, NOT OF THE SYNTAX).
+// This is the over-charge half of R802's fix and exists only because the masking half below now marks
+// every uncaptured Net locator incomplete: without it a fully literal `new URL(...)` would become
+// uncertifiable (the R416 shape PART 88's a4local exists to refuse).
+//
+// Returns the URL's href, or null. EVERY doubt answers null, which fails the surface closed — never open:
+//   • the constructor must be the PLATFORM's `URL`/`Request` (no declaration in a project file — a
+//     project class of the same name could compute anything);
+//   • every argument must be a string literal or a `const` string (`new URL(path, base)` is evaluated
+//     with the real WHATWG parser, so an ABSOLUTE `path` correctly wins over `base`);
+//   • through a binding, the binding must be a NON-EXPORTED `const` whose only uses are as an ARGUMENT
+//     OF THE CALL BEING CLASSIFIED or a non-assigning member READ. A URL object is MUTABLE —
+//     `u.hostname = runtime` or handing `u` to any other function could move its host — so any other use
+//     (an assignment rooted at it, another call's argument, an alias, a return) refuses the capture.
+function determinedUrlObject(expr, call, depth = 0) {
+  if (!expr || depth > 1) return null;
+  while (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) || ts.isNonNullExpression(expr)
+         || ts.isSatisfiesExpression?.(expr)) expr = expr.expression;
+  if (ts.isNewExpression(expr) && ts.isIdentifier(expr.expression)
+      && (expr.expression.text === "URL" || expr.expression.text === "Request")) {
+    const decls = checker.getSymbolAtLocation(expr.expression)?.declarations ?? [];
+    if (decls.length === 0
+        || decls.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)))) return null;
+    const args = expr.arguments ?? [];
+    const max = expr.expression.text === "URL" ? 2 : 1;
+    if (args.length === 0 || args.length > max) return null;
+    const strs = args.map((a) => (ts.isStringLiteralLike(a) ? a.text : constStringValue(a)));
+    if (strs.some((s) => s == null)) return null;
+    try { return new URL(strs[0], strs[1]).href; } catch { return null; }
+  }
+  if (!ts.isIdentifier(expr)) return null;
+  const sym = checker.getSymbolAtLocation(expr);
+  const decls = sym?.declarations ?? [];
+  if (decls.length !== 1) return null;
+  const d = decls[0];
+  if (!ts.isVariableDeclaration(d) || !ts.isIdentifier(d.name) || !d.initializer) return null;
+  const list = d.parent;
+  if (!(list && ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.Const) !== 0)) return null;
+  const stmt = list.parent;
+  if (stmt && ts.isVariableStatement(stmt)
+      && (ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Export) !== 0) return null;
+  let safe = true;
+  const visit = (n) => {
+    if (!safe) return;
+    if (ts.isIdentifier(n) && n !== d.name && n.text === d.name.text && checker.getSymbolAtLocation(n) === sym) {
+      const p = n.parent;
+      const isOwnArg = p === call && (call.arguments ?? []).includes(n);
+      let readOnly = false;
+      if (ts.isPropertyAccessExpression(p) && p.expression === n) {
+        // a member READ: walk up the access chain; refuse if the chain's root is an assignment target,
+        // a delete/++/-- operand, or the chain is called (a method call may mutate — `u.searchParams.set`
+        // cannot move the host, but this does not try to tell them apart).
+        let top = p;
+        while (top.parent && (ts.isPropertyAccessExpression(top.parent) || ts.isElementAccessExpression(top.parent))
+               && top.parent.expression === top) top = top.parent;
+        const tp = top.parent;
+        readOnly = !(tp && ((ts.isBinaryExpression(tp) && tp.left === top
+                             && tp.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+                             && tp.operatorToken.kind <= ts.SyntaxKind.LastAssignment)
+                            || ts.isDeleteExpression(tp)
+                            || ((ts.isPrefixUnaryExpression(tp) || ts.isPostfixUnaryExpression(tp)))
+                            || (ts.isCallExpression(tp) && tp.expression === top)));
+      }
+      if (!isOwnArg && !readOnly) safe = false;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(d.getSourceFile());
+  return safe ? determinedUrlObject(d.initializer, call, depth + 1) : null;
+}
 function urlArgLiteral(node, member, mod) {
   const args = node.arguments ?? [];
   const litAt = (i) => {
@@ -3414,8 +3487,9 @@ function urlArgLiteral(node, member, mod) {
     if (!a) return null;
     if (ts.isStringLiteralLike(a)) return a.text;
     // const-anchored host (fetch(API_BASE), `${API_BASE}/x`, API_BASE+"/x"), THEN literal-head extraction
-    // (`\`https://host/${p}\``, `"https://host/" + p`) when the literal head already completes the authority.
-    return resolveConstUrlString(a) ?? literalHeadHostUrl(a);
+    // (`\`https://host/${p}\``, `"https://host/" + p`) when the literal head already completes the authority,
+    // THEN a determined URL object (R802, above).
+    return resolveConstUrlString(a) ?? literalHeadHostUrl(a) ?? determinedUrlObject(a, node);
   };
   if (member && NET_URL_ARG1_MEMBERS.has(member)) return litAt(0) ?? litAt(1); // (port, host) or (path)
   // ⟨0.29⟩ dgram `send` — keyed on the MODULE, because a bare `send` elsewhere legitimately takes its
@@ -3428,23 +3502,6 @@ function urlArgLiteral(node, member, mod) {
   // spelling of `send` that does carry a destination, so that rule keeps its own answer.
   if (member && NET_USE_VERBS.has(member)) return null;
   return litAt(0);
-}
-// Is arg0 a RUNTIME STRING expression whose host can't be known statically — a template, a string
-// concat, or a `string`-typed variable/member/call? Only THIS shape masks the host and must fail the
-// surface closed. A STRUCTURED url arg (`new URL(...)`, a `Request` object, any non-string value) carries
-// its host in a form the literal gate never saw, but it did not mask a literal that WAS there — pre-Llm
-// behavior added Net and moved on, so it must NOT regress to fail-closed. Absent arg0 → not a masking
-// string either (never fabricate incompleteness). A static string literal is handled by urlArgLiteral, so
-// it is excluded here.
-function urlArgIsRuntimeString(node) {
-  const a0 = (node.arguments ?? [])[0];
-  if (!a0 || ts.isStringLiteralLike(a0)) return false;
-  if (ts.isTemplateExpression(a0)) return true; // `${base}/path` — host built at runtime
-  if (ts.isBinaryExpression(a0) && a0.operatorToken.kind === ts.SyntaxKind.PlusToken) return true; // concat
-  // a variable/member/call arg: a masking runtime host only when its static type is `string` (a
-  // `new URL()`/`Request`/other object is NOT a string type — leave it clean, as before the Llm port).
-  const t = checker.getTypeAtLocation(a0);
-  return t ? (t.flags & (ts.TypeFlags.String | ts.TypeFlags.StringLiteral)) !== 0 : false;
 }
 // The Ollama local-endpoint decision (java Literals parity #2), routed through the EXTRACTED host, never
 // a raw literal that merely CONTAINS ":11434". `urlLit` is arg0's string text; `host` is hostLiteral(urlLit)
@@ -8057,7 +8114,7 @@ const resolvedIsHostFetch = (call) => {
 // instead of Net, the effect users most care about. Resolve the identifier's symbol up to its
 // ImportDeclaration and match the specifier; used both to CLASSIFY the call Net and to SUPPRESS the spurious
 // callback-Unknown for the same node.
-const NET_REQUEST_NAMED = new Set(["fetch", "request", "stream", "pipeline"]); // undici/node-fetch callables
+// `NET_REQUEST_NAMED` (undici/node-fetch callables) lives in scan-core beside NET_ESTABLISHING — R781.
 const importedFromNetPkg = (id) => {
   if (!id || !ts.isIdentifier(id)) return false;
   for (const d of checker.getSymbolAtLocation(id)?.declarations ?? []) {
@@ -9722,14 +9779,27 @@ function visitCalls(node) {
             const h = hostLiteral(urlLit);
             rec.hosts.add(h);
             for (const e of modelHostEffects(h)) rec.direct.add(e);
-          } else if (ollama === "llm-no-capture") {
-            // §1 ⟨0.13⟩ dotless local Ollama endpoint: Llm WITHOUT capturing the host (java parity #2).
-            rec.direct.add("Llm");
-          } else if (urlArgIsRuntimeString(node)) {
-            // Only a RUNTIME STRING url (template/concat/`string`-typed value) masks the host → fail closed,
-            // like a host-establishing κ call. A structured `new URL(...)`/`Request` arg (or absent arg) did
-            // NOT mask a literal — it passed clean pre-Llm-port, so it must NOT regress to fail-closed (FINDING 7).
-            rec.incomplete.add("Net");
+          } else {
+            // §1 ⟨0.13⟩ dotless local Ollama endpoint: Llm WITHOUT capturing the host (java parity #2) — and,
+            // like the κ path, the uncaptured host still marks the surface below (it is not certifiable).
+            if (ollama === "llm-no-capture") rec.direct.add("Llm");
+            if ((node.arguments ?? []).length > 0) {
+              // SOUNDNESS R802 — NO CAPTURED HOST ⇒ THE SURFACE IS INCOMPLETE, the rule the κ path beside this
+              // one already applies (`netEstablishing` → `incomplete`), and java's Net rule. This used to ask an
+              // INCLUSION-shaped question instead — "is arg0 a template, a `+` concat, or `string`-typed?" — and
+              // every other shape was certified by whatever sibling literal shared the function. MEASURED at
+              // the pre-fix base, each beside `await fetch("https://ok.example/a")`, `allow Net in <fn>
+              // ok.example` EXIT 0 while a local server logged the request to the CALLER's URL:
+              //     fetch(new URL(u))   fetch(new Request(u))   fetch(u: URL)   fetch(u: RequestInfo | URL)
+              //     fetch(u: string | URL)   fetch(u: any)   axios({ url: u })   (importedFromNetPkg)
+              // and the `fetch(u: string)` control exited 1. The predicate's own comment defended it by
+              // HISTORY ("it passed clean pre-Llm-port, so it must NOT regress") — an argument about not
+              // changing behaviour, never one about masking. The over-charge it was guarding against (a
+              // DETERMINED `new URL("https://h/x")` failing closed — FINDING 7) is now answered by capturing
+              // that host (`determinedUrlObject`), which is the precise fix for it.
+              // An ABSENT argument stays unmarked: `fetch()` throws before any I/O and names no destination.
+              rec.incomplete.add("Net");
+            }
           }
         }
       }

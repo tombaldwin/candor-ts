@@ -259,11 +259,35 @@ export const RESERVED_SIDECAR_SEGMENTS =
 // into a use-verb denylist beside the other two; that is a wider change with its own
 // over-charge bill to price, so it is filed rather than smuggled in here.
 
+//
+// SOUNDNESS R781 (the destination half) — THE URL-FIRST CLIENT VERBS OF THE WHOLE-MODULE Net PACKAGES WERE
+// MISSING. κ charges every member of `undici`/`got`/`axios`/… `Net`, so `undici.stream(u, …)`,
+// `undici.pipeline(u, …)`, `undici.upgrade(u)` carried the effect while contributing no host, and beside
+// `undici.request("https://ok.example/a")` the gate `allow Net in <fn> ok.example` exited 0 — EXECUTED,
+// a local server logged each request to the caller's URL. `stream` and `pipeline` were ALREADY named in
+// `NET_REQUEST_NAMED` below as undici's URL-taking callables: two tables answering one question, and only
+// one was consulted for masking. That set is now held to be a SUBSET of this one (test.mjs), so the next
+// request callable added there cannot be missing here. `axios`'s `postForm`/`putForm`/`patchForm` take the
+// URL first exactly like `post`/`put`/`patch` and are written in with them (R346: the family, not the
+// spelling in hand). FAILURE DIRECTION of these additions: a whole-module Net package whose `stream` takes
+// no destination is now marked incomplete — an over-charge, fail-closed. The pinned ts roster has ZERO
+// unmasked Net calls under any of these names (MASKPROBE over all 28 entries), so the price there is 0.
+//
+// NOT ADDED, DELIBERATELY: `listen`/`bind`. A listen/bind address is where the process LISTENS, not a
+// destination it reaches; ts already withholds that literal from `hosts` (rust ⟨0.29⟩ `is_net_binding`,
+// R809). Whether ACCEPTING inbound connections must mark the surface is the open spec question R817, and
+// the engines disagree on it today (rust: no hedge; swift `NWListener`: opaque, marked) — not a list fix.
 export const NET_ESTABLISHING = new Set(["request", "get", "post", "put", "patch", "delete", "head",
   "options", "connect", "createConnection", "fetch",
+  "stream", "pipeline", "upgrade", "postForm", "putForm", "patchForm",
   "lookup", "lookupService", "reverse", "resolve", "resolve4", "resolve6", "resolveAny",
   "resolveCname", "resolveCaa", "resolveMx", "resolveNaptr", "resolveNs", "resolvePtr",
   "resolveSoa", "resolveSrv", "resolveTlsa", "resolveTxt"]);
+
+// The NAMED imports `scan.mjs`'s `importedFromNetPkg` treats as a package's REQUEST CALLABLE (`import {
+// fetch, request, stream, pipeline } from "undici"`). Every one takes its URL first, so every one must also
+// be host-ESTABLISHING above — R781's two-tables shape; test.mjs asserts the subset relation.
+export const NET_REQUEST_NAMED = new Set(["fetch", "request", "stream", "pipeline"]);
 
 // Fs/Exec USE-verbs whose LOCATOR was fixed earlier, not an arg of THIS call — so a missing literal
 // here is the legitimate split-construct/use shape, never the masking signal (the establishing-

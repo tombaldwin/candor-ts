@@ -10,6 +10,24 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ STRICTER: one masking rule for `Net` — **a host-bearing call whose host was not captured marks the
+  surface `incomplete`** — on the global-`fetch` path too (SOUNDNESS R802), and for undici's URL-first verbs
+  (SOUNDNESS R781, destination half). The fetch path used to ask an inclusion-shaped question (a template, a
+  `+` concat, or a `string`-typed value) while the κ path beside it asked "was a host captured?", so each of
+  these beside a benign `fetch("https://ok.example/a")` was certified by `allow Net in <fn> ok.example` (exit 0),
+  and each was EXECUTED against a local server that logged the caller's URL: `fetch(new URL(u))`,
+  `fetch(new Request(u))`, `fetch(u: URL)`, `fetch(u: RequestInfo | URL)`, `fetch(u: string | URL)`,
+  `fetch(u: any)`, `axios({ url: u })`, `undici.stream(u, …)`, `undici.pipeline(u, …)`, `undici.upgrade(u)`.
+  All now exit 1. A literal non-host (`fetch("/api")`) and a dotless `localhost:11434` Ollama URL on the fetch
+  path are now marked too, as the κ path already marked them. In the other direction, a DETERMINED URL object
+  is now a captured host — `new URL("https://h/x")`, `new URL("/p", "https://h")`, `new Request("https://h/x")`,
+  and a non-exported `const u = new URL(…)` used only as that call's argument or read — so it certifies; a URL
+  object that is assigned to, handed to another function, or built by a project class named `URL` is not
+  captured. Over the pinned 28-entry roster: 0 added, 0 removed, 41 changed — every change is `incomplete`
+  gaining `Net` on a unit with no captured host (the runtime-destination fetches in ofetch, unstorage, trpc,
+  hono, rxjs and pnpm, and their callers), so no `allow Net` gate there moves: each already failed closed on its
+  empty host surface. `listen`/`bind` are deliberately NOT marked: a listen address is local (R809), and
+  whether the accept side must mark the surface is the open spec question R817.
 - ⚠ STRICTER: `process.env` is charged as a VALUE, not as a spelling in a list of contexts (SOUNDNESS R928,
   R804). The Env arm recognised the exact node `process.env` (or an alias initialised to exactly that node)
   in seven reading contexts; every other spelling read as nothing. Now every expression whose value is the

@@ -20,7 +20,7 @@ import { printAgents, writeStdoutSync } from "./contract.mjs";
 import { KAPPA_RULES, KAPPA_PURE, kappaKnows, CLOCK_READING_PERFORMANCE_MEMBERS,
          CLOCK_READING_PROCESS_MEMBERS,
          CLOCK_READING_CONSOLE_MEMBERS, NODE_CORE_REVIEWED, CONNECTING_WEB_CTORS,
-         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, FS_USE_VERBS,
+         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, NET_REQUEST_NAMED, FS_USE_VERBS,
          EXEC_USE_VERBS } from "./scan-core.mjs";
 // R410's assertion needs node's OWN dns surface, not a list copied out of the engine — see the block
 // at the end of this file for why the family is DERIVED and not spelled.
@@ -3236,7 +3236,7 @@ export async function bedrock() { return fetch("https://bedrock-runtime.us-east-
     // FINDING 1: the :11434 gate must run against a PARSED host, not a raw literal that merely contains
     // ":11434". A relative path `axios.post("/v1/models:11434/generate")` parses to no host → NO Llm.
     // FINDING 6: `fetch(runtimeUrl, "literal")` — the trailing literal (options/headers) is NOT the host.
-    // FINDING 7: `fetch(new URL(...))` is a STRUCTURED arg — it must NOT fail the surface closed.
+    // FINDING 7: a DETERMINED `new URL("…")` must NOT fail the surface closed (R802: its host is captured).
     // (`incomplete` is an INTERNAL surface, not a report field, so masking is asserted through the GATE.)
     const fd = project({
       ...pkg("axios", `declare const axios: { post(url: string, body?: unknown): Promise<unknown>; get(url: string): Promise<unknown>; };\nexport default axios;`),
@@ -3270,9 +3270,10 @@ export async function realModel() { return fetch("https://api.anthropic.com/v1/m
           gw.status === 1 && gw.stdout.includes("[AS-EFF-008]") && gw.stdout.includes("src.f.wrongArg"),
           `status=${gw.status} ${gw.stdout.slice(0, 200)}`);
     // FINDING 7 (no fail-closed regression): `structured` reaches a VISIBLE literal host (api.example.com)
-    // AND a STRUCTURED `fetch(new URL(u))`. The structured arg did NOT mask a literal — pre-fix it wrongly
-    // marked the surface incomplete, so `allow Net api.example.com` failed closed even though the only real
-    // host IS allowlisted. Post-fix the structured arg is clean → the gate CERTIFIES it (exit 0, no AS-EFF-008).
+    // AND `fetch(u)` where `const u = new URL("https://api.example.com/x")` — a DETERMINED locator, so the
+    // gate must CERTIFY it (exit 0). R802 changed WHY this passes: it used to pass because a structured arg
+    // was never marked at all, which also certified `fetch(new URL(callerValue))`; it now passes because the
+    // URL object's host is CAPTURED (`determinedUrlObject`), and an uncaptured one fails closed.
     fs.writeFileSync(path.join(fd, "allow-struct"), "allow Net in src.f.structured api.example.com\n");
     const gs = scan(fd, "--policy", path.join(fd, "allow-struct")).r;
     check("FINDING 7: fetch(new URL(...)) alongside a visible host is NOT fail-closed — gate certifies clean (exit 0)",
@@ -20277,6 +20278,87 @@ export async function f(h: string): Promise<void> {
     const ex = scan(d, "--policy", path.join(d, "allow.pol")).r.status;
     check("R410 GATE: `allow Net api.stripe.com` FIRES (exit 1) over a `dns.resolve(h)` beside a benign `fetch` literal — measured exit 0 before the resolver family was named, with the sibling-free control correctly caught by AS-EFF-008",
           ex === 1, `exit ${ex}`);
+  }
+}
+
+// ── R781 / R802: ONE MASKING PREDICATE FOR Net — "NO CAPTURED HOST ⇒ INCOMPLETE" ──────────────────
+//
+// R802: the global-`fetch` path asked an INCLUSION-shaped question ("is arg0 a template, a `+` concat, or
+// `string`-typed?") where the κ path beside it asks "was a host captured?". Every structured or loosely
+// typed URL — `new URL(u)`, `new Request(u)`, a `URL`/`RequestInfo`/`any` parameter, `axios({ url })` —
+// was certified by a benign sibling literal. R781 (destination half): undici's `stream`/`pipeline`/
+// `upgrade` were missing from NET_ESTABLISHING although `stream`/`pipeline` were already in
+// NET_REQUEST_NAMED, the table that says which undici names take a URL. Each defect arm below was
+// measured EXIT 0 at the pre-fix base and EXECUTED against a local server that logged the caller's URL.
+if (blk()) {
+  check("R781: NET_REQUEST_NAMED ⊆ NET_ESTABLISHING — a package REQUEST callable takes its URL first, so a runtime URL there must mark the surface; two tables answering one question cannot drift apart",
+        [...NET_REQUEST_NAMED].every((n) => NET_ESTABLISHING.has(n)),
+        `missing: ${JSON.stringify([...NET_REQUEST_NAMED].filter((n) => !NET_ESTABLISHING.has(n)))}`);
+  check("R781: undici's URL-first verbs (stream/pipeline/upgrade) and axios's *Form verbs are host-ESTABLISHING",
+        ["stream", "pipeline", "upgrade", "postForm", "putForm", "patchForm"].every((n) => NET_ESTABLISHING.has(n)),
+        JSON.stringify([...NET_ESTABLISHING]));
+  // THE BOUNDARY THIS ROW DID NOT CROSS, pinned so it is crossed only by decision: a listen/bind address
+  // is LOCAL (rust ⟨0.29⟩ `is_net_binding`, R809) and its literal is withheld from `hosts`; whether an
+  // ACCEPTING socket must mark the surface is the open spec question R817, on which rust and swift differ.
+  check("R781 BOUNDARY: `listen`/`bind` are NOT host-establishing — a local address is not a destination (R809); marking the accept side waits on R817",
+        !["listen", "bind"].some((n) => NET_ESTABLISHING.has(n)), JSON.stringify([...NET_ESTABLISHING]));
+
+  const pkg = (name, types) => ({
+    [`node_modules/${name}/package.json`]: `{"name":"${name}","types":"index.d.ts","main":"index.js"}`,
+    [`node_modules/${name}/index.d.ts`]: types,
+    [`node_modules/${name}/index.js`]: ``,
+  });
+  const d = project({
+    ...pkg("undici", `export declare function request(url: string | URL): Promise<unknown>;
+export declare function stream(url: string | URL, opts: unknown, f: unknown): Promise<unknown>;
+export declare function upgrade(url: string | URL): Promise<unknown>;`),
+    ...pkg("axios", `declare const axios: { (config: { url: string }): Promise<unknown>; get(url: string): Promise<unknown>; };\nexport default axios;`),
+    "src/f.ts": `import * as undici from "undici";
+import axios from "axios";
+const OK = "https://ok.example/a";
+declare function mutate(u: URL): void;
+export async function dStr(u: string) { await fetch(OK); return fetch(u); }
+export async function dNewUrl(u: string) { await fetch(OK); return fetch(new URL(u)); }
+export async function dNewReq(u: string) { await fetch(OK); return fetch(new Request(u)); }
+export async function dUrlParam(u: URL) { await fetch(OK); return fetch(u); }
+export async function dInfo(u: RequestInfo | URL) { await fetch(OK); return fetch(u); }
+export async function dAnyParam(u: any) { await fetch(OK); return fetch(u); }
+export async function dAxiosCfg(u: string) { await axios.get(OK); return axios({ url: u }); }
+export async function dStream(u: string) { await undici.request(OK); return undici.stream(u, {}, null); }
+export async function dUpgrade(u: string) { await undici.request(OK); return undici.upgrade(u); }
+export async function eLitEvil() { await fetch(OK); return fetch(new URL("https://evil.example/x")); }
+export async function eAbsWins() { await fetch(OK); return fetch(new URL("https://evil.example/p", "https://ok.example")); }
+export async function eAssigned(h: string) { const u = new URL("https://ok.example/x"); u.hostname = h; await fetch(OK); return fetch(u); }
+export async function eHanded() { const u = new URL("https://ok.example/x"); mutate(u); await fetch(OK); return fetch(u); }
+export async function kBound() { const u = new URL("https://ok.example/x"); await fetch(OK); return fetch(u); }
+export async function kBased() { await fetch(OK); return fetch(new URL("/p", OK)); }
+export async function kReqLit() { await fetch(OK); return fetch(new Request("https://ok.example/x")); }
+export async function kStreamLit() { await undici.request(OK); return undici.stream("https://ok.example/b", {}, null); }`,
+    "src/shadow.ts": `class URL { constructor(public s: string) {} }
+export async function eShadow() { await fetch("https://ok.example/a"); return fetch(new URL("https://ok.example/x") as any); }`,
+  });
+  const gate = (fn) => {
+    fs.writeFileSync(path.join(d, "p.pol"), `allow Net in ${fn} ok.example\n`);
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  // the defect arms (exit 0 at the pre-fix base) and the string control (exit 1 before and after)
+  for (const fn of ["dStr", "dNewUrl", "dNewReq", "dUrlParam", "dInfo", "dAnyParam", "dAxiosCfg", "dStream", "dUpgrade"]) {
+    const ex = gate(`src.f.${fn}`);
+    check(`R802/R781 GATE: \`allow Net in src.f.${fn} ok.example\` FIRES (exit 1) — the call's destination is the caller's value and a benign sibling literal must not certify it`, ex === 1, `exit ${ex}`);
+  }
+  // the CAPTURE controls: a determined URL object certifies; any doubt about its host fails closed
+  for (const fn of ["eLitEvil", "eAbsWins", "eAssigned", "eHanded"]) {
+    const ex = gate(`src.f.${fn}`);
+    check(`R802 CAPTURE CONTROL: \`${fn}\` is NOT certified as ok.example (exit 1) — a literal other host, an absolute path beating its base, or a URL object that is mutated or handed away`, ex === 1, `exit ${ex}`);
+  }
+  {
+    const ex = gate("src.shadow.eShadow");
+    check("R802 CAPTURE CONTROL: a PROJECT class named `URL` is not the platform's — its argument is not read as a host (exit 1)", ex === 1, `exit ${ex}`);
+  }
+  // the OVER-CHARGE controls (SPEC §2 ⟨0.37⟩ a DETERMINED locator stays determined — PART 88's a4local shape)
+  for (const fn of ["kBound", "kBased", "kReqLit", "kStreamLit"]) {
+    const ex = gate(`src.f.${fn}`);
+    check(`R802/R781 OVER-CHARGE CONTROL: \`${fn}\` — a DETERMINED URL (literal, const-bound, const base, Request, literal stream) still certifies (exit 0)`, ex === 0, `exit ${ex}`);
   }
 }
 
