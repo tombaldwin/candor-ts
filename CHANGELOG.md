@@ -10,6 +10,27 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ STRICTER: **every conformer the type checker shows at an in-scan conversion is a dispatch candidate** (SOUNDNESS
+  R954, closing R927, R769 and R874; SPEC ⟨0.35⟩ §4). A candidate set used to hold only nominal
+  `implements` classes and literals written in a contextually-typed position, so one pure implementor made a dispatch
+  read COMPLETE while a value of another kind ran — silent at the dispatcher AND at an entry whose construction is
+  elsewhere, each EXECUTED: a local class that conforms by shape, an untyped literal converted later (same module or
+  another), an element-wise conversion (`Sink[]` from `X[]`), a field filled from a constructor parameter, `const s:
+  Sink = new LocalW(); s.m()`, a dependency class (`new DepThing()`, `dep.makeThing()`), and a literal or dependency
+  value in a CLASS-typed slot (R874, where the class arm had no candidate list at all). A new pass reads every
+  argument, typed initializer, return, assignment, element and property position — the TARGET is the contextual type,
+  the SOURCE the checker's type of the expression — and registers the conformer where every reader already asks:
+  `interfaceImpls`/`foreignInterfaceImpls` for an interface (so obligation 3's join sees it), and `classConformers`
+  (at the class and its ancestors, never a subtype) appended by `memberDispatchBodies`. A dependency conformer is
+  charged as a direct call to its member under its OWN key (R769's refusal stands), and keeps the dispatch's `Unknown`
+  when no chained report answers it; a published union over an interface a dependency class conforms to says
+  `Unknown` (R764). A source typed only through a generic signature (`dep.ident(x)`, `wrap<T>(x: T): T`) is NOT
+  read as the value (R82/PART 87: the signature proves assignability, not identity) unless the body is a proven
+  identity. `any`, assertions and dependency-invoked callbacks are NOT resolved here (that hedge is a separate
+  decision); R873 and class-expression overrides are the traversal half. Corpus A/B (28-entry roster): ADDED 45 (all
+  published union rows: 41 `Unknown`, 4 a conformer's genuine effect beside `Unknown`), REMOVED 0, CHANGED 175,
+  `inferred` CHANGED 20 (every new charge traced to a body), 0 concrete effects lost; reach 498 conversions in 26
+  entries.
 - ⚠ STRICTER: **a dgram `bind` handed a runtime NAME is an unseen Net destination** (SOUNDNESS R949, PART 96
   `e_rtname`). node's `socket.bind(port, address)` / `bind({ address })` runs `dns.lookup(address)` first —
   EXECUTED: `bind(0, "no-such-host.invalid")` fails `ENOTFOUND` in `getaddrinfo`, `bind(0, "localhost")` binds

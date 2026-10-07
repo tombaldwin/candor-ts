@@ -20566,6 +20566,91 @@ export async function uNs2(u: string) { await fetch("https://ok.example/a"); ret
   check("REFL CONTROL: `xs.map(String)` is still pure — the by-reference κ arm adds nothing for the ES lib", noEffectCharged(report, "src.f.cPure"));
 }
 
+// ── R954 (R927, R769, R874; analysis N1/N2/N4/N5): EVERY CONFORMER THE CHECKER SHOWS AT AN ──
+// IN-SCAN CONVERSION IS A DISPATCH CANDIDATE. One interface (or base class) per arm, each with the same pure nominal
+// implementor and its own dispatcher `dX` and entry `rX`, the conformer constructed at MODULE scope so the entry
+// is charged only through the dispatch (the r873s/r874s lesson). Every arm was EXECUTED (tsc + node) and wrote its
+// marker; every `deny Fs` below exited 0 at the base. Names are checked against §3.3 prefix matching (`dC2` and
+// `dL` were renamed for that reason: `src.a.dC` would have matched `dC2`).
+if (blk()) {
+  const dep = project({ "package.json": `{"name":"depthx","version":"1.0.0"}`, "src/index.ts": "import * as fs from \"node:fs\";\nexport class DepThing { m(): void { fs.writeFileSync(\"/tmp/candor-ts-conformer/dep\", \"x\"); } }\nexport function makeThing(): DepThing { return new DepThing(); }\nexport function listThings(): DepThing[] { return [new DepThing()]; }\n" });
+  scan(dep);
+  const app = project({
+    "package.json": `{"name":"appx","version":"1.0.0","dependencies":{"depthx":"1.0.0"}}`,
+    "src/a.ts": "import * as fs from \"node:fs\";\nimport * as dep from \"depthx\";\nimport { DepThing } from \"depthx\";\nimport { litQ } from \"./lit.js\";\n\n// N1 \u2014 a local class that conforms by shape, no implements; construction at module scope\nexport interface SinkA { m(): void }\nexport class PureA implements SinkA { m(): void { } }\nexport function dA(i: SinkA) { i.m(); }\nclass LwA { m(): void { fs.writeFileSync(\"/tmp/candor-ts-conformer/a\", \"x\"); } }\nconst vA = new LwA();\nexport function rA() { dA(vA); }\n// N1 \u2014 typed initializer, then a dispatch on the variable\nexport interface SinkB { m(): void }\nexport class PureB implements SinkB { m(): void { } }\nclass LwB { m(): void { fs.writeFileSync(\"/tmp/candor-ts-conformer/b\", \"x\"); } }\nconst sB: SinkB = new LwB();\nexport function rB() { sB.m(); }\n// N2 \u2014 an untyped literal converted later, same module and another module\nexport interface SinkC { m(): void }\nexport class PureC implements SinkC { m(): void { } }\nexport function dC(i: SinkC) { i.m(); }\nconst litC = { m() { fs.writeFileSync(\"/tmp/candor-ts-conformer/c\", \"x\"); } };\nexport function rC() { dC(litC); }\nexport interface SinkQ { m(): void }\nexport class PureQ implements SinkQ { m(): void { } }\nexport function dQ(i: SinkQ) { i.m(); }\nexport function rQ() { dQ(litQ); }\n// N4 \u2014 element-wise conversion\nexport interface SinkD { m(): void }\nexport class PureD implements SinkD { m(): void { } }\nexport function dD(i: SinkD) { i.m(); }\nclass LwD { m(): void { fs.writeFileSync(\"/tmp/candor-ts-conformer/d\", \"x\"); } }\nfunction mkD(): LwD[] { return [new LwD()]; }\nconst xsD: SinkD[] = mkD();\nexport function rD() { for (const x of xsD) dD(x); }\n// N5 \u2014 a field filled from a constructor parameter\nexport interface SinkE { m(): void }\nexport class PureE implements SinkE { m(): void { } }\nclass LwE { m(): void { fs.writeFileSync(\"/tmp/candor-ts-conformer/e\", \"x\"); } }\nclass HolderE { constructor(private s: SinkE) { } go() { this.s.m(); } }\nconst hE = new HolderE(new LwE());\nexport function rE() { hE.go(); }\n// R874 \u2014 a literal returned as a CLASS type\nclass BaseF { m(): void { } }\nfunction mkF(): BaseF { return { m() { fs.writeFileSync(\"/tmp/candor-ts-conformer/f\", \"x\"); } }; }\nconst sF = mkF();\nexport function dF(s: BaseF) { s.m(); }\nexport function rF() { dF(sF); }\n// R927 \u2014 a dependency class, constructed / from a factory / element-wise; R874 with a dependency value\nexport interface SinkK { m(): void }\nexport class PureK implements SinkK { m(): void { } }\nexport function dK(i: SinkK) { i.m(); }\nconst vK = new DepThing();\nexport function rK() { dK(vK); }\nexport interface SinkG { m(): void }\nexport class PureG implements SinkG { m(): void { } }\nexport function dG(i: SinkG) { i.m(); }\nconst vG = dep.makeThing();\nexport function rG() { dG(vG); }\nexport interface SinkH { m(): void }\nexport class PureH implements SinkH { m(): void { } }\nexport function dH(i: SinkH) { i.m(); }\nconst xsH: SinkH[] = dep.listThings();\nexport function rH() { for (const x of xsH) dH(x); }\nclass BaseN { m(): void { } }\nexport function dN(s: BaseN) { s.m(); }\nconst vN = dep.makeThing();\nexport function rN() { dN(vN); }\n// CONTROLS \u2014 a conformer at Mid is seen at Mid and at its SUPERTYPE, never at a subtype; super names one body\nexport class BaseM { m(): void { } }\nexport class MidM extends BaseM { }\nexport class LeafM extends MidM { m(): void { } }\nfunction mkMid(): MidM { return { m() { fs.writeFileSync(\"/tmp/candor-ts-conformer/m\", \"x\"); } }; }\nconst vM = mkMid();\nexport function dBaseM(b: BaseM) { b.m(); }\nexport function dMidM(x: MidM) { x.m(); }\nexport function dLeafM(l: LeafM) { l.m(); }\nexport class SupM extends BaseM { m(): void { super.m(); } }\nexport function dSupM(s: SupM) { s.m(); }\nexport function keepM() { return vM; }\n// CONTROL \u2014 an untyped literal that is never converted is not a candidate\nexport interface SinkZ { m(): void }\nexport class PureZ implements SinkZ { m(): void { } }\nexport function dZ(i: SinkZ) { i.m(); }\nconst litZ = { m() { fs.writeFileSync(\"/tmp/candor-ts-conformer/z\", \"x\"); } };\nexport function rZ() { dZ(new PureZ()); return litZ; }\n",
+    "src/lit.ts": "import * as fs from \"node:fs\";\nexport const litQ = { m() { fs.writeFileSync(\"/tmp/candor-ts-conformer/c2\", \"x\"); } };\n",
+    "node_modules/depthx/package.json": `{"name":"depthx","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/depthx/index.d.ts": "export declare class DepThing {\n    m(): void;\n}\nexport declare function makeThing(): DepThing;\nexport declare function listThings(): DepThing[];\n",
+    "node_modules/depthx/index.js": "",
+  });
+  const runA = (pol) => {
+    const env = { ...process.env, CANDOR_DEPS: path.join(dep, ".candor", "report.json") };
+    delete env.CANDOR_POLICY;
+    const extra = [];
+    if (pol) { fs.writeFileSync(path.join(app, "c.policy"), pol + "\n"); extra.push("--policy", path.join(app, "c.policy")); }
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), app, ...extra], { encoding: "utf8", env });
+    return { status: r.status, report: JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8")) };
+  };
+  const base = runA(null).report;
+  const arms = [["dA", "rA", "N1 local class, no implements"], [null, "rB", "N1 `const s: Sink = new LocalW(); s.m()`"],
+    ["dC", "rC", "N2 untyped literal converted later"], ["dQ", "rQ", "N2 untyped literal from another module"],
+    ["dD", "rD", "N4 element-wise `Sink[]` from `LocalW[]`"], ["HolderE.go", "rE", "N5 field filled from a constructor parameter"],
+    ["dF", "rF", "R874 literal returned as a CLASS type"], ["dK", "rK", "R927 `new DepThing()` (chained)"],
+    ["dG", "rG", "R927 `dep.makeThing()` (chained)"], ["dH", "rH", "R927/N4 element-wise from the dependency (chained)"],
+    ["dN", "rN", "R874 a dependency value in a CLASS-typed slot (chained)"], ["dBaseM", null, "a conformer at Mid seen at its SUPERTYPE"],
+    ["dMidM", null, "a conformer at Mid seen at Mid"]];
+  for (const [disp, run, why] of arms)
+    for (const fn of [disp, run].filter(Boolean))
+      check(`CONFORMERS: \`deny Fs src.a.${fn}\` fires (exit 1; 0 at the base) — ${why}`,
+            runA(`deny Fs src.a.${fn}`).status === 1, JSON.stringify(entry(base, `src.a.${fn}`)));
+  // the CONTROLS that must not move: a subtype receiver, a `super.m()`, an untyped literal never converted
+  for (const fn of ["dLeafM", "dSupM", "dZ", "rZ"])
+    check(`CONFORMERS CONTROL: \`deny Fs src.a.${fn}\` stays 0 — a subtype receiver never sees a conformer registered above it; \`super.m()\` names one body; a literal never converted is no candidate`,
+          runA(`deny Fs src.a.${fn}`).status === 0, JSON.stringify(entry(base, `src.a.${fn}`)));
+  // R769's refusal: a dependency conformer is charged under its OWN key, never minted under this package's
+  check("CONFORMERS R769: no row is minted under `appx#DepThing.m` — the dependency conformer is charged through `depthx#DepThing.m`",
+        !base.functions.some((f) => /DepThing/.test(f.fn) || /^appx#DepThing/.test(f.hash ?? "")), JSON.stringify(base.functions.map((f) => f.hash)));
+  // R764: a published union over an interface a dependency class conforms to is never a pure-only entry
+  for (const i of ["SinkK", "SinkG", "SinkH"]) {
+    const u = entry(base, `${i}.m`);
+    check(`CONFORMERS R764: the published \`${i}.m\` union says \`Unknown\` for the dependency conformer it cannot sum — never a pure-only entry`,
+          (u?.inferred ?? []).includes("Unknown"), JSON.stringify(u));
+  }
+  // and the local conformers' effects now reach the published union a chained consumer joins
+  check("CONFORMERS UNION: `SinkA.m` publishes the local conformer's Fs (it published nothing — pure — at the base)",
+        (entry(base, "SinkA.m")?.inferred ?? []).includes("Fs"), JSON.stringify(entry(base, "SinkA.m")));
+
+  // OBLIGATION 3's JOIN, written FIRST (the R872 lane put a silence there once): a structural conformer and a
+  // literal handed to a DEPENDENCY's `runIt(p: IP)` beside a pure nominal implementor. EXECUTED: each writes.
+  const depJ = project({ "package.json": `{"name":"depj2","version":"1.0.0"}`,
+    "src/index.ts": `export interface IP { m(): void }\nexport function runIt(p: IP): void { p.m(); }` });
+  scan(depJ);
+  const appJ = project({
+    "package.json": `{"name":"appj2","version":"1.0.0","dependencies":{"depj2":"1.0.0"}}`,
+    "src/index.ts": `import * as fs from "node:fs";
+import { IP, runIt } from "depj2";
+export class PP implements IP { m(): void { } }
+export function jPure(): void { runIt(new PP()); }
+class LW { m(): void { fs.writeFileSync("/tmp/candor-ts-conformer-lw", "x"); } }
+export function jStruct(): void { runIt(new LW()); }
+const L = { m() { fs.writeFileSync("/tmp/candor-ts-conformer-lit", "x"); } };
+export function jLit(): void { runIt(L); }`,
+    "node_modules/depj2/package.json": `{"name":"depj2","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/depj2/index.d.ts": `export interface IP { m(): void; }\nexport declare function runIt(p: IP): void;\n`,
+    "node_modules/depj2/index.js": "",
+  });
+  const runJ = (pol) => {
+    const env = { ...process.env, CANDOR_DEPS: path.join(depJ, ".candor", "report.json") };
+    delete env.CANDOR_POLICY;
+    const extra = [];
+    if (pol) { fs.writeFileSync(path.join(appJ, "j.policy"), pol + "\n"); extra.push("--policy", path.join(appJ, "j.policy")); }
+    return spawnSync("node", [path.join(HERE, "scan.mjs"), appJ, ...extra], { encoding: "utf8", env }).status;
+  };
+  for (const fn of ["jStruct", "jLit"])
+    check(`CONFORMERS JOIN: \`deny Fs src.index.${fn}\` fires — obligation 3's join reaches the conformer through \`foreignInterfaceImpls\` (exit 0 at the base)`,
+          runJ(`deny Fs src.index.${fn}`) === 1);
+}
+
 // ======================================================================================================
 // SOURCE-HYGIENE CENSUS — ported from candor-java's SourceHygieneTest (BACKLOG item 3).
 //

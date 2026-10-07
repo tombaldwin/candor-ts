@@ -4017,6 +4017,12 @@ const CHA_FANOUT_LIMIT = 12;
 const TYPINGS_CENSUS_CAP = 128;
 const classOverrides = new Map();// base-method MemberDeclaration node -> overriding subclass member nodes (class-CHA)
 const classDescendants = new Map();// base ClassDeclaration -> transitive LOCAL subclass ClassDeclarations (coercion-CHA)
+// R954 — the conformer registries (filled by the conversion pass after `walkStructural`).
+const classConformers = new Map();   // local ClassDeclaration -> conformer nodes (local class, literal, dep class)
+const depConformers = new Map();     // InterfaceDeclaration (local or foreign) -> dependency ClassDeclarations
+const ifaceFlows = new Map();        // local InterfaceDeclaration J -> Set of targets a J-typed value is converted to
+const isProjectNode = (d) => !!d && projectFiles.has(path.resolve(d.getSourceFile().fileName));
+const conversionAddedImpls = new Map(); // InterfaceDeclaration -> Set of implementors the conversion pass added
 // ⟨SOUNDNESS R867⟩ The class-CHA relation ACROSS the package boundary: a FOREIGN class METHOD declaration
 // (a dependency's `class BaseO { m() }`, reached through its source or its `.d.ts`) -> the LOCAL method
 // declarations that override it. `classOverrides` stops at the first `extends` that leaves the project
@@ -4144,8 +4150,75 @@ function overrideDescent(decl) {
 }
 function memberDispatchBodies(decl, rootClass) {
   const all = overrideDescent(decl);
-  if (!rootClass || all.length === 0) return all;
-  return all.filter((om) => ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass));
+  const scoped = (!rootClass || all.length === 0) ? all
+    : all.filter((om) => ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass));
+  // R954 — …and the CONFORMERS registered at the receiver's class (a value the checker showed
+  // converted to it, or to a subclass of it), which run for this dispatch exactly as an override does. Scoped
+  // the same way: registered at `Ct` and its ancestors, so a SUBTYPE receiver never sees them.
+  const at = rootClass ?? (decl?.parent && ts.isClassDeclaration(decl.parent) ? decl.parent : null);
+  const conf = at ? conformerBodies(at, decl?.name?.getText?.()) : [];
+  return conf.length ? [...scoped, ...conf.filter((b) => !scoped.includes(b))] : scoped;
+}
+// The bodies the conformers registered at `cls` run for `member`: a local class or literal through
+// `implMemberBodies` (its own member, its local ancestor's, and the overrides below it), and otherwise the
+// member DECLARATION the checker finds on the conformer's type — a dependency class's, or an inherited one this
+// scan does not hold — which the readers charge as a direct call to it (`chargeConformerBody`). Guarded against a
+// conformer cycle (A converted to B and B to A).
+const conformerBodiesActive = new Set();
+function conformerBodies(cls, member) {
+  const confs = classConformers.get(cls);
+  if (!confs?.length || !member || conformerBodiesActive.has(cls)) return [];
+  conformerBodiesActive.add(cls);
+  try {
+    const out = [];
+    for (const c of confs) {
+      const bodies = ts.isClassDeclaration(c) && !isProjectNode(c) ? null : implMemberBodies(c, member);
+      if (bodies) { for (const b of bodies) if (!out.includes(b)) out.push(b); continue; }
+      const d = conformerMemberDecl(c, member);
+      if (d && !out.includes(d)) out.push(d);
+    }
+    return out;
+  } finally { conformerBodiesActive.delete(cls); }
+}
+// The declaration of `member` on a conformer's (instance) type, wherever the checker finds it.
+function conformerMemberDecl(c, member) {
+  let t;
+  try {
+    t = ts.isClassDeclaration(c) ? checker.getDeclaredTypeOfSymbol(checker.getSymbolAtLocation(c.name) ?? c.symbol)
+      : checker.getTypeAtLocation(c);
+  } catch { t = null; }
+  let prop; try { prop = t && checker.getPropertyOfType(t, member); } catch { prop = null; }
+  return prop?.declarations?.[0] ?? null;
+}
+// A body the readers cannot edge to because this scan does not hold it — a conformer's member declared in a
+// dependency (or in node's typings). It is charged as a DIRECT CALL to that declaration would be: κ (a platform
+// class), the node-core floor, else the dependency funnel under the dependency's OWN key (R769).
+const isExternalConformerBody = (b) => !!b && typeof b.getSourceFile === "function" && !isProjectNode(b);
+//
+// Returns whether that ANSWERED the body: κ classified it, or a chained report holds it under its own key. An
+// unchained dependency's member is still charged (its `invisible` disclosure, exactly as a direct call gets), but
+// the reader keeps its `Unknown` beside it — measured, answering it as resolved removed the dispatch's `Unknown`
+// and left only `invisible`, which `deny Unknown` does not read: a disclosure traded for a weaker one.
+function chargeConformerBody(rec, b) {
+  const name = b.name?.getText?.();
+  const k = kappaOfRef(b, b.name);
+  if (k) {
+    rec.direct.add(k.eff);
+    if (k.eff === "Unknown") rec.why.add(`reflect:${k.kMod.replace(/^node:/, "")}.${k.member}`);
+    return true;
+  }
+  const kMod = declModule(b);
+  if (declIsNodeTypes(b) && kMod && name && nodeCoreUnreviewed(kMod, name)) {
+    rec.direct.add("Unknown");
+    rec.why.add(`native:${kMod.replace(/^node:/, "")}.${name}`);
+    return true;
+  }
+  chargeExternalDecl(rec, b, null, null);
+  if (!kMod || kMod.startsWith("<")) return false;
+  const pkg = kMod.startsWith("@types/") ? kMod.slice("@types/".length) : kMod;
+  const owner = memberSigOf(b).parent?.name?.getText?.();
+  return !!((owner && crossDeps.get(`${pkg}#${owner}.${name}`)) ?? crossDeps.get(`${pkg}#${name}`))
+    || (declIsNodeTypes(b) && !!kMod);   // a reviewed node-core member is answered pure by κ's floor
 }
 // The LOCAL class a receiver expression's static type pins, or null (a union, an interface, `any`, a foreign
 // type) — the condition under which every fan-out site narrows to a subtree. One definition, read by the
@@ -5671,6 +5744,265 @@ for (const sf of sources) {
   })(sf);
 }
 
+// ── R954 (R927, R769, R874; analysis N1/N2/N4/N5) — EVERY CONFORMER THE CHECKER SHOWS ────────
+// AT AN IN-SCAN CONVERSION IS A CANDIDATE. SPEC ⟨0.35⟩ §4, *A NON-EMPTY CANDIDATE SET IS NOT A COMPLETE ONE*,
+// binds wherever a structural implementor is VISIBLE to the engine's own resolution, and the two passes above
+// only ever saw two kinds of conformer: a NOMINAL `implements`, and a literal or `implements`-bearing class
+// expression written in a contextually-typed position. Every other value that reaches an `I` slot passed an
+// assignability check the checker can show us, with its SOURCE type, and was in no list — so one pure nominal
+// implementor made the dispatch read COMPLETE and the conformer's effect vanished. Measured silent at every
+// gate (`deny Fs` at the dispatcher AND at an entry whose construction is separated, and `deny Unknown`), each
+// EXECUTED to write its marker file:
+//   · a local class that matches by shape with no `implements` (`qDisp(new LocalW())`, `const s: Sink = new
+//     LocalW(); s.m()`);
+//   · an untyped literal converted LATER, in this module or another (`const lit = { m(){…} }; qDisp(lit)`);
+//   · a DEPENDENCY class (`new DepThing()`, `dep.makeThing()`, `dep.ident(dep.makeThing())`), chained or not —
+//     R927; R769 (a dependency that `implements` a project interface through `paths`) is one case of it;
+//   · an element-wise conversion (`const xs: Sink[] = dep.listThings()` from `DepThing[]`);
+//   · a value reaching a FIELD through a constructor parameter (`new Holder(dep.makeThing())`, `this.s.m()`);
+//   · a literal RETURNED as a CLASS type (`function mkS(): BaseL { return { m(){…} } }`) — R874, where the
+//     class arm had no candidate list at all: its candidates were the declaring class plus its subtree.
+//
+// THE RULE IS THE CHECKER'S, AT A REAL CONVERSION (R82, PART 87): at every argument, typed initializer, return,
+// assignment, element and property position, the TARGET is the contextual type and the SOURCE is the checker's
+// type of the expression — never a signature read as a promise about a value. A source that is `any`, an
+// assertion, or a value a dependency invokes us with is NOT here: the check is vacuous there, and the hedge for
+// it is a separate decision. A class-expression source (N3) and a constructor-assigned property (R873) are the
+// traversal half and are not here either.
+//
+// WHERE A CONFORMER GOES, so that every reader asks the ONE relation it already asks (R871/R872):
+//   · an INTERFACE target → `interfaceImpls` (or `foreignInterfaceImpls` for a dependency's interface, which is
+//     obligation 3's join), climbing super-interfaces exactly as a nominal implementor does; `implMemberBodies`
+//     already answers a local class or literal member;
+//   · a CLASS target `Ct` → `classConformers`, under `Ct` AND every local ancestor of `Ct` — a value converted to
+//     `Ct` can sit in a slot typed any SUPERTYPE, never a subtype — and `memberDispatchBodies(decl, rootClass)`
+//     appends the conformers registered at the receiver class, so the class arm, the accessor arm and, through
+//     `implMemberBodies`, every interface reader of an implementor class see them;
+//   · a DEPENDENCY class → its member's own declaration, which the readers charge as a DIRECT CALL to it would
+//     be charged (κ, else the dependency funnel under the dependency's OWN key — `depthing#DepThing.m`, never
+//     `proj#DepThing.m`: R769's refusal stands). Dependency conformers of an interface are held in
+//     `depConformers`, never in `interfaceImpls`, whose union reader would publish them as LOCAL classes.
+// (`classConformers`, `depConformers`, `ifaceFlows` are declared beside `classOverrides`, which readers reach earlier.)
+// The conformer a SOURCE type names, or null: the INSTANCE side of a class (never `typeof C`, which is the
+// constructor and conforms to a constructor interface, not to `I`), a project object literal, or a local
+// interface (whose own conformers then flow on — the fixpoint below).
+function conformerOfSourceType(st) {
+  const sym = st?.getSymbol?.() ?? st?.symbol;
+  for (const d of sym?.declarations ?? []) {
+    if (ts.isObjectLiteralExpression(d) && isProjectNode(d)) return { kind: "lit", node: d };
+    if (ts.isClassDeclaration(d)) {
+      let declared; try { declared = checker.getDeclaredTypeOfSymbol(sym); } catch { declared = null; }
+      const tgt = st.target ?? st;
+      if (!declared || !(tgt === declared || tgt === declared.target)) return null;   // the static side
+      if (isProjectNode(d)) return { kind: "class", node: d };
+      if (d.getSourceFile().isDeclarationFile) return { kind: "dep", node: d };
+      return null;
+    }
+    if (ts.isInterfaceDeclaration(d) && isProjectNode(d)) return { kind: "iface", node: d };
+  }
+  return null;
+}
+function localAncestorsAndSelf(cls) {
+  const out = [];
+  for (let c = cls, g = 0; c && g++ < 64; c = localBaseClassOf(c)) out.push(c);
+  return out;
+}
+function pushUnique(map, key, val) {
+  if (!map.has(key)) map.set(key, []);
+  const arr = map.get(key);
+  if (arr.includes(val)) return false;
+  arr.push(val);
+  return true;
+}
+function registerDepConformerIface(ifaceDecl, depCls, seen = new Set()) {
+  if (seen.has(ifaceDecl)) return;
+  seen.add(ifaceDecl);
+  pushUnique(depConformers, ifaceDecl, depCls);
+  for (const eh of ifaceDecl.heritageClauses ?? []) {
+    if (eh.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    for (const st of eh.types) {
+      let sym; try { sym = checker.getSymbolAtLocation(st.expression); } catch { sym = undefined; }
+      const tgt = sym && sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
+      for (const d of tgt?.declarations ?? [])
+        if (ts.isInterfaceDeclaration(d) && (isProjectNode(d) || isPublishableForeignIface(d)))
+          registerDepConformerIface(d, depCls, seen);
+    }
+  }
+}
+// Record that conformer `c` reached target declaration `t` (an interface or a local class). Returns whether
+// anything new was registered, which drives the interface-flow fixpoint.
+function recordConformer(c, t) {
+  if (!c || !t || c.node === t) return false;
+  if (c.kind === "iface") {
+    if (!ifaceFlows.has(c.node)) ifaceFlows.set(c.node, new Set());
+    const fl = ifaceFlows.get(c.node);
+    if (fl.has(t)) return false;
+    fl.add(t);
+    return true;
+  }
+  if (ts.isInterfaceDeclaration(t)) {
+    const local = isProjectNode(t);
+    if (c.kind === "dep") {
+      const before = depConformers.get(t)?.length ?? 0;
+      registerDepConformerIface(t, c.node);
+      return (depConformers.get(t)?.length ?? 0) > before;
+    }
+    const map = local ? interfaceImpls : foreignInterfaceImpls;
+    // A class whose local ANCESTOR (or itself) is already a candidate is already answered: `implMemberBodies`
+    // descends into that candidate's subtree. Registering it again would only inflate the count the ≤12 bound
+    // reads — MEASURED: typeorm's `Driver` went over the bound on subclasses of its nominal implementors and
+    // `DataSource.destroy` lost its `Fs` to a bare `Unknown`.
+    if (c.kind === "class" && localAncestorsAndSelf(c.node).some((a) => (map.get(t) ?? []).includes(a))) return false;
+    const before = map.get(t)?.length ?? 0;
+    const had = new Set(map.get(t) ?? []);
+    if (local) registerStructuralImpl(t, c.node); else registerForeignStructuralImpl(t, c.node);
+    if (!had.has(c.node) && (map.get(t) ?? []).includes(c.node)) {
+      if (!conversionAddedImpls.has(t)) conversionAddedImpls.set(t, new Set());
+      conversionAddedImpls.get(t).add(c.node);
+    }
+    // BODIES ONLY (R531): the literal's written members already have units; an ALIAS member (`go: other.m`) is left
+    // unresolved, so a dispatch over it discloses rather than re-pointing `enclosing()` — purely additive.
+    if (c.kind === "lit") mintStructuralMembers(c.node, true);
+    return (map.get(t)?.length ?? 0) > before;
+  }
+  if (ts.isClassDeclaration(t)) {
+    if (c.kind === "class" && classInSubtree(c.node, t)) return false;   // nominal: the subtree already answers
+    let added = false;
+    for (const anc of localAncestorsAndSelf(t)) added = pushUnique(classConformers, anc, c.node) || added;
+    if (c.kind === "lit") mintStructuralMembers(c.node, true);
+    return added;
+  }
+  return false;
+}
+// The declarations a TARGET type names that a conformer can be registered under: local and publishable
+// foreign interfaces, and local classes (instance side). A union target is decomposed, and a constituent is
+// kept only if the source is assignable to it — a `string | Sink` slot does not make a string a `Sink`.
+function conversionTargets(tt, st) {
+  const out = [];
+  const consider = (ct) => {
+    if (st && typeof checker.isTypeAssignableTo === "function") {
+      try { if (!checker.isTypeAssignableTo(st, ct)) return; } catch { /* keep: the checker could not say */ }
+    }
+    const sym = ct?.getSymbol?.() ?? ct?.symbol;
+    for (const d of sym?.declarations ?? []) {
+      if (ts.isInterfaceDeclaration(d) && (isProjectNode(d) || isPublishableForeignIface(d))) { if (!out.includes(d)) out.push(d); }
+      else if (ts.isClassDeclaration(d) && isProjectNode(d)) {
+        let declared; try { declared = checker.getDeclaredTypeOfSymbol(sym); } catch { declared = null; }
+        const tgt = ct.target ?? ct;
+        if (declared && (tgt === declared || tgt === declared.target) && !out.includes(d)) out.push(d);
+      }
+    }
+  };
+  if (!tt) return out;
+  if (tt.isUnion?.()) for (const ct of tt.types) consider(ct); else consider(tt);
+  return out;
+}
+// One conversion: the source and target types, followed ONE level into matching type arguments (`Sink[]` from
+// `DepThing[]`, `Promise<Sink>` from `Promise<DepThing>`) with the checker's own type-argument relation.
+function recordConversion(st, tt, depth = 0) {
+  if (!st || !tt || st === tt) return;
+  if (st.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return;   // vacuous: the hedge's question, not ours
+  const sources = st.isUnion?.() ? st.types : [st];
+  for (const s of sources) {
+    const c = conformerOfSourceType(s);
+    if (c) for (const t of conversionTargets(tt, s)) recordConformer(c, t);
+  }
+  if (depth >= 1) return;
+  const args = (x) => { try { return checker.getTypeArguments?.(x) ?? []; } catch { return []; } };
+  const sameShape = (a, b) => {
+    const at = a.target ?? null, bt = b.target ?? null;
+    if (at && bt && at === bt) return true;
+    try { return !!(checker.isArrayLikeType?.(a) && checker.isArrayLikeType?.(b)); } catch { return false; }
+  };
+  for (const s of sources) {
+    const tts = tt.isUnion?.() ? tt.types : [tt];
+    for (const t of tts) {
+      if (!s.target || !t.target || !sameShape(s, t)) continue;
+      const sa = args(s), ta = args(t);
+      if (sa.length && sa.length === ta.length) for (let i = 0; i < sa.length; i++) recordConversion(sa[i], ta[i], depth + 1);
+    }
+  }
+}
+// The expression positions where a value is CONVERTED to a declared type. Each is asked for its contextual type,
+// which the checker resolves against that slot (the parameter, the declared variable or field type, the return
+// type, the assigned-to type, the element or property type).
+function isConversionPosition(n) {
+  const p = n.parent;
+  if (!p) return false;
+  if ((ts.isCallExpression(p) || ts.isNewExpression(p)) && (p.arguments ?? []).includes(n)) return true;
+  if ((ts.isVariableDeclaration(p) || ts.isPropertyDeclaration(p) || ts.isParameter(p)) && p.initializer === n && p.type) return true;
+  if (ts.isReturnStatement(p) && p.expression === n) return true;
+  if (ts.isArrowFunction(p) && p.body === n) return true;
+  if (ts.isBinaryExpression(p) && p.right === n && p.operatorToken.kind === ts.SyntaxKind.EqualsToken) return true;
+  if (ts.isArrayLiteralExpression(p)) return true;
+  if (ts.isPropertyAssignment(p) && p.initializer === n) return true;
+  return false;
+}
+// R82 / PART 87: is the conversion's SOURCE type a fact about the VALUE, or only about a generic signature? A
+// call whose declared return type mentions one of its own type parameters (`wrap<T>(x: T): T`) hands back
+// whatever type the ARGUMENT had, and that signature proves assignability, never that the value IS the
+// argument — the suite's own `decoy` fixture (`return makeReal() as unknown as T`) is exactly that, and reading
+// its source type registered the pure decoy and made the dispatch vanish. Such a source is followed only
+// through a PROVEN identity body (`isProvenIdentityReturn`); a const is followed to its initializer. Anything
+// else — a declared return type, a typed parameter or field, `new`, a literal — is the checker's own fact.
+function conversionSourceTracked(e, depth = 0) {
+  if (!e || depth > 8) return true;
+  while (ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e)) e = e.expression;
+  if (ts.isConditionalExpression(e)) return conversionSourceTracked(e.whenTrue, depth + 1) && conversionSourceTracked(e.whenFalse, depth + 1);
+  if (ts.isCallExpression(e)) {
+    let sig; try { sig = checker.getResolvedSignature(e); } catch { sig = undefined; }
+    const decl = sig?.getDeclaration?.();
+    const tps = (decl?.typeParameters ?? []).map((tp) => tp.name.getText());
+    if (!tps.length || !decl?.type) return true;
+    const mentions = (n) => (ts.isTypeReferenceNode(n) && ts.isIdentifier(n.typeName) && tps.includes(n.typeName.text))
+      || (ts.forEachChild(n, (c) => (mentions(c) ? true : undefined)) ?? false);
+    if (!mentions(decl.type)) return true;
+    const idx = (decl.parameters ?? []).findIndex((pp) => pp.type && ts.isTypeReferenceNode(pp.type)
+      && ts.isIdentifier(pp.type.typeName) && pp.type.typeName.text === decl.type.getText());
+    return idx >= 0 && isProvenIdentityReturn(decl, idx) && conversionSourceTracked(e.arguments?.[idx], depth + 1);
+  }
+  if (ts.isIdentifier(e)) {
+    let sym; try { sym = checker.getSymbolAtLocation(e); } catch { sym = undefined; }
+    if (sym && sym.flags & ts.SymbolFlags.Alias) { try { sym = checker.getAliasedSymbol(sym); } catch { /* keep */ } }
+    const d = sym?.declarations?.length === 1 ? sym.declarations[0] : null;
+    if (d && ts.isVariableDeclaration(d) && !d.type && d.initializer && d.parent
+        && ts.isVariableDeclarationList(d.parent) && (d.parent.flags & ts.NodeFlags.Const))
+      return conversionSourceTracked(d.initializer, depth + 1);
+  }
+  return true;
+}
+const CONFORMER_REACH = process.env.CANDOR_CONFORMER_REACH ? (k, n) => console.error(`CONFORMER-REACH ${k} ${n}`) : null;
+for (const sf of sources) {
+  (function walkConversions(node) {
+    if (ts.isExpression(node) && !ts.isSpreadElement(node) && isConversionPosition(node) && conversionSourceTracked(node)) {
+      let tt, st;
+      try { tt = checker.getContextualType(node); } catch { tt = undefined; }
+      if (tt) {
+        try { st = checker.getTypeAtLocation(node); } catch { st = undefined; }
+        if (CONFORMER_REACH) {
+          const before = [...interfaceImpls.values(), ...foreignInterfaceImpls.values(), ...classConformers.values(), ...depConformers.values()]
+            .reduce((a, x) => a + x.length, 0);
+          recordConversion(st, tt);
+          const after = [...interfaceImpls.values(), ...foreignInterfaceImpls.values(), ...classConformers.values(), ...depConformers.values()]
+            .reduce((a, x) => a + x.length, 0);
+          if (after > before) CONFORMER_REACH("conversion", `${path.relative(rootDir, sf.fileName)}:${node.getStart()}`);
+        } else recordConversion(st, tt);
+      }
+    }
+    ts.forEachChild(node, walkConversions);
+  })(sf);
+}
+// The interface-flow fixpoint: a `J`-typed value converted to `X` carries every conformer of `J` with it.
+for (let changed = true, g = 0; changed && g++ < 32; ) {
+  changed = false;
+  for (const [j, targets] of ifaceFlows) {
+    const conf = [...(interfaceImpls.get(j) ?? []).map((n) => ({ kind: ts.isClassDeclaration(n) ? "class" : "lit", node: n })),
+                  ...(depConformers.get(j) ?? []).map((n) => ({ kind: "dep", node: n }))]
+      .filter((c) => c.kind !== "lit" || ts.isObjectLiteralExpression(c.node));   // a class EXPRESSION stays where it is
+    for (const t of targets) for (const c of conf) if (recordConformer(c, t)) changed = true;
+  }
+}
+
 // Accessor resolution (the silent-pure-accessor fix): a property READ (`x.raw`) or property
 // ASSIGNMENT target (`x.path = v`) may resolve to a getter/setter whose body performs effects. We
 // resolve the property-name symbol to its declarations and look for an accessor of the matching
@@ -5891,8 +6223,12 @@ function definePropForceTarget(propNode, kind /* "get" | "set" */) {
 // (EXECUTED: the caller was ABSENT over a real write). Bodies from `memberDispatchBodies`; the bound stays on
 // the one-level scoped count, and a transitive set past it also discloses — the method arm's rule verbatim.
 function accessorOverrideFanOut(rec, decl, recvExpr) {
-  const allOverrides = classOverrides.get(decl);
-  if (!allOverrides || allOverrides.length === 0) return;
+  const allOverrides = classOverrides.get(decl) ?? [];
+  // R954 — a conformer converted to the receiver's class runs its own accessor here too.
+  const confAt = isSuperReceiver(recvExpr) ? null
+    : (localReceiverClass(recvExpr) ?? (decl?.parent && ts.isClassDeclaration(decl.parent) ? decl.parent : null));
+  const confBodies = confAt ? conformerBodies(confAt, decl.name?.getText?.()) : [];
+  if (allOverrides.length === 0 && confBodies.length === 0) return;
   if (isSuperReceiver(recvExpr)) { probeR871("super-accessor", decl, allOverrides.length); return; } // `super.v` names one accessor; it does not dispatch
   // SOUNDNESS-PRESERVING FALLBACK, the method path's verbatim: a receiver we cannot pin to a LOCAL
   // class (a union, an interface, `any`, an external type) keeps the FULL override set.
@@ -5910,9 +6246,14 @@ function accessorOverrideFanOut(rec, decl, recvExpr) {
     rec.why.add(dispatchWhy(ownerQual(decl), decl.name?.getText?.()));
     return;
   }
-  let allResolved = overrides.length <= CHA_FANOUT_LIMIT;
+  let allResolved = overrides.filter((om) => !confBodies.includes(om)).length <= CHA_FANOUT_LIMIT;
   const targets = [];
-  for (const om of overrides) { const ot = nodeName.get(om); if (ot) targets.push(ot); else allResolved = false; }
+  for (const om of overrides) {
+    const ot = nodeName.get(om);
+    if (ot) targets.push(ot);
+    else if (confBodies.includes(om) && isExternalConformerBody(om)) { if (!chargeConformerBody(rec, om)) allResolved = false; }
+    else allResolved = false;
+  }
   for (const ot of targets) rec.edges.add(ot);       // (EDGE) into each override — effects propagate
   if (!allResolved) {
     rec.direct.add("Unknown");                       // an override we could not name is not a pure one
@@ -6738,8 +7079,16 @@ const probeJoinReach = (mark, outcome, detail) => {
 // co-extensive with the charge it replaces: where there is no implementor there is nothing to hedge.
 function joinLocalImpls(rec, d, hedgeOnly) {
   if (!rec || !d) return null;
+  let extraUnresolvedDep = false;
   const { targets, extra, extraUnresolved, allResolved, decls } = localImplTargets(d.key);
-  if (!targets.length) return null;
+  // R954 — a DEPENDENCY class this package converted to the dispatched interface (`runIt(new
+  // OtherDep())`) is a candidate the join answers too, charged as a direct call to its member.
+  const depBodies = [];
+  for (const x of decls ?? []) for (const dc of depConformers.get(x) ?? []) {
+    const b = conformerMemberDecl(dc, d.member);
+    if (b && !depBodies.includes(b)) depBodies.push(b);
+  }
+  if (!targets.length && !depBodies.length) return null;
   // The name means two things here, so no implementor set can be attributed to this key — §4 ⟨0.24⟩'s
   // `ambiguous:`, not `dispatch:`: the owner type is nameable, but WHICH declaration it names is not.
   if (decls.size > 1) {
@@ -6754,6 +7103,8 @@ function joinLocalImpls(rec, d, hedgeOnly) {
   }
   for (const t of targets) rec.edges.add(t);
   for (const t of extra) rec.edges.add(t);           // ⟨R872⟩ the implementors' overrides — see the index
+  for (const b of depBodies) if (!(isExternalConformerBody(b) && chargeConformerBody(rec, b))) extraUnresolvedDep = true;
+  if (extraUnresolvedDep) { rec.direct.add("Unknown"); rec.why.add(dispatchWhy(`${d.pkg}.${d.ifaceName}`, d.member)); }
   if (extraUnresolved) {
     rec.direct.add("Unknown");
     rec.why.add(dispatchWhy(`${d.pkg}.${d.ifaceName}`, d.member));
@@ -8837,8 +9188,17 @@ function visitCalls(node) {
             // receiver already resolved to the leaf (`new Dog()` -> Dog.speak, no overrides) so this is
             // inert there — no double-count. A base method NO subclass overrides has no entry: today's
             // behavior (just the base) is preserved exactly.
-            const allOverrides = classOverrides.get(decl);
-            if (allOverrides && allOverrides.length > 0) {
+            // R954 — the arm also runs where no subclass overrides `decl` but a CONFORMER was
+            // converted to the receiver's class (R874: `function mkS(): BaseL { return { m(){…} } }`), which had no
+            // candidate list here at all. `conformerBodies` is asked through `memberDispatchBodies` below; this is
+            // only the trigger, read at the same receiver class.
+            const allOverrides = classOverrides.get(decl) ?? [];
+            const confRecv = (ts.isPropertyAccessExpression(node.expression)
+              || ts.isElementAccessExpression(node.expression)) ? node.expression.expression : null;
+            const confAt = isSuperReceiver(confRecv) ? null
+              : (localReceiverClass(confRecv) ?? (ts.isClassDeclaration(decl.parent) ? decl.parent : null));
+            const confBodies = confAt ? conformerBodies(confAt, decl.name?.getText?.()) : [];
+            if (allOverrides.length > 0 || confBodies.length > 0) {
               // PRECISION: scope the fan-out to the RECEIVER's static-type subtree. A base-member
               // dispatch on a receiver statically typed as subclass `Cat` can only ever bind to a
               // `Cat`-subtree body — a SIBLING `Dog.speak` override is type-impossible on this path,
@@ -8871,11 +9231,13 @@ function visitCalls(node) {
               else if (direct.length <= CHA_FANOUT_LIMIT) probeR871("class", decl, overrides.length - direct.length);
               if (overrides.length > 0) {
                 if (direct.length <= CHA_FANOUT_LIMIT) {
-                  let allResolved = overrides.length <= CHA_FANOUT_LIMIT;
+                  // the bound stays on the OVERRIDE count it was decided on; conformers only add
+                  let allResolved = overrides.filter((om) => !confBodies.includes(om)).length <= CHA_FANOUT_LIMIT;
                   const oTargets = [];
                   for (const om of overrides) {
                     const ot = nodeName.get(om);
                     if (ot) oTargets.push(ot);
+                    else if (confBodies.includes(om) && isExternalConformerBody(om)) { if (!chargeConformerBody(rec, om)) allResolved = false; }
                     else allResolved = false;
                   }
                   for (const ot of oTargets) rec.edges.add(ot);
@@ -8955,10 +9317,18 @@ function visitCalls(node) {
                 // the arm where absence is the purity claim that deletes the consumer's disclosure.
                 recordDispatch(rec, sigDecl, pkgName);
                 const impls = interfaceImpls.get(sigDecl.parent) ?? [];
-                if (impls.length > 0 && impls.length <= CHA_FANOUT_LIMIT) {
+                // R954 — a DEPENDENCY class the checker showed converted to this interface is a
+                // candidate too; it counts toward the bound like any implementor, and is charged as a direct call.
+                const depImpls = depConformers.get(sigDecl.parent) ?? [];
+                if (impls.length + depImpls.length > 0 && impls.length + depImpls.length <= CHA_FANOUT_LIMIT) {
                   const member = sigDecl.name?.getText?.();
                   let allResolved = true;
-                  const targets = [];
+                  const targets = [], externals = [];
+                  for (const dc of depImpls) {
+                    const d = conformerMemberDecl(dc, member);
+                    if (d && isExternalConformerBody(d)) { if (!externals.includes(d)) externals.push(d); }
+                    else allResolved = false;
+                  }
                   for (const cls of impls) {
                     // ⟨0.35, PART 87 fix⟩ `cls` may be a ClassDeclaration/ClassExpression (`.members`) OR
                     // a structural implementor — an ObjectLiteralExpression (`.properties`) registered by
@@ -8981,12 +9351,16 @@ function visitCalls(node) {
                       // The implementor's own (or inherited) member decides `allResolved`, as it always did —
                       // and with it whether this caller is recorded as a genuine dispatcher below. An unnamed
                       // OVERRIDE under it discloses beside the edges and changes neither.
+                      // R954 — a conformer's body this scan does not hold (a dependency class
+                      // converted to an implementor's class type) is charged as a direct call, not hedged.
+                      else if (bi > 0 && isExternalConformerBody(b)) { if (!externals.includes(b)) externals.push(b); }
                       else if (bi === 0) allResolved = false;
                       else descentUnresolved = true;
                     }
                   }
                   for (const t of targets) rec.edges.add(t);
-                  edged = targets.length > 0 && allResolved;
+                  for (const b of externals) if (!chargeConformerBody(rec, b)) allResolved = false;
+                  edged = (targets.length > 0 || externals.length > 0) && allResolved;
                   // ⟨CARDINAL SIN FIX, caller-path scope⟩ record the GENUINE dispatch, at the point the
                   // dispatch happened — `owner` (this call's enclosing fn) really did resolve THROUGH
                   // `sigDecl.parent`'s own signature, not merely land on one of its implementers by
@@ -11703,6 +12077,19 @@ function typingsInterfaceImpls() {
     if (inScan && arm[1].every((c) => inScan.has(c))) continue;
     unionArms.push([arm[0], arm[1], false, owner, [], []]);
   }
+  // R954 — an in-scan arm that exists ONLY because the conversion pass found conformers must not
+  // collide with this package's own typings arm of the same name: the collision rule below skips BOTH, and
+  // MEASURED on pnpm that deleted a published `ImporterToResolve.isOverriddenDependency` entry carrying
+  // `Unknown` (a disclosure a consumer reads), the R764 shape. Such an arm yields to the typings arm, which is
+  // what was published before; the conformers still answer every in-scan dispatch.
+  for (let i = unionArms.length - 1; i >= 0; i--) {
+    const [d, , , owner] = unionArms[i];
+    const added = conversionAddedImpls.get(d);
+    if (!added || !interfaceImpls.has(d)) continue;
+    if (!(interfaceImpls.get(d) ?? []).every((x) => added.has(x))) continue;
+    if (unionArms.some((a, j) => j !== i && a[0] !== d && a[3] === owner && a[0].name?.text === d.name?.text))
+      unionArms.splice(i, 1);
+  }
   // ⟨0.39⟩ obligation 2's arms, pushed LAST and deliberately AFTER `inScanClassesByName` was taken: a
   // foreign `Backend` and a local one are different keys under different prefixes, so neither may
   // suppress the other as "redundant" and neither may make the other's NAME ambiguous. Both mistakes run
@@ -11789,6 +12176,11 @@ function typingsInterfaceImpls() {
     // once an unnamed one contributes real effects it has to be inside the bound that decides whether
     // this hierarchy is open.
     const overFanout = implClasses.length + implNodes.length > CHA_FANOUT_LIMIT;
+    // R954 — a DEPENDENCY class converted to this interface runs for a consumer's dispatch too,
+    // and its body is not this scan's to sum: the published entry says so (`Unknown`) rather than claiming the
+    // local implementors as the whole answer — never a pure-only entry a `crossDeps` hit would read as complete
+    // (R764).
+    const depHeld = (depConformers.get(ifaceDecl)?.length ?? 0) > 0;
 
     for (const member of ifaceDecl.members ?? []) {
       // Both spellings of an interface method (see the in-scan site): `run(): void` and
@@ -11804,7 +12196,8 @@ function typingsInterfaceImpls() {
       // per member. A structural implementor with no minted unit for `m` (a `.bind()` whose receiver
       // cannot be pinned, a call result, a getter, an absent optional member) is exactly as unaccountable
       // as the (CHA_FANOUT_LIMIT + 1)th named one, and takes the same disclosed Unknown.
-      let unaccounted = false;
+      let unaccounted = depHeld;
+      if (depHeld) infU.add("Unknown");
       if (overFanout) infU.add("Unknown");
       else {
         for (const clsName of implClasses) {
