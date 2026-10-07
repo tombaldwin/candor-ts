@@ -10,6 +10,23 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ STRICTER: **a server that ACCEPTS has an incomplete `Net` surface** (SPEC §2 ⟨0.40⟩, SOUNDNESS R817 —
+  R781's listen half; PART 96 `c_accept`). node's server `listen` hands every arriving connection to the
+  handler, so its peers are whoever connects; before this, `netm.connect(80, "ok.example")` beside
+  `netm.createServer(h).listen(8080)` read `hosts: ["ok.example"]`, complete, and `allow Net in <fn> ok.example`
+  exited 0 — EXECUTED, a client connecting to that listener received the handler's bytes. A new set,
+  `NET_ACCEPTING` (`listen`), marks `incomplete` unconditionally and captures nothing from the call; it is
+  member-keyed on the resolved declaration, so http/https/http2/tls servers, `new net.Server`, a project
+  subclass, socket.io's `listen` and a `listen` in a callee are all covered without being named, plus two
+  module-specific accepts (`inspector.open`, `ws`'s `WebSocketServer` construction). `bind` is NOT an accept
+  and still marks nothing (PART 96 `b_rtbind`/`d_ephemeral` certify, as before). Also stops a FABRICATION:
+  `server.listen("10.0.0.5")` (node's pipe-path overload) published `hosts: ["10.0.0.5"]`. Corpus A/B
+  (`bin/corpus-ab.py`, 28-entry pinned roster): ADDED 0, REMOVED 0, CHANGED 76, `inferred` CHANGED 0 — every
+  change is `incomplete` gaining `Net`; 26 accept sites (25 `net.Server.listen`, 1 `inspector.open`) in 7
+  entries, each read from source; none of the 76 rows had a captured host, so no `allow Net` gate on the
+  roster moves. Not seen (listed at `netAccepting`): framework `listen`s κ does not classify (express, koa,
+  fastify), a reflectively-invoked `listen`, Bun/Deno servers.
+
 - ⚠ STRICTER: one masking rule for `Net` — **a host-bearing call whose host was not captured marks the
   surface `incomplete`** — on the global-`fetch` path too (SOUNDNESS R802), and for undici's URL-first verbs
   (SOUNDNESS R781, destination half). The fetch path used to ask an inclusion-shaped question (a template, a

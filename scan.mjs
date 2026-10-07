@@ -37,7 +37,7 @@ import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadE
          tablesInSql, modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf,
          partnerFor, CLOCK_READING_PERFORMANCE_MEMBERS, CLOCK_READING_PROCESS_MEMBERS,
          CLOCK_READING_CONSOLE_MEMBERS, CONNECTING_WEB_CTORS,
-         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, NET_REQUEST_NAMED, FS_USE_VERBS,
+         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, NET_ACCEPTING, NET_REQUEST_NAMED, FS_USE_VERBS,
          EXEC_USE_VERBS, RESERVED_SIDECAR_SEGMENTS } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
@@ -8979,6 +8979,25 @@ function visitCalls(node) {
           const netEstablishing = (member) =>
             isConnectingCtor(ctorRuleName) || NET_ESTABLISHING.has(member)
             || (/^(node:)?dgram$/.test(mod) && member === "send");
+          // SOUNDNESS R817 / SPEC §2 ⟨0.40⟩ — an ACCEPT: the peers are whoever connects, so no literal anywhere
+          // in the unit can determine them (scan-core NET_ACCEPTING says why `listen` and why not `bind` or
+          // `createServer`). Asked only of a call κ already classified `Net`, and against `kMod`, the module κ
+          // was asked. Two accepts are module-specific because their member name is too common to key on:
+          //   `inspector.open(port, host)` — starts the inspector's WebSocket server (κ: Net);
+          //   `new WebSocketServer(opts)` / `new ws.Server(opts)` — listens on `opts.port` when given one. A
+          //   `{ server }` or `{ noServer: true }` server accepts nothing itself (the http server's `listen`
+          //   does, and is marked there) and is OVER-charged here: fail-closed, and not worth an options parser.
+          // ACCEPT SPELLINGS THIS DOES NOT SEE, so the reader does not mistake the list for the rule:
+          //   * a framework's own `listen` — express/koa `app.listen`, fastify `listen`, hapi `server.start` —
+          //     is not classified `Net` by κ at all (the packages are unlisted), so the gap there is the EFFECT,
+          //     not this mark; once κ names such a package, its `listen` lands here by member name;
+          //   * `listen` reached reflectively (`srv.listen.call(srv, p)`) goes through the reflective-invoke
+          //     arm, which applies no Net masking to ANY verb (connect included) — a separate route;
+          //   * Bun.serve / Deno.serve / `Deno.listen` — not node, not in κ.
+          const netAccepting = (member) =>
+            NET_ACCEPTING.has(member)
+            || (/^(node:)?inspector(\/promises)?$/.test(kMod) && member === "open")
+            || (/^ws$/.test(kMod) && member === "new" && /^(WebSocketServer|Server)$/.test(ctorClassName));
           // ⟨0.32⟩ THE CLASS BEING CONSTRUCTED, TAKEN FROM THE `new` EXPRESSION rather than from the
           // resolved constructor. A class that declares no constructor of its own INHERITS one, and
           // `getResolvedSignature()` hands back the BASE's — which lives in the base's file, so both the
@@ -9139,7 +9158,10 @@ function visitCalls(node) {
             if (eff === "Unknown") rec.why.add(`reflect:${kMod.replace(/^node:/, "")}.${member}`);
           }
           // the literal surfaces, read only at a CLASSIFIED call (SPEC §2)
-          if (eff === "Net") {
+          // ⟨0.40⟩ an accept marks the surface and captures NOTHING from its arguments — its address is where
+          // the process listens (R809's fabrication, now SPEC: "It MUST NOT enter `hosts`").
+          if (eff === "Net" && netAccepting(member)) rec.incomplete.add("Net");
+          else if (eff === "Net") {
             // The host predicate runs against the EXTRACTED URL argument (arg0 — the URL/endpoint slot of
             // fetch/axios/the HTTP verbs), NEVER the first literal anywhere in the args: a trailing literal
             // in headers/body/options must not be read as the host (FINDING 6). Ollama's model decision runs

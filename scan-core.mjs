@@ -273,16 +273,44 @@ export const RESERVED_SIDECAR_SEGMENTS =
 // no destination is now marked incomplete — an over-charge, fail-closed. The pinned ts roster has ZERO
 // unmasked Net calls under any of these names (MASKPROBE over all 28 entries), so the price there is 0.
 //
-// NOT ADDED, DELIBERATELY: `listen`/`bind`. A listen/bind address is where the process LISTENS, not a
-// destination it reaches; ts already withholds that literal from `hosts` (rust ⟨0.29⟩ `is_net_binding`,
-// R809). Whether ACCEPTING inbound connections must mark the surface is the open spec question R817, and
-// the engines disagree on it today (rust: no hedge; swift `NWListener`: opaque, marked) — not a list fix.
+// NOT HERE, DELIBERATELY: `listen`/`bind`. This set answers "does this call name the DESTINATION it reaches?",
+// and a listen/bind address names the process's OWN address (SPEC §2 ⟨0.40⟩ "A BIND OR LISTEN ADDRESS IS
+// WHERE THE PROCESS LISTENS"). Putting `listen` here would be wrong in the silent direction: a call in this
+// set marks `incomplete` only when NO host was captured, so `server.listen("10.0.0.5")` (a pipe path that
+// `hostLiteral` reads as a host) would publish the local address AND certify it. The accept side is its own
+// question with its own set, NET_ACCEPTING below.
 export const NET_ESTABLISHING = new Set(["request", "get", "post", "put", "patch", "delete", "head",
   "options", "connect", "createConnection", "fetch",
   "stream", "pipeline", "upgrade", "postForm", "putForm", "patchForm",
   "lookup", "lookupService", "reverse", "resolve", "resolve4", "resolve6", "resolveAny",
   "resolveCname", "resolveCaa", "resolveMx", "resolveNaptr", "resolveNs", "resolvePtr",
   "resolveSoa", "resolveSrv", "resolveTlsa", "resolveTxt"]);
+
+// SOUNDNESS R817 / SPEC §2 ⟨0.40⟩ — THE CALLS THAT ACCEPT. "A UNIT THAT ACCEPTS A CONNECTION TALKS TO PEERS NO
+// LITERAL CAN NAME, SO ITS `Net` SURFACE IS INCOMPLETE": node's server `listen` is the call that hands every
+// arriving connection to the server's handler, so it fixes the peer exactly as `connect` does for a client —
+// except that whoever connects chooses it. Read by scan.mjs's `netAccepting`, which marks `incomplete`
+// UNCONDITIONALLY (no literal makes an accept determined) and suppresses any capture from the call's
+// arguments (its address is local — the R809 fabrication). MEASURED before the fix (SOUNDNESS R781's listen
+// half, PART 96 c_accept): `netm.connect(80, "ok.example")` beside `netm.createServer(h).listen(8080)` read
+// `hosts: ["ok.example"]`, complete, and `allow Net ok.example` exited 0 over a server writing to anyone.
+//
+// MEMBER-KEYED, MODULE-FREE ON PURPOSE, and the module is the derived half. `listen` is read off the RESOLVED
+// declaration, so every server type node ships reaches it through `net.Server.listen` — `http`/`https`/
+// `http2`(`createSecureServer`)/`tls` servers, `new net.Server(h)`, and a project `class S extends
+// net.Server` — without being enumerated; and κ already decides WHICH modules' `listen` is a network call (the
+// net cluster; `socket.io`'s whole-module rule). A `listen` κ does not classify `Net` never reaches this set,
+// so it cannot over-charge a JSON-RPC `connection.listen()`. Two module-specific accepts sit in scan.mjs beside
+// the reader, because their member name is too common to key on alone: `inspector.open` (starts the debugger's
+// WebSocket server) and `ws`'s `WebSocketServer` construction.
+//
+// NOT AN ACCEPT: `bind`. A datagram socket's `bind` receives; its replies go out through `send`, which carries
+// its own locator (SPEC: "a datagram receive is not an accept"), and "A bind marks nothing". `createServer` is
+// not one either: it constructs a server and registers a handler, and nothing arrives until a `listen` — which
+// is marked in whichever unit calls it, and `incomplete` reaches that unit's callers over the edge like any
+// other. FAILURE DIRECTION: forgetting an accept spelling here UNDER-reports (an allowlist, R781's warning);
+// the spellings this does not see are listed at the reader.
+export const NET_ACCEPTING = new Set(["listen"]);
 
 // The NAMED imports `scan.mjs`'s `importedFromNetPkg` treats as a package's REQUEST CALLABLE (`import {
 // fetch, request, stream, pipeline } from "undici"`). Every one takes its URL first, so every one must also

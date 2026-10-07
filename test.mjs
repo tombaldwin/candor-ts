@@ -20,7 +20,7 @@ import { printAgents, writeStdoutSync } from "./contract.mjs";
 import { KAPPA_RULES, KAPPA_PURE, kappaKnows, CLOCK_READING_PERFORMANCE_MEMBERS,
          CLOCK_READING_PROCESS_MEMBERS,
          CLOCK_READING_CONSOLE_MEMBERS, NODE_CORE_REVIEWED, CONNECTING_WEB_CTORS,
-         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, NET_REQUEST_NAMED, FS_USE_VERBS,
+         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, NET_ACCEPTING, NET_REQUEST_NAMED, FS_USE_VERBS,
          EXEC_USE_VERBS } from "./scan-core.mjs";
 // R410's assertion needs node's OWN dns surface, not a list copied out of the engine — see the block
 // at the end of this file for why the family is DERIVED and not spelled.
@@ -20297,10 +20297,11 @@ if (blk()) {
   check("R781: undici's URL-first verbs (stream/pipeline/upgrade) and axios's *Form verbs are host-ESTABLISHING",
         ["stream", "pipeline", "upgrade", "postForm", "putForm", "patchForm"].every((n) => NET_ESTABLISHING.has(n)),
         JSON.stringify([...NET_ESTABLISHING]));
-  // THE BOUNDARY THIS ROW DID NOT CROSS, pinned so it is crossed only by decision: a listen/bind address
-  // is LOCAL (rust ⟨0.29⟩ `is_net_binding`, R809) and its literal is withheld from `hosts`; whether an
-  // ACCEPTING socket must mark the surface is the open spec question R817, on which rust and swift differ.
-  check("R781 BOUNDARY: `listen`/`bind` are NOT host-establishing — a local address is not a destination (R809); marking the accept side waits on R817",
+  // THE BOUNDARY, as SPEC §2 ⟨0.40⟩ (SOUNDNESS R817) rules it. This assertion used to say listen/bind were
+  // outside this set "until R817"; R817 decided them and they are STILL outside it, for a reason that is now
+  // stated: this set marks `incomplete` only when no host was CAPTURED, and a listen/bind address is the
+  // process's own, never a destination. `listen` is an ACCEPT and is marked by its own set, unconditionally.
+  check("R817 BOUNDARY: `listen`/`bind` are NOT host-ESTABLISHING — their address is where the process listens (SPEC §2 ⟨0.40⟩); an establishing verb is marked only when no host is captured, which would let `listen(\"10.0.0.5\")` publish and certify its own address",
         !["listen", "bind"].some((n) => NET_ESTABLISHING.has(n)), JSON.stringify([...NET_ESTABLISHING]));
 
   const pkg = (name, types) => ({
@@ -20360,6 +20361,86 @@ export async function eShadow() { await fetch("https://ok.example/a"); return fe
     const ex = gate(`src.f.${fn}`);
     check(`R802/R781 OVER-CHARGE CONTROL: \`${fn}\` — a DETERMINED URL (literal, const-bound, const base, Request, literal stream) still certifies (exit 0)`, ex === 0, `exit ${ex}`);
   }
+}
+
+// ── SOUNDNESS R817 / SPEC §2 ⟨0.40⟩: AN ACCEPT IS AN UNSEEN DESTINATION; A BIND IS NOT A DESTINATION ──────
+//
+// R781's listen half. node's server `listen` hands every arriving connection to the handler, so the peers
+// are whoever connects — and before this, `netm.connect(80, "ok.example")` beside `createServer(h).listen()`
+// read `hosts: ["ok.example"]`, COMPLETE, and `allow Net in <fn> ok.example` exited 0. EXECUTED: a client
+// connecting to that listener received the handler's bytes. The four PART 96 arms are reproduced first, with
+// PART 96's bodies verbatim; then the spellings that reach `listen` through other server types and across an
+// edge, which the member-keyed rule must cover without naming them; then the over-charge controls.
+if (blk()) {
+  check("R817: `listen` is an ACCEPT (NET_ACCEPTING) and `bind` is not — a datagram bind only receives, and SPEC: \"A bind marks nothing.\"",
+        NET_ACCEPTING.has("listen") && !NET_ACCEPTING.has("bind"), JSON.stringify([...NET_ACCEPTING]));
+  const pkgR = (name, types) => ({
+    [`node_modules/${name}/package.json`]: `{"name":"${name}","types":"index.d.ts","main":"index.js"}`,
+    [`node_modules/${name}/index.d.ts`]: types,
+    [`node_modules/${name}/index.js`]: ``,
+  });
+  const d = project({
+    ...pkgR("ws", `export declare class WebSocketServer { constructor(o: { port?: number; noServer?: boolean }); close(): void; }`),
+    ...pkgR("socket.io", `export declare class Server { constructor(); listen(p: number): this; }`),
+    "src/f.ts": `import * as netm from "node:net";
+import * as dgram from "node:dgram";
+import * as http from "node:http";
+import * as http2 from "node:http2";
+import * as tls from "node:tls";
+import * as inspector from "node:inspector";
+import { WebSocketServer } from "ws";
+import { Server as IoServer } from "socket.io";
+const OK = "ok.example";
+class MySrv extends netm.Server {}
+export function aLitbind(): void { dgram.createSocket("udp4").bind(9, "10.0.0.5"); }
+export function bRtbind(h: string): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(0, h); }
+export function cAccept(): void { netm.connect(80, "ok.example"); netm.createServer((s) => { s.write("hi"); }).listen(8080); }
+export function dEphemeral(): void { const s = dgram.createSocket("udp4"); s.bind(0); s.send(Buffer.from("x"), 53, "10.9.9.9"); }
+export function sHttp(): void { netm.connect(80, OK); http.createServer((q, r) => r.end("x")).listen(8080); }
+export function sH2(): void { netm.connect(80, OK); http2.createSecureServer({}).listen(8443); }
+export function sTls(): void { netm.connect(80, OK); tls.createServer({}, (s) => s.end("x")).listen(8443); }
+export function sNew(): void { netm.connect(80, OK); new netm.Server((s) => s.end("x")).listen(8080); }
+export function sSub(): void { netm.connect(80, OK); new MySrv().listen(8080); }
+export function sInsp(): void { netm.connect(80, OK); inspector.open(9229); }
+export function sWs(): void { netm.connect(80, OK); new WebSocketServer({ port: 8080 }); }
+export function sIo(): void { netm.connect(80, OK); new IoServer().listen(3000); }
+function lis(s: netm.Server): void { s.listen(8080); }
+export function viaCallee(): void { netm.connect(80, OK); lis(netm.createServer()); }
+export function lPipe(): void { netm.createServer().listen("10.0.0.5"); }
+export function kFactory(): netm.Server { netm.connect(80, OK); return netm.createServer((s) => s.end("x")); }`,
+  });
+  const gate = (fn, lit) => {
+    fs.writeFileSync(path.join(d, "p.pol"), `allow Net in src.f.${fn} ${lit}\n`);
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  // REACH first: every arm's `f` carries Net and, where it has one, the benign literal — otherwise an
+  // exit 1 below could be an empty surface failing rather than the accept (PART 96's own reach rule).
+  for (const fn of ["aLitbind", "bRtbind", "cAccept", "dEphemeral", "sHttp", "sInsp", "sWs", "sIo", "viaCallee", "kFactory"])
+    check(`R817 REACH: \`${fn}\` carries Net`, (row(fn).inferred ?? []).includes("Net"), JSON.stringify(row(fn)));
+  check("R817 REACH: the benign literal IS captured beside the accept, so c_accept's exit 1 is the accept and not an empty surface",
+        (row("cAccept").hosts ?? []).includes("ok.example"), JSON.stringify(row("cAccept")));
+  // PART 96 a_litbind: fails closed AND names no destination
+  check("R817 a_litbind: `allow Net 10.0.0.5` over a literal bind alone fails closed (exit 1) — by the empty surface, not by a mark",
+        gate("aLitbind", "10.0.0.5") === 1 && !(row("aLitbind").incomplete ?? []).includes("Net"), JSON.stringify(row("aLitbind")));
+  check("R817 a_litbind: the bind address does NOT enter `hosts`", !(row("aLitbind").hosts ?? []).some((h) => h.startsWith("10.0.0.5")),
+        JSON.stringify(row("aLitbind")));
+  check("R817 b_rtbind CONTROL: a runtime bind that never accepts marks nothing — `allow Net ok.example` exit 0",
+        gate("bRtbind", "ok.example") === 0, JSON.stringify(row("bRtbind")));
+  check("R817 c_accept: a listening server beside a benign literal is `incomplete` and `allow Net ok.example` FAILS CLOSED (exit 1; exit 0 at the pre-fix base)",
+        gate("cAccept", "ok.example") === 1 && (row("cAccept").incomplete ?? []).includes("Net"), JSON.stringify(row("cAccept")));
+  check("R817 d_ephemeral CONTROL: an ephemeral bind + a send to a literal still certifies — `allow Net 10.9.9.9` exit 0",
+        gate("dEphemeral", "10.9.9.9") === 0, JSON.stringify(row("dEphemeral")));
+  // the member-keyed rule reaches every node server type through `net.Server.listen`, a subclass, the
+  // module-specific accepts, and a `listen` in a CALLEE (incomplete crosses the edge). All exit 0 at the base.
+  for (const fn of ["sHttp", "sH2", "sTls", "sNew", "sSub", "sInsp", "sWs", "sIo", "viaCallee"])
+    check(`R817 ACCEPT SPELLING: \`${fn}\` beside a benign literal fails closed (exit 1)`, gate(fn, "ok.example") === 1, JSON.stringify(row(fn)));
+  // `listen(path)`: a string address that `hostLiteral` parses as a host was PUBLISHED and CERTIFIED at the base
+  check("R817: `listen(\"10.0.0.5\")` publishes no host (it was `hosts: [\"10.0.0.5\"]` at the base — the R809 fabrication by node's pipe-path overload)",
+        !(row("lPipe").hosts ?? []).length && (row("lPipe").incomplete ?? []).includes("Net"), JSON.stringify(row("lPipe")));
+  check("R817 OVER-CHARGE CONTROL: a unit that only CONSTRUCTS a server accepts nothing — `createServer` is not an accept, `allow Net ok.example` exit 0",
+        gate("kFactory", "ok.example") === 0, JSON.stringify(row("kFactory")));
 }
 
 // ======================================================================================================
