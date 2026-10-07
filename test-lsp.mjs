@@ -54,6 +54,17 @@ const DOC = pathToFileURL(path.join(W, "src", "app.ts")).href;
 // row expected a `window/logMessage` that a broken build never emits, at which point the session waited
 // forever. The deadline finishes with WHATEVER ARRIVED, so a missing message lands as the assertion it
 // belongs to rather than as a stalled runner.
+// THE SESSION ENDS ON A COUNT **AND** ON EVERY REQUEST HAVING ITS RESPONSE, and never drops a message it
+// already holds. MEASURED: two rows flaked on unmodified main (1–2 of 30 runs of the session alone) and were
+// first blamed on scan speed. The real mechanism was here. The loop RETURNED as soon as the count was
+// reached, so a later reply arriving in the SAME stdout chunk as the Nth message stayed in `buf`, never
+// parsed. The ⟨0.28⟩ zero-rule CONTROL session passes 4 and needs 5 (the whatif result is 5th). The ⟨0.32⟩
+// refused session passes 9 and needs 11. Both passed only when the kernel delivered the last reply in a
+// chunk of its own. A `node` shim that reads the server's stdout through a 300ms delay coalesces every
+// time, and turns those rows red on every run of unmodified main (three rows: the two observed plus the
+// ⟨0.32⟩ CONTROL beside them). So: (1) a request is never left unanswered by a count that was written one
+// short; (2) the parse loop drains everything it holds; (3) the promise settles on `close`, after stdout
+// has delivered its last byte, not on `exit`, which can fire first.
 function lspSession(messages, expectedInbound, extraEnv = {}, deadlineMs = 20000) {
   return new Promise((resolve) => {
     const srv = spawn("node", [path.join(HERE, "lsp.mjs")], { env: { ...process.env, ...extraEnv } });
@@ -61,13 +72,16 @@ function lspSession(messages, expectedInbound, extraEnv = {}, deadlineMs = 20000
     let buf = Buffer.alloc(0);
     const inbound = [];
     const times = [];    // arrival timestamp per inbound message — the perf fixture reads reply gaps
-    let finishing = false;
+    // every request this session sends gets exactly one response (result or error) from lsp.mjs
+    const awaiting = new Set(messages.filter((m) => m.id !== undefined && m.method).map((m) => m.id));
+    let finishing = false, exitCode = null;
     const finish = () => {
       if (finishing) return;
       finishing = true;
       clearTimeout(overall);
       const deadline = setTimeout(() => srv.kill("SIGKILL"), 15000);
-      srv.on("exit", (code) => { clearTimeout(deadline); resolve({ inbound, times, exitCode: code }); });
+      srv.on("exit", (code) => { exitCode = code; });
+      srv.on("close", () => { clearTimeout(deadline); resolve({ inbound, times, exitCode }); });
       srv.stdin.end();
     };
     srv.stdout.on("data", (chunk) => {
@@ -78,11 +92,13 @@ function lspSession(messages, expectedInbound, extraEnv = {}, deadlineMs = 20000
         const m = buf.slice(0, he).toString().match(/Content-Length:\s*(\d+)/i);
         const len = m ? parseInt(m[1], 10) : 0;
         if (buf.length < he + 4 + len) break;
-        inbound.push(JSON.parse(buf.slice(he + 4, he + 4 + len).toString()));
+        const msg = JSON.parse(buf.slice(he + 4, he + 4 + len).toString());
+        inbound.push(msg);
         times.push(Date.now());
+        if (msg.id !== undefined && !msg.method) awaiting.delete(msg.id);
         buf = buf.slice(he + 4 + len);
-        if (inbound.length >= expectedInbound) { finish(); return; }
       }
+      if (inbound.length >= expectedInbound && awaiting.size === 0) finish();
     });
     for (const msg of messages) {
       const body = Buffer.from(JSON.stringify(msg), "utf8");

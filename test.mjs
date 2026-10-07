@@ -20,7 +20,7 @@ import { printAgents, writeStdoutSync } from "./contract.mjs";
 import { KAPPA_RULES, KAPPA_PURE, kappaKnows, CLOCK_READING_PERFORMANCE_MEMBERS,
          CLOCK_READING_PROCESS_MEMBERS,
          CLOCK_READING_CONSOLE_MEMBERS, NODE_CORE_REVIEWED, CONNECTING_WEB_CTORS,
-         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, FS_USE_VERBS,
+         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, NET_ACCEPTING, NET_REQUEST_NAMED, FS_USE_VERBS,
          EXEC_USE_VERBS } from "./scan-core.mjs";
 // R410's assertion needs node's OWN dns surface, not a list copied out of the engine — see the block
 // at the end of this file for why the family is DERIVED and not spelled.
@@ -3236,7 +3236,7 @@ export async function bedrock() { return fetch("https://bedrock-runtime.us-east-
     // FINDING 1: the :11434 gate must run against a PARSED host, not a raw literal that merely contains
     // ":11434". A relative path `axios.post("/v1/models:11434/generate")` parses to no host → NO Llm.
     // FINDING 6: `fetch(runtimeUrl, "literal")` — the trailing literal (options/headers) is NOT the host.
-    // FINDING 7: `fetch(new URL(...))` is a STRUCTURED arg — it must NOT fail the surface closed.
+    // FINDING 7: a DETERMINED `new URL("…")` must NOT fail the surface closed (R802: its host is captured).
     // (`incomplete` is an INTERNAL surface, not a report field, so masking is asserted through the GATE.)
     const fd = project({
       ...pkg("axios", `declare const axios: { post(url: string, body?: unknown): Promise<unknown>; get(url: string): Promise<unknown>; };\nexport default axios;`),
@@ -3270,9 +3270,10 @@ export async function realModel() { return fetch("https://api.anthropic.com/v1/m
           gw.status === 1 && gw.stdout.includes("[AS-EFF-008]") && gw.stdout.includes("src.f.wrongArg"),
           `status=${gw.status} ${gw.stdout.slice(0, 200)}`);
     // FINDING 7 (no fail-closed regression): `structured` reaches a VISIBLE literal host (api.example.com)
-    // AND a STRUCTURED `fetch(new URL(u))`. The structured arg did NOT mask a literal — pre-fix it wrongly
-    // marked the surface incomplete, so `allow Net api.example.com` failed closed even though the only real
-    // host IS allowlisted. Post-fix the structured arg is clean → the gate CERTIFIES it (exit 0, no AS-EFF-008).
+    // AND `fetch(u)` where `const u = new URL("https://api.example.com/x")` — a DETERMINED locator, so the
+    // gate must CERTIFY it (exit 0). R802 changed WHY this passes: it used to pass because a structured arg
+    // was never marked at all, which also certified `fetch(new URL(callerValue))`; it now passes because the
+    // URL object's host is CAPTURED (`determinedUrlObject`), and an uncaptured one fails closed.
     fs.writeFileSync(path.join(fd, "allow-struct"), "allow Net in src.f.structured api.example.com\n");
     const gs = scan(fd, "--policy", path.join(fd, "allow-struct")).r;
     check("FINDING 7: fetch(new URL(...)) alongside a visible host is NOT fail-closed — gate certifies clean (exit 0)",
@@ -6819,8 +6820,15 @@ export function loadEnv(o: Record<string,string>) { assignInto(env, o); }
 export function dumpEnv() { return dumpKeys(env); }`,
     "src/neg.ts": `export function benignAssign() { return Object.assign({}, { a: 1 }); }
 export function benignKeys(o: Record<string,unknown>) { return Object.keys(o); }`,
+    // ⟨R928/R804⟩ THE SHADOW GUARD IS ASKED THROUGH THE ENV-FED PARAMETER (2c), where the builtin table
+    // still decides. Handing `process.env` to ANY callee now charges the HANDER — a project shadow
+    // included, because the callee runs with the live object (that is what closed `util.inspect`,
+    // `console.log` and an aliased `Object.assign`) — so `shadowedEntry` is Env by the value rule and
+    // the old direct spelling can no longer observe this guard. `shadowed`'s own body touches only its
+    // parameter: it is charged only if the TABLE matches the shadow's `Object.assign`.
     "src/shadow.ts": `const Shadow = { assign: (a: any) => a };
-export function shadowed() { const Object = Shadow; return Object.assign(process.env, {}); }`,
+function shadowed(t: any) { const Object = Shadow; return Object.assign(t, {}); }
+export function shadowedEntry() { return shadowed(process.env); }`,
   });
   const { report } = scan(d);
   const isEnv = (fn) => (entry(report, fn)?.inferred ?? []).includes("Env");
@@ -6833,8 +6841,179 @@ export function shadowed() { const Object = Shadow; return Object.assign(process
   check("GUARD: Object.assign/keys on a NON-env object stays PURE (no fabrication)",
         entry(report, "src.neg.benignAssign") == null && entry(report, "src.neg.benignKeys") == null,
         JSON.stringify([entry(report, "src.neg.benignAssign"), entry(report, "src.neg.benignKeys")]));
-  check("GUARD: a project-local `Object` SHADOW does NOT fabricate Env on `Object.assign(process.env, …)`",
+  check("GUARD: a project-local `Object` SHADOW does NOT fabricate Env on `Object.assign(envFedParam, …)` (the table never matches a shadow)",
         entry(report, "src.shadow.shadowed") == null, JSON.stringify(entry(report, "src.shadow.shadowed")));
+  check("…and the HANDER of process.env is Env by the value rule (R928/R804), shadow or not", isEnv("src.shadow.shadowedEntry"),
+        JSON.stringify(entry(report, "src.shadow.shadowedEntry")));
+}
+
+// ── SOUNDNESS R928 + R804 (ts vein C): `process.env` IS A VALUE, NOT A SPELLING ──────────────────────────
+// The Env arm recognised the EXACT node `process.env` (or an alias whose initializer was exactly that node)
+// in a LIST of reading contexts. Every spelling below is a different node or an unlisted context, every one
+// was ABSENT at 503f449 with `deny Env <fn>` AND `deny Unknown <fn>` both exit 0, and every one was EXECUTED
+// on node 22.12.0 reading a planted variable back (`tsagent-c/fx/envid`; the aliased `Object.assign` read
+// back by a child's `printenv`). Names are chosen so none is a §3.3 prefix of another.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", module: "commonjs", strict: true, skipLibCheck: true,
+                         types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+      include: ["src"],
+    }),
+    "src/ev.ts": `import * as util from "node:util";
+type E = Record<string, string | undefined>;
+const K = "CANDOR_SECRET_C";
+export function w01ParenZ() { return (process.env)[K]; }
+export function w02AsAnyZ() { return (process.env as any)[K]; }
+export function w03BangZ() { return process.env![K]; }
+export function w04SatisfiesZ() { return (process.env satisfies NodeJS.ProcessEnv)[K]; }
+export function w05AngleZ() { return (<any>process.env)[K]; }
+export function w06KeysParenZ() { return Object.keys((process.env)); }
+export function w07KeysAsZ() { return Object.keys(process.env as any); }
+export function w08CloneParenZ() { return structuredClone((process.env)); }
+export function w09AliasAsZ() { const e = process.env as E; return e[K]; }
+export function w10AliasSatZ() { const e = process.env satisfies NodeJS.ProcessEnv; return e[K]; }
+export function w11NullishZ(o?: E) { const e = o ?? process.env; return e[K]; }
+export function w12TernaryZ(c: boolean) { const e = c ? process.env : ({} as E); return e[K]; }
+export function w13DefaultZ(e: E = process.env) { return e[K]; }
+export function w14InspectZ() { return util.inspect(process.env); }
+export function w15FormatZ() { return util.format("%o", process.env); }
+export function w16ConsoleZ() { console.log(process.env); }
+export function w17AsnZ() { const asn = Object.assign; asn(process.env, { CANDOR_INJ: "yes" }); }
+function readerHelper(e: E) { return e[K]; }
+export function w18PasserZ() { return readerHelper(process.env); }
+function giverHelper() { return process.env; }
+export function w19TakerZ() { return giverHelper()[K]; }
+export function w20ElemZ() { return process["env"][K]; }
+export function w21ChainZ() { const e = process.env; const f = e; return f[K]; }
+const cenv = globalThis.process?.env ?? {};
+export function w23CittyZ() { return cenv[K]; }
+export function w24CorepackZ(env = process.env) { return env[K] != null; }
+export function m01MayZ(o?: E) { let e = process.env; if (o) e = o; return e[K]; }
+export function m02RebindZ() { let e: E = process.env; e = { [K]: "local" }; return e[K]; }
+export function c01PlainZ() { return process.env[K]; }
+export function c02ShadowParamZ(process: { env: E }) { return process.env[K]; }
+export function c04TypeofZ() { return typeof process.env; }
+export function c06TestZ() { return process.env === undefined || !process.env; }`,
+    "src/shadowproc.ts": `const process = { env: { CANDOR_SECRET_C: "fake" } as Record<string, string> };
+export function c03ShadowModZ() { return (process.env as any).CANDOR_SECRET_C; }
+export function c07ShadowModPassZ() { return JSON.stringify(process.env); }`,
+    "w.pol": "deny Env src.ev.w01ParenZ\n",
+    "may.pol": "deny Env src.ev.m01MayZ\ndeny Env src.ev.m02RebindZ\n",
+    "mayu.pol": "deny Unknown src.ev.m02RebindZ\n",
+  });
+  const { report } = scan(d);
+  const row = (fn) => entry(report, fn);
+  const inf = (fn) => row(fn)?.inferred ?? [];
+  const W = ["w01ParenZ", "w02AsAnyZ", "w03BangZ", "w04SatisfiesZ", "w05AngleZ", "w06KeysParenZ", "w07KeysAsZ",
+    "w08CloneParenZ", "w09AliasAsZ", "w10AliasSatZ", "w11NullishZ", "w12TernaryZ", "w13DefaultZ", "w14InspectZ",
+    "w15FormatZ", "w16ConsoleZ", "w17AsnZ", "w18PasserZ", "w19TakerZ", "w20ElemZ", "w21ChainZ", "w23CittyZ", "w24CorepackZ"];
+  for (const fn of W) check(`R928/R804: ${fn} reads the environment → Env (ABSENT at 503f449)`, inf(`src.ev.${fn}`).includes("Env"), JSON.stringify(row(`src.ev.${fn}`) ?? null));
+  check("R928: the plain control still Env", inf("src.ev.c01PlainZ").includes("Env"));
+  // A MAY-alias — rebindable away from process.env — discloses and never fabricates. m02's rebind DOMINATES
+  // the read (executed: it returns "local"), so Env there would be a fabrication; flow-insensitivity cannot
+  // tell it from m01, so both disclose.
+  for (const fn of ["m01MayZ", "m02RebindZ"]) {
+    check(`R928: MAY-alias ${fn} is Unknown[env-maybe-read], never Env`,
+          !inf(`src.ev.${fn}`).includes("Env") && inf(`src.ev.${fn}`).includes("Unknown")
+          && (row(`src.ev.${fn}`)?.unknownWhy ?? []).includes("env-maybe-read"), JSON.stringify(row(`src.ev.${fn}`) ?? null));
+  }
+  // Controls: a project `process` (parameter, module const) matches nothing, even passed whole to a builtin;
+  // a consumer that touches no key (`typeof`, `===`, `!`) charges nothing.
+  for (const fn of ["src.ev.c02ShadowParamZ", "src.ev.c04TypeofZ", "src.ev.c06TestZ", "src.shadowproc.c03ShadowModZ", "src.shadowproc.c07ShadowModPassZ"])
+    check(`R928 CONTROL: ${fn} charges nothing`, row(fn) == null, JSON.stringify(row(fn) ?? null));
+  // The POSTURE, pinned: a project callee that only READS its parameter is not itself charged — the HANDER
+  // is (w18) — because charging the callee pools the effect onto every other caller of it.
+  check("R928 POSTURE: readerHelper (reads a parameter) is not charged; its caller is", row("src.ev.readerHelper") == null,
+        JSON.stringify(row("src.ev.readerHelper") ?? null));
+  const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
+  check("R928 GATE: `deny Env src.ev.w01ParenZ` fires (exit 0 at 503f449)", ex("w.pol") === 1, `exit ${ex("w.pol")}`);
+  check("R928 GATE CONTROL: `deny Env` over the two MAY-aliases stays clean (no fabricated Env)", ex("may.pol") === 0, `exit ${ex("may.pol")}`);
+  check("R928 GATE: `deny Unknown` over the dominated rebind fires — disclosed, not silent", ex("mayu.pol") === 1, `exit ${ex("mayu.pol")}`);
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── SOUNDNESS R944: a unit with no name of its own is keyed by ANCHOR PATH + ORDINAL, not by OFFSET ──────
+// `<structural>@N`, `<callable>@N`, `<decorator>@N`, `<decorator-arg>@N` and `[computed@N]` were keyed by
+// the absolute character offset, so a COMMENT LINE above them renamed them — and under ⟨0.40⟩'s AS-EFF-005
+// (prior(key) = baseline[key] ?? ∅) a renamed effectful unit fires: git-js gave 6 firings from one comment.
+// Two halves, both asserted: (1) STABILITY — an edit outside the unit's enclosing named declarations
+// (a comment, a new function above) changes no key; (2) UNIQUENESS — the SEEDED COLLISION fixture holds
+// every shape that a naive path key would merge (two literals in one function, same-named bindings in two
+// branches, member names that sanitise alike, two IIFE call-targets, two decorator arguments, two anonymous
+// decorators, two top-level literals), each unit with its own effect, and every one stays separate.
+if (blk()) {
+  const SRC = `import * as fs from "node:fs";
+import * as net from "node:net";
+interface R { run(): void }
+// 1. two literals, same member name, same enclosing function
+export function twoLits(): R[] {
+  const a: R = { run() { fs.readFileSync("/a"); } };
+  const b: R = { run() { net.connect(80, "h"); } };
+  return [a, b];
+}
+// 2. same-named nested bindings in two branches -> identical anchor path outer/h
+export function outer(c: boolean): R {
+  if (c) { const h = (): R => ({ run() { fs.readFileSync("/b"); } }); return h(); }
+  else { const h = (): R => ({ run() { process.env.X; } }); return h(); }
+}
+// 3. member names that sanitise to the same anchor piece
+export const holder = {
+  "a.b": (): R => ({ run() { fs.readFileSync("/c"); } }),
+  a_b: (): R => ({ run() { Math.random(); } }),
+};
+// 4. two call-target arrows returned from IIFEs in one function
+export function iifes(): void {
+  const p = (() => () => { fs.readFileSync("/d"); })();
+  const q = (() => () => { net.connect(81, "h"); })();
+  p(); q();
+}
+// 5. two decorator-argument units on one class
+function Deco(_x: unknown) { return (_t: unknown) => {}; }
+@Deco(fs.readFileSync("/e"))
+@Deco(net.connect(82, "h"))
+export class Decorated {}
+// 6. two anonymous decorators
+@((_t: unknown) => { fs.readFileSync("/f"); })
+@((_t: unknown) => { Date.now(); })
+export class Anon {}
+// 7. top-level literal members, same name, two objects
+export const x1: R = { run() { fs.writeFileSync("/g", "x"); } };
+export const x2: R = { run() { net.connect(83, "h"); } };
+// 8. two call-target arrows built by IIFEs at module level, invoked from elsewhere (R531b's shape)
+const pA = (() => () => { fs.readFileSync("/h"); })();
+const pB = (() => () => { net.connect(84, "h"); })();
+export function useA(): void { pA(); }
+export function useB(): void { pB(); }
+`;
+  const d = project({
+    "tsconfig.json": JSON.stringify({ compilerOptions: { target: "ES2022", module: "nodenext", moduleResolution: "nodenext",
+      strict: true, experimentalDecorators: true, skipLibCheck: true, types: ["node"],
+      typeRoots: [path.join(HERE, "node_modules", "@types")] }, include: ["*.ts"] }),
+    "package.json": `{"type":"module"}`,
+    "k.ts": SRC,
+  });
+  const POS = /<(structural|callable|decorator|decorator-arg)>@|\[computed@/;
+  const rowsOf = () => (scan(d).report.functions ?? []).filter((e) => POS.test(e.fn));
+  const before = rowsOf();
+  // (2) UNIQUENESS — 16 positional units, 16 keys, 16 source positions, one effect each
+  const keys = new Set(before.map((e) => e.fn)), locs = new Set(before.map((e) => e.loc));
+  check("R944 UNIQUENESS: the seeded collision fixture keeps 16 positional units, 16 distinct keys, 16 distinct positions",
+        before.length === 16 && keys.size === 16 && locs.size === 16, JSON.stringify(before.map((e) => [e.fn, e.loc])));
+  check("R944 UNIQUENESS: no unit carries two seeded effects (a merge would fuse e.g. Fs+Net)",
+        before.every((e) => e.inferred.length === 1), JSON.stringify(before.map((e) => [e.fn, e.inferred])));
+  check("R944: no key is spelled with an offset (every one is anchor path + ordinal)",
+        before.every((e) => !/@\d/.test(e.fn)), JSON.stringify(before.map((e) => e.fn)));
+  // (1) STABILITY — a comment line and a whole new effectful function ABOVE everything: no key moves
+  const shape = (rows) => JSON.stringify(rows.map((e) => [e.fn, e.inferred]).sort());
+  fs.writeFileSync(path.join(d, "k.ts"), `// an unrelated comment\nexport function addedAbove(): string { return JSON.stringify({ run() { return 1; } }); }\n${SRC}`);
+  const after = rowsOf();
+  check("R944 STABILITY: a comment line + a new function above changes NO positional key (each was renamed at 503f449)",
+        shape(after) === shape(before), `before=${shape(before)}\nafter=${shape(after)}`);
+  check("R944 STABILITY CONTROL: the edit really moved the code (every loc shifted by two lines)",
+        after.every((e) => { const b = before.find((x) => x.fn === e.fn); return b && Number(e.loc.split(":")[1]) === Number(b.loc.split(":")[1]) + 2; }),
+        JSON.stringify(after.map((e) => [e.fn, e.loc])));
+  fs.rmSync(d, { recursive: true, force: true });
 }
 
 // ── the same whole-env class via for-in and the `structuredClone` bare global (a further corpus-probe pass). ──
@@ -8180,7 +8359,7 @@ if (blk()) {
 
 // ── the AS-EFF-005 baseline guard (CANDOR_BASELINE / config `baseline`; SPEC §7 item 5) ────────────
 // Exit-code contract per gate surface (TESTING.md §2.5): gain → 1, clean → 0, absent file → note + 0,
-// unparseable / missing-or-mismatched producing version → 2 WITHOUT evaluating, new fns exempt.
+// unparseable / missing-or-mismatched producing version → 2 WITHOUT evaluating; ⟨0.40⟩ new fns NOT exempt (prior ∅).
 // Semantics mirror the reference engine (candor-java Policy.checkBaseline).
 if (blk()) {
   const baseSrc = `import { DatabaseSync } from "node:sqlite";
@@ -8220,11 +8399,13 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
         gv?.ok === false && gRec?.fn === "src.db.save" && Array.isArray(gRec?.effects) && gRec.effects.includes("Fs"),
         JSON.stringify(gv)?.slice(0, 240));
 
-  // new-fn exemption: a NEW effectful fn (absent from the baseline) is reviewed as new code, not a regression
+  // ⟨0.40⟩ NO new-fn exemption: a NEW effectful fn (absent from the baseline) is compared against ∅ and
+  // fires. This arm asserted exit 0 until ⟨0.40⟩ (SPEC §3 baseline guard ⟨0.40⟩, R932).
   fs.writeFileSync(path.join(d, "src", "db.ts"),
     `${baseSrc}\nimport { readFileSync } from "node:fs";\nexport function fresh(): void { readFileSync("/etc/y"); }`);
   const rNew = run({ CANDOR_BASELINE: bl });
-  check("baseline guard: a NEW effectful fn is exempt (exit 0)", rNew.status === 0,
+  check("baseline guard ⟨0.40⟩: a NEW effectful fn absent from the baseline fires (exit 1, [AS-EFF-005])",
+        rNew.status === 1 && rNew.stdout.includes("[AS-EFF-005]") && rNew.stdout.includes("src.db.fresh"),
         `status=${rNew.status} ${(rNew.stdout + rNew.stderr).slice(0, 200)}`);
   fs.writeFileSync(path.join(d, "src", "db.ts"), gainedSrc);   // back to the gaining shape for the arms below
 
@@ -8310,16 +8491,22 @@ export function fmt(s: string): string { readFileSync("/etc/x"); return s.toUppe
   const gRec = gv?.violations?.find((x) => x.rule === "AS-EFF-005" && x.fn === "util.fmt");
   check("⟨0.16⟩ acceptance 1: the pure→effectful gain joins --gate-json (ok:false)",
         gv?.ok === false && Array.isArray(gRec?.effects) && gRec.effects.includes("Fs"), JSON.stringify(gv)?.slice(0, 240));
+  check("⟨0.40⟩ acceptance 1: a baseline-callgraph node is origin \"existing\" (it shipped pure)", gRec?.origin === "existing", JSON.stringify(gRec));
 
-  // ACCEPTANCE 2 (sidecar ABSENT): same edit, delete the callgraph → degrade to report-only. fmt was pure,
-  // so report-only reads it as new code → NOT caught → exit 0, plus the stderr note the guard is weaker.
+  // ACCEPTANCE 2 (sidecar ABSENT): same edit, delete the callgraph. ⟨0.40⟩ fmt is absent from the baseline
+  // REPORT, so its prior is ∅ and the gain STILL fires (exit 1) — the sidecar now decides only the LABEL,
+  // origin "unknown". Until ⟨0.40⟩ this arm asserted exit 0 (report-only degradation, fmt read as exempt).
   const blCgSaved = fs.readFileSync(blCg, "utf8");
   fs.rmSync(blCg);
-  const rNoCg = run({ CANDOR_BASELINE: bl });
-  check("⟨0.16⟩ acceptance 2: sidecar deleted → report-only degradation exits 0 (pure→effectful not caught)",
-        rNoCg.status === 0 && !rNoCg.stdout.includes("[AS-EFF-005]"), `status=${rNoCg.status} ${(rNoCg.stdout + rNoCg.stderr).slice(0, 200)}`);
-  check("⟨0.16⟩ acceptance 2: a stderr note discloses the guard is WEAKER without the sidecar",
-        /no baseline callgraph sidecar/.test(rNoCg.stderr) && /WEAKER/.test(rNoCg.stderr), rNoCg.stderr.slice(0, 260));
+  const gNoCg = path.join(d, "gate-nocg.json");
+  const rNoCg = run({ CANDOR_BASELINE: bl }, "--gate-json", gNoCg);
+  let ncv = null; try { ncv = JSON.parse(fs.readFileSync(gNoCg, "utf8")); } catch { /* null */ }
+  check("⟨0.40⟩ acceptance 2: sidecar deleted → pure→effectful STILL fires (exit 1), origin \"unknown\"",
+        rNoCg.status === 1 && rNoCg.stdout.includes("[AS-EFF-005]")
+          && ncv?.violations?.find((v) => v.fn === "util.fmt")?.origin === "unknown",
+        `status=${rNoCg.status} ${JSON.stringify(ncv)?.slice(0, 240)}`);
+  check("⟨0.40⟩ acceptance 2: a stderr note discloses the missing sidecar (findings labelled origin unknown)",
+        /no baseline callgraph sidecar/.test(rNoCg.stderr) && /origin "unknown"/.test(rNoCg.stderr), rNoCg.stderr.slice(0, 260));
 
   // ACCEPTANCE 3 (sidecar PRESENT-but-corrupt): truncate to `{` → fail closed (exit 2), like a corrupt
   // baseline. A broken sidecar must not silently narrow the guard back to report-only.
@@ -8342,13 +8529,17 @@ export function fetch_(h: string): Promise<Response> { readFileSync("/etc/x"); r
         rWiden.status === 1 && rWiden.stdout.includes("[AS-EFF-005]") && rWiden.stdout.includes("api.fetch_") && rWiden.stdout.includes("Fs"),
         `status=${rWiden.status} ${rWiden.stdout.slice(0, 240)}`);
 
-  // a genuinely NEW fn (in neither report nor callgraph) stays exempt even with the sidecar present
+  // ⟨0.40⟩ a genuinely NEW fn (in neither report nor callgraph) is NOT exempt: prior ∅, fires, origin "new"
   fs.writeFileSync(path.join(d, "api.ts"), apiSrc);   // revert api
   fs.writeFileSync(path.join(d, "util.ts"),
     `${utilPure}\nimport { readFileSync } from "node:fs";\nexport function brandnew(): void { readFileSync("/etc/y"); }`);
-  const rNew = run({ CANDOR_BASELINE: bl });
-  check("⟨0.16⟩ a genuinely new effectful fn (in neither report nor callgraph) stays exempt (exit 0)",
-        rNew.status === 0 && !rNew.stdout.includes("[AS-EFF-005]"), `status=${rNew.status} ${(rNew.stdout + rNew.stderr).slice(0, 200)}`);
+  const gNewP = path.join(d, "gate-new.json");
+  const rNew = run({ CANDOR_BASELINE: bl }, "--gate-json", gNewP);
+  let gnv = null; try { gnv = JSON.parse(fs.readFileSync(gNewP, "utf8")); } catch { /* null */ }
+  check("⟨0.40⟩ a genuinely new effectful fn (in neither report nor callgraph) fires (exit 1), origin \"new\"",
+        rNew.status === 1 && rNew.stdout.includes("util.brandnew")
+          && gnv?.violations?.find((v) => v.fn === "util.brandnew")?.origin === "new",
+        `status=${rNew.status} ${(rNew.stdout + rNew.stderr).slice(0, 200)}`);
   fs.writeFileSync(path.join(d, "util.ts"), utilPure);   // revert util for the Unknown-only arm below
 
   // ── ⟨0.16⟩ an Unknown-ONLY gain is ADVISORY, not a regression ──────────────────────────────
@@ -8383,6 +8574,95 @@ export function fmt(s: string, cb: Function): string { cb(); readFileSync("/etc/
   check("⟨0.16⟩ real+Unknown gain: still a violation (exit 1), shown effects are the REAL set with Unknown filtered",
         rMix.status === 1 && mv?.ok === false && mRec?.effects?.includes("Fs") && !mRec?.effects?.includes("Unknown"),
         `status=${rMix.status} ${JSON.stringify(mRec)}`);
+}
+
+// ── ⟨0.40⟩ A FUNCTION ABSENT FROM THE BASELINE IS COMPARED AGAINST ∅ (SPEC §3 baseline guard ⟨0.40⟩; R932) ──
+// Until ⟨0.40⟩ a key absent from a PRESENT baseline was skipped as "new code, reviewed normally" — and code
+// review does not read effects. Measured at 503f449: a baseline of `keep` (Fs) and a tree ADDING `fresh`
+// (Net) exited 0 with `violations: []`. PART 15d's n1–n4 as engine tests, on the conformance fixture's shape.
+if (blk()) {
+  const HEAD = `import * as fsm from "node:fs";
+import * as netm from "node:net";
+export function keep(): string { return fsm.readFileSync("/x", "utf8"); }`;
+  const d = project({ "nf.ts": HEAD });
+  // PRESENCE of CANDOR_UNKNOWN_RATCHET means on, so it is removed unless a cell sets it
+  const run = (env, ...extra) => {
+    const e = { ...process.env, ...env };
+    if (env.CANDOR_UNKNOWN_RATCHET === undefined) delete e.CANDOR_UNKNOWN_RATCHET;
+    return spawnSync("node", [path.join(HERE, "scan.mjs"), d, ...extra], { encoding: "utf8", env: e });
+  };
+  const blPrefix = path.join(d, ".candor", "nf-baseline");
+  run({}, "--out", blPrefix);
+  const bl = `${blPrefix}.json`, blCg = `${blPrefix}.callgraph.json`;
+  check("⟨0.40⟩ baseline pair recorded (report + callgraph sidecar)", fs.existsSync(bl) && fs.existsSync(blCg));
+  const cell = (src, env = {}) => {
+    fs.writeFileSync(path.join(d, "nf.ts"), src);
+    const gp = path.join(d, "nf-gate.json"), out = path.join(d, "nf-after");
+    const r = run({ CANDOR_BASELINE: bl, ...env }, "--out", out, "--gate-json", gp);
+    let g = null; try { g = JSON.parse(fs.readFileSync(gp, "utf8")); } catch { /* null → checks fail raw */ }
+    let rep = null; try { rep = JSON.parse(fs.readFileSync(`${out}.json`, "utf8")); } catch { /* null */ }
+    const row = (fn) => (g?.violations ?? []).find((v) => v.rule === "AS-EFF-005" && v.fn === fn);
+    const inf = (fn) => rep?.functions?.find((e) => e.fn === fn)?.inferred ?? [];
+    return { r, g, row, inf, all: r.stdout + r.stderr, out };
+  };
+
+  // n1 — a NEW effectful function fires: exit 1, row {fn, effects:[Net], origin:"new"}, worded as ABSENT
+  const n1 = cell(`${HEAD}\nexport function fresh(): void { netm.connect(80, "h"); }`);
+  check("⟨0.40⟩ n1 fixture reached: nf.fresh carries Net in the AFTER report", n1.inf("nf.fresh").includes("Net"), JSON.stringify(n1.inf("nf.fresh")));
+  check("⟨0.40⟩ n1: a new effectful fn absent from a present baseline exits 1 with [AS-EFF-005]",
+        n1.r.status === 1 && n1.r.stdout.includes("[AS-EFF-005]"), `status=${n1.r.status} ${n1.all.slice(0, 300)}`);
+  check("⟨0.40⟩ n1: the verdict row is {fn: nf.fresh, effects: [Net], origin: \"new\"}",
+        JSON.stringify(n1.row("nf.fresh")?.effects) === '["Net"]' && n1.row("nf.fresh")?.origin === "new", JSON.stringify(n1.g));
+  check("⟨0.40⟩ n1: the message says the fn is ABSENT FROM THE BASELINE, not that it gained",
+        /absent from the baseline/i.test(n1.row("nf.fresh")?.detail ?? "") && !/gained/.test(n1.row("nf.fresh")?.detail ?? ""),
+        n1.row("nf.fresh")?.detail);
+  check("⟨0.40⟩ n1: the remedy leads with `candor diff <this run's report> <baseline>` (current FIRST), then the record command",
+        n1.r.stderr.includes(`candor diff ${n1.out}.json ${bl}`) && n1.r.stderr.indexOf("candor diff") < n1.r.stderr.indexOf("--out <prefix>"),
+        n1.r.stderr.slice(0, 600));
+
+  // n2 — a new PURE function passes (the CONTROL: an engine charging every absent key fails here)
+  const n2 = cell(`${HEAD}\nexport function tidy(a: number): number { return a + 1; }`);
+  check("⟨0.40⟩ n2 CONTROL: a new PURE fn passes — exit 0, no [AS-EFF-005]",
+        n2.r.status === 0 && !n2.all.includes("[AS-EFF-005]") && n2.g?.ok === true, `status=${n2.r.status} ${n2.all.slice(0, 300)}`);
+
+  // n3 — a new Unknown-ONLY function is advisory (exit 0) but NAMED, separately from existing Unknown gains
+  const n3src = `${HEAD}\nexport function opaquenew(): number { const f: Function = (globalThis as any).x; return f(); }`;
+  const n3 = cell(n3src);
+  check("⟨0.40⟩ n3 fixture reached: nf.opaquenew is exactly [Unknown]", JSON.stringify(n3.inf("nf.opaquenew")) === '["Unknown"]', JSON.stringify(n3.inf("nf.opaquenew")));
+  check("⟨0.40⟩ n3: a new Unknown-only fn stays advisory — exit 0, no [AS-EFF-005]",
+        n3.r.status === 0 && !n3.all.includes("[AS-EFF-005]"), `status=${n3.r.status} ${n3.all.slice(0, 300)}`);
+  check("⟨0.40⟩ n3: …and is NAMED in a note of its own (new functions carrying only Unknown)",
+        n3.r.stderr.split("\n").some((l) => /new function\(s\)/.test(l) && l.includes("nf.opaquenew") && l.includes("Unknown")),
+        n3.r.stderr.slice(0, 600));
+  // …and under unknown-ratchet its prior is ∅, so its Unknown is newly introduced and fails
+  const n3r = cell(n3src, { CANDOR_UNKNOWN_RATCHET: "1" });
+  check("⟨0.40⟩ n3 + unknown-ratchet: the new Unknown-only fn FAILS (prior ∅), origin \"new\"",
+        n3r.r.status === 1 && n3r.row("nf.opaquenew")?.origin === "new", `status=${n3r.r.status} ${JSON.stringify(n3r.g)}`);
+
+  // n4 — an EXISTING fn gaining Net still fires, and is labelled origin:"existing"
+  const n4 = cell(`import * as fsm from "node:fs";
+import * as netm from "node:net";
+export function keep(): string { netm.connect(80, "h"); return fsm.readFileSync("/x", "utf8"); }`);
+  check("⟨0.40⟩ n4: an existing fn gaining Net exits 1, row origin \"existing\"",
+        n4.r.status === 1 && n4.row("nf.keep")?.origin === "existing" && JSON.stringify(n4.row("nf.keep")?.effects) === '["Net"]',
+        `status=${n4.r.status} ${JSON.stringify(n4.g)}`);
+
+  // the sidecar now decides only the LABEL: without it n1 still fires, origin "unknown"
+  const cgSaved = fs.readFileSync(blCg, "utf8");
+  fs.rmSync(blCg);
+  const n1u = cell(`${HEAD}\nexport function fresh(): void { netm.connect(80, "h"); }`);
+  check("⟨0.40⟩ sidecar absent: n1 still fires (exit 1), origin \"unknown\"",
+        n1u.r.status === 1 && n1u.row("nf.fresh")?.origin === "unknown", `status=${n1u.r.status} ${JSON.stringify(n1u.g)}`);
+  // …and a corrupt sidecar still fails closed (exit 2) — nothing about that posture moves
+  fs.writeFileSync(blCg, "{");
+  const n1c = cell(`${HEAD}\nexport function fresh(): void { netm.connect(80, "h"); }`);
+  check("⟨0.40⟩ corrupt sidecar: still exit 2, no [AS-EFF-005]", n1c.r.status === 2 && !n1c.r.stdout.includes("[AS-EFF-005]"), `status=${n1c.r.status}`);
+  fs.writeFileSync(blCg, cgSaved);
+  // a whole baseline FILE absent keeps its posture: note, guard inactive, exit 0
+  fs.writeFileSync(path.join(d, "nf.ts"), `${HEAD}\nexport function fresh(): void { netm.connect(80, "h"); }`);
+  const nAbs = run({ CANDOR_BASELINE: path.join(d, "no-such.json") });
+  check("⟨0.40⟩ whole baseline FILE absent: unchanged — note + exit 0", nAbs.status === 0 && /does not exist/.test(nAbs.stderr), `status=${nAbs.status}`);
+  fs.rmSync(d, { recursive: true, force: true });
 }
 
 // ── ⟨unknown-ratchet⟩ the OPT-IN that flips an Unknown-ONLY gain from advisory to a FAILURE ─────────
@@ -18459,10 +18739,15 @@ export function getSelf() { return self.structuredClone(lit); }`,
     // SHADOW CONTROL — a project's OWN `structuredClone`, bare and hung off a project-local `window`.
     // The helper still asks `identIsGlobal` on the identifier that decides (the bare callee, or the
     // global ROOT), so the SPELLING widened and what counts as the global did not.
+    // ⟨R928/R804⟩ Asked through the env-fed PARAMETER (2c), where the table still decides: handing
+    // `process.env` to any callee — a shadow included — now charges the hander by the value rule, so the
+    // direct spelling cannot observe this guard any more. `shadowBare`/`shadowWin` touch only their
+    // parameter and are charged only if the table matches the project's own `structuredClone`.
     "src/shadow.ts": `function structuredClone(x: unknown) { return x; }
 const window = { structuredClone(x: unknown) { return x; } };
-export function shadowBare() { return structuredClone(process.env); }
-export function shadowWin() { return window.structuredClone(process.env); }`,
+export function shadowBare(t: unknown) { return structuredClone(t); }
+export function shadowWin(t: unknown) { return window.structuredClone(t); }
+export function feedShadows() { return [shadowBare(process.env), shadowWin(process.env)]; }`,
     // OVER-CHARGE CONTROL — the qualified spelling over an object with no accessor, and over a CLASS
     // instance, whose accessor is prototype-installed and NON-enumerable so a clone never visits it
     // (R115's correct half, which this fix must not move: executed, 0 invocations).
@@ -18474,7 +18759,7 @@ export function pClass(k: Klass) { return globalThis.structuredClone(k); }`,
     "unk.pol": "deny Unknown src.a.getGT\ndeny Unknown src.a.getWin\ndeny Unknown src.a.getSelf\n",
     "purepol.pol": "deny Fs src.pure.pPlain\ndeny Env src.pure.pPlain\ndeny Unknown src.pure.pPlain\n"
                  + "deny Fs src.pure.pClass\ndeny Env src.pure.pClass\ndeny Unknown src.pure.pClass\n",
-    "shadowpol.pol": "deny Env src.shadow\n",
+    "shadowpol.pol": "deny Env src.shadow.shadowBare\ndeny Env src.shadow.shadowWin\n",
   });
   const { report } = scan(d);
   const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
@@ -18510,7 +18795,7 @@ export function pClass(k: Klass) { return globalThis.structuredClone(k); }`,
     // (that is what makes `pClass` a real test of R115's exclusion rather than an empty one), so a
     // file-wide `deny Fs` would fire on the fixture's own bait and prove nothing about the callers.
     check("R281 GATE CONTROL: both over-charge callers still gate clean under Fs+Env+Unknown", ex("purepol.pol") === 0, `exit ${ex("purepol.pol")}`);
-    check("R281 GATE CONTROL: the shadow file still gates clean under `deny Env`", ex("shadowpol.pol") === 0, `exit ${ex("shadowpol.pol")}`);
+    check("R281 GATE CONTROL: the two shadow-calling units still gate clean under `deny Env`", ex("shadowpol.pol") === 0, `exit ${ex("shadowpol.pol")}`);
   }
   fs.rmSync(d, { recursive: true, force: true });
 }
@@ -19994,6 +20279,416 @@ export async function f(h: string): Promise<void> {
     check("R410 GATE: `allow Net api.stripe.com` FIRES (exit 1) over a `dns.resolve(h)` beside a benign `fetch` literal — measured exit 0 before the resolver family was named, with the sibling-free control correctly caught by AS-EFF-008",
           ex === 1, `exit ${ex}`);
   }
+}
+
+// ── R781 / R802: ONE MASKING PREDICATE FOR Net — "NO CAPTURED HOST ⇒ INCOMPLETE" ──────────────────
+//
+// R802: the global-`fetch` path asked an INCLUSION-shaped question ("is arg0 a template, a `+` concat, or
+// `string`-typed?") where the κ path beside it asks "was a host captured?". Every structured or loosely
+// typed URL — `new URL(u)`, `new Request(u)`, a `URL`/`RequestInfo`/`any` parameter, `axios({ url })` —
+// was certified by a benign sibling literal. R781 (destination half): undici's `stream`/`pipeline`/
+// `upgrade` were missing from NET_ESTABLISHING although `stream`/`pipeline` were already in
+// NET_REQUEST_NAMED, the table that says which undici names take a URL. Each defect arm below was
+// measured EXIT 0 at the pre-fix base and EXECUTED against a local server that logged the caller's URL.
+if (blk()) {
+  check("R781: NET_REQUEST_NAMED ⊆ NET_ESTABLISHING — a package REQUEST callable takes its URL first, so a runtime URL there must mark the surface; two tables answering one question cannot drift apart",
+        [...NET_REQUEST_NAMED].every((n) => NET_ESTABLISHING.has(n)),
+        `missing: ${JSON.stringify([...NET_REQUEST_NAMED].filter((n) => !NET_ESTABLISHING.has(n)))}`);
+  check("R781: undici's URL-first verbs (stream/pipeline/upgrade) and axios's *Form verbs are host-ESTABLISHING",
+        ["stream", "pipeline", "upgrade", "postForm", "putForm", "patchForm"].every((n) => NET_ESTABLISHING.has(n)),
+        JSON.stringify([...NET_ESTABLISHING]));
+  // THE BOUNDARY, as SPEC §2 ⟨0.40⟩ (SOUNDNESS R817) rules it. This assertion used to say listen/bind were
+  // outside this set "until R817"; R817 decided them and they are STILL outside it, for a reason that is now
+  // stated: this set marks `incomplete` only when no host was CAPTURED, and a listen/bind address is the
+  // process's own, never a destination. `listen` is an ACCEPT and is marked by its own set, unconditionally.
+  check("R817 BOUNDARY: `listen`/`bind` are NOT host-ESTABLISHING — their address is where the process listens (SPEC §2 ⟨0.40⟩); an establishing verb is marked only when no host is captured, which would let `listen(\"10.0.0.5\")` publish and certify its own address",
+        !["listen", "bind"].some((n) => NET_ESTABLISHING.has(n)), JSON.stringify([...NET_ESTABLISHING]));
+
+  const pkg = (name, types) => ({
+    [`node_modules/${name}/package.json`]: `{"name":"${name}","types":"index.d.ts","main":"index.js"}`,
+    [`node_modules/${name}/index.d.ts`]: types,
+    [`node_modules/${name}/index.js`]: ``,
+  });
+  const d = project({
+    ...pkg("undici", `export declare function request(url: string | URL): Promise<unknown>;
+export declare function stream(url: string | URL, opts: unknown, f: unknown): Promise<unknown>;
+export declare function upgrade(url: string | URL): Promise<unknown>;`),
+    ...pkg("axios", `declare const axios: { (config: { url: string }): Promise<unknown>; get(url: string): Promise<unknown>; };\nexport default axios;`),
+    "src/f.ts": `import * as undici from "undici";
+import axios from "axios";
+const OK = "https://ok.example/a";
+declare function mutate(u: URL): void;
+export async function dStr(u: string) { await fetch(OK); return fetch(u); }
+export async function dNewUrl(u: string) { await fetch(OK); return fetch(new URL(u)); }
+export async function dNewReq(u: string) { await fetch(OK); return fetch(new Request(u)); }
+export async function dUrlParam(u: URL) { await fetch(OK); return fetch(u); }
+export async function dInfo(u: RequestInfo | URL) { await fetch(OK); return fetch(u); }
+export async function dAnyParam(u: any) { await fetch(OK); return fetch(u); }
+export async function dAxiosCfg(u: string) { await axios.get(OK); return axios({ url: u }); }
+export async function dStream(u: string) { await undici.request(OK); return undici.stream(u, {}, null); }
+export async function dUpgrade(u: string) { await undici.request(OK); return undici.upgrade(u); }
+export async function eLitEvil() { await fetch(OK); return fetch(new URL("https://evil.example/x")); }
+export async function eAbsWins() { await fetch(OK); return fetch(new URL("https://evil.example/p", "https://ok.example")); }
+export async function eAssigned(h: string) { const u = new URL("https://ok.example/x"); u.hostname = h; await fetch(OK); return fetch(u); }
+export async function eHanded() { const u = new URL("https://ok.example/x"); mutate(u); await fetch(OK); return fetch(u); }
+export async function kBound() { const u = new URL("https://ok.example/x"); await fetch(OK); return fetch(u); }
+export async function kBased() { await fetch(OK); return fetch(new URL("/p", OK)); }
+export async function kReqLit() { await fetch(OK); return fetch(new Request("https://ok.example/x")); }
+export async function kStreamLit() { await undici.request(OK); return undici.stream("https://ok.example/b", {}, null); }`,
+    "src/shadow.ts": `class URL { constructor(public s: string) {} }
+export async function eShadow() { await fetch("https://ok.example/a"); return fetch(new URL("https://ok.example/x") as any); }`,
+  });
+  const gate = (fn) => {
+    fs.writeFileSync(path.join(d, "p.pol"), `allow Net in ${fn} ok.example\n`);
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  // the defect arms (exit 0 at the pre-fix base) and the string control (exit 1 before and after)
+  for (const fn of ["dStr", "dNewUrl", "dNewReq", "dUrlParam", "dInfo", "dAnyParam", "dAxiosCfg", "dStream", "dUpgrade"]) {
+    const ex = gate(`src.f.${fn}`);
+    check(`R802/R781 GATE: \`allow Net in src.f.${fn} ok.example\` FIRES (exit 1) — the call's destination is the caller's value and a benign sibling literal must not certify it`, ex === 1, `exit ${ex}`);
+  }
+  // the CAPTURE controls: a determined URL object certifies; any doubt about its host fails closed
+  for (const fn of ["eLitEvil", "eAbsWins", "eAssigned", "eHanded"]) {
+    const ex = gate(`src.f.${fn}`);
+    check(`R802 CAPTURE CONTROL: \`${fn}\` is NOT certified as ok.example (exit 1) — a literal other host, an absolute path beating its base, or a URL object that is mutated or handed away`, ex === 1, `exit ${ex}`);
+  }
+  {
+    const ex = gate("src.shadow.eShadow");
+    check("R802 CAPTURE CONTROL: a PROJECT class named `URL` is not the platform's — its argument is not read as a host (exit 1)", ex === 1, `exit ${ex}`);
+  }
+  // the OVER-CHARGE controls (SPEC §2 ⟨0.37⟩ a DETERMINED locator stays determined — PART 88's a4local shape)
+  for (const fn of ["kBound", "kBased", "kReqLit", "kStreamLit"]) {
+    const ex = gate(`src.f.${fn}`);
+    check(`R802/R781 OVER-CHARGE CONTROL: \`${fn}\` — a DETERMINED URL (literal, const-bound, const base, Request, literal stream) still certifies (exit 0)`, ex === 0, `exit ${ex}`);
+  }
+}
+
+// ── SOUNDNESS R817 / SPEC §2 ⟨0.40⟩: AN ACCEPT IS AN UNSEEN DESTINATION; A BIND IS NOT A DESTINATION ──────
+//
+// R781's listen half. node's server `listen` hands every arriving connection to the handler, so the peers
+// are whoever connects — and before this, `netm.connect(80, "ok.example")` beside `createServer(h).listen()`
+// read `hosts: ["ok.example"]`, COMPLETE, and `allow Net in <fn> ok.example` exited 0. EXECUTED: a client
+// connecting to that listener received the handler's bytes. The four PART 96 arms are reproduced first, with
+// PART 96's bodies verbatim; then the spellings that reach `listen` through other server types and across an
+// edge, which the member-keyed rule must cover without naming them; then the over-charge controls.
+if (blk()) {
+  check("R817: `listen` is an ACCEPT (NET_ACCEPTING) and `bind` is not — a datagram bind only receives, and SPEC: \"A bind marks nothing.\"",
+        NET_ACCEPTING.has("listen") && !NET_ACCEPTING.has("bind"), JSON.stringify([...NET_ACCEPTING]));
+  const pkgR = (name, types) => ({
+    [`node_modules/${name}/package.json`]: `{"name":"${name}","types":"index.d.ts","main":"index.js"}`,
+    [`node_modules/${name}/index.d.ts`]: types,
+    [`node_modules/${name}/index.js`]: ``,
+  });
+  const d = project({
+    ...pkgR("ws", `export declare class WebSocketServer { constructor(o: { port?: number; noServer?: boolean }); close(): void; }`),
+    ...pkgR("socket.io", `export declare class Server { constructor(); listen(p: number): this; }`),
+    "src/f.ts": `import * as netm from "node:net";
+import * as dgram from "node:dgram";
+import * as http from "node:http";
+import * as http2 from "node:http2";
+import * as tls from "node:tls";
+import * as inspector from "node:inspector";
+import * as dns from "node:dns";
+import { WebSocketServer } from "ws";
+import { Server as IoServer } from "socket.io";
+const OK = "ok.example";
+const BIND = "10.0.0.5";
+class MySrv extends netm.Server {}
+export function aLitbind(): void { dgram.createSocket("udp4").bind(9, "10.0.0.5"); }
+export function bRtbind(): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(0); }
+export function eRtname(h: string): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(0, h); }
+export function gOptRt(h: string): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind({ port: 0, address: h }); }
+export function gAnyRt(h: any): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(0, h); }
+export function gLitAddr(): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(9, "10.0.0.5"); }
+export function gConstAddr(): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(9, BIND); }
+export function gOptLitAddr(): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind({ port: 9, address: "10.0.0.5" }); }
+export function gPortCb(): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(0, () => {}); }
+export function lRtHost(h: string): void { netm.connect(80, "ok.example"); netm.createServer().listen(8080, h); }
+export function qDnsLit(): void { dns.lookup("evil.example", () => {}); }
+export function cAccept(): void { netm.connect(80, "ok.example"); netm.createServer((s) => { s.write("hi"); }).listen(8080); }
+export function dEphemeral(): void { const s = dgram.createSocket("udp4"); s.bind(0); s.send(Buffer.from("x"), 53, "10.9.9.9"); }
+export function sHttp(): void { netm.connect(80, OK); http.createServer((q, r) => r.end("x")).listen(8080); }
+export function sH2(): void { netm.connect(80, OK); http2.createSecureServer({}).listen(8443); }
+export function sTls(): void { netm.connect(80, OK); tls.createServer({}, (s) => s.end("x")).listen(8443); }
+export function sNew(): void { netm.connect(80, OK); new netm.Server((s) => s.end("x")).listen(8080); }
+export function sSub(): void { netm.connect(80, OK); new MySrv().listen(8080); }
+export function sInsp(): void { netm.connect(80, OK); inspector.open(9229); }
+export function sWs(): void { netm.connect(80, OK); new WebSocketServer({ port: 8080 }); }
+export function sIo(): void { netm.connect(80, OK); new IoServer().listen(3000); }
+function lis(s: netm.Server): void { s.listen(8080); }
+export function viaCallee(): void { netm.connect(80, OK); lis(netm.createServer()); }
+export function lPipe(): void { netm.createServer().listen("10.0.0.5"); }
+export function kFactory(): netm.Server { netm.connect(80, OK); return netm.createServer((s) => s.end("x")); }`,
+  });
+  const gate = (fn, lit) => {
+    fs.writeFileSync(path.join(d, "p.pol"), `allow Net in src.f.${fn} ${lit}\n`);
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  // REACH first: every arm's `f` carries Net and, where it has one, the benign literal — otherwise an
+  // exit 1 below could be an empty surface failing rather than the accept (PART 96's own reach rule).
+  for (const fn of ["aLitbind", "bRtbind", "cAccept", "dEphemeral", "sHttp", "sInsp", "sWs", "sIo", "viaCallee", "kFactory"])
+    check(`R817 REACH: \`${fn}\` carries Net`, (row(fn).inferred ?? []).includes("Net"), JSON.stringify(row(fn)));
+  check("R817 REACH: the benign literal IS captured beside the accept, so c_accept's exit 1 is the accept and not an empty surface",
+        (row("cAccept").hosts ?? []).includes("ok.example"), JSON.stringify(row("cAccept")));
+  // PART 96 a_litbind: fails closed AND names no destination
+  check("R817 a_litbind: `allow Net 10.0.0.5` over a literal bind alone fails closed (exit 1) — by the empty surface, not by a mark",
+        gate("aLitbind", "10.0.0.5") === 1 && !(row("aLitbind").incomplete ?? []).includes("Net"), JSON.stringify(row("aLitbind")));
+  check("R817 a_litbind: the bind address does NOT enter `hosts`", !(row("aLitbind").hosts ?? []).some((h) => h.startsWith("10.0.0.5")),
+        JSON.stringify(row("aLitbind")));
+  check("R817/R949 b_rtbind CONTROL: a PORT-ONLY bind resolves no name and marks nothing — `allow Net ok.example` exit 0",
+        gate("bRtbind", "ok.example") === 0, JSON.stringify(row("bRtbind")));
+  // SOUNDNESS R949: a bind handed a runtime STRING resolves it (node runs `dns.lookup(address)` — EXECUTED:
+  // `bind(0, "no-such-host.invalid")` fails ENOTFOUND in getaddrinfo, `bind(0, "localhost")` binds 127.0.0.1).
+  // That lookup is a Net reach whose locator is the name, so it marks; a determined address does not, and is
+  // still never a `hosts` entry. All three marking arms exited 0 at the base.
+  for (const fn of ["eRtname", "gOptRt", "gAnyRt"])
+    check(`R949 e_rtname: \`${fn}\` — a bind given a runtime name is \`incomplete\` and \`allow Net ok.example\` fails closed (exit 1)`,
+          gate(fn, "ok.example") === 1 && (row(fn).incomplete ?? []).includes("Net"), JSON.stringify(row(fn)));
+  for (const fn of ["gLitAddr", "gConstAddr", "gOptLitAddr", "gPortCb"])
+    check(`R949 CONTROL: \`${fn}\` — a determined (or absent) bind address resolves nothing unseen: exit 0, and no \`hosts\` entry names 10.0.0.5`,
+          gate(fn, "ok.example") === 0 && !(row(fn).hosts ?? []).some((h) => h.startsWith("10.0.0.5")), JSON.stringify(row(fn)));
+  check("R949: `server.listen(port, h)` is marked as an ACCEPT (R817) — exit 1", gate("lRtHost", "ok.example") === 1, JSON.stringify(row("lRtHost")));
+  check("R949: a literal name resolved and discarded — `dns.lookup(\"evil.example\")` — IS a destination: `hosts` names it",
+        (row("qDnsLit").hosts ?? []).includes("evil.example") && gate("qDnsLit", "evil.example") === 0, JSON.stringify(row("qDnsLit")));
+  check("R817 c_accept: a listening server beside a benign literal is `incomplete` and `allow Net ok.example` FAILS CLOSED (exit 1; exit 0 at the pre-fix base)",
+        gate("cAccept", "ok.example") === 1 && (row("cAccept").incomplete ?? []).includes("Net"), JSON.stringify(row("cAccept")));
+  check("R817 d_ephemeral CONTROL: an ephemeral bind + a send to a literal still certifies — `allow Net 10.9.9.9` exit 0",
+        gate("dEphemeral", "10.9.9.9") === 0, JSON.stringify(row("dEphemeral")));
+  // the member-keyed rule reaches every node server type through `net.Server.listen`, a subclass, the
+  // module-specific accepts, and a `listen` in a CALLEE (incomplete crosses the edge). All exit 0 at the base.
+  for (const fn of ["sHttp", "sH2", "sTls", "sNew", "sSub", "sInsp", "sWs", "sIo", "viaCallee"])
+    check(`R817 ACCEPT SPELLING: \`${fn}\` beside a benign literal fails closed (exit 1)`, gate(fn, "ok.example") === 1, JSON.stringify(row(fn)));
+  // `listen(path)`: a string address that `hostLiteral` parses as a host was PUBLISHED and CERTIFIED at the base
+  check("R817: `listen(\"10.0.0.5\")` publishes no host (it was `hosts: [\"10.0.0.5\"]` at the base — the R809 fabrication by node's pipe-path overload)",
+        !(row("lPipe").hosts ?? []).length && (row("lPipe").incomplete ?? []).includes("Net"), JSON.stringify(row("lPipe")));
+  check("R817 OVER-CHARGE CONTROL: a unit that only CONSTRUCTS a server accepts nothing — `createServer` is not an accept, `allow Net ok.example` exit 0",
+        gate("kFactory", "ok.example") === 0, JSON.stringify(row("kFactory")));
+}
+
+// ── R947: EVERY ROUTE THAT INVOKES A κ-CLASSIFIED FUNCTION REACHES THE SAME LOCATOR GUARD ─────────
+//
+// One question, asked of every invocation route rather than one row per spelling: does the call reach κ AND the
+// ⟨0.29⟩/⟨0.37⟩/⟨0.40⟩ locator guard? Census (2026-10-07, three effects × eleven routes): direct, `?.()`,
+// `a?.b()`, `a["b"]()`, a destructured or aliased reference and a `.bind(t)` with no bound argument all reached
+// it. Three routes did not, in two different ways:
+//   * `.call`/`.apply`/`Reflect.apply` reached κ (the effect) but NOT the guard: beside a benign sibling,
+//     `allow <E> in <fn> <benign>` exited 0 over a runtime locator AND over a literal OTHER one, for Net, Fs,
+//     Exec and the ⟨0.40⟩ accept alike;
+//   * a κ builtin passed BY REFERENCE (`xs.forEach(fs.unlinkSync)`, `setTimeout(net.connect, 0, 80, h)`,
+//     `.then(cp.execSync)`) and a `.bind(t, a…)(…)` with bound arguments reached NOTHING — the unit was ABSENT
+//     from `functions[]` and `deny Fs`/`deny Exec`/`deny Net` exited 0. A LOCAL `del.bind(null, p)(1)` too.
+// Every defect cell was EXECUTED by `node` (a local server accepted all five Net routes; the files were deleted;
+// the commands ran) and is red at the base this was written against.
+if (blk()) {
+  const d = project({
+    "src/f.ts": `import * as netm from "node:net";
+import * as fs from "node:fs";
+import * as cp from "node:child_process";
+function del(p: string, _n: number): void { fs.unlinkSync(p); }
+export function nCall(h: string): void { netm.connect(80, "ok.example"); netm.connect.call(undefined, 80 as any, h as any); }
+export function nApply(h: string): void { netm.connect(80, "ok.example"); netm.connect.apply(undefined, [80, h] as any); }
+export function nReflect(h: string): void { netm.connect(80, "ok.example"); Reflect.apply(netm.connect, undefined, [80, h]); }
+export function xCallEvil(): void { netm.connect(80, "ok.example"); netm.connect.call(undefined, 80 as any, "evil.example" as any); }
+export function aCall(): void { netm.connect(80, "ok.example"); const s = netm.createServer(); s.listen.call(s, 8080); }
+export function fCall(p: string): void { fs.readFileSync("/tmp/ok/a"); fs.readFileSync.call(undefined, p); }
+export function fApply(p: string): void { fs.readFileSync("/tmp/ok/a"); fs.readFileSync.apply(undefined, [p] as any); }
+export function fReflect(p: string): void { fs.readFileSync("/tmp/ok/a"); Reflect.apply(fs.readFileSync, undefined, [p]); }
+export function yApplyVar(a: [string]): void { fs.readFileSync("/tmp/ok/a"); fs.readFileSync.apply(undefined, a); }
+export function eCall(c: string): void { cp.execSync("ls"); cp.execSync.call(undefined, c); }
+export function eReflectEvil(): void { cp.execSync("ls"); Reflect.apply(cp.execSync, undefined, ["rm -rf /"]); }
+export function kCall(): void { netm.connect.call(undefined, 80 as any, "ok.example" as any); }
+export function kFsReflect(): void { Reflect.apply(fs.readFileSync, undefined, ["/tmp/ok/b"]); }
+export function kExecApply(): void { cp.execSync.apply(undefined, ["ls"] as any); }
+export function kFdCall(fd: number): void { fs.closeSync.call(undefined, fd); }
+export function hEach(ps: string[]): void { ps.forEach(fs.unlinkSync as any); }
+export function hTimeout(p: string): void { setTimeout(fs.unlinkSync, 0, p); }
+export function hThen(c: string): void { Promise.resolve(c).then(cp.execSync); }
+export function hNet(h: string): void { setTimeout(netm.connect, 0, 80, h); }
+export function hBound(p: string): void { setTimeout(fs.unlinkSync.bind(null, p), 0); }
+export function bFs(p: string): void { fs.unlinkSync.bind(null, p)(); }
+export function bExec(c: string): void { cp.execSync.bind(null, c)(); }
+export function bNet(h: string): void { netm.connect.bind(null, 80)(h as any); }
+export function bLocal(p: string): void { del.bind(null, p)(1); }
+export function bLit(): void { fs.readFileSync("/tmp/ok/a"); fs.readFileSync.bind(null, "/etc/passwd")(); }
+export function bNone(): void { fs.readFileSync.bind(undefined)("/tmp/ok/b"); }
+export function cPure(xs: unknown[]): unknown[] { return xs.map(String); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  // the GUARD on the reflective routes — a runtime locator, and a literal OTHER one, fail closed
+  for (const [fn, eff, lit] of [["nCall", "Net", "ok.example"], ["nApply", "Net", "ok.example"], ["nReflect", "Net", "ok.example"],
+                                ["xCallEvil", "Net", "ok.example"], ["aCall", "Net", "ok.example"],
+                                ["fCall", "Fs", "/tmp/ok"], ["fApply", "Fs", "/tmp/ok"], ["fReflect", "Fs", "/tmp/ok"], ["yApplyVar", "Fs", "/tmp/ok"],
+                                ["eCall", "Exec", "ls"], ["eReflectEvil", "Exec", "ls"]])
+    check(`REFL GUARD: \`allow ${eff} in src.f.${fn} ${lit}\` fails closed (exit 1; exit 0 at the base) — the reflective route reaches the locator guard`,
+          gate(`allow ${eff} in src.f.${fn} ${lit}`) === 1, JSON.stringify(row(fn)));
+  check("REFL CAPTURE: a literal reached through `.call` is the call's own locator — `xCallEvil` publishes evil.example",
+        (row("xCallEvil").hosts ?? []).includes("evil.example"), JSON.stringify(row("xCallEvil")));
+  // the RESOLUTION half: a DETERMINED locator through a reflective route certifies (it failed closed at the base)
+  for (const [fn, eff, lit] of [["kCall", "Net", "ok.example"], ["kFsReflect", "Fs", "/tmp/ok"], ["kExecApply", "Exec", "ls"]])
+    check(`REFL OVER-CHARGE CONTROL: \`${fn}\` — a literal locator through a reflective route certifies under \`allow ${eff} ${lit}\` (exit 0)`,
+          gate(`allow ${eff} in src.f.${fn} ${lit}`) === 0, JSON.stringify(row(fn)));
+  check("REFL USE-VERB CONTROL: `fs.closeSync.call(undefined, fd)` is an fd verb and marks nothing",
+        !(row("kFdCall").incomplete ?? []).length && (row("kFdCall").inferred ?? []).includes("Fs"), JSON.stringify(row("kFdCall")));
+  // the EFFECT on the by-reference and bound-argument routes — ABSENT at the base
+  for (const [fn, eff] of [["hEach", "Fs"], ["hTimeout", "Fs"], ["hThen", "Exec"], ["hNet", "Net"], ["hBound", "Fs"],
+                           ["bFs", "Fs"], ["bExec", "Exec"], ["bNet", "Net"], ["bLocal", "Fs"]]) {
+    check(`REFL EFFECT: \`${fn}\` carries ${eff} and \`deny ${eff} src.f.${fn}\` fires (exit 1; ABSENT and exit 0 at the base)`,
+          (row(fn).inferred ?? []).includes(eff) && gate(`deny ${eff} src.f.${fn}`) === 1, JSON.stringify(row(fn)));
+    if (fn !== "bLocal")
+      check(`REFL EFFECT: \`${fn}\`'s locator is not one this scan saw — \`incomplete\` names ${eff}`,
+            (row(fn).incomplete ?? []).includes(eff), JSON.stringify(row(fn)));
+  }
+  check("REFL EDGE: a LOCAL `del.bind(null, p)(1)` edges to `del` (ABSENT at the base)", (row("bLocal").calls ?? []).includes("src.f.del"), JSON.stringify(row("bLocal")));
+  check("REFL BIND CAPTURE: a BOUND literal is the invoked call's position 0 — `bLit` publishes /etc/passwd and fails `allow Fs /tmp/ok` closed",
+        (row("bLit").paths ?? []).includes("/etc/passwd") && gate("allow Fs in src.f.bLit /tmp/ok") === 1, JSON.stringify(row("bLit")));
+  check("REFL CONTROL: a `.bind(t)` with NO bound argument stays the (CLASSIFY) arm's — one captured path, no mark",
+        JSON.stringify(row("bNone").paths) === JSON.stringify(["/tmp/ok/b"]) && !(row("bNone").incomplete ?? []).length, JSON.stringify(row("bNone")));
+  {
+    // the UNINSTALLED-namespace κ route: the package is declared and absent, so the signature never resolves
+    const u = project({
+      "package.json": `{"name":"u","dependencies":{"axios":"^1"}}`,
+      "src/f.ts": `import * as ax from "axios";
+export async function uNs(u: string) { await fetch("https://ok.example/a"); return (ax as any).get(u); }
+export async function uNs2(u: string) { await fetch("https://ok.example/a"); return ax.get(u); }`,
+    });
+    fs.writeFileSync(path.join(u, "p.pol"), "allow Net in src.f.uNs2 ok.example\n");
+    const ex = scan(u, "--policy", path.join(u, "p.pol")).r.status;
+    check("REFL GUARD: a κ package through an UNINSTALLED namespace import reaches the guard — `ax.get(u)` beside a captured fetch fails `allow Net ok.example` closed (exit 1; 0 at the base)",
+          ex === 1, `exit ${ex}`);
+  }
+  check("REFL CONTROL: `xs.map(String)` is still pure — the by-reference κ arm adds nothing for the ES lib", noEffectCharged(report, "src.f.cPure"));
+}
+
+// ── R954 (R927, R769, R874; analysis N1/N2/N4/N5): EVERY CONFORMER THE CHECKER SHOWS AT AN ──
+// IN-SCAN CONVERSION IS A DISPATCH CANDIDATE. One interface (or base class) per arm, each with the same pure nominal
+// implementor and its own dispatcher `dX` and entry `rX`, the conformer constructed at MODULE scope so the entry
+// is charged only through the dispatch (the r873s/r874s lesson). Every arm was EXECUTED (tsc + node) and wrote its
+// marker; every `deny Fs` below exited 0 at the base. Names are checked against §3.3 prefix matching (`dC2` and
+// `dL` were renamed for that reason: `src.a.dC` would have matched `dC2`).
+if (blk()) {
+  const dep = project({ "package.json": `{"name":"depthx","version":"1.0.0"}`, "src/index.ts": "import * as fs from \"node:fs\";\nexport class DepThing { m(): void { fs.writeFileSync(\"/tmp/candor-ts-conformer/dep\", \"x\"); } }\nexport function makeThing(): DepThing { return new DepThing(); }\nexport function listThings(): DepThing[] { return [new DepThing()]; }\n" });
+  scan(dep);
+  const app = project({
+    "package.json": `{"name":"appx","version":"1.0.0","dependencies":{"depthx":"1.0.0"}}`,
+    "src/a.ts": "import * as fs from \"node:fs\";\nimport * as dep from \"depthx\";\nimport { DepThing } from \"depthx\";\nimport { litQ } from \"./lit.js\";\n\n// N1 \u2014 a local class that conforms by shape, no implements; construction at module scope\nexport interface SinkA { m(): void }\nexport class PureA implements SinkA { m(): void { } }\nexport function dA(i: SinkA) { i.m(); }\nclass LwA { m(): void { fs.writeFileSync(\"/tmp/candor-ts-conformer/a\", \"x\"); } }\nconst vA = new LwA();\nexport function rA() { dA(vA); }\n// N1 \u2014 typed initializer, then a dispatch on the variable\nexport interface SinkB { m(): void }\nexport class PureB implements SinkB { m(): void { } }\nclass LwB { m(): void { fs.writeFileSync(\"/tmp/candor-ts-conformer/b\", \"x\"); } }\nconst sB: SinkB = new LwB();\nexport function rB() { sB.m(); }\n// N2 \u2014 an untyped literal converted later, same module and another module\nexport interface SinkC { m(): void }\nexport class PureC implements SinkC { m(): void { } }\nexport function dC(i: SinkC) { i.m(); }\nconst litC = { m() { fs.writeFileSync(\"/tmp/candor-ts-conformer/c\", \"x\"); } };\nexport function rC() { dC(litC); }\nexport interface SinkQ { m(): void }\nexport class PureQ implements SinkQ { m(): void { } }\nexport function dQ(i: SinkQ) { i.m(); }\nexport function rQ() { dQ(litQ); }\n// N4 \u2014 element-wise conversion\nexport interface SinkD { m(): void }\nexport class PureD implements SinkD { m(): void { } }\nexport function dD(i: SinkD) { i.m(); }\nclass LwD { m(): void { fs.writeFileSync(\"/tmp/candor-ts-conformer/d\", \"x\"); } }\nfunction mkD(): LwD[] { return [new LwD()]; }\nconst xsD: SinkD[] = mkD();\nexport function rD() { for (const x of xsD) dD(x); }\n// N5 \u2014 a field filled from a constructor parameter\nexport interface SinkE { m(): void }\nexport class PureE implements SinkE { m(): void { } }\nclass LwE { m(): void { fs.writeFileSync(\"/tmp/candor-ts-conformer/e\", \"x\"); } }\nclass HolderE { constructor(private s: SinkE) { } go() { this.s.m(); } }\nconst hE = new HolderE(new LwE());\nexport function rE() { hE.go(); }\n// R874 \u2014 a literal returned as a CLASS type\nclass BaseF { m(): void { } }\nfunction mkF(): BaseF { return { m() { fs.writeFileSync(\"/tmp/candor-ts-conformer/f\", \"x\"); } }; }\nconst sF = mkF();\nexport function dF(s: BaseF) { s.m(); }\nexport function rF() { dF(sF); }\n// R927 \u2014 a dependency class, constructed / from a factory / element-wise; R874 with a dependency value\nexport interface SinkK { m(): void }\nexport class PureK implements SinkK { m(): void { } }\nexport function dK(i: SinkK) { i.m(); }\nconst vK = new DepThing();\nexport function rK() { dK(vK); }\nexport interface SinkG { m(): void }\nexport class PureG implements SinkG { m(): void { } }\nexport function dG(i: SinkG) { i.m(); }\nconst vG = dep.makeThing();\nexport function rG() { dG(vG); }\nexport interface SinkH { m(): void }\nexport class PureH implements SinkH { m(): void { } }\nexport function dH(i: SinkH) { i.m(); }\nconst xsH: SinkH[] = dep.listThings();\nexport function rH() { for (const x of xsH) dH(x); }\nclass BaseN { m(): void { } }\nexport function dN(s: BaseN) { s.m(); }\nconst vN = dep.makeThing();\nexport function rN() { dN(vN); }\n// CONTROLS \u2014 a conformer at Mid is seen at Mid and at its SUPERTYPE, never at a subtype; super names one body\nexport class BaseM { m(): void { } }\nexport class MidM extends BaseM { }\nexport class LeafM extends MidM { m(): void { } }\nfunction mkMid(): MidM { return { m() { fs.writeFileSync(\"/tmp/candor-ts-conformer/m\", \"x\"); } }; }\nconst vM = mkMid();\nexport function dBaseM(b: BaseM) { b.m(); }\nexport function dMidM(x: MidM) { x.m(); }\nexport function dLeafM(l: LeafM) { l.m(); }\nexport class SupM extends BaseM { m(): void { super.m(); } }\nexport function dSupM(s: SupM) { s.m(); }\nexport function keepM() { return vM; }\n// CONTROL \u2014 an untyped literal that is never converted is not a candidate\nexport interface SinkZ { m(): void }\nexport class PureZ implements SinkZ { m(): void { } }\nexport function dZ(i: SinkZ) { i.m(); }\nconst litZ = { m() { fs.writeFileSync(\"/tmp/candor-ts-conformer/z\", \"x\"); } };\nexport function rZ() { dZ(new PureZ()); return litZ; }\n",
+    "src/lit.ts": "import * as fs from \"node:fs\";\nexport const litQ = { m() { fs.writeFileSync(\"/tmp/candor-ts-conformer/c2\", \"x\"); } };\n",
+    "node_modules/depthx/package.json": `{"name":"depthx","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/depthx/index.d.ts": "export declare class DepThing {\n    m(): void;\n}\nexport declare function makeThing(): DepThing;\nexport declare function listThings(): DepThing[];\n",
+    "node_modules/depthx/index.js": "",
+  });
+  const runA = (pol) => {
+    const env = { ...process.env, CANDOR_DEPS: path.join(dep, ".candor", "report.json") };
+    delete env.CANDOR_POLICY;
+    const extra = [];
+    if (pol) { fs.writeFileSync(path.join(app, "c.policy"), pol + "\n"); extra.push("--policy", path.join(app, "c.policy")); }
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), app, ...extra], { encoding: "utf8", env });
+    return { status: r.status, report: JSON.parse(fs.readFileSync(path.join(app, ".candor", "report.json"), "utf8")) };
+  };
+  const base = runA(null).report;
+  const arms = [["dA", "rA", "N1 local class, no implements"], [null, "rB", "N1 `const s: Sink = new LocalW(); s.m()`"],
+    ["dC", "rC", "N2 untyped literal converted later"], ["dQ", "rQ", "N2 untyped literal from another module"],
+    ["dD", "rD", "N4 element-wise `Sink[]` from `LocalW[]`"], ["HolderE.go", "rE", "N5 field filled from a constructor parameter"],
+    ["dF", "rF", "R874 literal returned as a CLASS type"], ["dK", "rK", "R927 `new DepThing()` (chained)"],
+    ["dG", "rG", "R927 `dep.makeThing()` (chained)"], ["dH", "rH", "R927/N4 element-wise from the dependency (chained)"],
+    ["dN", "rN", "R874 a dependency value in a CLASS-typed slot (chained)"], ["dBaseM", null, "a conformer at Mid seen at its SUPERTYPE"],
+    ["dMidM", null, "a conformer at Mid seen at Mid"]];
+  for (const [disp, run, why] of arms)
+    for (const fn of [disp, run].filter(Boolean))
+      check(`CONFORMERS: \`deny Fs src.a.${fn}\` fires (exit 1; 0 at the base) — ${why}`,
+            runA(`deny Fs src.a.${fn}`).status === 1, JSON.stringify(entry(base, `src.a.${fn}`)));
+  // the CONTROLS that must not move: a subtype receiver, a `super.m()`, an untyped literal never converted
+  for (const fn of ["dLeafM", "dSupM", "dZ", "rZ"])
+    check(`CONFORMERS CONTROL: \`deny Fs src.a.${fn}\` stays 0 — a subtype receiver never sees a conformer registered above it; \`super.m()\` names one body; a literal never converted is no candidate`,
+          runA(`deny Fs src.a.${fn}`).status === 0, JSON.stringify(entry(base, `src.a.${fn}`)));
+  // R769's refusal: a dependency conformer is charged under its OWN key, never minted under this package's
+  check("CONFORMERS R769: no row is minted under `appx#DepThing.m` — the dependency conformer is charged through `depthx#DepThing.m`",
+        !base.functions.some((f) => /DepThing/.test(f.fn) || /^appx#DepThing/.test(f.hash ?? "")), JSON.stringify(base.functions.map((f) => f.hash)));
+  // R764: a published union over an interface a dependency class conforms to is never a pure-only entry
+  for (const i of ["SinkK", "SinkG", "SinkH"]) {
+    const u = entry(base, `${i}.m`);
+    check(`CONFORMERS R764: the published \`${i}.m\` union says \`Unknown\` for the dependency conformer it cannot sum — never a pure-only entry`,
+          (u?.inferred ?? []).includes("Unknown"), JSON.stringify(u));
+  }
+  // and the local conformers' effects now reach the published union a chained consumer joins
+  check("CONFORMERS UNION: `SinkA.m` publishes the local conformer's Fs (it published nothing — pure — at the base)",
+        (entry(base, "SinkA.m")?.inferred ?? []).includes("Fs"), JSON.stringify(entry(base, "SinkA.m")));
+
+  // OBLIGATION 3's JOIN, written FIRST (the R872 lane put a silence there once): a structural conformer and a
+  // literal handed to a DEPENDENCY's `runIt(p: IP)` beside a pure nominal implementor. EXECUTED: each writes.
+  const depJ = project({ "package.json": `{"name":"depj2","version":"1.0.0"}`,
+    "src/index.ts": `export interface IP { m(): void }\nexport function runIt(p: IP): void { p.m(); }` });
+  scan(depJ);
+  const appJ = project({
+    "package.json": `{"name":"appj2","version":"1.0.0","dependencies":{"depj2":"1.0.0"}}`,
+    "src/index.ts": `import * as fs from "node:fs";
+import { IP, runIt } from "depj2";
+export class PP implements IP { m(): void { } }
+export function jPure(): void { runIt(new PP()); }
+class LW { m(): void { fs.writeFileSync("/tmp/candor-ts-conformer-lw", "x"); } }
+export function jStruct(): void { runIt(new LW()); }
+const L = { m() { fs.writeFileSync("/tmp/candor-ts-conformer-lit", "x"); } };
+export function jLit(): void { runIt(L); }`,
+    "node_modules/depj2/package.json": `{"name":"depj2","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/depj2/index.d.ts": `export interface IP { m(): void; }\nexport declare function runIt(p: IP): void;\n`,
+    "node_modules/depj2/index.js": "",
+  });
+  const runJ = (pol) => {
+    const env = { ...process.env, CANDOR_DEPS: path.join(depJ, ".candor", "report.json") };
+    delete env.CANDOR_POLICY;
+    const extra = [];
+    if (pol) { fs.writeFileSync(path.join(appJ, "j.policy"), pol + "\n"); extra.push("--policy", path.join(appJ, "j.policy")); }
+    return spawnSync("node", [path.join(HERE, "scan.mjs"), appJ, ...extra], { encoding: "utf8", env }).status;
+  };
+  for (const fn of ["jStruct", "jLit"])
+    check(`CONFORMERS JOIN: \`deny Fs src.index.${fn}\` fires — obligation 3's join reaches the conformer through \`foreignInterfaceImpls\` (exit 0 at the base)`,
+          runJ(`deny Fs src.index.${fn}`) === 1);
+}
+
+// ── SOUNDNESS R955: A CALLEE THAT CAN HOLD MORE THAN ONE FUNCTION CALLS EVERY ONE OF THEM ────────────────────────
+// The call walk resolves ONE declaration per call, and for a choice of functions the checker's union puts first
+// whichever TYPE was created first. So `(c ? fb : fa)(p)` edged `fa` only when `fa` was declared first, and an
+// arrow-const pair edged nothing either way — the caller ABSENT, `deny Fs` exit 0. Every effect arm below was
+// EXECUTED (each wrote its marker) and the ABSENT ones exited 0 at the base: `?:` with the effectful function
+// declared second, arrow consts in both orders, `c && f || g`, `[g, f][i]`, `const pick = c ? g : f`, an IIFE
+// returning a choice, `(c ? g : f).call(…)`; `??`, `||` and a reassigned `let` were `Unknown` only. Names are
+// checked against §3.3 prefix matching (`cTernR` -> `dTernR` for that reason). The pure-only choices stay pure.
+if (blk()) {
+  const d = project({ "src/a.ts": "import * as fs from \"node:fs\";\n// effectful DECLARED FIRST (fa) and DECLARED SECOND (fz); pure fb / pb; arrow consts xa (effectful) and xb (pure)\nexport function fb(_p: string): void { }\nexport function fa(p: string): void { fs.writeFileSync(\"/tmp/candor-ts-r955/\" + p, \"x\"); }\nexport function pb(_p: string): void { }\nexport function fz(p: string): void { fs.writeFileSync(\"/tmp/candor-ts-r955/\" + p, \"x\"); }\nexport const xb = (_p: string): void => { };\nexport const xa = (p: string): void => { fs.writeFileSync(\"/tmp/candor-ts-r955/\" + p, \"x\"); };\nconst ga: ((p: string) => void) | undefined = fa;\nexport function cTern(c: boolean, p: string) { (c ? fb : fa)(p); }\nexport function dTernR(c: boolean, p: string) { (c ? fa : fb)(p); }\nexport function eTernZ(c: boolean, p: string) { (c ? pb : fz)(p); }\nexport function gArrow(c: boolean, p: string) { (c ? xb : xa)(p); }\nexport function hArrowR(c: boolean, p: string) { (c ? xa : xb)(p); }\nexport function cNullish(p: string) { (ga ?? fb)(p); }\nexport function cOr(p: string) { (ga || fb)(p); }\nexport function cAnd(c: boolean, p: string) { (c && fz || pb)(p); }\nexport function cComma(p: string) { (0, xa)(p); }\nexport function cParen(p: string) { (xa)(p); }\nexport function cIndex(i: number, p: string) { [xb, xa][i](p); }\nexport function cObj(p: string) { ({ a: xa }).a(p); }\nexport function cLocal(c: boolean, p: string) { const pick = c ? xb : xa; pick(p); }\nexport function cLet(c: boolean, p: string) { let pick = xb; if (c) pick = xa; pick(p); }\nexport function cIife(p: string) { (() => xa)()(p); }\nexport function kIifeC(c: boolean, p: string) { (function () { return c ? xb : xa; })()(p); }\nexport function cCall(c: boolean, p: string) { (c ? xb : xa).call(undefined, p); }\nexport function mPure(c: boolean, p: string) { (c ? fb : pb)(p); }\nexport function nPureIdx(i: number, p: string) { [xb, fb][i](p); }\n" });
+  const { report } = scan(d);
+  const gate = (fn) => { fs.writeFileSync(path.join(d, "p.pol"), `deny Fs src.a.${fn}\n`); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  for (const fn of ["cTern", "dTernR", "eTernZ", "gArrow", "hArrowR", "cNullish", "cOr", "cAnd", "cComma", "cParen",
+                    "cIndex", "cObj", "cLocal", "cLet", "cIife", "kIifeC", "cCall"])
+    check(`R955: \`deny Fs src.a.${fn}\` fires — every function the callee can hold is called`, gate(fn) === 1, JSON.stringify(entry(report, `src.a.${fn}`)));
+  check("R955 ORDER: the choice edges BOTH branches whichever is declared first — `cTern` and `eTernZ` each reach their pure AND their effectful function",
+        ["src.a.fa", "src.a.fb"].every((t) => (entry(report, "src.a.cTern")?.calls ?? []).includes(t))
+          && ["src.a.fz", "src.a.pb"].every((t) => (entry(report, "src.a.eTernZ")?.calls ?? []).includes(t)),
+        JSON.stringify([entry(report, "src.a.cTern"), entry(report, "src.a.eTernZ")]));
+  for (const fn of ["mPure", "nPureIdx"])
+    check(`R955 CONTROL: a choice between PURE functions charges nothing — \`${fn}\``, noEffectCharged(report, `src.a.${fn}`) && gate(fn) === 0);
+}
+
+// ── R958: ASSERTION LOOK-THROUGH IN THE CONFORMER PASS — UPCASTS ONLY ─────────────────────────────────────────────
+// A value under `as any`, `as unknown as I` or `<I>` keeps the checker type of what it IS, and that names the
+// conformer: each arm below was EXECUTED (its marker written) and `deny Fs` exited 0 at the base. The DOWNCAST
+// control was written first: `bO as SubO` (a nominal supertype asserted down to its subclass) registers nothing.
+// Measured: the downcast guard is load-bearing — a structurally identical Base IS assignable to Sub — and it is
+// scoped to ASSERTIONS, because the same value passed WITHOUT one (`dP(bP)`) is a checker-passed conversion of a
+// value that really is a Base. A string under `as any` names nothing.
+if (blk()) {
+  const d = project({ "src/a.ts": "import * as fs from \"node:fs\";\n// DOWNCAST CONTROL, written first: a nominal supertype asserted DOWN to its subclass must not become a conformer of it\nexport class BaseO { m(): void { fs.writeFileSync(\"/tmp/candor-ts-r956-o\", \"x\"); } }\nexport class SubO extends BaseO { m(): void { } }\nexport function dO(s: SubO) { s.m(); }\nconst bO: BaseO = new BaseO();\nexport function rO() { dO(bO as SubO); }\n// `as any` at the argument: the inner type names the conformer\nexport interface SinkA { m(): void }\nexport class PureA implements SinkA { m(): void { } }\nexport function dA(i: SinkA) { i.m(); }\nclass LwA { m(): void { fs.writeFileSync(\"/tmp/candor-ts-r956-a\", \"x\"); } }\nconst wA = new LwA();\nexport function rA() { dA(wA as any); }\n// `as unknown as Sink`, then a dispatch on the variable\nexport interface SinkB { m(): void }\nexport class PureB implements SinkB { m(): void { } }\nclass LwB { m(): void { fs.writeFileSync(\"/tmp/candor-ts-r956-b\", \"x\"); } }\nconst wB = new LwB();\nconst sB = wB as unknown as SinkB;\nexport function rB() { sB.m(); }\n// angle-bracket assertion at the argument\nexport interface SinkC { m(): void }\nexport class PureC implements SinkC { m(): void { } }\nexport function dC(i: SinkC) { i.m(); }\nclass LwC { m(): void { fs.writeFileSync(\"/tmp/candor-ts-r956-c\", \"x\"); } }\nconst wC = new LwC();\nexport function rC() { dC(<SinkC>wC); }\n// an upcast to a CLASS type through `as any`\nexport class BaseE { m(): void { } }\nexport function dE(s: BaseE) { s.m(); }\nclass LwE { m(): void { fs.writeFileSync(\"/tmp/candor-ts-r956-e\", \"x\"); } }\nconst wE = new LwE();\nexport function rE() { dE(wE as any); }\n// CONTROL: `as any` over a value whose type names nothing (a string) registers nothing\nexport interface SinkZ { m(): void }\nexport class PureZ implements SinkZ { m(): void { } }\nexport function dZ(i: SinkZ) { i.m(); }\nexport function rZ(s: string) { dZ(s as any); }\n// CONTROL beside the downcast: WITHOUT an assertion a structurally identical Base passed the checker into a Sub\n// slot, and the value really is a Base \u2014 it stays a conformer (the R954 behaviour).\nexport class BaseP { m(): void { fs.writeFileSync(\"/tmp/candor-ts-r956-p\", \"x\"); } }\nexport class SubP extends BaseP { m(): void { } }\nexport function dP(s: SubP) { s.m(); }\nconst bP = new BaseP();\nexport function rP() { dP(bP); }\n" });
+  const { report } = scan(d);
+  const gate = (fn) => { fs.writeFileSync(path.join(d, "p.pol"), `deny Fs src.a.${fn}\n`); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  for (const fn of ["dA", "rA", "rB", "dC", "rC", "dE", "rE", "dP", "rP"])
+    check(`R958: \`deny Fs src.a.${fn}\` fires — the conformer under the assertion (or the checker-passed Base) is a candidate`, gate(fn) === 1, JSON.stringify(entry(report, `src.a.${fn}`)));
+  for (const fn of ["dO", "rO", "dZ", "rZ"])
+    check(`R958 CONTROL: \`deny Fs src.a.${fn}\` stays 0 — an asserted DOWNCAST registers no supertype; \`as any\` over a string names nothing`, gate(fn) === 0, JSON.stringify(entry(report, `src.a.${fn}`)));
 }
 
 // ======================================================================================================

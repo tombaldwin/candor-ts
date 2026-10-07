@@ -37,7 +37,7 @@ import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadE
          tablesInSql, modelHostEffects, isModelHost, isModelSdkPackage, netClassesOf,
          partnerFor, CLOCK_READING_PERFORMANCE_MEMBERS, CLOCK_READING_PROCESS_MEMBERS,
          CLOCK_READING_CONSOLE_MEMBERS, CONNECTING_WEB_CTORS,
-         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, FS_USE_VERBS,
+         WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, NET_ACCEPTING, NET_REQUEST_NAMED, FS_USE_VERBS,
          EXEC_USE_VERBS, RESERVED_SIDECAR_SEGMENTS } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
 
@@ -167,7 +167,8 @@ ENVIRONMENT / CONFIG
                                  \`policy\` key works too)
   CANDOR_BASELINE=<report.json>  (or a .candor/config \`baseline\` key) runs the AS-EFF-005
                                  regression guard against a saved same-build report: exit 1
-                                 when an existing function gained an effect, exit 2 on an
+                                 when a function gained an effect — one ABSENT from the
+                                 baseline is compared against nothing (⟨0.40⟩), exit 2 on an
                                  unparseable or different-build baseline (never evaluated),
                                  a stderr note when absent
   CANDOR_UNKNOWN_RATCHET         (or a .candor/config \`unknown-ratchet\` key) opt-in: flip an
@@ -3087,8 +3088,8 @@ function isDestructuringAssignTarget(node) {
 // is_cmd_naming_method gate. Returns null when arg0 is not a static string literal — the safe
 // direction. ⟨0.29⟩ the `cmds` SURFACE reads this too: it was documented as cosmetic, but `cmds` is what
 // `allow Exec <cmd>` gates on (AS-EFF-008).
-function programHeadLiteral(node) {
-  const a0 = (node.arguments ?? [])[0];
+function programHeadLiteral(node, args = node.arguments ?? []) {
+  const a0 = args[0];
   return a0 && ts.isStringLiteralLike(a0) ? a0.text : null;
 }
 // The URL/endpoint literal of a host-bearing Net call, read from the DOCUMENTED URL arg position — a host
@@ -3143,6 +3144,41 @@ function dgramSendAddressIndex(args) {
   if (isNumericLit(args[3])) return 4;
   if (isNumericLit(args[1])) return 2;
   return -1;
+}
+// SOUNDNESS R949 — A dgram BIND HANDED A RUNTIME NAME RESOLVES IT. node's `socket.bind(port, address)` (and
+// `bind({ port, address })`) runs `dns.lookup(address)` before binding: a Net reach whose locator is the NAME,
+// chosen at run time. So the bind is not "nothing" when its address is a runtime string — SPEC ⟨0.40⟩'s "a bind
+// marks nothing" is about the bind ADDRESS as a destination, and the lookup is a destination. Returns true when
+// the address position holds a value that may be a string this scan cannot read:
+//   bind()  bind(port)  bind(port, cb)  bind(cb)  bind({ port })     → false (no address: nothing resolved)
+//   bind(port, "10.0.0.5")  bind(port, CONST)  bind({ address: "…" }) → false (determined; NOT captured into
+//                                                                        `hosts` either — it is a bind address)
+//   bind(port, h: string | any | unknown)  bind({ address: h })       → true
+//   bind(opts) with a non-literal options value                        → true (its `address` cannot be read —
+//                                                                        fail-closed, an over-charge if it has none)
+// "May be a string" is the checker's answer, so a number- or function-typed second argument (`bind(0, cb)`) is not one.
+function dgramBindResolvesRuntimeName(args) {
+  const determined = (e) => e && (ts.isStringLiteralLike(e) || constStringValue(e) != null);
+  const mayBeString = (e) => {
+    let t; try { t = checker.getTypeAtLocation(e); } catch { return true; }
+    const one = (x) => (x.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.StringLike)) !== 0;
+    return t.isUnion?.() ? t.types.some(one) : one(t);
+  };
+  const a0 = args[0] && unwrapArgExpr(args[0]);
+  if (a0 && ts.isObjectLiteralExpression(a0)) {
+    const p = a0.properties.find((q) => q.name && !ts.isComputedPropertyName(q.name) && q.name.getText() === "address");
+    if (!p) return a0.properties.some((q) => ts.isSpreadAssignment(q));    // `{ ...opts }` may carry one
+    if (!ts.isPropertyAssignment(p)) return true;                           // shorthand `{ address }` — a variable
+    return !determined(unwrapArgExpr(p.initializer)) && mayBeString(p.initializer);
+  }
+  if (a0 && !isNumericLit(a0) && !ts.isArrowFunction(a0) && !ts.isFunctionExpression(a0)) {
+    let t; try { t = checker.getTypeAtLocation(a0); } catch { t = null; }
+    // a non-literal first argument that is an OBJECT (an options value) — its address is not readable
+    if (t && (t.flags & ts.TypeFlags.Object) !== 0 && !t.getCallSignatures?.().length) return true;
+  }
+  const a1 = args[1] && unwrapArgExpr(args[1]);
+  if (!a1 || ts.isArrowFunction(a1) || ts.isFunctionExpression(a1)) return false;
+  return !determined(a1) && mayBeString(a1);
 }
 // ⟨0.29⟩ THE Fs PATH LITERAL, read from the PATH ARGUMENT POSITION — the third application of the
 // `programHeadLiteral` discipline, and the one that never got it. The comment above says that rule was
@@ -3277,8 +3313,7 @@ function declMemberToken(decl, name) {
   }
   return name;
 }
-function fsPathLiteral(node, member) {
-  const args = node.arguments ?? [];
+function fsPathLiteral(node, member, args = node.arguments ?? [], twoPaths = null) {
   const at = (i) => {
     const a = args[i];
     if (!a) return null;
@@ -3289,7 +3324,9 @@ function fsPathLiteral(node, member) {
   };
   const a0 = at(0);
   const listed = FS_TWO_PATH_MEMBERS.has(member);
-  const needsTwo = listed || signatureHasTwoPaths(node);
+  // `twoPaths` (non-null) answers for an INDIRECT route, whose own call node resolves to `Function.call`/a
+  // bound signature rather than the invoked `fs` verb — see `chargeLocatorSurfaces`.
+  const needsTwo = listed || (twoPaths ?? signatureHasTwoPaths(node));
   if (needsTwo && !listed) r801Hit(`two:${member}`);
   const a1 = needsTwo ? at(1) : null;
   const complete = a0 !== null && (!needsTwo || a1 !== null);
@@ -3406,15 +3443,505 @@ function literalHeadHostUrl(expr) {
   }
   return null;
 }
-function urlArgLiteral(node, member, mod) {
-  const args = node.arguments ?? [];
+// SOUNDNESS R802 — A DETERMINED URL OBJECT IS A DETERMINED LOCATOR. `fetch(new URL("https://h/x"))`,
+// `fetch(new Request("https://h/x"))` and `const u = new URL("https://h/x"); fetch(u)` name their host as
+// surely as the string does (SPEC §2 ⟨0.37⟩: "DETERMINED" IS A PROPERTY OF THE VALUE, NOT OF THE SYNTAX).
+// This is the over-charge half of R802's fix and exists only because the masking half below now marks
+// every uncaptured Net locator incomplete: without it a fully literal `new URL(...)` would become
+// uncertifiable (the R416 shape PART 88's a4local exists to refuse).
+//
+// Returns the URL's href, or null. EVERY doubt answers null, which fails the surface closed — never open:
+//   • the constructor must be the PLATFORM's `URL`/`Request` (no declaration in a project file — a
+//     project class of the same name could compute anything);
+//   • every argument must be a string literal or a `const` string (`new URL(path, base)` is evaluated
+//     with the real WHATWG parser, so an ABSOLUTE `path` correctly wins over `base`);
+//   • through a binding, the binding must be a NON-EXPORTED `const` whose only uses are as an ARGUMENT
+//     OF THE CALL BEING CLASSIFIED or a non-assigning member READ. A URL object is MUTABLE —
+//     `u.hostname = runtime` or handing `u` to any other function could move its host — so any other use
+//     (an assignment rooted at it, another call's argument, an alias, a return) refuses the capture.
+function determinedUrlObject(expr, call, depth = 0) {
+  if (!expr || depth > 1) return null;
+  while (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) || ts.isNonNullExpression(expr)
+         || ts.isSatisfiesExpression?.(expr)) expr = expr.expression;
+  if (ts.isNewExpression(expr) && ts.isIdentifier(expr.expression)
+      && (expr.expression.text === "URL" || expr.expression.text === "Request")) {
+    const decls = checker.getSymbolAtLocation(expr.expression)?.declarations ?? [];
+    if (decls.length === 0
+        || decls.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)))) return null;
+    const args = expr.arguments ?? [];
+    const max = expr.expression.text === "URL" ? 2 : 1;
+    if (args.length === 0 || args.length > max) return null;
+    const strs = args.map((a) => (ts.isStringLiteralLike(a) ? a.text : constStringValue(a)));
+    if (strs.some((s) => s == null)) return null;
+    try { return new URL(strs[0], strs[1]).href; } catch { return null; }
+  }
+  if (!ts.isIdentifier(expr)) return null;
+  const sym = checker.getSymbolAtLocation(expr);
+  const decls = sym?.declarations ?? [];
+  if (decls.length !== 1) return null;
+  const d = decls[0];
+  if (!ts.isVariableDeclaration(d) || !ts.isIdentifier(d.name) || !d.initializer) return null;
+  const list = d.parent;
+  if (!(list && ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.Const) !== 0)) return null;
+  const stmt = list.parent;
+  if (stmt && ts.isVariableStatement(stmt)
+      && (ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Export) !== 0) return null;
+  let safe = true;
+  const visit = (n) => {
+    if (!safe) return;
+    if (ts.isIdentifier(n) && n !== d.name && n.text === d.name.text && checker.getSymbolAtLocation(n) === sym) {
+      const p = n.parent;
+      const isOwnArg = p === call && (call.arguments ?? []).includes(n);
+      let readOnly = false;
+      if (ts.isPropertyAccessExpression(p) && p.expression === n) {
+        // a member READ: walk up the access chain; refuse if the chain's root is an assignment target,
+        // a delete/++/-- operand, or the chain is called (a method call may mutate — `u.searchParams.set`
+        // cannot move the host, but this does not try to tell them apart).
+        let top = p;
+        while (top.parent && (ts.isPropertyAccessExpression(top.parent) || ts.isElementAccessExpression(top.parent))
+               && top.parent.expression === top) top = top.parent;
+        const tp = top.parent;
+        readOnly = !(tp && ((ts.isBinaryExpression(tp) && tp.left === top
+                             && tp.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+                             && tp.operatorToken.kind <= ts.SyntaxKind.LastAssignment)
+                            || ts.isDeleteExpression(tp)
+                            || ((ts.isPrefixUnaryExpression(tp) || ts.isPostfixUnaryExpression(tp)))
+                            || (ts.isCallExpression(tp) && tp.expression === top)));
+      }
+      if (!isOwnArg && !readOnly) safe = false;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(d.getSourceFile());
+  return safe ? determinedUrlObject(d.initializer, call, depth + 1) : null;
+}
+// R947 — the invoked function's own ARGUMENTS on the reflective routes, or `null` when they are not
+// visible here (a spread, an `.apply` of a non-literal array). `null` is the safe answer: it captures nothing.
+function unwrapArgExpr(e) {
+  while (e && (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression?.(e)
+               || ts.isNonNullExpression(e) || ts.isSatisfiesExpression?.(e))) e = e.expression;
+  return e;
+}
+function literalArgList(e) {
+  if (!e) return [];
+  const u = unwrapArgExpr(e);
+  if (!u || !ts.isArrayLiteralExpression(u)) return null;
+  return u.elements.some((x) => ts.isSpreadElement(x)) ? null : [...u.elements];
+}
+// ── SOUNDNESS R955 — A CALLEE EXPRESSION THAT CAN HOLD MORE THAN ONE FUNCTION CALLS ALL OF THEM ─────────────────
+//
+// The call walk resolves a call through `getResolvedSignature(node).declaration`, which names ONE declaration. For
+// a callee that is a choice between functions the checker unions their types and that one declaration is
+// whichever the union put first — by TYPE CREATION ORDER, not by anything in the program. So `(c ? fb : fa)(p)`
+// edged `fa` when `fa` was declared first and NOTHING when it was declared second, and an arrow-const pair edged
+// nothing either way: the caller was ABSENT and `deny Fs` exited 0 over a call that writes (EXECUTED). Census,
+// one fixture, effectful branch only, base: `?:` (declared second / arrow consts), `c && f || g`, `[g, f][i]`,
+// `const pick = c ? g : f; pick(p)`, an IIFE returning a choice, `(c ? g : f).call(…)` — ABSENT; `??`, `||`, a
+// reassigned `let` — `Unknown` only; `(0, f)`, `(f)`, `({a: f}).a`, `(() => f)()` — correct. The rollup corpus
+// entry showed the ordering live: an unrelated change to type creation order moved its one edge from
+// `copyPropertyStatic` to `copyNonDefaultOwnPropertyLiveBinding`.
+//
+// So the CALLEE EXPRESSION is read for every function value it can evaluate to, and each is charged as a call
+// to it: `?:` (both arms), `??`/`||` (both operands), `&&`/`,` (the right operand — a falsy left value is not
+// callable), `[f, g][i]` (the indexed element, or every element), an IIFE (every value its literal body
+// returns), and a const or a `let` bound to any of these (the initializer and every assignment in the file).
+// Returns null when `expr` is not such a shape (the ordinary path answers it), else `{ leaves, open }`: `open`
+// when some value cannot be bounded (a spread, a compound assignment, a body that returns nothing), which
+// discloses.
+function calleeChoiceLeaves(expr) {
+  const leaves = [];
+  let open = false, compound = false;
+  const seenSyms = new Set();
+  const visit = (e, d) => {
+    if (!e || d > 12) { open = true; return; }
+    e = unwrapArgExpr(e);
+    if (ts.isConditionalExpression(e)) { compound = true; visit(e.whenTrue, d + 1); visit(e.whenFalse, d + 1); return; }
+    if (ts.isBinaryExpression(e)) {
+      const k = e.operatorToken.kind;
+      if (k === ts.SyntaxKind.QuestionQuestionToken || k === ts.SyntaxKind.BarBarToken) {
+        compound = true; visit(e.left, d + 1); visit(e.right, d + 1); return;
+      }
+      if (k === ts.SyntaxKind.AmpersandAmpersandToken || k === ts.SyntaxKind.CommaToken) { compound = true; visit(e.right, d + 1); return; }
+    }
+    if (ts.isElementAccessExpression(e) && ts.isArrayLiteralExpression(unwrapArgExpr(e.expression))) {
+      compound = true;
+      const els = unwrapArgExpr(e.expression).elements;
+      const ix = e.argumentExpression;
+      if (ix && ts.isNumericLiteral(ix)) {
+        const el = els[Number(ix.text)];
+        if (el && !ts.isSpreadElement(el) && !ts.isOmittedExpression(el)) visit(el, d + 1); else open = true;
+        return;
+      }
+      for (const el of els) { if (ts.isSpreadElement(el) || ts.isOmittedExpression(el)) open = true; else visit(el, d + 1); }
+      return;
+    }
+    if (ts.isCallExpression(e) && (e.arguments ?? []).length === 0) {
+      const f = unwrapArgExpr(e.expression);
+      if (ts.isArrowFunction(f) || ts.isFunctionExpression(f)) {
+        compound = true;
+        if (!ts.isBlock(f.body)) { visit(f.body, d + 1); return; }
+        let any = false;
+        (function rets(n) {
+          if (n !== f.body && (ts.isFunctionLike(n) || ts.isClassLike(n))) return;   // a nested function's returns are its own
+          if (ts.isReturnStatement(n)) { any = true; if (n.expression) visit(n.expression, d + 1); else open = true; }
+          ts.forEachChild(n, rets);
+        })(f.body);
+        if (!any) open = true;
+        return;
+      }
+    }
+    if (ts.isIdentifier(e)) {
+      let sym; try { sym = checker.getSymbolAtLocation(e); } catch { sym = undefined; }
+      const decl = sym?.declarations?.length === 1 ? sym.declarations[0] : null;
+      if (decl && ts.isVariableDeclaration(decl) && ts.isIdentifier(decl.name) && decl.initializer && !seenSyms.has(sym)
+          && decl.parent && ts.isVariableDeclarationList(decl.parent)) {
+        const isConst = (decl.parent.flags & ts.NodeFlags.Const) !== 0;
+        const init = unwrapArgExpr(decl.initializer);
+        // Only a binding whose value is itself a CHOICE, or a `let` that is reassigned, is unfolded here; a const
+        // bound to one function is the ordinary path's alias question and stays there.
+        const assigns = [];
+        if (!isConst) {
+          (function find(n) {
+            if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+                && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment && ts.isIdentifier(unwrapArgExpr(n.left))) {
+              let s2; try { s2 = checker.getSymbolAtLocation(unwrapArgExpr(n.left)); } catch { s2 = undefined; }
+              if (s2 === sym) assigns.push(n);
+            }
+            ts.forEachChild(n, find);
+          })(decl.getSourceFile());
+        }
+        if (calleeChoiceLeaves(init) !== null || assigns.length) {
+          seenSyms.add(sym);
+          compound = true;
+          visit(init, d + 1);
+          for (const a of assigns) {
+            if (a.operatorToken.kind !== ts.SyntaxKind.EqualsToken) open = true; else visit(a.right, d + 1);
+          }
+          return;
+        }
+      }
+    }
+    leaves.push(e);
+  };
+  visit(expr, 0);
+  return compound ? { leaves, open } : null;
+}
+// One callee value of a choice, charged as a call to it with this call's arguments: an inline function literal is
+// already charged to its lexical owner (or to its own minted unit, edged here); a parameter is a callback-flow
+// invocation (`paramInvokes`, exactly as `cb()` is); a reference is the reflective funnel's question
+// (`chargeInvokedRef`: a local unit, κ with its locator, the dependency funnel, or a value holder's `Unknown`),
+// plus this call's argument slots for the callback flow of a LOCAL target. Returns false when the value cannot
+// be named — then the choice is `open` and discloses.
+function chargeCalleeLeaf(rec, node, leaf, tag) {
+  if (ts.isArrowFunction(leaf) || ts.isFunctionExpression(leaf)) { const u = nodeName.get(leaf); if (u) rec.edges.add(u); return true; }
+  if (!(ts.isIdentifier(leaf) || ts.isPropertyAccessExpression(leaf)
+        || (ts.isElementAccessExpression(leaf) && accessedMemberName(leaf)))) return false;
+  const d2 = refSlotDecl(leaf);
+  if (d2 && ts.isParameter(d2) && d2.parent && nodeName.get(d2.parent)) {
+    const ownerUnit = nodeName.get(d2.parent);
+    const idx = d2.parent.parameters.indexOf(d2);
+    (paramInvokes.get(ownerUnit) ?? paramInvokes.set(ownerUnit, new Set()).get(ownerUnit)).add(idx);
+    return true;
+  }
+  const t = (d2 && callTargetUnit(d2)) || resolveFnRefUnit(leaf);
+  if (t) { rec.edges.add(t); registerCallbackArgs(rec, t, node.arguments ?? []); return true; }
+  // Named only where the funnel ANSWERS: a dependency or platform function (κ, or the dependency funnel's
+  // ledger/`invisible`), or a value holder (which it discloses). A reference with no declaration (`(x as
+  // any).gc`) or a local member SIGNATURE with no body (`options.callback`) is not named — MEASURED, counting
+  // them closed removed zod's `callback:collect` and ioredis's `callback:callback` over values nobody bounded.
+  const holder = d2 && (ts.isVariableDeclaration(d2) || ts.isBindingElement(d2) || ts.isParameter(d2));
+  if (!d2 || (declIsLocal(d2) && !holder)) return false;
+  chargeInvokedRef(rec, node, leaf, node.arguments ?? [], tag);
+  return true;
+}
+function reflectiveArgs(node, m, recvText) {
+  const as = [...(node.arguments ?? [])];
+  if (recvText === "Reflect") return m === "apply" ? literalArgList(as[2]) : null;
+  if (m === "call") { const r = as.slice(1); return r.some((x) => ts.isSpreadElement(x)) ? null : r; }
+  if (m === "apply") return literalArgList(as[1]);
+  return null;
+}
+// A `.bind` chain at a call's callee: `f.bind(t, a).bind(u, b)(c)` → { ref: f, bound: [a, b] }. Not a `.bind`
+// callee → null. `ref` is null when the chain's root is not a nameable reference (`getCb().bind(t, a)`).
+function bindChainCallee(expr) {
+  let e = unwrapArgExpr(expr);
+  const layers = [];
+  while (e && ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === "bind") {
+    layers.push([...(e.arguments ?? [])]);
+    e = unwrapArgExpr(e.expression.expression);
+  }
+  if (!layers.length) return null;
+  const bound = [];
+  for (const l of layers.reverse()) bound.push(...l.slice(1));
+  const ref = e && (ts.isIdentifier(e) || ts.isPropertyAccessExpression(e)
+                    || (ts.isElementAccessExpression(e) && accessedMemberName(e))) ? e : null;
+  return { ref, bound };
+}
+// Whether the invoked DECLARATION takes two paths — `signatureHasTwoPaths` for a route whose call node is not
+// the invoked function's own call.
+function declHasTwoPaths(decl) {
+  const ps = decl?.parameters ?? [];
+  if (ps.length < 2) return false;
+  const ty = (p) => checker.getTypeAtLocation(p);
+  try { return isPathParamType(ty(ps[0])) && isPathParamType(ty(ps[1])); } catch { return false; }
+}
+// The κ answer for a function reference (not a call): the module and the R801 member token, as the
+// (CLASSIFY) arm would compute them for a direct call to the same declaration.
+function kappaOfRef(d2, ref) {
+  if (!d2 || isOwnPackageDecl(d2)) return null;
+  const kMod = declModule(d2);
+  const raw = d2.name?.getText?.() ?? (ts.isIdentifier(ref) ? ref.text : accessedMemberName(ref));
+  const member = raw ? declMemberToken(d2, raw) : null;
+  const eff = kMod && member ? kappa(kMod, member) : null;
+  return eff ? { eff, kMod, member } : null;
+}
+// The Net verb predicates, shared by the (CLASSIFY) arm's closures and every indirect route. A construction is
+// the (CLASSIFY) arm's alone (`isConnectingCtor`, the `ws` server), so it is not asked here.
+function netEstablishingVerb(member, mod) {
+  return NET_ESTABLISHING.has(member) || (/^(node:)?dgram$/.test(mod ?? "") && member === "send");
+}
+function netAcceptingVerb(member, kMod) {
+  return NET_ACCEPTING.has(member) || (/^(node:)?inspector(\/promises)?$/.test(kMod ?? "") && member === "open");
+}
+// An INDIRECT route's surfaces: the Fs direction the (CLASSIFY) arm records, then the shared locator guard.
+function chargeInvokedSurfaces(rec, eff, member, kMod, node, args, decl) {
+  if (eff === "Fs") {
+    const ks = fsKind(kMod, member);
+    if (ks.length === 0) rec.fsKinds.add("?"); else for (const k of ks) rec.fsKinds.add(k);
+  }
+  chargeLocatorSurfaces(rec, eff, member, kMod, node, args, {
+    direct: false, accepting: netAcceptingVerb(member, kMod), establishing: netEstablishingVerb(member, kMod),
+    twoPaths: declHasTwoPaths(decl) });
+}
+// ── THE REFLECTIVE-INVOKE FUNNEL: a function reference INVOKED by `.call`/`.apply`/`Reflect.apply`/
+// `Reflect.construct` or by a partially-applied `.bind(t, a…)(…)` — resolved from the REFERENCE, because the
+// call node itself resolves to `Function.call` or to a bound signature that names no declaration. Was inline in
+// the call walk's `.call`/`.apply` arm; it is shared with the `.bind` route (R947), which reached
+// none of it — `fs.unlinkSync.bind(null, p)()` and a LOCAL `del.bind(null, p)(1)` were ABSENT from
+// `functions[]`, a positive purity claim over a body `node` ran to delete a file.
+// `args`: the invoked function's own arguments (see `chargeLocatorSurfaces`), `null` when not visible, or
+// `undefined` for `Reflect.construct`, whose surfaces the construction arm owns.
+function chargeInvokedRef(rec, node, invokedRef, args, whyTag) {
+  const d2 = refSlotDecl(invokedRef);
+  // Resolve the receiver/arg0 to its function unit, FOLLOWING local-variable aliases
+  // (`const m = effectful; m.call(…)`) — the direct-identifier form already landed on a minted
+  // unit, but an aliased local var resolves to its VARIABLE decl (not a unit), which dropped the
+  // edge silent-pure. `resolveFnRefUnit` chases the initializer alias to the real fn.
+  const t = (d2 && nodeName.get(d2)) || resolveFnRefUnit(invokedRef);
+  if (t) rec.edges.add(t);
+  else {
+    // Not a project unit — but the invoked reference may be a κ-modeled BUILTIN function
+    // (`fs.writeFileSync.call(…)` / `Reflect.apply(fs.writeFileSync, …)`): the reflective invoke reaches
+    // the SAME effect a direct call would. Classify the invoked function's DECLARATION through the same
+    // κ table (module + member), exactly as the (CLASSIFY) arm does. A PURE builtin — `[].slice.call`,
+    // `Array.prototype.map.call`, `Function.prototype.bind` — matches no κ rule and stays pure (no
+    // over-disclosure); an EFFECTFUL one (`fs.writeFileSync` → Fs, `dns.resolve` → Net) gets its effect.
+    const kMod = d2 && declModule(d2);
+    const kMember = declMemberToken(d2, d2?.name?.getText?.()
+      ?? (ts.isIdentifier(invokedRef) ? invokedRef.text : accessedMemberName(invokedRef)));  // R801 token
+    // SELF-NAME GUARD (see `isOwnPackageDecl`): the reflectively-invoked reference may be OUR
+    // OWN package's own function, reached through its own `dist/*.d.ts` — never let κ answer
+    // for it, same reasoning as the (CLASSIFY) arm.
+    const kEff = kMod && kMember && !isOwnPackageDecl(d2) ? kappa(kMod, kMember) : null;
+    // ⟨SOUNDNESS R587⟩ THE DISPATCH JOIN, AT THE FUNNEL THAT HAD NEITHER HALF OF IT. This is
+    // the site R573 was filed on and it was silent in EIGHT spellings, not the two the row
+    // named. `chargeExternalDecl` below runs `joinLocalImpls(recordDispatch(…))` — obligation
+    // 3's DECLARED half — and never `joinIndexSignatureImpls`, so a foreign index signature
+    // reached `[]`; and `declIsLocal` keeps a LOCAL declaration out of that funnel entirely,
+    // so both local spellings (index-signature AND declared-member) reached nothing at all
+    // and their callers were ABSENT. Measured at `6a639e6`, one file, `tsc` clean, every body
+    // ground-truthed by `node` to write a file:
+    //
+    //     fCall/fApply/fReflect  []      lCall/lApply/lReflect   ABSENT
+    //     ldCall/ldApply         ABSENT  ← the LOCAL DECLARED half, which R573 does not name
+    //     fdCall/fdApply ['Fs']  fPlain/fdPlain/ldPlain ['Fs']   ← the controls
+    //
+    // and the local half is STRICTLY WORSE than its own baseline: `li.roll(n)` discloses
+    // `Unknown` (`deny Unknown` exit 1) and the identical body through `.call` is silent.
+    //
+    // §G — THE SAME PREDICATE THE HOF-REF ARM CALLS, not a third join. Adding
+    // `joinIndexSignatureImpls` to `chargeExternalDecl` (the remedy the review named) would
+    // close three of these eight: that function receives no call-site expression, so it
+    // cannot supply the member name an index signature has no declaration to give, and it is
+    // unreachable for every LOCAL arm. The question "does this reference name an abstract
+    // member some visible implementor answers" is one question and now has one implementation.
+    //
+    // ⟨R574⟩ IS CARRIED ACROSS RATHER THAN RE-DECIDED. Where κ answered AND the receiver is
+    // demonstrably the package's own product (`const g = makeClient(); g.fetchIt.call(…)`),
+    // this hedges — `Unknown` + `dispatch:` — exactly as the CallExpression arm does, on the
+    // same `packageProducedReceiver` test with the same `eff ?` gate. Without it this fix
+    // would reintroduce R574's fabricated concrete effect at a NEW site, which is how that
+    // class spread the first time.
+    const ownProduct = kEff && (ts.isPropertyAccessExpression(invokedRef) || ts.isElementAccessExpression(invokedRef))
+      ? packageProducedReceiver(invokedRef.expression,
+          kMod?.startsWith("@types/") ? kMod.slice("@types/".length) : kMod)
+      : null;
+    chargeMemberRefDispatch(rec, invokedRef, d2, !!ownProduct, "R587-REACH");
+    if (kEff) {
+      rec.direct.add(kEff);
+      if (kEff === "Unknown") rec.why.add(`reflect:${kMod.replace(/^node:/, "")}.${kMember}`);
+      // R947 — …and the LOCATOR, which this arm never asked: `net.connect.call(null, 80, h)`
+      // beside `net.connect(80, "ok.example")` was certified by `allow Net ok.example` (Fs, Exec alike).
+      // A type-only wrapper on an argument (`h as any`, which `.call`'s `...args: any[]` invites) is the same
+                // runtime value, so it is read through; an identifier under one is then not this call's own
+                // argument, which `determinedUrlObject` refuses — the safe direction.
+                if (args !== undefined) chargeInvokedSurfaces(rec, kEff, kMember, kMod, node, args && args.map(unwrapArgExpr), d2);
+    }
+    // HONESTY: the receiver IS a local variable/parameter (a value declaration) that we could NOT pin
+    // to a function unit (bound to a param, a reassigned/branched value, an `any`-typed holder). The
+    // `.call`/`.apply` still INVOKES whatever it holds, so a silent-pure verdict would be the cardinal
+    // sin — disclose Unknown. (A direct fn identifier / known fn resolved above; a non-value receiver
+    // — a type, a literal — resolves to no decl and stays out, no fabrication.)
+    else if (d2 && (ts.isVariableDeclaration(d2) || ts.isBindingElement(d2) || ts.isParameter(d2))) {
+      rec.direct.add("Unknown");
+      rec.why.add(`callback:${whyTag}`); // method on an indeterminate-valued receiver (no resolvable owner TYPE) — canonical `callback:`, not the frontier's `dispatch:OWNER.member`
+    }
+    // THE FUNNEL: `d2` resolved to a concrete, non-local declaration that named neither a κ effect
+    // nor a value-holder shape above — a reflective `.call`/`.apply`/`Reflect.apply` onto an
+    // uncurated dependency's exported function (`depFn.call(this, x)`), the by-reference sibling
+    // of the HOF-ref arm's own `chargeExternalDecl(rec, d2)` call. Without this the invoke was
+    // NEITHER edged, NOR κ-classified, NOR disclosed — silent-pure on a call that unquestionably
+    // runs caller-reachable code, the same shape as the two cardinal sins this funnel closes.
+    else if (d2 && !declIsLocal(d2)) chargeExternalDecl(rec, d2, null,
+      (ts.isPropertyAccessExpression(invokedRef) || ts.isElementAccessExpression(invokedRef)) ? invokedRef.expression : null);
+  }
+}
+
+// ── SOUNDNESS R947 — THE LOCATOR SURFACES OF A κ-CLASSIFIED INVOCATION, ONE IMPLEMENTATION FOR EVERY ROUTE ───
+//
+// `hosts`/`tables`/`cmds`/`paths` and the per-effect masking marks (SPEC §2, ⟨0.29⟩ positions, ⟨0.37⟩ "no
+// captured locator ⇒ `incomplete`", ⟨0.40⟩ accepts). This lived inline in the call walk's (CLASSIFY) arm, and
+// the three OTHER routes that invoke a κ-classified function — `fn.call`/`fn.apply`/`Reflect.apply`, a
+// by-reference callback (`xs.forEach(fs.unlinkSync)`, `setTimeout(net.connect, 0, 80, h)`), and a
+// partially-applied `fn.bind(t, a)(b)` — never reached it: beside a benign sibling literal each of them was
+// CERTIFIED by `allow <E> in <fn> <benign>` over a runtime locator, for Net, Fs and Exec alike (measured,
+// 2026-10-07). So the question "was the locator captured?" now has one answer, asked by every route.
+//
+//   args      the arguments the INVOKED function receives, in its own positions (a `.call`'s arguments after
+//             `thisArg`, a literal `.apply` array, a `.bind` chain's bound arguments followed by the call's), or
+//             `null` when this route cannot see them — a callback a library invokes with values it chooses.
+//             `null` captures nothing and marks every establishing verb, which is the ⟨0.37⟩ rule applied to a
+//             locator nobody in this scan wrote down.
+//   direct    `args` IS `node.arguments` of a call that resolved to the invoked declaration — only then are
+//             the call's own signature (two-path `fs` verbs) and receiver (the ORM entity route) about it.
+//   twoPaths  for an indirect route: whether the invoked declaration takes two paths (its own parameters).
+function chargeLocatorSurfaces(rec, eff, member, kMod, node, args, { direct, accepting, establishing, twoPaths }) {
+  // ⟨0.40⟩ an accept marks the surface and captures NOTHING from its arguments — its address is where
+  // the process listens (R809's fabrication, now SPEC: "It MUST NOT enter `hosts`").
+  if (eff === "Net" && accepting) rec.incomplete.add("Net");
+  // R949 — a dgram `bind` captures nothing (its address is the process's own) and marks only when it resolves a
+  // runtime name; `args` null (a by-reference route) cannot rule an address out, so it marks.
+  else if (eff === "Net" && member === "bind" && /^(node:)?dgram$/.test(kMod ?? "")) {
+    if (!args || dgramBindResolvesRuntimeName(args)) rec.incomplete.add("Net");
+  }
+  else if (eff === "Net") {
+    // The host predicate runs against the EXTRACTED URL argument (arg0 — the URL/endpoint slot of
+    // fetch/axios/the HTTP verbs), NEVER the first literal anywhere in the args: a trailing literal
+    // in headers/body/options must not be read as the host (FINDING 6). Ollama's model decision runs
+    // through the parsed host too, never a raw string that merely contains ":11434" (FINDING 1/9).
+    const urlLit = args ? urlArgLiteral(node, member, kMod, args) : null;
+    const ollama = ollamaFromUrlArg(urlLit);
+    if (ollama === "capture-model" || ollama === "capture-plain") {
+      const h = hostLiteral(urlLit);
+      rec.hosts.add(h);
+      // SPEC §1 ⟨0.13⟩ Llm host-literal refinement: a known model host makes this a model call
+      // (Llm + Net — Net is never dropped), exactly as a jdbc URL classifies Db.
+      for (const e of modelHostEffects(h)) rec.direct.add(e);
+    } else {
+      // No captured host literal. §1 ⟨0.13⟩ Ollama LOCAL endpoint (`localhost:11434`/`127.0.0.1:11434`):
+      // refine to Llm but do NOT capture the host as a Net allowlist literal (java parity #2 —
+      // preserve the host gate so `deny Llm` catches it while `allow Llm localhost` fails closed).
+      if (ollama === "llm-no-capture") rec.direct.add("Llm");
+      // MASKING fix: a host-ESTABLISHING Net call whose host is NOT a captured literal (runtime URL, or
+      // built elsewhere) leaves the host invisible to the gate → mark the surface incomplete so a
+      // benign literal can't mask it. ALLOWLIST of establishing forms only — NEVER use-calls
+      // (write/end/non-dgram send), which would false-positive on `socket.connect("h").write(data)`
+      // (the host is captured at connect). Under-catches an unlisted establishing verb (safe
+      // direction); never over-flags a use-call.
+      if (establishing) rec.incomplete.add("Net");
+    }
+  }
+  if (eff === "Db") {
+    // ⟨0.29⟩ THE SQL SLOT, never the first literal anywhere. Every string-SQL client puts the
+    // query at argument 0 (`query(text, values)`, `execute(sql, params)`, `raw(sql, bindings)`,
+    // `prepare(sql)`), so a literal in a LATER position is a parameter, a fallback query, a
+    // health-check string — data, not the statement being run. MEASURED:
+    // `db.query(userSql, "SELECT * FROM audit_log")` published `tables: ["audit_log"]` and, because
+    // a table HAD been captured, the masking guard below never fired — so `allow Db audit_log`
+    // certified a query whose SQL is a runtime value. The `Fs` and `Net` defects of this rung, in
+    // the fourth and last locator surface.
+    const a0 = args ? args[0] : null;
+    const lit = a0 && ts.isStringLiteralLike(a0) ? a0.text : null;
+    const before = rec.tables.size;
+    for (const t of lit ? tablesInSql(lit) : []) rec.tables.add(t);
+    // ORM route: `this.userRepository.find(…)` — the receiver's `Repository<UserEntity>`
+    // type argument names the entity; its `@Entity("user")` decorator names the table.
+    if (direct && ts.isPropertyAccessExpression(node.expression)) {
+      const rt = checker.getTypeAtLocation(node.expression.expression);
+      for (const ta of checker.getTypeArguments?.(rt) ?? rt?.typeArguments ?? []) {
+        const d = ta?.symbol?.declarations?.[0];
+        const tbl = d && entityTables.get(d);
+        if (tbl) rec.tables.add(tbl);
+      }
+    }
+    // masking: a Db call that surfaced NO table (no SQL literal, no entity-typed receiver) reaches a
+    // runtime/invisible table — a benign sibling query's literal table must not mask it. The entity
+    // route above is NOT a literal so it still counts as visible (a captured table); only a fully
+    // invisible query marks incomplete. `new` (a connection ctor) carries no table — skip it.
+    if (rec.tables.size === before && member !== "new") rec.incomplete.add("Db");
+  }
+  if (eff === "Exec") {
+    // ⟨0.29⟩ `cmds` reads argv[0] too. It was documented as "the cosmetic cmds surface (any
+    // literal)", but `cmds` is precisely what `allow Exec <cmd>` gates on (AS-EFF-008) — nothing
+    // cosmetic about it. No node API places a bare string after the head (args are an array,
+    // options an object), so this changes no measured behaviour today; it removes the hazard for
+    // the next exec-like wrapper whose second argument is a string, which is how the identical
+    // defect reached `Fs`, `Net` and `Db` in this same rung.
+    // ⟨0.29⟩ A USE-VERB NAMES NO PROGRAM, and its argument 0 is not a head. `EXEC_USE_VERBS`
+    // already says so — it is consulted for the `incomplete` branch below and was NOT consulted
+    // here, so `child.send(msg)` (IPC to an ALREADY-spawned child) read its MESSAGE as argv[0].
+    // MEASURED: `ch.send("ls")` published `cmds: ["ls"]` and certified under `allow Exec ls`
+    // though the function executes nothing, and `ch.send("curl")` FABRICATED `Net` — a function
+    // that makes no network call reported as performing one, which `deny Net` then fires on.
+    // That is exactly what the doc comment above forbids ("`spawn(toolVar, "curl")` must NOT
+    // fabricate Net — the literal is an argument, not the program"); the rule was written for the
+    // argument POSITION and never covered the same hazard reached through the RECEIVER.
+    const lit = EXEC_USE_VERBS.has(member) || !args ? null : programHeadLiteral(node, args);
+    if (lit) rec.cmds.add(lit.trim().split(/\s+/)[0]);
+    // a known literal head refines the cliff (curl→Net, candor→Fs/Env); Exec stays. The head
+    // MUST be argv[0] (programHeadLiteral), NOT any literal arg: `spawn(toolVar, "curl")`
+    // names no static program, so its trailing literal must not fabricate Net (spec §4).
+    const head = lit;
+    if (head) for (const e of commandHeadEffects(head)) rec.direct.add(e);
+    // masking (sweep [11]): an Exec call whose program head is NOT a static literal (runtime
+    // command) leaves the command invisible. Establishing = the spawn fns; ChildProcess use-verbs
+    // (kill/send/disconnect/ref/unref) carry no command and are excluded.
+    else if (!EXEC_USE_VERBS.has(member)) rec.incomplete.add("Exec");
+  }
+  if (eff === "Fs") {
+    // ⟨0.29⟩ the PATH POSITION, never the first literal anywhere — see fsPathLiteral.
+    const { lits, complete } = args ? fsPathLiteral(node, member, args, direct ? null : twoPaths) : { lits: [], complete: false };
+    const captured = lits.filter((l) => /[/\\]|^[.~]/.test(l)); // path-shaped literals only
+    const pathCaptured = captured.length > 0 && captured.length === lits.length;
+    for (const l of captured) rec.paths.add(l);
+    // masking (sweep [11]): a path-taking fs.* call whose path is NOT a captured literal (runtime
+    // path) leaves it invisible. fd/FileHandle USE-verbs (fd came from a prior open()) are excluded.
+    // ⟨0.29⟩ `complete` also covers a two-path op whose SECOND path is runtime, which a captured
+    // position-0 literal would otherwise certify.
+    if (!(pathCaptured && complete) && !FS_USE_VERBS.has(member)) rec.incomplete.add("Fs");
+  }
+}
+
+function urlArgLiteral(node, member, mod, args = node.arguments ?? []) {
   const litAt = (i) => {
     const a = args[i];
     if (!a) return null;
     if (ts.isStringLiteralLike(a)) return a.text;
     // const-anchored host (fetch(API_BASE), `${API_BASE}/x`, API_BASE+"/x"), THEN literal-head extraction
-    // (`\`https://host/${p}\``, `"https://host/" + p`) when the literal head already completes the authority.
-    return resolveConstUrlString(a) ?? literalHeadHostUrl(a);
+    // (`\`https://host/${p}\``, `"https://host/" + p`) when the literal head already completes the authority,
+    // THEN a determined URL object (R802, above).
+    return resolveConstUrlString(a) ?? literalHeadHostUrl(a) ?? determinedUrlObject(a, node);
   };
   if (member && NET_URL_ARG1_MEMBERS.has(member)) return litAt(0) ?? litAt(1); // (port, host) or (path)
   // ⟨0.29⟩ dgram `send` — keyed on the MODULE, because a bare `send` elsewhere legitimately takes its
@@ -3427,23 +3954,6 @@ function urlArgLiteral(node, member, mod) {
   // spelling of `send` that does carry a destination, so that rule keeps its own answer.
   if (member && NET_USE_VERBS.has(member)) return null;
   return litAt(0);
-}
-// Is arg0 a RUNTIME STRING expression whose host can't be known statically — a template, a string
-// concat, or a `string`-typed variable/member/call? Only THIS shape masks the host and must fail the
-// surface closed. A STRUCTURED url arg (`new URL(...)`, a `Request` object, any non-string value) carries
-// its host in a form the literal gate never saw, but it did not mask a literal that WAS there — pre-Llm
-// behavior added Net and moved on, so it must NOT regress to fail-closed. Absent arg0 → not a masking
-// string either (never fabricate incompleteness). A static string literal is handled by urlArgLiteral, so
-// it is excluded here.
-function urlArgIsRuntimeString(node) {
-  const a0 = (node.arguments ?? [])[0];
-  if (!a0 || ts.isStringLiteralLike(a0)) return false;
-  if (ts.isTemplateExpression(a0)) return true; // `${base}/path` — host built at runtime
-  if (ts.isBinaryExpression(a0) && a0.operatorToken.kind === ts.SyntaxKind.PlusToken) return true; // concat
-  // a variable/member/call arg: a masking runtime host only when its static type is `string` (a
-  // `new URL()`/`Request`/other object is NOT a string type — leave it clean, as before the Llm port).
-  const t = checker.getTypeAtLocation(a0);
-  return t ? (t.flags & (ts.TypeFlags.String | ts.TypeFlags.StringLiteral)) !== 0 : false;
 }
 // The Ollama local-endpoint decision (java Literals parity #2), routed through the EXTRACTED host, never
 // a raw literal that merely CONTAINS ":11434". `urlLit` is arg0's string text; `host` is hostLiteral(urlLit)
@@ -3633,6 +4143,12 @@ const CHA_FANOUT_LIMIT = 12;
 const TYPINGS_CENSUS_CAP = 128;
 const classOverrides = new Map();// base-method MemberDeclaration node -> overriding subclass member nodes (class-CHA)
 const classDescendants = new Map();// base ClassDeclaration -> transitive LOCAL subclass ClassDeclarations (coercion-CHA)
+// R954 — the conformer registries (filled by the conversion pass after `walkStructural`).
+const classConformers = new Map();   // local ClassDeclaration -> conformer nodes (local class, literal, dep class)
+const depConformers = new Map();     // InterfaceDeclaration (local or foreign) -> dependency ClassDeclarations
+const ifaceFlows = new Map();        // local InterfaceDeclaration J -> Set of targets a J-typed value is converted to
+const isProjectNode = (d) => !!d && projectFiles.has(path.resolve(d.getSourceFile().fileName));
+const conversionAddedImpls = new Map(); // InterfaceDeclaration -> Set of implementors the conversion pass added
 // ⟨SOUNDNESS R867⟩ The class-CHA relation ACROSS the package boundary: a FOREIGN class METHOD declaration
 // (a dependency's `class BaseO { m() }`, reached through its source or its `.d.ts`) -> the LOCAL method
 // declarations that override it. `classOverrides` stops at the first `extends` that leaves the project
@@ -3760,8 +4276,75 @@ function overrideDescent(decl) {
 }
 function memberDispatchBodies(decl, rootClass) {
   const all = overrideDescent(decl);
-  if (!rootClass || all.length === 0) return all;
-  return all.filter((om) => ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass));
+  const scoped = (!rootClass || all.length === 0) ? all
+    : all.filter((om) => ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass));
+  // R954 — …and the CONFORMERS registered at the receiver's class (a value the checker showed
+  // converted to it, or to a subclass of it), which run for this dispatch exactly as an override does. Scoped
+  // the same way: registered at `Ct` and its ancestors, so a SUBTYPE receiver never sees them.
+  const at = rootClass ?? (decl?.parent && ts.isClassDeclaration(decl.parent) ? decl.parent : null);
+  const conf = at ? conformerBodies(at, decl?.name?.getText?.()) : [];
+  return conf.length ? [...scoped, ...conf.filter((b) => !scoped.includes(b))] : scoped;
+}
+// The bodies the conformers registered at `cls` run for `member`: a local class or literal through
+// `implMemberBodies` (its own member, its local ancestor's, and the overrides below it), and otherwise the
+// member DECLARATION the checker finds on the conformer's type — a dependency class's, or an inherited one this
+// scan does not hold — which the readers charge as a direct call to it (`chargeConformerBody`). Guarded against a
+// conformer cycle (A converted to B and B to A).
+const conformerBodiesActive = new Set();
+function conformerBodies(cls, member) {
+  const confs = classConformers.get(cls);
+  if (!confs?.length || !member || conformerBodiesActive.has(cls)) return [];
+  conformerBodiesActive.add(cls);
+  try {
+    const out = [];
+    for (const c of confs) {
+      const bodies = ts.isClassDeclaration(c) && !isProjectNode(c) ? null : implMemberBodies(c, member);
+      if (bodies) { for (const b of bodies) if (!out.includes(b)) out.push(b); continue; }
+      const d = conformerMemberDecl(c, member);
+      if (d && !out.includes(d)) out.push(d);
+    }
+    return out;
+  } finally { conformerBodiesActive.delete(cls); }
+}
+// The declaration of `member` on a conformer's (instance) type, wherever the checker finds it.
+function conformerMemberDecl(c, member) {
+  let t;
+  try {
+    t = ts.isClassDeclaration(c) ? checker.getDeclaredTypeOfSymbol(checker.getSymbolAtLocation(c.name) ?? c.symbol)
+      : checker.getTypeAtLocation(c);
+  } catch { t = null; }
+  let prop; try { prop = t && checker.getPropertyOfType(t, member); } catch { prop = null; }
+  return prop?.declarations?.[0] ?? null;
+}
+// A body the readers cannot edge to because this scan does not hold it — a conformer's member declared in a
+// dependency (or in node's typings). It is charged as a DIRECT CALL to that declaration would be: κ (a platform
+// class), the node-core floor, else the dependency funnel under the dependency's OWN key (R769).
+const isExternalConformerBody = (b) => !!b && typeof b.getSourceFile === "function" && !isProjectNode(b);
+//
+// Returns whether that ANSWERED the body: κ classified it, or a chained report holds it under its own key. An
+// unchained dependency's member is still charged (its `invisible` disclosure, exactly as a direct call gets), but
+// the reader keeps its `Unknown` beside it — measured, answering it as resolved removed the dispatch's `Unknown`
+// and left only `invisible`, which `deny Unknown` does not read: a disclosure traded for a weaker one.
+function chargeConformerBody(rec, b) {
+  const name = b.name?.getText?.();
+  const k = kappaOfRef(b, b.name);
+  if (k) {
+    rec.direct.add(k.eff);
+    if (k.eff === "Unknown") rec.why.add(`reflect:${k.kMod.replace(/^node:/, "")}.${k.member}`);
+    return true;
+  }
+  const kMod = declModule(b);
+  if (declIsNodeTypes(b) && kMod && name && nodeCoreUnreviewed(kMod, name)) {
+    rec.direct.add("Unknown");
+    rec.why.add(`native:${kMod.replace(/^node:/, "")}.${name}`);
+    return true;
+  }
+  chargeExternalDecl(rec, b, null, null);
+  if (!kMod || kMod.startsWith("<")) return false;
+  const pkg = kMod.startsWith("@types/") ? kMod.slice("@types/".length) : kMod;
+  const owner = memberSigOf(b).parent?.name?.getText?.();
+  return !!((owner && crossDeps.get(`${pkg}#${owner}.${name}`)) ?? crossDeps.get(`${pkg}#${name}`))
+    || (declIsNodeTypes(b) && !!kMod);   // a reviewed node-core member is answered pure by κ's floor
 }
 // The LOCAL class a receiver expression's static type pins, or null (a union, an interface, `any`, a foreign
 // type) — the condition under which every fan-out site narrows to a subtree. One definition, read by the
@@ -3907,6 +4490,110 @@ function moduleOf(sf) {
   const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?[tj]sx?$/, "");
   return rel.split(path.sep).join(".");
 }
+// ---- ⟨SOUNDNESS R944⟩ STABLE KEYS FOR UNITS THAT HAVE NO NAME OF THEIR OWN ----------------------------
+// Five unit kinds have no declaration name to key on — a structural member (`{ run(){…} }` in an
+// expression position), a resolved call-target arrow (`<callable>`), an anonymous decorator
+// (`<decorator>`), a decorator's argument data (`<decorator-arg>`), and a `defineProperty` descriptor
+// with a computed key (`[computed…]`). They were keyed by ABSOLUTE CHARACTER OFFSET (`node.getStart()`),
+// so ANY edit above them in the same file — a comment line — renamed them. Under ⟨0.40⟩'s AS-EFF-005
+// (prior(key) = baseline[key] ?? ∅) a renamed effectful unit FIRES: MEASURED on git-js, one comment line
+// at the top of `create-test-context.ts` gave 6 firings, every one `<structural>@<offset>`.
+//
+// THE KEY IS NOW `<anchor path>#<ordinal>`:
+//   anchor path — the names of the enclosing NAMED declarations, outermost first, joined by `/`
+//                 (function, class, method/accessor/constructor, variable, property, namespace). `~` at
+//                 the top level. Sanitised to [A-Za-z0-9_$] so it never contains the `.` separator.
+//   ordinal     — 1-based position, in document order, among ALL nodes of the same unit kind's syntactic
+//                 shape in the same MODULE with the same anchor path (and, for a structural member, the
+//                 same member name). Counted over a SYNTACTIC superset, never over "the nodes that were
+//                 minted", so it does not depend on minting order or on the R531b fixpoint.
+// UNIQUENESS IS BY CONSTRUCTION, not by argument: within one module and one kind, two nodes share
+// (path, name) only if they are in one ordinal list, and a list's indices are distinct. Counting per
+// MODULE rather than per file matters — `moduleOf` strips the extension, so `a.ts` and `a.js` are one
+// module. The claim inside `stableUnitTag` is the second line: a tag minted for a DIFFERENT node than first claimed
+// it falls back to the old offset spelling, so a defect in the path or ordinal can cost stability but
+// can never MERGE two units (the key-collision fabrication class).
+// STABLE across any edit outside the unit's enclosing named declarations; an edit INSIDE one that adds
+// an earlier node of the same shape (same name, for a structural member) still shifts the ordinal.
+const STABLE_KEY_SHAPES = {
+  structural: new Set([ts.SyntaxKind.MethodDeclaration, ts.SyntaxKind.PropertyAssignment,
+    ts.SyntaxKind.PropertyDeclaration, ts.SyntaxKind.GetAccessor, ts.SyntaxKind.SetAccessor,
+    ts.SyntaxKind.ShorthandPropertyAssignment]),
+  callable: new Set([ts.SyntaxKind.ArrowFunction, ts.SyntaxKind.FunctionExpression]),
+  decorator: new Set([ts.SyntaxKind.ArrowFunction, ts.SyntaxKind.FunctionExpression]),
+  "decorator-arg": new Set([ts.SyntaxKind.CallExpression]),
+  computed: null,   // a descriptor member of any shape — counted over EVERY node under the anchor
+};
+const stableKeySanitise = (s) => s.replace(/[^A-Za-z0-9_$]/g, "_");
+function stableAnchorPiece(n) {
+  if (ts.isSourceFile(n)) return null;
+  if (ts.isConstructorDeclaration(n)) return "constructor";
+  if (ts.isClassStaticBlockDeclaration(n)) return "static";
+  if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n) || ts.isClassExpression(n) || ts.isFunctionExpression(n)
+       || ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)
+       || ts.isPropertyDeclaration(n) || ts.isPropertyAssignment(n) || ts.isVariableDeclaration(n)
+       || ts.isModuleDeclaration(n) || ts.isEnumDeclaration(n)) && n.name
+      && (ts.isIdentifier(n.name) || ts.isStringLiteralLike(n.name) || ts.isNumericLiteral(n.name) || ts.isPrivateIdentifier(n.name)))
+    return stableKeySanitise(n.name.text ?? n.name.getText());
+  return null;
+}
+function stableAnchorPath(node) {
+  const pieces = [];
+  for (let p = node.parent; p && !ts.isSourceFile(p); p = p.parent) {
+    const piece = stableAnchorPiece(p);
+    if (piece) pieces.push(piece);
+  }
+  return pieces.length ? pieces.reverse().join("/") : "~";
+}
+const stableNameOf = (kind, n) => (kind === "structural" && n.name && !ts.isComputedPropertyName(n.name) ? n.name.getText() : "");
+const stableOrdinals = new Map();   // `${kind}|${mod}` -> Map(node -> ordinal)
+function stableOrdinal(kind, node) {
+  const mod = moduleOf(node.getSourceFile());
+  const memoKey = `${kind}|${mod}`;
+  let ords = stableOrdinals.get(memoKey);
+  if (!ords) {
+    ords = new Map();
+    const counts = new Map();
+    const shape = STABLE_KEY_SHAPES[kind];
+    for (const sf of sources) {
+      if (moduleOf(sf) !== mod) continue;
+      (function walk(n) {
+        if (!shape || shape.has(n.kind)) {
+          const g = `${stableAnchorPath(n)}|${stableNameOf(kind, n)}`;
+          const k = (counts.get(g) ?? 0) + 1;
+          counts.set(g, k);
+          ords.set(n, k);
+        }
+        ts.forEachChild(n, walk);
+      })(sf);
+    }
+    stableOrdinals.set(memoKey, ords);
+  }
+  return ords.get(node);
+}
+// The discriminator that replaces `node.getStart()`. Falls back to the offset when the node is not in
+// the module's walk (a source outside `sources`), which is the old behaviour, never a guess.
+// Second line of defence, applied HERE so every one of the five kinds gets it: one tag, one node. A tag
+// already claimed by a DIFFERENT node (same kind, module and member name) falls back to the offset
+// spelling and is counted — never merged. MEASURED as load-bearing: with the tag forced to a constant,
+// the seeded collision fixture keeps all 16 units through this fallback and fuses them to 6 without it.
+const stableKeyOwner = new Map();
+let stableKeyFallbacks = 0;
+function stableUnitTag(kind, node) {
+  const ord = stableOrdinal(kind, node);
+  const offsetKey = String(node.getStart());
+  if (ord === undefined) return offsetKey;
+  const tag = `${stableAnchorPath(node)}#${ord}`;
+  const key = `${kind}|${moduleOf(node.getSourceFile())}|${tag}|${stableNameOf(kind, node)}`;
+  const owner = stableKeyOwner.get(key);
+  if (owner === undefined) { stableKeyOwner.set(key, node); return tag; }
+  if (owner === node) return tag;
+  stableKeyFallbacks++;
+  // REACH PROBE, env-gated: a fallback means the path/ordinal derivation produced a duplicate, which by
+  // construction it cannot — so any line here is a defect report, and `--mark R944-FALLBACK` counts it.
+  if (process.env.CANDOR_R944_REACH) console.error(`R944-FALLBACK #${stableKeyFallbacks} ${key} -> @${offsetKey}`);
+  return offsetKey;
+}
 // Enclosing `namespace`/`module` blocks are NAME SEGMENTS (the family ruling: §6.2 scope segments
 // split on the same boundaries as the §3.1 query name ladder, and a namespace is a segment — rust
 // modules and swift enum-namespaces already qualify this way). A unit declared in
@@ -4048,7 +4735,7 @@ function localName(node) {
     const da = definePropertyAccessor(node);
     if (da) {
       const tn = da.targetExpr ? da.targetExpr.getText().replace(/\s+/g, "") : "<create>";
-      const key = da.keyText ?? `[computed@${node.getStart()}]`;
+      const key = da.keyText ?? `[computed@${stableUnitTag("computed", node)}]`;   // ⟨R944⟩ not the offset
       return `defineProperty(${tn}).${da.kind} ${key}`;
     }
   }
@@ -4111,7 +4798,7 @@ function localName(node) {
         const gp = callOuter.parent;
         isFactoryCallee = ts.isDecorator(gp) && gp.expression === callOuter;
       }
-      if (isDirectDecorator || isFactoryCallee) return `<decorator>@${node.getStart()}`;
+      if (isDirectDecorator || isFactoryCallee) return `<decorator>@${stableUnitTag("decorator", node)}`;   // ⟨R944⟩
     }
   }
   return null;
@@ -4543,6 +5230,25 @@ const callbackArgs = new Map();    // calleeName -> Map(argIndex -> Array<{calle
                                     // callback per caller instead of unioning every caller's choice onto
                                     // the HOF and handing the whole union to everyone (BACKLOG "a shared
                                     // HOF's effects are charged to EVERY caller").
+// What each argument position of a call to LOCAL unit `targetName` received (callback flow, see `callbackArgs`).
+// Shared by the ordinary local arm and R955's callee-choice arm, so a callback passed through either is seen.
+function registerCallbackArgs(rec, targetName, args) {
+  args.forEach((a, i) => {
+    const slot = (callbackArgs.get(targetName) ?? callbackArgs.set(targetName, new Map()).get(targetName));
+    const list = slot.get(i) ?? [];
+    let target = null, opaque = false;
+    if (ts.isIdentifier(a)) {
+      const d2 = realDecl(checker.getSymbolAtLocation(a));
+      target = d2 && nodeName.get(d2);
+      if (!target) opaque = true;
+    } else {
+      // inline closure (attributed lexically to the PASSER already) or any other opaque shape
+      opaque = true;
+    }
+    list.push({ callerRec: rec, target, opaque });
+    slot.set(i, list);
+  });
+}
 const paramInvokes = new Map();    // fnName -> Set(paramIndex) — this fn calls its own parameter
 
 // ── entry points (SPEC §2 `entryPoint`): runtime-invoked roots the framework calls — their
@@ -5025,7 +5731,7 @@ function callTargetUnit(decl) {
   return undefined;
 }
 function mintPositionalStructuralUnit(mod, sf, prop, name) {
-  const qual = `${mod}.<structural>@${prop.getStart()}.${name}`;
+  const qual = `${mod}.<structural>@${stableUnitTag("structural", prop)}.${name}`;   // ⟨R944⟩ not the offset
   if (!fns.has(qual)) {
     const { line, character } = sf.getLineAndCharacterOfPosition(prop.getStart());
     fns.set(qual, { local: `<structural>.${name}`, direct: new Set(), fsKinds: new Set(), edges: new Set(),
@@ -5181,6 +5887,293 @@ for (const sf of sources) {
     }
     ts.forEachChild(node, walkStructural);
   })(sf);
+}
+
+// ── R954 (R927, R769, R874; analysis N1/N2/N4/N5) — EVERY CONFORMER THE CHECKER SHOWS ────────
+// AT AN IN-SCAN CONVERSION IS A CANDIDATE. SPEC ⟨0.35⟩ §4, *A NON-EMPTY CANDIDATE SET IS NOT A COMPLETE ONE*,
+// binds wherever a structural implementor is VISIBLE to the engine's own resolution, and the two passes above
+// only ever saw two kinds of conformer: a NOMINAL `implements`, and a literal or `implements`-bearing class
+// expression written in a contextually-typed position. Every other value that reaches an `I` slot passed an
+// assignability check the checker can show us, with its SOURCE type, and was in no list — so one pure nominal
+// implementor made the dispatch read COMPLETE and the conformer's effect vanished. Measured silent at every
+// gate (`deny Fs` at the dispatcher AND at an entry whose construction is separated, and `deny Unknown`), each
+// EXECUTED to write its marker file:
+//   · a local class that matches by shape with no `implements` (`qDisp(new LocalW())`, `const s: Sink = new
+//     LocalW(); s.m()`);
+//   · an untyped literal converted LATER, in this module or another (`const lit = { m(){…} }; qDisp(lit)`);
+//   · a DEPENDENCY class (`new DepThing()`, `dep.makeThing()`, `dep.ident(dep.makeThing())`), chained or not —
+//     R927; R769 (a dependency that `implements` a project interface through `paths`) is one case of it;
+//   · an element-wise conversion (`const xs: Sink[] = dep.listThings()` from `DepThing[]`);
+//   · a value reaching a FIELD through a constructor parameter (`new Holder(dep.makeThing())`, `this.s.m()`);
+//   · a literal RETURNED as a CLASS type (`function mkS(): BaseL { return { m(){…} } }`) — R874, where the
+//     class arm had no candidate list at all: its candidates were the declaring class plus its subtree.
+//
+// THE RULE IS THE CHECKER'S, AT A REAL CONVERSION (R82, PART 87): at every argument, typed initializer, return,
+// assignment, element and property position, the TARGET is the contextual type and the SOURCE is the checker's
+// type of the expression — never a signature read as a promise about a value. A source that is `any`, an
+// assertion, or a value a dependency invokes us with is NOT here: the check is vacuous there, and the hedge for
+// it is a separate decision. A class-expression source (N3) and a constructor-assigned property (R873) are the
+// traversal half and are not here either.
+//
+// WHERE A CONFORMER GOES, so that every reader asks the ONE relation it already asks (R871/R872):
+//   · an INTERFACE target → `interfaceImpls` (or `foreignInterfaceImpls` for a dependency's interface, which is
+//     obligation 3's join), climbing super-interfaces exactly as a nominal implementor does; `implMemberBodies`
+//     already answers a local class or literal member;
+//   · a CLASS target `Ct` → `classConformers`, under `Ct` AND every local ancestor of `Ct` — a value converted to
+//     `Ct` can sit in a slot typed any SUPERTYPE, never a subtype — and `memberDispatchBodies(decl, rootClass)`
+//     appends the conformers registered at the receiver class, so the class arm, the accessor arm and, through
+//     `implMemberBodies`, every interface reader of an implementor class see them;
+//   · a DEPENDENCY class → its member's own declaration, which the readers charge as a DIRECT CALL to it would
+//     be charged (κ, else the dependency funnel under the dependency's OWN key — `depthing#DepThing.m`, never
+//     `proj#DepThing.m`: R769's refusal stands). Dependency conformers of an interface are held in
+//     `depConformers`, never in `interfaceImpls`, whose union reader would publish them as LOCAL classes.
+// (`classConformers`, `depConformers`, `ifaceFlows` are declared beside `classOverrides`, which readers reach earlier.)
+// The conformer a SOURCE type names, or null: the INSTANCE side of a class (never `typeof C`, which is the
+// constructor and conforms to a constructor interface, not to `I`), a project object literal, or a local
+// interface (whose own conformers then flow on — the fixpoint below).
+function conformerOfSourceType(st) {
+  const sym = st?.getSymbol?.() ?? st?.symbol;
+  for (const d of sym?.declarations ?? []) {
+    if (ts.isObjectLiteralExpression(d) && isProjectNode(d)) return { kind: "lit", node: d };
+    if (ts.isClassDeclaration(d)) {
+      let declared; try { declared = checker.getDeclaredTypeOfSymbol(sym); } catch { declared = null; }
+      const tgt = st.target ?? st;
+      if (!declared || !(tgt === declared || tgt === declared.target)) return null;   // the static side
+      if (isProjectNode(d)) return { kind: "class", node: d };
+      if (d.getSourceFile().isDeclarationFile) return { kind: "dep", node: d };
+      return null;
+    }
+    if (ts.isInterfaceDeclaration(d) && isProjectNode(d)) return { kind: "iface", node: d };
+  }
+  return null;
+}
+function localAncestorsAndSelf(cls) {
+  const out = [];
+  for (let c = cls, g = 0; c && g++ < 64; c = localBaseClassOf(c)) out.push(c);
+  return out;
+}
+function pushUnique(map, key, val) {
+  if (!map.has(key)) map.set(key, []);
+  const arr = map.get(key);
+  if (arr.includes(val)) return false;
+  arr.push(val);
+  return true;
+}
+function registerDepConformerIface(ifaceDecl, depCls, seen = new Set()) {
+  if (seen.has(ifaceDecl)) return;
+  seen.add(ifaceDecl);
+  pushUnique(depConformers, ifaceDecl, depCls);
+  for (const eh of ifaceDecl.heritageClauses ?? []) {
+    if (eh.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    for (const st of eh.types) {
+      let sym; try { sym = checker.getSymbolAtLocation(st.expression); } catch { sym = undefined; }
+      const tgt = sym && sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
+      for (const d of tgt?.declarations ?? [])
+        if (ts.isInterfaceDeclaration(d) && (isProjectNode(d) || isPublishableForeignIface(d)))
+          registerDepConformerIface(d, depCls, seen);
+    }
+  }
+}
+// Record that conformer `c` reached target declaration `t` (an interface or a local class). Returns whether
+// anything new was registered, which drives the interface-flow fixpoint.
+function recordConformer(c, t) {
+  if (!c || !t || c.node === t) return false;
+  if (c.kind === "iface") {
+    if (!ifaceFlows.has(c.node)) ifaceFlows.set(c.node, new Set());
+    const fl = ifaceFlows.get(c.node);
+    if (fl.has(t)) return false;
+    fl.add(t);
+    return true;
+  }
+  if (ts.isInterfaceDeclaration(t)) {
+    const local = isProjectNode(t);
+    if (c.kind === "dep") {
+      const before = depConformers.get(t)?.length ?? 0;
+      registerDepConformerIface(t, c.node);
+      return (depConformers.get(t)?.length ?? 0) > before;
+    }
+    const map = local ? interfaceImpls : foreignInterfaceImpls;
+    // A class whose local ANCESTOR (or itself) is already a candidate is already answered: `implMemberBodies`
+    // descends into that candidate's subtree. Registering it again would only inflate the count the ≤12 bound
+    // reads — MEASURED: typeorm's `Driver` went over the bound on subclasses of its nominal implementors and
+    // `DataSource.destroy` lost its `Fs` to a bare `Unknown`.
+    if (c.kind === "class" && localAncestorsAndSelf(c.node).some((a) => (map.get(t) ?? []).includes(a))) return false;
+    const before = map.get(t)?.length ?? 0;
+    const had = new Set(map.get(t) ?? []);
+    if (local) registerStructuralImpl(t, c.node); else registerForeignStructuralImpl(t, c.node);
+    if (!had.has(c.node) && (map.get(t) ?? []).includes(c.node)) {
+      if (!conversionAddedImpls.has(t)) conversionAddedImpls.set(t, new Set());
+      conversionAddedImpls.get(t).add(c.node);
+    }
+    // BODIES ONLY (R531): the literal's written members already have units; an ALIAS member (`go: other.m`) is left
+    // unresolved, so a dispatch over it discloses rather than re-pointing `enclosing()` — purely additive.
+    if (c.kind === "lit") mintStructuralMembers(c.node, true);
+    return (map.get(t)?.length ?? 0) > before;
+  }
+  if (ts.isClassDeclaration(t)) {
+    if (c.kind === "class" && classInSubtree(c.node, t)) return false;   // nominal: the subtree already answers
+    // R958 — an ASSERTED downcast (`base as Sub`, the target inside the conformer's own subtree) names no new
+    // conformer: the receiver's class arm answers `Sub`'s subtree. Scoped to an ASSERTION on purpose. Without one,
+    // `f(new Base())` into `f(s: Sub)` passed the checker's own (structural) check and the value really IS a
+    // `Base` — refusing that would drop the body that runs. MEASURED: the guard unscoped is load-bearing (a
+    // structurally identical `Base` IS assignable to `Sub`), so its scope decides which of the two it decides.
+    if (c.kind === "class" && conversionViaAssertion && classInSubtree(t, c.node)) return false;
+    let added = false;
+    for (const anc of localAncestorsAndSelf(t)) added = pushUnique(classConformers, anc, c.node) || added;
+    if (c.kind === "lit") mintStructuralMembers(c.node, true);
+    return added;
+  }
+  return false;
+}
+// The declarations a TARGET type names that a conformer can be registered under: local and publishable
+// foreign interfaces, and local classes (instance side). A union target is decomposed, and a constituent is
+// kept only if the source is assignable to it — a `string | Sink` slot does not make a string a `Sink`.
+function conversionTargets(tt, st) {
+  const out = [];
+  const consider = (ct) => {
+    if (st && typeof checker.isTypeAssignableTo === "function") {
+      try { if (!checker.isTypeAssignableTo(st, ct)) return; } catch { /* keep: the checker could not say */ }
+    }
+    const sym = ct?.getSymbol?.() ?? ct?.symbol;
+    for (const d of sym?.declarations ?? []) {
+      if (ts.isInterfaceDeclaration(d) && (isProjectNode(d) || isPublishableForeignIface(d))) { if (!out.includes(d)) out.push(d); }
+      else if (ts.isClassDeclaration(d) && isProjectNode(d)) {
+        let declared; try { declared = checker.getDeclaredTypeOfSymbol(sym); } catch { declared = null; }
+        const tgt = ct.target ?? ct;
+        if (declared && (tgt === declared || tgt === declared.target) && !out.includes(d)) out.push(d);
+      }
+    }
+  };
+  if (!tt) return out;
+  if (tt.isUnion?.()) for (const ct of tt.types) consider(ct); else consider(tt);
+  return out;
+}
+// One conversion: the source and target types, followed ONE level into matching type arguments (`Sink[]` from
+// `DepThing[]`, `Promise<Sink>` from `Promise<DepThing>`) with the checker's own type-argument relation.
+function recordConversion(st, tt, depth = 0) {
+  if (!st || !tt || st === tt) return;
+  if (st.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return;   // vacuous: the hedge's question, not ours
+  const sources = st.isUnion?.() ? st.types : [st];
+  for (const s of sources) {
+    const c = conformerOfSourceType(s);
+    if (c) for (const t of conversionTargets(tt, s)) recordConformer(c, t);
+  }
+  if (depth >= 1) return;
+  const args = (x) => { try { return checker.getTypeArguments?.(x) ?? []; } catch { return []; } };
+  const sameShape = (a, b) => {
+    const at = a.target ?? null, bt = b.target ?? null;
+    if (at && bt && at === bt) return true;
+    try { return !!(checker.isArrayLikeType?.(a) && checker.isArrayLikeType?.(b)); } catch { return false; }
+  };
+  for (const s of sources) {
+    const tts = tt.isUnion?.() ? tt.types : [tt];
+    for (const t of tts) {
+      if (!s.target || !t.target || !sameShape(s, t)) continue;
+      const sa = args(s), ta = args(t);
+      if (sa.length && sa.length === ta.length) for (let i = 0; i < sa.length; i++) recordConversion(sa[i], ta[i], depth + 1);
+    }
+  }
+}
+// The expression positions where a value is CONVERTED to a declared type. Each is asked for its contextual type,
+// which the checker resolves against that slot (the parameter, the declared variable or field type, the return
+// type, the assigned-to type, the element or property type).
+function isConversionPosition(n) {
+  const p = n.parent;
+  if (!p) return false;
+  if ((ts.isCallExpression(p) || ts.isNewExpression(p)) && (p.arguments ?? []).includes(n)) return true;
+  if ((ts.isVariableDeclaration(p) || ts.isPropertyDeclaration(p) || ts.isParameter(p)) && p.initializer === n && p.type) return true;
+  if (ts.isReturnStatement(p) && p.expression === n) return true;
+  if (ts.isArrowFunction(p) && p.body === n) return true;
+  if (ts.isBinaryExpression(p) && p.right === n && p.operatorToken.kind === ts.SyntaxKind.EqualsToken) return true;
+  if (ts.isArrayLiteralExpression(p)) return true;
+  if (ts.isPropertyAssignment(p) && p.initializer === n) return true;
+  return false;
+}
+// R958 — the value under an assertion chain: parentheses, `as`, `<T>`, `!` and `satisfies` change no runtime value.
+let conversionViaAssertion = false;   // set while `convert` records a source read THROUGH an assertion
+function peelAssertions(e) {
+  while (e && (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression(e)
+               || ts.isNonNullExpression(e) || ts.isSatisfiesExpression?.(e))) e = e.expression;
+  return e;
+}
+// R82 / PART 87: is the conversion's SOURCE type a fact about the VALUE, or only about a generic signature? A
+// call whose declared return type mentions one of its own type parameters (`wrap<T>(x: T): T`) hands back
+// whatever type the ARGUMENT had, and that signature proves assignability, never that the value IS the
+// argument — the suite's own `decoy` fixture (`return makeReal() as unknown as T`) is exactly that, and reading
+// its source type registered the pure decoy and made the dispatch vanish. Such a source is followed only
+// through a PROVEN identity body (`isProvenIdentityReturn`); a const is followed to its initializer. Anything
+// else — a declared return type, a typed parameter or field, `new`, a literal — is the checker's own fact.
+function conversionSourceTracked(e, depth = 0) {
+  if (!e || depth > 8) return true;
+  while (ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e)) e = e.expression;
+  if (ts.isConditionalExpression(e)) return conversionSourceTracked(e.whenTrue, depth + 1) && conversionSourceTracked(e.whenFalse, depth + 1);
+  if (ts.isCallExpression(e)) {
+    let sig; try { sig = checker.getResolvedSignature(e); } catch { sig = undefined; }
+    const decl = sig?.getDeclaration?.();
+    const tps = (decl?.typeParameters ?? []).map((tp) => tp.name.getText());
+    if (!tps.length || !decl?.type) return true;
+    const mentions = (n) => (ts.isTypeReferenceNode(n) && ts.isIdentifier(n.typeName) && tps.includes(n.typeName.text))
+      || (ts.forEachChild(n, (c) => (mentions(c) ? true : undefined)) ?? false);
+    if (!mentions(decl.type)) return true;
+    const idx = (decl.parameters ?? []).findIndex((pp) => pp.type && ts.isTypeReferenceNode(pp.type)
+      && ts.isIdentifier(pp.type.typeName) && pp.type.typeName.text === decl.type.getText());
+    return idx >= 0 && isProvenIdentityReturn(decl, idx) && conversionSourceTracked(e.arguments?.[idx], depth + 1);
+  }
+  if (ts.isIdentifier(e)) {
+    let sym; try { sym = checker.getSymbolAtLocation(e); } catch { sym = undefined; }
+    if (sym && sym.flags & ts.SymbolFlags.Alias) { try { sym = checker.getAliasedSymbol(sym); } catch { /* keep */ } }
+    const d = sym?.declarations?.length === 1 ? sym.declarations[0] : null;
+    if (d && ts.isVariableDeclaration(d) && !d.type && d.initializer && d.parent
+        && ts.isVariableDeclarationList(d.parent) && (d.parent.flags & ts.NodeFlags.Const))
+      return conversionSourceTracked(d.initializer, depth + 1);
+  }
+  return true;
+}
+const CONFORMER_REACH = process.env.CANDOR_CONFORMER_REACH ? (k, n) => console.error(`CONFORMER-REACH ${k} ${n}`) : null;
+for (const sf of sources) {
+  const convert = (src, tt, at, kind) => {
+    if (!tt || !conversionSourceTracked(src)) return;
+    let st; try { st = checker.getTypeAtLocation(src); } catch { st = undefined; }
+    conversionViaAssertion = kind !== "conversion";
+    try {
+      if (!CONFORMER_REACH) { recordConversion(st, tt); return; }
+      const count = () => [...interfaceImpls.values(), ...foreignInterfaceImpls.values(), ...classConformers.values(),
+                           ...depConformers.values()].reduce((a, x) => a + x.length, 0);
+      const before = count();
+      recordConversion(st, tt);
+      if (count() > before) CONFORMER_REACH(kind, `${path.relative(rootDir, sf.fileName)}:${at.getStart()}`);
+    } finally { conversionViaAssertion = false; }
+  };
+  (function walkConversions(node) {
+    if (ts.isExpression(node) && !ts.isSpreadElement(node) && isConversionPosition(node)) {
+      let tt; try { tt = checker.getContextualType(node); } catch { tt = undefined; }
+      // R958 — ASSERTION LOOK-THROUGH: the source of a conversion is the value UNDER any assertion chain
+      // (`x as any`, `x as unknown as I`, `<I>x`), whose own checker type names the conformer; the assertion's
+      // type is a claim about it, not a different value. Only an UPCAST registers — `conversionTargets` keeps a
+      // target constituent only when the inner type is assignable to it, and `recordConformer` refuses a class
+      // whose own subtree holds the target (a DOWNCAST, which CHA already answers from the subtree).
+      const inner = peelAssertions(node);
+      convert(inner, tt, node, inner === node ? "conversion" : "assertion-arg");
+    }
+    // …and an assertion is itself a conversion of its operand to the asserted type, wherever it sits.
+    if ((ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) && node.type
+        && !(ts.isTypeReferenceNode(node.type) && node.type.typeName.getText() === "const")
+        && node.type.kind !== ts.SyntaxKind.AnyKeyword && node.type.kind !== ts.SyntaxKind.UnknownKeyword) {
+      let tt; try { tt = checker.getTypeFromTypeNode(node.type); } catch { tt = undefined; }
+      convert(peelAssertions(node.expression), tt, node, "assertion");
+    }
+    ts.forEachChild(node, walkConversions);
+  })(sf);
+}
+// The interface-flow fixpoint: a `J`-typed value converted to `X` carries every conformer of `J` with it.
+for (let changed = true, g = 0; changed && g++ < 32; ) {
+  changed = false;
+  for (const [j, targets] of ifaceFlows) {
+    const conf = [...(interfaceImpls.get(j) ?? []).map((n) => ({ kind: ts.isClassDeclaration(n) ? "class" : "lit", node: n })),
+                  ...(depConformers.get(j) ?? []).map((n) => ({ kind: "dep", node: n }))]
+      .filter((c) => c.kind !== "lit" || ts.isObjectLiteralExpression(c.node));   // a class EXPRESSION stays where it is
+    for (const t of targets) for (const c of conf) if (recordConformer(c, t)) changed = true;
+  }
 }
 
 // Accessor resolution (the silent-pure-accessor fix): a property READ (`x.raw`) or property
@@ -5403,8 +6396,12 @@ function definePropForceTarget(propNode, kind /* "get" | "set" */) {
 // (EXECUTED: the caller was ABSENT over a real write). Bodies from `memberDispatchBodies`; the bound stays on
 // the one-level scoped count, and a transitive set past it also discloses — the method arm's rule verbatim.
 function accessorOverrideFanOut(rec, decl, recvExpr) {
-  const allOverrides = classOverrides.get(decl);
-  if (!allOverrides || allOverrides.length === 0) return;
+  const allOverrides = classOverrides.get(decl) ?? [];
+  // R954 — a conformer converted to the receiver's class runs its own accessor here too.
+  const confAt = isSuperReceiver(recvExpr) ? null
+    : (localReceiverClass(recvExpr) ?? (decl?.parent && ts.isClassDeclaration(decl.parent) ? decl.parent : null));
+  const confBodies = confAt ? conformerBodies(confAt, decl.name?.getText?.()) : [];
+  if (allOverrides.length === 0 && confBodies.length === 0) return;
   if (isSuperReceiver(recvExpr)) { probeR871("super-accessor", decl, allOverrides.length); return; } // `super.v` names one accessor; it does not dispatch
   // SOUNDNESS-PRESERVING FALLBACK, the method path's verbatim: a receiver we cannot pin to a LOCAL
   // class (a union, an interface, `any`, an external type) keeps the FULL override set.
@@ -5422,9 +6419,14 @@ function accessorOverrideFanOut(rec, decl, recvExpr) {
     rec.why.add(dispatchWhy(ownerQual(decl), decl.name?.getText?.()));
     return;
   }
-  let allResolved = overrides.length <= CHA_FANOUT_LIMIT;
+  let allResolved = overrides.filter((om) => !confBodies.includes(om)).length <= CHA_FANOUT_LIMIT;
   const targets = [];
-  for (const om of overrides) { const ot = nodeName.get(om); if (ot) targets.push(ot); else allResolved = false; }
+  for (const om of overrides) {
+    const ot = nodeName.get(om);
+    if (ot) targets.push(ot);
+    else if (confBodies.includes(om) && isExternalConformerBody(om)) { if (!chargeConformerBody(rec, om)) allResolved = false; }
+    else allResolved = false;
+  }
   for (const ot of targets) rec.edges.add(ot);       // (EDGE) into each override — effects propagate
   if (!allResolved) {
     rec.direct.add("Unknown");                       // an override we could not name is not a pure one
@@ -5907,10 +6909,12 @@ function staticBlockUnit(node) {
 // every effect anywhere in ONE decorator's argument list shares ONE unit, mirroring how a factory's own
 // body is one unit no matter how many effects it contains. unitKind "initializer": this runs at
 // class-definition time, the same category as a `static {}` block or a module's top-level statements.
+// ⟨R944⟩ spelled ONCE: the unit's minting and the class-definition edge both ask this.
+function decoratorArgLocal(callNode) { return `${DECORATOR_ARG_LOCAL}${stableUnitTag("decorator-arg", callNode)}`; }
 function decoratorArgUnit(callNode) {
   const sf = callNode.getSourceFile();
   const mod = moduleOf(sf);
-  const local = `${DECORATOR_ARG_LOCAL}${callNode.getStart()}`;
+  const local = decoratorArgLocal(callNode);
   const qual = `${mod}.${local}`;
   let rec = fns.get(qual);
   if (!rec) {
@@ -6248,8 +7252,16 @@ const probeJoinReach = (mark, outcome, detail) => {
 // co-extensive with the charge it replaces: where there is no implementor there is nothing to hedge.
 function joinLocalImpls(rec, d, hedgeOnly) {
   if (!rec || !d) return null;
+  let extraUnresolvedDep = false;
   const { targets, extra, extraUnresolved, allResolved, decls } = localImplTargets(d.key);
-  if (!targets.length) return null;
+  // R954 — a DEPENDENCY class this package converted to the dispatched interface (`runIt(new
+  // OtherDep())`) is a candidate the join answers too, charged as a direct call to its member.
+  const depBodies = [];
+  for (const x of decls ?? []) for (const dc of depConformers.get(x) ?? []) {
+    const b = conformerMemberDecl(dc, d.member);
+    if (b && !depBodies.includes(b)) depBodies.push(b);
+  }
+  if (!targets.length && !depBodies.length) return null;
   // The name means two things here, so no implementor set can be attributed to this key — §4 ⟨0.24⟩'s
   // `ambiguous:`, not `dispatch:`: the owner type is nameable, but WHICH declaration it names is not.
   if (decls.size > 1) {
@@ -6264,6 +7276,8 @@ function joinLocalImpls(rec, d, hedgeOnly) {
   }
   for (const t of targets) rec.edges.add(t);
   for (const t of extra) rec.edges.add(t);           // ⟨R872⟩ the implementors' overrides — see the index
+  for (const b of depBodies) if (!(isExternalConformerBody(b) && chargeConformerBody(rec, b))) extraUnresolvedDep = true;
+  if (extraUnresolvedDep) { rec.direct.add("Unknown"); rec.why.add(dispatchWhy(`${d.pkg}.${d.ifaceName}`, d.member)); }
   if (extraUnresolved) {
     rec.direct.add("Unknown");
     rec.why.add(dispatchWhy(`${d.pkg}.${d.ifaceName}`, d.member));
@@ -7440,9 +8454,44 @@ const identIsGlobalProcess = (id) => {
   };
   for (const sf of sources) collectProcessAliases(sf);
 }
-// `process.env` as an expression (PropertyAccess `process.env` where `process` is the global).
-const isProcessEnvExpr = (expr) =>
-  expr && ts.isPropertyAccessExpression(expr) && expr.name.text === "env" && identIsGlobalProcess(expr.expression);
+// ---- THE `process.env` VALUE: ONE IDENTITY, ASKED ONCE (SOUNDNESS R928 + R804, ts vein C) -------------
+// Everything below answers ONE question — "is this expression's value the process environment object?" —
+// and the Env arm in the classifier asks it of every expression instead of enumerating the contexts a read
+// may appear in. The model it replaces had two halves that each failed by spelling:
+//
+//   IDENTITY by exact node: `isProcessEnvExpr` required the PropertyAccess `process.env` itself, and an
+//     alias required the exact initializer `= process.env`. `(process.env as any).X`, `process.env!.X`,
+//     `(process.env satisfies …).X`, `(process.env).X`, `<any>process.env`, `process["env"]`,
+//     `const e = process.env as E`, `const e = o ?? process.env`, `c ? process.env : {}`, and an alias OF
+//     an alias (`const f = e`) were all a different node and all read as nothing.
+//   CONSUMERS by list: dot/bracket, destructure, `in`, spread, for-in and a table of whole-object builtins.
+//     `util.inspect(env)`, `util.format('%o', env)`, `console.log(env)`, `const asn = Object.assign;
+//     asn(env, o)`, `readKey(process.env)` into a project function that READS it, `return process.env`,
+//     and a default parameter `e = process.env` were unlisted, so ABSENT.
+//
+// MEASURED at 503f449 (`tsagent-c/fx/envid`, every shape EXECUTED on node 22.12.0 with a planted
+// `CANDOR_SECRET_C` read back, the aliased `Object.assign` read back by a child's `printenv`): 25 of 25
+// env-reading spellings ABSENT with `deny Env <fn>` and `deny Unknown <fn>` both exit 0; the plain
+// `process.env[K]` control exit 1. The argv arm beside it never had this class, because it marks the
+// EXPRESSION — that is the model this adopts, with identity widened from a node to a value.
+//
+// TRANSPARENT: the wrappers that change only the static type, never the value.
+const unwrapEnvTransparent = (e) => {
+  while (e && (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression(e)
+               || ts.isNonNullExpression(e) || ts.isSatisfiesExpression(e))) e = e.expression;
+  return e;
+};
+// `process.env` / `process["env"]` / `globalThis.process?.env` / `(process as any).env` — the global
+// process object's `env` member. The `process` side keeps `identIsGlobalProcess`'s shadow guard, so a
+// project-local `process` (a parameter, a module `const`) matches nothing.
+const isProcessEnvExpr = (expr) => {
+  if (!expr) return false;
+  let obj = null;
+  if (ts.isPropertyAccessExpression(expr) && expr.name.text === "env") obj = expr.expression;
+  else if (ts.isElementAccessExpression(expr) && expr.argumentExpression
+           && ts.isStringLiteralLike(expr.argumentExpression) && expr.argumentExpression.text === "env") obj = expr.expression;
+  return !!obj && identIsGlobalProcess(unwrapEnvTransparent(obj));
+};
 
 // …AND `process.argv`, which is the same channel. §1 defines Env as "reading environment variables /
 // THE PROCESS ENVIRONMENT", and argv is process-startup state delivered by the same `exec` call that
@@ -7456,48 +8505,81 @@ const isProcessEnvExpr = (expr) =>
 const isProcessArgvExpr = (expr) =>
   expr && ts.isPropertyAccessExpression(expr) && expr.name.text === "argv" && identIsGlobalProcess(expr.expression);
 
-// The set of local-binding SYMBOLS that alias process.env — collected below, one pre-pass over the
-// sources. A symbol lands here iff its ONLY initializer/assignment is `= process.env` (a reassignment
-// to anything else removes it → the alias is cleared, per the spec's reassignment rule).
+// The LEAVES a value can come from: through the transparent wrappers, both arms of `?:`, either side of
+// `??`/`||`, the right of `&&`/`,`, and the right of an assignment expression. A merge is a MAY-flow, and
+// Env is an all-paths over-approximation (§3.3): `(o ?? process.env).X` reads the environment on the path
+// where `o` is nullish, which is a real execution, so the merged value counts — it is NOT the reassignment
+// case below, where flow-insensitivity cannot order the rebind against the read.
+const envValueLeaves = (expr, out = []) => {
+  const e = unwrapEnvTransparent(expr);
+  if (!e) return out;
+  if (ts.isConditionalExpression(e)) { envValueLeaves(e.whenTrue, out); envValueLeaves(e.whenFalse, out); return out; }
+  if (ts.isBinaryExpression(e)) {
+    const k = e.operatorToken.kind;
+    if (k === ts.SyntaxKind.QuestionQuestionToken || k === ts.SyntaxKind.BarBarToken) {
+      envValueLeaves(e.left, out); envValueLeaves(e.right, out); return out;
+    }
+    if (k === ts.SyntaxKind.AmpersandAmpersandToken || k === ts.SyntaxKind.CommaToken
+        || k === ts.SyntaxKind.EqualsToken) { envValueLeaves(e.right, out); return out; }
+  }
+  out.push(e);
+  return out;
+};
+
+// ALIASES — MUST and MAY, now over VALUES and to a fixpoint (an alias of an alias is an alias).
+//   MUST (`envAliasSymbols`): EVERY binding of the symbol has a process.env leaf (or a MUST-alias leaf).
+//     `const e = process.env as E`, `const e = o ?? process.env`, `const f = e` all qualify.
+//   MAY (`envMayAliasSymbols`, a superset): SOME binding has an env leaf. A symbol in MAY but not MUST —
+//     dotenv's `let pe = process.env; if (opts.pe) pe = opts.pe`, or a rebind that dominates every read —
+//     is POSSIBLY the environment, and flow-insensitivity cannot tell which, so its reads disclose
+//     `Unknown` and never fabricate `Env` (the 2c posture, now applied to reads too: at 503f449 a MAY-alias
+//     READ was not even `Unknown` — it was absent).
+// A binding is a `VariableDeclaration` with an identifier name (no initializer = a binding with no env
+// leaf), a plain or logical (`??=`/`||=`/`&&=`) assignment to an identifier, or `{ env } = process` /
+// `{ env: e } = process` (wrappers unwrapped). A PARAMETER is never an alias — callers bind it — so
+// `e = process.env` as a default is charged where the default is evaluated (see the Env arm).
 const envAliasSymbols = new Set();
-// MAY-alias: symbols that were EVER bound `= process.env`, INCLUDING ones later reassigned (a union like
-// dotenv's `let processEnv = process.env; if (opts.processEnv) processEnv = opts.processEnv`). A MUST-alias
-// (envAliasSymbols) is a proven env read → Env; a MAY-alias is only POSSIBLY env → the effect-polymorphism
-// pass (2c) discloses Unknown, never fabricates Env, for one passed into a written parameter.
 const envMayAliasSymbols = new Set();
 {
-  const aliasCandidates = new Set();   // symbol -> declared `= process.env`
-  const disqualified = new Set();      // symbol assigned to something that is NOT process.env
-  const noteBinding = (symbol, init) => {
-    if (!symbol) return;
-    if (init && isProcessEnvExpr(init)) aliasCandidates.add(symbol);
-    else disqualified.add(symbol);     // bound/assigned to a non-process.env value → not (or no longer) an alias
-  };
-  const collectAliases = (node) => {
-    // `const env = process.env` / `let`/`var` — a name-identifier binding with an initializer.
+  const ENV_DESTRUCTURED = Symbol("env-destructured");
+  const bindings = new Map(); // symbol -> [value expr | null | ENV_DESTRUCTURED]
+  const note = (sym, v) => { if (sym) (bindings.get(sym) ?? bindings.set(sym, []).get(sym)).push(v); };
+  const LOGICAL_ASSIGN = new Set([ts.SyntaxKind.EqualsToken, ts.SyntaxKind.QuestionQuestionEqualsToken,
+                                  ts.SyntaxKind.BarBarEqualsToken, ts.SyntaxKind.AmpersandAmpersandEqualsToken]);
+  const collect = (node) => {
     if (ts.isVariableDeclaration(node) && node.name && ts.isIdentifier(node.name)) {
-      noteBinding(checker.getSymbolAtLocation(node.name), node.initializer ?? null);
-    }
-    // `const { env } = process` — destructuring `env` off the global `process` makes `env` an alias too.
-    else if (ts.isVariableDeclaration(node) && node.name && ts.isObjectBindingPattern(node.name)
-             && node.initializer && ts.isIdentifier(node.initializer) && identIsGlobalProcess(node.initializer)) {
+      note(checker.getSymbolAtLocation(node.name), node.initializer ?? null);
+    } else if (ts.isVariableDeclaration(node) && node.name && ts.isObjectBindingPattern(node.name)
+               && node.initializer && identIsGlobalProcess(unwrapEnvTransparent(node.initializer))) {
       for (const el of node.name.elements) {
-        // the property picked off `process` must be `env` (`{env}` or `{env: local}`); the bound name is the alias.
         const propName = el.propertyName ? (ts.isIdentifier(el.propertyName) ? el.propertyName.text : null)
                                          : (ts.isIdentifier(el.name) ? el.name.text : null);
-        if (propName === "env" && ts.isIdentifier(el.name)) aliasCandidates.add(checker.getSymbolAtLocation(el.name));
+        if (propName === "env" && ts.isIdentifier(el.name)) note(checker.getSymbolAtLocation(el.name), ENV_DESTRUCTURED);
       }
+    } else if (ts.isBinaryExpression(node) && LOGICAL_ASSIGN.has(node.operatorToken.kind) && ts.isIdentifier(node.left)) {
+      note(checker.getSymbolAtLocation(node.left), node.right);
     }
-    // `env = <expr>` reassignment — a `let`/`var` alias reassigned to a non-process.env value is cleared.
-    else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
-             && ts.isIdentifier(node.left)) {
-      noteBinding(checker.getSymbolAtLocation(node.left), node.right);
-    }
-    ts.forEachChild(node, collectAliases);
+    ts.forEachChild(node, collect);
   };
-  for (const sf of sources) collectAliases(sf);
-  for (const s of aliasCandidates) if (s && !disqualified.has(s)) envAliasSymbols.add(s);
-  for (const s of aliasCandidates) if (s) envMayAliasSymbols.add(s); // the MAY set: ever-bound `= process.env`
+  for (const sf of sources) collect(sf);
+  const leafIn = (leaf, set) => isProcessEnvExpr(leaf)
+    || (ts.isIdentifier(leaf) && set.has(checker.getSymbolAtLocation(leaf)));
+  const hasEnvLeaf = (v, set) => v === ENV_DESTRUCTURED || (!!v && typeof v === "object" && envValueLeaves(v).some((l) => leafIn(l, set)));
+  // MAY: least fixpoint of "some binding has a leaf that is process.env or already MAY".
+  for (let changed = true, n = 0; changed && n < 64; n++) {
+    changed = false;
+    for (const [sym, vals] of bindings) {
+      if (!envMayAliasSymbols.has(sym) && vals.some((v) => hasEnvLeaf(v, envMayAliasSymbols))) { envMayAliasSymbols.add(sym); changed = true; }
+    }
+  }
+  // MUST: least fixpoint (from empty) of "every binding has a leaf that is process.env or already MUST" —
+  // least, so a cycle that never touches process.env directly stays MAY (the disclosing side).
+  for (let changed = true, n = 0; changed && n < 64; n++) {
+    changed = false;
+    for (const sym of envMayAliasSymbols) {
+      if (!envAliasSymbols.has(sym) && bindings.get(sym).every((v) => hasEnvLeaf(v, envAliasSymbols))) { envAliasSymbols.add(sym); changed = true; }
+    }
+  }
 }
 // True when `id` is an identifier resolving to a confirmed process.env alias local.
 const identIsEnvAlias = (id) => {
@@ -7505,13 +8587,87 @@ const identIsEnvAlias = (id) => {
   const sym = checker.getSymbolAtLocation(id);
   return !!sym && envAliasSymbols.has(sym);
 };
-// The receiver expression READS process.env — it is either `process.env` itself or a confirmed alias.
-const readsProcessEnv = (expr) => isProcessEnvExpr(expr) || identIsEnvAlias(expr);
-// MAY-read: process.env, a MUST-alias, or a MAY-alias (ever-bound to process.env but reassignable).
+// MAY-read: a MAY-alias (ever-bound to process.env but reassignable). A superset of the MUST set.
 const identIsEnvMayAlias = (id) => {
   if (!id || !ts.isIdentifier(id)) return false;
   const sym = checker.getSymbolAtLocation(id);
   return !!sym && envMayAliasSymbols.has(sym);
+};
+// The env kind of an expression's VALUE: "env" if some leaf is process.env or a MUST-alias, "may" if
+// some leaf is only a MAY-alias, else null. The one answer the Env arm, 2c and the shared helpers ask.
+const envValueKind = (expr) => {
+  let kind = null;
+  for (const l of envValueLeaves(expr)) {
+    if (isProcessEnvExpr(l) || identIsEnvAlias(l)) return "env";
+    if (identIsEnvMayAlias(l)) kind = "may";
+  }
+  return kind;
+};
+// ⟨R928/R804⟩ Is `node` an EXPRESSION whose value is the environment object? "env" for `process.env` in
+// any spelling (`isProcessEnvExpr`) or a reference to a MUST-alias, "may" for a reference to a MAY-only
+// alias, else null. A binding NAME, an assignment TARGET, a member name and a type position are not
+// value references. A shorthand `{ env }` IS one, and asks the checker for the VALUE symbol (the plain
+// lookup returns the property).
+const envIsAssignOp = (k) => k >= ts.SyntaxKind.FirstAssignment && k <= ts.SyntaxKind.LastAssignment;
+let envAliasNames = null;
+const envRefKind = (node) => {
+  if (isProcessEnvExpr(node)) return "env";
+  if (!ts.isIdentifier(node)) return null;
+  envAliasNames ??= new Set([...envMayAliasSymbols].map((s) => s.name));
+  if (!envAliasNames.has(node.text)) return null;
+  const p = node.parent;
+  if (!p) return null;
+  if ((ts.isVariableDeclaration(p) || ts.isParameter(p) || ts.isBindingElement(p) || ts.isPropertyAssignment(p)
+       || ts.isPropertyDeclaration(p) || ts.isFunctionDeclaration(p)) && p.name === node) return null;
+  if (ts.isBindingElement(p) && p.propertyName === node) return null;
+  if ((ts.isPropertyAccessExpression(p) || ts.isQualifiedName(p)) && p.name === node) return null;
+  if (ts.isTypeQueryNode(p) || ts.isExportSpecifier(p) || ts.isImportSpecifier(p) || ts.isImportClause(p)
+      || ts.isNamespaceImport(p) || ts.isImportEqualsDeclaration(p)) return null;
+  if (ts.isBinaryExpression(p) && p.left === node && envIsAssignOp(p.operatorToken.kind)) return null;
+  if ((ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p))
+      && (p.operator === ts.SyntaxKind.PlusPlusToken || p.operator === ts.SyntaxKind.MinusMinusToken)) return null;
+  const sym = ts.isShorthandPropertyAssignment(p) && p.name === node
+    ? checker.getShorthandAssignmentValueSymbol(p) : checker.getSymbolAtLocation(node);
+  if (!sym || !envMayAliasSymbols.has(sym)) return null;
+  return envAliasSymbols.has(sym) ? "env" : "may";
+};
+// ⟨R928/R804⟩ Does the CONSUMER of this env value provably touch no key? Climb through what passes the
+// value on unchanged (the transparent wrappers, both arms of `?:`, either side of `??`/`||`, the right of
+// `&&`/`,`) to the node that consumes it, then answer from a CLOSED list of non-reading consumers.
+// Everything not on it charges: that is the direction a list must fail in here (a missing entry is an
+// over-charge on code that already names the environment, never a silence).
+const envConsumerInert = (node) => {
+  let cur = node;
+  for (;;) {
+    const p = cur.parent;
+    if (!p) return true; // a bare expression with no parent cannot be evaluated
+    if ((ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isTypeAssertionExpression(p)
+         || ts.isNonNullExpression(p) || ts.isSatisfiesExpression(p)) && p.expression === cur) { cur = p; continue; }
+    if (ts.isConditionalExpression(p) && (p.whenTrue === cur || p.whenFalse === cur)) { cur = p; continue; }
+    if (ts.isBinaryExpression(p)) {
+      const k = p.operatorToken.kind;
+      if (k === ts.SyntaxKind.QuestionQuestionToken || k === ts.SyntaxKind.BarBarToken) { cur = p; continue; }
+      if ((k === ts.SyntaxKind.AmpersandAmpersandToken || k === ts.SyntaxKind.CommaToken) && p.right === cur) { cur = p; continue; }
+      if ((k === ts.SyntaxKind.AmpersandAmpersandToken || k === ts.SyntaxKind.CommaToken) && p.left === cur) return true; // tested/discarded
+      if (k === ts.SyntaxKind.EqualsEqualsEqualsToken || k === ts.SyntaxKind.ExclamationEqualsEqualsToken
+          || k === ts.SyntaxKind.EqualsEqualsToken || k === ts.SyntaxKind.ExclamationEqualsToken
+          || (k === ts.SyntaxKind.InstanceOfKeyword && p.left === cur)) return true;
+      // `e = <env>` / `e ??= <env>` into an identifier that IS an alias: judged at e's own uses.
+      if (p.right === cur && envIsAssignOp(k) && ts.isIdentifier(p.left)
+          && envMayAliasSymbols.has(checker.getSymbolAtLocation(p.left))) return true;
+      return false;
+    }
+    // `const e = <env>` that made `e` an alias (MUST or MAY): judged at e's own uses.
+    if (ts.isVariableDeclaration(p) && p.initializer === cur && ts.isIdentifier(p.name)
+        && envMayAliasSymbols.has(checker.getSymbolAtLocation(p.name))) return true;
+    if (ts.isTypeOfExpression(p) || ts.isVoidExpression(p)) return true;
+    if (ts.isPrefixUnaryExpression(p) && p.operator === ts.SyntaxKind.ExclamationToken) return true;
+    if ((ts.isIfStatement(p) || ts.isWhileStatement(p) || ts.isDoStatement(p)) && p.expression === cur) return true;
+    if (ts.isForStatement(p) && p.condition === cur) return true;
+    if (ts.isConditionalExpression(p) && p.condition === cur) return true;
+    if (ts.isExpressionStatement(p)) return true; // value discarded
+    return false;
+  }
 };
 
 // R113 — WEB STORAGE, IDENTIFIED FROM THE RECEIVER'S TYPE rather than from the member's declaration.
@@ -7808,7 +8964,7 @@ const resolvedIsHostFetch = (call) => {
 // instead of Net, the effect users most care about. Resolve the identifier's symbol up to its
 // ImportDeclaration and match the specifier; used both to CLASSIFY the call Net and to SUPPRESS the spurious
 // callback-Unknown for the same node.
-const NET_REQUEST_NAMED = new Set(["fetch", "request", "stream", "pipeline"]); // undici/node-fetch callables
+// `NET_REQUEST_NAMED` (undici/node-fetch callables) lives in scan-core beside NET_ESTABLISHING — R781.
 const importedFromNetPkg = (id) => {
   if (!id || !ts.isIdentifier(id)) return false;
   for (const d of checker.getSymbolAtLocation(id)?.declarations ?? []) {
@@ -7847,6 +9003,20 @@ function visitCalls(node) {
           // report — see `candor-locator-spelling-vein`, where 17,944 units read "inert" and the probe
           // showed the edited line was never reached.
           if (process.env.CANDOR_R439_MARK) process.stderr.write(`CANDOR_R439_HIT ${cmSpec}\n`);
+        }
+      }
+      // R955 — a callee that is a CHOICE between functions calls every one of them (see `calleeChoiceLeaves`).
+      // Charged here, beside whatever the one resolved declaration below edges (a subset of this union); a choice
+      // whose every value was named also stands in for the unresolved-callee `Unknown` that arm would add.
+      let calleeChoiceClosed = false;
+      if (rec && ts.isCallExpression(node)) {
+        const ch = calleeChoiceLeaves(node.expression);
+        if (ch) {
+          const tag = (node.expression.getText?.() ?? "?").replace(/\s+/g, "").slice(0, 60);
+          let named = !ch.open;
+          for (const leaf of ch.leaves) if (!chargeCalleeLeaf(rec, node, leaf, tag)) named = false;
+          if (!named) { rec.direct.add("Unknown"); rec.why.add(`callback:${tag}`); }   // owner-less: SPEC §4's `callback:`
+          calleeChoiceClosed = named;
         }
       }
       const sig = checker.getResolvedSignature(node);
@@ -7898,25 +9068,30 @@ function visitCalls(node) {
           // package isn't installed in this tree. The κ table may still MODEL it, so classify by the import
           // SPECIFIER (the syntactic path, mirroring how the Rust scanner classifies a crate path without
           // building). Only fires for κ-modeled packages (winston/pino/pg/…); everything else still → Unknown.
-          let kEff = null;
+          let kEff = null, kSpec = null;
           if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
               && ts.isIdentifier(node.expression.expression)) {
             const sym = checker.getSymbolAtLocation(node.expression.expression);
             for (const d of sym?.declarations ?? []) {
               if (ts.isNamespaceImport(d)) {
                 const spec = d.parent?.parent?.moduleSpecifier;
-                if (spec && ts.isStringLiteralLike(spec)) kEff = kappa(spec.text, node.expression.name.text);
+                if (spec && ts.isStringLiteralLike(spec)) { kSpec = spec.text; kEff = kappa(kSpec, node.expression.name.text); }
                 break;
               }
             }
           }
           if (kEff) {
             rec.direct.add(kEff); // κ-modeled package reached via an uninstalled namespace import
+            // R947 — …and its LOCATOR, the guard every other κ route now reaches. Measured: beside a
+            // captured `fetch("https://ok.example/a")`, `ax.get(u)` on an uninstalled `axios` certified `allow Net
+            // ok.example` (exit 0); `fsx.readFileSync(p)` likewise for Fs. The signature did not resolve, so the
+            // positions are the call's own and nothing about the signature is known (`twoPaths` false).
+            chargeInvokedSurfaces(rec, kEff, node.expression.name.text, kSpec, node, node.arguments ?? [], null);
           } else if (ts.isCallExpression(node) && importedFromNetPkg(node.expression)) {
             rec.direct.add("Net"); // bare call to an HTTP-client default/named import whose pkg isn't installed
                                    // (so its signature didn't resolve) — Net, not Unknown (#13). Host capture
                                    // happens in the global/builtin arm below, which fires for the same node.
-          } else {
+          } else if (!calleeChoiceClosed) {
             rec.direct.add("Unknown"); // unresolvable call → Unknown, never silent-pure (SPEC §4)
             // ⟨0.19⟩ SETUP split (SPEC §6.2 §3): if the callee binds to a DECLARED-but-UNINSTALLED package,
             // this Unknown is a mis-configuration (the pkg isn't `npm install`ed), not a genuine dynamic hole
@@ -7969,7 +9144,11 @@ function visitCalls(node) {
         const calleeName = ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text
           : ts.isIdentifier(node.expression) ? node.expression.text : null;
         if (mod !== "<local>" && calleeName && HOF_INVOKERS.has(calleeName)) {
-          node.arguments?.forEach((a, argIdx) => {
+          node.arguments?.forEach((a0, argIdx) => {
+            // R947 — a TYPE-ONLY wrapper is the same reference: `xs.forEach(fs.unlinkSync as any)`
+            // was dropped by the id/property-access gate below (no edge, no κ, no disclosure) while the bare
+            // spelling was not. `as`/`!`/`satisfies`/parentheses change no runtime value.
+            const a = unwrapArgExpr(a0);
             // A `<ref>.bind(…)` partial-application is a CallExpression (skipped by the id/property-access
             // gate below) but the INVOKING HOF calls the bound fn → its effects are reachable. Unwrap the
             // `.bind` chain to the root receiver and resolve it like a bare ref (`resolveFnRefUnit` follows
@@ -7986,7 +9165,14 @@ function visitCalls(node) {
               const bref = bound.ref;
               const d3 = bref && realDecl(checker.getSymbolAtLocation(bref));
               const tb = (d3 && nodeName.get(d3)) || (bref && resolveFnRefUnit(bref));
+              const kb = !tb && d3 && !declIsLocal(d3) ? kappaOfRef(d3, bref) : null;
               if (tb) rec.edges.add(tb);
+              // R947 — a BOUND κ builtin (`setTimeout(fs.unlinkSync.bind(null, p), 0)`) is charged as
+              // the builtin, not hedged as an opaque callback. The bound arguments are visible but the call's are
+              // not, so the locator is read as not visible (`null`): bound arguments fill positions from 0 and a
+              // later caller-supplied one could still be the locator of a two-path verb.
+              else if (kb) { rec.direct.add(kb.eff); if (kb.eff === "Unknown") rec.why.add(`reflect:${kb.kMod.replace(/^node:/, "")}.${kb.member}`);
+                             chargeInvokedSurfaces(rec, kb.eff, kb.member, kb.kMod, node, null, d3); }
               else {
                 rec.direct.add("Unknown");
                 rec.why.add(`callback:bind:${(bref ?? a).getText().replace(/\s+/g, "").slice(0, 40)}`); // `.bind(...)` yields a function VALUE — canonical `callback:`
@@ -8067,6 +9253,16 @@ function visitCalls(node) {
             // dep VALUE with a call signature, passes. Guard (1) exists for exactly this shape and its own
             // comment names the case (`path.reduce(fn, obj)`); the new arm simply ran before it.
             if (d2 && !declIsLocal(d2) && argIsCallable(a)) {
+              // R947 — A κ-CLASSIFIED BUILTIN PASSED BY REFERENCE. `chargeExternalDecl` is the
+              // dependency funnel and never asks κ, and `disclosureTail` treats a κ-KNOWN member as covered, so
+              // `xs.forEach(fs.unlinkSync)`, `setTimeout(fs.unlinkSync, 0, p)`, `.then(cp.execSync)` and
+              // `setTimeout(net.connect, 0, 80, h)` charged NOTHING — ABSENT from `functions[]`, `deny Fs`/`deny
+              // Exec`/`deny Net` exit 0, every one EXECUTED by `node` to perform the effect. κ answers here exactly
+              // as for a direct call to the same declaration; the library supplies the arguments, so the locator
+              // is not visible (`args` null) and every establishing verb is marked `incomplete`.
+              const k = kappaOfRef(d2, a);
+              if (k) { rec.direct.add(k.eff); if (k.eff === "Unknown") rec.why.add(`reflect:${k.kMod.replace(/^node:/, "")}.${k.member}`);
+                       chargeInvokedSurfaces(rec, k.eff, k.member, k.kMod, node, null, d2); return; }
               chargeExternalDecl(rec, d2, null,
                 (ts.isPropertyAccessExpression(a) || ts.isElementAccessExpression(a)) ? a.expression : null);
               return;
@@ -8092,6 +9288,23 @@ function visitCalls(node) {
         // silent-pure (HIGH: a common reflective-invoke shape). Edge to the referenced unit, mirroring the
         // HOF-ref arm: a pure ref edges to a pure unit (no fabrication); a non-fn receiver/arg resolves to
         // no minted unit (`nodeName` miss) and adds nothing; an unresolvable ref stays opaque/Unknown.
+        // R947 — A PARTIALLY-APPLIED `.bind`, CALLED: `f.bind(t, a)(b)` invokes `f(a, b)`. The checker
+        // resolves the call to the bound signature `(...args: A) => R`, which names no declaration, so neither
+        // the edge nor κ nor a disclosure ran and the caller was ABSENT — `fs.unlinkSync.bind(null, p)()` and a
+        // LOCAL `del.bind(null, p)(1)` alike, both EXECUTED to delete a file. A `.bind` with NO bound argument
+        // keeps the target's signature and is the (CLASSIFY) arm's (measured: it reads the call as the target's
+        // own), so it is left there rather than charged twice.
+        if (ts.isCallExpression(node)) {
+          const bc = bindChainCallee(node.expression);
+          if (bc && bc.bound.length) {
+            const tag = `bind:${(bc.ref ?? node.expression).getText().replace(/\s+/g, "").slice(0, 40)}`;
+            if (!bc.ref) { rec.direct.add("Unknown"); rec.why.add(`callback:${tag}`); }
+            else {
+              const all = [...bc.bound, ...(node.arguments ?? [])];
+              chargeInvokedRef(rec, node, bc.ref, all.some((x) => ts.isSpreadElement(x)) ? null : all, tag);
+            }
+          }
+        }
         if (ts.isPropertyAccessExpression(node.expression)) {
           const m = node.expression.name.text;
           const recv = node.expression.expression;
@@ -8110,85 +9323,29 @@ function visitCalls(node) {
           // (`fElemCall`/`lElemCall`/`fdElemCall`). Restricted to a LITERAL key by
           // `accessedMemberName` — a computed `i[k].call(…)` names nothing and is left where it was
           // rather than guessed at, which is the same line R524 drew.
+          // R955 — `(c ? f : g).call(t, …)` invokes every function the receiver can hold.
+          const reflChoice = invokedRef && (m === "call" || m === "apply" || recvText === "Reflect")
+            && !(ts.isIdentifier(invokedRef) || ts.isPropertyAccessExpression(invokedRef)) ? calleeChoiceLeaves(invokedRef) : null;
+          if (reflChoice) {
+            const rArgs = m === "construct" ? undefined : reflectiveArgs(node, m, recvText);
+            let named = !reflChoice.open;
+            for (const leaf of reflChoice.leaves) {
+              if (ts.isArrowFunction(leaf) || ts.isFunctionExpression(leaf)) { const u = nodeName.get(leaf); if (u) rec.edges.add(u); }
+              else if (ts.isIdentifier(leaf) || ts.isPropertyAccessExpression(leaf)) {
+                const d2 = refSlotDecl(leaf);
+                const unit = (d2 && callTargetUnit(d2)) || resolveFnRefUnit(leaf);
+                const holder = d2 && (ts.isVariableDeclaration(d2) || ts.isBindingElement(d2) || ts.isParameter(d2));
+                if (!unit && (!d2 || (declIsLocal(d2) && !holder))) named = false;   // as `chargeCalleeLeaf`
+                else chargeInvokedRef(rec, node, leaf, rArgs, `${recvText.slice(0, 40)}.${m}`);
+              }
+              else named = false;
+            }
+            if (!named) { rec.direct.add("Unknown"); rec.why.add(`callback:${recvText.slice(0, 40)}.${m}`); }
+          }
           if (invokedRef && (ts.isIdentifier(invokedRef) || ts.isPropertyAccessExpression(invokedRef)
                              || (ts.isElementAccessExpression(invokedRef) && accessedMemberName(invokedRef)))) {
-            const d2 = refSlotDecl(invokedRef);
-            // Resolve the receiver/arg0 to its function unit, FOLLOWING local-variable aliases
-            // (`const m = effectful; m.call(…)`) — the direct-identifier form already landed on a minted
-            // unit, but an aliased local var resolves to its VARIABLE decl (not a unit), which dropped the
-            // edge silent-pure. `resolveFnRefUnit` chases the initializer alias to the real fn.
-            const t = (d2 && nodeName.get(d2)) || resolveFnRefUnit(invokedRef);
-            if (t) rec.edges.add(t);
-            else {
-              // Not a project unit — but the invoked reference may be a κ-modeled BUILTIN function
-              // (`fs.writeFileSync.call(…)` / `Reflect.apply(fs.writeFileSync, …)`): the reflective invoke reaches
-              // the SAME effect a direct call would. Classify the invoked function's DECLARATION through the same
-              // κ table (module + member), exactly as the (CLASSIFY) arm does. A PURE builtin — `[].slice.call`,
-              // `Array.prototype.map.call`, `Function.prototype.bind` — matches no κ rule and stays pure (no
-              // over-disclosure); an EFFECTFUL one (`fs.writeFileSync` → Fs, `dns.resolve` → Net) gets its effect.
-              const kMod = d2 && declModule(d2);
-              const kMember = d2?.name?.getText?.()
-                ?? (ts.isIdentifier(invokedRef) ? invokedRef.text : accessedMemberName(invokedRef));
-              // SELF-NAME GUARD (see `isOwnPackageDecl`): the reflectively-invoked reference may be OUR
-              // OWN package's own function, reached through its own `dist/*.d.ts` — never let κ answer
-              // for it, same reasoning as the (CLASSIFY) arm.
-              const kEff = kMod && kMember && !isOwnPackageDecl(d2) ? kappa(kMod, kMember) : null;
-              // ⟨SOUNDNESS R587⟩ THE DISPATCH JOIN, AT THE FUNNEL THAT HAD NEITHER HALF OF IT. This is
-              // the site R573 was filed on and it was silent in EIGHT spellings, not the two the row
-              // named. `chargeExternalDecl` below runs `joinLocalImpls(recordDispatch(…))` — obligation
-              // 3's DECLARED half — and never `joinIndexSignatureImpls`, so a foreign index signature
-              // reached `[]`; and `declIsLocal` keeps a LOCAL declaration out of that funnel entirely,
-              // so both local spellings (index-signature AND declared-member) reached nothing at all
-              // and their callers were ABSENT. Measured at `6a639e6`, one file, `tsc` clean, every body
-              // ground-truthed by `node` to write a file:
-              //
-              //     fCall/fApply/fReflect  []      lCall/lApply/lReflect   ABSENT
-              //     ldCall/ldApply         ABSENT  ← the LOCAL DECLARED half, which R573 does not name
-              //     fdCall/fdApply ['Fs']  fPlain/fdPlain/ldPlain ['Fs']   ← the controls
-              //
-              // and the local half is STRICTLY WORSE than its own baseline: `li.roll(n)` discloses
-              // `Unknown` (`deny Unknown` exit 1) and the identical body through `.call` is silent.
-              //
-              // §G — THE SAME PREDICATE THE HOF-REF ARM CALLS, not a third join. Adding
-              // `joinIndexSignatureImpls` to `chargeExternalDecl` (the remedy the review named) would
-              // close three of these eight: that function receives no call-site expression, so it
-              // cannot supply the member name an index signature has no declaration to give, and it is
-              // unreachable for every LOCAL arm. The question "does this reference name an abstract
-              // member some visible implementor answers" is one question and now has one implementation.
-              //
-              // ⟨R574⟩ IS CARRIED ACROSS RATHER THAN RE-DECIDED. Where κ answered AND the receiver is
-              // demonstrably the package's own product (`const g = makeClient(); g.fetchIt.call(…)`),
-              // this hedges — `Unknown` + `dispatch:` — exactly as the CallExpression arm does, on the
-              // same `packageProducedReceiver` test with the same `eff ?` gate. Without it this fix
-              // would reintroduce R574's fabricated concrete effect at a NEW site, which is how that
-              // class spread the first time.
-              const ownProduct = kEff && (ts.isPropertyAccessExpression(invokedRef) || ts.isElementAccessExpression(invokedRef))
-                ? packageProducedReceiver(invokedRef.expression,
-                    kMod?.startsWith("@types/") ? kMod.slice("@types/".length) : kMod)
-                : null;
-              chargeMemberRefDispatch(rec, invokedRef, d2, !!ownProduct, "R587-REACH");
-              if (kEff) {
-                rec.direct.add(kEff);
-                if (kEff === "Unknown") rec.why.add(`reflect:${kMod.replace(/^node:/, "")}.${kMember}`);
-              }
-              // HONESTY: the receiver IS a local variable/parameter (a value declaration) that we could NOT pin
-              // to a function unit (bound to a param, a reassigned/branched value, an `any`-typed holder). The
-              // `.call`/`.apply` still INVOKES whatever it holds, so a silent-pure verdict would be the cardinal
-              // sin — disclose Unknown. (A direct fn identifier / known fn resolved above; a non-value receiver
-              // — a type, a literal — resolves to no decl and stays out, no fabrication.)
-              else if (d2 && (ts.isVariableDeclaration(d2) || ts.isBindingElement(d2) || ts.isParameter(d2))) {
-                rec.direct.add("Unknown");
-                rec.why.add(`callback:${recvText.slice(0, 40)}.${m}`); // method on an indeterminate-valued receiver (no resolvable owner TYPE) — canonical `callback:`, not the frontier's `dispatch:OWNER.member`
-              }
-              // THE FUNNEL: `d2` resolved to a concrete, non-local declaration that named neither a κ effect
-              // nor a value-holder shape above — a reflective `.call`/`.apply`/`Reflect.apply` onto an
-              // uncurated dependency's exported function (`depFn.call(this, x)`), the by-reference sibling
-              // of the HOF-ref arm's own `chargeExternalDecl(rec, d2)` call. Without this the invoke was
-              // NEITHER edged, NOR κ-classified, NOR disclosed — silent-pure on a call that unquestionably
-              // runs caller-reachable code, the same shape as the two cardinal sins this funnel closes.
-              else if (d2 && !declIsLocal(d2)) chargeExternalDecl(rec, d2, null,
-                (ts.isPropertyAccessExpression(invokedRef) || ts.isElementAccessExpression(invokedRef)) ? invokedRef.expression : null);
-            }
+            chargeInvokedRef(rec, node, invokedRef,
+              m === "construct" ? undefined : reflectiveArgs(node, m, recvText), `${recvText.slice(0, 40)}.${m}`);
           }
           // EXPLICIT iterator force: `it.next()` / `it.return()` / `it.throw()` on an OPAQUE iterator
           // (a parameter / `any` / type-parameter typed as the `Iterator`/`Generator` protocol) runs
@@ -8237,8 +9394,17 @@ function visitCalls(node) {
             // receiver already resolved to the leaf (`new Dog()` -> Dog.speak, no overrides) so this is
             // inert there — no double-count. A base method NO subclass overrides has no entry: today's
             // behavior (just the base) is preserved exactly.
-            const allOverrides = classOverrides.get(decl);
-            if (allOverrides && allOverrides.length > 0) {
+            // R954 — the arm also runs where no subclass overrides `decl` but a CONFORMER was
+            // converted to the receiver's class (R874: `function mkS(): BaseL { return { m(){…} } }`), which had no
+            // candidate list here at all. `conformerBodies` is asked through `memberDispatchBodies` below; this is
+            // only the trigger, read at the same receiver class.
+            const allOverrides = classOverrides.get(decl) ?? [];
+            const confRecv = (ts.isPropertyAccessExpression(node.expression)
+              || ts.isElementAccessExpression(node.expression)) ? node.expression.expression : null;
+            const confAt = isSuperReceiver(confRecv) ? null
+              : (localReceiverClass(confRecv) ?? (ts.isClassDeclaration(decl.parent) ? decl.parent : null));
+            const confBodies = confAt ? conformerBodies(confAt, decl.name?.getText?.()) : [];
+            if (allOverrides.length > 0 || confBodies.length > 0) {
               // PRECISION: scope the fan-out to the RECEIVER's static-type subtree. A base-member
               // dispatch on a receiver statically typed as subclass `Cat` can only ever bind to a
               // `Cat`-subtree body — a SIBLING `Dog.speak` override is type-impossible on this path,
@@ -8271,11 +9437,13 @@ function visitCalls(node) {
               else if (direct.length <= CHA_FANOUT_LIMIT) probeR871("class", decl, overrides.length - direct.length);
               if (overrides.length > 0) {
                 if (direct.length <= CHA_FANOUT_LIMIT) {
-                  let allResolved = overrides.length <= CHA_FANOUT_LIMIT;
+                  // the bound stays on the OVERRIDE count it was decided on; conformers only add
+                  let allResolved = overrides.filter((om) => !confBodies.includes(om)).length <= CHA_FANOUT_LIMIT;
                   const oTargets = [];
                   for (const om of overrides) {
                     const ot = nodeName.get(om);
                     if (ot) oTargets.push(ot);
+                    else if (confBodies.includes(om) && isExternalConformerBody(om)) { if (!chargeConformerBody(rec, om)) allResolved = false; }
                     else allResolved = false;
                   }
                   for (const ot of oTargets) rec.edges.add(ot);
@@ -8296,21 +9464,7 @@ function visitCalls(node) {
             // record what each argument position received (callback-flow, see callbackArgs) — keyed with
             // THIS call site's own caller record (`rec`), so a HOF called from two sites with two
             // different named callbacks can be resolved per site in pass 2b, not pooled into one bucket.
-            (node.arguments ?? []).forEach((a, i) => {
-              const slot = (callbackArgs.get(targetName) ?? callbackArgs.set(targetName, new Map()).get(targetName));
-              const list = slot.get(i) ?? [];
-              let target = null, opaque = false;
-              if (ts.isIdentifier(a)) {
-                const d2 = realDecl(checker.getSymbolAtLocation(a));
-                target = d2 && nodeName.get(d2);
-                if (!target) opaque = true;
-              } else {
-                // inline closure (attributed lexically to the PASSER already) or any other opaque shape
-                opaque = true;
-              }
-              list.push({ callerRec: rec, target, opaque });
-              slot.set(i, list);
-            });
+            registerCallbackArgs(rec, targetName, node.arguments ?? []);
           } else if (!ts.isArrowFunction(decl) && !ts.isFunctionExpression(decl)) {
             // Resolution landed on a TYPE (a function-type annotation, a method/property signature),
             // not a body. If that type belongs to a PARAMETER of a unit, defer to callback-flow
@@ -8355,10 +9509,18 @@ function visitCalls(node) {
                 // the arm where absence is the purity claim that deletes the consumer's disclosure.
                 recordDispatch(rec, sigDecl, pkgName);
                 const impls = interfaceImpls.get(sigDecl.parent) ?? [];
-                if (impls.length > 0 && impls.length <= CHA_FANOUT_LIMIT) {
+                // R954 — a DEPENDENCY class the checker showed converted to this interface is a
+                // candidate too; it counts toward the bound like any implementor, and is charged as a direct call.
+                const depImpls = depConformers.get(sigDecl.parent) ?? [];
+                if (impls.length + depImpls.length > 0 && impls.length + depImpls.length <= CHA_FANOUT_LIMIT) {
                   const member = sigDecl.name?.getText?.();
                   let allResolved = true;
-                  const targets = [];
+                  const targets = [], externals = [];
+                  for (const dc of depImpls) {
+                    const d = conformerMemberDecl(dc, member);
+                    if (d && isExternalConformerBody(d)) { if (!externals.includes(d)) externals.push(d); }
+                    else allResolved = false;
+                  }
                   for (const cls of impls) {
                     // ⟨0.35, PART 87 fix⟩ `cls` may be a ClassDeclaration/ClassExpression (`.members`) OR
                     // a structural implementor — an ObjectLiteralExpression (`.properties`) registered by
@@ -8381,12 +9543,16 @@ function visitCalls(node) {
                       // The implementor's own (or inherited) member decides `allResolved`, as it always did —
                       // and with it whether this caller is recorded as a genuine dispatcher below. An unnamed
                       // OVERRIDE under it discloses beside the edges and changes neither.
+                      // R954 — a conformer's body this scan does not hold (a dependency class
+                      // converted to an implementor's class type) is charged as a direct call, not hedged.
+                      else if (bi > 0 && isExternalConformerBody(b)) { if (!externals.includes(b)) externals.push(b); }
                       else if (bi === 0) allResolved = false;
                       else descentUnresolved = true;
                     }
                   }
                   for (const t of targets) rec.edges.add(t);
-                  edged = targets.length > 0 && allResolved;
+                  for (const b of externals) if (!chargeConformerBody(rec, b)) allResolved = false;
+                  edged = (targets.length > 0 || externals.length > 0) && allResolved;
                   // ⟨CARDINAL SIN FIX, caller-path scope⟩ record the GENUINE dispatch, at the point the
                   // dispatch happened — `owner` (this call's enclosing fn) really did resolve THROUGH
                   // `sigDecl.parent`'s own signature, not merely land on one of its implementers by
@@ -8671,8 +9837,25 @@ function visitCalls(node) {
           // `ctorRuleName` (below) rather than `ctorClassName`: a connecting ctor reached through a local
           // alias must still fail the surface closed on a runtime URL. Evaluated at call time, after it.
           const netEstablishing = (member) =>
-            isConnectingCtor(ctorRuleName) || NET_ESTABLISHING.has(member)
-            || (/^(node:)?dgram$/.test(mod) && member === "send");
+            isConnectingCtor(ctorRuleName) || netEstablishingVerb(member, mod);
+          // SOUNDNESS R817 / SPEC §2 ⟨0.40⟩ — an ACCEPT: the peers are whoever connects, so no literal anywhere
+          // in the unit can determine them (scan-core NET_ACCEPTING says why `listen` and why not `bind` or
+          // `createServer`). Asked only of a call κ already classified `Net`, and against `kMod`, the module κ
+          // was asked. Two accepts are module-specific because their member name is too common to key on:
+          //   `inspector.open(port, host)` — starts the inspector's WebSocket server (κ: Net);
+          //   `new WebSocketServer(opts)` / `new ws.Server(opts)` — listens on `opts.port` when given one. A
+          //   `{ server }` or `{ noServer: true }` server accepts nothing itself (the http server's `listen`
+          //   does, and is marked there) and is OVER-charged here: fail-closed, and not worth an options parser.
+          // ACCEPT SPELLINGS THIS DOES NOT SEE, so the reader does not mistake the list for the rule:
+          //   * a framework's own `listen` — express/koa `app.listen`, fastify `listen`, hapi `server.start` —
+          //     is not classified `Net` by κ at all (the packages are unlisted), so the gap there is the EFFECT,
+          //     not this mark; once κ names such a package, its `listen` lands here by member name;
+          //   * `listen` reached reflectively (`srv.listen.call(srv, p)`) goes through the reflective-invoke
+          //     arm, which applies no Net masking to ANY verb (connect included) — a separate route;
+          //   * Bun.serve / Deno.serve / `Deno.listen` — not node, not in κ.
+          const netAccepting = (member) =>
+            netAcceptingVerb(member, kMod)
+            || (/^ws$/.test(kMod) && member === "new" && /^(WebSocketServer|Server)$/.test(ctorClassName));
           // ⟨0.32⟩ THE CLASS BEING CONSTRUCTED, TAKEN FROM THE `new` EXPRESSION rather than from the
           // resolved constructor. A class that declares no constructor of its own INHERITS one, and
           // `getResolvedSignature()` hands back the BASE's — which lives in the base's file, so both the
@@ -8833,107 +10016,13 @@ function visitCalls(node) {
             if (eff === "Unknown") rec.why.add(`reflect:${kMod.replace(/^node:/, "")}.${member}`);
           }
           // the literal surfaces, read only at a CLASSIFIED call (SPEC §2)
-          if (eff === "Net") {
-            // The host predicate runs against the EXTRACTED URL argument (arg0 — the URL/endpoint slot of
-            // fetch/axios/the HTTP verbs), NEVER the first literal anywhere in the args: a trailing literal
-            // in headers/body/options must not be read as the host (FINDING 6). Ollama's model decision runs
-            // through the parsed host too, never a raw string that merely contains ":11434" (FINDING 1/9).
-            const urlLit = urlArgLiteral(node, member, kMod);
-            const ollama = ollamaFromUrlArg(urlLit);
-            if (ollama === "capture-model" || ollama === "capture-plain") {
-              const h = hostLiteral(urlLit);
-              rec.hosts.add(h);
-              // SPEC §1 ⟨0.13⟩ Llm host-literal refinement: a known model host makes this a model call
-              // (Llm + Net — Net is never dropped), exactly as a jdbc URL classifies Db.
-              for (const e of modelHostEffects(h)) rec.direct.add(e);
-            } else {
-              // No captured host literal. §1 ⟨0.13⟩ Ollama LOCAL endpoint (`localhost:11434`/`127.0.0.1:11434`):
-              // refine to Llm but do NOT capture the host as a Net allowlist literal (java parity #2 —
-              // preserve the host gate so `deny Llm` catches it while `allow Llm localhost` fails closed).
-              if (ollama === "llm-no-capture") rec.direct.add("Llm");
-              // MASKING fix: a host-ESTABLISHING Net call whose host is NOT a captured literal (runtime URL, or
-              // built elsewhere) leaves the host invisible to the gate → mark the surface incomplete so a
-              // benign literal can't mask it. ALLOWLIST of establishing forms only — NEVER use-calls
-              // (write/end/non-dgram send), which would false-positive on `socket.connect("h").write(data)`
-              // (the host is captured at connect). Under-catches an unlisted establishing verb (safe
-              // direction); never over-flags a use-call.
-              if (netEstablishing(member)) rec.incomplete.add("Net");
-            }
-          }
+          chargeLocatorSurfaces(rec, eff, member, kMod, node, node.arguments ?? [],
+            { direct: true, accepting: netAccepting(member), establishing: netEstablishing(member) });
           // SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface: a call into a curated model-provider client (the
           // scan-core MODEL_SDK regex, also the whole-module Net κ rule above) dispatches a model request
           // → Llm + Net. Net came from κ (eff === "Net"); add Llm on top. NO method-name gating (java
           // parity #1) — any call into these single-purpose clients is a model dispatch. Additive.
           if (isModelSdkPackage(mod)) rec.direct.add("Llm");
-          if (eff === "Db") {
-            // ⟨0.29⟩ THE SQL SLOT, never the first literal anywhere. Every string-SQL client puts the
-            // query at argument 0 (`query(text, values)`, `execute(sql, params)`, `raw(sql, bindings)`,
-            // `prepare(sql)`), so a literal in a LATER position is a parameter, a fallback query, a
-            // health-check string — data, not the statement being run. MEASURED:
-            // `db.query(userSql, "SELECT * FROM audit_log")` published `tables: ["audit_log"]` and, because
-            // a table HAD been captured, the masking guard below never fired — so `allow Db audit_log`
-            // certified a query whose SQL is a runtime value. The `Fs` and `Net` defects of this rung, in
-            // the fourth and last locator surface.
-            const a0 = (node.arguments ?? [])[0];
-            const lit = a0 && ts.isStringLiteralLike(a0) ? a0.text : null;
-            const before = rec.tables.size;
-            for (const t of lit ? tablesInSql(lit) : []) rec.tables.add(t);
-            // ORM route: `this.userRepository.find(…)` — the receiver's `Repository<UserEntity>`
-            // type argument names the entity; its `@Entity("user")` decorator names the table.
-            if (ts.isPropertyAccessExpression(node.expression)) {
-              const rt = checker.getTypeAtLocation(node.expression.expression);
-              for (const ta of checker.getTypeArguments?.(rt) ?? rt?.typeArguments ?? []) {
-                const d = ta?.symbol?.declarations?.[0];
-                const tbl = d && entityTables.get(d);
-                if (tbl) rec.tables.add(tbl);
-              }
-            }
-            // masking: a Db call that surfaced NO table (no SQL literal, no entity-typed receiver) reaches a
-            // runtime/invisible table — a benign sibling query's literal table must not mask it. The entity
-            // route above is NOT a literal so it still counts as visible (a captured table); only a fully
-            // invisible query marks incomplete. `new` (a connection ctor) carries no table — skip it.
-            if (rec.tables.size === before && member !== "new") rec.incomplete.add("Db");
-          }
-          if (eff === "Exec") {
-            // ⟨0.29⟩ `cmds` reads argv[0] too. It was documented as "the cosmetic cmds surface (any
-            // literal)", but `cmds` is precisely what `allow Exec <cmd>` gates on (AS-EFF-008) — nothing
-            // cosmetic about it. No node API places a bare string after the head (args are an array,
-            // options an object), so this changes no measured behaviour today; it removes the hazard for
-            // the next exec-like wrapper whose second argument is a string, which is how the identical
-            // defect reached `Fs`, `Net` and `Db` in this same rung.
-            // ⟨0.29⟩ A USE-VERB NAMES NO PROGRAM, and its argument 0 is not a head. `EXEC_USE_VERBS`
-            // already says so — it is consulted for the `incomplete` branch below and was NOT consulted
-            // here, so `child.send(msg)` (IPC to an ALREADY-spawned child) read its MESSAGE as argv[0].
-            // MEASURED: `ch.send("ls")` published `cmds: ["ls"]` and certified under `allow Exec ls`
-            // though the function executes nothing, and `ch.send("curl")` FABRICATED `Net` — a function
-            // that makes no network call reported as performing one, which `deny Net` then fires on.
-            // That is exactly what the doc comment above forbids ("`spawn(toolVar, "curl")` must NOT
-            // fabricate Net — the literal is an argument, not the program"); the rule was written for the
-            // argument POSITION and never covered the same hazard reached through the RECEIVER.
-            const lit = EXEC_USE_VERBS.has(member) ? null : programHeadLiteral(node);
-            if (lit) rec.cmds.add(lit.trim().split(/\s+/)[0]);
-            // a known literal head refines the cliff (curl→Net, candor→Fs/Env); Exec stays. The head
-            // MUST be argv[0] (programHeadLiteral), NOT any literal arg: `spawn(toolVar, "curl")`
-            // names no static program, so its trailing literal must not fabricate Net (spec §4).
-            const head = lit;
-            if (head) for (const e of commandHeadEffects(head)) rec.direct.add(e);
-            // masking (sweep [11]): an Exec call whose program head is NOT a static literal (runtime
-            // command) leaves the command invisible. Establishing = the spawn fns; ChildProcess use-verbs
-            // (kill/send/disconnect/ref/unref) carry no command and are excluded.
-            else if (!EXEC_USE_VERBS.has(member)) rec.incomplete.add("Exec");
-          }
-          if (eff === "Fs") {
-            // ⟨0.29⟩ the PATH POSITION, never the first literal anywhere — see fsPathLiteral.
-            const { lits, complete } = fsPathLiteral(node, member);
-            const captured = lits.filter((l) => /[/\\]|^[.~]/.test(l)); // path-shaped literals only
-            const pathCaptured = captured.length > 0 && captured.length === lits.length;
-            for (const l of captured) rec.paths.add(l);
-            // masking (sweep [11]): a path-taking fs.* call whose path is NOT a captured literal (runtime
-            // path) leaves it invisible. fd/FileHandle USE-verbs (fd came from a prior open()) are excluded.
-            // ⟨0.29⟩ `complete` also covers a two-path op whose SECOND path is runtime, which a captured
-            // position-0 literal would otherwise certify.
-            if (!(pathCaptured && complete) && !FS_USE_VERBS.has(member)) rec.incomplete.add("Fs");
-          }
           // ── ⟨0.32⟩ THE NODE-CORE FLOOR: an unclassified member of node core fails CLOSED ─────────
           //
           // κ is an allowlist, and a miss inside @types/node used to land on PURE — written down two
@@ -9209,9 +10298,28 @@ function visitCalls(node) {
       }
     }
   }
-  // Reading process.env — the JVM System.getenv twin → Env. All the common idioms count, not just the
-  // direct `process.env.KEY` dot access (see the process.env-recognition note above): dot/bracket access
-  // on process.env or a confirmed alias, destructuring a key off it, and the `in` membership test.
+  // Reading process.env — the JVM System.getenv twin → Env. ⟨R928/R804⟩ MARKED ON THE VALUE, the way the
+  // argv line below always was: every expression whose value is the environment object (`envRefKind` —
+  // `process.env` in any spelling, or a reference to an alias) charges its unit, UNLESS its consumer
+  // provably touches no key (`envConsumerInert`). The old arm listed the consumers that DO read (dot,
+  // bracket, destructure, `in`, spread, a builtin table, for-in) and every unlisted one was silent: an
+  // ALLOWLIST over an open set. This is the denylist of the same question, and the denylist is closed —
+  // a binding that BECOMES an alias (its reads are judged at its own uses), `typeof`, an (in)equality or
+  // `instanceof` test, a truthiness test, and a discarded value.
+  //
+  // WHAT THE DEFAULT CHARGES THAT THE LIST DID NOT, and why each is a real read and not a fabrication:
+  //  - a call argument to ANY callee (`util.inspect`, `console.log`, an aliased `Object.assign`, a dep, a
+  //    project function): the callee runs inside this unit's execution with the live object, so whatever
+  //    it reads is read during this call. A project callee that reads its parameter is NOT charged — that
+  //    would pool the effect onto every other caller of the same function (the HOF fabrication 2b
+  //    exists to prevent); 2c still charges a callee that WRITES it, as before.
+  //  - `return process.env` / an arrow body: the caller holds the live object; it reaches this unit
+  //    through the ordinary call edge.
+  //  - a store into an object, array or field: the value escapes to the heap. Charged where it escapes.
+  //    A unit that later reads it from the heap WITHOUT calling the storer is the residual this does not
+  //    close (module-level `const cfg = { env: process.env }` charges `<module>`, not the reader).
+  //  - a default parameter `e = process.env`: evaluated in the function's own frame when the argument is
+  //    omitted, which is the call every such default exists for (pnpm `isExecutedByCorepack`).
   {
     const markEnv = () => { const owner = enclosing(node); if (owner) fns.get(owner).direct.add("Env"); };
     // `process.argv` — the same channel, and the same ruling candor-rust has always applied to
@@ -9219,32 +10327,15 @@ function visitCalls(node) {
     // `const [,,x] = process.argv`, or handing it to a parser all reach the same process-startup state.
     // Marked on the expression itself so every idiom counts without enumerating them.
     if (isProcessArgvExpr(node)) markEnv();
-    // `process.env.KEY` / `env.KEY` (dot) and `process.env["KEY"]` / `env[k]` (bracket, literal OR dynamic key).
-    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && readsProcessEnv(node.expression)) {
-      markEnv();
-    }
-    // `const {KEY} = process.env` / `const {KEY} = env` — the object-binding pattern's initializer reads env.
-    else if (ts.isVariableDeclaration(node) && node.name && ts.isObjectBindingPattern(node.name)
-             && node.initializer && readsProcessEnv(node.initializer)) {
-      markEnv();
-    }
-    // `"KEY" in process.env` / `"KEY" in env` — the `in` operator's right operand reads env.
-    else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InKeyword
-             && readsProcessEnv(node.right)) {
-      markEnv();
-    }
-    // `{...process.env}` / `[...process.env]` / `f(...process.env)` — spreading env enumerates every key.
-    else if ((ts.isSpreadAssignment(node) || ts.isSpreadElement(node)) && readsProcessEnv(node.expression)) {
-      markEnv();
-    }
-    // `Object.assign(process.env, …)` / `Object.keys(env)` / `Reflect.set(process.env, …)` / `JSON.stringify(env)`
-    // / `structuredClone(env)` — a builtin that reads/writes every key of an env-object argument.
-    else if (envTouchingBuiltinCall(node) && node.arguments.some((a) => readsProcessEnv(a))) {
-      markEnv();
-    }
-    // `for (const k in process.env)` — the for-in loop enumerates every key of the environment.
-    else if (ts.isForInStatement(node) && readsProcessEnv(node.expression)) {
-      markEnv();
+    const kind = envRefKind(node);
+    if (kind && !envConsumerInert(node)) {
+      if (kind === "env") markEnv();
+      else {
+        // A MAY-alias (rebindable away from process.env): POSSIBLY the environment — disclose, never
+        // fabricate. Same posture and spelling as 2c's `env-maybe-write`; projects to `unresolved`.
+        const owner = enclosing(node);
+        if (owner) { const r = fns.get(owner); r.direct.add("Unknown"); r.why.add("env-maybe-read"); }
+      }
     }
   }
   // R113 — WEB STORAGE, THE WHOLE INTERFACE, through the same six shapes the `process.env` block above
@@ -9471,14 +10562,27 @@ function visitCalls(node) {
             const h = hostLiteral(urlLit);
             rec.hosts.add(h);
             for (const e of modelHostEffects(h)) rec.direct.add(e);
-          } else if (ollama === "llm-no-capture") {
-            // §1 ⟨0.13⟩ dotless local Ollama endpoint: Llm WITHOUT capturing the host (java parity #2).
-            rec.direct.add("Llm");
-          } else if (urlArgIsRuntimeString(node)) {
-            // Only a RUNTIME STRING url (template/concat/`string`-typed value) masks the host → fail closed,
-            // like a host-establishing κ call. A structured `new URL(...)`/`Request` arg (or absent arg) did
-            // NOT mask a literal — it passed clean pre-Llm-port, so it must NOT regress to fail-closed (FINDING 7).
-            rec.incomplete.add("Net");
+          } else {
+            // §1 ⟨0.13⟩ dotless local Ollama endpoint: Llm WITHOUT capturing the host (java parity #2) — and,
+            // like the κ path, the uncaptured host still marks the surface below (it is not certifiable).
+            if (ollama === "llm-no-capture") rec.direct.add("Llm");
+            if ((node.arguments ?? []).length > 0) {
+              // SOUNDNESS R802 — NO CAPTURED HOST ⇒ THE SURFACE IS INCOMPLETE, the rule the κ path beside this
+              // one already applies (`netEstablishing` → `incomplete`), and java's Net rule. This used to ask an
+              // INCLUSION-shaped question instead — "is arg0 a template, a `+` concat, or `string`-typed?" — and
+              // every other shape was certified by whatever sibling literal shared the function. MEASURED at
+              // the pre-fix base, each beside `await fetch("https://ok.example/a")`, `allow Net in <fn>
+              // ok.example` EXIT 0 while a local server logged the request to the CALLER's URL:
+              //     fetch(new URL(u))   fetch(new Request(u))   fetch(u: URL)   fetch(u: RequestInfo | URL)
+              //     fetch(u: string | URL)   fetch(u: any)   axios({ url: u })   (importedFromNetPkg)
+              // and the `fetch(u: string)` control exited 1. The predicate's own comment defended it by
+              // HISTORY ("it passed clean pre-Llm-port, so it must NOT regress") — an argument about not
+              // changing behaviour, never one about masking. The over-charge it was guarding against (a
+              // DETERMINED `new URL("https://h/x")` failing closed — FINDING 7) is now answered by capturing
+              // that host (`determinedUrlObject`), which is the precise fix for it.
+              // An ABSENT argument stays unmarked: `fetch()` throws before any I/O and names no destination.
+              rec.incomplete.add("Net");
+            }
           }
         }
       }
@@ -10061,7 +11165,7 @@ function visitCalls(node) {
  * candidate set only shrinks) makes the loop terminate in the number of candidates. */
 function mintCallTargetUnit(fn) {
   const sf = fn.getSourceFile();
-  const local = `<callable>@${fn.getStart()}`;
+  const local = `<callable>@${stableUnitTag("callable", fn)}`;   // ⟨R944⟩ not the offset
   const qual = `${moduleOf(sf)}.${local}`;
   const owner = enclosing(fn.parent); // BEFORE the nodeName.set below — the PRE-mint attribution owner
   if (!fns.has(qual)) {
@@ -10182,7 +11286,7 @@ for (const sf of sources) visitCalls(sf);
       while (ts.isParenthesizedExpression(e)) e = e.expression;
       if (ts.isCallExpression(e)) {
         add(localBodiedUnit(e), "deco");                         // the factory call
-        add(`${moduleOf(e.getSourceFile())}.${DECORATOR_ARG_LOCAL}${e.getStart()}`, "arg");
+        add(`${moduleOf(e.getSourceFile())}.${decoratorArgLocal(e)}`, "arg");   // ⟨R944⟩ the ONE spelling
       }
     }
     for (const m of cls.members ?? [])
@@ -10268,9 +11372,11 @@ const setFed = (sym, kind) => {
 // The env-source kind an expression denotes, or null: process.env / a MUST-alias → "env"; a MAY-alias
 // (ever-`=process.env`, reassignable) → "unknown"; an identifier already known env-fed → its recorded kind.
 const envSourceKind = (expr) => {
-  if (isProcessEnvExpr(expr) || identIsEnvAlias(expr)) return "env";
+  // ⟨R928⟩ through the one identity answer — wrappers, merges, alias-of-alias — not the exact node.
+  const vk = envValueKind(expr);
+  if (vk === "env") return "env";
+  if (vk === "may") return "unknown";
   if (ts.isIdentifier(expr)) {
-    if (identIsEnvMayAlias(expr)) return "unknown";
     const k = envFed.get(checker.getSymbolAtLocation(expr));
     if (k) return k;
   }
@@ -11163,6 +12269,19 @@ function typingsInterfaceImpls() {
     if (inScan && arm[1].every((c) => inScan.has(c))) continue;
     unionArms.push([arm[0], arm[1], false, owner, [], []]);
   }
+  // R954 — an in-scan arm that exists ONLY because the conversion pass found conformers must not
+  // collide with this package's own typings arm of the same name: the collision rule below skips BOTH, and
+  // MEASURED on pnpm that deleted a published `ImporterToResolve.isOverriddenDependency` entry carrying
+  // `Unknown` (a disclosure a consumer reads), the R764 shape. Such an arm yields to the typings arm, which is
+  // what was published before; the conformers still answer every in-scan dispatch.
+  for (let i = unionArms.length - 1; i >= 0; i--) {
+    const [d, , , owner] = unionArms[i];
+    const added = conversionAddedImpls.get(d);
+    if (!added || !interfaceImpls.has(d)) continue;
+    if (!(interfaceImpls.get(d) ?? []).every((x) => added.has(x))) continue;
+    if (unionArms.some((a, j) => j !== i && a[0] !== d && a[3] === owner && a[0].name?.text === d.name?.text))
+      unionArms.splice(i, 1);
+  }
   // ⟨0.39⟩ obligation 2's arms, pushed LAST and deliberately AFTER `inScanClassesByName` was taken: a
   // foreign `Backend` and a local one are different keys under different prefixes, so neither may
   // suppress the other as "redundant" and neither may make the other's NAME ambiguous. Both mistakes run
@@ -11249,6 +12368,11 @@ function typingsInterfaceImpls() {
     // once an unnamed one contributes real effects it has to be inside the bound that decides whether
     // this hierarchy is open.
     const overFanout = implClasses.length + implNodes.length > CHA_FANOUT_LIMIT;
+    // R954 — a DEPENDENCY class converted to this interface runs for a consumer's dispatch too,
+    // and its body is not this scan's to sum: the published entry says so (`Unknown`) rather than claiming the
+    // local implementors as the whole answer — never a pure-only entry a `crossDeps` hit would read as complete
+    // (R764).
+    const depHeld = (depConformers.get(ifaceDecl)?.length ?? 0) > 0;
 
     for (const member of ifaceDecl.members ?? []) {
       // Both spellings of an interface method (see the in-scan site): `run(): void` and
@@ -11264,7 +12388,8 @@ function typingsInterfaceImpls() {
       // per member. A structural implementor with no minted unit for `m` (a `.bind()` whose receiver
       // cannot be pinned, a call result, a getter, an absent optional member) is exactly as unaccountable
       // as the (CHA_FANOUT_LIMIT + 1)th named one, and takes the same disclosed Unknown.
-      let unaccounted = false;
+      let unaccounted = depHeld;
+      if (depHeld) infU.add("Unknown");
       if (overFanout) infU.add("Unknown");
       else {
         for (const clsName of implClasses) {
@@ -12508,9 +13633,12 @@ const writeRefusal = (reason, unevaluated = null) => {
 //    evaluating a stale one yields a bogus AS-EFF-005 wave; skipping is an unbounded fail-open window).
 //    The read-only `diff`/`gains` QUERIES disclose a mismatch instead of failing — a comparison the
 //    user explicitly asked for should inform; this scan-time guard is the gate and fails closed.
-//  · Valid + same build → per-fn compare: an EXISTING fn gaining an effect is an [AS-EFF-005]
-//    violation (exit 1, joins --gate-json); a fn absent from the baseline is NEW code, reviewed as
-//    such, not a regression. Baselines omit pure fns (spec §2), so absent-prior means no prior claim.
+//  · Valid + same build → per-fn compare: a fn gaining an effect is an [AS-EFF-005] violation (exit 1,
+//    joins --gate-json). ⟨0.40⟩ A fn ABSENT from the baseline is compared against ∅ — prior(key) =
+//    baseline[key] ?? ∅ — so a new fn performing a real effect FIRES too (SPEC §3 baseline guard ⟨0.40⟩,
+//    SOUNDNESS R932). Until ⟨0.40⟩ it was skipped as "new code, reviewed normally", and code review does
+//    not read effects: a baseline of `keep` (Fs) and a tree adding `fresh` (Net) exited 0, `violations: []`.
+//    A new PURE fn gains nothing and passes; a new Unknown-ONLY fn is advisory but NAMED in its own note.
 //    An Unknown-ONLY gain is ADVISORY (a note, exit 0) UNLESS the ⟨unknown-ratchet⟩ opt-in is on
 //    (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET) — then a NEWLY-introduced Unknown FAILS
 //    (exit 1) while a fn already Unknown in the baseline is grandfathered (see the gain loop below).
@@ -12521,11 +13649,12 @@ const writeRefusal = (reason, unevaluated = null) => {
 // CALLGRAPH sidecar (<baseline>.callgraph.json, §2.2 — it lists every project fn INCLUDING pure
 // leaves), exactly as `gains`'s `origin` existence test does (query-core.mjs `gains`: a fn is
 // "existing" if it is a baseline-callgraph node — a caller key or a callee):
-//  · sidecar PRESENT + loaded → a fn that is a baseline-callgraph node has baseline effect set ∅
-//    (pure → omitted from the report) and any effect now is a GAIN violation. pure→effectful is caught.
-//    A fn in NEITHER report nor callgraph genuinely did not exist → stays exempt "new".
-//  · sidecar ABSENT → degrade to report-only existence (pre-⟨0.16⟩: a formerly-pure fn reads as new;
-//    still catches an already-effectful fn WIDENING). One stderr note that the guard is weaker.
+//  · ⟨0.40⟩ THE SIDECAR NOW DECIDES ONLY THE LABEL, never whether the guard fires (every absent key has
+//    prior ∅). Each AS-EFF-005 row carries ⟨0.12⟩'s `origin`: "existing" — in the baseline report or a
+//    baseline-callgraph node; "new" — in neither, sidecar loaded; "unknown" — absent from the report and
+//    no sidecar. "new" means ABSENT UNDER THIS KEY, not proof of new code: ts keys `Module.fn`, so
+//    renaming a file renames every unit in it, and `<structural>@<offset>` units are keyed by position.
+//  · sidecar ABSENT → existence labels degrade to "unknown"; one stderr note.
 //  · sidecar PRESENT-but-CORRUPT → fail closed (exit 2), like a corrupt baseline: a broken sidecar
 //    must not silently NARROW the guard back to report-only.
 if (baselinePath !== null) {
@@ -12605,22 +13734,24 @@ if (baselinePath !== null) {
       // as `gains` computes cgNodes. Non-array edge values are tolerated (skipped), matching loadCallgraph.
       cgNodes = new Set(Object.entries(baseCg).flatMap(([k, vs]) => [k, ...(Array.isArray(vs) ? vs : [])]));
     } else {
-      console.error(`candor-ts: no baseline callgraph sidecar at ${sidecarPath} — the AS-EFF-005 guard is `
-        + `WEAKER: existence falls back to the report, which omits pure functions, so a formerly-PURE fn `
-        + `turning effectful reads as new code and is NOT caught (only an already-effectful fn widening is). `
+      console.error(`candor-ts: no baseline callgraph sidecar at ${sidecarPath} — the AS-EFF-005 guard still `
+        + `compares every function (one absent from the baseline report against ∅), but cannot tell a `
+        + `formerly-PURE function from a new one, so its findings are labelled origin "unknown". `
         + `Regenerate the baseline with --out so the .callgraph.json is written alongside it.`);
     }
-    const unknownOnly = [];   // ⟨0.16⟩ advisory: fns that gained ONLY Unknown vs the baseline
+    const unknownOnly = [];      // ⟨0.16⟩ advisory: EXISTING fns that gained ONLY Unknown vs the baseline
+    const newUnknownOnly = [];   // ⟨0.40⟩ advisory, named separately: fns ABSENT from the baseline, only Unknown
+    let absentFired = false;     // ⟨0.40⟩ a firing on an absent key → print the review-first remedy once
     for (const name of [...inferred.keys()].sort()) {
       const prior = base.get(name);
-      // ⟨0.16⟩ Existence ladder: in the baseline REPORT → its recorded inferred set is the prior;
-      // else a baseline-callgraph NODE (sidecar present) → it existed and was pure, so prior = ∅ (any
-      // effect now is a gain); else genuinely absent → new code, exempt. Without the sidecar (cgNodes
-      // null) only the report path decides, the pre-⟨0.16⟩ semantics.
-      const priorSet = prior !== undefined ? prior
-        : (cgNodes !== null && cgNodes.has(name)) ? new Set()   // baseline-pure node → ∅ prior
-        : null;                                                 // new function — not a regression
-      if (priorSet === null) continue;
+      // ⟨0.40⟩ prior(key) = baseline[key] ?? ∅. The existence ladder survives only as the ⟨0.12⟩ LABEL:
+      // in the report → "existing"; a baseline-callgraph node (pure → omitted from the report) →
+      // "existing"; in neither with the sidecar loaded → "new"; absent from the report, no sidecar → "unknown".
+      const origin = prior !== undefined ? "existing"
+        : cgNodes === null ? "unknown"
+        : cgNodes.has(name) ? "existing" : "new";
+      const absent = origin !== "existing";
+      const priorSet = prior ?? new Set();
       const gained = [...inferred.get(name)].filter((x) => !priorSet.has(x)).sort();
       if (!gained.length) continue;
       // ⟨0.16⟩ the ratchet fires only on gaining a REAL boundary effect. An Unknown-ONLY gain is
@@ -12642,17 +13773,38 @@ if (baselinePath !== null) {
           // than read off an entry because this loop walks `inferred`, not `functions`; `unitHash` is the
           // one derivation, shared with the report entry.
           gateViolations.push({ rule: "AS-EFF-005", fn: name, ...(unitHash(name) ? { hash: unitHash(name) } : {}),
-            effects: ["Unknown"],
-            detail: `\`${name}\` gained an unresolved call (Unknown) not in the baseline — a NEW blind spot `
-              + `(unknown-ratchet); resolve it, or regenerate the baseline to grandfather it` });
+            effects: ["Unknown"], origin,
+            detail: absent
+              ? `\`${name}\` is ABSENT FROM THE BASELINE (under this key) and carries an unresolved call `
+                + `(Unknown) — a blind spot the baseline did not have (unknown-ratchet; prior ∅)`
+              : `\`${name}\` gained an unresolved call (Unknown) not in the baseline — a NEW blind spot `
+                + `(unknown-ratchet); resolve it, or regenerate the baseline to grandfather it` });
+          if (absent) absentFired = true;
+        } else if (absent) {
+          newUnknownOnly.push(name);
         } else {
           unknownOnly.push(name);
         }
         continue;
       }
       gateViolations.push({ rule: "AS-EFF-005", fn: name, ...(unitHash(name) ? { hash: unitHash(name) } : {}),
-        effects: real,
-        detail: `\`${name}\` gained effect { ${real.join(", ")} } not present in the baseline` });
+        effects: real, origin,
+        // ⟨0.40⟩ an absent key is NOT worded as a gain: under `Module.fn` keys a renamed file reads as
+        // absent too, so the message states what was measured (absent under this key), not new code.
+        detail: absent
+          ? `\`${name}\` is ABSENT FROM THE BASELINE (under this key) and performs { ${real.join(", ")} } — `
+            + `compared against nothing (prior ∅, origin ${origin})`
+          : `\`${name}\` gained effect { ${real.join(", ")} } not present in the baseline` });
+      if (absent) absentFired = true;
+    }
+    if (absentFired) {
+      // ⟨0.40⟩ REVIEW FIRST, then re-record — re-recording re-blesses everything else that moved, and the
+      // diff is how the operator sees what they would be blessing. `candor diff` takes the CURRENT report
+      // first (§3.1); its rows carry status "new".
+      console.error(`candor-ts: AS-EFF-005 fired on function(s) ABSENT from the baseline ${shownB} — absent under `
+        + `this engine's \`Module.fn\` key, which a file rename or move also produces. Review what changed: `
+        + `candor diff ${outPrefix}.json ${shownB} — then, if it is intended, record a new baseline with `
+        + `this build: candor-ts <target> --out <prefix>.`);
     }
     if (unknownOnly.length) {
       unknownOnly.sort();
@@ -12661,6 +13813,15 @@ if (baselinePath !== null) {
       console.error(`candor-ts: note — ${unknownOnly.length} function(s) gained an unresolved call `
         + `(Unknown) vs the baseline but no real effect — advisory, NOT a regression (Unknown is the §4 `
         + `trust marker, dominated by resolution noise on version bumps): ${shown}${more}`);
+    }
+    if (newUnknownOnly.length) {
+      // ⟨0.40⟩ NAMED, separately from the existing functions above: before this rung a new Unknown-only
+      // function was not mentioned at all. Advisory (exit 0) unless unknown-ratchet, which fails it above.
+      newUnknownOnly.sort();
+      const shown = newUnknownOnly.slice(0, 3).join(", ");
+      const more = newUnknownOnly.length > 3 ? ` (+${newUnknownOnly.length - 3} more)` : "";
+      console.error(`candor-ts: note — ${newUnknownOnly.length} new function(s) (absent from the baseline) carry `
+        + `only Unknown — advisory, not a regression: ${shown}${more}`);
     }
   }
 }

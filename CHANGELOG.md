@@ -10,6 +10,174 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ STRICTER: **the conformer pass looks through assertions — upcasts only** (SOUNDNESS R958, the resolution the review
+  chose over the open-world hedge). A value under `x as any`, `x as unknown as I` or `<I>x` keeps the checker type of
+  what it IS, and that names the conformer; each EXECUTED arm (a local class through `as any` at an argument, through
+  `as unknown as I` then a dispatch on the variable, through `<I>x`, and through `as any` into a CLASS-typed slot)
+  wrote its marker while `deny Fs` exited 0 at the dispatcher and at the entry. An assertion is also read as a
+  conversion of its operand to the asserted type wherever it sits. Only an UPCAST registers: a target constituent is
+  kept only if the inner type is assignable to it, and an asserted DOWNCAST (`base as Sub`) registers no supertype —
+  measured load-bearing, because a structurally identical `Base` IS assignable to `Sub`. That guard is scoped to
+  assertions: the same `Base` passed into a `Sub` slot WITHOUT one passed the checker and really is a `Base`, and
+  stays a conformer. NOTE the executed downcast fixture writes too (the value is a real `Base`); declining it is the
+  review's precision ruling, not a soundness proof. Corpus A/B (28-entry roster): CHANGED 2 (xstate: the `atom`
+  literal returned `as unknown as Atom<T>` now answers the store's `get` dispatch), 0 added, 0 removed, `inferred`
+  unchanged; reach 56 registrations through assertions in 11 entries (typeorm 38).
+
+- ⚠ STRICTER: **a callee that can hold more than one function calls every one of them** (SOUNDNESS R955). The call
+  walk resolved ONE declaration per call, and for a choice of functions the checker's union put first whichever TYPE
+  was created first — so `(c ? fb : fa)(p)` edged `fa` only when `fa` was declared first, an arrow-const pair edged
+  nothing in either order, and a report could change with an unrelated edit (rollup's one edge moved between two
+  helpers when type creation order changed). EXECUTED census, base: `?:` with the effectful function declared
+  second, arrow consts in both orders, `c && f || g`, `[g, f][i]`, `const pick = c ? g : f; pick(p)`, an IIFE
+  returning a choice, `(c ? g : f).call(…)` — caller ABSENT, `deny Fs` exit 0; `??`, `||`, a reassigned `let` —
+  `Unknown` only; `(0, f)`, `(f)`, `({a: f}).a`, `(() => f)()` were already right. The callee expression is now read
+  for every function value it can evaluate to (`?:` both arms, `??`/`||` both operands, `&&`/`,` the right one, an
+  array index, an IIFE's returns, a const or a reassigned `let` bound to any of these) and each is charged as a call
+  to it — a local unit (with its callback-argument slots), a parameter (callback flow), κ or the dependency funnel; a
+  value that cannot be bounded (`(x as any).f`, a body-less member signature) discloses `Unknown[callback:…]` (SPEC
+  §4's class for an owner-less invocation). Pure-only choices stay pure. Corpus A/B (28-entry roster): ADDED 6
+  (silent choices now disclosed), REMOVED 0, CHANGED 166, `inferred` CHANGED 12 (new charges traced: rxjs
+  `ajax*` -> the IIFE's `create` -> `fromAjax` Net; rollup's reassigned `timeStart` -> `timeStartImpl` Clock), 0
+  effects lost, no `Unknown` removed (5 placeholder `unresolved` whys became named ones); reach 233 choice
+  callees in 23 entries.
+
+- ⚠ STRICTER: **every conformer the type checker shows at an in-scan conversion is a dispatch candidate** (SOUNDNESS
+  R954, closing R927, R769 and R874; SPEC ⟨0.35⟩ §4). A candidate set used to hold only nominal
+  `implements` classes and literals written in a contextually-typed position, so one pure implementor made a dispatch
+  read COMPLETE while a value of another kind ran — silent at the dispatcher AND at an entry whose construction is
+  elsewhere, each EXECUTED: a local class that conforms by shape, an untyped literal converted later (same module or
+  another), an element-wise conversion (`Sink[]` from `X[]`), a field filled from a constructor parameter, `const s:
+  Sink = new LocalW(); s.m()`, a dependency class (`new DepThing()`, `dep.makeThing()`), and a literal or dependency
+  value in a CLASS-typed slot (R874, where the class arm had no candidate list at all). A new pass reads every
+  argument, typed initializer, return, assignment, element and property position — the TARGET is the contextual type,
+  the SOURCE the checker's type of the expression — and registers the conformer where every reader already asks:
+  `interfaceImpls`/`foreignInterfaceImpls` for an interface (so obligation 3's join sees it), and `classConformers`
+  (at the class and its ancestors, never a subtype) appended by `memberDispatchBodies`. A dependency conformer is
+  charged as a direct call to its member under its OWN key (R769's refusal stands), and keeps the dispatch's `Unknown`
+  when no chained report answers it; a published union over an interface a dependency class conforms to says
+  `Unknown` (R764). A source typed only through a generic signature (`dep.ident(x)`, `wrap<T>(x: T): T`) is NOT
+  read as the value (R82/PART 87: the signature proves assignability, not identity) unless the body is a proven
+  identity. `any`, assertions and dependency-invoked callbacks are NOT resolved here (that hedge is a separate
+  decision); R873 and class-expression overrides are the traversal half. Corpus A/B (28-entry roster): ADDED 45 (all
+  published union rows: 41 `Unknown`, 4 a conformer's genuine effect beside `Unknown`), REMOVED 0, CHANGED 175,
+  `inferred` CHANGED 20 (every new charge traced to a body), 0 concrete effects lost; reach 498 conversions in 26
+  entries.
+- ⚠ STRICTER: **a dgram `bind` handed a runtime NAME is an unseen Net destination** (SOUNDNESS R949, PART 96
+  `e_rtname`). node's `socket.bind(port, address)` / `bind({ address })` runs `dns.lookup(address)` first —
+  EXECUTED: `bind(0, "no-such-host.invalid")` fails `ENOTFOUND` in `getaddrinfo`, `bind(0, "localhost")` binds
+  127.0.0.1 — so a bind whose address may be a string this scan cannot read (checker-typed `string`/`any`/
+  `unknown`, or an options value whose `address` is not readable) marks `incomplete: ["Net"]`, and beside a
+  benign literal `allow Net <benign>` fails closed (exit 0 before). A port-only bind (`bind(0)`, `bind(0, cb)`,
+  `bind({ port })`) and a determined address (literal or `const`) mark nothing, and a bind address is still
+  never captured into `hosts`. A literal name resolved and discarded (`dns.lookup("evil.example", cb)`) was
+  already a `hosts` entry, confirmed. Corpus A/B (28-entry roster): CHANGED 0 — the rule has 0 sites on the
+  roster (reach probe 0, calibrated at 9 on the fixture), so the evidence is the executed fixture.
+
+- ⚠ STRICTER: **every route that invokes a κ-classified function now reaches κ and the locator guard**
+  (SOUNDNESS R947). Census over three effects × eleven invocation routes. Two classes of defect,
+  every cell EXECUTED by `node`:
+  - **SILENT — the effect was lost.** A κ builtin passed BY REFERENCE to an invoking HOF
+    (`xs.forEach(fs.unlinkSync)`, `setTimeout(fs.unlinkSync, 0, p)`, `.then(cp.execSync)`,
+    `setTimeout(net.connect, 0, 80, h)`), and a partially-applied `.bind` called (`fs.unlinkSync.bind(null, p)()`,
+    `cp.execSync.bind(null, c)()`, a LOCAL `del.bind(null, p)(1)`), were ABSENT from `functions[]`: `deny Fs`,
+    `deny Exec`, `deny Net` exited 0. The by-reference arm now asks κ (it went straight to the dependency funnel,
+    which never does, and a κ-KNOWN member read as covered); the `.bind` route resolves the bound target like
+    `.call` does. A type-only wrapper on a by-reference argument (`fs.unlinkSync as any`) is read through.
+  - **MASKED — the effect was charged, the locator never read.** `.call`/`.apply`/`Reflect.apply` reached κ but
+    not the guard, so beside a benign sibling `allow Net|Fs|Exec in <fn> <benign>` exited 0 over a runtime
+    locator and over a literal OTHER one, and over a ⟨0.40⟩ accept (`s.listen.call(s, p)`).
+    The same held for a κ package reached through an UNINSTALLED namespace import (`ax.get(u)` beside a
+    captured `fetch("https://ok.example/a")`).
+  The surface code (⟨0.29⟩ positions, ⟨0.37⟩ masking, ⟨0.40⟩ accept) moves out of the call walk into ONE
+  function, `chargeLocatorSurfaces`, which every route calls with the invoked function's own arguments, or
+  `null` when a library supplies them (then every establishing verb is marked). Also a RESOLUTION: a literal
+  locator through `.call`/`.apply`/`Reflect.apply` is now captured, so `allow` certifies it (it failed closed).
+  Corpus A/B (`bin/corpus-ab.py`, 28-entry roster): ADDED 0, REMOVED 0, CHANGED 2, `inferred` CHANGED 0 — two
+  ioredis units gain an edge to the pure `packObject` (`.map(packObject as …)`); 0 corpus reach for the three
+  routes, so the evidence for them is the executed fixtures.
+
+- ⚠ STRICTER: **a server that ACCEPTS has an incomplete `Net` surface** (SPEC §2 ⟨0.40⟩, SOUNDNESS R817 —
+  R781's listen half; PART 96 `c_accept`). node's server `listen` hands every arriving connection to the
+  handler, so its peers are whoever connects; before this, `netm.connect(80, "ok.example")` beside
+  `netm.createServer(h).listen(8080)` read `hosts: ["ok.example"]`, complete, and `allow Net in <fn> ok.example`
+  exited 0 — EXECUTED, a client connecting to that listener received the handler's bytes. A new set,
+  `NET_ACCEPTING` (`listen`), marks `incomplete` unconditionally and captures nothing from the call; it is
+  member-keyed on the resolved declaration, so http/https/http2/tls servers, `new net.Server`, a project
+  subclass, socket.io's `listen` and a `listen` in a callee are all covered without being named, plus two
+  module-specific accepts (`inspector.open`, `ws`'s `WebSocketServer` construction). `bind` is NOT an accept
+  and still marks nothing (PART 96 `b_rtbind`/`d_ephemeral` certify, as before). Also stops a FABRICATION:
+  `server.listen("10.0.0.5")` (node's pipe-path overload) published `hosts: ["10.0.0.5"]`. Corpus A/B
+  (`bin/corpus-ab.py`, 28-entry pinned roster): ADDED 0, REMOVED 0, CHANGED 76, `inferred` CHANGED 0 — every
+  change is `incomplete` gaining `Net`; 26 accept sites (25 `net.Server.listen`, 1 `inspector.open`) in 7
+  entries, each read from source; none of the 76 rows had a captured host, so no `allow Net` gate on the
+  roster moves. Not seen (listed at `netAccepting`): framework `listen`s κ does not classify (express, koa,
+  fastify), a reflectively-invoked `listen`, Bun/Deno servers.
+
+- ⚠ STRICTER: one masking rule for `Net` — **a host-bearing call whose host was not captured marks the
+  surface `incomplete`** — on the global-`fetch` path too (SOUNDNESS R802), and for undici's URL-first verbs
+  (SOUNDNESS R781, destination half). The fetch path used to ask an inclusion-shaped question (a template, a
+  `+` concat, or a `string`-typed value) while the κ path beside it asked "was a host captured?", so each of
+  these beside a benign `fetch("https://ok.example/a")` was certified by `allow Net in <fn> ok.example` (exit 0),
+  and each was EXECUTED against a local server that logged the caller's URL: `fetch(new URL(u))`,
+  `fetch(new Request(u))`, `fetch(u: URL)`, `fetch(u: RequestInfo | URL)`, `fetch(u: string | URL)`,
+  `fetch(u: any)`, `axios({ url: u })`, `undici.stream(u, …)`, `undici.pipeline(u, …)`, `undici.upgrade(u)`.
+  All now exit 1. A literal non-host (`fetch("/api")`) and a dotless `localhost:11434` Ollama URL on the fetch
+  path are now marked too, as the κ path already marked them. In the other direction, a DETERMINED URL object
+  is now a captured host — `new URL("https://h/x")`, `new URL("/p", "https://h")`, `new Request("https://h/x")`,
+  and a non-exported `const u = new URL(…)` used only as that call's argument or read — so it certifies; a URL
+  object that is assigned to, handed to another function, or built by a project class named `URL` is not
+  captured. Over the pinned 28-entry roster: 0 added, 0 removed, 41 changed — every change is `incomplete`
+  gaining `Net` on a unit with no captured host (the runtime-destination fetches in ofetch, unstorage, trpc,
+  hono, rxjs and pnpm, and their callers), so no `allow Net` gate there moves: each already failed closed on its
+  empty host surface. `listen`/`bind` are deliberately NOT marked: a listen address is local (R809), and
+  whether the accept side must mark the surface is the open spec question R817.
+- ⚠ STRICTER: `process.env` is charged as a VALUE, not as a spelling in a list of contexts (SOUNDNESS R928,
+  R804). The Env arm recognised the exact node `process.env` (or an alias initialised to exactly that node)
+  in seven reading contexts; every other spelling read as nothing. Now every expression whose value is the
+  environment object charges its unit unless its consumer provably touches no key (`typeof`, `===`/`!==`,
+  a truthiness test, a discarded value, or a binding that becomes an alias and is judged at its own uses).
+  Newly Env, all EXECUTED, all `deny Env <fn>` and `deny Unknown <fn>` exit 0 → `deny Env` exit 1:
+  `(process.env).X`, `(process.env as any).X`, `process.env!.X`, `satisfies`, `<any>process.env`,
+  `process["env"]`, `Object.keys((process.env))`, `structuredClone((process.env))`, `const e = process.env as
+  E`, `const e = o ?? process.env`, a ternary, an alias of an alias, a default parameter `e = process.env`,
+  `util.inspect`/`util.format('%o')`/`console.log` of the environment, `const asn = Object.assign; asn(process.env,
+  o)`, handing `process.env` to any function, and returning it. A binding reassigned away from
+  `process.env` (a MAY-alias) now discloses `Unknown[env-maybe-read]` on a read — it was ABSENT, not
+  `Unknown`, before — and never `Env`. A project's own `process` still matches nothing.
+  Over the pinned 28-entry roster: 12 rows added, 25 changed, 0 removed; 13 units gain a direct `Env`, every
+  one audited against source as a real read (pnpm `isExecutedByCorepack` and `prependDirsToPath`, citty's
+  `_color` module initializer, simple-git's environment guard, `envReplace(…, process.env)` ×3, …); 0
+  `Unknown`-only rows added.
+- ⚠ STRICTER (⟨0.40⟩ second half, SOUNDNESS R932): the AS-EFF-005 baseline guard no longer exempts a
+  function ABSENT from the baseline — its prior is ∅ (`baseline[key] ?? ∅`). A new function performing a real
+  effect now fails the scan (exit 1); a new pure function passes; a new `Unknown`-only function stays
+  advisory but is NAMED in its own note (and fails under `unknown-ratchet`, its Unknown being new). Every
+  AS-EFF-005 verdict row carries `origin` — `existing` / `new` / `unknown` (no callgraph sidecar) — and the
+  baseline callgraph sidecar now decides only that label: a formerly-pure function turning effectful fires
+  with or without it. An absent key is worded "ABSENT FROM THE BASELINE (under this key)", never "gained",
+  and the remedy leads with `candor diff <this run's report> <baseline>` before re-recording. A corrupt
+  sidecar still exits 2; a whole baseline FILE absent is still a note and exit 0. Flips one way, 0 → 1; no
+  flip at upgrade (a different-build baseline already exits 2). KEY NOISE, measured on the pinned 28-entry
+  roster with each entry's own HEAD report as its baseline: renaming one file fires on that file's effectful
+  units — ≥1 firing for 1,883 of the 4,632 files that carry an effectful or Unknown-only unit (mean 1.21,
+  max 66); inserting one line at the top of a file fires only on its offset-keyed `<structural>@N` units —
+  ≥1 firing for 134 of those files (max 16). Both calibrated by doing the edit: predicted 2 and 6, measured
+  2 and 6 (citty, git-js); the pre-⟨0.40⟩ build gave 0 on both.
+- ⚠ REPORT KEYS (SOUNDNESS R944): a unit with no name of its own is keyed by ANCHOR PATH + ORDINAL, not by
+  character offset. `<structural>@N.m`, `<callable>@N`, `<decorator>@N`, `<decorator-arg>@N` and
+  `defineProperty(…).get [computed@N]` used `node.getStart()`, so any edit above them in the same file — a
+  comment line — renamed them, and under ⟨0.40⟩'s AS-EFF-005 a renamed effectful unit fires (git-js: 6
+  firings from one comment line). They are now `<structural>@<enclosing/named/decls>#<k>.m` etc.: the names
+  of the enclosing named declarations, then a 1-based ordinal among same-shape nodes (same member name, for a
+  structural member) under that path in the same module. Stable across any edit outside those enclosing
+  declarations. Unique by construction, plus a claim check that falls back to the offset spelling rather
+  than ever merging two units; a seeded collision fixture keeps 16 of 16 units apart, and fuses them to 6
+  with the path forced constant and the check removed. Every such key in an existing report or baseline is
+  renamed by this build. Over the pinned 28-entry roster: 4,403 positional units renamed, 0 other keys
+  touched; every one pairs 1:1 with its old key by source position, and every report row and callgraph is
+  byte-equal once old keys are mapped to new (0 `inferred` changes). The `hash` of `<callable>`,
+  `<decorator>` and `<decorator-arg>` units changes with the key; `<structural>` hashes do not.
 - ⚠ STRICTER: a dispatch now reaches EVERY override below the body it resolved to, not one level of them
   (SOUNDNESS R871, R872). Five readers answered "which bodies can `x.m()` run?" separately and disagreed in
   one report; they now share one answer (`overrideDescent` / `memberDispatchBodies` / `implMemberBodies`).
