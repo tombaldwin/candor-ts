@@ -20443,6 +20443,105 @@ export function kFactory(): netm.Server { netm.connect(80, OK); return netm.crea
         gate("kFactory", "ok.example") === 0, JSON.stringify(row("kFactory")));
 }
 
+// ── R947: EVERY ROUTE THAT INVOKES A κ-CLASSIFIED FUNCTION REACHES THE SAME LOCATOR GUARD ─────────
+//
+// One question, asked of every invocation route rather than one row per spelling: does the call reach κ AND the
+// ⟨0.29⟩/⟨0.37⟩/⟨0.40⟩ locator guard? Census (2026-10-07, three effects × eleven routes): direct, `?.()`,
+// `a?.b()`, `a["b"]()`, a destructured or aliased reference and a `.bind(t)` with no bound argument all reached
+// it. Three routes did not, in two different ways:
+//   * `.call`/`.apply`/`Reflect.apply` reached κ (the effect) but NOT the guard: beside a benign sibling,
+//     `allow <E> in <fn> <benign>` exited 0 over a runtime locator AND over a literal OTHER one, for Net, Fs,
+//     Exec and the ⟨0.40⟩ accept alike;
+//   * a κ builtin passed BY REFERENCE (`xs.forEach(fs.unlinkSync)`, `setTimeout(net.connect, 0, 80, h)`,
+//     `.then(cp.execSync)`) and a `.bind(t, a…)(…)` with bound arguments reached NOTHING — the unit was ABSENT
+//     from `functions[]` and `deny Fs`/`deny Exec`/`deny Net` exited 0. A LOCAL `del.bind(null, p)(1)` too.
+// Every defect cell was EXECUTED by `node` (a local server accepted all five Net routes; the files were deleted;
+// the commands ran) and is red at the base this was written against.
+if (blk()) {
+  const d = project({
+    "src/f.ts": `import * as netm from "node:net";
+import * as fs from "node:fs";
+import * as cp from "node:child_process";
+function del(p: string, _n: number): void { fs.unlinkSync(p); }
+export function nCall(h: string): void { netm.connect(80, "ok.example"); netm.connect.call(undefined, 80 as any, h as any); }
+export function nApply(h: string): void { netm.connect(80, "ok.example"); netm.connect.apply(undefined, [80, h] as any); }
+export function nReflect(h: string): void { netm.connect(80, "ok.example"); Reflect.apply(netm.connect, undefined, [80, h]); }
+export function nCallEvil(): void { netm.connect(80, "ok.example"); netm.connect.call(undefined, 80 as any, "evil.example" as any); }
+export function aCall(): void { netm.connect(80, "ok.example"); const s = netm.createServer(); s.listen.call(s, 8080); }
+export function fCall(p: string): void { fs.readFileSync("/tmp/ok/a"); fs.readFileSync.call(undefined, p); }
+export function fApply(p: string): void { fs.readFileSync("/tmp/ok/a"); fs.readFileSync.apply(undefined, [p] as any); }
+export function fReflect(p: string): void { fs.readFileSync("/tmp/ok/a"); Reflect.apply(fs.readFileSync, undefined, [p]); }
+export function fApplyVar(a: [string]): void { fs.readFileSync("/tmp/ok/a"); fs.readFileSync.apply(undefined, a); }
+export function eCall(c: string): void { cp.execSync("ls"); cp.execSync.call(undefined, c); }
+export function eReflectEvil(): void { cp.execSync("ls"); Reflect.apply(cp.execSync, undefined, ["rm -rf /"]); }
+export function kCall(): void { netm.connect.call(undefined, 80 as any, "ok.example" as any); }
+export function kFsReflect(): void { Reflect.apply(fs.readFileSync, undefined, ["/tmp/ok/b"]); }
+export function kExecApply(): void { cp.execSync.apply(undefined, ["ls"] as any); }
+export function kFdCall(fd: number): void { fs.closeSync.call(undefined, fd); }
+export function hEach(ps: string[]): void { ps.forEach(fs.unlinkSync as any); }
+export function hTimeout(p: string): void { setTimeout(fs.unlinkSync, 0, p); }
+export function hThen(c: string): void { Promise.resolve(c).then(cp.execSync); }
+export function hNet(h: string): void { setTimeout(netm.connect, 0, 80, h); }
+export function hBound(p: string): void { setTimeout(fs.unlinkSync.bind(null, p), 0); }
+export function bFs(p: string): void { fs.unlinkSync.bind(null, p)(); }
+export function bExec(c: string): void { cp.execSync.bind(null, c)(); }
+export function bNet(h: string): void { netm.connect.bind(null, 80)(h as any); }
+export function bLocal(p: string): void { del.bind(null, p)(1); }
+export function bLit(): void { fs.readFileSync("/tmp/ok/a"); fs.readFileSync.bind(null, "/etc/passwd")(); }
+export function bNone(): void { fs.readFileSync.bind(undefined)("/tmp/ok/b"); }
+export function cPure(xs: unknown[]): unknown[] { return xs.map(String); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  // the GUARD on the reflective routes — a runtime locator, and a literal OTHER one, fail closed
+  for (const [fn, eff, lit] of [["nCall", "Net", "ok.example"], ["nApply", "Net", "ok.example"], ["nReflect", "Net", "ok.example"],
+                                ["nCallEvil", "Net", "ok.example"], ["aCall", "Net", "ok.example"],
+                                ["fCall", "Fs", "/tmp/ok"], ["fApply", "Fs", "/tmp/ok"], ["fReflect", "Fs", "/tmp/ok"], ["fApplyVar", "Fs", "/tmp/ok"],
+                                ["eCall", "Exec", "ls"], ["eReflectEvil", "Exec", "ls"]])
+    check(`REFL GUARD: \`allow ${eff} in src.f.${fn} ${lit}\` fails closed (exit 1; exit 0 at the base) — the reflective route reaches the locator guard`,
+          gate(`allow ${eff} in src.f.${fn} ${lit}`) === 1, JSON.stringify(row(fn)));
+  check("REFL CAPTURE: a literal reached through `.call` is the call's own locator — `nCallEvil` publishes evil.example",
+        (row("nCallEvil").hosts ?? []).includes("evil.example"), JSON.stringify(row("nCallEvil")));
+  // the RESOLUTION half: a DETERMINED locator through a reflective route certifies (it failed closed at the base)
+  for (const [fn, eff, lit] of [["kCall", "Net", "ok.example"], ["kFsReflect", "Fs", "/tmp/ok"], ["kExecApply", "Exec", "ls"]])
+    check(`REFL OVER-CHARGE CONTROL: \`${fn}\` — a literal locator through a reflective route certifies under \`allow ${eff} ${lit}\` (exit 0)`,
+          gate(`allow ${eff} in src.f.${fn} ${lit}`) === 0, JSON.stringify(row(fn)));
+  check("REFL USE-VERB CONTROL: `fs.closeSync.call(undefined, fd)` is an fd verb and marks nothing",
+        !(row("kFdCall").incomplete ?? []).length && (row("kFdCall").inferred ?? []).includes("Fs"), JSON.stringify(row("kFdCall")));
+  // the EFFECT on the by-reference and bound-argument routes — ABSENT at the base
+  for (const [fn, eff] of [["hEach", "Fs"], ["hTimeout", "Fs"], ["hThen", "Exec"], ["hNet", "Net"], ["hBound", "Fs"],
+                           ["bFs", "Fs"], ["bExec", "Exec"], ["bNet", "Net"], ["bLocal", "Fs"]]) {
+    check(`REFL EFFECT: \`${fn}\` carries ${eff} and \`deny ${eff} src.f.${fn}\` fires (exit 1; ABSENT and exit 0 at the base)`,
+          (row(fn).inferred ?? []).includes(eff) && gate(`deny ${eff} src.f.${fn}`) === 1, JSON.stringify(row(fn)));
+    if (fn !== "bLocal")
+      check(`REFL EFFECT: \`${fn}\`'s locator is not one this scan saw — \`incomplete\` names ${eff}`,
+            (row(fn).incomplete ?? []).includes(eff), JSON.stringify(row(fn)));
+  }
+  check("REFL EDGE: a LOCAL `del.bind(null, p)(1)` edges to `del` (ABSENT at the base)", (row("bLocal").calls ?? []).includes("src.f.del"), JSON.stringify(row("bLocal")));
+  check("REFL BIND CAPTURE: a BOUND literal is the invoked call's position 0 — `bLit` publishes /etc/passwd and fails `allow Fs /tmp/ok` closed",
+        (row("bLit").paths ?? []).includes("/etc/passwd") && gate("allow Fs in src.f.bLit /tmp/ok") === 1, JSON.stringify(row("bLit")));
+  check("REFL CONTROL: a `.bind(t)` with NO bound argument stays the (CLASSIFY) arm's — one captured path, no mark",
+        JSON.stringify(row("bNone").paths) === JSON.stringify(["/tmp/ok/b"]) && !(row("bNone").incomplete ?? []).length, JSON.stringify(row("bNone")));
+  {
+    // the UNINSTALLED-namespace κ route: the package is declared and absent, so the signature never resolves
+    const u = project({
+      "package.json": `{"name":"u","dependencies":{"axios":"^1"}}`,
+      "src/f.ts": `import * as ax from "axios";
+export async function uNs(u: string) { await fetch("https://ok.example/a"); return (ax as any).get(u); }
+export async function uNs2(u: string) { await fetch("https://ok.example/a"); return ax.get(u); }`,
+    });
+    fs.writeFileSync(path.join(u, "p.pol"), "allow Net in src.f.uNs2 ok.example\n");
+    const ex = scan(u, "--policy", path.join(u, "p.pol")).r.status;
+    check("REFL GUARD: a κ package through an UNINSTALLED namespace import reaches the guard — `ax.get(u)` beside a captured fetch fails `allow Net ok.example` closed (exit 1; 0 at the base)",
+          ex === 1, `exit ${ex}`);
+  }
+  check("REFL CONTROL: `xs.map(String)` is still pure — the by-reference κ arm adds nothing for the ES lib", noEffectCharged(report, "src.f.cPure"));
+}
+
 // ======================================================================================================
 // SOURCE-HYGIENE CENSUS — ported from candor-java's SourceHygieneTest (BACKLOG item 3).
 //

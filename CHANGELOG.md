@@ -10,6 +10,29 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ STRICTER: **every route that invokes a κ-classified function now reaches κ and the locator guard**
+  (SOUNDNESS R947). Census over three effects × eleven invocation routes. Two classes of defect,
+  every cell EXECUTED by `node`:
+  - **SILENT — the effect was lost.** A κ builtin passed BY REFERENCE to an invoking HOF
+    (`xs.forEach(fs.unlinkSync)`, `setTimeout(fs.unlinkSync, 0, p)`, `.then(cp.execSync)`,
+    `setTimeout(net.connect, 0, 80, h)`), and a partially-applied `.bind` called (`fs.unlinkSync.bind(null, p)()`,
+    `cp.execSync.bind(null, c)()`, a LOCAL `del.bind(null, p)(1)`), were ABSENT from `functions[]`: `deny Fs`,
+    `deny Exec`, `deny Net` exited 0. The by-reference arm now asks κ (it went straight to the dependency funnel,
+    which never does, and a κ-KNOWN member read as covered); the `.bind` route resolves the bound target like
+    `.call` does. A type-only wrapper on a by-reference argument (`fs.unlinkSync as any`) is read through.
+  - **MASKED — the effect was charged, the locator never read.** `.call`/`.apply`/`Reflect.apply` reached κ but
+    not the guard, so beside a benign sibling `allow Net|Fs|Exec in <fn> <benign>` exited 0 over a runtime
+    locator and over a literal OTHER one, and over a ⟨0.40⟩ accept (`s.listen.call(s, p)`).
+    The same held for a κ package reached through an UNINSTALLED namespace import (`ax.get(u)` beside a
+    captured `fetch("https://ok.example/a")`).
+  The surface code (⟨0.29⟩ positions, ⟨0.37⟩ masking, ⟨0.40⟩ accept) moves out of the call walk into ONE
+  function, `chargeLocatorSurfaces`, which every route calls with the invoked function's own arguments, or
+  `null` when a library supplies them (then every establishing verb is marked). Also a RESOLUTION: a literal
+  locator through `.call`/`.apply`/`Reflect.apply` is now captured, so `allow` certifies it (it failed closed).
+  Corpus A/B (`bin/corpus-ab.py`, 28-entry roster): ADDED 0, REMOVED 0, CHANGED 2, `inferred` CHANGED 0 — two
+  ioredis units gain an edge to the pure `packObject` (`.map(packObject as …)`); 0 corpus reach for the three
+  routes, so the evidence for them is the executed fixtures.
+
 - ⚠ STRICTER: **a server that ACCEPTS has an incomplete `Net` surface** (SPEC §2 ⟨0.40⟩, SOUNDNESS R817 —
   R781's listen half; PART 96 `c_accept`). node's server `listen` hands every arriving connection to the
   handler, so its peers are whoever connects; before this, `netm.connect(80, "ok.example")` beside

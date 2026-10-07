@@ -3088,8 +3088,8 @@ function isDestructuringAssignTarget(node) {
 // is_cmd_naming_method gate. Returns null when arg0 is not a static string literal — the safe
 // direction. ⟨0.29⟩ the `cmds` SURFACE reads this too: it was documented as cosmetic, but `cmds` is what
 // `allow Exec <cmd>` gates on (AS-EFF-008).
-function programHeadLiteral(node) {
-  const a0 = (node.arguments ?? [])[0];
+function programHeadLiteral(node, args = node.arguments ?? []) {
+  const a0 = args[0];
   return a0 && ts.isStringLiteralLike(a0) ? a0.text : null;
 }
 // The URL/endpoint literal of a host-bearing Net call, read from the DOCUMENTED URL arg position — a host
@@ -3278,8 +3278,7 @@ function declMemberToken(decl, name) {
   }
   return name;
 }
-function fsPathLiteral(node, member) {
-  const args = node.arguments ?? [];
+function fsPathLiteral(node, member, args = node.arguments ?? [], twoPaths = null) {
   const at = (i) => {
     const a = args[i];
     if (!a) return null;
@@ -3290,7 +3289,9 @@ function fsPathLiteral(node, member) {
   };
   const a0 = at(0);
   const listed = FS_TWO_PATH_MEMBERS.has(member);
-  const needsTwo = listed || signatureHasTwoPaths(node);
+  // `twoPaths` (non-null) answers for an INDIRECT route, whose own call node resolves to `Function.call`/a
+  // bound signature rather than the invoked `fs` verb — see `chargeLocatorSurfaces`.
+  const needsTwo = listed || (twoPaths ?? signatureHasTwoPaths(node));
   if (needsTwo && !listed) r801Hit(`two:${member}`);
   const a1 = needsTwo ? at(1) : null;
   const complete = a0 !== null && (!needsTwo || a1 !== null);
@@ -3480,8 +3481,293 @@ function determinedUrlObject(expr, call, depth = 0) {
   visit(d.getSourceFile());
   return safe ? determinedUrlObject(d.initializer, call, depth + 1) : null;
 }
-function urlArgLiteral(node, member, mod) {
-  const args = node.arguments ?? [];
+// R947 — the invoked function's own ARGUMENTS on the reflective routes, or `null` when they are not
+// visible here (a spread, an `.apply` of a non-literal array). `null` is the safe answer: it captures nothing.
+function unwrapArgExpr(e) {
+  while (e && (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression?.(e)
+               || ts.isNonNullExpression(e) || ts.isSatisfiesExpression?.(e))) e = e.expression;
+  return e;
+}
+function literalArgList(e) {
+  if (!e) return [];
+  const u = unwrapArgExpr(e);
+  if (!u || !ts.isArrayLiteralExpression(u)) return null;
+  return u.elements.some((x) => ts.isSpreadElement(x)) ? null : [...u.elements];
+}
+function reflectiveArgs(node, m, recvText) {
+  const as = [...(node.arguments ?? [])];
+  if (recvText === "Reflect") return m === "apply" ? literalArgList(as[2]) : null;
+  if (m === "call") { const r = as.slice(1); return r.some((x) => ts.isSpreadElement(x)) ? null : r; }
+  if (m === "apply") return literalArgList(as[1]);
+  return null;
+}
+// A `.bind` chain at a call's callee: `f.bind(t, a).bind(u, b)(c)` → { ref: f, bound: [a, b] }. Not a `.bind`
+// callee → null. `ref` is null when the chain's root is not a nameable reference (`getCb().bind(t, a)`).
+function bindChainCallee(expr) {
+  let e = unwrapArgExpr(expr);
+  const layers = [];
+  while (e && ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === "bind") {
+    layers.push([...(e.arguments ?? [])]);
+    e = unwrapArgExpr(e.expression.expression);
+  }
+  if (!layers.length) return null;
+  const bound = [];
+  for (const l of layers.reverse()) bound.push(...l.slice(1));
+  const ref = e && (ts.isIdentifier(e) || ts.isPropertyAccessExpression(e)
+                    || (ts.isElementAccessExpression(e) && accessedMemberName(e))) ? e : null;
+  return { ref, bound };
+}
+// Whether the invoked DECLARATION takes two paths — `signatureHasTwoPaths` for a route whose call node is not
+// the invoked function's own call.
+function declHasTwoPaths(decl) {
+  const ps = decl?.parameters ?? [];
+  if (ps.length < 2) return false;
+  const ty = (p) => checker.getTypeAtLocation(p);
+  try { return isPathParamType(ty(ps[0])) && isPathParamType(ty(ps[1])); } catch { return false; }
+}
+// The κ answer for a function reference (not a call): the module and the R801 member token, as the
+// (CLASSIFY) arm would compute them for a direct call to the same declaration.
+function kappaOfRef(d2, ref) {
+  if (!d2 || isOwnPackageDecl(d2)) return null;
+  const kMod = declModule(d2);
+  const raw = d2.name?.getText?.() ?? (ts.isIdentifier(ref) ? ref.text : accessedMemberName(ref));
+  const member = raw ? declMemberToken(d2, raw) : null;
+  const eff = kMod && member ? kappa(kMod, member) : null;
+  return eff ? { eff, kMod, member } : null;
+}
+// The Net verb predicates, shared by the (CLASSIFY) arm's closures and every indirect route. A construction is
+// the (CLASSIFY) arm's alone (`isConnectingCtor`, the `ws` server), so it is not asked here.
+function netEstablishingVerb(member, mod) {
+  return NET_ESTABLISHING.has(member) || (/^(node:)?dgram$/.test(mod ?? "") && member === "send");
+}
+function netAcceptingVerb(member, kMod) {
+  return NET_ACCEPTING.has(member) || (/^(node:)?inspector(\/promises)?$/.test(kMod ?? "") && member === "open");
+}
+// An INDIRECT route's surfaces: the Fs direction the (CLASSIFY) arm records, then the shared locator guard.
+function chargeInvokedSurfaces(rec, eff, member, kMod, node, args, decl) {
+  if (eff === "Fs") {
+    const ks = fsKind(kMod, member);
+    if (ks.length === 0) rec.fsKinds.add("?"); else for (const k of ks) rec.fsKinds.add(k);
+  }
+  chargeLocatorSurfaces(rec, eff, member, kMod, node, args, {
+    direct: false, accepting: netAcceptingVerb(member, kMod), establishing: netEstablishingVerb(member, kMod),
+    twoPaths: declHasTwoPaths(decl) });
+}
+// ── THE REFLECTIVE-INVOKE FUNNEL: a function reference INVOKED by `.call`/`.apply`/`Reflect.apply`/
+// `Reflect.construct` or by a partially-applied `.bind(t, a…)(…)` — resolved from the REFERENCE, because the
+// call node itself resolves to `Function.call` or to a bound signature that names no declaration. Was inline in
+// the call walk's `.call`/`.apply` arm; it is shared with the `.bind` route (R947), which reached
+// none of it — `fs.unlinkSync.bind(null, p)()` and a LOCAL `del.bind(null, p)(1)` were ABSENT from
+// `functions[]`, a positive purity claim over a body `node` ran to delete a file.
+// `args`: the invoked function's own arguments (see `chargeLocatorSurfaces`), `null` when not visible, or
+// `undefined` for `Reflect.construct`, whose surfaces the construction arm owns.
+function chargeInvokedRef(rec, node, invokedRef, args, whyTag) {
+  const d2 = refSlotDecl(invokedRef);
+  // Resolve the receiver/arg0 to its function unit, FOLLOWING local-variable aliases
+  // (`const m = effectful; m.call(…)`) — the direct-identifier form already landed on a minted
+  // unit, but an aliased local var resolves to its VARIABLE decl (not a unit), which dropped the
+  // edge silent-pure. `resolveFnRefUnit` chases the initializer alias to the real fn.
+  const t = (d2 && nodeName.get(d2)) || resolveFnRefUnit(invokedRef);
+  if (t) rec.edges.add(t);
+  else {
+    // Not a project unit — but the invoked reference may be a κ-modeled BUILTIN function
+    // (`fs.writeFileSync.call(…)` / `Reflect.apply(fs.writeFileSync, …)`): the reflective invoke reaches
+    // the SAME effect a direct call would. Classify the invoked function's DECLARATION through the same
+    // κ table (module + member), exactly as the (CLASSIFY) arm does. A PURE builtin — `[].slice.call`,
+    // `Array.prototype.map.call`, `Function.prototype.bind` — matches no κ rule and stays pure (no
+    // over-disclosure); an EFFECTFUL one (`fs.writeFileSync` → Fs, `dns.resolve` → Net) gets its effect.
+    const kMod = d2 && declModule(d2);
+    const kMember = declMemberToken(d2, d2?.name?.getText?.()
+      ?? (ts.isIdentifier(invokedRef) ? invokedRef.text : accessedMemberName(invokedRef)));  // R801 token
+    // SELF-NAME GUARD (see `isOwnPackageDecl`): the reflectively-invoked reference may be OUR
+    // OWN package's own function, reached through its own `dist/*.d.ts` — never let κ answer
+    // for it, same reasoning as the (CLASSIFY) arm.
+    const kEff = kMod && kMember && !isOwnPackageDecl(d2) ? kappa(kMod, kMember) : null;
+    // ⟨SOUNDNESS R587⟩ THE DISPATCH JOIN, AT THE FUNNEL THAT HAD NEITHER HALF OF IT. This is
+    // the site R573 was filed on and it was silent in EIGHT spellings, not the two the row
+    // named. `chargeExternalDecl` below runs `joinLocalImpls(recordDispatch(…))` — obligation
+    // 3's DECLARED half — and never `joinIndexSignatureImpls`, so a foreign index signature
+    // reached `[]`; and `declIsLocal` keeps a LOCAL declaration out of that funnel entirely,
+    // so both local spellings (index-signature AND declared-member) reached nothing at all
+    // and their callers were ABSENT. Measured at `6a639e6`, one file, `tsc` clean, every body
+    // ground-truthed by `node` to write a file:
+    //
+    //     fCall/fApply/fReflect  []      lCall/lApply/lReflect   ABSENT
+    //     ldCall/ldApply         ABSENT  ← the LOCAL DECLARED half, which R573 does not name
+    //     fdCall/fdApply ['Fs']  fPlain/fdPlain/ldPlain ['Fs']   ← the controls
+    //
+    // and the local half is STRICTLY WORSE than its own baseline: `li.roll(n)` discloses
+    // `Unknown` (`deny Unknown` exit 1) and the identical body through `.call` is silent.
+    //
+    // §G — THE SAME PREDICATE THE HOF-REF ARM CALLS, not a third join. Adding
+    // `joinIndexSignatureImpls` to `chargeExternalDecl` (the remedy the review named) would
+    // close three of these eight: that function receives no call-site expression, so it
+    // cannot supply the member name an index signature has no declaration to give, and it is
+    // unreachable for every LOCAL arm. The question "does this reference name an abstract
+    // member some visible implementor answers" is one question and now has one implementation.
+    //
+    // ⟨R574⟩ IS CARRIED ACROSS RATHER THAN RE-DECIDED. Where κ answered AND the receiver is
+    // demonstrably the package's own product (`const g = makeClient(); g.fetchIt.call(…)`),
+    // this hedges — `Unknown` + `dispatch:` — exactly as the CallExpression arm does, on the
+    // same `packageProducedReceiver` test with the same `eff ?` gate. Without it this fix
+    // would reintroduce R574's fabricated concrete effect at a NEW site, which is how that
+    // class spread the first time.
+    const ownProduct = kEff && (ts.isPropertyAccessExpression(invokedRef) || ts.isElementAccessExpression(invokedRef))
+      ? packageProducedReceiver(invokedRef.expression,
+          kMod?.startsWith("@types/") ? kMod.slice("@types/".length) : kMod)
+      : null;
+    chargeMemberRefDispatch(rec, invokedRef, d2, !!ownProduct, "R587-REACH");
+    if (kEff) {
+      rec.direct.add(kEff);
+      if (kEff === "Unknown") rec.why.add(`reflect:${kMod.replace(/^node:/, "")}.${kMember}`);
+      // R947 — …and the LOCATOR, which this arm never asked: `net.connect.call(null, 80, h)`
+      // beside `net.connect(80, "ok.example")` was certified by `allow Net ok.example` (Fs, Exec alike).
+      // A type-only wrapper on an argument (`h as any`, which `.call`'s `...args: any[]` invites) is the same
+                // runtime value, so it is read through; an identifier under one is then not this call's own
+                // argument, which `determinedUrlObject` refuses — the safe direction.
+                if (args !== undefined) chargeInvokedSurfaces(rec, kEff, kMember, kMod, node, args && args.map(unwrapArgExpr), d2);
+    }
+    // HONESTY: the receiver IS a local variable/parameter (a value declaration) that we could NOT pin
+    // to a function unit (bound to a param, a reassigned/branched value, an `any`-typed holder). The
+    // `.call`/`.apply` still INVOKES whatever it holds, so a silent-pure verdict would be the cardinal
+    // sin — disclose Unknown. (A direct fn identifier / known fn resolved above; a non-value receiver
+    // — a type, a literal — resolves to no decl and stays out, no fabrication.)
+    else if (d2 && (ts.isVariableDeclaration(d2) || ts.isBindingElement(d2) || ts.isParameter(d2))) {
+      rec.direct.add("Unknown");
+      rec.why.add(`callback:${whyTag}`); // method on an indeterminate-valued receiver (no resolvable owner TYPE) — canonical `callback:`, not the frontier's `dispatch:OWNER.member`
+    }
+    // THE FUNNEL: `d2` resolved to a concrete, non-local declaration that named neither a κ effect
+    // nor a value-holder shape above — a reflective `.call`/`.apply`/`Reflect.apply` onto an
+    // uncurated dependency's exported function (`depFn.call(this, x)`), the by-reference sibling
+    // of the HOF-ref arm's own `chargeExternalDecl(rec, d2)` call. Without this the invoke was
+    // NEITHER edged, NOR κ-classified, NOR disclosed — silent-pure on a call that unquestionably
+    // runs caller-reachable code, the same shape as the two cardinal sins this funnel closes.
+    else if (d2 && !declIsLocal(d2)) chargeExternalDecl(rec, d2, null,
+      (ts.isPropertyAccessExpression(invokedRef) || ts.isElementAccessExpression(invokedRef)) ? invokedRef.expression : null);
+  }
+}
+
+// ── SOUNDNESS R947 — THE LOCATOR SURFACES OF A κ-CLASSIFIED INVOCATION, ONE IMPLEMENTATION FOR EVERY ROUTE ───
+//
+// `hosts`/`tables`/`cmds`/`paths` and the per-effect masking marks (SPEC §2, ⟨0.29⟩ positions, ⟨0.37⟩ "no
+// captured locator ⇒ `incomplete`", ⟨0.40⟩ accepts). This lived inline in the call walk's (CLASSIFY) arm, and
+// the three OTHER routes that invoke a κ-classified function — `fn.call`/`fn.apply`/`Reflect.apply`, a
+// by-reference callback (`xs.forEach(fs.unlinkSync)`, `setTimeout(net.connect, 0, 80, h)`), and a
+// partially-applied `fn.bind(t, a)(b)` — never reached it: beside a benign sibling literal each of them was
+// CERTIFIED by `allow <E> in <fn> <benign>` over a runtime locator, for Net, Fs and Exec alike (measured,
+// 2026-10-07). So the question "was the locator captured?" now has one answer, asked by every route.
+//
+//   args      the arguments the INVOKED function receives, in its own positions (a `.call`'s arguments after
+//             `thisArg`, a literal `.apply` array, a `.bind` chain's bound arguments followed by the call's), or
+//             `null` when this route cannot see them — a callback a library invokes with values it chooses.
+//             `null` captures nothing and marks every establishing verb, which is the ⟨0.37⟩ rule applied to a
+//             locator nobody in this scan wrote down.
+//   direct    `args` IS `node.arguments` of a call that resolved to the invoked declaration — only then are
+//             the call's own signature (two-path `fs` verbs) and receiver (the ORM entity route) about it.
+//   twoPaths  for an indirect route: whether the invoked declaration takes two paths (its own parameters).
+function chargeLocatorSurfaces(rec, eff, member, kMod, node, args, { direct, accepting, establishing, twoPaths }) {
+  // ⟨0.40⟩ an accept marks the surface and captures NOTHING from its arguments — its address is where
+  // the process listens (R809's fabrication, now SPEC: "It MUST NOT enter `hosts`").
+  if (eff === "Net" && accepting) rec.incomplete.add("Net");
+  else if (eff === "Net") {
+    // The host predicate runs against the EXTRACTED URL argument (arg0 — the URL/endpoint slot of
+    // fetch/axios/the HTTP verbs), NEVER the first literal anywhere in the args: a trailing literal
+    // in headers/body/options must not be read as the host (FINDING 6). Ollama's model decision runs
+    // through the parsed host too, never a raw string that merely contains ":11434" (FINDING 1/9).
+    const urlLit = args ? urlArgLiteral(node, member, kMod, args) : null;
+    const ollama = ollamaFromUrlArg(urlLit);
+    if (ollama === "capture-model" || ollama === "capture-plain") {
+      const h = hostLiteral(urlLit);
+      rec.hosts.add(h);
+      // SPEC §1 ⟨0.13⟩ Llm host-literal refinement: a known model host makes this a model call
+      // (Llm + Net — Net is never dropped), exactly as a jdbc URL classifies Db.
+      for (const e of modelHostEffects(h)) rec.direct.add(e);
+    } else {
+      // No captured host literal. §1 ⟨0.13⟩ Ollama LOCAL endpoint (`localhost:11434`/`127.0.0.1:11434`):
+      // refine to Llm but do NOT capture the host as a Net allowlist literal (java parity #2 —
+      // preserve the host gate so `deny Llm` catches it while `allow Llm localhost` fails closed).
+      if (ollama === "llm-no-capture") rec.direct.add("Llm");
+      // MASKING fix: a host-ESTABLISHING Net call whose host is NOT a captured literal (runtime URL, or
+      // built elsewhere) leaves the host invisible to the gate → mark the surface incomplete so a
+      // benign literal can't mask it. ALLOWLIST of establishing forms only — NEVER use-calls
+      // (write/end/non-dgram send), which would false-positive on `socket.connect("h").write(data)`
+      // (the host is captured at connect). Under-catches an unlisted establishing verb (safe
+      // direction); never over-flags a use-call.
+      if (establishing) rec.incomplete.add("Net");
+    }
+  }
+  if (eff === "Db") {
+    // ⟨0.29⟩ THE SQL SLOT, never the first literal anywhere. Every string-SQL client puts the
+    // query at argument 0 (`query(text, values)`, `execute(sql, params)`, `raw(sql, bindings)`,
+    // `prepare(sql)`), so a literal in a LATER position is a parameter, a fallback query, a
+    // health-check string — data, not the statement being run. MEASURED:
+    // `db.query(userSql, "SELECT * FROM audit_log")` published `tables: ["audit_log"]` and, because
+    // a table HAD been captured, the masking guard below never fired — so `allow Db audit_log`
+    // certified a query whose SQL is a runtime value. The `Fs` and `Net` defects of this rung, in
+    // the fourth and last locator surface.
+    const a0 = args ? args[0] : null;
+    const lit = a0 && ts.isStringLiteralLike(a0) ? a0.text : null;
+    const before = rec.tables.size;
+    for (const t of lit ? tablesInSql(lit) : []) rec.tables.add(t);
+    // ORM route: `this.userRepository.find(…)` — the receiver's `Repository<UserEntity>`
+    // type argument names the entity; its `@Entity("user")` decorator names the table.
+    if (direct && ts.isPropertyAccessExpression(node.expression)) {
+      const rt = checker.getTypeAtLocation(node.expression.expression);
+      for (const ta of checker.getTypeArguments?.(rt) ?? rt?.typeArguments ?? []) {
+        const d = ta?.symbol?.declarations?.[0];
+        const tbl = d && entityTables.get(d);
+        if (tbl) rec.tables.add(tbl);
+      }
+    }
+    // masking: a Db call that surfaced NO table (no SQL literal, no entity-typed receiver) reaches a
+    // runtime/invisible table — a benign sibling query's literal table must not mask it. The entity
+    // route above is NOT a literal so it still counts as visible (a captured table); only a fully
+    // invisible query marks incomplete. `new` (a connection ctor) carries no table — skip it.
+    if (rec.tables.size === before && member !== "new") rec.incomplete.add("Db");
+  }
+  if (eff === "Exec") {
+    // ⟨0.29⟩ `cmds` reads argv[0] too. It was documented as "the cosmetic cmds surface (any
+    // literal)", but `cmds` is precisely what `allow Exec <cmd>` gates on (AS-EFF-008) — nothing
+    // cosmetic about it. No node API places a bare string after the head (args are an array,
+    // options an object), so this changes no measured behaviour today; it removes the hazard for
+    // the next exec-like wrapper whose second argument is a string, which is how the identical
+    // defect reached `Fs`, `Net` and `Db` in this same rung.
+    // ⟨0.29⟩ A USE-VERB NAMES NO PROGRAM, and its argument 0 is not a head. `EXEC_USE_VERBS`
+    // already says so — it is consulted for the `incomplete` branch below and was NOT consulted
+    // here, so `child.send(msg)` (IPC to an ALREADY-spawned child) read its MESSAGE as argv[0].
+    // MEASURED: `ch.send("ls")` published `cmds: ["ls"]` and certified under `allow Exec ls`
+    // though the function executes nothing, and `ch.send("curl")` FABRICATED `Net` — a function
+    // that makes no network call reported as performing one, which `deny Net` then fires on.
+    // That is exactly what the doc comment above forbids ("`spawn(toolVar, "curl")` must NOT
+    // fabricate Net — the literal is an argument, not the program"); the rule was written for the
+    // argument POSITION and never covered the same hazard reached through the RECEIVER.
+    const lit = EXEC_USE_VERBS.has(member) || !args ? null : programHeadLiteral(node, args);
+    if (lit) rec.cmds.add(lit.trim().split(/\s+/)[0]);
+    // a known literal head refines the cliff (curl→Net, candor→Fs/Env); Exec stays. The head
+    // MUST be argv[0] (programHeadLiteral), NOT any literal arg: `spawn(toolVar, "curl")`
+    // names no static program, so its trailing literal must not fabricate Net (spec §4).
+    const head = lit;
+    if (head) for (const e of commandHeadEffects(head)) rec.direct.add(e);
+    // masking (sweep [11]): an Exec call whose program head is NOT a static literal (runtime
+    // command) leaves the command invisible. Establishing = the spawn fns; ChildProcess use-verbs
+    // (kill/send/disconnect/ref/unref) carry no command and are excluded.
+    else if (!EXEC_USE_VERBS.has(member)) rec.incomplete.add("Exec");
+  }
+  if (eff === "Fs") {
+    // ⟨0.29⟩ the PATH POSITION, never the first literal anywhere — see fsPathLiteral.
+    const { lits, complete } = args ? fsPathLiteral(node, member, args, direct ? null : twoPaths) : { lits: [], complete: false };
+    const captured = lits.filter((l) => /[/\\]|^[.~]/.test(l)); // path-shaped literals only
+    const pathCaptured = captured.length > 0 && captured.length === lits.length;
+    for (const l of captured) rec.paths.add(l);
+    // masking (sweep [11]): a path-taking fs.* call whose path is NOT a captured literal (runtime
+    // path) leaves it invisible. fd/FileHandle USE-verbs (fd came from a prior open()) are excluded.
+    // ⟨0.29⟩ `complete` also covers a two-path op whose SECOND path is runtime, which a captured
+    // position-0 literal would otherwise certify.
+    if (!(pathCaptured && complete) && !FS_USE_VERBS.has(member)) rec.incomplete.add("Fs");
+  }
+}
+
+function urlArgLiteral(node, member, mod, args = node.arguments ?? []) {
   const litAt = (i) => {
     const a = args[i];
     if (!a) return null;
@@ -8204,20 +8490,25 @@ function visitCalls(node) {
           // package isn't installed in this tree. The κ table may still MODEL it, so classify by the import
           // SPECIFIER (the syntactic path, mirroring how the Rust scanner classifies a crate path without
           // building). Only fires for κ-modeled packages (winston/pino/pg/…); everything else still → Unknown.
-          let kEff = null;
+          let kEff = null, kSpec = null;
           if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
               && ts.isIdentifier(node.expression.expression)) {
             const sym = checker.getSymbolAtLocation(node.expression.expression);
             for (const d of sym?.declarations ?? []) {
               if (ts.isNamespaceImport(d)) {
                 const spec = d.parent?.parent?.moduleSpecifier;
-                if (spec && ts.isStringLiteralLike(spec)) kEff = kappa(spec.text, node.expression.name.text);
+                if (spec && ts.isStringLiteralLike(spec)) { kSpec = spec.text; kEff = kappa(kSpec, node.expression.name.text); }
                 break;
               }
             }
           }
           if (kEff) {
             rec.direct.add(kEff); // κ-modeled package reached via an uninstalled namespace import
+            // R947 — …and its LOCATOR, the guard every other κ route now reaches. Measured: beside a
+            // captured `fetch("https://ok.example/a")`, `ax.get(u)` on an uninstalled `axios` certified `allow Net
+            // ok.example` (exit 0); `fsx.readFileSync(p)` likewise for Fs. The signature did not resolve, so the
+            // positions are the call's own and nothing about the signature is known (`twoPaths` false).
+            chargeInvokedSurfaces(rec, kEff, node.expression.name.text, kSpec, node, node.arguments ?? [], null);
           } else if (ts.isCallExpression(node) && importedFromNetPkg(node.expression)) {
             rec.direct.add("Net"); // bare call to an HTTP-client default/named import whose pkg isn't installed
                                    // (so its signature didn't resolve) — Net, not Unknown (#13). Host capture
@@ -8275,7 +8566,11 @@ function visitCalls(node) {
         const calleeName = ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text
           : ts.isIdentifier(node.expression) ? node.expression.text : null;
         if (mod !== "<local>" && calleeName && HOF_INVOKERS.has(calleeName)) {
-          node.arguments?.forEach((a, argIdx) => {
+          node.arguments?.forEach((a0, argIdx) => {
+            // R947 — a TYPE-ONLY wrapper is the same reference: `xs.forEach(fs.unlinkSync as any)`
+            // was dropped by the id/property-access gate below (no edge, no κ, no disclosure) while the bare
+            // spelling was not. `as`/`!`/`satisfies`/parentheses change no runtime value.
+            const a = unwrapArgExpr(a0);
             // A `<ref>.bind(…)` partial-application is a CallExpression (skipped by the id/property-access
             // gate below) but the INVOKING HOF calls the bound fn → its effects are reachable. Unwrap the
             // `.bind` chain to the root receiver and resolve it like a bare ref (`resolveFnRefUnit` follows
@@ -8292,7 +8587,14 @@ function visitCalls(node) {
               const bref = bound.ref;
               const d3 = bref && realDecl(checker.getSymbolAtLocation(bref));
               const tb = (d3 && nodeName.get(d3)) || (bref && resolveFnRefUnit(bref));
+              const kb = !tb && d3 && !declIsLocal(d3) ? kappaOfRef(d3, bref) : null;
               if (tb) rec.edges.add(tb);
+              // R947 — a BOUND κ builtin (`setTimeout(fs.unlinkSync.bind(null, p), 0)`) is charged as
+              // the builtin, not hedged as an opaque callback. The bound arguments are visible but the call's are
+              // not, so the locator is read as not visible (`null`): bound arguments fill positions from 0 and a
+              // later caller-supplied one could still be the locator of a two-path verb.
+              else if (kb) { rec.direct.add(kb.eff); if (kb.eff === "Unknown") rec.why.add(`reflect:${kb.kMod.replace(/^node:/, "")}.${kb.member}`);
+                             chargeInvokedSurfaces(rec, kb.eff, kb.member, kb.kMod, node, null, d3); }
               else {
                 rec.direct.add("Unknown");
                 rec.why.add(`callback:bind:${(bref ?? a).getText().replace(/\s+/g, "").slice(0, 40)}`); // `.bind(...)` yields a function VALUE — canonical `callback:`
@@ -8373,6 +8675,16 @@ function visitCalls(node) {
             // dep VALUE with a call signature, passes. Guard (1) exists for exactly this shape and its own
             // comment names the case (`path.reduce(fn, obj)`); the new arm simply ran before it.
             if (d2 && !declIsLocal(d2) && argIsCallable(a)) {
+              // R947 — A κ-CLASSIFIED BUILTIN PASSED BY REFERENCE. `chargeExternalDecl` is the
+              // dependency funnel and never asks κ, and `disclosureTail` treats a κ-KNOWN member as covered, so
+              // `xs.forEach(fs.unlinkSync)`, `setTimeout(fs.unlinkSync, 0, p)`, `.then(cp.execSync)` and
+              // `setTimeout(net.connect, 0, 80, h)` charged NOTHING — ABSENT from `functions[]`, `deny Fs`/`deny
+              // Exec`/`deny Net` exit 0, every one EXECUTED by `node` to perform the effect. κ answers here exactly
+              // as for a direct call to the same declaration; the library supplies the arguments, so the locator
+              // is not visible (`args` null) and every establishing verb is marked `incomplete`.
+              const k = kappaOfRef(d2, a);
+              if (k) { rec.direct.add(k.eff); if (k.eff === "Unknown") rec.why.add(`reflect:${k.kMod.replace(/^node:/, "")}.${k.member}`);
+                       chargeInvokedSurfaces(rec, k.eff, k.member, k.kMod, node, null, d2); return; }
               chargeExternalDecl(rec, d2, null,
                 (ts.isPropertyAccessExpression(a) || ts.isElementAccessExpression(a)) ? a.expression : null);
               return;
@@ -8398,6 +8710,23 @@ function visitCalls(node) {
         // silent-pure (HIGH: a common reflective-invoke shape). Edge to the referenced unit, mirroring the
         // HOF-ref arm: a pure ref edges to a pure unit (no fabrication); a non-fn receiver/arg resolves to
         // no minted unit (`nodeName` miss) and adds nothing; an unresolvable ref stays opaque/Unknown.
+        // R947 — A PARTIALLY-APPLIED `.bind`, CALLED: `f.bind(t, a)(b)` invokes `f(a, b)`. The checker
+        // resolves the call to the bound signature `(...args: A) => R`, which names no declaration, so neither
+        // the edge nor κ nor a disclosure ran and the caller was ABSENT — `fs.unlinkSync.bind(null, p)()` and a
+        // LOCAL `del.bind(null, p)(1)` alike, both EXECUTED to delete a file. A `.bind` with NO bound argument
+        // keeps the target's signature and is the (CLASSIFY) arm's (measured: it reads the call as the target's
+        // own), so it is left there rather than charged twice.
+        if (ts.isCallExpression(node)) {
+          const bc = bindChainCallee(node.expression);
+          if (bc && bc.bound.length) {
+            const tag = `bind:${(bc.ref ?? node.expression).getText().replace(/\s+/g, "").slice(0, 40)}`;
+            if (!bc.ref) { rec.direct.add("Unknown"); rec.why.add(`callback:${tag}`); }
+            else {
+              const all = [...bc.bound, ...(node.arguments ?? [])];
+              chargeInvokedRef(rec, node, bc.ref, all.some((x) => ts.isSpreadElement(x)) ? null : all, tag);
+            }
+          }
+        }
         if (ts.isPropertyAccessExpression(node.expression)) {
           const m = node.expression.name.text;
           const recv = node.expression.expression;
@@ -8418,83 +8747,8 @@ function visitCalls(node) {
           // rather than guessed at, which is the same line R524 drew.
           if (invokedRef && (ts.isIdentifier(invokedRef) || ts.isPropertyAccessExpression(invokedRef)
                              || (ts.isElementAccessExpression(invokedRef) && accessedMemberName(invokedRef)))) {
-            const d2 = refSlotDecl(invokedRef);
-            // Resolve the receiver/arg0 to its function unit, FOLLOWING local-variable aliases
-            // (`const m = effectful; m.call(…)`) — the direct-identifier form already landed on a minted
-            // unit, but an aliased local var resolves to its VARIABLE decl (not a unit), which dropped the
-            // edge silent-pure. `resolveFnRefUnit` chases the initializer alias to the real fn.
-            const t = (d2 && nodeName.get(d2)) || resolveFnRefUnit(invokedRef);
-            if (t) rec.edges.add(t);
-            else {
-              // Not a project unit — but the invoked reference may be a κ-modeled BUILTIN function
-              // (`fs.writeFileSync.call(…)` / `Reflect.apply(fs.writeFileSync, …)`): the reflective invoke reaches
-              // the SAME effect a direct call would. Classify the invoked function's DECLARATION through the same
-              // κ table (module + member), exactly as the (CLASSIFY) arm does. A PURE builtin — `[].slice.call`,
-              // `Array.prototype.map.call`, `Function.prototype.bind` — matches no κ rule and stays pure (no
-              // over-disclosure); an EFFECTFUL one (`fs.writeFileSync` → Fs, `dns.resolve` → Net) gets its effect.
-              const kMod = d2 && declModule(d2);
-              const kMember = d2?.name?.getText?.()
-                ?? (ts.isIdentifier(invokedRef) ? invokedRef.text : accessedMemberName(invokedRef));
-              // SELF-NAME GUARD (see `isOwnPackageDecl`): the reflectively-invoked reference may be OUR
-              // OWN package's own function, reached through its own `dist/*.d.ts` — never let κ answer
-              // for it, same reasoning as the (CLASSIFY) arm.
-              const kEff = kMod && kMember && !isOwnPackageDecl(d2) ? kappa(kMod, kMember) : null;
-              // ⟨SOUNDNESS R587⟩ THE DISPATCH JOIN, AT THE FUNNEL THAT HAD NEITHER HALF OF IT. This is
-              // the site R573 was filed on and it was silent in EIGHT spellings, not the two the row
-              // named. `chargeExternalDecl` below runs `joinLocalImpls(recordDispatch(…))` — obligation
-              // 3's DECLARED half — and never `joinIndexSignatureImpls`, so a foreign index signature
-              // reached `[]`; and `declIsLocal` keeps a LOCAL declaration out of that funnel entirely,
-              // so both local spellings (index-signature AND declared-member) reached nothing at all
-              // and their callers were ABSENT. Measured at `6a639e6`, one file, `tsc` clean, every body
-              // ground-truthed by `node` to write a file:
-              //
-              //     fCall/fApply/fReflect  []      lCall/lApply/lReflect   ABSENT
-              //     ldCall/ldApply         ABSENT  ← the LOCAL DECLARED half, which R573 does not name
-              //     fdCall/fdApply ['Fs']  fPlain/fdPlain/ldPlain ['Fs']   ← the controls
-              //
-              // and the local half is STRICTLY WORSE than its own baseline: `li.roll(n)` discloses
-              // `Unknown` (`deny Unknown` exit 1) and the identical body through `.call` is silent.
-              //
-              // §G — THE SAME PREDICATE THE HOF-REF ARM CALLS, not a third join. Adding
-              // `joinIndexSignatureImpls` to `chargeExternalDecl` (the remedy the review named) would
-              // close three of these eight: that function receives no call-site expression, so it
-              // cannot supply the member name an index signature has no declaration to give, and it is
-              // unreachable for every LOCAL arm. The question "does this reference name an abstract
-              // member some visible implementor answers" is one question and now has one implementation.
-              //
-              // ⟨R574⟩ IS CARRIED ACROSS RATHER THAN RE-DECIDED. Where κ answered AND the receiver is
-              // demonstrably the package's own product (`const g = makeClient(); g.fetchIt.call(…)`),
-              // this hedges — `Unknown` + `dispatch:` — exactly as the CallExpression arm does, on the
-              // same `packageProducedReceiver` test with the same `eff ?` gate. Without it this fix
-              // would reintroduce R574's fabricated concrete effect at a NEW site, which is how that
-              // class spread the first time.
-              const ownProduct = kEff && (ts.isPropertyAccessExpression(invokedRef) || ts.isElementAccessExpression(invokedRef))
-                ? packageProducedReceiver(invokedRef.expression,
-                    kMod?.startsWith("@types/") ? kMod.slice("@types/".length) : kMod)
-                : null;
-              chargeMemberRefDispatch(rec, invokedRef, d2, !!ownProduct, "R587-REACH");
-              if (kEff) {
-                rec.direct.add(kEff);
-                if (kEff === "Unknown") rec.why.add(`reflect:${kMod.replace(/^node:/, "")}.${kMember}`);
-              }
-              // HONESTY: the receiver IS a local variable/parameter (a value declaration) that we could NOT pin
-              // to a function unit (bound to a param, a reassigned/branched value, an `any`-typed holder). The
-              // `.call`/`.apply` still INVOKES whatever it holds, so a silent-pure verdict would be the cardinal
-              // sin — disclose Unknown. (A direct fn identifier / known fn resolved above; a non-value receiver
-              // — a type, a literal — resolves to no decl and stays out, no fabrication.)
-              else if (d2 && (ts.isVariableDeclaration(d2) || ts.isBindingElement(d2) || ts.isParameter(d2))) {
-                rec.direct.add("Unknown");
-                rec.why.add(`callback:${recvText.slice(0, 40)}.${m}`); // method on an indeterminate-valued receiver (no resolvable owner TYPE) — canonical `callback:`, not the frontier's `dispatch:OWNER.member`
-              }
-              // THE FUNNEL: `d2` resolved to a concrete, non-local declaration that named neither a κ effect
-              // nor a value-holder shape above — a reflective `.call`/`.apply`/`Reflect.apply` onto an
-              // uncurated dependency's exported function (`depFn.call(this, x)`), the by-reference sibling
-              // of the HOF-ref arm's own `chargeExternalDecl(rec, d2)` call. Without this the invoke was
-              // NEITHER edged, NOR κ-classified, NOR disclosed — silent-pure on a call that unquestionably
-              // runs caller-reachable code, the same shape as the two cardinal sins this funnel closes.
-              else if (d2 && !declIsLocal(d2)) chargeExternalDecl(rec, d2, null,
-                (ts.isPropertyAccessExpression(invokedRef) || ts.isElementAccessExpression(invokedRef)) ? invokedRef.expression : null);
-            }
+            chargeInvokedRef(rec, node, invokedRef,
+              m === "construct" ? undefined : reflectiveArgs(node, m, recvText), `${recvText.slice(0, 40)}.${m}`);
           }
           // EXPLICIT iterator force: `it.next()` / `it.return()` / `it.throw()` on an OPAQUE iterator
           // (a parameter / `any` / type-parameter typed as the `Iterator`/`Generator` protocol) runs
@@ -8977,8 +9231,7 @@ function visitCalls(node) {
           // `ctorRuleName` (below) rather than `ctorClassName`: a connecting ctor reached through a local
           // alias must still fail the surface closed on a runtime URL. Evaluated at call time, after it.
           const netEstablishing = (member) =>
-            isConnectingCtor(ctorRuleName) || NET_ESTABLISHING.has(member)
-            || (/^(node:)?dgram$/.test(mod) && member === "send");
+            isConnectingCtor(ctorRuleName) || netEstablishingVerb(member, mod);
           // SOUNDNESS R817 / SPEC §2 ⟨0.40⟩ — an ACCEPT: the peers are whoever connects, so no literal anywhere
           // in the unit can determine them (scan-core NET_ACCEPTING says why `listen` and why not `bind` or
           // `createServer`). Asked only of a call κ already classified `Net`, and against `kMod`, the module κ
@@ -8995,8 +9248,7 @@ function visitCalls(node) {
           //     arm, which applies no Net masking to ANY verb (connect included) — a separate route;
           //   * Bun.serve / Deno.serve / `Deno.listen` — not node, not in κ.
           const netAccepting = (member) =>
-            NET_ACCEPTING.has(member)
-            || (/^(node:)?inspector(\/promises)?$/.test(kMod) && member === "open")
+            netAcceptingVerb(member, kMod)
             || (/^ws$/.test(kMod) && member === "new" && /^(WebSocketServer|Server)$/.test(ctorClassName));
           // ⟨0.32⟩ THE CLASS BEING CONSTRUCTED, TAKEN FROM THE `new` EXPRESSION rather than from the
           // resolved constructor. A class that declares no constructor of its own INHERITS one, and
@@ -9158,110 +9410,13 @@ function visitCalls(node) {
             if (eff === "Unknown") rec.why.add(`reflect:${kMod.replace(/^node:/, "")}.${member}`);
           }
           // the literal surfaces, read only at a CLASSIFIED call (SPEC §2)
-          // ⟨0.40⟩ an accept marks the surface and captures NOTHING from its arguments — its address is where
-          // the process listens (R809's fabrication, now SPEC: "It MUST NOT enter `hosts`").
-          if (eff === "Net" && netAccepting(member)) rec.incomplete.add("Net");
-          else if (eff === "Net") {
-            // The host predicate runs against the EXTRACTED URL argument (arg0 — the URL/endpoint slot of
-            // fetch/axios/the HTTP verbs), NEVER the first literal anywhere in the args: a trailing literal
-            // in headers/body/options must not be read as the host (FINDING 6). Ollama's model decision runs
-            // through the parsed host too, never a raw string that merely contains ":11434" (FINDING 1/9).
-            const urlLit = urlArgLiteral(node, member, kMod);
-            const ollama = ollamaFromUrlArg(urlLit);
-            if (ollama === "capture-model" || ollama === "capture-plain") {
-              const h = hostLiteral(urlLit);
-              rec.hosts.add(h);
-              // SPEC §1 ⟨0.13⟩ Llm host-literal refinement: a known model host makes this a model call
-              // (Llm + Net — Net is never dropped), exactly as a jdbc URL classifies Db.
-              for (const e of modelHostEffects(h)) rec.direct.add(e);
-            } else {
-              // No captured host literal. §1 ⟨0.13⟩ Ollama LOCAL endpoint (`localhost:11434`/`127.0.0.1:11434`):
-              // refine to Llm but do NOT capture the host as a Net allowlist literal (java parity #2 —
-              // preserve the host gate so `deny Llm` catches it while `allow Llm localhost` fails closed).
-              if (ollama === "llm-no-capture") rec.direct.add("Llm");
-              // MASKING fix: a host-ESTABLISHING Net call whose host is NOT a captured literal (runtime URL, or
-              // built elsewhere) leaves the host invisible to the gate → mark the surface incomplete so a
-              // benign literal can't mask it. ALLOWLIST of establishing forms only — NEVER use-calls
-              // (write/end/non-dgram send), which would false-positive on `socket.connect("h").write(data)`
-              // (the host is captured at connect). Under-catches an unlisted establishing verb (safe
-              // direction); never over-flags a use-call.
-              if (netEstablishing(member)) rec.incomplete.add("Net");
-            }
-          }
+          chargeLocatorSurfaces(rec, eff, member, kMod, node, node.arguments ?? [],
+            { direct: true, accepting: netAccepting(member), establishing: netEstablishing(member) });
           // SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface: a call into a curated model-provider client (the
           // scan-core MODEL_SDK regex, also the whole-module Net κ rule above) dispatches a model request
           // → Llm + Net. Net came from κ (eff === "Net"); add Llm on top. NO method-name gating (java
           // parity #1) — any call into these single-purpose clients is a model dispatch. Additive.
           if (isModelSdkPackage(mod)) rec.direct.add("Llm");
-          if (eff === "Db") {
-            // ⟨0.29⟩ THE SQL SLOT, never the first literal anywhere. Every string-SQL client puts the
-            // query at argument 0 (`query(text, values)`, `execute(sql, params)`, `raw(sql, bindings)`,
-            // `prepare(sql)`), so a literal in a LATER position is a parameter, a fallback query, a
-            // health-check string — data, not the statement being run. MEASURED:
-            // `db.query(userSql, "SELECT * FROM audit_log")` published `tables: ["audit_log"]` and, because
-            // a table HAD been captured, the masking guard below never fired — so `allow Db audit_log`
-            // certified a query whose SQL is a runtime value. The `Fs` and `Net` defects of this rung, in
-            // the fourth and last locator surface.
-            const a0 = (node.arguments ?? [])[0];
-            const lit = a0 && ts.isStringLiteralLike(a0) ? a0.text : null;
-            const before = rec.tables.size;
-            for (const t of lit ? tablesInSql(lit) : []) rec.tables.add(t);
-            // ORM route: `this.userRepository.find(…)` — the receiver's `Repository<UserEntity>`
-            // type argument names the entity; its `@Entity("user")` decorator names the table.
-            if (ts.isPropertyAccessExpression(node.expression)) {
-              const rt = checker.getTypeAtLocation(node.expression.expression);
-              for (const ta of checker.getTypeArguments?.(rt) ?? rt?.typeArguments ?? []) {
-                const d = ta?.symbol?.declarations?.[0];
-                const tbl = d && entityTables.get(d);
-                if (tbl) rec.tables.add(tbl);
-              }
-            }
-            // masking: a Db call that surfaced NO table (no SQL literal, no entity-typed receiver) reaches a
-            // runtime/invisible table — a benign sibling query's literal table must not mask it. The entity
-            // route above is NOT a literal so it still counts as visible (a captured table); only a fully
-            // invisible query marks incomplete. `new` (a connection ctor) carries no table — skip it.
-            if (rec.tables.size === before && member !== "new") rec.incomplete.add("Db");
-          }
-          if (eff === "Exec") {
-            // ⟨0.29⟩ `cmds` reads argv[0] too. It was documented as "the cosmetic cmds surface (any
-            // literal)", but `cmds` is precisely what `allow Exec <cmd>` gates on (AS-EFF-008) — nothing
-            // cosmetic about it. No node API places a bare string after the head (args are an array,
-            // options an object), so this changes no measured behaviour today; it removes the hazard for
-            // the next exec-like wrapper whose second argument is a string, which is how the identical
-            // defect reached `Fs`, `Net` and `Db` in this same rung.
-            // ⟨0.29⟩ A USE-VERB NAMES NO PROGRAM, and its argument 0 is not a head. `EXEC_USE_VERBS`
-            // already says so — it is consulted for the `incomplete` branch below and was NOT consulted
-            // here, so `child.send(msg)` (IPC to an ALREADY-spawned child) read its MESSAGE as argv[0].
-            // MEASURED: `ch.send("ls")` published `cmds: ["ls"]` and certified under `allow Exec ls`
-            // though the function executes nothing, and `ch.send("curl")` FABRICATED `Net` — a function
-            // that makes no network call reported as performing one, which `deny Net` then fires on.
-            // That is exactly what the doc comment above forbids ("`spawn(toolVar, "curl")` must NOT
-            // fabricate Net — the literal is an argument, not the program"); the rule was written for the
-            // argument POSITION and never covered the same hazard reached through the RECEIVER.
-            const lit = EXEC_USE_VERBS.has(member) ? null : programHeadLiteral(node);
-            if (lit) rec.cmds.add(lit.trim().split(/\s+/)[0]);
-            // a known literal head refines the cliff (curl→Net, candor→Fs/Env); Exec stays. The head
-            // MUST be argv[0] (programHeadLiteral), NOT any literal arg: `spawn(toolVar, "curl")`
-            // names no static program, so its trailing literal must not fabricate Net (spec §4).
-            const head = lit;
-            if (head) for (const e of commandHeadEffects(head)) rec.direct.add(e);
-            // masking (sweep [11]): an Exec call whose program head is NOT a static literal (runtime
-            // command) leaves the command invisible. Establishing = the spawn fns; ChildProcess use-verbs
-            // (kill/send/disconnect/ref/unref) carry no command and are excluded.
-            else if (!EXEC_USE_VERBS.has(member)) rec.incomplete.add("Exec");
-          }
-          if (eff === "Fs") {
-            // ⟨0.29⟩ the PATH POSITION, never the first literal anywhere — see fsPathLiteral.
-            const { lits, complete } = fsPathLiteral(node, member);
-            const captured = lits.filter((l) => /[/\\]|^[.~]/.test(l)); // path-shaped literals only
-            const pathCaptured = captured.length > 0 && captured.length === lits.length;
-            for (const l of captured) rec.paths.add(l);
-            // masking (sweep [11]): a path-taking fs.* call whose path is NOT a captured literal (runtime
-            // path) leaves it invisible. fd/FileHandle USE-verbs (fd came from a prior open()) are excluded.
-            // ⟨0.29⟩ `complete` also covers a two-path op whose SECOND path is runtime, which a captured
-            // position-0 literal would otherwise certify.
-            if (!(pathCaptured && complete) && !FS_USE_VERBS.has(member)) rec.incomplete.add("Fs");
-          }
           // ── ⟨0.32⟩ THE NODE-CORE FLOOR: an unclassified member of node core fails CLOSED ─────────
           //
           // κ is an allowlist, and a miss inside @types/node used to land on PURE — written down two
