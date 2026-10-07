@@ -42,6 +42,20 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   max 66); inserting one line at the top of a file fires only on its offset-keyed `<structural>@N` units —
   ≥1 firing for 134 of those files (max 16). Both calibrated by doing the edit: predicted 2 and 6, measured
   2 and 6 (citty, git-js); the pre-⟨0.40⟩ build gave 0 on both.
+- ⚠ REPORT KEYS (SOUNDNESS R944): a unit with no name of its own is keyed by ANCHOR PATH + ORDINAL, not by
+  character offset. `<structural>@N.m`, `<callable>@N`, `<decorator>@N`, `<decorator-arg>@N` and
+  `defineProperty(…).get [computed@N]` used `node.getStart()`, so any edit above them in the same file — a
+  comment line — renamed them, and under ⟨0.40⟩'s AS-EFF-005 a renamed effectful unit fires (git-js: 6
+  firings from one comment line). They are now `<structural>@<enclosing/named/decls>#<k>.m` etc.: the names
+  of the enclosing named declarations, then a 1-based ordinal among same-shape nodes (same member name, for a
+  structural member) under that path in the same module. Stable across any edit outside those enclosing
+  declarations. Unique by construction, plus a claim check that falls back to the offset spelling rather
+  than ever merging two units; a seeded collision fixture keeps 16 of 16 units apart, and fuses them to 6
+  with the path forced constant and the check removed. Every such key in an existing report or baseline is
+  renamed by this build. Over the pinned 28-entry roster: 4,403 positional units renamed, 0 other keys
+  touched; every one pairs 1:1 with its old key by source position, and every report row and callgraph is
+  byte-equal once old keys are mapped to new (0 `inferred` changes). The `hash` of `<callable>`,
+  `<decorator>` and `<decorator-arg>` units changes with the key; `<structural>` hashes do not.
 - ⚠ STRICTER: a dispatch now reaches EVERY override below the body it resolved to, not one level of them
   (SOUNDNESS R871, R872). Five readers answered "which bodies can `x.m()` run?" separately and disagreed in
   one report; they now share one answer (`overrideDescent` / `memberDispatchBodies` / `implMemberBodies`).

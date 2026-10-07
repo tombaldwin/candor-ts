@@ -6932,6 +6932,89 @@ export function c07ShadowModPassZ() { return JSON.stringify(process.env); }`,
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── SOUNDNESS R944: a unit with no name of its own is keyed by ANCHOR PATH + ORDINAL, not by OFFSET ──────
+// `<structural>@N`, `<callable>@N`, `<decorator>@N`, `<decorator-arg>@N` and `[computed@N]` were keyed by
+// the absolute character offset, so a COMMENT LINE above them renamed them — and under ⟨0.40⟩'s AS-EFF-005
+// (prior(key) = baseline[key] ?? ∅) a renamed effectful unit fires: git-js gave 6 firings from one comment.
+// Two halves, both asserted: (1) STABILITY — an edit outside the unit's enclosing named declarations
+// (a comment, a new function above) changes no key; (2) UNIQUENESS — the SEEDED COLLISION fixture holds
+// every shape that a naive path key would merge (two literals in one function, same-named bindings in two
+// branches, member names that sanitise alike, two IIFE call-targets, two decorator arguments, two anonymous
+// decorators, two top-level literals), each unit with its own effect, and every one stays separate.
+if (blk()) {
+  const SRC = `import * as fs from "node:fs";
+import * as net from "node:net";
+interface R { run(): void }
+// 1. two literals, same member name, same enclosing function
+export function twoLits(): R[] {
+  const a: R = { run() { fs.readFileSync("/a"); } };
+  const b: R = { run() { net.connect(80, "h"); } };
+  return [a, b];
+}
+// 2. same-named nested bindings in two branches -> identical anchor path outer/h
+export function outer(c: boolean): R {
+  if (c) { const h = (): R => ({ run() { fs.readFileSync("/b"); } }); return h(); }
+  else { const h = (): R => ({ run() { process.env.X; } }); return h(); }
+}
+// 3. member names that sanitise to the same anchor piece
+export const holder = {
+  "a.b": (): R => ({ run() { fs.readFileSync("/c"); } }),
+  a_b: (): R => ({ run() { Math.random(); } }),
+};
+// 4. two call-target arrows returned from IIFEs in one function
+export function iifes(): void {
+  const p = (() => () => { fs.readFileSync("/d"); })();
+  const q = (() => () => { net.connect(81, "h"); })();
+  p(); q();
+}
+// 5. two decorator-argument units on one class
+function Deco(_x: unknown) { return (_t: unknown) => {}; }
+@Deco(fs.readFileSync("/e"))
+@Deco(net.connect(82, "h"))
+export class Decorated {}
+// 6. two anonymous decorators
+@((_t: unknown) => { fs.readFileSync("/f"); })
+@((_t: unknown) => { Date.now(); })
+export class Anon {}
+// 7. top-level literal members, same name, two objects
+export const x1: R = { run() { fs.writeFileSync("/g", "x"); } };
+export const x2: R = { run() { net.connect(83, "h"); } };
+// 8. two call-target arrows built by IIFEs at module level, invoked from elsewhere (R531b's shape)
+const pA = (() => () => { fs.readFileSync("/h"); })();
+const pB = (() => () => { net.connect(84, "h"); })();
+export function useA(): void { pA(); }
+export function useB(): void { pB(); }
+`;
+  const d = project({
+    "tsconfig.json": JSON.stringify({ compilerOptions: { target: "ES2022", module: "nodenext", moduleResolution: "nodenext",
+      strict: true, experimentalDecorators: true, skipLibCheck: true, types: ["node"],
+      typeRoots: [path.join(HERE, "node_modules", "@types")] }, include: ["*.ts"] }),
+    "package.json": `{"type":"module"}`,
+    "k.ts": SRC,
+  });
+  const POS = /<(structural|callable|decorator|decorator-arg)>@|\[computed@/;
+  const rowsOf = () => (scan(d).report.functions ?? []).filter((e) => POS.test(e.fn));
+  const before = rowsOf();
+  // (2) UNIQUENESS — 16 positional units, 16 keys, 16 source positions, one effect each
+  const keys = new Set(before.map((e) => e.fn)), locs = new Set(before.map((e) => e.loc));
+  check("R944 UNIQUENESS: the seeded collision fixture keeps 16 positional units, 16 distinct keys, 16 distinct positions",
+        before.length === 16 && keys.size === 16 && locs.size === 16, JSON.stringify(before.map((e) => [e.fn, e.loc])));
+  check("R944 UNIQUENESS: no unit carries two seeded effects (a merge would fuse e.g. Fs+Net)",
+        before.every((e) => e.inferred.length === 1), JSON.stringify(before.map((e) => [e.fn, e.inferred])));
+  check("R944: no key is spelled with an offset (every one is anchor path + ordinal)",
+        before.every((e) => !/@\d/.test(e.fn)), JSON.stringify(before.map((e) => e.fn)));
+  // (1) STABILITY — a comment line and a whole new effectful function ABOVE everything: no key moves
+  const shape = (rows) => JSON.stringify(rows.map((e) => [e.fn, e.inferred]).sort());
+  fs.writeFileSync(path.join(d, "k.ts"), `// an unrelated comment\nexport function addedAbove(): string { return JSON.stringify({ run() { return 1; } }); }\n${SRC}`);
+  const after = rowsOf();
+  check("R944 STABILITY: a comment line + a new function above changes NO positional key (each was renamed at 503f449)",
+        shape(after) === shape(before), `before=${shape(before)}\nafter=${shape(after)}`);
+  check("R944 STABILITY CONTROL: the edit really moved the code (every loc shifted by two lines)",
+        after.every((e) => { const b = before.find((x) => x.fn === e.fn); return b && Number(e.loc.split(":")[1]) === Number(b.loc.split(":")[1]) + 2; }),
+        JSON.stringify(after.map((e) => [e.fn, e.loc])));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── the same whole-env class via for-in and the `structuredClone` bare global (a further corpus-probe pass). ──
 if (blk()) {
   const d = project({

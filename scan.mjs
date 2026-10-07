@@ -3908,6 +3908,110 @@ function moduleOf(sf) {
   const rel = path.relative(rootDir, path.resolve(sf.fileName)).replace(/\.[mc]?[tj]sx?$/, "");
   return rel.split(path.sep).join(".");
 }
+// ---- ⟨SOUNDNESS R944⟩ STABLE KEYS FOR UNITS THAT HAVE NO NAME OF THEIR OWN ----------------------------
+// Five unit kinds have no declaration name to key on — a structural member (`{ run(){…} }` in an
+// expression position), a resolved call-target arrow (`<callable>`), an anonymous decorator
+// (`<decorator>`), a decorator's argument data (`<decorator-arg>`), and a `defineProperty` descriptor
+// with a computed key (`[computed…]`). They were keyed by ABSOLUTE CHARACTER OFFSET (`node.getStart()`),
+// so ANY edit above them in the same file — a comment line — renamed them. Under ⟨0.40⟩'s AS-EFF-005
+// (prior(key) = baseline[key] ?? ∅) a renamed effectful unit FIRES: MEASURED on git-js, one comment line
+// at the top of `create-test-context.ts` gave 6 firings, every one `<structural>@<offset>`.
+//
+// THE KEY IS NOW `<anchor path>#<ordinal>`:
+//   anchor path — the names of the enclosing NAMED declarations, outermost first, joined by `/`
+//                 (function, class, method/accessor/constructor, variable, property, namespace). `~` at
+//                 the top level. Sanitised to [A-Za-z0-9_$] so it never contains the `.` separator.
+//   ordinal     — 1-based position, in document order, among ALL nodes of the same unit kind's syntactic
+//                 shape in the same MODULE with the same anchor path (and, for a structural member, the
+//                 same member name). Counted over a SYNTACTIC superset, never over "the nodes that were
+//                 minted", so it does not depend on minting order or on the R531b fixpoint.
+// UNIQUENESS IS BY CONSTRUCTION, not by argument: within one module and one kind, two nodes share
+// (path, name) only if they are in one ordinal list, and a list's indices are distinct. Counting per
+// MODULE rather than per file matters — `moduleOf` strips the extension, so `a.ts` and `a.js` are one
+// module. The claim inside `stableUnitTag` is the second line: a tag minted for a DIFFERENT node than first claimed
+// it falls back to the old offset spelling, so a defect in the path or ordinal can cost stability but
+// can never MERGE two units (the key-collision fabrication class).
+// STABLE across any edit outside the unit's enclosing named declarations; an edit INSIDE one that adds
+// an earlier node of the same shape (same name, for a structural member) still shifts the ordinal.
+const STABLE_KEY_SHAPES = {
+  structural: new Set([ts.SyntaxKind.MethodDeclaration, ts.SyntaxKind.PropertyAssignment,
+    ts.SyntaxKind.PropertyDeclaration, ts.SyntaxKind.GetAccessor, ts.SyntaxKind.SetAccessor,
+    ts.SyntaxKind.ShorthandPropertyAssignment]),
+  callable: new Set([ts.SyntaxKind.ArrowFunction, ts.SyntaxKind.FunctionExpression]),
+  decorator: new Set([ts.SyntaxKind.ArrowFunction, ts.SyntaxKind.FunctionExpression]),
+  "decorator-arg": new Set([ts.SyntaxKind.CallExpression]),
+  computed: null,   // a descriptor member of any shape — counted over EVERY node under the anchor
+};
+const stableKeySanitise = (s) => s.replace(/[^A-Za-z0-9_$]/g, "_");
+function stableAnchorPiece(n) {
+  if (ts.isSourceFile(n)) return null;
+  if (ts.isConstructorDeclaration(n)) return "constructor";
+  if (ts.isClassStaticBlockDeclaration(n)) return "static";
+  if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n) || ts.isClassExpression(n) || ts.isFunctionExpression(n)
+       || ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)
+       || ts.isPropertyDeclaration(n) || ts.isPropertyAssignment(n) || ts.isVariableDeclaration(n)
+       || ts.isModuleDeclaration(n) || ts.isEnumDeclaration(n)) && n.name
+      && (ts.isIdentifier(n.name) || ts.isStringLiteralLike(n.name) || ts.isNumericLiteral(n.name) || ts.isPrivateIdentifier(n.name)))
+    return stableKeySanitise(n.name.text ?? n.name.getText());
+  return null;
+}
+function stableAnchorPath(node) {
+  const pieces = [];
+  for (let p = node.parent; p && !ts.isSourceFile(p); p = p.parent) {
+    const piece = stableAnchorPiece(p);
+    if (piece) pieces.push(piece);
+  }
+  return pieces.length ? pieces.reverse().join("/") : "~";
+}
+const stableNameOf = (kind, n) => (kind === "structural" && n.name && !ts.isComputedPropertyName(n.name) ? n.name.getText() : "");
+const stableOrdinals = new Map();   // `${kind}|${mod}` -> Map(node -> ordinal)
+function stableOrdinal(kind, node) {
+  const mod = moduleOf(node.getSourceFile());
+  const memoKey = `${kind}|${mod}`;
+  let ords = stableOrdinals.get(memoKey);
+  if (!ords) {
+    ords = new Map();
+    const counts = new Map();
+    const shape = STABLE_KEY_SHAPES[kind];
+    for (const sf of sources) {
+      if (moduleOf(sf) !== mod) continue;
+      (function walk(n) {
+        if (!shape || shape.has(n.kind)) {
+          const g = `${stableAnchorPath(n)}|${stableNameOf(kind, n)}`;
+          const k = (counts.get(g) ?? 0) + 1;
+          counts.set(g, k);
+          ords.set(n, k);
+        }
+        ts.forEachChild(n, walk);
+      })(sf);
+    }
+    stableOrdinals.set(memoKey, ords);
+  }
+  return ords.get(node);
+}
+// The discriminator that replaces `node.getStart()`. Falls back to the offset when the node is not in
+// the module's walk (a source outside `sources`), which is the old behaviour, never a guess.
+// Second line of defence, applied HERE so every one of the five kinds gets it: one tag, one node. A tag
+// already claimed by a DIFFERENT node (same kind, module and member name) falls back to the offset
+// spelling and is counted — never merged. MEASURED as load-bearing: with the tag forced to a constant,
+// the seeded collision fixture keeps all 16 units through this fallback and fuses them to 6 without it.
+const stableKeyOwner = new Map();
+let stableKeyFallbacks = 0;
+function stableUnitTag(kind, node) {
+  const ord = stableOrdinal(kind, node);
+  const offsetKey = String(node.getStart());
+  if (ord === undefined) return offsetKey;
+  const tag = `${stableAnchorPath(node)}#${ord}`;
+  const key = `${kind}|${moduleOf(node.getSourceFile())}|${tag}|${stableNameOf(kind, node)}`;
+  const owner = stableKeyOwner.get(key);
+  if (owner === undefined) { stableKeyOwner.set(key, node); return tag; }
+  if (owner === node) return tag;
+  stableKeyFallbacks++;
+  // REACH PROBE, env-gated: a fallback means the path/ordinal derivation produced a duplicate, which by
+  // construction it cannot — so any line here is a defect report, and `--mark R944-FALLBACK` counts it.
+  if (process.env.CANDOR_R944_REACH) console.error(`R944-FALLBACK #${stableKeyFallbacks} ${key} -> @${offsetKey}`);
+  return offsetKey;
+}
 // Enclosing `namespace`/`module` blocks are NAME SEGMENTS (the family ruling: §6.2 scope segments
 // split on the same boundaries as the §3.1 query name ladder, and a namespace is a segment — rust
 // modules and swift enum-namespaces already qualify this way). A unit declared in
@@ -4049,7 +4153,7 @@ function localName(node) {
     const da = definePropertyAccessor(node);
     if (da) {
       const tn = da.targetExpr ? da.targetExpr.getText().replace(/\s+/g, "") : "<create>";
-      const key = da.keyText ?? `[computed@${node.getStart()}]`;
+      const key = da.keyText ?? `[computed@${stableUnitTag("computed", node)}]`;   // ⟨R944⟩ not the offset
       return `defineProperty(${tn}).${da.kind} ${key}`;
     }
   }
@@ -4112,7 +4216,7 @@ function localName(node) {
         const gp = callOuter.parent;
         isFactoryCallee = ts.isDecorator(gp) && gp.expression === callOuter;
       }
-      if (isDirectDecorator || isFactoryCallee) return `<decorator>@${node.getStart()}`;
+      if (isDirectDecorator || isFactoryCallee) return `<decorator>@${stableUnitTag("decorator", node)}`;   // ⟨R944⟩
     }
   }
   return null;
@@ -5026,7 +5130,7 @@ function callTargetUnit(decl) {
   return undefined;
 }
 function mintPositionalStructuralUnit(mod, sf, prop, name) {
-  const qual = `${mod}.<structural>@${prop.getStart()}.${name}`;
+  const qual = `${mod}.<structural>@${stableUnitTag("structural", prop)}.${name}`;   // ⟨R944⟩ not the offset
   if (!fns.has(qual)) {
     const { line, character } = sf.getLineAndCharacterOfPosition(prop.getStart());
     fns.set(qual, { local: `<structural>.${name}`, direct: new Set(), fsKinds: new Set(), edges: new Set(),
@@ -5908,10 +6012,12 @@ function staticBlockUnit(node) {
 // every effect anywhere in ONE decorator's argument list shares ONE unit, mirroring how a factory's own
 // body is one unit no matter how many effects it contains. unitKind "initializer": this runs at
 // class-definition time, the same category as a `static {}` block or a module's top-level statements.
+// ⟨R944⟩ spelled ONCE: the unit's minting and the class-definition edge both ask this.
+function decoratorArgLocal(callNode) { return `${DECORATOR_ARG_LOCAL}${stableUnitTag("decorator-arg", callNode)}`; }
 function decoratorArgUnit(callNode) {
   const sf = callNode.getSourceFile();
   const mod = moduleOf(sf);
-  const local = `${DECORATOR_ARG_LOCAL}${callNode.getStart()}`;
+  const local = decoratorArgLocal(callNode);
   const qual = `${mod}.${local}`;
   let rec = fns.get(qual);
   if (!rec) {
@@ -10206,7 +10312,7 @@ function visitCalls(node) {
  * candidate set only shrinks) makes the loop terminate in the number of candidates. */
 function mintCallTargetUnit(fn) {
   const sf = fn.getSourceFile();
-  const local = `<callable>@${fn.getStart()}`;
+  const local = `<callable>@${stableUnitTag("callable", fn)}`;   // ⟨R944⟩ not the offset
   const qual = `${moduleOf(sf)}.${local}`;
   const owner = enclosing(fn.parent); // BEFORE the nodeName.set below — the PRE-mint attribution owner
   if (!fns.has(qual)) {
@@ -10327,7 +10433,7 @@ for (const sf of sources) visitCalls(sf);
       while (ts.isParenthesizedExpression(e)) e = e.expression;
       if (ts.isCallExpression(e)) {
         add(localBodiedUnit(e), "deco");                         // the factory call
-        add(`${moduleOf(e.getSourceFile())}.${DECORATOR_ARG_LOCAL}${e.getStart()}`, "arg");
+        add(`${moduleOf(e.getSourceFile())}.${decoratorArgLocal(e)}`, "arg");   // ⟨R944⟩ the ONE spelling
       }
     }
     for (const m of cls.members ?? [])
