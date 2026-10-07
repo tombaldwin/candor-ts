@@ -10,6 +10,12 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **Declares spec 0.40** (was 0.39) — the family floor bump. candor-ts implements both ⟨0.40⟩ halves that
+  bind it: the AS-EFF-005 new-function baseline rule (SOUNDNESS R932, with the stable unit keys of R944 so a
+  comment line no longer renames a unit) and bind/listen for `Net` (R817/R949: a `listen`/accept fails
+  `allow Net` closed). The type-surface half is declared NOT APPLICABLE to TypeScript (§2). **A gate that
+  passed on 0.39.x can exit 1 on identical bytes** — see candor-spec SPEC §8 ⟨0.40⟩.
+
 - ⚠ STRICTER: **the conformer pass looks through assertions — upcasts only** (SOUNDNESS R958, the resolution the review
   chose over the open-world hedge). A value under `x as any`, `x as unknown as I` or `<I>x` keeps the checker type of
   what it IS, and that names the conformer; each EXECUTED arm (a local class through `as any` at an argument, through
