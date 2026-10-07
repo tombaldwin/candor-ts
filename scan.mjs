@@ -3145,6 +3145,41 @@ function dgramSendAddressIndex(args) {
   if (isNumericLit(args[1])) return 2;
   return -1;
 }
+// SOUNDNESS R949 — A dgram BIND HANDED A RUNTIME NAME RESOLVES IT. node's `socket.bind(port, address)` (and
+// `bind({ port, address })`) runs `dns.lookup(address)` before binding: a Net reach whose locator is the NAME,
+// chosen at run time. So the bind is not "nothing" when its address is a runtime string — SPEC ⟨0.40⟩'s "a bind
+// marks nothing" is about the bind ADDRESS as a destination, and the lookup is a destination. Returns true when
+// the address position holds a value that may be a string this scan cannot read:
+//   bind()  bind(port)  bind(port, cb)  bind(cb)  bind({ port })     → false (no address: nothing resolved)
+//   bind(port, "10.0.0.5")  bind(port, CONST)  bind({ address: "…" }) → false (determined; NOT captured into
+//                                                                        `hosts` either — it is a bind address)
+//   bind(port, h: string | any | unknown)  bind({ address: h })       → true
+//   bind(opts) with a non-literal options value                        → true (its `address` cannot be read —
+//                                                                        fail-closed, an over-charge if it has none)
+// "May be a string" is the checker's answer, so a number- or function-typed second argument (`bind(0, cb)`) is not one.
+function dgramBindResolvesRuntimeName(args) {
+  const determined = (e) => e && (ts.isStringLiteralLike(e) || constStringValue(e) != null);
+  const mayBeString = (e) => {
+    let t; try { t = checker.getTypeAtLocation(e); } catch { return true; }
+    const one = (x) => (x.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.StringLike)) !== 0;
+    return t.isUnion?.() ? t.types.some(one) : one(t);
+  };
+  const a0 = args[0] && unwrapArgExpr(args[0]);
+  if (a0 && ts.isObjectLiteralExpression(a0)) {
+    const p = a0.properties.find((q) => q.name && !ts.isComputedPropertyName(q.name) && q.name.getText() === "address");
+    if (!p) return a0.properties.some((q) => ts.isSpreadAssignment(q));    // `{ ...opts }` may carry one
+    if (!ts.isPropertyAssignment(p)) return true;                           // shorthand `{ address }` — a variable
+    return !determined(unwrapArgExpr(p.initializer)) && mayBeString(p.initializer);
+  }
+  if (a0 && !isNumericLit(a0) && !ts.isArrowFunction(a0) && !ts.isFunctionExpression(a0)) {
+    let t; try { t = checker.getTypeAtLocation(a0); } catch { t = null; }
+    // a non-literal first argument that is an OBJECT (an options value) — its address is not readable
+    if (t && (t.flags & ts.TypeFlags.Object) !== 0 && !t.getCallSignatures?.().length) return true;
+  }
+  const a1 = args[1] && unwrapArgExpr(args[1]);
+  if (!a1 || ts.isArrowFunction(a1) || ts.isFunctionExpression(a1)) return false;
+  return !determined(a1) && mayBeString(a1);
+}
 // ⟨0.29⟩ THE Fs PATH LITERAL, read from the PATH ARGUMENT POSITION — the third application of the
 // `programHeadLiteral` discipline, and the one that never got it. The comment above says that rule was
 // "generalized from Exec to Net"; it stopped there, and `Fs` went on reading the first literal ANYWHERE
@@ -3669,6 +3704,11 @@ function chargeLocatorSurfaces(rec, eff, member, kMod, node, args, { direct, acc
   // ⟨0.40⟩ an accept marks the surface and captures NOTHING from its arguments — its address is where
   // the process listens (R809's fabrication, now SPEC: "It MUST NOT enter `hosts`").
   if (eff === "Net" && accepting) rec.incomplete.add("Net");
+  // R949 — a dgram `bind` captures nothing (its address is the process's own) and marks only when it resolves a
+  // runtime name; `args` null (a by-reference route) cannot rule an address out, so it marks.
+  else if (eff === "Net" && member === "bind" && /^(node:)?dgram$/.test(kMod ?? "")) {
+    if (!args || dgramBindResolvesRuntimeName(args)) rec.incomplete.add("Net");
+  }
   else if (eff === "Net") {
     // The host predicate runs against the EXTRACTED URL argument (arg0 — the URL/endpoint slot of
     // fetch/axios/the HTTP verbs), NEVER the first literal anywhere in the args: a trailing literal

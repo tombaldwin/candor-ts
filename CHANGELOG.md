@@ -10,6 +10,17 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ STRICTER: **a dgram `bind` handed a runtime NAME is an unseen Net destination** (SOUNDNESS R949, PART 96
+  `e_rtname`). node's `socket.bind(port, address)` / `bind({ address })` runs `dns.lookup(address)` first —
+  EXECUTED: `bind(0, "no-such-host.invalid")` fails `ENOTFOUND` in `getaddrinfo`, `bind(0, "localhost")` binds
+  127.0.0.1 — so a bind whose address may be a string this scan cannot read (checker-typed `string`/`any`/
+  `unknown`, or an options value whose `address` is not readable) marks `incomplete: ["Net"]`, and beside a
+  benign literal `allow Net <benign>` fails closed (exit 0 before). A port-only bind (`bind(0)`, `bind(0, cb)`,
+  `bind({ port })`) and a determined address (literal or `const`) mark nothing, and a bind address is still
+  never captured into `hosts`. A literal name resolved and discarded (`dns.lookup("evil.example", cb)`) was
+  already a `hosts` entry, confirmed. Corpus A/B (28-entry roster): CHANGED 0 — the rule has 0 sites on the
+  roster (reach probe 0, calibrated at 9 on the fixture), so the evidence is the executed fixture.
+
 - ⚠ STRICTER: **every route that invokes a κ-classified function now reaches κ and the locator guard**
   (SOUNDNESS R947). Census over three effects × eleven invocation routes. Two classes of defect,
   every cell EXECUTED by `node`:

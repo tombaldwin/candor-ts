@@ -20388,12 +20388,23 @@ import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as tls from "node:tls";
 import * as inspector from "node:inspector";
+import * as dns from "node:dns";
 import { WebSocketServer } from "ws";
 import { Server as IoServer } from "socket.io";
 const OK = "ok.example";
+const BIND = "10.0.0.5";
 class MySrv extends netm.Server {}
 export function aLitbind(): void { dgram.createSocket("udp4").bind(9, "10.0.0.5"); }
-export function bRtbind(h: string): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(0, h); }
+export function bRtbind(): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(0); }
+export function eRtname(h: string): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(0, h); }
+export function gOptRt(h: string): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind({ port: 0, address: h }); }
+export function gAnyRt(h: any): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(0, h); }
+export function gLitAddr(): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(9, "10.0.0.5"); }
+export function gConstAddr(): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(9, BIND); }
+export function gOptLitAddr(): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind({ port: 9, address: "10.0.0.5" }); }
+export function gPortCb(): void { netm.connect(80, "ok.example"); dgram.createSocket("udp4").bind(0, () => {}); }
+export function lRtHost(h: string): void { netm.connect(80, "ok.example"); netm.createServer().listen(8080, h); }
+export function qDnsLit(): void { dns.lookup("evil.example", () => {}); }
 export function cAccept(): void { netm.connect(80, "ok.example"); netm.createServer((s) => { s.write("hi"); }).listen(8080); }
 export function dEphemeral(): void { const s = dgram.createSocket("udp4"); s.bind(0); s.send(Buffer.from("x"), 53, "10.9.9.9"); }
 export function sHttp(): void { netm.connect(80, OK); http.createServer((q, r) => r.end("x")).listen(8080); }
@@ -20426,8 +20437,21 @@ export function kFactory(): netm.Server { netm.connect(80, OK); return netm.crea
         gate("aLitbind", "10.0.0.5") === 1 && !(row("aLitbind").incomplete ?? []).includes("Net"), JSON.stringify(row("aLitbind")));
   check("R817 a_litbind: the bind address does NOT enter `hosts`", !(row("aLitbind").hosts ?? []).some((h) => h.startsWith("10.0.0.5")),
         JSON.stringify(row("aLitbind")));
-  check("R817 b_rtbind CONTROL: a runtime bind that never accepts marks nothing — `allow Net ok.example` exit 0",
+  check("R817/R949 b_rtbind CONTROL: a PORT-ONLY bind resolves no name and marks nothing — `allow Net ok.example` exit 0",
         gate("bRtbind", "ok.example") === 0, JSON.stringify(row("bRtbind")));
+  // SOUNDNESS R949: a bind handed a runtime STRING resolves it (node runs `dns.lookup(address)` — EXECUTED:
+  // `bind(0, "no-such-host.invalid")` fails ENOTFOUND in getaddrinfo, `bind(0, "localhost")` binds 127.0.0.1).
+  // That lookup is a Net reach whose locator is the name, so it marks; a determined address does not, and is
+  // still never a `hosts` entry. All three marking arms exited 0 at the base.
+  for (const fn of ["eRtname", "gOptRt", "gAnyRt"])
+    check(`R949 e_rtname: \`${fn}\` — a bind given a runtime name is \`incomplete\` and \`allow Net ok.example\` fails closed (exit 1)`,
+          gate(fn, "ok.example") === 1 && (row(fn).incomplete ?? []).includes("Net"), JSON.stringify(row(fn)));
+  for (const fn of ["gLitAddr", "gConstAddr", "gOptLitAddr", "gPortCb"])
+    check(`R949 CONTROL: \`${fn}\` — a determined (or absent) bind address resolves nothing unseen: exit 0, and no \`hosts\` entry names 10.0.0.5`,
+          gate(fn, "ok.example") === 0 && !(row(fn).hosts ?? []).some((h) => h.startsWith("10.0.0.5")), JSON.stringify(row(fn)));
+  check("R949: `server.listen(port, h)` is marked as an ACCEPT (R817) — exit 1", gate("lRtHost", "ok.example") === 1, JSON.stringify(row("lRtHost")));
+  check("R949: a literal name resolved and discarded — `dns.lookup(\"evil.example\")` — IS a destination: `hosts` names it",
+        (row("qDnsLit").hosts ?? []).includes("evil.example") && gate("qDnsLit", "evil.example") === 0, JSON.stringify(row("qDnsLit")));
   check("R817 c_accept: a listening server beside a benign literal is `incomplete` and `allow Net ok.example` FAILS CLOSED (exit 1; exit 0 at the pre-fix base)",
         gate("cAccept", "ok.example") === 1 && (row("cAccept").incomplete ?? []).includes("Net"), JSON.stringify(row("cAccept")));
   check("R817 d_ephemeral CONTROL: an ephemeral bind + a send to a literal still certifies — `allow Net 10.9.9.9` exit 0",
@@ -20466,12 +20490,12 @@ function del(p: string, _n: number): void { fs.unlinkSync(p); }
 export function nCall(h: string): void { netm.connect(80, "ok.example"); netm.connect.call(undefined, 80 as any, h as any); }
 export function nApply(h: string): void { netm.connect(80, "ok.example"); netm.connect.apply(undefined, [80, h] as any); }
 export function nReflect(h: string): void { netm.connect(80, "ok.example"); Reflect.apply(netm.connect, undefined, [80, h]); }
-export function nCallEvil(): void { netm.connect(80, "ok.example"); netm.connect.call(undefined, 80 as any, "evil.example" as any); }
+export function xCallEvil(): void { netm.connect(80, "ok.example"); netm.connect.call(undefined, 80 as any, "evil.example" as any); }
 export function aCall(): void { netm.connect(80, "ok.example"); const s = netm.createServer(); s.listen.call(s, 8080); }
 export function fCall(p: string): void { fs.readFileSync("/tmp/ok/a"); fs.readFileSync.call(undefined, p); }
 export function fApply(p: string): void { fs.readFileSync("/tmp/ok/a"); fs.readFileSync.apply(undefined, [p] as any); }
 export function fReflect(p: string): void { fs.readFileSync("/tmp/ok/a"); Reflect.apply(fs.readFileSync, undefined, [p]); }
-export function fApplyVar(a: [string]): void { fs.readFileSync("/tmp/ok/a"); fs.readFileSync.apply(undefined, a); }
+export function yApplyVar(a: [string]): void { fs.readFileSync("/tmp/ok/a"); fs.readFileSync.apply(undefined, a); }
 export function eCall(c: string): void { cp.execSync("ls"); cp.execSync.call(undefined, c); }
 export function eReflectEvil(): void { cp.execSync("ls"); Reflect.apply(cp.execSync, undefined, ["rm -rf /"]); }
 export function kCall(): void { netm.connect.call(undefined, 80 as any, "ok.example" as any); }
@@ -20499,13 +20523,13 @@ export function cPure(xs: unknown[]): unknown[] { return xs.map(String); }`,
   const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
   // the GUARD on the reflective routes — a runtime locator, and a literal OTHER one, fail closed
   for (const [fn, eff, lit] of [["nCall", "Net", "ok.example"], ["nApply", "Net", "ok.example"], ["nReflect", "Net", "ok.example"],
-                                ["nCallEvil", "Net", "ok.example"], ["aCall", "Net", "ok.example"],
-                                ["fCall", "Fs", "/tmp/ok"], ["fApply", "Fs", "/tmp/ok"], ["fReflect", "Fs", "/tmp/ok"], ["fApplyVar", "Fs", "/tmp/ok"],
+                                ["xCallEvil", "Net", "ok.example"], ["aCall", "Net", "ok.example"],
+                                ["fCall", "Fs", "/tmp/ok"], ["fApply", "Fs", "/tmp/ok"], ["fReflect", "Fs", "/tmp/ok"], ["yApplyVar", "Fs", "/tmp/ok"],
                                 ["eCall", "Exec", "ls"], ["eReflectEvil", "Exec", "ls"]])
     check(`REFL GUARD: \`allow ${eff} in src.f.${fn} ${lit}\` fails closed (exit 1; exit 0 at the base) — the reflective route reaches the locator guard`,
           gate(`allow ${eff} in src.f.${fn} ${lit}`) === 1, JSON.stringify(row(fn)));
-  check("REFL CAPTURE: a literal reached through `.call` is the call's own locator — `nCallEvil` publishes evil.example",
-        (row("nCallEvil").hosts ?? []).includes("evil.example"), JSON.stringify(row("nCallEvil")));
+  check("REFL CAPTURE: a literal reached through `.call` is the call's own locator — `xCallEvil` publishes evil.example",
+        (row("xCallEvil").hosts ?? []).includes("evil.example"), JSON.stringify(row("xCallEvil")));
   // the RESOLUTION half: a DETERMINED locator through a reflective route certifies (it failed closed at the base)
   for (const [fn, eff, lit] of [["kCall", "Net", "ok.example"], ["kFsReflect", "Fs", "/tmp/ok"], ["kExecApply", "Exec", "ls"]])
     check(`REFL OVER-CHARGE CONTROL: \`${fn}\` — a literal locator through a reflective route certifies under \`allow ${eff} ${lit}\` (exit 0)`,
