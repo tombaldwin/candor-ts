@@ -10,6 +10,24 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ STRICTER: **a callee that can hold more than one function calls every one of them** (SOUNDNESS R955). The call
+  walk resolved ONE declaration per call, and for a choice of functions the checker's union put first whichever TYPE
+  was created first — so `(c ? fb : fa)(p)` edged `fa` only when `fa` was declared first, an arrow-const pair edged
+  nothing in either order, and a report could change with an unrelated edit (rollup's one edge moved between two
+  helpers when type creation order changed). EXECUTED census, base: `?:` with the effectful function declared
+  second, arrow consts in both orders, `c && f || g`, `[g, f][i]`, `const pick = c ? g : f; pick(p)`, an IIFE
+  returning a choice, `(c ? g : f).call(…)` — caller ABSENT, `deny Fs` exit 0; `??`, `||`, a reassigned `let` —
+  `Unknown` only; `(0, f)`, `(f)`, `({a: f}).a`, `(() => f)()` were already right. The callee expression is now read
+  for every function value it can evaluate to (`?:` both arms, `??`/`||` both operands, `&&`/`,` the right one, an
+  array index, an IIFE's returns, a const or a reassigned `let` bound to any of these) and each is charged as a call
+  to it — a local unit (with its callback-argument slots), a parameter (callback flow), κ or the dependency funnel; a
+  value that cannot be bounded (`(x as any).f`, a body-less member signature) discloses `Unknown[callback:…]` (SPEC
+  §4's class for an owner-less invocation). Pure-only choices stay pure. Corpus A/B (28-entry roster): ADDED 6
+  (silent choices now disclosed), REMOVED 0, CHANGED 166, `inferred` CHANGED 12 (new charges traced: rxjs
+  `ajax*` -> the IIFE's `create` -> `fromAjax` Net; rollup's reassigned `timeStart` -> `timeStartImpl` Clock), 0
+  effects lost, no `Unknown` removed (5 placeholder `unresolved` whys became named ones); reach 233 choice
+  callees in 23 entries.
+
 - ⚠ STRICTER: **every conformer the type checker shows at an in-scan conversion is a dispatch candidate** (SOUNDNESS
   R954, closing R927, R769 and R874; SPEC ⟨0.35⟩ §4). A candidate set used to hold only nominal
   `implements` classes and literals written in a contextually-typed position, so one pure implementor made a dispatch

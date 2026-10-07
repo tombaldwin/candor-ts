@@ -20651,6 +20651,29 @@ export function jLit(): void { runIt(L); }`,
           runJ(`deny Fs src.index.${fn}`) === 1);
 }
 
+// ── SOUNDNESS R955: A CALLEE THAT CAN HOLD MORE THAN ONE FUNCTION CALLS EVERY ONE OF THEM ────────────────────────
+// The call walk resolves ONE declaration per call, and for a choice of functions the checker's union puts first
+// whichever TYPE was created first. So `(c ? fb : fa)(p)` edged `fa` only when `fa` was declared first, and an
+// arrow-const pair edged nothing either way — the caller ABSENT, `deny Fs` exit 0. Every effect arm below was
+// EXECUTED (each wrote its marker) and the ABSENT ones exited 0 at the base: `?:` with the effectful function
+// declared second, arrow consts in both orders, `c && f || g`, `[g, f][i]`, `const pick = c ? g : f`, an IIFE
+// returning a choice, `(c ? g : f).call(…)`; `??`, `||` and a reassigned `let` were `Unknown` only. Names are
+// checked against §3.3 prefix matching (`cTernR` -> `dTernR` for that reason). The pure-only choices stay pure.
+if (blk()) {
+  const d = project({ "src/a.ts": "import * as fs from \"node:fs\";\n// effectful DECLARED FIRST (fa) and DECLARED SECOND (fz); pure fb / pb; arrow consts xa (effectful) and xb (pure)\nexport function fb(_p: string): void { }\nexport function fa(p: string): void { fs.writeFileSync(\"/tmp/candor-ts-r955/\" + p, \"x\"); }\nexport function pb(_p: string): void { }\nexport function fz(p: string): void { fs.writeFileSync(\"/tmp/candor-ts-r955/\" + p, \"x\"); }\nexport const xb = (_p: string): void => { };\nexport const xa = (p: string): void => { fs.writeFileSync(\"/tmp/candor-ts-r955/\" + p, \"x\"); };\nconst ga: ((p: string) => void) | undefined = fa;\nexport function cTern(c: boolean, p: string) { (c ? fb : fa)(p); }\nexport function dTernR(c: boolean, p: string) { (c ? fa : fb)(p); }\nexport function eTernZ(c: boolean, p: string) { (c ? pb : fz)(p); }\nexport function gArrow(c: boolean, p: string) { (c ? xb : xa)(p); }\nexport function hArrowR(c: boolean, p: string) { (c ? xa : xb)(p); }\nexport function cNullish(p: string) { (ga ?? fb)(p); }\nexport function cOr(p: string) { (ga || fb)(p); }\nexport function cAnd(c: boolean, p: string) { (c && fz || pb)(p); }\nexport function cComma(p: string) { (0, xa)(p); }\nexport function cParen(p: string) { (xa)(p); }\nexport function cIndex(i: number, p: string) { [xb, xa][i](p); }\nexport function cObj(p: string) { ({ a: xa }).a(p); }\nexport function cLocal(c: boolean, p: string) { const pick = c ? xb : xa; pick(p); }\nexport function cLet(c: boolean, p: string) { let pick = xb; if (c) pick = xa; pick(p); }\nexport function cIife(p: string) { (() => xa)()(p); }\nexport function kIifeC(c: boolean, p: string) { (function () { return c ? xb : xa; })()(p); }\nexport function cCall(c: boolean, p: string) { (c ? xb : xa).call(undefined, p); }\nexport function mPure(c: boolean, p: string) { (c ? fb : pb)(p); }\nexport function nPureIdx(i: number, p: string) { [xb, fb][i](p); }\n" });
+  const { report } = scan(d);
+  const gate = (fn) => { fs.writeFileSync(path.join(d, "p.pol"), `deny Fs src.a.${fn}\n`); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  for (const fn of ["cTern", "dTernR", "eTernZ", "gArrow", "hArrowR", "cNullish", "cOr", "cAnd", "cComma", "cParen",
+                    "cIndex", "cObj", "cLocal", "cLet", "cIife", "kIifeC", "cCall"])
+    check(`R955: \`deny Fs src.a.${fn}\` fires — every function the callee can hold is called`, gate(fn) === 1, JSON.stringify(entry(report, `src.a.${fn}`)));
+  check("R955 ORDER: the choice edges BOTH branches whichever is declared first — `cTern` and `eTernZ` each reach their pure AND their effectful function",
+        ["src.a.fa", "src.a.fb"].every((t) => (entry(report, "src.a.cTern")?.calls ?? []).includes(t))
+          && ["src.a.fz", "src.a.pb"].every((t) => (entry(report, "src.a.eTernZ")?.calls ?? []).includes(t)),
+        JSON.stringify([entry(report, "src.a.cTern"), entry(report, "src.a.eTernZ")]));
+  for (const fn of ["mPure", "nPureIdx"])
+    check(`R955 CONTROL: a choice between PURE functions charges nothing — \`${fn}\``, noEffectCharged(report, `src.a.${fn}`) && gate(fn) === 0);
+}
+
 // ======================================================================================================
 // SOURCE-HYGIENE CENSUS — ported from candor-java's SourceHygieneTest (BACKLOG item 3).
 //

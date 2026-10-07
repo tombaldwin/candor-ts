@@ -3529,6 +3529,132 @@ function literalArgList(e) {
   if (!u || !ts.isArrayLiteralExpression(u)) return null;
   return u.elements.some((x) => ts.isSpreadElement(x)) ? null : [...u.elements];
 }
+// ── SOUNDNESS R955 — A CALLEE EXPRESSION THAT CAN HOLD MORE THAN ONE FUNCTION CALLS ALL OF THEM ─────────────────
+//
+// The call walk resolves a call through `getResolvedSignature(node).declaration`, which names ONE declaration. For
+// a callee that is a choice between functions the checker unions their types and that one declaration is
+// whichever the union put first — by TYPE CREATION ORDER, not by anything in the program. So `(c ? fb : fa)(p)`
+// edged `fa` when `fa` was declared first and NOTHING when it was declared second, and an arrow-const pair edged
+// nothing either way: the caller was ABSENT and `deny Fs` exited 0 over a call that writes (EXECUTED). Census,
+// one fixture, effectful branch only, base: `?:` (declared second / arrow consts), `c && f || g`, `[g, f][i]`,
+// `const pick = c ? g : f; pick(p)`, an IIFE returning a choice, `(c ? g : f).call(…)` — ABSENT; `??`, `||`, a
+// reassigned `let` — `Unknown` only; `(0, f)`, `(f)`, `({a: f}).a`, `(() => f)()` — correct. The rollup corpus
+// entry showed the ordering live: an unrelated change to type creation order moved its one edge from
+// `copyPropertyStatic` to `copyNonDefaultOwnPropertyLiveBinding`.
+//
+// So the CALLEE EXPRESSION is read for every function value it can evaluate to, and each is charged as a call
+// to it: `?:` (both arms), `??`/`||` (both operands), `&&`/`,` (the right operand — a falsy left value is not
+// callable), `[f, g][i]` (the indexed element, or every element), an IIFE (every value its literal body
+// returns), and a const or a `let` bound to any of these (the initializer and every assignment in the file).
+// Returns null when `expr` is not such a shape (the ordinary path answers it), else `{ leaves, open }`: `open`
+// when some value cannot be bounded (a spread, a compound assignment, a body that returns nothing), which
+// discloses.
+function calleeChoiceLeaves(expr) {
+  const leaves = [];
+  let open = false, compound = false;
+  const seenSyms = new Set();
+  const visit = (e, d) => {
+    if (!e || d > 12) { open = true; return; }
+    e = unwrapArgExpr(e);
+    if (ts.isConditionalExpression(e)) { compound = true; visit(e.whenTrue, d + 1); visit(e.whenFalse, d + 1); return; }
+    if (ts.isBinaryExpression(e)) {
+      const k = e.operatorToken.kind;
+      if (k === ts.SyntaxKind.QuestionQuestionToken || k === ts.SyntaxKind.BarBarToken) {
+        compound = true; visit(e.left, d + 1); visit(e.right, d + 1); return;
+      }
+      if (k === ts.SyntaxKind.AmpersandAmpersandToken || k === ts.SyntaxKind.CommaToken) { compound = true; visit(e.right, d + 1); return; }
+    }
+    if (ts.isElementAccessExpression(e) && ts.isArrayLiteralExpression(unwrapArgExpr(e.expression))) {
+      compound = true;
+      const els = unwrapArgExpr(e.expression).elements;
+      const ix = e.argumentExpression;
+      if (ix && ts.isNumericLiteral(ix)) {
+        const el = els[Number(ix.text)];
+        if (el && !ts.isSpreadElement(el) && !ts.isOmittedExpression(el)) visit(el, d + 1); else open = true;
+        return;
+      }
+      for (const el of els) { if (ts.isSpreadElement(el) || ts.isOmittedExpression(el)) open = true; else visit(el, d + 1); }
+      return;
+    }
+    if (ts.isCallExpression(e) && (e.arguments ?? []).length === 0) {
+      const f = unwrapArgExpr(e.expression);
+      if (ts.isArrowFunction(f) || ts.isFunctionExpression(f)) {
+        compound = true;
+        if (!ts.isBlock(f.body)) { visit(f.body, d + 1); return; }
+        let any = false;
+        (function rets(n) {
+          if (n !== f.body && (ts.isFunctionLike(n) || ts.isClassLike(n))) return;   // a nested function's returns are its own
+          if (ts.isReturnStatement(n)) { any = true; if (n.expression) visit(n.expression, d + 1); else open = true; }
+          ts.forEachChild(n, rets);
+        })(f.body);
+        if (!any) open = true;
+        return;
+      }
+    }
+    if (ts.isIdentifier(e)) {
+      let sym; try { sym = checker.getSymbolAtLocation(e); } catch { sym = undefined; }
+      const decl = sym?.declarations?.length === 1 ? sym.declarations[0] : null;
+      if (decl && ts.isVariableDeclaration(decl) && ts.isIdentifier(decl.name) && decl.initializer && !seenSyms.has(sym)
+          && decl.parent && ts.isVariableDeclarationList(decl.parent)) {
+        const isConst = (decl.parent.flags & ts.NodeFlags.Const) !== 0;
+        const init = unwrapArgExpr(decl.initializer);
+        // Only a binding whose value is itself a CHOICE, or a `let` that is reassigned, is unfolded here; a const
+        // bound to one function is the ordinary path's alias question and stays there.
+        const assigns = [];
+        if (!isConst) {
+          (function find(n) {
+            if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+                && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment && ts.isIdentifier(unwrapArgExpr(n.left))) {
+              let s2; try { s2 = checker.getSymbolAtLocation(unwrapArgExpr(n.left)); } catch { s2 = undefined; }
+              if (s2 === sym) assigns.push(n);
+            }
+            ts.forEachChild(n, find);
+          })(decl.getSourceFile());
+        }
+        if (calleeChoiceLeaves(init) !== null || assigns.length) {
+          seenSyms.add(sym);
+          compound = true;
+          visit(init, d + 1);
+          for (const a of assigns) {
+            if (a.operatorToken.kind !== ts.SyntaxKind.EqualsToken) open = true; else visit(a.right, d + 1);
+          }
+          return;
+        }
+      }
+    }
+    leaves.push(e);
+  };
+  visit(expr, 0);
+  return compound ? { leaves, open } : null;
+}
+// One callee value of a choice, charged as a call to it with this call's arguments: an inline function literal is
+// already charged to its lexical owner (or to its own minted unit, edged here); a parameter is a callback-flow
+// invocation (`paramInvokes`, exactly as `cb()` is); a reference is the reflective funnel's question
+// (`chargeInvokedRef`: a local unit, κ with its locator, the dependency funnel, or a value holder's `Unknown`),
+// plus this call's argument slots for the callback flow of a LOCAL target. Returns false when the value cannot
+// be named — then the choice is `open` and discloses.
+function chargeCalleeLeaf(rec, node, leaf, tag) {
+  if (ts.isArrowFunction(leaf) || ts.isFunctionExpression(leaf)) { const u = nodeName.get(leaf); if (u) rec.edges.add(u); return true; }
+  if (!(ts.isIdentifier(leaf) || ts.isPropertyAccessExpression(leaf)
+        || (ts.isElementAccessExpression(leaf) && accessedMemberName(leaf)))) return false;
+  const d2 = refSlotDecl(leaf);
+  if (d2 && ts.isParameter(d2) && d2.parent && nodeName.get(d2.parent)) {
+    const ownerUnit = nodeName.get(d2.parent);
+    const idx = d2.parent.parameters.indexOf(d2);
+    (paramInvokes.get(ownerUnit) ?? paramInvokes.set(ownerUnit, new Set()).get(ownerUnit)).add(idx);
+    return true;
+  }
+  const t = (d2 && callTargetUnit(d2)) || resolveFnRefUnit(leaf);
+  if (t) { rec.edges.add(t); registerCallbackArgs(rec, t, node.arguments ?? []); return true; }
+  // Named only where the funnel ANSWERS: a dependency or platform function (κ, or the dependency funnel's
+  // ledger/`invisible`), or a value holder (which it discloses). A reference with no declaration (`(x as
+  // any).gc`) or a local member SIGNATURE with no body (`options.callback`) is not named — MEASURED, counting
+  // them closed removed zod's `callback:collect` and ioredis's `callback:callback` over values nobody bounded.
+  const holder = d2 && (ts.isVariableDeclaration(d2) || ts.isBindingElement(d2) || ts.isParameter(d2));
+  if (!d2 || (declIsLocal(d2) && !holder)) return false;
+  chargeInvokedRef(rec, node, leaf, node.arguments ?? [], tag);
+  return true;
+}
 function reflectiveArgs(node, m, recvText) {
   const as = [...(node.arguments ?? [])];
   if (recvText === "Reflect") return m === "apply" ? literalArgList(as[2]) : null;
@@ -5104,6 +5230,25 @@ const callbackArgs = new Map();    // calleeName -> Map(argIndex -> Array<{calle
                                     // callback per caller instead of unioning every caller's choice onto
                                     // the HOF and handing the whole union to everyone (BACKLOG "a shared
                                     // HOF's effects are charged to EVERY caller").
+// What each argument position of a call to LOCAL unit `targetName` received (callback flow, see `callbackArgs`).
+// Shared by the ordinary local arm and R955's callee-choice arm, so a callback passed through either is seen.
+function registerCallbackArgs(rec, targetName, args) {
+  args.forEach((a, i) => {
+    const slot = (callbackArgs.get(targetName) ?? callbackArgs.set(targetName, new Map()).get(targetName));
+    const list = slot.get(i) ?? [];
+    let target = null, opaque = false;
+    if (ts.isIdentifier(a)) {
+      const d2 = realDecl(checker.getSymbolAtLocation(a));
+      target = d2 && nodeName.get(d2);
+      if (!target) opaque = true;
+    } else {
+      // inline closure (attributed lexically to the PASSER already) or any other opaque shape
+      opaque = true;
+    }
+    list.push({ callerRec: rec, target, opaque });
+    slot.set(i, list);
+  });
+}
 const paramInvokes = new Map();    // fnName -> Set(paramIndex) — this fn calls its own parameter
 
 // ── entry points (SPEC §2 `entryPoint`): runtime-invoked roots the framework calls — their
@@ -8832,6 +8977,20 @@ function visitCalls(node) {
           if (process.env.CANDOR_R439_MARK) process.stderr.write(`CANDOR_R439_HIT ${cmSpec}\n`);
         }
       }
+      // R955 — a callee that is a CHOICE between functions calls every one of them (see `calleeChoiceLeaves`).
+      // Charged here, beside whatever the one resolved declaration below edges (a subset of this union); a choice
+      // whose every value was named also stands in for the unresolved-callee `Unknown` that arm would add.
+      let calleeChoiceClosed = false;
+      if (rec && ts.isCallExpression(node)) {
+        const ch = calleeChoiceLeaves(node.expression);
+        if (ch) {
+          const tag = (node.expression.getText?.() ?? "?").replace(/\s+/g, "").slice(0, 60);
+          let named = !ch.open;
+          for (const leaf of ch.leaves) if (!chargeCalleeLeaf(rec, node, leaf, tag)) named = false;
+          if (!named) { rec.direct.add("Unknown"); rec.why.add(`callback:${tag}`); }   // owner-less: SPEC §4's `callback:`
+          calleeChoiceClosed = named;
+        }
+      }
       const sig = checker.getResolvedSignature(node);
       let decl = sig && sig.declaration;
       // ⟨R103⟩ A WRITABLE SLOT IS AN INCOMPLETE CANDIDATE SET — see `openCallSlot`, and see the class-
@@ -8904,7 +9063,7 @@ function visitCalls(node) {
             rec.direct.add("Net"); // bare call to an HTTP-client default/named import whose pkg isn't installed
                                    // (so its signature didn't resolve) — Net, not Unknown (#13). Host capture
                                    // happens in the global/builtin arm below, which fires for the same node.
-          } else {
+          } else if (!calleeChoiceClosed) {
             rec.direct.add("Unknown"); // unresolvable call → Unknown, never silent-pure (SPEC §4)
             // ⟨0.19⟩ SETUP split (SPEC §6.2 §3): if the callee binds to a DECLARED-but-UNINSTALLED package,
             // this Unknown is a mis-configuration (the pkg isn't `npm install`ed), not a genuine dynamic hole
@@ -9136,6 +9295,25 @@ function visitCalls(node) {
           // (`fElemCall`/`lElemCall`/`fdElemCall`). Restricted to a LITERAL key by
           // `accessedMemberName` — a computed `i[k].call(…)` names nothing and is left where it was
           // rather than guessed at, which is the same line R524 drew.
+          // R955 — `(c ? f : g).call(t, …)` invokes every function the receiver can hold.
+          const reflChoice = invokedRef && (m === "call" || m === "apply" || recvText === "Reflect")
+            && !(ts.isIdentifier(invokedRef) || ts.isPropertyAccessExpression(invokedRef)) ? calleeChoiceLeaves(invokedRef) : null;
+          if (reflChoice) {
+            const rArgs = m === "construct" ? undefined : reflectiveArgs(node, m, recvText);
+            let named = !reflChoice.open;
+            for (const leaf of reflChoice.leaves) {
+              if (ts.isArrowFunction(leaf) || ts.isFunctionExpression(leaf)) { const u = nodeName.get(leaf); if (u) rec.edges.add(u); }
+              else if (ts.isIdentifier(leaf) || ts.isPropertyAccessExpression(leaf)) {
+                const d2 = refSlotDecl(leaf);
+                const unit = (d2 && callTargetUnit(d2)) || resolveFnRefUnit(leaf);
+                const holder = d2 && (ts.isVariableDeclaration(d2) || ts.isBindingElement(d2) || ts.isParameter(d2));
+                if (!unit && (!d2 || (declIsLocal(d2) && !holder))) named = false;   // as `chargeCalleeLeaf`
+                else chargeInvokedRef(rec, node, leaf, rArgs, `${recvText.slice(0, 40)}.${m}`);
+              }
+              else named = false;
+            }
+            if (!named) { rec.direct.add("Unknown"); rec.why.add(`callback:${recvText.slice(0, 40)}.${m}`); }
+          }
           if (invokedRef && (ts.isIdentifier(invokedRef) || ts.isPropertyAccessExpression(invokedRef)
                              || (ts.isElementAccessExpression(invokedRef) && accessedMemberName(invokedRef)))) {
             chargeInvokedRef(rec, node, invokedRef,
@@ -9258,21 +9436,7 @@ function visitCalls(node) {
             // record what each argument position received (callback-flow, see callbackArgs) — keyed with
             // THIS call site's own caller record (`rec`), so a HOF called from two sites with two
             // different named callbacks can be resolved per site in pass 2b, not pooled into one bucket.
-            (node.arguments ?? []).forEach((a, i) => {
-              const slot = (callbackArgs.get(targetName) ?? callbackArgs.set(targetName, new Map()).get(targetName));
-              const list = slot.get(i) ?? [];
-              let target = null, opaque = false;
-              if (ts.isIdentifier(a)) {
-                const d2 = realDecl(checker.getSymbolAtLocation(a));
-                target = d2 && nodeName.get(d2);
-                if (!target) opaque = true;
-              } else {
-                // inline closure (attributed lexically to the PASSER already) or any other opaque shape
-                opaque = true;
-              }
-              list.push({ callerRec: rec, target, opaque });
-              slot.set(i, list);
-            });
+            registerCallbackArgs(rec, targetName, node.arguments ?? []);
           } else if (!ts.isArrowFunction(decl) && !ts.isFunctionExpression(decl)) {
             // Resolution landed on a TYPE (a function-type annotation, a method/property signature),
             // not a body. If that type belongs to a PARAMETER of a unit, defer to callback-flow
