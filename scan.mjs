@@ -7440,9 +7440,44 @@ const identIsGlobalProcess = (id) => {
   };
   for (const sf of sources) collectProcessAliases(sf);
 }
-// `process.env` as an expression (PropertyAccess `process.env` where `process` is the global).
-const isProcessEnvExpr = (expr) =>
-  expr && ts.isPropertyAccessExpression(expr) && expr.name.text === "env" && identIsGlobalProcess(expr.expression);
+// ---- THE `process.env` VALUE: ONE IDENTITY, ASKED ONCE (SOUNDNESS R928 + R804, ts vein C) -------------
+// Everything below answers ONE question — "is this expression's value the process environment object?" —
+// and the Env arm in the classifier asks it of every expression instead of enumerating the contexts a read
+// may appear in. The model it replaces had two halves that each failed by spelling:
+//
+//   IDENTITY by exact node: `isProcessEnvExpr` required the PropertyAccess `process.env` itself, and an
+//     alias required the exact initializer `= process.env`. `(process.env as any).X`, `process.env!.X`,
+//     `(process.env satisfies …).X`, `(process.env).X`, `<any>process.env`, `process["env"]`,
+//     `const e = process.env as E`, `const e = o ?? process.env`, `c ? process.env : {}`, and an alias OF
+//     an alias (`const f = e`) were all a different node and all read as nothing.
+//   CONSUMERS by list: dot/bracket, destructure, `in`, spread, for-in and a table of whole-object builtins.
+//     `util.inspect(env)`, `util.format('%o', env)`, `console.log(env)`, `const asn = Object.assign;
+//     asn(env, o)`, `readKey(process.env)` into a project function that READS it, `return process.env`,
+//     and a default parameter `e = process.env` were unlisted, so ABSENT.
+//
+// MEASURED at 503f449 (`tsagent-c/fx/envid`, every shape EXECUTED on node 22.12.0 with a planted
+// `CANDOR_SECRET_C` read back, the aliased `Object.assign` read back by a child's `printenv`): 25 of 25
+// env-reading spellings ABSENT with `deny Env <fn>` and `deny Unknown <fn>` both exit 0; the plain
+// `process.env[K]` control exit 1. The argv arm beside it never had this class, because it marks the
+// EXPRESSION — that is the model this adopts, with identity widened from a node to a value.
+//
+// TRANSPARENT: the wrappers that change only the static type, never the value.
+const unwrapEnvTransparent = (e) => {
+  while (e && (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression(e)
+               || ts.isNonNullExpression(e) || ts.isSatisfiesExpression(e))) e = e.expression;
+  return e;
+};
+// `process.env` / `process["env"]` / `globalThis.process?.env` / `(process as any).env` — the global
+// process object's `env` member. The `process` side keeps `identIsGlobalProcess`'s shadow guard, so a
+// project-local `process` (a parameter, a module `const`) matches nothing.
+const isProcessEnvExpr = (expr) => {
+  if (!expr) return false;
+  let obj = null;
+  if (ts.isPropertyAccessExpression(expr) && expr.name.text === "env") obj = expr.expression;
+  else if (ts.isElementAccessExpression(expr) && expr.argumentExpression
+           && ts.isStringLiteralLike(expr.argumentExpression) && expr.argumentExpression.text === "env") obj = expr.expression;
+  return !!obj && identIsGlobalProcess(unwrapEnvTransparent(obj));
+};
 
 // …AND `process.argv`, which is the same channel. §1 defines Env as "reading environment variables /
 // THE PROCESS ENVIRONMENT", and argv is process-startup state delivered by the same `exec` call that
@@ -7456,48 +7491,81 @@ const isProcessEnvExpr = (expr) =>
 const isProcessArgvExpr = (expr) =>
   expr && ts.isPropertyAccessExpression(expr) && expr.name.text === "argv" && identIsGlobalProcess(expr.expression);
 
-// The set of local-binding SYMBOLS that alias process.env — collected below, one pre-pass over the
-// sources. A symbol lands here iff its ONLY initializer/assignment is `= process.env` (a reassignment
-// to anything else removes it → the alias is cleared, per the spec's reassignment rule).
+// The LEAVES a value can come from: through the transparent wrappers, both arms of `?:`, either side of
+// `??`/`||`, the right of `&&`/`,`, and the right of an assignment expression. A merge is a MAY-flow, and
+// Env is an all-paths over-approximation (§3.3): `(o ?? process.env).X` reads the environment on the path
+// where `o` is nullish, which is a real execution, so the merged value counts — it is NOT the reassignment
+// case below, where flow-insensitivity cannot order the rebind against the read.
+const envValueLeaves = (expr, out = []) => {
+  const e = unwrapEnvTransparent(expr);
+  if (!e) return out;
+  if (ts.isConditionalExpression(e)) { envValueLeaves(e.whenTrue, out); envValueLeaves(e.whenFalse, out); return out; }
+  if (ts.isBinaryExpression(e)) {
+    const k = e.operatorToken.kind;
+    if (k === ts.SyntaxKind.QuestionQuestionToken || k === ts.SyntaxKind.BarBarToken) {
+      envValueLeaves(e.left, out); envValueLeaves(e.right, out); return out;
+    }
+    if (k === ts.SyntaxKind.AmpersandAmpersandToken || k === ts.SyntaxKind.CommaToken
+        || k === ts.SyntaxKind.EqualsToken) { envValueLeaves(e.right, out); return out; }
+  }
+  out.push(e);
+  return out;
+};
+
+// ALIASES — MUST and MAY, now over VALUES and to a fixpoint (an alias of an alias is an alias).
+//   MUST (`envAliasSymbols`): EVERY binding of the symbol has a process.env leaf (or a MUST-alias leaf).
+//     `const e = process.env as E`, `const e = o ?? process.env`, `const f = e` all qualify.
+//   MAY (`envMayAliasSymbols`, a superset): SOME binding has an env leaf. A symbol in MAY but not MUST —
+//     dotenv's `let pe = process.env; if (opts.pe) pe = opts.pe`, or a rebind that dominates every read —
+//     is POSSIBLY the environment, and flow-insensitivity cannot tell which, so its reads disclose
+//     `Unknown` and never fabricate `Env` (the 2c posture, now applied to reads too: at 503f449 a MAY-alias
+//     READ was not even `Unknown` — it was absent).
+// A binding is a `VariableDeclaration` with an identifier name (no initializer = a binding with no env
+// leaf), a plain or logical (`??=`/`||=`/`&&=`) assignment to an identifier, or `{ env } = process` /
+// `{ env: e } = process` (wrappers unwrapped). A PARAMETER is never an alias — callers bind it — so
+// `e = process.env` as a default is charged where the default is evaluated (see the Env arm).
 const envAliasSymbols = new Set();
-// MAY-alias: symbols that were EVER bound `= process.env`, INCLUDING ones later reassigned (a union like
-// dotenv's `let processEnv = process.env; if (opts.processEnv) processEnv = opts.processEnv`). A MUST-alias
-// (envAliasSymbols) is a proven env read → Env; a MAY-alias is only POSSIBLY env → the effect-polymorphism
-// pass (2c) discloses Unknown, never fabricates Env, for one passed into a written parameter.
 const envMayAliasSymbols = new Set();
 {
-  const aliasCandidates = new Set();   // symbol -> declared `= process.env`
-  const disqualified = new Set();      // symbol assigned to something that is NOT process.env
-  const noteBinding = (symbol, init) => {
-    if (!symbol) return;
-    if (init && isProcessEnvExpr(init)) aliasCandidates.add(symbol);
-    else disqualified.add(symbol);     // bound/assigned to a non-process.env value → not (or no longer) an alias
-  };
-  const collectAliases = (node) => {
-    // `const env = process.env` / `let`/`var` — a name-identifier binding with an initializer.
+  const ENV_DESTRUCTURED = Symbol("env-destructured");
+  const bindings = new Map(); // symbol -> [value expr | null | ENV_DESTRUCTURED]
+  const note = (sym, v) => { if (sym) (bindings.get(sym) ?? bindings.set(sym, []).get(sym)).push(v); };
+  const LOGICAL_ASSIGN = new Set([ts.SyntaxKind.EqualsToken, ts.SyntaxKind.QuestionQuestionEqualsToken,
+                                  ts.SyntaxKind.BarBarEqualsToken, ts.SyntaxKind.AmpersandAmpersandEqualsToken]);
+  const collect = (node) => {
     if (ts.isVariableDeclaration(node) && node.name && ts.isIdentifier(node.name)) {
-      noteBinding(checker.getSymbolAtLocation(node.name), node.initializer ?? null);
-    }
-    // `const { env } = process` — destructuring `env` off the global `process` makes `env` an alias too.
-    else if (ts.isVariableDeclaration(node) && node.name && ts.isObjectBindingPattern(node.name)
-             && node.initializer && ts.isIdentifier(node.initializer) && identIsGlobalProcess(node.initializer)) {
+      note(checker.getSymbolAtLocation(node.name), node.initializer ?? null);
+    } else if (ts.isVariableDeclaration(node) && node.name && ts.isObjectBindingPattern(node.name)
+               && node.initializer && identIsGlobalProcess(unwrapEnvTransparent(node.initializer))) {
       for (const el of node.name.elements) {
-        // the property picked off `process` must be `env` (`{env}` or `{env: local}`); the bound name is the alias.
         const propName = el.propertyName ? (ts.isIdentifier(el.propertyName) ? el.propertyName.text : null)
                                          : (ts.isIdentifier(el.name) ? el.name.text : null);
-        if (propName === "env" && ts.isIdentifier(el.name)) aliasCandidates.add(checker.getSymbolAtLocation(el.name));
+        if (propName === "env" && ts.isIdentifier(el.name)) note(checker.getSymbolAtLocation(el.name), ENV_DESTRUCTURED);
       }
+    } else if (ts.isBinaryExpression(node) && LOGICAL_ASSIGN.has(node.operatorToken.kind) && ts.isIdentifier(node.left)) {
+      note(checker.getSymbolAtLocation(node.left), node.right);
     }
-    // `env = <expr>` reassignment — a `let`/`var` alias reassigned to a non-process.env value is cleared.
-    else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
-             && ts.isIdentifier(node.left)) {
-      noteBinding(checker.getSymbolAtLocation(node.left), node.right);
-    }
-    ts.forEachChild(node, collectAliases);
+    ts.forEachChild(node, collect);
   };
-  for (const sf of sources) collectAliases(sf);
-  for (const s of aliasCandidates) if (s && !disqualified.has(s)) envAliasSymbols.add(s);
-  for (const s of aliasCandidates) if (s) envMayAliasSymbols.add(s); // the MAY set: ever-bound `= process.env`
+  for (const sf of sources) collect(sf);
+  const leafIn = (leaf, set) => isProcessEnvExpr(leaf)
+    || (ts.isIdentifier(leaf) && set.has(checker.getSymbolAtLocation(leaf)));
+  const hasEnvLeaf = (v, set) => v === ENV_DESTRUCTURED || (!!v && typeof v === "object" && envValueLeaves(v).some((l) => leafIn(l, set)));
+  // MAY: least fixpoint of "some binding has a leaf that is process.env or already MAY".
+  for (let changed = true, n = 0; changed && n < 64; n++) {
+    changed = false;
+    for (const [sym, vals] of bindings) {
+      if (!envMayAliasSymbols.has(sym) && vals.some((v) => hasEnvLeaf(v, envMayAliasSymbols))) { envMayAliasSymbols.add(sym); changed = true; }
+    }
+  }
+  // MUST: least fixpoint (from empty) of "every binding has a leaf that is process.env or already MUST" —
+  // least, so a cycle that never touches process.env directly stays MAY (the disclosing side).
+  for (let changed = true, n = 0; changed && n < 64; n++) {
+    changed = false;
+    for (const sym of envMayAliasSymbols) {
+      if (!envAliasSymbols.has(sym) && bindings.get(sym).every((v) => hasEnvLeaf(v, envAliasSymbols))) { envAliasSymbols.add(sym); changed = true; }
+    }
+  }
 }
 // True when `id` is an identifier resolving to a confirmed process.env alias local.
 const identIsEnvAlias = (id) => {
@@ -7505,13 +7573,87 @@ const identIsEnvAlias = (id) => {
   const sym = checker.getSymbolAtLocation(id);
   return !!sym && envAliasSymbols.has(sym);
 };
-// The receiver expression READS process.env — it is either `process.env` itself or a confirmed alias.
-const readsProcessEnv = (expr) => isProcessEnvExpr(expr) || identIsEnvAlias(expr);
-// MAY-read: process.env, a MUST-alias, or a MAY-alias (ever-bound to process.env but reassignable).
+// MAY-read: a MAY-alias (ever-bound to process.env but reassignable). A superset of the MUST set.
 const identIsEnvMayAlias = (id) => {
   if (!id || !ts.isIdentifier(id)) return false;
   const sym = checker.getSymbolAtLocation(id);
   return !!sym && envMayAliasSymbols.has(sym);
+};
+// The env kind of an expression's VALUE: "env" if some leaf is process.env or a MUST-alias, "may" if
+// some leaf is only a MAY-alias, else null. The one answer the Env arm, 2c and the shared helpers ask.
+const envValueKind = (expr) => {
+  let kind = null;
+  for (const l of envValueLeaves(expr)) {
+    if (isProcessEnvExpr(l) || identIsEnvAlias(l)) return "env";
+    if (identIsEnvMayAlias(l)) kind = "may";
+  }
+  return kind;
+};
+// ⟨R928/R804⟩ Is `node` an EXPRESSION whose value is the environment object? "env" for `process.env` in
+// any spelling (`isProcessEnvExpr`) or a reference to a MUST-alias, "may" for a reference to a MAY-only
+// alias, else null. A binding NAME, an assignment TARGET, a member name and a type position are not
+// value references. A shorthand `{ env }` IS one, and asks the checker for the VALUE symbol (the plain
+// lookup returns the property).
+const envIsAssignOp = (k) => k >= ts.SyntaxKind.FirstAssignment && k <= ts.SyntaxKind.LastAssignment;
+let envAliasNames = null;
+const envRefKind = (node) => {
+  if (isProcessEnvExpr(node)) return "env";
+  if (!ts.isIdentifier(node)) return null;
+  envAliasNames ??= new Set([...envMayAliasSymbols].map((s) => s.name));
+  if (!envAliasNames.has(node.text)) return null;
+  const p = node.parent;
+  if (!p) return null;
+  if ((ts.isVariableDeclaration(p) || ts.isParameter(p) || ts.isBindingElement(p) || ts.isPropertyAssignment(p)
+       || ts.isPropertyDeclaration(p) || ts.isFunctionDeclaration(p)) && p.name === node) return null;
+  if (ts.isBindingElement(p) && p.propertyName === node) return null;
+  if ((ts.isPropertyAccessExpression(p) || ts.isQualifiedName(p)) && p.name === node) return null;
+  if (ts.isTypeQueryNode(p) || ts.isExportSpecifier(p) || ts.isImportSpecifier(p) || ts.isImportClause(p)
+      || ts.isNamespaceImport(p) || ts.isImportEqualsDeclaration(p)) return null;
+  if (ts.isBinaryExpression(p) && p.left === node && envIsAssignOp(p.operatorToken.kind)) return null;
+  if ((ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p))
+      && (p.operator === ts.SyntaxKind.PlusPlusToken || p.operator === ts.SyntaxKind.MinusMinusToken)) return null;
+  const sym = ts.isShorthandPropertyAssignment(p) && p.name === node
+    ? checker.getShorthandAssignmentValueSymbol(p) : checker.getSymbolAtLocation(node);
+  if (!sym || !envMayAliasSymbols.has(sym)) return null;
+  return envAliasSymbols.has(sym) ? "env" : "may";
+};
+// ⟨R928/R804⟩ Does the CONSUMER of this env value provably touch no key? Climb through what passes the
+// value on unchanged (the transparent wrappers, both arms of `?:`, either side of `??`/`||`, the right of
+// `&&`/`,`) to the node that consumes it, then answer from a CLOSED list of non-reading consumers.
+// Everything not on it charges: that is the direction a list must fail in here (a missing entry is an
+// over-charge on code that already names the environment, never a silence).
+const envConsumerInert = (node) => {
+  let cur = node;
+  for (;;) {
+    const p = cur.parent;
+    if (!p) return true; // a bare expression with no parent cannot be evaluated
+    if ((ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isTypeAssertionExpression(p)
+         || ts.isNonNullExpression(p) || ts.isSatisfiesExpression(p)) && p.expression === cur) { cur = p; continue; }
+    if (ts.isConditionalExpression(p) && (p.whenTrue === cur || p.whenFalse === cur)) { cur = p; continue; }
+    if (ts.isBinaryExpression(p)) {
+      const k = p.operatorToken.kind;
+      if (k === ts.SyntaxKind.QuestionQuestionToken || k === ts.SyntaxKind.BarBarToken) { cur = p; continue; }
+      if ((k === ts.SyntaxKind.AmpersandAmpersandToken || k === ts.SyntaxKind.CommaToken) && p.right === cur) { cur = p; continue; }
+      if ((k === ts.SyntaxKind.AmpersandAmpersandToken || k === ts.SyntaxKind.CommaToken) && p.left === cur) return true; // tested/discarded
+      if (k === ts.SyntaxKind.EqualsEqualsEqualsToken || k === ts.SyntaxKind.ExclamationEqualsEqualsToken
+          || k === ts.SyntaxKind.EqualsEqualsToken || k === ts.SyntaxKind.ExclamationEqualsToken
+          || (k === ts.SyntaxKind.InstanceOfKeyword && p.left === cur)) return true;
+      // `e = <env>` / `e ??= <env>` into an identifier that IS an alias: judged at e's own uses.
+      if (p.right === cur && envIsAssignOp(k) && ts.isIdentifier(p.left)
+          && envMayAliasSymbols.has(checker.getSymbolAtLocation(p.left))) return true;
+      return false;
+    }
+    // `const e = <env>` that made `e` an alias (MUST or MAY): judged at e's own uses.
+    if (ts.isVariableDeclaration(p) && p.initializer === cur && ts.isIdentifier(p.name)
+        && envMayAliasSymbols.has(checker.getSymbolAtLocation(p.name))) return true;
+    if (ts.isTypeOfExpression(p) || ts.isVoidExpression(p)) return true;
+    if (ts.isPrefixUnaryExpression(p) && p.operator === ts.SyntaxKind.ExclamationToken) return true;
+    if ((ts.isIfStatement(p) || ts.isWhileStatement(p) || ts.isDoStatement(p)) && p.expression === cur) return true;
+    if (ts.isForStatement(p) && p.condition === cur) return true;
+    if (ts.isConditionalExpression(p) && p.condition === cur) return true;
+    if (ts.isExpressionStatement(p)) return true; // value discarded
+    return false;
+  }
 };
 
 // R113 — WEB STORAGE, IDENTIFIED FROM THE RECEIVER'S TYPE rather than from the member's declaration.
@@ -9209,9 +9351,28 @@ function visitCalls(node) {
       }
     }
   }
-  // Reading process.env — the JVM System.getenv twin → Env. All the common idioms count, not just the
-  // direct `process.env.KEY` dot access (see the process.env-recognition note above): dot/bracket access
-  // on process.env or a confirmed alias, destructuring a key off it, and the `in` membership test.
+  // Reading process.env — the JVM System.getenv twin → Env. ⟨R928/R804⟩ MARKED ON THE VALUE, the way the
+  // argv line below always was: every expression whose value is the environment object (`envRefKind` —
+  // `process.env` in any spelling, or a reference to an alias) charges its unit, UNLESS its consumer
+  // provably touches no key (`envConsumerInert`). The old arm listed the consumers that DO read (dot,
+  // bracket, destructure, `in`, spread, a builtin table, for-in) and every unlisted one was silent: an
+  // ALLOWLIST over an open set. This is the denylist of the same question, and the denylist is closed —
+  // a binding that BECOMES an alias (its reads are judged at its own uses), `typeof`, an (in)equality or
+  // `instanceof` test, a truthiness test, and a discarded value.
+  //
+  // WHAT THE DEFAULT CHARGES THAT THE LIST DID NOT, and why each is a real read and not a fabrication:
+  //  - a call argument to ANY callee (`util.inspect`, `console.log`, an aliased `Object.assign`, a dep, a
+  //    project function): the callee runs inside this unit's execution with the live object, so whatever
+  //    it reads is read during this call. A project callee that reads its parameter is NOT charged — that
+  //    would pool the effect onto every other caller of the same function (the HOF fabrication 2b
+  //    exists to prevent); 2c still charges a callee that WRITES it, as before.
+  //  - `return process.env` / an arrow body: the caller holds the live object; it reaches this unit
+  //    through the ordinary call edge.
+  //  - a store into an object, array or field: the value escapes to the heap. Charged where it escapes.
+  //    A unit that later reads it from the heap WITHOUT calling the storer is the residual this does not
+  //    close (module-level `const cfg = { env: process.env }` charges `<module>`, not the reader).
+  //  - a default parameter `e = process.env`: evaluated in the function's own frame when the argument is
+  //    omitted, which is the call every such default exists for (pnpm `isExecutedByCorepack`).
   {
     const markEnv = () => { const owner = enclosing(node); if (owner) fns.get(owner).direct.add("Env"); };
     // `process.argv` — the same channel, and the same ruling candor-rust has always applied to
@@ -9219,32 +9380,15 @@ function visitCalls(node) {
     // `const [,,x] = process.argv`, or handing it to a parser all reach the same process-startup state.
     // Marked on the expression itself so every idiom counts without enumerating them.
     if (isProcessArgvExpr(node)) markEnv();
-    // `process.env.KEY` / `env.KEY` (dot) and `process.env["KEY"]` / `env[k]` (bracket, literal OR dynamic key).
-    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && readsProcessEnv(node.expression)) {
-      markEnv();
-    }
-    // `const {KEY} = process.env` / `const {KEY} = env` — the object-binding pattern's initializer reads env.
-    else if (ts.isVariableDeclaration(node) && node.name && ts.isObjectBindingPattern(node.name)
-             && node.initializer && readsProcessEnv(node.initializer)) {
-      markEnv();
-    }
-    // `"KEY" in process.env` / `"KEY" in env` — the `in` operator's right operand reads env.
-    else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InKeyword
-             && readsProcessEnv(node.right)) {
-      markEnv();
-    }
-    // `{...process.env}` / `[...process.env]` / `f(...process.env)` — spreading env enumerates every key.
-    else if ((ts.isSpreadAssignment(node) || ts.isSpreadElement(node)) && readsProcessEnv(node.expression)) {
-      markEnv();
-    }
-    // `Object.assign(process.env, …)` / `Object.keys(env)` / `Reflect.set(process.env, …)` / `JSON.stringify(env)`
-    // / `structuredClone(env)` — a builtin that reads/writes every key of an env-object argument.
-    else if (envTouchingBuiltinCall(node) && node.arguments.some((a) => readsProcessEnv(a))) {
-      markEnv();
-    }
-    // `for (const k in process.env)` — the for-in loop enumerates every key of the environment.
-    else if (ts.isForInStatement(node) && readsProcessEnv(node.expression)) {
-      markEnv();
+    const kind = envRefKind(node);
+    if (kind && !envConsumerInert(node)) {
+      if (kind === "env") markEnv();
+      else {
+        // A MAY-alias (rebindable away from process.env): POSSIBLY the environment — disclose, never
+        // fabricate. Same posture and spelling as 2c's `env-maybe-write`; projects to `unresolved`.
+        const owner = enclosing(node);
+        if (owner) { const r = fns.get(owner); r.direct.add("Unknown"); r.why.add("env-maybe-read"); }
+      }
     }
   }
   // R113 — WEB STORAGE, THE WHOLE INTERFACE, through the same six shapes the `process.env` block above
@@ -10268,9 +10412,11 @@ const setFed = (sym, kind) => {
 // The env-source kind an expression denotes, or null: process.env / a MUST-alias → "env"; a MAY-alias
 // (ever-`=process.env`, reassignable) → "unknown"; an identifier already known env-fed → its recorded kind.
 const envSourceKind = (expr) => {
-  if (isProcessEnvExpr(expr) || identIsEnvAlias(expr)) return "env";
+  // ⟨R928⟩ through the one identity answer — wrappers, merges, alias-of-alias — not the exact node.
+  const vk = envValueKind(expr);
+  if (vk === "env") return "env";
+  if (vk === "may") return "unknown";
   if (ts.isIdentifier(expr)) {
-    if (identIsEnvMayAlias(expr)) return "unknown";
     const k = envFed.get(checker.getSymbolAtLocation(expr));
     if (k) return k;
   }

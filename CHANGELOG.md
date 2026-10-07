@@ -10,6 +10,23 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ STRICTER: `process.env` is charged as a VALUE, not as a spelling in a list of contexts (SOUNDNESS R928,
+  R804). The Env arm recognised the exact node `process.env` (or an alias initialised to exactly that node)
+  in seven reading contexts; every other spelling read as nothing. Now every expression whose value is the
+  environment object charges its unit unless its consumer provably touches no key (`typeof`, `===`/`!==`,
+  a truthiness test, a discarded value, or a binding that becomes an alias and is judged at its own uses).
+  Newly Env, all EXECUTED, all `deny Env <fn>` and `deny Unknown <fn>` exit 0 → `deny Env` exit 1:
+  `(process.env).X`, `(process.env as any).X`, `process.env!.X`, `satisfies`, `<any>process.env`,
+  `process["env"]`, `Object.keys((process.env))`, `structuredClone((process.env))`, `const e = process.env as
+  E`, `const e = o ?? process.env`, a ternary, an alias of an alias, a default parameter `e = process.env`,
+  `util.inspect`/`util.format('%o')`/`console.log` of the environment, `const asn = Object.assign; asn(process.env,
+  o)`, handing `process.env` to any function, and returning it. A binding reassigned away from
+  `process.env` (a MAY-alias) now discloses `Unknown[env-maybe-read]` on a read — it was ABSENT, not
+  `Unknown`, before — and never `Env`. A project's own `process` still matches nothing.
+  Over the pinned 28-entry roster: 12 rows added, 25 changed, 0 removed; 13 units gain a direct `Env`, every
+  one audited against source as a real read (pnpm `isExecutedByCorepack` and `prependDirsToPath`, citty's
+  `_color` module initializer, simple-git's environment guard, `envReplace(…, process.env)` ×3, …); 0
+  `Unknown`-only rows added.
 - ⚠ STRICTER: a dispatch now reaches EVERY override below the body it resolved to, not one level of them
   (SOUNDNESS R871, R872). Five readers answered "which bodies can `x.m()` run?" separately and disagreed in
   one report; they now share one answer (`overrideDescent` / `memberDispatchBodies` / `implMemberBodies`).

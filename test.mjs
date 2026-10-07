@@ -6819,8 +6819,15 @@ export function loadEnv(o: Record<string,string>) { assignInto(env, o); }
 export function dumpEnv() { return dumpKeys(env); }`,
     "src/neg.ts": `export function benignAssign() { return Object.assign({}, { a: 1 }); }
 export function benignKeys(o: Record<string,unknown>) { return Object.keys(o); }`,
+    // ⟨R928/R804⟩ THE SHADOW GUARD IS ASKED THROUGH THE ENV-FED PARAMETER (2c), where the builtin table
+    // still decides. Handing `process.env` to ANY callee now charges the HANDER — a project shadow
+    // included, because the callee runs with the live object (that is what closed `util.inspect`,
+    // `console.log` and an aliased `Object.assign`) — so `shadowedEntry` is Env by the value rule and
+    // the old direct spelling can no longer observe this guard. `shadowed`'s own body touches only its
+    // parameter: it is charged only if the TABLE matches the shadow's `Object.assign`.
     "src/shadow.ts": `const Shadow = { assign: (a: any) => a };
-export function shadowed() { const Object = Shadow; return Object.assign(process.env, {}); }`,
+function shadowed(t: any) { const Object = Shadow; return Object.assign(t, {}); }
+export function shadowedEntry() { return shadowed(process.env); }`,
   });
   const { report } = scan(d);
   const isEnv = (fn) => (entry(report, fn)?.inferred ?? []).includes("Env");
@@ -6833,8 +6840,96 @@ export function shadowed() { const Object = Shadow; return Object.assign(process
   check("GUARD: Object.assign/keys on a NON-env object stays PURE (no fabrication)",
         entry(report, "src.neg.benignAssign") == null && entry(report, "src.neg.benignKeys") == null,
         JSON.stringify([entry(report, "src.neg.benignAssign"), entry(report, "src.neg.benignKeys")]));
-  check("GUARD: a project-local `Object` SHADOW does NOT fabricate Env on `Object.assign(process.env, …)`",
+  check("GUARD: a project-local `Object` SHADOW does NOT fabricate Env on `Object.assign(envFedParam, …)` (the table never matches a shadow)",
         entry(report, "src.shadow.shadowed") == null, JSON.stringify(entry(report, "src.shadow.shadowed")));
+  check("…and the HANDER of process.env is Env by the value rule (R928/R804), shadow or not", isEnv("src.shadow.shadowedEntry"),
+        JSON.stringify(entry(report, "src.shadow.shadowedEntry")));
+}
+
+// ── SOUNDNESS R928 + R804 (ts vein C): `process.env` IS A VALUE, NOT A SPELLING ──────────────────────────
+// The Env arm recognised the EXACT node `process.env` (or an alias whose initializer was exactly that node)
+// in a LIST of reading contexts. Every spelling below is a different node or an unlisted context, every one
+// was ABSENT at 503f449 with `deny Env <fn>` AND `deny Unknown <fn>` both exit 0, and every one was EXECUTED
+// on node 22.12.0 reading a planted variable back (`tsagent-c/fx/envid`; the aliased `Object.assign` read
+// back by a child's `printenv`). Names are chosen so none is a §3.3 prefix of another.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", module: "commonjs", strict: true, skipLibCheck: true,
+                         types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+      include: ["src"],
+    }),
+    "src/ev.ts": `import * as util from "node:util";
+type E = Record<string, string | undefined>;
+const K = "CANDOR_SECRET_C";
+export function w01ParenZ() { return (process.env)[K]; }
+export function w02AsAnyZ() { return (process.env as any)[K]; }
+export function w03BangZ() { return process.env![K]; }
+export function w04SatisfiesZ() { return (process.env satisfies NodeJS.ProcessEnv)[K]; }
+export function w05AngleZ() { return (<any>process.env)[K]; }
+export function w06KeysParenZ() { return Object.keys((process.env)); }
+export function w07KeysAsZ() { return Object.keys(process.env as any); }
+export function w08CloneParenZ() { return structuredClone((process.env)); }
+export function w09AliasAsZ() { const e = process.env as E; return e[K]; }
+export function w10AliasSatZ() { const e = process.env satisfies NodeJS.ProcessEnv; return e[K]; }
+export function w11NullishZ(o?: E) { const e = o ?? process.env; return e[K]; }
+export function w12TernaryZ(c: boolean) { const e = c ? process.env : ({} as E); return e[K]; }
+export function w13DefaultZ(e: E = process.env) { return e[K]; }
+export function w14InspectZ() { return util.inspect(process.env); }
+export function w15FormatZ() { return util.format("%o", process.env); }
+export function w16ConsoleZ() { console.log(process.env); }
+export function w17AsnZ() { const asn = Object.assign; asn(process.env, { CANDOR_INJ: "yes" }); }
+function readerHelper(e: E) { return e[K]; }
+export function w18PasserZ() { return readerHelper(process.env); }
+function giverHelper() { return process.env; }
+export function w19TakerZ() { return giverHelper()[K]; }
+export function w20ElemZ() { return process["env"][K]; }
+export function w21ChainZ() { const e = process.env; const f = e; return f[K]; }
+const cenv = globalThis.process?.env ?? {};
+export function w23CittyZ() { return cenv[K]; }
+export function w24CorepackZ(env = process.env) { return env[K] != null; }
+export function m01MayZ(o?: E) { let e = process.env; if (o) e = o; return e[K]; }
+export function m02RebindZ() { let e: E = process.env; e = { [K]: "local" }; return e[K]; }
+export function c01PlainZ() { return process.env[K]; }
+export function c02ShadowParamZ(process: { env: E }) { return process.env[K]; }
+export function c04TypeofZ() { return typeof process.env; }
+export function c06TestZ() { return process.env === undefined || !process.env; }`,
+    "src/shadowproc.ts": `const process = { env: { CANDOR_SECRET_C: "fake" } as Record<string, string> };
+export function c03ShadowModZ() { return (process.env as any).CANDOR_SECRET_C; }
+export function c07ShadowModPassZ() { return JSON.stringify(process.env); }`,
+    "w.pol": "deny Env src.ev.w01ParenZ\n",
+    "may.pol": "deny Env src.ev.m01MayZ\ndeny Env src.ev.m02RebindZ\n",
+    "mayu.pol": "deny Unknown src.ev.m02RebindZ\n",
+  });
+  const { report } = scan(d);
+  const row = (fn) => entry(report, fn);
+  const inf = (fn) => row(fn)?.inferred ?? [];
+  const W = ["w01ParenZ", "w02AsAnyZ", "w03BangZ", "w04SatisfiesZ", "w05AngleZ", "w06KeysParenZ", "w07KeysAsZ",
+    "w08CloneParenZ", "w09AliasAsZ", "w10AliasSatZ", "w11NullishZ", "w12TernaryZ", "w13DefaultZ", "w14InspectZ",
+    "w15FormatZ", "w16ConsoleZ", "w17AsnZ", "w18PasserZ", "w19TakerZ", "w20ElemZ", "w21ChainZ", "w23CittyZ", "w24CorepackZ"];
+  for (const fn of W) check(`R928/R804: ${fn} reads the environment → Env (ABSENT at 503f449)`, inf(`src.ev.${fn}`).includes("Env"), JSON.stringify(row(`src.ev.${fn}`) ?? null));
+  check("R928: the plain control still Env", inf("src.ev.c01PlainZ").includes("Env"));
+  // A MAY-alias — rebindable away from process.env — discloses and never fabricates. m02's rebind DOMINATES
+  // the read (executed: it returns "local"), so Env there would be a fabrication; flow-insensitivity cannot
+  // tell it from m01, so both disclose.
+  for (const fn of ["m01MayZ", "m02RebindZ"]) {
+    check(`R928: MAY-alias ${fn} is Unknown[env-maybe-read], never Env`,
+          !inf(`src.ev.${fn}`).includes("Env") && inf(`src.ev.${fn}`).includes("Unknown")
+          && (row(`src.ev.${fn}`)?.unknownWhy ?? []).includes("env-maybe-read"), JSON.stringify(row(`src.ev.${fn}`) ?? null));
+  }
+  // Controls: a project `process` (parameter, module const) matches nothing, even passed whole to a builtin;
+  // a consumer that touches no key (`typeof`, `===`, `!`) charges nothing.
+  for (const fn of ["src.ev.c02ShadowParamZ", "src.ev.c04TypeofZ", "src.ev.c06TestZ", "src.shadowproc.c03ShadowModZ", "src.shadowproc.c07ShadowModPassZ"])
+    check(`R928 CONTROL: ${fn} charges nothing`, row(fn) == null, JSON.stringify(row(fn) ?? null));
+  // The POSTURE, pinned: a project callee that only READS its parameter is not itself charged — the HANDER
+  // is (w18) — because charging the callee pools the effect onto every other caller of it.
+  check("R928 POSTURE: readerHelper (reads a parameter) is not charged; its caller is", row("src.ev.readerHelper") == null,
+        JSON.stringify(row("src.ev.readerHelper") ?? null));
+  const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
+  check("R928 GATE: `deny Env src.ev.w01ParenZ` fires (exit 0 at 503f449)", ex("w.pol") === 1, `exit ${ex("w.pol")}`);
+  check("R928 GATE CONTROL: `deny Env` over the two MAY-aliases stays clean (no fabricated Env)", ex("may.pol") === 0, `exit ${ex("may.pol")}`);
+  check("R928 GATE: `deny Unknown` over the dominated rebind fires — disclosed, not silent", ex("mayu.pol") === 1, `exit ${ex("mayu.pol")}`);
+  fs.rmSync(d, { recursive: true, force: true });
 }
 
 // ── the same whole-env class via for-in and the `structuredClone` bare global (a further corpus-probe pass). ──
@@ -18459,10 +18554,15 @@ export function getSelf() { return self.structuredClone(lit); }`,
     // SHADOW CONTROL — a project's OWN `structuredClone`, bare and hung off a project-local `window`.
     // The helper still asks `identIsGlobal` on the identifier that decides (the bare callee, or the
     // global ROOT), so the SPELLING widened and what counts as the global did not.
+    // ⟨R928/R804⟩ Asked through the env-fed PARAMETER (2c), where the table still decides: handing
+    // `process.env` to any callee — a shadow included — now charges the hander by the value rule, so the
+    // direct spelling cannot observe this guard any more. `shadowBare`/`shadowWin` touch only their
+    // parameter and are charged only if the table matches the project's own `structuredClone`.
     "src/shadow.ts": `function structuredClone(x: unknown) { return x; }
 const window = { structuredClone(x: unknown) { return x; } };
-export function shadowBare() { return structuredClone(process.env); }
-export function shadowWin() { return window.structuredClone(process.env); }`,
+export function shadowBare(t: unknown) { return structuredClone(t); }
+export function shadowWin(t: unknown) { return window.structuredClone(t); }
+export function feedShadows() { return [shadowBare(process.env), shadowWin(process.env)]; }`,
     // OVER-CHARGE CONTROL — the qualified spelling over an object with no accessor, and over a CLASS
     // instance, whose accessor is prototype-installed and NON-enumerable so a clone never visits it
     // (R115's correct half, which this fix must not move: executed, 0 invocations).
@@ -18474,7 +18574,7 @@ export function pClass(k: Klass) { return globalThis.structuredClone(k); }`,
     "unk.pol": "deny Unknown src.a.getGT\ndeny Unknown src.a.getWin\ndeny Unknown src.a.getSelf\n",
     "purepol.pol": "deny Fs src.pure.pPlain\ndeny Env src.pure.pPlain\ndeny Unknown src.pure.pPlain\n"
                  + "deny Fs src.pure.pClass\ndeny Env src.pure.pClass\ndeny Unknown src.pure.pClass\n",
-    "shadowpol.pol": "deny Env src.shadow\n",
+    "shadowpol.pol": "deny Env src.shadow.shadowBare\ndeny Env src.shadow.shadowWin\n",
   });
   const { report } = scan(d);
   const eff = (fn) => (report.functions ?? []).find((e) => e.fn === fn);
@@ -18510,7 +18610,7 @@ export function pClass(k: Klass) { return globalThis.structuredClone(k); }`,
     // (that is what makes `pClass` a real test of R115's exclusion rather than an empty one), so a
     // file-wide `deny Fs` would fire on the fixture's own bait and prove nothing about the callers.
     check("R281 GATE CONTROL: both over-charge callers still gate clean under Fs+Env+Unknown", ex("purepol.pol") === 0, `exit ${ex("purepol.pol")}`);
-    check("R281 GATE CONTROL: the shadow file still gates clean under `deny Env`", ex("shadowpol.pol") === 0, `exit ${ex("shadowpol.pol")}`);
+    check("R281 GATE CONTROL: the two shadow-calling units still gate clean under `deny Env`", ex("shadowpol.pol") === 0, `exit ${ex("shadowpol.pol")}`);
   }
   fs.rmSync(d, { recursive: true, force: true });
 }
