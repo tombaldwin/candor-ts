@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.40.0] — 2026-10-07
+
 - ⚠ **Declares spec 0.40** (was 0.39) — the family floor bump. candor-ts implements both ⟨0.40⟩ halves that
   bind it: the AS-EFF-005 new-function baseline rule (SOUNDNESS R932, with the stable unit keys of R944 so a
   comment line no longer renames a unit) and bind/listen for `Net` (R817/R949: a `listen`/accept fails
