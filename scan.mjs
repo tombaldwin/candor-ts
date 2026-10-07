@@ -167,7 +167,8 @@ ENVIRONMENT / CONFIG
                                  \`policy\` key works too)
   CANDOR_BASELINE=<report.json>  (or a .candor/config \`baseline\` key) runs the AS-EFF-005
                                  regression guard against a saved same-build report: exit 1
-                                 when an existing function gained an effect, exit 2 on an
+                                 when a function gained an effect — one ABSENT from the
+                                 baseline is compared against nothing (⟨0.40⟩), exit 2 on an
                                  unparseable or different-build baseline (never evaluated),
                                  a stderr note when absent
   CANDOR_UNKNOWN_RATCHET         (or a .candor/config \`unknown-ratchet\` key) opt-in: flip an
@@ -12654,9 +12655,12 @@ const writeRefusal = (reason, unevaluated = null) => {
 //    evaluating a stale one yields a bogus AS-EFF-005 wave; skipping is an unbounded fail-open window).
 //    The read-only `diff`/`gains` QUERIES disclose a mismatch instead of failing — a comparison the
 //    user explicitly asked for should inform; this scan-time guard is the gate and fails closed.
-//  · Valid + same build → per-fn compare: an EXISTING fn gaining an effect is an [AS-EFF-005]
-//    violation (exit 1, joins --gate-json); a fn absent from the baseline is NEW code, reviewed as
-//    such, not a regression. Baselines omit pure fns (spec §2), so absent-prior means no prior claim.
+//  · Valid + same build → per-fn compare: a fn gaining an effect is an [AS-EFF-005] violation (exit 1,
+//    joins --gate-json). ⟨0.40⟩ A fn ABSENT from the baseline is compared against ∅ — prior(key) =
+//    baseline[key] ?? ∅ — so a new fn performing a real effect FIRES too (SPEC §3 baseline guard ⟨0.40⟩,
+//    SOUNDNESS R932). Until ⟨0.40⟩ it was skipped as "new code, reviewed normally", and code review does
+//    not read effects: a baseline of `keep` (Fs) and a tree adding `fresh` (Net) exited 0, `violations: []`.
+//    A new PURE fn gains nothing and passes; a new Unknown-ONLY fn is advisory but NAMED in its own note.
 //    An Unknown-ONLY gain is ADVISORY (a note, exit 0) UNLESS the ⟨unknown-ratchet⟩ opt-in is on
 //    (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET) — then a NEWLY-introduced Unknown FAILS
 //    (exit 1) while a fn already Unknown in the baseline is grandfathered (see the gain loop below).
@@ -12667,11 +12671,12 @@ const writeRefusal = (reason, unevaluated = null) => {
 // CALLGRAPH sidecar (<baseline>.callgraph.json, §2.2 — it lists every project fn INCLUDING pure
 // leaves), exactly as `gains`'s `origin` existence test does (query-core.mjs `gains`: a fn is
 // "existing" if it is a baseline-callgraph node — a caller key or a callee):
-//  · sidecar PRESENT + loaded → a fn that is a baseline-callgraph node has baseline effect set ∅
-//    (pure → omitted from the report) and any effect now is a GAIN violation. pure→effectful is caught.
-//    A fn in NEITHER report nor callgraph genuinely did not exist → stays exempt "new".
-//  · sidecar ABSENT → degrade to report-only existence (pre-⟨0.16⟩: a formerly-pure fn reads as new;
-//    still catches an already-effectful fn WIDENING). One stderr note that the guard is weaker.
+//  · ⟨0.40⟩ THE SIDECAR NOW DECIDES ONLY THE LABEL, never whether the guard fires (every absent key has
+//    prior ∅). Each AS-EFF-005 row carries ⟨0.12⟩'s `origin`: "existing" — in the baseline report or a
+//    baseline-callgraph node; "new" — in neither, sidecar loaded; "unknown" — absent from the report and
+//    no sidecar. "new" means ABSENT UNDER THIS KEY, not proof of new code: ts keys `Module.fn`, so
+//    renaming a file renames every unit in it, and `<structural>@<offset>` units are keyed by position.
+//  · sidecar ABSENT → existence labels degrade to "unknown"; one stderr note.
 //  · sidecar PRESENT-but-CORRUPT → fail closed (exit 2), like a corrupt baseline: a broken sidecar
 //    must not silently NARROW the guard back to report-only.
 if (baselinePath !== null) {
@@ -12751,22 +12756,24 @@ if (baselinePath !== null) {
       // as `gains` computes cgNodes. Non-array edge values are tolerated (skipped), matching loadCallgraph.
       cgNodes = new Set(Object.entries(baseCg).flatMap(([k, vs]) => [k, ...(Array.isArray(vs) ? vs : [])]));
     } else {
-      console.error(`candor-ts: no baseline callgraph sidecar at ${sidecarPath} — the AS-EFF-005 guard is `
-        + `WEAKER: existence falls back to the report, which omits pure functions, so a formerly-PURE fn `
-        + `turning effectful reads as new code and is NOT caught (only an already-effectful fn widening is). `
+      console.error(`candor-ts: no baseline callgraph sidecar at ${sidecarPath} — the AS-EFF-005 guard still `
+        + `compares every function (one absent from the baseline report against ∅), but cannot tell a `
+        + `formerly-PURE function from a new one, so its findings are labelled origin "unknown". `
         + `Regenerate the baseline with --out so the .callgraph.json is written alongside it.`);
     }
-    const unknownOnly = [];   // ⟨0.16⟩ advisory: fns that gained ONLY Unknown vs the baseline
+    const unknownOnly = [];      // ⟨0.16⟩ advisory: EXISTING fns that gained ONLY Unknown vs the baseline
+    const newUnknownOnly = [];   // ⟨0.40⟩ advisory, named separately: fns ABSENT from the baseline, only Unknown
+    let absentFired = false;     // ⟨0.40⟩ a firing on an absent key → print the review-first remedy once
     for (const name of [...inferred.keys()].sort()) {
       const prior = base.get(name);
-      // ⟨0.16⟩ Existence ladder: in the baseline REPORT → its recorded inferred set is the prior;
-      // else a baseline-callgraph NODE (sidecar present) → it existed and was pure, so prior = ∅ (any
-      // effect now is a gain); else genuinely absent → new code, exempt. Without the sidecar (cgNodes
-      // null) only the report path decides, the pre-⟨0.16⟩ semantics.
-      const priorSet = prior !== undefined ? prior
-        : (cgNodes !== null && cgNodes.has(name)) ? new Set()   // baseline-pure node → ∅ prior
-        : null;                                                 // new function — not a regression
-      if (priorSet === null) continue;
+      // ⟨0.40⟩ prior(key) = baseline[key] ?? ∅. The existence ladder survives only as the ⟨0.12⟩ LABEL:
+      // in the report → "existing"; a baseline-callgraph node (pure → omitted from the report) →
+      // "existing"; in neither with the sidecar loaded → "new"; absent from the report, no sidecar → "unknown".
+      const origin = prior !== undefined ? "existing"
+        : cgNodes === null ? "unknown"
+        : cgNodes.has(name) ? "existing" : "new";
+      const absent = origin !== "existing";
+      const priorSet = prior ?? new Set();
       const gained = [...inferred.get(name)].filter((x) => !priorSet.has(x)).sort();
       if (!gained.length) continue;
       // ⟨0.16⟩ the ratchet fires only on gaining a REAL boundary effect. An Unknown-ONLY gain is
@@ -12788,17 +12795,38 @@ if (baselinePath !== null) {
           // than read off an entry because this loop walks `inferred`, not `functions`; `unitHash` is the
           // one derivation, shared with the report entry.
           gateViolations.push({ rule: "AS-EFF-005", fn: name, ...(unitHash(name) ? { hash: unitHash(name) } : {}),
-            effects: ["Unknown"],
-            detail: `\`${name}\` gained an unresolved call (Unknown) not in the baseline — a NEW blind spot `
-              + `(unknown-ratchet); resolve it, or regenerate the baseline to grandfather it` });
+            effects: ["Unknown"], origin,
+            detail: absent
+              ? `\`${name}\` is ABSENT FROM THE BASELINE (under this key) and carries an unresolved call `
+                + `(Unknown) — a blind spot the baseline did not have (unknown-ratchet; prior ∅)`
+              : `\`${name}\` gained an unresolved call (Unknown) not in the baseline — a NEW blind spot `
+                + `(unknown-ratchet); resolve it, or regenerate the baseline to grandfather it` });
+          if (absent) absentFired = true;
+        } else if (absent) {
+          newUnknownOnly.push(name);
         } else {
           unknownOnly.push(name);
         }
         continue;
       }
       gateViolations.push({ rule: "AS-EFF-005", fn: name, ...(unitHash(name) ? { hash: unitHash(name) } : {}),
-        effects: real,
-        detail: `\`${name}\` gained effect { ${real.join(", ")} } not present in the baseline` });
+        effects: real, origin,
+        // ⟨0.40⟩ an absent key is NOT worded as a gain: under `Module.fn` keys a renamed file reads as
+        // absent too, so the message states what was measured (absent under this key), not new code.
+        detail: absent
+          ? `\`${name}\` is ABSENT FROM THE BASELINE (under this key) and performs { ${real.join(", ")} } — `
+            + `compared against nothing (prior ∅, origin ${origin})`
+          : `\`${name}\` gained effect { ${real.join(", ")} } not present in the baseline` });
+      if (absent) absentFired = true;
+    }
+    if (absentFired) {
+      // ⟨0.40⟩ REVIEW FIRST, then re-record — re-recording re-blesses everything else that moved, and the
+      // diff is how the operator sees what they would be blessing. `candor diff` takes the CURRENT report
+      // first (§3.1); its rows carry status "new".
+      console.error(`candor-ts: AS-EFF-005 fired on function(s) ABSENT from the baseline ${shownB} — absent under `
+        + `this engine's \`Module.fn\` key, which a file rename or move also produces. Review what changed: `
+        + `candor diff ${outPrefix}.json ${shownB} — then, if it is intended, record a new baseline with `
+        + `this build: candor-ts <target> --out <prefix>.`);
     }
     if (unknownOnly.length) {
       unknownOnly.sort();
@@ -12807,6 +12835,15 @@ if (baselinePath !== null) {
       console.error(`candor-ts: note — ${unknownOnly.length} function(s) gained an unresolved call `
         + `(Unknown) vs the baseline but no real effect — advisory, NOT a regression (Unknown is the §4 `
         + `trust marker, dominated by resolution noise on version bumps): ${shown}${more}`);
+    }
+    if (newUnknownOnly.length) {
+      // ⟨0.40⟩ NAMED, separately from the existing functions above: before this rung a new Unknown-only
+      // function was not mentioned at all. Advisory (exit 0) unless unknown-ratchet, which fails it above.
+      newUnknownOnly.sort();
+      const shown = newUnknownOnly.slice(0, 3).join(", ");
+      const more = newUnknownOnly.length > 3 ? ` (+${newUnknownOnly.length - 3} more)` : "";
+      console.error(`candor-ts: note — ${newUnknownOnly.length} new function(s) (absent from the baseline) carry `
+        + `only Unknown — advisory, not a regression: ${shown}${more}`);
     }
   }
 }

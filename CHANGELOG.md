@@ -27,6 +27,21 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   one audited against source as a real read (pnpm `isExecutedByCorepack` and `prependDirsToPath`, citty's
   `_color` module initializer, simple-git's environment guard, `envReplace(…, process.env)` ×3, …); 0
   `Unknown`-only rows added.
+- ⚠ STRICTER (⟨0.40⟩ second half, SOUNDNESS R932): the AS-EFF-005 baseline guard no longer exempts a
+  function ABSENT from the baseline — its prior is ∅ (`baseline[key] ?? ∅`). A new function performing a real
+  effect now fails the scan (exit 1); a new pure function passes; a new `Unknown`-only function stays
+  advisory but is NAMED in its own note (and fails under `unknown-ratchet`, its Unknown being new). Every
+  AS-EFF-005 verdict row carries `origin` — `existing` / `new` / `unknown` (no callgraph sidecar) — and the
+  baseline callgraph sidecar now decides only that label: a formerly-pure function turning effectful fires
+  with or without it. An absent key is worded "ABSENT FROM THE BASELINE (under this key)", never "gained",
+  and the remedy leads with `candor diff <this run's report> <baseline>` before re-recording. A corrupt
+  sidecar still exits 2; a whole baseline FILE absent is still a note and exit 0. Flips one way, 0 → 1; no
+  flip at upgrade (a different-build baseline already exits 2). KEY NOISE, measured on the pinned 28-entry
+  roster with each entry's own HEAD report as its baseline: renaming one file fires on that file's effectful
+  units — ≥1 firing for 1,883 of the 4,632 files that carry an effectful or Unknown-only unit (mean 1.21,
+  max 66); inserting one line at the top of a file fires only on its offset-keyed `<structural>@N` units —
+  ≥1 firing for 134 of those files (max 16). Both calibrated by doing the edit: predicted 2 and 6, measured
+  2 and 6 (citty, git-js); the pre-⟨0.40⟩ build gave 0 on both.
 - ⚠ STRICTER: a dispatch now reaches EVERY override below the body it resolved to, not one level of them
   (SOUNDNESS R871, R872). Five readers answered "which bodies can `x.m()` run?" separately and disagreed in
   one report; they now share one answer (`overrideDescent` / `memberDispatchBodies` / `implMemberBodies`).

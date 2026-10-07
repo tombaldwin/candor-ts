@@ -50,9 +50,12 @@ scan target; relative values resolve against the config's repo, so CI is "point 
 configured-but-unusable config/policy/baseline fails loud (exit 2), never silently gateless.
 
 The scan-time **baseline guard** (AS-EFF-005, spec §7) makes effect *regressions* un-shippable:
-point `CANDOR_BASELINE` (or the config's `baseline` key) at a saved report, and any existing
+point `CANDOR_BASELINE` (or the config's `baseline` key) at a saved report, and any
 function that **gained** an effect fails the scan — exit 1, the records join the `--gate-json`
-verdict. New functions are exempt (reviewed as new code, not a regression). The guard is
+verdict, each carrying `origin` (`existing` / `new` / `unknown`). ⟨0.40⟩ A function ABSENT from the
+baseline is compared against nothing, so a new effectful function fails too; a new pure one passes,
+and a new `Unknown`-only one is named in a note. `Module.fn` keys mean a renamed file reads as absent:
+review with `candor diff <this run's report> <baseline>` before re-recording. The guard is
 fail-closed like the policy gate: a present-but-unparseable baseline, or one produced by a
 different engine build (§2.1 — an engine upgrade is baseline-invalidating), exits 2 **without
 evaluating**; only a genuinely absent file is a one-line note (guard not active). Keep the two

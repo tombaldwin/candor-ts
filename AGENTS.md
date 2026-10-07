@@ -62,9 +62,12 @@ set the exit code. A checked-in `.candor/config` (spec §3.4; `policy <file>` / 
 anchored to the config's repo) is the no-env-wiring floor; flag → env → config → default.
 
 **The AS-EFF-005 baseline guard** (spec §7): set `CANDOR_BASELINE=<saved report.json>` (or the
-config `baseline` key) and the scan compares per function — an EXISTING function that gained an
-effect versus the baseline fails the run (exit 1, `[AS-EFF-005]` lines, records join `--gate-json`);
-new functions are exempt. Fail-closed: an unparseable baseline, or one from a different engine
+config `baseline` key) and the scan compares per function — a function that gained an effect versus
+the baseline fails the run (exit 1, `[AS-EFF-005]` lines, records join `--gate-json` with `origin`);
+⟨0.40⟩ a function ABSENT from the baseline is compared against nothing (a new effectful function fails,
+`origin:"new"`; a new pure one passes; a new `Unknown`-only one is named in a note) — keys are
+`Module.fn`, so a renamed file reads as absent: run `candor diff <this run's report> <baseline>` before
+re-recording. Fail-closed: an unparseable baseline, or one from a different engine
 build, is invalid gate input — exit 2 WITHOUT evaluating (never a silent skip); an absent file is a
 note and the guard is inactive. `query diff` is the read-only twin: it DISCLOSES a build mismatch
 (⚠, exit 0) instead of failing — use the scan-time guard, not `diff`, as the CI gate. Semantics

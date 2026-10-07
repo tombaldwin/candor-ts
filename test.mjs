@@ -8275,7 +8275,7 @@ if (blk()) {
 
 // ── the AS-EFF-005 baseline guard (CANDOR_BASELINE / config `baseline`; SPEC §7 item 5) ────────────
 // Exit-code contract per gate surface (TESTING.md §2.5): gain → 1, clean → 0, absent file → note + 0,
-// unparseable / missing-or-mismatched producing version → 2 WITHOUT evaluating, new fns exempt.
+// unparseable / missing-or-mismatched producing version → 2 WITHOUT evaluating; ⟨0.40⟩ new fns NOT exempt (prior ∅).
 // Semantics mirror the reference engine (candor-java Policy.checkBaseline).
 if (blk()) {
   const baseSrc = `import { DatabaseSync } from "node:sqlite";
@@ -8315,11 +8315,13 @@ export function save(db: DatabaseSync): void { db.exec("UPDATE customers SET v =
         gv?.ok === false && gRec?.fn === "src.db.save" && Array.isArray(gRec?.effects) && gRec.effects.includes("Fs"),
         JSON.stringify(gv)?.slice(0, 240));
 
-  // new-fn exemption: a NEW effectful fn (absent from the baseline) is reviewed as new code, not a regression
+  // ⟨0.40⟩ NO new-fn exemption: a NEW effectful fn (absent from the baseline) is compared against ∅ and
+  // fires. This arm asserted exit 0 until ⟨0.40⟩ (SPEC §3 baseline guard ⟨0.40⟩, R932).
   fs.writeFileSync(path.join(d, "src", "db.ts"),
     `${baseSrc}\nimport { readFileSync } from "node:fs";\nexport function fresh(): void { readFileSync("/etc/y"); }`);
   const rNew = run({ CANDOR_BASELINE: bl });
-  check("baseline guard: a NEW effectful fn is exempt (exit 0)", rNew.status === 0,
+  check("baseline guard ⟨0.40⟩: a NEW effectful fn absent from the baseline fires (exit 1, [AS-EFF-005])",
+        rNew.status === 1 && rNew.stdout.includes("[AS-EFF-005]") && rNew.stdout.includes("src.db.fresh"),
         `status=${rNew.status} ${(rNew.stdout + rNew.stderr).slice(0, 200)}`);
   fs.writeFileSync(path.join(d, "src", "db.ts"), gainedSrc);   // back to the gaining shape for the arms below
 
@@ -8405,16 +8407,22 @@ export function fmt(s: string): string { readFileSync("/etc/x"); return s.toUppe
   const gRec = gv?.violations?.find((x) => x.rule === "AS-EFF-005" && x.fn === "util.fmt");
   check("⟨0.16⟩ acceptance 1: the pure→effectful gain joins --gate-json (ok:false)",
         gv?.ok === false && Array.isArray(gRec?.effects) && gRec.effects.includes("Fs"), JSON.stringify(gv)?.slice(0, 240));
+  check("⟨0.40⟩ acceptance 1: a baseline-callgraph node is origin \"existing\" (it shipped pure)", gRec?.origin === "existing", JSON.stringify(gRec));
 
-  // ACCEPTANCE 2 (sidecar ABSENT): same edit, delete the callgraph → degrade to report-only. fmt was pure,
-  // so report-only reads it as new code → NOT caught → exit 0, plus the stderr note the guard is weaker.
+  // ACCEPTANCE 2 (sidecar ABSENT): same edit, delete the callgraph. ⟨0.40⟩ fmt is absent from the baseline
+  // REPORT, so its prior is ∅ and the gain STILL fires (exit 1) — the sidecar now decides only the LABEL,
+  // origin "unknown". Until ⟨0.40⟩ this arm asserted exit 0 (report-only degradation, fmt read as exempt).
   const blCgSaved = fs.readFileSync(blCg, "utf8");
   fs.rmSync(blCg);
-  const rNoCg = run({ CANDOR_BASELINE: bl });
-  check("⟨0.16⟩ acceptance 2: sidecar deleted → report-only degradation exits 0 (pure→effectful not caught)",
-        rNoCg.status === 0 && !rNoCg.stdout.includes("[AS-EFF-005]"), `status=${rNoCg.status} ${(rNoCg.stdout + rNoCg.stderr).slice(0, 200)}`);
-  check("⟨0.16⟩ acceptance 2: a stderr note discloses the guard is WEAKER without the sidecar",
-        /no baseline callgraph sidecar/.test(rNoCg.stderr) && /WEAKER/.test(rNoCg.stderr), rNoCg.stderr.slice(0, 260));
+  const gNoCg = path.join(d, "gate-nocg.json");
+  const rNoCg = run({ CANDOR_BASELINE: bl }, "--gate-json", gNoCg);
+  let ncv = null; try { ncv = JSON.parse(fs.readFileSync(gNoCg, "utf8")); } catch { /* null */ }
+  check("⟨0.40⟩ acceptance 2: sidecar deleted → pure→effectful STILL fires (exit 1), origin \"unknown\"",
+        rNoCg.status === 1 && rNoCg.stdout.includes("[AS-EFF-005]")
+          && ncv?.violations?.find((v) => v.fn === "util.fmt")?.origin === "unknown",
+        `status=${rNoCg.status} ${JSON.stringify(ncv)?.slice(0, 240)}`);
+  check("⟨0.40⟩ acceptance 2: a stderr note discloses the missing sidecar (findings labelled origin unknown)",
+        /no baseline callgraph sidecar/.test(rNoCg.stderr) && /origin "unknown"/.test(rNoCg.stderr), rNoCg.stderr.slice(0, 260));
 
   // ACCEPTANCE 3 (sidecar PRESENT-but-corrupt): truncate to `{` → fail closed (exit 2), like a corrupt
   // baseline. A broken sidecar must not silently narrow the guard back to report-only.
@@ -8437,13 +8445,17 @@ export function fetch_(h: string): Promise<Response> { readFileSync("/etc/x"); r
         rWiden.status === 1 && rWiden.stdout.includes("[AS-EFF-005]") && rWiden.stdout.includes("api.fetch_") && rWiden.stdout.includes("Fs"),
         `status=${rWiden.status} ${rWiden.stdout.slice(0, 240)}`);
 
-  // a genuinely NEW fn (in neither report nor callgraph) stays exempt even with the sidecar present
+  // ⟨0.40⟩ a genuinely NEW fn (in neither report nor callgraph) is NOT exempt: prior ∅, fires, origin "new"
   fs.writeFileSync(path.join(d, "api.ts"), apiSrc);   // revert api
   fs.writeFileSync(path.join(d, "util.ts"),
     `${utilPure}\nimport { readFileSync } from "node:fs";\nexport function brandnew(): void { readFileSync("/etc/y"); }`);
-  const rNew = run({ CANDOR_BASELINE: bl });
-  check("⟨0.16⟩ a genuinely new effectful fn (in neither report nor callgraph) stays exempt (exit 0)",
-        rNew.status === 0 && !rNew.stdout.includes("[AS-EFF-005]"), `status=${rNew.status} ${(rNew.stdout + rNew.stderr).slice(0, 200)}`);
+  const gNewP = path.join(d, "gate-new.json");
+  const rNew = run({ CANDOR_BASELINE: bl }, "--gate-json", gNewP);
+  let gnv = null; try { gnv = JSON.parse(fs.readFileSync(gNewP, "utf8")); } catch { /* null */ }
+  check("⟨0.40⟩ a genuinely new effectful fn (in neither report nor callgraph) fires (exit 1), origin \"new\"",
+        rNew.status === 1 && rNew.stdout.includes("util.brandnew")
+          && gnv?.violations?.find((v) => v.fn === "util.brandnew")?.origin === "new",
+        `status=${rNew.status} ${(rNew.stdout + rNew.stderr).slice(0, 200)}`);
   fs.writeFileSync(path.join(d, "util.ts"), utilPure);   // revert util for the Unknown-only arm below
 
   // ── ⟨0.16⟩ an Unknown-ONLY gain is ADVISORY, not a regression ──────────────────────────────
@@ -8478,6 +8490,95 @@ export function fmt(s: string, cb: Function): string { cb(); readFileSync("/etc/
   check("⟨0.16⟩ real+Unknown gain: still a violation (exit 1), shown effects are the REAL set with Unknown filtered",
         rMix.status === 1 && mv?.ok === false && mRec?.effects?.includes("Fs") && !mRec?.effects?.includes("Unknown"),
         `status=${rMix.status} ${JSON.stringify(mRec)}`);
+}
+
+// ── ⟨0.40⟩ A FUNCTION ABSENT FROM THE BASELINE IS COMPARED AGAINST ∅ (SPEC §3 baseline guard ⟨0.40⟩; R932) ──
+// Until ⟨0.40⟩ a key absent from a PRESENT baseline was skipped as "new code, reviewed normally" — and code
+// review does not read effects. Measured at 503f449: a baseline of `keep` (Fs) and a tree ADDING `fresh`
+// (Net) exited 0 with `violations: []`. PART 15d's n1–n4 as engine tests, on the conformance fixture's shape.
+if (blk()) {
+  const HEAD = `import * as fsm from "node:fs";
+import * as netm from "node:net";
+export function keep(): string { return fsm.readFileSync("/x", "utf8"); }`;
+  const d = project({ "nf.ts": HEAD });
+  // PRESENCE of CANDOR_UNKNOWN_RATCHET means on, so it is removed unless a cell sets it
+  const run = (env, ...extra) => {
+    const e = { ...process.env, ...env };
+    if (env.CANDOR_UNKNOWN_RATCHET === undefined) delete e.CANDOR_UNKNOWN_RATCHET;
+    return spawnSync("node", [path.join(HERE, "scan.mjs"), d, ...extra], { encoding: "utf8", env: e });
+  };
+  const blPrefix = path.join(d, ".candor", "nf-baseline");
+  run({}, "--out", blPrefix);
+  const bl = `${blPrefix}.json`, blCg = `${blPrefix}.callgraph.json`;
+  check("⟨0.40⟩ baseline pair recorded (report + callgraph sidecar)", fs.existsSync(bl) && fs.existsSync(blCg));
+  const cell = (src, env = {}) => {
+    fs.writeFileSync(path.join(d, "nf.ts"), src);
+    const gp = path.join(d, "nf-gate.json"), out = path.join(d, "nf-after");
+    const r = run({ CANDOR_BASELINE: bl, ...env }, "--out", out, "--gate-json", gp);
+    let g = null; try { g = JSON.parse(fs.readFileSync(gp, "utf8")); } catch { /* null → checks fail raw */ }
+    let rep = null; try { rep = JSON.parse(fs.readFileSync(`${out}.json`, "utf8")); } catch { /* null */ }
+    const row = (fn) => (g?.violations ?? []).find((v) => v.rule === "AS-EFF-005" && v.fn === fn);
+    const inf = (fn) => rep?.functions?.find((e) => e.fn === fn)?.inferred ?? [];
+    return { r, g, row, inf, all: r.stdout + r.stderr, out };
+  };
+
+  // n1 — a NEW effectful function fires: exit 1, row {fn, effects:[Net], origin:"new"}, worded as ABSENT
+  const n1 = cell(`${HEAD}\nexport function fresh(): void { netm.connect(80, "h"); }`);
+  check("⟨0.40⟩ n1 fixture reached: nf.fresh carries Net in the AFTER report", n1.inf("nf.fresh").includes("Net"), JSON.stringify(n1.inf("nf.fresh")));
+  check("⟨0.40⟩ n1: a new effectful fn absent from a present baseline exits 1 with [AS-EFF-005]",
+        n1.r.status === 1 && n1.r.stdout.includes("[AS-EFF-005]"), `status=${n1.r.status} ${n1.all.slice(0, 300)}`);
+  check("⟨0.40⟩ n1: the verdict row is {fn: nf.fresh, effects: [Net], origin: \"new\"}",
+        JSON.stringify(n1.row("nf.fresh")?.effects) === '["Net"]' && n1.row("nf.fresh")?.origin === "new", JSON.stringify(n1.g));
+  check("⟨0.40⟩ n1: the message says the fn is ABSENT FROM THE BASELINE, not that it gained",
+        /absent from the baseline/i.test(n1.row("nf.fresh")?.detail ?? "") && !/gained/.test(n1.row("nf.fresh")?.detail ?? ""),
+        n1.row("nf.fresh")?.detail);
+  check("⟨0.40⟩ n1: the remedy leads with `candor diff <this run's report> <baseline>` (current FIRST), then the record command",
+        n1.r.stderr.includes(`candor diff ${n1.out}.json ${bl}`) && n1.r.stderr.indexOf("candor diff") < n1.r.stderr.indexOf("--out <prefix>"),
+        n1.r.stderr.slice(0, 600));
+
+  // n2 — a new PURE function passes (the CONTROL: an engine charging every absent key fails here)
+  const n2 = cell(`${HEAD}\nexport function tidy(a: number): number { return a + 1; }`);
+  check("⟨0.40⟩ n2 CONTROL: a new PURE fn passes — exit 0, no [AS-EFF-005]",
+        n2.r.status === 0 && !n2.all.includes("[AS-EFF-005]") && n2.g?.ok === true, `status=${n2.r.status} ${n2.all.slice(0, 300)}`);
+
+  // n3 — a new Unknown-ONLY function is advisory (exit 0) but NAMED, separately from existing Unknown gains
+  const n3src = `${HEAD}\nexport function opaquenew(): number { const f: Function = (globalThis as any).x; return f(); }`;
+  const n3 = cell(n3src);
+  check("⟨0.40⟩ n3 fixture reached: nf.opaquenew is exactly [Unknown]", JSON.stringify(n3.inf("nf.opaquenew")) === '["Unknown"]', JSON.stringify(n3.inf("nf.opaquenew")));
+  check("⟨0.40⟩ n3: a new Unknown-only fn stays advisory — exit 0, no [AS-EFF-005]",
+        n3.r.status === 0 && !n3.all.includes("[AS-EFF-005]"), `status=${n3.r.status} ${n3.all.slice(0, 300)}`);
+  check("⟨0.40⟩ n3: …and is NAMED in a note of its own (new functions carrying only Unknown)",
+        n3.r.stderr.split("\n").some((l) => /new function\(s\)/.test(l) && l.includes("nf.opaquenew") && l.includes("Unknown")),
+        n3.r.stderr.slice(0, 600));
+  // …and under unknown-ratchet its prior is ∅, so its Unknown is newly introduced and fails
+  const n3r = cell(n3src, { CANDOR_UNKNOWN_RATCHET: "1" });
+  check("⟨0.40⟩ n3 + unknown-ratchet: the new Unknown-only fn FAILS (prior ∅), origin \"new\"",
+        n3r.r.status === 1 && n3r.row("nf.opaquenew")?.origin === "new", `status=${n3r.r.status} ${JSON.stringify(n3r.g)}`);
+
+  // n4 — an EXISTING fn gaining Net still fires, and is labelled origin:"existing"
+  const n4 = cell(`import * as fsm from "node:fs";
+import * as netm from "node:net";
+export function keep(): string { netm.connect(80, "h"); return fsm.readFileSync("/x", "utf8"); }`);
+  check("⟨0.40⟩ n4: an existing fn gaining Net exits 1, row origin \"existing\"",
+        n4.r.status === 1 && n4.row("nf.keep")?.origin === "existing" && JSON.stringify(n4.row("nf.keep")?.effects) === '["Net"]',
+        `status=${n4.r.status} ${JSON.stringify(n4.g)}`);
+
+  // the sidecar now decides only the LABEL: without it n1 still fires, origin "unknown"
+  const cgSaved = fs.readFileSync(blCg, "utf8");
+  fs.rmSync(blCg);
+  const n1u = cell(`${HEAD}\nexport function fresh(): void { netm.connect(80, "h"); }`);
+  check("⟨0.40⟩ sidecar absent: n1 still fires (exit 1), origin \"unknown\"",
+        n1u.r.status === 1 && n1u.row("nf.fresh")?.origin === "unknown", `status=${n1u.r.status} ${JSON.stringify(n1u.g)}`);
+  // …and a corrupt sidecar still fails closed (exit 2) — nothing about that posture moves
+  fs.writeFileSync(blCg, "{");
+  const n1c = cell(`${HEAD}\nexport function fresh(): void { netm.connect(80, "h"); }`);
+  check("⟨0.40⟩ corrupt sidecar: still exit 2, no [AS-EFF-005]", n1c.r.status === 2 && !n1c.r.stdout.includes("[AS-EFF-005]"), `status=${n1c.r.status}`);
+  fs.writeFileSync(blCg, cgSaved);
+  // a whole baseline FILE absent keeps its posture: note, guard inactive, exit 0
+  fs.writeFileSync(path.join(d, "nf.ts"), `${HEAD}\nexport function fresh(): void { netm.connect(80, "h"); }`);
+  const nAbs = run({ CANDOR_BASELINE: path.join(d, "no-such.json") });
+  check("⟨0.40⟩ whole baseline FILE absent: unchanged — note + exit 0", nAbs.status === 0 && /does not exist/.test(nAbs.stderr), `status=${nAbs.status}`);
+  fs.rmSync(d, { recursive: true, force: true });
 }
 
 // ── ⟨unknown-ratchet⟩ the OPT-IN that flips an Unknown-ONLY gain from advisory to a FAILURE ─────────
