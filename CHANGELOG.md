@@ -10,6 +10,43 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **A value laundered through an `any` PARAMETER into a closed dispatch** (SOUNDNESS R958, the intra-project
+  half). `launder(x: any) { qDisp(x) }` called as `launder(new LocalW())` ran `LocalW.m` (EXECUTED) with `deny Fs`
+  exit 0 on the caller. The parameter's visible arguments are now recorded as conversion sources (upcasts only),
+  from the same provenance index the R246 accessor arm asks. A dependency-sourced value and a lying downcast stay
+  R958's by-design residue.
+- ⚠ **An accessor reached through an `any`/`unknown` receiver** (SOUNDNESS R246). `(s as any).token = v`,
+  `(s as any)[k] = v` and `function w(o: any) { o.token = v }` called with a class instance ran the class's
+  setter (EXECUTED) and were ABSENT with `deny Fs` exit 0 — the caller too. The receiver's VALUE is now asked:
+  the operand under an assertion, and an `any` parameter's arguments at every visible call site. A pinned name
+  resolves to the setter's effects; an unpinned key takes R240(b)'s `reflect:accessor:dynamic-key`, as on a
+  typed receiver. Where neither names the value (an escaped function, no visible caller) a WRITE discloses
+  `Unknown[reflect:accessor:any-receiver]`, only when the project declares a setter with a body and an effect
+  that the write could name. **The READ side is hedged the same way** (SOUNDNESS R1039): a read through such a
+  receiver discloses `Unknown[reflect:accessor:any-receiver]` when the project declares a bodied, effectful getter
+  the read could name (EXECUTED: an escaped `r(o: any) { return o.token }` ran a file-writing getter and was ABSENT).
+  Gates scoped to those readers can go from exit 0 to exit 1 under `deny Unknown`.
+- ⚠ **A function reference inside an object literal handed to an invoker** (SOUNDNESS R1031). rxjs
+  `subscribe({ next: h })`, `{ complete: h }`, `{ next }`, `{ next: o.m.bind(o) }` and
+  `addEventListener(t, { handleEvent: h })` dropped the reference (caller ABSENT, EXECUTED). Each member the
+  parameter's DECLARED type makes callable is now treated as R803 treats a bare reference. Descriptors
+  (`Object.defineProperty(o, k, { get })`) and generic store slots (`Object.assign(p, { f })`) admit nothing.
+- ⚠ **The rest of the browser's persistent stores and navigation** (SOUNDNESS R241). `document.cookie` (read or
+  write), a write to any `location` property, `location.assign`/`replace`/`reload`, and every member of
+  IndexedDB, the Cache API, `StorageManager`, the OPFS handles and `CookieStore` read as nothing under
+  `lib: ["DOM"]`; they now disclose `Unknown[native:<Interface>.<member>]`, as `localStorage` already did.
+- ⚠ **The environment object is followed into PARAMETERS and heap FIELDS, not only locals** (SOUNDNESS R934,
+  R935). A function that reads a parameter every visible call site hands `process.env` (`function rd(e) { return
+  e.K }` called as `rd(process.env)`; pnpm's `readEnvVar(env, …)` behind `const env = opts.env ?? process.env`),
+  a destructured parameter (`({ K }) => …`), and a reader of a field that holds it (`const cfg = { env:
+  process.env }; … cfg.env.K`, a class field, a constructor `this.env = process.env`) was ABSENT with `deny Env
+  <fn>` exit 0 (EXECUTED). Each is now `Env`. One binding table and one pair of MUST/MAY fixpoints now cover
+  locals, parameters and properties. A parameter fed `process.env` at one site and something else at another
+  (the divergent shared-callee shape) stays uncharged — its env-passing caller is charged, as for a divergent
+  HOF; a function that escapes as a value, a method of an extended class and an interface-declared property are
+  not locations (their bindings are not enumerable). A field rebound elsewhere, or written reflectively
+  (`Object.assign`, a computed-key store), discloses `Unknown[env-maybe-read]` instead of `Env`. Gates scoped to
+  such readers can go from exit 0 to exit 1.
 - ⚠ **A function reference handed to an invoker OFF the `HOF_INVOKERS` list is charged** (SOUNDNESS R803).
   `e.on("x", f)`, `once`/`addListener`/`prependOnceListener`, `process.on`, `http.createServer(h)`,
   `EventTarget.addEventListener`, `Array.from(xs, f)`, `new Promise(exec)`, lodash `_.each`/`_.times`, rxjs

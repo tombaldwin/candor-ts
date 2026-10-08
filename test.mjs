@@ -6740,7 +6740,10 @@ export function callMay(opts: { pe?: Record<string,string> }) {
     "src/neg.ts": `function writePlain(target: Record<string,string>) { target.FOO = "x"; }
 export function callPlain() { writePlain({}); }`,
     "src/read.ts": `function readParam(src: Record<string,string>) { return src.FOO; }
-export function callRead() { return readParam(process.env); }`,
+export function callRead() { return readParam(process.env); }
+function readDiv(src: Record<string,string>) { return src.FOO; }
+export function callDivEnv() { return readDiv(process.env); }
+export function callDivLit() { return readDiv({ FOO: "x" }); }`,
   });
   const { report } = scan(d);
   const inf = (fn) => entry(report, fn)?.inferred ?? [];
@@ -6751,8 +6754,14 @@ export function callRead() { return readParam(process.env); }`,
         JSON.stringify(entry(report, "src.may.writeMay")));
   check("param-write leaf called with a NON-env object stays PURE (no over-disclosure — the 27:1 guard)",
         entry(report, "src.neg.writePlain") == null, JSON.stringify(entry(report, "src.neg.writePlain")));
-  check("a leaf that only READS its parameter (no write) is NOT tainted by an env arg (stays pure)",
-        entry(report, "src.read.readParam") == null, JSON.stringify(entry(report, "src.read.readParam")));
+  // ⟨R934⟩ a READ through a parameter that EVERY visible call site hands the environment is that
+  // function's own Env — the parameter is a MUST location. Pure before R934 (this assertion was the
+  // opposite); the DIVERGENT twin below is the shape the old posture protected, and it still stays pure.
+  check("⟨R934⟩ a leaf that only READS a parameter every visible site feeds process.env → Env",
+        (entry(report, "src.read.readParam")?.inferred ?? []).includes("Env"), JSON.stringify(entry(report, "src.read.readParam")));
+  check("⟨R934⟩ …a DIVERGENT reader (env at one site, a literal at another) stays pure — no pooling onto the literal caller",
+        entry(report, "src.read.readDiv") == null && entry(report, "src.read.callDivLit") == null,
+        JSON.stringify([entry(report, "src.read.readDiv"), entry(report, "src.read.callDivLit")]));
 }
 
 // ── EFFECT-POLYMORPHISM, the TRANSITIVE closure (a max code review found pass 2c's one-hop/direct model leaked):
@@ -6828,7 +6837,8 @@ export function benignKeys(o: Record<string,unknown>) { return Object.keys(o); }
     // parameter: it is charged only if the TABLE matches the shadow's `Object.assign`.
     "src/shadow.ts": `const Shadow = { assign: (a: any) => a };
 function shadowed(t: any) { const Object = Shadow; return Object.assign(t, {}); }
-export function shadowedEntry() { return shadowed(process.env); }`,
+export function shadowedEntry() { return shadowed(process.env); }
+export function shadowedLit() { return shadowed({}); }`,  // ⟨R934⟩ divergent: \`t\` is 2c-fed, not a MUST location
   });
   const { report } = scan(d);
   const isEnv = (fn) => (entry(report, fn)?.inferred ?? []).includes("Env");
@@ -6922,14 +6932,127 @@ export function c07ShadowModPassZ() { return JSON.stringify(process.env); }`,
   // a consumer that touches no key (`typeof`, `===`, `!`) charges nothing.
   for (const fn of ["src.ev.c02ShadowParamZ", "src.ev.c04TypeofZ", "src.ev.c06TestZ", "src.shadowproc.c03ShadowModZ", "src.shadowproc.c07ShadowModPassZ"])
     check(`R928 CONTROL: ${fn} charges nothing`, row(fn) == null, JSON.stringify(row(fn) ?? null));
-  // The POSTURE, pinned: a project callee that only READS its parameter is not itself charged — the HANDER
-  // is (w18) — because charging the callee pools the effect onto every other caller of it.
-  check("R928 POSTURE: readerHelper (reads a parameter) is not charged; its caller is", row("src.ev.readerHelper") == null,
+  // The POSTURE, REVISED by ⟨R934⟩: a project callee that only READS its parameter is charged when EVERY
+  // visible call site hands it the environment (readerHelper has one caller, w18), because then no other
+  // caller exists for the effect to pool onto. The divergent shape stays uncharged (pinned in the 2c block).
+  check("⟨R934⟩ POSTURE: readerHelper (every visible site passes process.env) is charged, and so is its caller",
+        (row("src.ev.readerHelper")?.inferred ?? []).includes("Env") && inf("src.ev.w18PasserZ").includes("Env"),
         JSON.stringify(row("src.ev.readerHelper") ?? null));
   const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
   check("R928 GATE: `deny Env src.ev.w01ParenZ` fires (exit 0 at 503f449)", ex("w.pol") === 1, `exit ${ex("w.pol")}`);
   check("R928 GATE CONTROL: `deny Env` over the two MAY-aliases stays clean (no fabricated Env)", ex("may.pol") === 0, `exit ${ex("may.pol")}`);
   check("R928 GATE: `deny Unknown` over the dominated rebind fires — disclosed, not silent", ex("mayu.pol") === 1, `exit ${ex("mayu.pol")}`);
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── SOUNDNESS R934 + R935: THE ENVIRONMENT OBJECT STORED IN A PARAMETER OR A FIELD ──────────────────────────
+// The R928 identity stopped at locals: a function reading a parameter every visible call site hands
+// `process.env`, or a field holding it, was ABSENT with `deny Env <fn>` exit 0. EXECUTED on node 22.12.0
+// (`tsagent-v042/fx/env` + `fx/env2`, a planted CANDOR_SECRET_V read back): every `*Q` reader returned the
+// secret; `divLitCallerQ`, `ctl*`, `zeroNoneN`, `fieldExtN`, `owReadN` (after the Object.assign rebind),
+// `leafLitN` and `shadowN` returned a literal. Names: no §3.3 prefix collisions (Q/N suffixes, distinct stems).
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", module: "commonjs", strict: true, skipLibCheck: true,
+                         types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+      include: ["src"],
+    }),
+    "src/envp.ts": `type E = Record<string, string | undefined>;
+const K = "CANDOR_SECRET_V";
+// ---- R934: parameter flow
+function uniReader(e: E) { return e[K]; }                       // every visible caller passes process.env
+export function uniCallerQ() { return uniReader(process.env); }
+function divReader(e: E) { return e[K]; }                        // divergent: env at one site, literal at another
+export function divEnvCallerQ() { return divReader(process.env); }
+export function divLitCallerQ() { return divReader({ [K]: "lit" }); }
+function fwdLeaf(e: E) { return e[K]; }                          // forwarded through a middle frame
+function fwdMid(e: E) { return fwdLeaf(e); }
+export function fwdTopQ() { return fwdMid(process.env); }
+function uniKeys(e: E) { return Object.keys(e).length; }         // whole-object read through a param
+export function uniKeysCallerQ() { return uniKeys(process.env); }
+function uniDestr({ [K]: v }: E) { return v; }                   // destructured parameter (not an identifier)
+export function uniDestrCallerQ() { return uniDestr(process.env); }
+// ---- R935: heap field flow
+const cfg = { env: process.env };
+export function heapConstQ() { return cfg.env[K]; }
+class Holder { env: E = process.env; read() { return this.env[K]; } }
+export function heapClassQ() { return new Holder().read(); }
+class CtorHolder { env: E; constructor() { this.env = process.env; } get() { return this.env[K]; } }
+export function heapCtorQ() { return new CtorHolder().get(); }
+const nested = { inner: { env: process.env } };
+export function heapNestedQ() { return nested.inner.env[K]; }
+const reb = { env: process.env as E };
+export function rebindFieldQ(o: E) { reb.env = o; }
+export function heapRebQ() { return reb.env[K]; }                // MAY: the field is rebound elsewhere
+interface Cfg { env: E }
+const typed: Cfg = { env: process.env };
+export function heapTypedQ() { return typed.env[K]; }
+// ---- controls
+export function ctlPlainQ() { return process.env[K]; }
+const pureCfg = { env: { [K]: "lit" } as E };
+export function ctlPureHeapQ() { return pureCfg.env[K]; }
+function ctlPureReader(e: E) { return e[K]; }
+export function ctlPureCallerQ() { return ctlPureReader({ [K]: "lit" }); }
+`,
+    "src/envn.ts": `type E = Record<string, string | undefined>;
+const K = "CANDOR_SECRET_V";
+// escaped: also handed out as a value → its parameter has unseen bindings → not a location
+function escReader(e: E) { return e[K]; }
+export function escDirectN() { return escReader(process.env); }
+export function escMapN() { return [{ [K]: "lit" } as E].map(escReader); }
+// a zero-argument site makes it divergent
+function zeroReader(e?: E) { return e?.[K]; }
+export function zeroEnvN() { return zeroReader(process.env); }
+export function zeroNoneN() { return zeroReader(); }
+// exported, every visible caller passes env → charged (the 2b UNIFORM precedent)
+export function expReaderN(e: E) { return e[K]; }
+export function expCallerN() { return expReaderN(process.env); }
+// a method of an extended class is excluded (an override's bindings are invisible)
+class Base { m(e: E) { return e[K]; } }
+class Sub extends Base { m(e: E) { return "sub:" + String(e[K]); } }
+export function extCallerN() { return new Base().m(process.env) + new Sub().m({ [K]: "lit" }); }
+// a field of an extended class is excluded
+class FB { env: E = process.env; rd() { return this.env[K]; } }
+class FS extends FB { env: E = { [K]: "lit" }; }
+export function fieldExtN() { return new FS().rd(); }
+// UNSEEN WRITE (the stated over-approximation): Object.assign rebinds the field off the books
+const ow = { env: process.env as E };
+export function owRebindN() { Object.assign(ow, { env: { [K]: "lit" } }); }
+export function owReadN() { return ow.env[K]; }
+// a parameter forwarded divergently from a MUST location
+function midDiv(e: E) { return leafDiv(e); }
+function leafDiv(e: E) { return e[K]; }
+export function midTopN() { return midDiv(process.env); }
+export function leafLitN() { return leafDiv({ [K]: "lit" }); }
+// a project-local process must match nothing
+export function shadowN(process: { env: E }) { const c = { env: process.env }; return c.env[K]; }
+`,
+    "p.pol": "deny Env src.envp.uniReader\ndeny Env src.envp.heapConstQ\n",
+    "neg.pol": "deny Env src.envp.divReader\ndeny Env src.envp.divLitCallerQ\ndeny Env src.envp.ctlPureHeapQ\n"
+             + "deny Env src.envn.zeroReader\ndeny Env src.envn.zeroNoneN\ndeny Env src.envn.owReadN\ndeny Env src.envn.shadowN\n",
+  });
+  const { report } = scan(d);
+  const row = (fn) => entry(report, fn);
+  const inf = (fn) => row(fn)?.inferred ?? [];
+  for (const fn of ["uniReader", "fwdLeaf", "fwdMid", "uniDestr", "heapConstQ", "Holder.read", "CtorHolder.get", "heapNestedQ",
+                    "uniCallerQ", "divEnvCallerQ", "fwdTopQ"])
+    check(`R934/R935: src.envp.${fn} reads the environment → Env`, inf(`src.envp.${fn}`).includes("Env"), JSON.stringify(row(`src.envp.${fn}`) ?? null));
+  check("R935: a field REBOUND elsewhere is a MAY location → Unknown[env-maybe-read], never Env",
+        inf("src.envp.heapRebQ").includes("Unknown") && !inf("src.envp.heapRebQ").includes("Env")
+        && (row("src.envp.heapRebQ")?.unknownWhy ?? []).includes("env-maybe-read"), JSON.stringify(row("src.envp.heapRebQ") ?? null));
+  check("R935: a field rebound by `Object.assign` (off the binding table) is MAY → Unknown, never Env (executed: reads the replacement)",
+        inf("src.envn.owReadN").includes("Unknown") && !inf("src.envn.owReadN").includes("Env"), JSON.stringify(row("src.envn.owReadN") ?? null));
+  for (const fn of ["src.envp.divReader", "src.envp.divLitCallerQ", "src.envp.ctlPureHeapQ", "src.envp.ctlPureReader", "src.envp.ctlPureCallerQ",
+                    "src.envn.escReader", "src.envn.zeroReader", "src.envn.zeroNoneN", "src.envn.Base.m", "src.envn.FB.rd", "src.envn.fieldExtN",
+                    "src.envn.leafDiv", "src.envn.leafLitN", "src.envn.shadowN"])
+    check(`R934/R935 CONTROL: ${fn} charges no Env (divergent / escaped / extended / literal / shadow)`, !inf(fn).includes("Env"), JSON.stringify(row(fn) ?? null));
+  check("R934: an EXPORTED reader every visible site feeds the environment is charged (pass 2b UNIFORM precedent)", inf("src.envn.expReaderN").includes("Env"));
+  check("R934: a middle frame forwarding a MUST parameter to a divergent leaf is charged; the leaf is not",
+        inf("src.envn.midDiv").includes("Env") && !inf("src.envn.leafDiv").includes("Env"));
+  const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
+  check("R934/R935 GATE: `deny Env` scoped to the parameter reader and the field reader fires (exit 0 at 85977fd)", ex("p.pol") === 1, `exit ${ex("p.pol")}`);
+  check("R934/R935 GATE CONTROL: `deny Env` over the divergent / literal / reflectively-rebound / shadow units stays clean", ex("neg.pol") === 0, `exit ${ex("neg.pol")}`);
   fs.rmSync(d, { recursive: true, force: true });
 }
 
@@ -18747,7 +18870,8 @@ export function getSelf() { return self.structuredClone(lit); }`,
 const window = { structuredClone(x: unknown) { return x; } };
 export function shadowBare(t: unknown) { return structuredClone(t); }
 export function shadowWin(t: unknown) { return window.structuredClone(t); }
-export function feedShadows() { return [shadowBare(process.env), shadowWin(process.env)]; }`,
+export function feedShadows() { return [shadowBare(process.env), shadowWin(process.env)]; }
+export function feedShadowsLit() { return [shadowBare({}), shadowWin({})]; }`, // ⟨R934⟩ divergent: 2c decides, not the MUST rule
     // OVER-CHARGE CONTROL — the qualified spelling over an object with no accessor, and over a CLASS
     // instance, whose accessor is prototype-installed and NON-enumerable so a clone never visits it
     // (R115's correct half, which this fix must not move: executed, 0 invocations).
@@ -23178,6 +23302,204 @@ export function n32_assign() { return Object.assign(w, { tag: 1 }); }`,
                     "n30_proxy", "n31_offbound", "n32_assign"])
     check(`R803 NON-INVOKER: \`${fn}\` removes or stores \`w\` and never runs it — no Fs, \`deny Fs src.f.${fn}\` exit 0`,
           !(row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.f.${fn}`) === 0, JSON.stringify(row(fn)));
+}
+
+// ── R1031: A FUNCTION REFERENCE INSIDE AN OBSERVER OBJECT — `subscribe({ next: h })` ─────────────────────────────
+// R803 admits a POSITION the signature declares callable; an object literal's MEMBERS are positions its type
+// declares callable too. EXECUTED against real rxjs 7 (`tsagent-v042/fx/r1031`): `{ next: h }`, `{ complete: h }`,
+// `{ next }` and `{ next: o.m.bind(o) }` ran their handler and were ABSENT, `deny Fs` exit 0 at 85977fd; a
+// descriptor's `get` is INSTALLED and never run by `defineProperty` (executed: no write), and must stay uncharged.
+// The `rxjsish` stub reproduces rxjs's own `subscribe(observerOrNext?: Partial<Observer<T>> | ((value: T) => void))`.
+if (blk()) {
+  const d = project({
+    "node_modules/rxjsish/package.json": `{"name":"rxjsish","version":"7.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/rxjsish/index.d.ts": `export interface Observer<T> { next: (value: T) => void; error: (err: any) => void; complete: () => void; }
+export declare class Observable<T> { subscribe(observerOrNext?: Partial<Observer<T>> | ((value: T) => void)): { unsubscribe(): void }; }
+export declare function of<T>(...xs: T[]): Observable<T>;
+`,
+    "node_modules/rxjsish/index.js": "",
+    "src/o.ts": `import * as fs from "node:fs";
+import { of } from "rxjsish";
+function onNextW(v: number) { fs.writeFileSync("/tmp/r1031-" + v, "x"); }
+function onDoneW() { fs.writeFileSync("/tmp/r1031-done", "x"); }
+function pureNext(v: number) { return v + 1; }
+function loudGet() { fs.writeFileSync("/tmp/r1031-desc", "x"); return 1; }
+class Obs { handle(v: number) { fs.writeFileSync("/tmp/r1031-b" + v, "x"); } }
+export function bareSubQ() { of(1).subscribe(onNextW); }
+export function objSubQ() { of(2).subscribe({ next: onNextW }); }
+export function objDoneQ() { of(3).subscribe({ complete: onDoneW }); }
+export function objShortQ() { const next = onNextW; of(4).subscribe({ next }); }
+export function objBoundQ() { const o = new Obs(); of(7).subscribe({ next: o.handle.bind(o) }); }
+export function evObjQ(t: EventTarget) { t.addEventListener("x", { handleEvent: onDoneW }); }
+export function ctlPureSubQ() { of(8).subscribe({ next: pureNext }); }
+export function ctlDescQ() { const o = {}; Object.defineProperty(o, "k", { get: loudGet }); return o; }
+export function ctlAssignQ() { return Object.assign(new Promise<void>(() => {}), { unsubscribe: onDoneW }); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.o.${fn}`) ?? {};
+  for (const fn of ["bareSubQ", "objSubQ", "objDoneQ", "objShortQ", "objBoundQ", "evObjQ"])
+    check(`R1031 INVOKER: \`${fn}\` hands a reference inside an observer/listener object — Fs, \`deny Fs src.o.${fn}\` exit 1`,
+          (row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.o.${fn}`) === 1, JSON.stringify(row(fn)));
+  for (const fn of ["ctlPureSubQ", "ctlDescQ", "ctlAssignQ"])
+    check(`R1031 CONTROL: \`${fn}\` (a pure handler / an INSTALLED descriptor accessor / a generic STORE slot) — no Fs, \`deny Fs src.o.${fn}\` exit 0`,
+          !(row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.o.${fn}`) === 0, JSON.stringify(row(fn)));
+}
+
+// ── R246: AN ACCESSOR REACHED THROUGH A RECEIVER WHOSE STATIC TYPE IS `any` ──────────────────────────────────────
+// Accessor lookup asked the receiver's TYPE, and `any` declares nothing. EXECUTED (`tsagent-v042/fx/anyw`, 6 of 6
+// writes observed): `(s as any).token = v`, `(s as any)[k] = v`, `o.token = v` / `o[k] = v` with `o: any` called
+// with a `Sx`, and `(o as Record<…>)[k] = v` with `o: unknown` were ABSENT (`deny Fs` exit 0 — the CALLER too).
+// The assertion's operand and the `any` parameter's visible arguments say what the value is. A PINNED name
+// resolves to the setter (Fs); an unpinned key takes R240(b)'s own `reflect:accessor:dynamic-key` disclosure, as
+// it does on a typed receiver. Controls: an `any` receiver only ever handed `{}`. An ESCAPED `any` parameter is the hedge below.
+if (blk()) {
+  const d = project({
+    "src/a.ts": `import * as fs from "node:fs";
+export class Sx { set token(v: string) { fs.writeFileSync("/tmp/r246-" + v, "x"); } get token() { return "t"; } }
+export function pinnedW(s: Sx) { s["token" as const] = "pinned"; }
+export function assertAnyW(s: Sx, k: string) { (s as any)[k] = "assertany"; }
+export function assertAnyNameW(s: Sx) { (s as any).token = "assertname"; }
+export function anyRecvW(o: any, k: string) { o[k] = "anyrecv"; }
+export function anyNameW(o: any) { o.token = "anyname"; }
+export function anyCallerW() { anyRecvW(new Sx(), "token"); anyNameW(new Sx()); }
+export function unknownRecvW(o: unknown, k: string) { (o as Record<string, string>)[k] = "unknownrec"; }
+export function unknownCallerW() { unknownRecvW(new Sx(), "token"); }
+export function reflAnyW(s: Sx) { Reflect.set(s as any, "token", "refl"); }
+export function ctlAnyW(o: any, k: string) { o[k] = 1; }
+export function ctlCallerW() { ctlAnyW({}, "a"); }
+function escAnyW(o: any) { o.token = "esc"; }
+export function ctlEscW() { [new Sx()].forEach(escAnyW); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.a.${fn}`) ?? {};
+  for (const fn of ["assertAnyNameW", "anyNameW", "anyCallerW", "reflAnyW"])
+    check(`R246 RESOLVED: \`${fn}\` reaches Sx's setter through an \`any\` receiver — Fs, \`deny Fs src.a.${fn}\` exit 1 (ABSENT at 85977fd)`,
+          (row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.a.${fn}`) === 1, JSON.stringify(row(fn)));
+  for (const fn of ["assertAnyW", "anyRecvW", "unknownRecvW"])
+    check(`R246 DISCLOSED: \`${fn}\` writes an UNPINNED key on an \`any\` receiver whose value is a Sx — reflect:accessor:dynamic-key, \`deny Unknown src.a.${fn}\` exit 1`,
+          (row(fn).unknownWhy ?? []).includes("reflect:accessor:dynamic-key") && gate(`deny Unknown src.a.${fn}`) === 1, JSON.stringify(row(fn)));
+  for (const fn of ["ctlAnyW", "ctlCallerW"])
+    check(`R246 CONTROL: \`${fn}\` — an \`any\` receiver only ever handed \`{}\` charges nothing`, Object.keys(row(fn)).length === 0, JSON.stringify(row(fn)));
+  // THE HEDGE: an ESCAPED `any` parameter (handed to forEach) has no enumerable bindings; the project declares
+  // an EFFECTFUL setter of the written name, so the write discloses (executed: Sx's setter ran) — and the
+  // caller inherits it. ABSENT, `deny Unknown` exit 0, at 85977fd.
+  check("R246 HEDGE: `escAnyW` (escaped `any` receiver, effectful project setter `token`) is Unknown[reflect:accessor:any-receiver]",
+        (row("escAnyW").unknownWhy ?? []).includes("reflect:accessor:any-receiver") && !(row("escAnyW").inferred ?? []).includes("Fs"), JSON.stringify(row("escAnyW")));
+  check("R246 HEDGE GATE: `deny Unknown src.a.ctlEscW` fires through the forEach edge", gate("deny Unknown src.a.ctlEscW") === 1);
+}
+// …and its CALIBRATION: the same escaped write in a project whose setter of that name is PURE discloses nothing.
+if (blk()) {
+  const d = project({
+    "src/b.ts": `export class Sp { v = ""; set token(x: string) { this.v = x; } }
+function escPureW(o: any) { o.token = "esc"; }
+export function ctlEscPureW() { [new Sp()].forEach(escPureW); }`,
+  });
+  const { report } = scan(d);
+  check("R246 HEDGE CONTROL: a pure project setter arms nothing — `escPureW` and its caller are absent",
+        entry(report, "src.b.escPureW") == null && entry(report, "src.b.ctlEscPureW") == null,
+        JSON.stringify([entry(report, "src.b.escPureW"), entry(report, "src.b.ctlEscPureW")]));
+}
+
+// ── R1039: THE READ SIDE OF R246's RESIDUE — a project GETTER reached through an unresolvable `any` receiver ──────
+// EXECUTED (`tsagent-v042/fx/anyr`): `readNamedR(o: any) { return o.token }` and `readDynEscR(o: any) { return o[KEYS[0]] }`,
+// each ESCAPED into `[new Gx()].map(…)`, ran Gx's file-writing getters; on v0.40.0 both readers and both callers were
+// ABSENT, `deny Unknown` and `deny Fs Unknown` exit 0. Same admission as the write side: a getter with a body and an
+// effect the read could name. Controls: a PURE getter of the read name, and a name no project getter declares.
+if (blk()) {
+  const d = project({
+    "src/a.ts": `import * as fs from "node:fs";
+export class Gx { get token(): string { fs.writeFileSync("/tmp/r1039-n", "x"); return "t"; }
+                  get other(): string { fs.writeFileSync("/tmp/r1039-d", "x"); return "o"; } }
+function readNamedR(o: any) { return o.token; }
+export function escNamedR() { return [new Gx()].map(readNamedR); }
+const KEYS: string[] = ["other"];
+function readDynEscR(o: any) { return o[KEYS[0]]; }
+export function escDynEscR() { return [new Gx()].map(readDynEscR); }
+export class Gp { get quiet(): number { return 1; } }
+function readQuietR(o: any) { return o.quiet; }
+export function escQuietR() { return [new Gp()].map(readQuietR); }
+function readMissR(o: any) { return o.nothingHere; }
+export function escMissR() { return [{ nothingHere: 1 }].map(readMissR); }`,
+  });
+  const gate = (line) => { fs.writeFileSync(path.join(d, "p.pol"), line + "\n"); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.a.${fn}`) ?? {};
+  for (const fn of ["readNamedR", "readDynEscR"])
+    check(`R1039: \`${fn}\` reads through an unresolvable \`any\` receiver a project declares an effectful getter for — Unknown[reflect:accessor:any-receiver]`,
+          (row(fn).unknownWhy ?? []).includes("reflect:accessor:any-receiver"), JSON.stringify(row(fn)));
+  for (const fn of ["escNamedR", "escDynEscR"])
+    check(`R1039 GATE: \`deny Fs Unknown src.a.${fn}\` fires through the map edge (exit 0 on v0.40.0)`, gate(`deny Fs Unknown src.a.${fn}`) === 1);
+  for (const fn of ["readQuietR", "escQuietR", "readMissR", "escMissR"])
+    check(`R1039 CONTROL: \`${fn}\` (pure getter of that name / no getter of that name) charges nothing`, Object.keys(row(fn)).length === 0, JSON.stringify(row(fn)));
+}
+
+// ── R241: THE REST OF THE BROWSER'S PERSISTENT STORES AND NAVIGATION ─────────────────────────────────────────
+// Under `lib: ["ES2022","DOM"]` all six of the row's spellings — `document.cookie` read and write,
+// `location.href = u`, `location.assign(u)`, `indexedDB.open`, `caches.open`, `navigator.storage.getDirectory`
+// — were ABSENT (deny Unknown exit 0 at 85977fd) while `localStorage.setItem` on the same tree read
+// `Unknown[native:Storage.setItem]`. Now the same answer, from the resolved declaration's interface. Controls:
+// READING `location.href` (no navigation), a pure function, and a PROJECT `class Cache` (resolves `<local>`).
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({ compilerOptions: { target: "ES2022", lib: ["ES2022", "DOM"], module: "commonjs",
+                                      strict: true, skipLibCheck: true, types: [] }, include: ["src"] }),
+    "src/d.ts": `export function cookieReadD() { return document.cookie; }
+export function cookieWriteD(v: string) { document.cookie = "tok=" + v; }
+export function hrefWriteD(u: string) { location.href = u; }
+export function assignD(u: string) { location.assign(u); }
+export function idbOpenD() { return indexedDB.open("db", 1); }
+export function idbPutD(db: IDBDatabase) { db.transaction("s", "readwrite").objectStore("s").put({ a: 1 }, "k"); }
+export async function cachesOpenD() { const c = await caches.open("v1"); await c.put("/x", new Response("y")); }
+export async function opfsD() { return navigator.storage.getDirectory(); }
+export function hrefReadCtlD() { return location.href; }
+export function pureCtlD(x: number) { return x * 2; }
+class Cache { open() { return 1; } }
+export function shadowCtlD() { return new Cache().open(); }`,
+  });
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.d.${fn}`) ?? {};
+  for (const fn of ["cookieReadD", "cookieWriteD", "hrefWriteD", "assignD", "idbOpenD", "idbPutD", "cachesOpenD", "opfsD"])
+    check(`R241: \`${fn}\` touches a browser store / navigates — Unknown[native:…] (ABSENT at 85977fd)`,
+          (row(fn).unknownWhy ?? []).some((w) => w.startsWith("native:")), JSON.stringify(row(fn)));
+  for (const fn of ["hrefReadCtlD", "pureCtlD", "shadowCtlD"])
+    check(`R241 CONTROL: \`${fn}\` charges nothing`, Object.keys(row(fn)).length === 0, JSON.stringify(row(fn)));
+}
+
+// ── R958 (the `any`-PARAMETER half): A VALUE LAUNDERED THROUGH AN `any` PARAMETER INTO A CLOSED DISPATCH ──────
+// `launder(x: any) { qDisp(x) }` called as `launder(new LocalW())` ran LocalW's `m` (EXECUTED, `tsagent-v042/fx/r958`)
+// and `deny Fs` on the caller was exit 0 at 85977fd: an `any` source names no conformer. The parameter's visible
+// arguments are recorded as conversion sources (the provenance index R246 also asks). Control: the same laundering
+// into a SEPARATE interface with only a PURE class passed stays pure (one closed dispatch per interface — CHA). A dependency-sourced value stays R958's by-design residue.
+if (blk()) {
+  const d = project({
+    "src/a.ts": `import * as fs from "node:fs";
+export interface Sink { m(): void }
+export class PureSink implements Sink { m(): void { } }
+export function qDisp(i: Sink) { i.m(); }
+class LocalW { m(): void { fs.writeFileSync("/tmp/r958-lau", "x"); } }
+function launder(x: any) { qDisp(x); }
+export function qLaunderRun() { launder(new LocalW()); }
+export interface QSink { q(): void }
+export class PureQ implements QSink { q(): void { } }
+export function qQDisp(i: QSink) { i.q(); }
+class QuietW { q(): void { } }
+function launderQuiet(y: unknown) { qQDisp(y as QSink); }
+export function qQuietRun() { launderQuiet(new QuietW()); }`,
+  });
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.a.${fn}`) ?? {};
+  check("R958 any-param: `qLaunderRun` reaches LocalW.m through `launder(x: any)` — Fs (ABSENT/pure at 85977fd)",
+        (row("qLaunderRun").inferred ?? []).includes("Fs"), JSON.stringify(row("qLaunderRun")));
+  check("R958 any-param CONTROL: laundering only a PURE class charges nothing",
+        !(row("qQuietRun").inferred ?? []).length, JSON.stringify(row("qQuietRun")));
 }
 
 // ── R780: ONE TRANSPARENT-WRAPPER SET — `( )`, `as`, `<T>`, `!`, `satisfies` change no runtime value ─────────
