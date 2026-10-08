@@ -51,6 +51,10 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 - ⚠ **`(process as any).argv` and `require("process").env` read the environment** (SOUNDNESS R936). The argv arm
   never unwrapped (even `(process).argv` read nothing), and `require("process")` / `require("node:process")` is the
   module-binding spelling of the same global. Both are now the process object; a local `process` still is not.
+- **A scoped `allow` that binds no function is a zero-match** (SOUNDNESS R952, ts half). `allow Net in nosuch.fn
+  ok.example` printed `policy ✓` and exited 0 with nothing said — the zero-match pass enrolled `deny`/`forbid`/`only`
+  and never `allow`. It now prints the same `policy rule matched NO function` line and rides the verdict's
+  `zeroMatch`, exactly as an unbound `deny` does; exit codes unchanged; a scopeless `allow` stays exempt.
 
 ## [0.40.0] — 2026-10-07
 

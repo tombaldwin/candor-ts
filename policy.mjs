@@ -1296,11 +1296,19 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
   // a rule whose destinations all resolve while its `from` names nothing has bound nothing, and that is
   // exactly the typo that leaves an operator believing a leaf is protected.
   for (const r of pol.only ?? []) zeroCount.set(r.raw, 0);
+  // ⟨SOUNDNESS R952⟩ …and a SCOPED `allow`. It was never enrolled, so `allow Net in nosuch.fn ok.example` — a
+  // typo'd scope — bound nothing, said nothing, and exited 0: a gate that cannot fail, exactly the `deny` typo
+  // this pass exists for, one rule kind over. A scoped allow makes a promise about the functions its scope names;
+  // naming none is the same unanswerable rule. A SCOPELESS allow applies to every function and stays exempt, as a
+  // scopeless `deny` does. Disclosure only: the line and `zeroMatch` entry `deny` already gets, exit unchanged
+  // (candor-rust's half, same shape).
+  for (const r of pol.allow ?? []) if (r.scope) zeroCount.set(r.raw, 0);
   if (zeroCount.size) {
     const names = new Set(functions.map((f) => f.fn));
     for (const k of Object.keys(callgraph ?? {})) names.add(k);
     for (const n of names) {
       for (const r of pol.deny) if (r.scope && scopeMatches(n, r.scope)) zeroCount.set(r.raw, zeroCount.get(r.raw) + 1);
+      for (const r of pol.allow ?? []) if (r.scope && scopeMatches(n, r.scope)) zeroCount.set(r.raw, zeroCount.get(r.raw) + 1);
       for (const r of pol.forbid) {
         if (scopeMatches(n, r.from) || scopeMatches(n, r.to)) zeroCount.set(r.raw, zeroCount.get(r.raw) + 1);
       }

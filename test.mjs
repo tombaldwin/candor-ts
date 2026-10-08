@@ -23419,6 +23419,36 @@ export function shadowed(process: { argv: string[] }) { return (process as any).
         !(row("shadowed").inferred ?? []).includes("Env"), JSON.stringify(row("shadowed")));
 }
 
+// ── R952 (ts half): A SCOPED `allow` THAT BINDS NO FUNCTION IS A ZERO-MATCH, DISCLOSED LIKE `deny` ───────────────
+//
+// The zero-match pass enrolled deny/forbid/only and never `allow`, so `allow Net in nosuch.fn ok.example` printed
+// `policy ✓`, exited 0 and carried no `zeroMatch` — a gate that cannot fail. Same shape as candor-rust's half:
+// the `matched NO function` stderr line and the verdict's `zeroMatch` entry, exit code unchanged; a SCOPELESS allow
+// stays exempt (it binds every function) and a bound one is not listed.
+if (blk()) {
+  const d = project({ "src/f.ts": `import * as net from "node:net";\nexport function real() { net.connect(80, "evil.example"); }\n` });
+  const run = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    const gj = path.join(d, "g.json");
+    try { fs.unlinkSync(gj); } catch { /* none yet */ }
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", path.join(d, "p.pol"), "--gate-json", gj], { encoding: "utf8" });
+    const v = fs.existsSync(gj) ? JSON.parse(fs.readFileSync(gj, "utf8")) : {};
+    return { status: r.status, line: (r.stderr ?? "").includes(`policy rule matched NO function — \`${line}\``), zm: v.zeroMatch ?? [] };
+  };
+  const u = run("allow Net in nosuch.fn ok.example");
+  check("R952 UNBOUND ALLOW: `allow Net in nosuch.fn ok.example` prints `matched NO function` and rides `zeroMatch`, exit 0 unchanged",
+        u.status === 0 && u.line && JSON.stringify(u.zm) === JSON.stringify(["allow Net in nosuch.fn ok.example"]), JSON.stringify(u));
+  const dn = run("deny Net nosuch.fn");
+  check("R952 PARITY: the unbound `deny` has the same two disclosures (the shape the allow now matches)",
+        dn.status === 0 && dn.line && JSON.stringify(dn.zm) === JSON.stringify(["deny Net nosuch.fn"]), JSON.stringify(dn));
+  const sl = run("allow Net ok.example");
+  check("R952 SCOPELESS: a scopeless allow binds every function — no zero-match, the violation still exits 1",
+        sl.status === 1 && !sl.line && sl.zm.length === 0, JSON.stringify(sl));
+  const b = run("allow Net in src.f.real ok.example");
+  check("R952 BOUND: a scoped allow that binds `real` is not listed — exit 1 on its real violation",
+        b.status === 1 && !b.line && b.zm.length === 0, JSON.stringify(b));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
