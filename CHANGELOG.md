@@ -19,6 +19,11 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   receiver, and the reviewed library's generic value slots (`Map.set`, `Set.add`, `includes`, `Object.assign`,
   a promise `resolve`, `new Proxy`). A parameter handed to one is resolved by the callback flow. Gates on
   callers of real registrations can go from exit 0 to exit 1.
+- ⚠ **One transparent-wrapper set** (SOUNDNESS R780). Parentheses, `as`, `<T>x`, `!` and `satisfies` change no
+  runtime value; seventeen hand-rolled loops answered "is this THAT reference / object?" with five different
+  wrapper sets. `(k.m as F).call(k)`, `Reflect.apply(f as F, …)` and `(<any>globalThis).process.env.HOME` were
+  ABSENT (`deny` and `deny Unknown` exit 0, EXECUTED); `(f as F).bind(t)` and `run((f))` were opaque `Unknown`.
+  All now route through `unwrapArgExpr`. (The R780 HOF-argument spelling itself was already closed by R947.)
 
 ## [0.40.0] — 2026-10-07
 

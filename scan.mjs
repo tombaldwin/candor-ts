@@ -3461,8 +3461,7 @@ function literalHeadHostUrl(expr) {
 //     (an assignment rooted at it, another call's argument, an alias, a return) refuses the capture.
 function determinedUrlObject(expr, call, depth = 0) {
   if (!expr || depth > 1) return null;
-  while (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) || ts.isNonNullExpression(expr)
-         || ts.isSatisfiesExpression?.(expr)) expr = expr.expression;
+  expr = unwrapArgExpr(expr);   // R780: the one transparent-wrapper set
   if (ts.isNewExpression(expr) && ts.isIdentifier(expr.expression)
       && (expr.expression.text === "URL" || expr.expression.text === "Request")) {
     const decls = checker.getSymbolAtLocation(expr.expression)?.declarations ?? [];
@@ -3516,8 +3515,17 @@ function determinedUrlObject(expr, call, depth = 0) {
   visit(d.getSourceFile());
   return safe ? determinedUrlObject(d.initializer, call, depth + 1) : null;
 }
-// R947 — the invoked function's own ARGUMENTS on the reflective routes, or `null` when they are not
-// visible here (a spread, an `.apply` of a non-literal array). `null` is the safe answer: it captures nothing.
+// ⟨SOUNDNESS R780⟩ THE ONE TRANSPARENT-WRAPPER SET. Parentheses, `as`, `<T>x`, `!` and `satisfies` change no runtime
+// value, so every "is this expression THAT reference / THAT object?" question asks it through this one function.
+// There were seventeen hand-rolled loops answering it with FIVE different wrapper sets (parens only; +`as`;
+// +`!`; +`satisfies`; +`<T>`), and every gap was a spelling the engine went blind on: `(k.m as F).call(k)`,
+// `Reflect.apply(f as F, …)` and `(<any>globalThis).process.env.HOME` were ABSENT (EXECUTED, lane fixture
+// `fx/r780`), `(f as F).bind(t)` and `run((f))` were opaque. Two loops are deliberately NOT routed here:
+// `conversionSourceTracked` stops at `as` because an `as` IS the conversion it is asking about (R958 reads the
+// assertion separately), and `rootsAtStdStream` is a SUPPRESSOR (it frees `process.stdout.write` of a fabricated
+// Net) — widening a suppressor removes charges, which is not this fix's direction.
+// (Also R947: the invoked function's own ARGUMENTS on the reflective routes, or `null` when they are not
+// visible here — a spread, an `.apply` of a non-literal array. `null` is the safe answer: it captures nothing.)
 function unwrapArgExpr(e) {
   while (e && (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression?.(e)
                || ts.isNonNullExpression(e) || ts.isSatisfiesExpression?.(e))) e = e.expression;
@@ -5233,7 +5241,8 @@ const callbackArgs = new Map();    // calleeName -> Map(argIndex -> Array<{calle
 // What each argument position of a call to LOCAL unit `targetName` received (callback flow, see `callbackArgs`).
 // Shared by the ordinary local arm and R955's callee-choice arm, so a callback passed through either is seen.
 function registerCallbackArgs(rec, targetName, args) {
-  args.forEach((a, i) => {
+  args.forEach((a0, i) => {
+    const a = unwrapArgExpr(a0);   // R780: `run((f))` / `run(f as F)` pass the same function as `run(f)`
     const slot = (callbackArgs.get(targetName) ?? callbackArgs.set(targetName, new Map()).get(targetName));
     const list = slot.get(i) ?? [];
     let target = null, opaque = false;
@@ -5372,8 +5381,7 @@ if (R103_HITS) process.on("exit", () => {
 });
 function openCallSlot(node) {
   if (!ts.isCallExpression(node)) return null;             // `new X()` constructs a class, not a slot
-  let callee = node.expression;
-  while (ts.isParenthesizedExpression(callee)) callee = callee.expression;
+  const callee = unwrapArgExpr(node.expression);   // R780
   // ELEMENT ACCESS IS THE SAME SLOT BY ANOTHER SPELLING, and it is here because the first draft of this
   // comment asserted the opposite — "an element access already reaches the dynamic-key/`callback:` arms"
   // — and that was FALSE when measured: `this["handler"]()` and `this[k]()` (k narrowed to the literal
@@ -5439,8 +5447,8 @@ function unwrapBind(node, depth = 0) {
   if (!node || depth > 8) return null;
   if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) return null;
   if (node.expression.name.text !== "bind") return null;
-  let recv = node.expression.expression;
-  while (ts.isParenthesizedExpression(recv)) recv = recv.expression;
+  // R780: `(f as F).bind(t)` / `(f satisfies F).bind(t)` bind the same function — the ONE wrapper set, not parens only.
+  const recv = unwrapArgExpr(node.expression.expression);
   // chained `.bind().bind()` — recurse only when the receiver is ITSELF a `.bind` call, else it's an
   // arbitrary call (`getCallback().bind`) whose result we can't pin → unresolvable bind.
   if (ts.isCallExpression(recv)) {
@@ -6091,11 +6099,7 @@ function isConversionPosition(n) {
 }
 // R958 — the value under an assertion chain: parentheses, `as`, `<T>`, `!` and `satisfies` change no runtime value.
 let conversionViaAssertion = false;   // set while `convert` records a source read THROUGH an assertion
-function peelAssertions(e) {
-  while (e && (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression(e)
-               || ts.isNonNullExpression(e) || ts.isSatisfiesExpression?.(e))) e = e.expression;
-  return e;
-}
+const peelAssertions = (e) => unwrapArgExpr(e);   // R780: one wrapper set, not a third copy of it
 // R82 / PART 87: is the conversion's SOURCE type a fact about the VALUE, or only about a generic signature? A
 // call whose declared return type mentions one of its own type parameters (`wrap<T>(x: T): T`) hands back
 // whatever type the ARGUMENT had, and that signature proves assignability, never that the value IS the
@@ -6670,9 +6674,7 @@ function enumerateGetters(owner, type, srcExpr) {
   //
   // R120 — THREE UNWRAPS AND ONE ALIAS HOP, because the question is which OBJECT is being copied and
   // none of these four wrappers changes that answer. Each is a spelling measured absent at e5c60bc.
-  let se = srcExpr;
-  while (se && (ts.isParenthesizedExpression(se) || ts.isAsExpression(se)
-                || ts.isSatisfiesExpression(se) || ts.isNonNullExpression(se))) se = se.expression;
+  const se = unwrapArgExpr(srcExpr);   // R780
   if (!se || !ts.isIdentifier(se)) return;                                  // parameter / call return / member
   let sym0 = checker.getSymbolAtLocation(se);
   if (!sym0) return;
@@ -6682,9 +6684,7 @@ function enumerateGetters(owner, type, srcExpr) {
   if (sym0.flags & ts.SymbolFlags.Alias) { try { sym0 = checker.getAliasedSymbol(sym0) ?? sym0; } catch { /* unresolved import */ } }
   for (const d of sym0.declarations ?? []) {
     if (!ts.isVariableDeclaration(d) || !d.initializer) continue;
-    let init = d.initializer;
-    while (ts.isParenthesizedExpression(init) || ts.isAsExpression(init)
-           || ts.isSatisfiesExpression(init) || ts.isNonNullExpression(init)) init = init.expression;
+    const init = unwrapArgExpr(d.initializer);   // R780
     if (!ts.isObjectLiteralExpression(init)) continue;
     for (const pr of init.properties) {
       if (!ts.isGetAccessorDeclaration(pr)) continue;
@@ -6729,8 +6729,7 @@ function enumerateGetters(owner, type, srcExpr) {
 const provenCopiedKeys = (sources) => {
   const keys = new Set();
   for (let s of sources) {
-    while (s && (ts.isParenthesizedExpression(s) || ts.isAsExpression(s)
-                 || ts.isSatisfiesExpression(s) || ts.isNonNullExpression(s))) s = s.expression;
+    s = unwrapArgExpr(s);   // R780
     if (!s || !ts.isObjectLiteralExpression(s)) return null;   // parameter / call return / variable
     for (const pr of s.properties) {
       if (ts.isSpreadAssignment(pr)) return null;              // `{...o}` copies an unknown key set
@@ -7204,8 +7203,7 @@ function recordDispatch(rec, decl, pkg) {
 function packageProducedReceiver(recvExpr, pkg) {
   if (!recvExpr || !pkg) return null;
   const unwrap = (x) => {
-    while (x && (ts.isAwaitExpression(x) || ts.isParenthesizedExpression(x) || ts.isNonNullExpression(x)
-                 || ts.isAsExpression(x))) x = x.expression;
+    for (x = unwrapArgExpr(x); x && ts.isAwaitExpression(x);) x = unwrapArgExpr(x.expression);   // R780: + `await`
     return x;
   };
   let e = unwrap(recvExpr);
@@ -8468,8 +8466,7 @@ const identIsGlobalProcess = (id) => {
   // `globalThis.process?.env`, often `(globalThis as any).process.env`). Unwrap parens/`as` casts around the
   // root; the `globalThis`/`global` root must be the ambient global, not a project shadow.
   if (ts.isPropertyAccessExpression(id) && id.name.text === "process") {
-    let root = id.expression;
-    while (ts.isParenthesizedExpression(root) || ts.isAsExpression(root) || ts.isNonNullExpression(root)) root = root.expression;
+    const root = unwrapArgExpr(id.expression);   // R780: `(<any>globalThis).process` is the same object
     if (ts.isIdentifier(root) && (root.text === "globalThis" || root.text === "global")) {
       const gd = checker.getSymbolAtLocation(root)?.declarations ?? [];
       return !gd.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)));
@@ -8498,9 +8495,7 @@ const identIsGlobalProcess = (id) => {
 {
   const isGlobalProcessInitializer = (expr) => {
     if (!expr) return false;
-    let e = expr;
-    while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e)) e = e.expression;
-    return identIsGlobalProcess(e); // handles `globalThis.process` / `global.process` / bare ambient `process`
+    return identIsGlobalProcess(unwrapArgExpr(expr));   // R780 // handles `globalThis.process` / `global.process` / bare ambient `process`
   };
   const collectProcessAliases = (node) => {
     if (ts.isVariableDeclaration(node) && node.name && ts.isIdentifier(node.name) && node.initializer) {
@@ -8509,8 +8504,7 @@ const identIsGlobalProcess = (id) => {
         if (sym) processAliasSymbols.add(sym);
       }
     } else if (ts.isVariableDeclaration(node) && node.name && ts.isObjectBindingPattern(node.name) && node.initializer) {
-      let root = node.initializer;
-      while (ts.isParenthesizedExpression(root) || ts.isAsExpression(root) || ts.isNonNullExpression(root)) root = root.expression;
+      const root = unwrapArgExpr(node.initializer);   // R780
       if (ts.isIdentifier(root) && (root.text === "globalThis" || root.text === "global")) {
         const gd = checker.getSymbolAtLocation(root)?.declarations ?? [];
         if (!gd.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)))) {
@@ -8551,11 +8545,7 @@ const identIsGlobalProcess = (id) => {
 // EXPRESSION — that is the model this adopts, with identity widened from a node to a value.
 //
 // TRANSPARENT: the wrappers that change only the static type, never the value.
-const unwrapEnvTransparent = (e) => {
-  while (e && (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression(e)
-               || ts.isNonNullExpression(e) || ts.isSatisfiesExpression(e))) e = e.expression;
-  return e;
-};
+const unwrapEnvTransparent = (e) => unwrapArgExpr(e);   // R780: one wrapper set, not a fourth copy of it
 // `process.env` / `process["env"]` / `globalThis.process?.env` / `(process as any).env` — the global
 // process object's `env` member. The `process` side keeps `identIsGlobalProcess`'s shadow guard, so a
 // project-local `process` (a parameter, a module `const`) matches nothing.
@@ -8836,14 +8826,10 @@ const globalBuiltinCallee = (callee) => {
   if (!callee || !ts.isPropertyAccessExpression(callee)) return null;
   const member = callee.name?.text;
   if (!member) return null;
-  let owner = callee.expression;
-  while (owner && (ts.isParenthesizedExpression(owner) || ts.isAsExpression(owner)
-                   || ts.isNonNullExpression(owner))) owner = owner.expression;
+  const owner = unwrapArgExpr(callee.expression);   // R780
   if (ts.isIdentifier(owner)) return identIsGlobal(owner) ? `${owner.text}.${member}` : null;
   if (!ts.isPropertyAccessExpression(owner) || !owner.name?.text) return null;
-  let root = owner.expression;
-  while (root && (ts.isParenthesizedExpression(root) || ts.isAsExpression(root)
-                  || ts.isNonNullExpression(root))) root = root.expression;
+  const root = unwrapArgExpr(owner.expression);   // R780
   if (!ts.isIdentifier(root) || !GLOBAL_ROOTS.has(root.text) || !identIsGlobal(root)) return null;
   return `${owner.name.text}.${member}`;
 };
@@ -8880,9 +8866,7 @@ const globalBareCallee = (callee) => {
   if (!callee) return null;
   if (ts.isIdentifier(callee)) return identIsGlobal(callee) ? callee.text : null;
   if (!ts.isPropertyAccessExpression(callee) || !callee.name?.text) return null;
-  let root = callee.expression;
-  while (root && (ts.isParenthesizedExpression(root) || ts.isAsExpression(root)
-                  || ts.isNonNullExpression(root))) root = root.expression;
+  const root = unwrapArgExpr(callee.expression);   // R780
   // ONLY a global ROOT, never an arbitrary owner: `Object.assign` must not read as the bare global
   // `assign`, and `globalThis.Object.assign` must not read as the bare global `Object` — both are the
   // member helper's business, and answering them here would be the second copy §G exists to prevent.
@@ -9415,6 +9399,11 @@ function visitCalls(node) {
           if ((m === "call" || m === "apply") && recvText !== "Reflect") invokedRef = recv;
           else if (recvText === "Reflect" && (m === "apply" || m === "construct"))
             invokedRef = (node.arguments ?? [])[0] ?? null;
+          // ⟨SOUNDNESS R780⟩ `(k.m as F).call(k)`, `(f satisfies F).call(t)` and `Reflect.apply(f as F, …)` invoke what
+          // the bare spelling invokes. A single wrapped reference is not a CHOICE, so R955's leaves (which do unwrap)
+          // returned null and the id/property gate below saw a ParenthesizedExpression: no edge, no `Unknown`, the
+          // caller ABSENT (EXECUTED, `fx/r780`).
+          invokedRef = unwrapArgExpr(invokedRef);
           // ⟨SOUNDNESS R587⟩ …and the ELEMENT-ACCESS spelling of the invoked reference, on the same
           // grounds as the HOF-ref arm above: `i["roll"].call(null, n)` invokes exactly what
           // `i.roll.call(null, n)` invokes. Measured ABSENT at `6a639e6` in every cell
@@ -11380,8 +11369,7 @@ for (const sf of sources) visitCalls(sf);
     })(cls);
     for (const dec of decorators) {
       add(localBodiedUnit(dec), "deco");                         // the application
-      let e = dec.expression;
-      while (ts.isParenthesizedExpression(e)) e = e.expression;
+      const e = unwrapArgExpr(dec.expression);   // R780
       if (ts.isCallExpression(e)) {
         add(localBodiedUnit(e), "deco");                         // the factory call
         add(`${moduleOf(e.getSourceFile())}.${decoratorArgLocal(e)}`, "arg");   // ⟨R944⟩ the ONE spelling

@@ -23180,6 +23180,45 @@ export function n32_assign() { return Object.assign(w, { tag: 1 }); }`,
           !(row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.f.${fn}`) === 0, JSON.stringify(row(fn)));
 }
 
+// ── R780: ONE TRANSPARENT-WRAPPER SET — `( )`, `as`, `<T>`, `!`, `satisfies` change no runtime value ─────────
+//
+// The HOF-ref arm already unwrapped (R947). Seventeen other loops answered "is this THAT reference / THAT object?"
+// with five different wrapper sets, and each gap was a spelling the engine went blind on. Every cell EXECUTED by
+// node (`fx/r780`, lane tsagent-v041): the ABSENT ones (`deny <E>` AND `deny Unknown` exit 0 at v0.40.0) are the
+// reflective receiver (`(k.m as F).call(k)`, `Reflect.apply(f as F, …)`) and the process root
+// (`(<any>globalThis).process.env.HOME`); the bind receiver and a wrapped callback argument were opaque `Unknown`.
+if (blk()) {
+  const d = project({
+    "src/f.ts": `import * as fs from "node:fs";
+type F = () => void;
+export function wa(): void { fs.writeFileSync("/tmp/r780", "x"); }
+export class K { m(): void { fs.writeFileSync("/tmp/r780", "x"); } }
+export function run(cb: () => void) { cb(); }
+export function d06_mas(k: K) { (k.m as F).call(k); }
+export function d07_msat(k: K) { (k.m satisfies F).call(k); }
+export function r01_as() { Reflect.apply(wa as F, undefined, []); }
+export function r02_callsat() { (wa satisfies F).call(undefined); }
+export function r03_angle() { (<F>wa).call(undefined); }
+export function b01_as() { [1].forEach((wa as F).bind(null)); }
+export function b02_sat() { setTimeout((wa satisfies F).bind(null), 0); }
+export function f04_paren() { run((wa)); }
+export function e02_gangle() { return (<any>globalThis).process.env.HOME; }
+export function e03_gsat() { return (globalThis satisfies typeof globalThis).process.env.HOME; }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  for (const [fn, eff] of [["d06_mas", "Fs"], ["d07_msat", "Fs"], ["r01_as", "Fs"], ["r02_callsat", "Fs"], ["r03_angle", "Fs"],
+                           ["b01_as", "Fs"], ["b02_sat", "Fs"], ["f04_paren", "Fs"], ["e02_gangle", "Env"], ["e03_gsat", "Env"]])
+    check(`R780 WRAPPER: \`${fn}\` reaches the same body as its bare spelling — ${eff}, \`deny ${eff} src.f.${fn}\` exit 1 (exit 0 at the base)`,
+          (row(fn).inferred ?? []).includes(eff) && gate(`deny ${eff} src.f.${fn}`) === 1, JSON.stringify(row(fn)));
+  check("R780 CALLBACK FLOW: `run((wa))` names `wa` — `run` resolves uniformly, the opaque `callback:param#0` is gone",
+        (row("run").calls ?? []).includes("src.f.wa") && !(row("run").unknownWhy ?? []).includes("callback:param#0"), JSON.stringify(row("run")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
