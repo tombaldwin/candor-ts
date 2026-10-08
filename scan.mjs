@@ -1653,11 +1653,60 @@ if (NO_SOURCES) {
 // types). Resolved via the module system, NOT a fixed relative path — npm HOISTS dependencies, so
 // in an npx/install tree @types/node sits BESIDE candor-ts, not inside it (the second probe's
 // catch). The TARGET's own @types win when present.
+// ⟨SOUNDNESS R1062⟩ THE ENGINE'S OWN TYPE PACKAGES ARE PART OF THE ENGINE. The compiler (and its `lib.*.d.ts`),
+// `@types/node` (the fallback root below) and `undici-types` (which `@types/node` re-exports `fetch`/`WebSocket`
+// from) decide resolutions, so a different version is, in principle, a different engine. A fresh install of the
+// published v0.40.1 resolved `@types/node` 25.9.9 against a tested 25.9.2 — MEASURED to move nothing on vitest
+// (the four-row difference first blamed on it was the type-ROOT leak below), and unmeasured everywhere else. The
+// package now pins them exactly and ships `npm-shrinkwrap.json`; this note covers the installs that ignore a
+// shrinkwrap (pnpm, yarn) or a hand-edited tree. Advisory: an untested version is not a wrong verdict, but it is
+// not the one this build's tests measured, and the operator should be told.
+{
+  try {
+    const lockPath = ["npm-shrinkwrap.json", "package-lock.json"].map((f) => path.join(ENGINE_DIR, f)).find((f) => fs.existsSync(f));
+    if (lockPath) {
+      const lock = JSON.parse(fs.readFileSync(lockPath, "utf8")).packages ?? {};
+      const req = createRequire(path.join(ENGINE_DIR, "scan.mjs"));
+      const loaded = (name, from) => {
+        try { return JSON.parse(fs.readFileSync(createRequire(from).resolve(`${name}/package.json`), "utf8")).version; }
+        catch { return null; }
+      };
+      const nodeTypesPkg = (() => { try { return req.resolve("@types/node/package.json"); } catch { return null; } })();
+      const seen = [["typescript", ts.version], ["@types/node", loaded("@types/node", path.join(ENGINE_DIR, "scan.mjs"))],
+                    ["undici-types", nodeTypesPkg ? loaded("undici-types", nodeTypesPkg) : null]];
+      for (const [name, got] of seen) {
+        const want = lock[`node_modules/${name}`]?.version;
+        if (want && got && want !== got)
+          console.error(`candor-ts: note — this install loaded ${name} ${got}; candor-ts ${PKG_VERSION} was tested `
+            + `with ${want}, and type packages change verdicts (SOUNDNESS R1062). Reinstall with npm, which honours the `
+            + `shipped npm-shrinkwrap.json.`);
+      }
+    }
+  } catch { /* advisory only */ }
+}
 if (!compilerOptions.typeRoots) {
   const roots = [path.join(rootDir, "node_modules", "@types")];
   try {
     const req = createRequire(path.join(ENGINE_DIR, "scan.mjs"));
-    roots.push(path.dirname(path.dirname(req.resolve("@types/node/package.json"))));
+    const nodeTypes = path.dirname(req.resolve("@types/node/package.json"));
+    const engineTypes = path.dirname(nodeTypes);
+    // ⟨SOUNDNESS R1062⟩ …AND ONLY @types/node. A type ROOT is not just where `types: ["node"]` is looked up: the
+    // compiler also resolves a TARGET's bare import (`import type { Node } from "estree"`) through it when the
+    // target has no package of that name installed. The engine's directory holds whatever else was installed
+    // beside it — in a development tree, eslint's `@types/estree` — so vitest (scanned without node_modules) had
+    // its `estree` imports resolved against the ENGINE's copy, and four rows that are `Unknown` from a clean
+    // `npm install candor-ts` were absent from the same source run out of the repo (MEASURED; the `@types/node`
+    // version, 25.9.2 vs 25.9.9, moved nothing). A verdict must not depend on the engine's neighbours, so when
+    // that directory holds anything but `node`, the root is a private directory holding `node` alone.
+    let others = [];
+    try { others = fs.readdirSync(engineTypes).filter((n) => n !== "node" && !n.startsWith(".")); } catch { others = []; }
+    if (!others.length) roots.push(engineTypes);
+    else {
+      const shim = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-types-"));
+      fs.symlinkSync(nodeTypes, path.join(shim, "node"), "junction");
+      process.on("exit", () => { try { fs.rmSync(shim, { recursive: true, force: true }); } catch { /* best effort */ } });
+      roots.push(shim);
+    }
   } catch {}
   compilerOptions.typeRoots = roots;
 }

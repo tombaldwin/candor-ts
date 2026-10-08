@@ -10,6 +10,17 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **The engine lends a scanned project nothing but `@types/node`** (SOUNDNESS R1062). The engine added its own
+  `@types` directory as a type root, and the compiler resolves a target's uninstalled bare import through a type
+  root — so whatever sat beside the engine (in a development tree, eslint's `@types/estree`) answered the target's
+  `import … from "estree"`. On vitest, scanned without node_modules, four rows that a clean `npm install candor-ts`
+  reports as `Unknown` were absent when the same code ran from the repository. The fallback root now holds
+  `@types/node` alone. A clean install's report is unchanged (measured byte-identical on vitest).
+- **The package pins its type dependencies exactly and ships `npm-shrinkwrap.json`** (SOUNDNESS R1062): `typescript`
+  6.0.3, `@types/node` 25.9.2 and `undici-types` 7.24.6 are what every install resolves, as the tests ran. A scan
+  that loads a different version (pnpm and yarn ignore a shrinkwrap) prints a stderr note. Measured: `@types/node`
+  25.9.9 against 25.9.2 changes no vitest row; the pin removes the variable rather than a known difference.
+
 - ⚠ **A class expression's definition-time work is wired from the unit that evaluates it** (SOUNDNESS R1060). `export
   class HB { static Inner = class { static { write } } }` wired the inner `static {}` block from `HB.constructor`, so
   `new HB()` was charged a write it never performs and the module that performs it at import read nothing (EXECUTED).

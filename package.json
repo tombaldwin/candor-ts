@@ -5,8 +5,8 @@
   "description": "candor for TypeScript — per-function side effects, transitively, with a policy gate (candor-spec 0.40)",
   "type": "module",
   "dependencies": {
-    "@types/node": "^25.9.2",
-    "typescript": "^6.0.3"
+    "@types/node": "25.9.2",
+    "typescript": "6.0.3"
   },
   "bin": {
     "candor-ts": "./scan.mjs",
@@ -21,6 +21,8 @@
   },
   "scripts": {
     "lint": "eslint *.mjs",
+    "prepack": "node -e \"require('fs').copyFileSync('package-lock.json','npm-shrinkwrap.json')\"",
+    "postpack": "node -e \"require('fs').rmSync('npm-shrinkwrap.json',{force:true})\"",
     "test": "npm run lint && node --test test-unit.mjs && node test.mjs --parallel && node test-mcp.mjs && node test-lsp.mjs && node test-watch.mjs && npm run test:probe && npm run test:fuzz",
     "test:unit": "node --test test-unit.mjs",
     "test:probe": "node fabrication_probe.mjs",
@@ -45,6 +47,7 @@
     "node": ">=20"
   },
   "files": [
+    "npm-shrinkwrap.json",
     "Cases.ts",
     "scan.mjs",
     "query.mjs",

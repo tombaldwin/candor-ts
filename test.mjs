@@ -7223,6 +7223,28 @@ export function mkD2z() { return new D2(); }
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── SOUNDNESS R1062: the engine's OWN type root lends the target nothing but @types/node ────────────────────────
+// A target scanned without node_modules imports `estree`. A clean `npm install candor-ts` has only `@types/node`
+// beside the engine and reads the import unresolved (`Unknown`); this development tree also has eslint's
+// `@types/estree` there, and before the fix the target's import resolved to THAT copy — the row went absent. Same
+// source, same engine code, a different verdict from the engine's neighbours (MEASURED on vitest: 4 rows). The
+// VACUITY FLOOR asserts the neighbour is really present, or this block proves nothing.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({ compilerOptions: { target: "ES2022", module: "nodenext", moduleResolution: "nodenext", strict: true }, include: ["src"] }),
+    "src/e.ts": `import type { Program } from "estree";
+export function stmtKindsE(p: Program) { return p.body.map((s) => s.type); }
+`,
+  });
+  check("R1062 VACUITY FLOOR: the engine's own @types directory holds a package other than node (eslint's @types/estree)",
+        fs.existsSync(path.join(HERE, "node_modules", "@types", "estree")));
+  const { report } = scan(d);
+  const row = entry(report, "src.e.stmtKindsE");
+  check("R1062: the target's uninstalled `estree` import is NOT resolved through the engine's neighbour — Unknown, as from a clean install",
+        (row?.inferred ?? []).includes("Unknown"), JSON.stringify(row ?? null));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── SOUNDNESS R944: a unit with no name of its own is keyed by ANCHOR PATH + ORDINAL, not by OFFSET ──────
 // `<structural>@N`, `<callable>@N`, `<decorator>@N`, `<decorator-arg>@N` and `[computed@N]` were keyed by
 // the absolute character offset, so a COMMENT LINE above them renamed them — and under ⟨0.40⟩'s AS-EFF-005
