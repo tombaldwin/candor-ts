@@ -23390,6 +23390,35 @@ export function rpcOnly() { net.connect(80, "ok.example"); mk().listen(); }`,
         !(row("rpcOnly").incomplete ?? []).includes("Net") && gate("allow Net in src.f.rpcOnly ok.example") === 0, JSON.stringify(row("rpcOnly")));
 }
 
+// ── R936: `(process as any).argv` AND `require("process").env` ARE THE PROCESS OBJECT ──────────────────────────────
+//
+// The argv arm handed `identIsGlobalProcess` the WRAPPED node, which matched an Identifier only, so even
+// `(process).argv` read nothing; `require("process")` is the module-binding spelling of the same global. All ABSENT
+// at v0.40.0 (EXECUTED in the lane fixture `fx/r936`). A project-local `process` parameter still matches nothing.
+if (blk()) {
+  const d = project({
+    "src/f.ts": `import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+export function argvCast() { return (process as any).argv[2]; }
+export function argvAngle() { return (<any>process).argv[2]; }
+export function argvParen() { return (process).argv[2]; }
+export function envReq() { return require("process").env.HOME; }
+export function envReqNode() { return require("node:process").env.HOME; }
+export function shadowed(process: { argv: string[] }) { return (process as any).argv[2]; }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  for (const fn of ["argvCast", "argvAngle", "argvParen", "envReq", "envReqNode"])
+    check(`R936: \`${fn}\` reads the process environment — Env, \`deny Env src.f.${fn}\` exit 1 (ABSENT, exit 0 at the base)`,
+          (row(fn).inferred ?? []).includes("Env") && gate(`deny Env src.f.${fn}`) === 1, JSON.stringify(row(fn)));
+  check("R936 SHADOW: a parameter named `process` is not the process object, wrapped or not — no Env",
+        !(row("shadowed").inferred ?? []).includes("Env"), JSON.stringify(row("shadowed")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

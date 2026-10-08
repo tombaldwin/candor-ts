@@ -8606,8 +8606,20 @@ const declImportsNodeProcess = (decl) => {
 // downstream consult — the fix in one place, per brief §F1 item 3 ("make the two paths share one
 // authority", not patch the losing copy). Populated by the pre-pass immediately below.
 const processAliasSymbols = new Set();
-const identIsGlobalProcess = (id) => {
+const identIsGlobalProcess = (id0) => {
+  // ⟨SOUNDNESS R936⟩ through the ONE transparent-wrapper set (R780): `(process as any).argv`, `(<any>process).argv`
+  // and even `(process).argv` were ABSENT because the argv arm handed this the wrapped node and this matched an
+  // Identifier only — the env arm unwrapped first and the argv arm did not. Unwrapping HERE gives every caller
+  // the same answer instead of each remembering to.
+  const id = unwrapArgExpr(id0);
   if (!id) return false;
+  // ⟨SOUNDNESS R936⟩ `require("process")` / `require("node:process")` IS the process object — the module-binding
+  // spelling of the same global (CJS, `--allow-js` trees, and `createRequire`). `require("process").env.HOME` read
+  // nothing (EXECUTED). Keyed on a callee spelled `require` and the literal specifier; a project function that
+  // happens to be called `require` and returns something else is the only false match, and it over-charges.
+  if (ts.isCallExpression(id) && ts.isIdentifier(id.expression) && id.expression.text === "require"
+      && id.arguments.length === 1 && ts.isStringLiteralLike(id.arguments[0])
+      && (id.arguments[0].text === "process" || id.arguments[0].text === "node:process")) return true;
   // `globalThis.process` / `global.process` — the SAME process object reached off the global (isomorphic code:
   // `globalThis.process?.env`, often `(globalThis as any).process.env`). Unwrap parens/`as` casts around the
   // root; the `globalThis`/`global` root must be the ambient global, not a project shadow.

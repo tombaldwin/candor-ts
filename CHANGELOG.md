@@ -48,6 +48,9 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   `allow Net ok.example` exited 0 over a server answering anyone (EXECUTED with real express 5 and fastify 5). A
   dependency member named `listen` that κ does not answer is now `Net` with an `incomplete` surface; JSON-RPC
   connections (vscode-jsonrpc / vscode-languageserver) are excluded as non-network.
+- ⚠ **`(process as any).argv` and `require("process").env` read the environment** (SOUNDNESS R936). The argv arm
+  never unwrapped (even `(process).argv` read nothing), and `require("process")` / `require("node:process")` is the
+  module-binding spelling of the same global. Both are now the process object; a local `process` still is not.
 
 ## [0.40.0] — 2026-10-07
 
