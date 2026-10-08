@@ -32,6 +32,11 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   constructor (construction runs the produced class's constructor through `super`); computed keys go to the
   scope around the class or literal. New `<heritage>` rows; `C.constructor` rows that only carried static
   initialisers disappear.
+- ⚠ **A pnpm or nested `node_modules` layout keys each package by its own name** (SOUNDNESS R778). The package
+  that owns a declaration is the INNERMOST `node_modules/<pkg>/` segment; the first one keyed every foreign package
+  of a pnpm tree as `.pnpm` (a false `invisible:['.pnpm']`, and an fs-extra `Fs` that `deny Fs` read as exit 0) and
+  `outer/node_modules/inner` as `outer`. Flat npm keys do not move. On a pnpm tree, `invisible` and
+  `dispatchesOn` entries and union-row hashes are renamed from `.pnpm#…` to the real package.
 
 ## [0.40.0] — 2026-10-07
 

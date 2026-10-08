@@ -2658,7 +2658,16 @@ function declModule(decl) {
   let m = f.match(/@types\/node\/(.+?)\.d\.ts$/);
   if (m) return m[1];
   if (/typescript\/lib\/lib\..*\.d\.ts$/.test(f)) return "<es-lib>";
-  m = f.match(/node_modules\/(@[^/]+\/[^/]+|[^/]+)\//);
+  // ⟨SOUNDNESS R778⟩ The INNERMOST `node_modules/<pkg>/` owns the file, not the first. pnpm's real path is
+  // `node_modules/.pnpm/fs-extra@11.2.0/node_modules/fs-extra/…` and an npm nested install is
+  // `node_modules/outer/node_modules/inner/…`; the first-segment match keyed every foreign package of a pnpm
+  // tree as `.pnpm` and `inner` as `outer`. MEASURED with the installer the only variable (fx/r778-{npm,pnpm},
+  // EXECUTED to write the file): npm read `['Fs']` and `deny Fs` exit 1, pnpm read `[]` + `invisible:['.pnpm']`
+  // and exit 0 — a FALSE disclosure (`.pnpm` is not a package) hiding a κ-classified effect. For a flat npm
+  // layout the first and last segments are the same one, so no npm key moves. A file directly under a dot-store
+  // with no inner `node_modules/` (no package segment at all) asks the nearest `package.json` instead.
+  m = [...f.matchAll(/node_modules\/(@[^/]+\/[^/]+|[^/]+)\//g)].at(-1) ?? null;
+  if (m && m[1].startsWith(".")) m = (() => { const n = nearestPackageName(f); return n ? [null, n] : m; })();
   if (m) {
     // `@types/X` (DefinitelyTyped) provides types for the RUNTIME package X — map it to X so the curated κ
     // tier (keyed by the runtime name: pg/ws/…) fires. Without this a package typed via @types resolved to

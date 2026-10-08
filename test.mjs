@@ -23268,6 +23268,43 @@ export function mkD3() { return new D3(); }`,
         (row("C5.constructor").inferred ?? []).includes("Fs"), JSON.stringify(row("C5.constructor")));
 }
 
+// ── R778: THE INNERMOST `node_modules/<pkg>/` OWNS A FILE — pnpm's store and npm's nested installs ─────────────
+//
+// `declModule` took the FIRST `node_modules/` segment, so a pnpm tree keyed every foreign package as `.pnpm` and a
+// nested `outer/node_modules/inner` as `outer`. With the installer the only variable (EXECUTED: the stub writes the
+// file), npm read `['Fs']` and `deny Fs` exit 1 while pnpm read `[]` + `invisible:['.pnpm']` and exit 0 — a false
+// disclosure hiding a κ-classified effect.
+if (blk()) {
+  const stub = "export declare function outputFileSync(file: string, data: string): void;\n";
+  const mk = (layout) => {
+    const files = { "src/f.ts": `import { outputFileSync } from "fs-extra";\nexport function write778(p: string) { outputFileSync(p, "x"); }\n` };
+    const at = layout === "pnpm" ? "node_modules/.pnpm/fs-extra@11.2.0/node_modules/fs-extra" : "node_modules/fs-extra";
+    files[`${at}/package.json`] = `{"name":"fs-extra","version":"11.2.0","types":"index.d.ts","main":"index.js"}`;
+    files[`${at}/index.d.ts`] = stub;
+    files[`${at}/index.js`] = "";
+    const d = project(files);
+    if (layout === "pnpm") fs.symlinkSync(".pnpm/fs-extra@11.2.0/node_modules/fs-extra", path.join(d, "node_modules/fs-extra"));
+    return d;
+  };
+  const gate = (d, line) => { fs.writeFileSync(path.join(d, "p.pol"), line + "\n"); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  for (const layout of ["npm", "pnpm"]) {
+    const d = mk(layout);
+    const r = entry(scan(d).report, "src.f.write778") ?? {};
+    check(`R778 ${layout}: fs-extra's outputFileSync is Fs and \`deny Fs src.f.write778\` exits 1 (pnpm: [] + invisible ['.pnpm'], exit 0 at the base)`,
+          (r.inferred ?? []).includes("Fs") && !(r.invisible ?? []).includes(".pnpm") && gate(d, "deny Fs src.f.write778") === 1, JSON.stringify(r));
+  }
+  const n = project({
+    "src/f.ts": `import { outputFileSync } from "outer";\nexport function writeNest778(p: string) { outputFileSync(p, "x"); }\n`,
+    "node_modules/outer/package.json": `{"name":"outer","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/outer/index.d.ts": `export { outputFileSync } from "inner";\n`, "node_modules/outer/index.js": "",
+    "node_modules/outer/node_modules/inner/package.json": `{"name":"inner","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/outer/node_modules/inner/index.d.ts": stub, "node_modules/outer/node_modules/inner/index.js": "",
+  });
+  const rn = entry(scan(n).report, "src.f.writeNest778") ?? {};
+  check("R778 NESTED: a declaration under `outer/node_modules/inner` is inner's — `invisible` names `inner`, not `outer`",
+        JSON.stringify(rn.invisible) === JSON.stringify(["inner"]), JSON.stringify(rn));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
