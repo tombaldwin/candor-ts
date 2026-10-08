@@ -4162,6 +4162,14 @@ const CHA_FANOUT_LIMIT = 12;
 // rather than inlined for the reason `CHA_FANOUT_LIMIT` was: two literals for one rule is how they drift.
 const TYPINGS_CENSUS_CAP = 128;
 const classOverrides = new Map();// base-method MemberDeclaration node -> overriding subclass member nodes (class-CHA)
+// ⟨SOUNDNESS R873⟩ An override that is not a class MEMBER: `this.m = () => …` assigned inside an instance body of
+// class `C` replaces `m` on every `C` instance. Registered in `classOverrides` like a member, keyed to the class
+// that performs the assignment here, because the node's `.parent` is an expression, not the class.
+const assignedOverrideClass = new Map(); // assigned override node -> the class-like node whose instances it overrides
+// The class an override node belongs to, for receiver-subtree scoping: a member's own class (declaration OR
+// expression — ⟨R956⟩), or the assigning class of a ⟨R873⟩ assigned override.
+const overrideOwner = (om) => assignedOverrideClass.get(om)
+  ?? ((om?.parent && (ts.isClassDeclaration(om.parent) || ts.isClassExpression(om.parent))) ? om.parent : null);
 const classDescendants = new Map();// base ClassDeclaration -> transitive LOCAL subclass ClassDeclarations (coercion-CHA)
 // R954 — the conformer registries (filled by the conversion pass after `walkStructural`).
 const classConformers = new Map();   // local ClassDeclaration -> conformer nodes (local class, literal, dep class)
@@ -4246,7 +4254,7 @@ function overrideClosure(seeds) {
   const out = [];
   for (const s of seeds) {
     for (const m of [s, ...overrideDescent(s)]) {
-      if (isOverridableMethod(m) && !out.includes(m)) out.push(m);
+      if ((isOverridableMethod(m) || assignedOverrideClass.has(m)) && !out.includes(m)) out.push(m);
       if (out.length > CHA_FANOUT_LIMIT + 1) return out;
     }
   }
@@ -4297,7 +4305,7 @@ function overrideDescent(decl) {
 function memberDispatchBodies(decl, rootClass) {
   const all = overrideDescent(decl);
   const scoped = (!rootClass || all.length === 0) ? all
-    : all.filter((om) => ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass));
+    : all.filter((om) => classInSubtree(overrideOwner(om), rootClass));   // R873/R956: assigned and class-expression overrides
   // R954 — …and the CONFORMERS registered at the receiver's class (a value the checker showed
   // converted to it, or to a subclass of it), which run for this dispatch exactly as an override does. Scoped
   // the same way: registered at `Ct` and its ancestors, so a SUBTYPE receiver never sees them.
@@ -5173,7 +5181,9 @@ for (const { mod, name, ident } of exportAliasCandidates) {
   const baseClassOf = localBaseClassOf;
   for (const sf of sources) {
     (function scan(node) {
-      if (ts.isClassDeclaration(node)) {
+      // ⟨SOUNDNESS R956⟩ a CLASS EXPRESSION is a subclass like any other: `new (class extends BaseC { m(){…} })()`
+      // reaching a `BaseC`-typed `b.m()` was ABSENT at every gate (EXECUTED) because this index read declarations only.
+      if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
         // Local-DESCENDANT index (the coercion-CHA universe, below). classOverrides is keyed by an
         // ANCESTOR MEMBER, so it only sees an override whose base ALSO declares the name. The coercion
         // protocol's members are the opposite shape: `class Sub extends Base { toString(){…} }` where
@@ -5210,6 +5220,7 @@ for (const { mod, name, ident } of exportAliasCandidates) {
               if (!classOverrides.has(ancestor)) classOverrides.set(ancestor, []);
               classOverrides.get(ancestor).push(m);
               foundLocal = true;
+              mintClassExprOverride(node, m, name);   // R956
               break;
             }
             base = baseClassOf(base);
@@ -5229,13 +5240,76 @@ for (const { mod, name, ident } of exportAliasCandidates) {
                 if (!foreignClassOverrides.has(fm)) foreignClassOverrides.set(fm, []);
                 const arr = foreignClassOverrides.get(fm);
                 if (!arr.includes(m)) arr.push(m);
+                mintClassExprOverride(node, m, name);   // R956
               }
             }
           }
         }
       }
+      if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) registerAssignedOverrides(node);   // R873
       ts.forEachChild(node, scan);
     })(sf);
+  }
+}
+
+// ⟨SOUNDNESS R956⟩ A class EXPRESSION's member has no unit (`localName` names class DECLARATION members only), so
+// its body folded into whatever evaluates the expression and no dispatch could land on it. An override needs an
+// addressable body: mint it the way a structural implementor's member is minted — keyed by `stableUnitTag`, with
+// ⟨R519⟩'s containment edge so the evaluating unit keeps every charge it had (an ADDITION, never a move). Only a
+// member that OVERRIDES is minted; a class expression's other members stay where they were.
+function mintClassExprOverride(cls, m, name) {
+  if (!ts.isClassExpression(cls) || nodeName.has(m)) return;
+  const bodied = (ts.isMethodDeclaration(m) && m.body)
+    || (ts.isPropertyDeclaration(m) && m.initializer && (ts.isArrowFunction(m.initializer) || ts.isFunctionExpression(m.initializer)));
+  if (!bodied) return;   // an unminted override reads unresolved at every reader — disclosed, never silent
+  const sf = m.getSourceFile();
+  mintPositionalStructuralUnit(moduleOf(sf), sf, m, name);
+  if (process.env.CANDOR_R873_REACH) console.error(`R873-REACH classexpr ${name}`);
+}
+// ⟨SOUNDNESS R873⟩ `this.m = <value>` inside an INSTANCE body of class `C` (its constructor, a method, an accessor,
+// an arrow property — not a nested `function`, which rebinds `this`) replaces `m` on that instance. Where `C` or a
+// local ancestor declares METHOD `m`, the assignment is an override of it: a `Base`-typed `b.m()` on a `C` runs the
+// assigned value. MEASURED: `class SubC extends BaseC { constructor(){ super(); this.m = () => write } }` with a
+// `BaseC`-typed `b.m()` was ABSENT at every gate (EXECUTED), the arrow charged to `SubC.constructor` only.
+//  · a function literal is minted (`mintCallTargetUnit`, containment edge kept: the assigning body still carries it)
+//    and registered — a resolution;
+//  · `this.m = this.m.bind(…)` / `this.m = this.m` re-installs the same method and registers nothing;
+//  · any other value (a wrapper's result, another method's `.bind`, a parameter) is registered UNRESOLVED, so every
+//    reader's `allResolved` gate discloses `dispatch:` rather than certifying the declared body alone.
+// A PROPERTY `m` is not this rule's: a written property slot is ⟨R103⟩'s, which already discloses.
+function registerAssignedOverrides(cls) {
+  const memberNamed = (c, name) => (c.members ?? []).find((x) => ts.isMethodDeclaration(x) && x.name?.getText?.() === name);
+  for (const mem of cls.members ?? []) {
+    if (ts.getCombinedModifierFlags(mem) & ts.ModifierFlags.Static) continue;
+    const body = (ts.isConstructorDeclaration(mem) || ts.isMethodDeclaration(mem) || ts.isGetAccessorDeclaration(mem)
+                  || ts.isSetAccessorDeclaration(mem)) ? mem.body
+      : (ts.isPropertyDeclaration(mem) && mem.initializer && ts.isArrowFunction(mem.initializer)) ? mem.initializer.body : null;
+    if (!body) continue;
+    (function walk(n) {
+      if (n !== body && (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isClassLike(n))) return;
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken
+          && ts.isPropertyAccessExpression(n.left) && n.left.expression.kind === ts.SyntaxKind.ThisKeyword) {
+        const name = n.left.name.getText();
+        let anc = memberNamed(cls, name);
+        for (let b = localBaseClassOf(cls), g = 0; !anc && b && g++ < 64; b = localBaseClassOf(b)) anc = memberNamed(b, name);
+        if (anc) {
+          const rhs = unwrapArgExpr(n.right);
+          const bound = rhs && ts.isCallExpression(rhs) ? unwrapBind(rhs) : null;
+          const ref = bound ? bound.ref : rhs;
+          const same = ref && ts.isPropertyAccessExpression(ref) && ref.expression.kind === ts.SyntaxKind.ThisKeyword
+            && ref.name.getText() === name;
+          if (!same) {
+            const node = rhs && (ts.isArrowFunction(rhs) || ts.isFunctionExpression(rhs)) ? rhs : n;
+            if (node === rhs && !callTargetUnit(rhs)) mintCallTargetUnit(rhs);
+            if (!classOverrides.has(anc)) classOverrides.set(anc, []);
+            const arr = classOverrides.get(anc);
+            if (!arr.includes(node)) { arr.push(node); assignedOverrideClass.set(node, cls); }
+            if (process.env.CANDOR_R873_REACH) console.error(`R873-REACH assigned ${node === rhs ? "fn" : "opaque"} ${name}`);
+          }
+        }
+      }
+      ts.forEachChild(n, walk);
+    })(body);
   }
 }
 
@@ -6422,8 +6496,7 @@ function accessorOverrideFanOut(rec, decl, recvExpr) {
   // SOUNDNESS-PRESERVING FALLBACK, the method path's verbatim: a receiver we cannot pin to a LOCAL
   // class (a union, an interface, `any`, an external type) keeps the FULL override set.
   const rootClass = localReceiverClass(recvExpr);
-  const direct = rootClass ? allOverrides.filter((om) =>
-    ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass)) : allOverrides;
+  const direct = rootClass ? allOverrides.filter((om) => classInSubtree(overrideOwner(om), rootClass)) : allOverrides;
   const overrides = memberDispatchBodies(decl, rootClass);
   if (direct.length <= CHA_FANOUT_LIMIT) probeR871("accessor", decl, overrides.length - direct.length);
   if (overrides.length === 0) return;
@@ -9582,8 +9655,7 @@ function visitCalls(node) {
               const recvExpr = (ts.isPropertyAccessExpression(node.expression)
                 || ts.isElementAccessExpression(node.expression)) ? node.expression.expression : null;
               const rootClass = localReceiverClass(recvExpr);
-              const direct = rootClass ? allOverrides.filter((om) =>
-                ts.isClassDeclaration(om.parent) && classInSubtree(om.parent, rootClass)) : allOverrides;
+              const direct = rootClass ? allOverrides.filter((om) => classInSubtree(overrideOwner(om), rootClass)) : allOverrides;
               const overrides = isSuperReceiver(recvExpr) ? [] : memberDispatchBodies(decl, rootClass);
               if (isSuperReceiver(recvExpr)) probeR871("super-call", decl, direct.length);
               else if (direct.length <= CHA_FANOUT_LIMIT) probeR871("class", decl, overrides.length - direct.length);

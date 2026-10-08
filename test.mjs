@@ -23305,6 +23305,52 @@ if (blk()) {
         JSON.stringify(rn.invisible) === JSON.stringify(["inner"]), JSON.stringify(rn));
 }
 
+// ── R873 + R956: TWO OVERRIDE SHAPES THE CLASS-CHA INDEX NEVER SAW — `this.m = …` and a class-expression subclass ──
+//
+// `classOverrides` indexed class DECLARATION members only. A constructor/method that assigns `this.m = () => …` and
+// `new (class extends Base { m(){…} })()` both replace `m` for a value a `Base`-typed `b.m()` can receive, and both
+// were ABSENT at every gate (EXECUTED, lane fixture `fx/r873`). Controls pin the precision: an identity
+// re-binding (`this.m = this.m.bind(this)`) adds no hedge, a sibling subclass's receiver gains nothing, and an
+// assigned value the engine cannot name DISCLOSES (`dispatch:`) rather than certifying the declared body.
+if (blk()) {
+  const d = project({
+    "src/f.ts": `import * as fs from "node:fs";
+const w = (k: string) => fs.writeFileSync("/tmp/r873-" + k, "x");
+export function wrapFn<T extends (...a: any[]) => any>(f: T): T { return ((...a: any[]) => f(...a)) as T; }
+export class BaseC { m(): void { } other(): void { w("other"); } }
+export class SubA extends BaseC { constructor() { super(); this.m = () => { w("a1"); }; } }
+export class SubB extends BaseC { init(): void { this.m = function () { w("a2"); }; } }
+export class SubI extends BaseC { m(): void { } constructor() { super(); this.m = this.m.bind(this); } }
+export class Sib extends BaseC { }
+export function viaBaseA(b: BaseC) { b.m(); }
+export function viaSubI(s: SubI) { s.m(); }
+export function viaSib(s: Sib) { s.m(); }
+export class BaseO { m(): void { } other(): void { w("o"); } }
+export class SubO extends BaseO { constructor() { super(); this.m = wrapFn(this.other.bind(this)); } }
+export function viaBaseO(b: BaseO) { b.m(); }
+export class Base2 { m(): void { } }
+export const inst2: Base2 = new (class X2 extends Base2 { m(): void { w("c1"); } })();
+export function viaBase2(b: Base2) { b.m(); }
+export class Sib2 extends Base2 { }
+export function viaSib2(s: Sib2) { s.m(); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  check("R873 ASSIGNED: `this.m = () => write` in a constructor (and `function(){}` in a method) is an override — `viaBaseA` Fs, `deny Fs` exit 1 (ABSENT, exit 0 at the base)",
+        (row("viaBaseA").inferred ?? []).includes("Fs") && gate("deny Fs src.f.viaBaseA") === 1, JSON.stringify(row("viaBaseA")));
+  check("R873 OPAQUE: an assigned value the engine cannot name discloses `dispatch:` — `deny Unknown src.f.viaBaseO` exit 1 (0 at the base)",
+        (row("viaBaseO").unknownWhy ?? []).some((x) => x.startsWith("dispatch:")) && gate("deny Unknown src.f.viaBaseO") === 1, JSON.stringify(row("viaBaseO")));
+  check("R956 CLASS EXPRESSION: `new (class X2 extends Base2 { m(){ write } })()` reaching `viaBase2` — Fs, `deny Fs` exit 1 (ABSENT, exit 0 at the base)",
+        (row("viaBase2").inferred ?? []).includes("Fs") && gate("deny Fs src.f.viaBase2") === 1, JSON.stringify(row("viaBase2")));
+  for (const fn of ["viaSubI", "viaSib", "viaSib2"])
+    check(`R873/R956 PRECISION: \`${fn}\` gains neither an effect nor a hedge — identity re-binding / a sibling subtree`,
+          !(row(fn).inferred ?? []).length && gate(`deny Unknown src.f.${fn}`) === 0, JSON.stringify(row(fn)));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

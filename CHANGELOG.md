@@ -37,6 +37,12 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   of a pnpm tree as `.pnpm` (a false `invisible:['.pnpm']`, and an fs-extra `Fs` that `deny Fs` read as exit 0) and
   `outer/node_modules/inner` as `outer`. Flat npm keys do not move. On a pnpm tree, `invisible` and
   `dispatchesOn` entries and union-row hashes are renamed from `.pnpm#…` to the real package.
+- ⚠ **Two override shapes reach class dispatch** (SOUNDNESS R873, R956). `this.m = () => …` assigned in an instance
+  body, and a class-EXPRESSION subclass (`new (class extends Base { m(){…} })()`), replace `m` for values a
+  `Base`-typed `b.m()` can receive; both were ABSENT at every gate (EXECUTED). The class-CHA index now registers
+  both (minting the body as a unit, its containing function keeping its charges); an assigned value the engine
+  cannot name discloses `dispatch:`; `this.m = this.m.bind(this)` re-installs the same method and adds nothing.
+  New `<callable>`/`<structural>` rows and union rows for such hierarchies.
 
 ## [0.40.0] — 2026-10-07
 
