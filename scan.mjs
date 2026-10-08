@@ -46,7 +46,7 @@ const R815_REACH = process.env.CANDOR_R815_REACH ? (k) => console.error(`R815-RE
 // ⟨R934/R935⟩ reach marker: a charge that came from a PARAMETER or PROPERTY environment location.
 const R246_REACH = process.env.CANDOR_R246_REACH ? (k) => console.error(`R246-REACH ${k}`) : null;
 let projAccessorNames = null;
-const anyRecvSetResidue = [];   // ⟨R246⟩ { owner, name|null } — see the post-fixpoint disclosure
+const anyRecvSetResidue = [];   // ⟨R246/R1039⟩ { owner, name|null, kind } — see the post-fixpoint disclosure
 const ENVLOC_REACH = process.env.CANDOR_ENVLOC_REACH ? (k) => console.error(`ENVLOC-REACH ${k}`) : null;
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -11573,16 +11573,17 @@ function visitCalls(node) {
       && p.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && p.operatorToken.kind <= ts.SyntaxKind.LastAssignment;
     const recordKind = (kind) => {
       const hits = accessorsAt(node, kind);
-      // ⟨R246⟩ THE RESIDUE: a WRITE through a receiver whose static type is `any`/`unknown` and whose value
-      // neither the assertion look-through nor the parameter provenance could name. Recorded here; whether
-      // it is disclosed is decided after the fixpoint, when it is known which project setters have effects.
-      if (kind === "set" && !(hits && hits.length)) {
+      // ⟨R246/R1039⟩ THE RESIDUE: a WRITE (R246) or READ (R1039) through a receiver whose static type is
+      // `any`/`unknown` and whose value neither the assertion look-through nor the parameter provenance could
+      // name. Recorded here; whether it is disclosed is decided after the fixpoint, when it is known which
+      // project accessors of that kind have effects.
+      if (!(hits && hits.length)) {
         let rt1; try { rt1 = checker.getTypeAtLocation(node.expression); } catch { rt1 = null; }
         if (anyishType(rt1) && !receiverValueTypes(node.expression).length) {
           const owner1 = enclosing(node);
           const nm1 = ts.isPropertyAccessExpression(node) ? node.name.text
             : (node.argumentExpression && ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : null);
-          if (owner1) anyRecvSetResidue.push({ owner: owner1, name: nm1 });
+          if (owner1) anyRecvSetResidue.push({ owner: owner1, name: nm1, kind });
         }
       }
       if (R246_REACH) {
@@ -12631,26 +12632,29 @@ const inferred = new Map([...fns.keys()].map((k) => [k, new Set(fns.get(k).direc
 // DISCLOSES rather than charges: `Unknown[reflect:accessor:any-receiver]` on the writer, and only when the
 // project declares a setter that could be the one — the SAME name (or any string-named setter for an
 // unpinnable key) — AND that setter's body has an effect. A setter-free or pure-setter project pays nothing.
-// Priced on the 28-entry roster (see the commit for the measured count — a handful of units, <0.1%). The
-// READ side (getters) is the same question at 609 units (1.45%) and is NOT shipped here — it is a separate
-// decision, stated in SOUNDNESS rather than folded into this row's price.
+// Priced on the 28-entry roster (see the commit for the measured count — a handful of units, <0.1%).
+// SOUNDNESS R1039 — THE READ SIDE, SAME RULE: `o.name` / `o[k]` through such a receiver can run a project
+// GETTER (EXECUTED: an escaped `r(o: any) { return o.token }` handed a class whose `get token()` writes a
+// file — `r` ABSENT, `deny Unknown`/`deny Fs Unknown` exit 0 on v0.40.0). Same admission: a getter WITH A
+// BODY and an EFFECT that the read could name (the same name, or any string-named one for an unpinnable key).
 if (anyRecvSetResidue.length) {
-  const setterUnits = new Map();   // name -> [unit]
+  const accUnits = { get: new Map(), set: new Map() };   // kind -> name -> [unit]
   const visitS = (n) => {
-    // A setter WITH A BODY: a body-less declaration (a project typings stub) is already its own `native:`
+    // An accessor WITH A BODY: a body-less declaration (a project typings stub) is already its own `native:`
     // disclosure, and arming every `any` write on it measured as pure noise (typeorm's bson `ObjectId.set id`).
-    if (ts.isSetAccessorDeclaration(n) && n.body && n.name && !ts.isComputedPropertyName(n.name)) {
+    if ((ts.isSetAccessorDeclaration(n) || ts.isGetAccessorDeclaration(n)) && n.body && n.name && !ts.isComputedPropertyName(n.name)) {
       const u = nodeName.get(n);
-      if (u) { const k = n.name.getText(); (setterUnits.get(k) ?? setterUnits.set(k, []).get(k)).push(u); }
+      const m = ts.isSetAccessorDeclaration(n) ? accUnits.set : accUnits.get;
+      if (u) { const k = n.name.getText(); (m.get(k) ?? m.set(k, []).get(k)).push(u); }
     }
     ts.forEachChild(n, visitS);
   };
   for (const sf of sources) visitS(sf);
   const effectful = (u) => (inferred.get(u)?.size ?? 0) > 0;
-  const anyEffectful = [...setterUnits.values()].flat().some(effectful);
+  const anyEffectful = { get: [...accUnits.get.values()].flat().some(effectful), set: [...accUnits.set.values()].flat().some(effectful) };
   const hedged = new Set();
-  for (const { owner, name } of anyRecvSetResidue) {
-    const hit = name == null ? anyEffectful : (setterUnits.get(name) ?? []).some(effectful);
+  for (const { owner, name, kind } of anyRecvSetResidue) {
+    const hit = name == null ? anyEffectful[kind] : (accUnits[kind].get(name) ?? []).some(effectful);
     if (!hit || !fns.has(owner)) continue;
     const rec = fns.get(owner);
     rec.direct.add("Unknown"); rec.why.add("reflect:accessor:any-receiver");

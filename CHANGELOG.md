@@ -22,8 +22,10 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   resolves to the setter's effects; an unpinned key takes R240(b)'s `reflect:accessor:dynamic-key`, as on a
   typed receiver. Where neither names the value (an escaped function, no visible caller) a WRITE discloses
   `Unknown[reflect:accessor:any-receiver]`, only when the project declares a setter with a body and an effect
-  that the write could name. The read (getter) side of the same residue is NOT hedged (priced at 1.45% of
-  roster units; a separate decision).
+  that the write could name. **The READ side is hedged the same way** (SOUNDNESS R1039): a read through such a
+  receiver discloses `Unknown[reflect:accessor:any-receiver]` when the project declares a bodied, effectful getter
+  the read could name (EXECUTED: an escaped `r(o: any) { return o.token }` ran a file-writing getter and was ABSENT).
+  Gates scoped to those readers can go from exit 0 to exit 1 under `deny Unknown`.
 - ⚠ **A function reference inside an object literal handed to an invoker** (SOUNDNESS R1031). rxjs
   `subscribe({ next: h })`, `{ complete: h }`, `{ next }`, `{ next: o.m.bind(o) }` and
   `addEventListener(t, { handleEvent: h })` dropped the reference (caller ABSENT, EXECUTED). Each member the

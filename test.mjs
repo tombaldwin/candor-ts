@@ -23408,6 +23408,39 @@ export function ctlEscPureW() { [new Sp()].forEach(escPureW); }`,
         JSON.stringify([entry(report, "src.b.escPureW"), entry(report, "src.b.ctlEscPureW")]));
 }
 
+// ── R1039: THE READ SIDE OF R246's RESIDUE — a project GETTER reached through an unresolvable `any` receiver ──────
+// EXECUTED (`tsagent-v042/fx/anyr`): `readNamedR(o: any) { return o.token }` and `readDynEscR(o: any) { return o[KEYS[0]] }`,
+// each ESCAPED into `[new Gx()].map(…)`, ran Gx's file-writing getters; on v0.40.0 both readers and both callers were
+// ABSENT, `deny Unknown` and `deny Fs Unknown` exit 0. Same admission as the write side: a getter with a body and an
+// effect the read could name. Controls: a PURE getter of the read name, and a name no project getter declares.
+if (blk()) {
+  const d = project({
+    "src/a.ts": `import * as fs from "node:fs";
+export class Gx { get token(): string { fs.writeFileSync("/tmp/r1039-n", "x"); return "t"; }
+                  get other(): string { fs.writeFileSync("/tmp/r1039-d", "x"); return "o"; } }
+function readNamedR(o: any) { return o.token; }
+export function escNamedR() { return [new Gx()].map(readNamedR); }
+const KEYS: string[] = ["other"];
+function readDynEscR(o: any) { return o[KEYS[0]]; }
+export function escDynEscR() { return [new Gx()].map(readDynEscR); }
+export class Gp { get quiet(): number { return 1; } }
+function readQuietR(o: any) { return o.quiet; }
+export function escQuietR() { return [new Gp()].map(readQuietR); }
+function readMissR(o: any) { return o.nothingHere; }
+export function escMissR() { return [{ nothingHere: 1 }].map(readMissR); }`,
+  });
+  const gate = (line) => { fs.writeFileSync(path.join(d, "p.pol"), line + "\n"); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.a.${fn}`) ?? {};
+  for (const fn of ["readNamedR", "readDynEscR"])
+    check(`R1039: \`${fn}\` reads through an unresolvable \`any\` receiver a project declares an effectful getter for — Unknown[reflect:accessor:any-receiver]`,
+          (row(fn).unknownWhy ?? []).includes("reflect:accessor:any-receiver"), JSON.stringify(row(fn)));
+  for (const fn of ["escNamedR", "escDynEscR"])
+    check(`R1039 GATE: \`deny Fs Unknown src.a.${fn}\` fires through the map edge (exit 0 on v0.40.0)`, gate(`deny Fs Unknown src.a.${fn}`) === 1);
+  for (const fn of ["readQuietR", "escQuietR", "readMissR", "escMissR"])
+    check(`R1039 CONTROL: \`${fn}\` (pure getter of that name / no getter of that name) charges nothing`, Object.keys(row(fn)).length === 0, JSON.stringify(row(fn)));
+}
+
 // ── R241: THE REST OF THE BROWSER'S PERSISTENT STORES AND NAVIGATION ─────────────────────────────────────────
 // Under `lib: ["ES2022","DOM"]` all six of the row's spellings — `document.cookie` read and write,
 // `location.href = u`, `location.assign(u)`, `indexedDB.open`, `caches.open`, `navigator.storage.getDirectory`
