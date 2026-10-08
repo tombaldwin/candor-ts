@@ -10,6 +10,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **A function reference handed to an invoker OFF the `HOF_INVOKERS` list is charged** (SOUNDNESS R803).
+  `e.on("x", f)`, `once`/`addListener`/`prependOnceListener`, `process.on`, `http.createServer(h)`,
+  `EventTarget.addEventListener`, `Array.from(xs, f)`, `new Promise(exec)`, lodash `_.each`/`_.times`, rxjs
+  `subscribe` and a dependency's `queue.add(f)` dropped the reference (caller ABSENT, `deny Fs` exit 0, every one
+  EXECUTED). An unlisted non-local callee now invokes the positions its signature positively declares callable,
+  minus a denylist: removal names (`off`/`removeListener`/`removeEventListener`/`removeAllListeners`) on any
+  receiver, and the reviewed library's generic value slots (`Map.set`, `Set.add`, `includes`, `Object.assign`,
+  a promise `resolve`, `new Proxy`). A parameter handed to one is resolved by the callback flow. Gates on
+  callers of real registrations can go from exit 0 to exit 1.
+
 ## [0.40.0] — 2026-10-07
 
 - ⚠ **Declares spec 0.40** (was 0.39) — the family floor bump. candor-ts implements both ⟨0.40⟩ halves that

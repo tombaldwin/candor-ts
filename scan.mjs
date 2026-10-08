@@ -8357,6 +8357,81 @@ const HOF_INVOKERS = new Set([
   "then", "catch", "finally", "nextTick",
 ]);
 
+// ⟨SOUNDNESS R803⟩ THE LIST ABOVE IS NO LONGER THE GATE — IT IS THE POSITION MAP FOR THE CALLEES IT NAMES.
+//
+// `HOF_INVOKERS` decided, by callee NAME, whether a function reference handed to a non-local callee could be
+// invoked by it, and every callee it did not name dropped the reference: no edge, no `Unknown`, no row.
+// Measured on `fx/r803`, every cell EXECUTED by node to run its handler: `e.on`, `e.once`, `e.addListener`,
+// `process.once`, `http.createServer(h)`, `Array.from(xs, f)`, `new Promise(exec)`, lodash `_.each`/`_.times`,
+// a dependency `queue.add(f)` and `EventTarget.addEventListener` were all ABSENT, `deny Fs` exit 0 on each
+// caller. The comment that guarded it called the omission "an honest under-report (sound)" — true about
+// fabrication, false about silence; it also falsified `KAPPA_PURE`'s premise that lodash/rxjs side effects
+// "live in visible user callbacks", because this list is what decides whether those callbacks are visible.
+//
+// WHY NOT "ASK THE SIGNATURE" ALONE — measured by the ts vein analysis on the 28-entry roster: of 253 sites
+// where a callee's parameter is callable-typed and the argument is a local function reference, about half are
+// REMOVALS or STORES (`off`, `removeListener`, `removeEventListener`, `Map.set`, `Object.assign`), and 15 of the
+// 25 effect-bearing ones never invoke. A signature rule alone fabricates on those.
+//
+// So the rule is: an UNLISTED non-local callee invokes every argument position its resolved signature
+// POSITIVELY declares callable (`calleeParamIsCallable === true`), unless the callee is on the DENYLIST below.
+// The failure directions, stated because they are the reason for the shape (`candor-denylist-over-allowlist`):
+//   · a non-invoker MISSING from the denylist → an over-charge (its reference's effects charged to the
+//     caller). Visible, and the corpus A/B is the instrument that catches it.
+//   · an invoker the old list missed → now charged. Nothing an invoker can do lands it back in silence
+//     except being DENYLISTED, and the denylist only names declarations whose semantics are a removal or a
+//     store — the removal NAMES on any receiver, and reviewed ES-lib / node-core members by owner.
+//   · a callee whose parameter is `any`/`unknown`/unresolvable (`null`) is NOT admitted here. That is a
+//     residual, named rather than hidden: `console.log(f)`/`assert.equal(f, …)` take `any` and never invoke,
+//     and admitting `null` charges them — priced on the roster before deciding (see the commit message).
+// The listed names keep their own position map (`hofInvokesArg`/`hofArgIsNeverCallback`) unchanged.
+//
+// Removal by NAME on ANY receiver: a method named `removeListener` that invokes the listener it is removing
+// would be perverse, and these four are the registration API's inverse everywhere they appear (node events,
+// DOM `EventTarget`, eventemitter3, socket.io's emitter). Asked of the callee's spelling AND of the declaration
+// it resolved to, because `const processOff = process.off.bind(process); processOff(sig, h)` (vitest) and
+// got's `removeSessionSocketListener` are the same removal under a local name.
+//
+// Everything else is asked of the RESOLVED REVIEWED-LIBRARY declaration (ES lib, @types/node), never of a
+// name, so a DEPENDENCY's `add(fn)` (p-queue — a real roster silence) is not excused by sharing a name with
+// `Set.add`. The rule there is the GENERIC VALUE SLOT: a parameter whose declared type is a bare type
+// parameter (alone or beside non-callable members such as `PromiseLike<T>`) whose constraint has no call
+// signature. Such a callee is handed a value it knows nothing about and cannot call without a cast — `Map.set`'s
+// `V`, `Set.add`/`includes`/`indexOf`'s `T`, `Object.assign`/`defineProperties`/`freeze`'s `T`, a promise
+// executor's `resolve(value: T | PromiseLike<T>)`, `new Proxy(target: T)`, `new WeakRef(target: T)`. The
+// argument reads callable only because the CALL instantiated `T` with a function type. Restricted to the
+// reviewed library declarations on purpose: a dependency CAN cast and call (`(x as any)()`), so there the
+// generic slot is an assumption, and an assumption is not denylist evidence.
+const HOF_REMOVAL_NAMES = new Set(["off", "removeListener", "removeEventListener", "removeAllListeners"]);
+// NOT non-invokers — they invoke their first argument — but the reflective arm below answers them with the
+// invoked function's OWN arguments (R947's locator), and this arm, which cannot see those, would add a second
+// locator-less charge beside it (measured: `Reflect.apply(fs.readFileSync, undefined, ["/tmp/ok/b"])` lost its
+// `allow Fs /tmp/ok` certification). Owned elsewhere, so excluded here.
+const HOF_OWNED_ELSEWHERE = new Set(["Reflect.apply", "Reflect.construct"]);
+const hofOwnerMember = (decl) => {
+  if (!decl) return null;
+  const member = ts.isConstructSignatureDeclaration(decl) ? "new" : decl.name?.getText?.();
+  const holder = decl.parent && ts.isModuleBlock(decl.parent) ? decl.parent.parent : decl.parent;  // `namespace Reflect {…}`
+  const owner = holder?.name?.getText?.() ?? null;
+  return owner && member ? `${owner}.${member}` : null;
+};
+const declIsReviewedLib = (decl) => !!decl && (declModule(decl) === "<es-lib>" || declIsNodeTypes(decl));
+const hofCalleeNeverInvokes = (decl, name) => {
+  if ((name && HOF_REMOVAL_NAMES.has(name)) || HOF_REMOVAL_NAMES.has(decl?.name?.getText?.() ?? "")) return true;
+  return declIsReviewedLib(decl) && HOF_OWNED_ELSEWHERE.has(hofOwnerMember(decl) ?? "");
+};
+const calleeParamIsGenericSlot = (node, i) => {
+  const sd = checker.getResolvedSignature?.(node)?.declaration;
+  const ps = sd?.parameters;
+  if (!ps?.length || i >= ps.length || !ps[i].type || ps[i].dotDotDotToken) return false;
+  const t = checker.getTypeFromTypeNode(ps[i].type);
+  const isFreeTP = (u) => !!(u.flags & ts.TypeFlags.TypeParameter)
+    && !(checker.getBaseConstraintOfType(u)?.getCallSignatures?.().length > 0);
+  const parts = t.types ?? [t];
+  return parts.some(isFreeTP) && !parts.some((u) => !isFreeTP(u) && u.getCallSignatures?.().length > 0);
+};
+const HOF_REACH = process.env.CANDOR_HOF_REACH ? (k, n) => console.error(`HOF-REACH ${k} ${n}`) : null;
+
 // ---- process.env recognition: the direct dot access (`process.env.KEY`) is the JVM System.getenv twin,
 // but the same environment READ is spelled several other ways that all read silent-pure without help:
 // bracket access (`process.env[k]`), a local const-alias (`const env = process.env; env.KEY`),
@@ -9143,8 +9218,17 @@ function visitCalls(node) {
         // never a fabrication. (A LOCAL callee keeps its precise callback-flow below.)
         const calleeName = ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text
           : ts.isIdentifier(node.expression) ? node.expression.text : null;
-        if (mod !== "<local>" && calleeName && HOF_INVOKERS.has(calleeName)) {
+        // ⟨SOUNDNESS R803⟩ a LISTED name keeps its position map; an UNLISTED non-local callee is admitted at the
+        // positions its signature POSITIVELY declares callable, unless denylisted. See `HOF_REMOVAL_NAMES`.
+        const hofListed = !!calleeName && HOF_INVOKERS.has(calleeName);
+        const hofName = calleeName ?? decl.name?.getText?.() ?? null;
+        const hofOpenAt = (!hofListed && mod !== "<local>" && node.arguments?.length
+                           && !hofCalleeNeverInvokes(decl, hofName))
+          ? (i) => calleeParamIsCallable(node, i) === true
+                   && !(declIsReviewedLib(decl) && calleeParamIsGenericSlot(node, i)) : null;
+        if (mod !== "<local>" && (hofListed || hofOpenAt)) {
           node.arguments?.forEach((a0, argIdx) => {
+            if (!hofListed && !hofOpenAt(argIdx)) return;
             // R947 — a TYPE-ONLY wrapper is the same reference: `xs.forEach(fs.unlinkSync as any)`
             // was dropped by the id/property-access gate below (no edge, no κ, no disclosure) while the bare
             // spelling was not. `as`/`!`/`satisfies`/parentheses change no runtime value.
@@ -9159,7 +9243,7 @@ function visitCalls(node) {
             // the same over-charge the by-reference arm below was fixed for and this arm was not.
             // …but it must be the NEGATIVE test, not `!hofInvokesArg`: an unresolved or loosely-typed
             // callee signature is not a licence to drop a bound callback. See `hofArgIsNeverCallback`.
-            if (hofArgIsNeverCallback(calleeName, argIdx, node)) return;
+            if (hofListed && hofArgIsNeverCallback(calleeName, argIdx, node)) return;
             const bound = unwrapBind(a);
             if (bound) {
               const bref = bound.ref;
@@ -9212,7 +9296,8 @@ function visitCalls(node) {
             if (!ts.isIdentifier(a) && !ts.isPropertyAccessExpression(a)) return;
             const d2 = realDecl(checker.getSymbolAtLocation(a));
             const t = (d2 && nodeName.get(d2)) || resolveFnRefUnit(a); // pin direct fn OR a local alias chain
-            if (t) { rec.edges.add(t); return; } // resolvable named/local callback — keep its analyzed effect
+            if (t) { if (!hofListed) HOF_REACH?.("edge", `${hofName}->${t}`);
+                     rec.edges.add(t); return; } // resolvable named/local callback — keep its analyzed effect
             // A DEPENDENCY function passed BY REFERENCE — `xs.forEach(depWrite)`, `setTimeout(dep.tick, 0)`.
             // The invoking HOF calls it, so its effects are reachable here, and the dependency's report
             // holds them under `<pkg>#depWrite`. Guard (2) below reasons that a ref resolving to a concrete
@@ -9238,7 +9323,7 @@ function visitCalls(node) {
             //      through the κ/invisible channel, so blanket-Unknown here would over-disclose them.
             //  (3) CALLABILITY — `argIsCallable` (has a call signature, or `any`/`unknown`/unconstrained
             //      generic that COULD hold a function).
-            if (!hofInvokesArg(calleeName, argIdx, node)) return;
+            if (hofListed && !hofInvokesArg(calleeName, argIdx, node)) return;
             // ⟨SOUNDNESS R558⟩ …and BEFORE the by-reference dependency charge below, without returning:
             // a FOREIGN interface member named as a value needs BOTH the visible-implementor join and
             // the `invisible`/ledger disclosure `chargeExternalDecl` already gives it, and the two
@@ -9253,6 +9338,7 @@ function visitCalls(node) {
             // dep VALUE with a call signature, passes. Guard (1) exists for exactly this shape and its own
             // comment names the case (`path.reduce(fn, obj)`); the new arm simply ran before it.
             if (d2 && !declIsLocal(d2) && argIsCallable(a)) {
+              if (!hofListed) HOF_REACH?.("dep", `${hofName}->${a.getText().slice(0, 40)}`);
               // R947 — A κ-CLASSIFIED BUILTIN PASSED BY REFERENCE. `chargeExternalDecl` is the
               // dependency funnel and never asks κ, and `disclosureTail` treats a κ-KNOWN member as covered, so
               // `xs.forEach(fs.unlinkSync)`, `setTimeout(fs.unlinkSync, 0, p)`, `.then(cp.execSync)` and
@@ -9275,7 +9361,19 @@ function visitCalls(node) {
             const holderIsProjectValue = d2 && (ts.isParameter(d2) || ts.isVariableDeclaration(d2) || ts.isBindingElement(d2))
               && projectFiles.has(path.resolve(d2.getSourceFile().fileName));
             if (!(holderIsProjectValue || !d2)) return;
+            // ⟨SOUNDNESS R803⟩ a newly admitted callee handed its OWN caller's parameter (`reg(e, h) { e.on("y", h) }`)
+            // is the callback flow's question, not an opaque value: the parameter is INVOKED, so pass 2b resolves it
+            // to what every visible call site passed (an edge — `deny Fs` on the caller of `reg` fires) and keeps the
+            // honest `callback:param#i` where a call site is opaque or none is visible. The listed names keep their
+            // older `callback:<name>` disclosure — unchanged here so this fix removes nothing it did not add.
+            if (!hofListed && d2 && ts.isParameter(d2) && d2.parent && nodeName.get(d2.parent) && argIsCallable(a)) {
+              const ownerUnit = nodeName.get(d2.parent);
+              HOF_REACH?.("param", `${hofName}->${a.getText().slice(0, 40)}`);
+              (paramInvokes.get(ownerUnit) ?? paramInvokes.set(ownerUnit, new Set()).get(ownerUnit)).add(d2.parent.parameters.indexOf(d2));
+              return;
+            }
             if (argIsCallable(a)) {
+              if (!hofListed) HOF_REACH?.("opaque", `${hofName}->${a.getText().slice(0, 40)}`);
               rec.direct.add("Unknown");
               rec.why.add(`callback:${a.getText().replace(/\s+/g, "").slice(0, 40)}`); // opaque callable invoked by a sync HOF — canonical `callback:`
             }

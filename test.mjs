@@ -23110,6 +23110,76 @@ export class OtherF implements IF { m(): void { ${W}; } }`,
         !!uf && uf.inferred.includes("Fs") && uf.inferred.includes("Unknown"), JSON.stringify(uf));
 }
 
+// ── R803: A FUNCTION REFERENCE HANDED TO AN INVOKER OFF `HOF_INVOKERS` IS CHARGED; A REMOVAL OR STORE IS NOT ──
+//
+// `HOF_INVOKERS` was the GATE: a local function reference passed to any callee it did not name was dropped — no
+// edge, no `Unknown`, no row. Every `cNN` cell below was EXECUTED by node (`fx/r803`, lane tsagent-v041) to run
+// its handler, and was ABSENT with `deny Fs` exit 0 at the base (`v0.40.0`). An unlisted non-local callee now
+// invokes the positions its signature POSITIVELY declares callable, minus a denylist: removal NAMES on any
+// receiver, and the reviewed library's GENERIC VALUE SLOTS (`Map.set`'s `V`, `includes`' `T`, `resolve`'s
+// `T | PromiseLike<T>`, `new Proxy(target: T)`). The `nNN` cells never run their target (EXECUTED) and must stay
+// uncharged — each was calibrated to fire WITHOUT its denylist rule.
+if (blk()) {
+  const d = project({
+    "node_modules/lodash/package.json": `{"name":"lodash","version":"4.17.21","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/lodash/index.d.ts": `export declare function each<T>(xs: T[], fn: (x: T) => void): void;\nexport declare function times(n: number, fn: (i: number) => void): void;\n`,
+    "node_modules/lodash/index.js": "",
+    "node_modules/pq/package.json": `{"name":"pq","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/pq/index.d.ts": `export declare class Queue { add(fn: () => void): Promise<void>; }\n`,
+    "node_modules/pq/index.js": "",
+    "src/f.ts": `import * as fs from "node:fs";
+import * as http from "node:http";
+import { EventEmitter } from "node:events";
+import * as _ from "lodash";
+import { Queue } from "pq";
+export function w(): void { fs.writeFileSync("/tmp/r803", "x"); }
+export function wReq(_q: http.IncomingMessage, r: http.ServerResponse): void { fs.writeFileSync("/tmp/r803", "x"); r.end(); }
+export function wExec(res: () => void): void { fs.writeFileSync("/tmp/r803", "x"); res(); }
+export function c01_on(e: EventEmitter) { e.on("x", w); }
+export function c02_once(e: EventEmitter) { e.once("x", w); }
+export function c03_addl(e: EventEmitter) { e.addListener("x", w); }
+export function c04_proc() { process.once("beforeExit", w); }
+export function c05_srv() { return http.createServer(wReq); }
+export function c06_from() { return Array.from([1], w); }
+export function c07_prom() { return new Promise<void>(wExec); }
+export function c08_each() { _.each([1], w); }
+export function c09_times() { _.times(1, w); }
+export function c10_queue() { return new Queue().add(w); }
+export function c11_evt() { new EventTarget().addEventListener("x", w); }
+export function c12_reg(e: EventEmitter, h: () => void) { e.on("y", h); }
+export function c13_viareg(e: EventEmitter) { c12_reg(e, w); }
+export function c14_bound(e: EventEmitter) { e.on("x", w.bind(null)); }
+export function n21_off(e: EventEmitter) { e.off("x", w); }
+export function n22_rml(e: EventEmitter) { e.removeListener("x", w); }
+export function n23_mapset() { return new Map<string, () => void>().set("k", w); }
+export function n24_push() { const xs: Array<() => void> = []; xs.push(w); return xs; }
+export function n25_incl(xs: Array<() => void>) { return xs.includes(w); }
+export function n26_setadd() { return new Set<() => void>().add(w); }
+export function n27_evrm() { new EventTarget().removeEventListener("x", w); }
+export function n29_resolve() { return new Promise<() => void>((res) => res(w)); }
+export function n30_proxy() { return new Proxy(w, {}); }
+const offB = process.off.bind(process);
+export function n31_offbound() { offB("beforeExit", w); }
+export function n32_assign() { return Object.assign(w, { tag: 1 }); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  for (const fn of ["c01_on", "c02_once", "c03_addl", "c04_proc", "c05_srv", "c06_from", "c07_prom", "c08_each", "c09_times",
+                    "c10_queue", "c11_evt", "c12_reg", "c13_viareg", "c14_bound"])
+    check(`R803 INVOKER: \`${fn}\` hands \`w\` to a callee off HOF_INVOKERS that runs it — Fs, \`deny Fs src.f.${fn}\` exit 1 (ABSENT, exit 0 at the base)`,
+          (row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.f.${fn}`) === 1, JSON.stringify(row(fn)));
+  check("R803 CALLBACK FLOW: a parameter handed to an unlisted invoker is the parameter's invocation — `c12_reg` edges to what its one caller passed, no hedge",
+        (row("c12_reg").calls ?? []).includes("src.f.w") && !(row("c12_reg").inferred ?? []).includes("Unknown"), JSON.stringify(row("c12_reg")));
+  for (const fn of ["n21_off", "n22_rml", "n23_mapset", "n24_push", "n25_incl", "n26_setadd", "n27_evrm", "n29_resolve",
+                    "n30_proxy", "n31_offbound", "n32_assign"])
+    check(`R803 NON-INVOKER: \`${fn}\` removes or stores \`w\` and never runs it — no Fs, \`deny Fs src.f.${fn}\` exit 0`,
+          !(row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.f.${fn}`) === 0, JSON.stringify(row(fn)));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
