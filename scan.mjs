@@ -6566,8 +6566,52 @@ for (const sf of sources) {
       let tt; try { tt = checker.getTypeFromTypeNode(node.type); } catch { tt = undefined; }
       convert(peelAssertions(node.expression), tt, node, "assertion");
     }
+    if (ts.isObjectLiteralExpression(node)) providerSubstitution(node);   // ⟨R1061⟩
     ts.forEachChild(node, walkConversions);
   })(sf);
+}
+// ⟨SOUNDNESS R1061⟩ A DEPENDENCY-INJECTION PROVIDER IS A CONVERSION THE CHECKER NEVER SEES. NestJS (and Angular,
+// which shares the shape) wires `{ provide: Store, useClass: FileStore }` — or `useValue: <obj>`, `useFactory: () =>
+// <obj>`, `useExisting: Other` — and the container then hands the substitute to every `store: Store` parameter. No
+// expression converts the substitute to `Store`, so a `this.store.save()` resolved to `Store.save` alone: EXECUTED on
+// NestJS 10, `FileStore.save` wrote a file while the calling method was ABSENT and `deny Fs`/`deny Fs Unknown` exited 0
+// for all three provider forms. The provider entry IS the conversion, so the substitute is registered as a conformer
+// of the token class — the union of the declared class and the visible substitute, through the R874/R954 conformer
+// arm every class dispatch already asks. Registered directly, without the checker's assignability test, because the
+// container does not apply one (a token class with a private member is not structurally assignable from its
+// substitute, and is still what gets injected). Only a token that names a LOCAL class registers; a string or symbol
+// token types its parameter by an interface or `any`, which the interface arm already answers or discloses.
+function providerSubstitution(lit) {
+  const prop = (name) => lit.properties.find((p) => ts.isPropertyAssignment(p) && p.name && !ts.isComputedPropertyName(p.name)
+    && (p.name.text ?? p.name.getText()) === name);
+  const provide = prop("provide");
+  if (!provide) return;
+  let tsym; try { tsym = checker.getSymbolAtLocation(peelAssertions(provide.initializer)); } catch { tsym = undefined; }
+  if (tsym && (tsym.flags & ts.SymbolFlags.Alias)) { try { tsym = checker.getAliasedSymbol(tsym); } catch { return; } }
+  const target = (tsym?.declarations ?? []).find((d) => ts.isClassDeclaration(d) && isProjectNode(d));
+  if (!target) return;
+  const instanceOf = (e) => {
+    let s; try { s = checker.getSymbolAtLocation(peelAssertions(e)); } catch { s = undefined; }
+    if (s && (s.flags & ts.SymbolFlags.Alias)) { try { s = checker.getAliasedSymbol(s); } catch { s = undefined; } }
+    if (!s || !(s.flags & ts.SymbolFlags.Class)) return null;
+    try { return checker.getDeclaredTypeOfSymbol(s); } catch { return null; }
+  };
+  const sources = [];
+  for (const key of ["useClass", "useExisting"]) { const p = prop(key); const t = p && instanceOf(p.initializer); if (t) sources.push(t); }
+  const uv = prop("useValue");
+  if (uv) { try { sources.push(checker.getTypeAtLocation(peelAssertions(uv.initializer))); } catch { /* none */ } }
+  const uf = prop("useFactory");
+  if (uf) {
+    let ft; try { ft = checker.getTypeAtLocation(uf.initializer); } catch { ft = undefined; }
+    for (const sig of ft?.getCallSignatures?.() ?? []) {
+      let rt; try { rt = sig.getReturnType(); rt = checker.getAwaitedType?.(rt) ?? rt; } catch { rt = undefined; }
+      if (rt) sources.push(rt);
+    }
+  }
+  for (const st of sources) for (const s of st?.isUnion?.() ? st.types : [st]) {
+    const c = conformerOfSourceType(s);
+    if (c && recordConformer(c, target)) CONFORMER_REACH?.("di-provider", `${path.relative(rootDir, lit.getSourceFile().fileName)}:${lit.getStart()}`);
+  }
 }
 // The interface-flow fixpoint: a `J`-typed value converted to `X` carries every conformer of `J` with it.
 for (let changed = true, g = 0; changed && g++ < 32; ) {

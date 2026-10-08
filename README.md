@@ -185,21 +185,19 @@ functions analyzed): its DI-style fs injection means many functions read `Unknow
 that's the contract working, not noise. The report says "can reach", never "does"; an absent
 literal is never a claim of absence.
 
-**Named miss — framework dependency injection (spec §2's bounded-CHA clause, "a named miss").** rimraf's
-injection is a function-valued parameter, which reads `Unknown`. A DI *container* is different, and only
-partly disclosed. Measured on NestJS 10 (an executed fixture: every arm below wrote its marker file):
+**Framework dependency injection (spec §2's bounded-CHA clause).** rimraf's injection is a function-valued
+parameter, which reads `Unknown`. A DI *container* is measured separately, on NestJS 10 with an executed fixture:
 
-- a constructor parameter typed by a **CLASS** whose provider is substituted —
-  `{ provide: Store, useClass: FileStore }`, and equally a `useValue` or `useFactory` provider under a class
-  token — resolves to `Store`'s own body and its subclasses, never to the substitute. **Silent:** the method
-  calling `this.store.save()` was ABSENT and both `deny Fs` and `deny Fs Unknown` scoped to it exited 0
-  while the substitute wrote a file (all three provider forms measured);
-- a parameter typed by an **INTERFACE** (`@Inject("SINK") sink: Sink`) dispatches over the project's
-  visible implementors of `Sink`, so a `useClass` that `implements Sink` is charged; a `useValue` object
-  literal that implements nothing reads `Unknown` (`dispatch:`).
+- a provider entry `{ provide: Store, useClass | useValue | useFactory | useExisting: … }` whose token is a project
+  CLASS is read as a conversion: the substitute joins `Store`'s candidates, so `this.store.save()` is charged the
+  union of `Store.save` and the substitute's `save` (SOUNDNESS R1061 — silent before, all three forms executed);
+- a parameter typed by an INTERFACE (`@Inject("SINK") sink: Sink`) dispatches over the project's visible
+  implementors of `Sink`, so a `useClass` that `implements Sink` is charged; a `useValue` object literal that
+  implements nothing reads `Unknown` (`dispatch:`).
 
-The container's wiring (`@Module({ providers })`) is not read. Gate a DI-heavy service with
-`deny <E> Unknown` *and* check its class-token providers by hand.
+**Named miss:** a provider list the scan cannot see (built at runtime, or imported from an unscanned package), a
+token that is a variable rather than the class itself, and a substitute supplied by a dependency are not
+substitutions to this engine. Gate a DI-heavy service with `deny <E> Unknown` as well as `deny <E>`.
 
 ## Cross-engine consistency — machine-checked
 

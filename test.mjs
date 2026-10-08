@@ -7245,6 +7245,49 @@ export function stmtKindsE(p: Program) { return p.body.map((s) => s.type); }
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── SOUNDNESS R1061: a DI provider entry substitutes a class token — the union of declared class and substitute ────
+// EXECUTED on NestJS 10 (`tsagent-v043/fxdi`): `{ provide: Store, useClass|useValue|useFactory: … }` handed the
+// substitute to a `store: Store` constructor parameter, which wrote a file; the calling method was ABSENT and `deny Fs`
+// / `deny Fs Unknown` exited 0 at v0.40.1. The shape is syntactic (Nest and Angular share it), so this fixture needs
+// no framework. CONTROLS: a substitute that is PURE charges nothing, and a token nobody substitutes stays pure.
+if (blk()) {
+  const d = project({ "src/di.ts": `import * as fs from "fs";
+export class StoreA { save(): void { /* pure */ } }
+export class FileA { save(): void { fs.writeFileSync("/tmp/candor-r1061-a", "x"); } }
+export class StoreB { private id = 1; save(): number { return this.id; } }     // a private member: not assignable from its substitute
+export class StoreC { save(): void { /* pure */ } }
+export class StoreD { save(): void { /* pure */ } }
+export class PureE { save(): void { /* pure */ } }
+export class StoreE { save(): void { /* pure */ } }
+export class StoreF { save(): void { /* pure */ } }
+export const providers = [
+  { provide: StoreA, useClass: FileA },
+  { provide: StoreB, useValue: { save() { fs.writeFileSync("/tmp/candor-r1061-b", "x"); return 0; } } },
+  { provide: StoreC, useFactory: () => ({ save() { fs.writeFileSync("/tmp/candor-r1061-c", "x"); } }) },
+  { provide: StoreD, useFactory: async () => ({ save() { fs.writeFileSync("/tmp/candor-r1061-d", "x"); } }) },
+  { provide: StoreE, useClass: PureE },
+];
+export class SvcDi {
+  constructor(private a: StoreA, private b: StoreB, private c: StoreC, private dd: StoreD, private e: StoreE, private f: StoreF) {}
+  runDiA() { this.a.save(); }
+  runDiB() { this.b.save(); }
+  runDiC() { this.c.save(); }
+  runDiD() { this.dd.save(); }
+  runDiE() { this.e.save(); }
+  runDiF() { this.f.save(); }
+}
+` });
+  const { report } = scan(d);
+  const gate = (fn) => { fs.writeFileSync(path.join(d, "p.pol"), `deny Fs src.di.SvcDi.${fn}\n`); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  for (const fn of ["runDiA", "runDiB", "runDiC", "runDiD"])
+    check(`R1061: \`deny Fs src.di.SvcDi.${fn}\` fires — the provider's substitute is a candidate (exit 0 at v0.40.1)`, gate(fn) === 1,
+          JSON.stringify(entry(report, `src.di.SvcDi.${fn}`) ?? null));
+  for (const fn of ["runDiE", "runDiF"])
+    check(`R1061 CONTROL: \`deny Fs src.di.SvcDi.${fn}\` stays 0 — a pure substitute / an unsubstituted token`, gate(fn) === 0,
+          JSON.stringify(entry(report, `src.di.SvcDi.${fn}`) ?? null));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── SOUNDNESS R944: a unit with no name of its own is keyed by ANCHOR PATH + ORDINAL, not by OFFSET ──────
 // `<structural>@N`, `<callable>@N`, `<decorator>@N`, `<decorator-arg>@N` and `[computed@N]` were keyed by
 // the absolute character offset, so a COMMENT LINE above them renamed them — and under ⟨0.40⟩'s AS-EFF-005

@@ -10,6 +10,12 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **A DI provider entry substitutes a class token** (SOUNDNESS R1061). `{ provide: Store, useClass: FileStore }`
+  (and `useValue`, `useFactory` — sync or async — and `useExisting`) is read as a conversion of the substitute to
+  `Store`, so a `store: Store` dispatch is charged the union of the declared class and the substitute. EXECUTED on
+  NestJS 10: all three forms wrote a file through the substitute while the calling method was ABSENT, `deny Fs` and
+  `deny Fs Unknown` exit 0; now exit 1. Corpus: 1 hit (nest `CatsModule`), one new edge to a pure body, 0 effect changes.
+
 - **The engine lends a scanned project nothing but `@types/node`** (SOUNDNESS R1062). The engine added its own
   `@types` directory as a type root, and the compiler resolves a target's uninstalled bare import through a type
   root — so whatever sat beside the engine (in a development tree, eslint's `@types/estree`) answered the target's
@@ -35,8 +41,7 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   object = new LocalW(); qDisp(o as Sink)`, the `unknown` twin and `lObj(o: object) { qDisp(o as Sink) }` were all
   `[]` (EXECUTED: each ran `LocalW.m`); they are now `Fs`. Over the 28-entry corpus: 0 rows change their effect set,
   3 rows drop the `reflect:accessor:any-receiver` reason beside others (still `Unknown`).
-- **README: a named miss for framework DI** (NestJS provider substitution under a class token — `useClass`,
-  `useValue`, `useFactory` — is silent; interface tokens resolve or disclose). Measured on an executed fixture.
+- **README: framework DI** — what the engine reads of a provider list, and the named miss beyond it.
 
 - ⚠ **A parameter fed the environment at SOME visible call site is the environment in its reader** (SOUNDNESS R934,
   the divergent half). `readDiv(e) { return e.SECRET }` called as `readDiv(process.env)` and `readDiv({…})` printed
