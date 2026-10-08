@@ -23110,6 +23110,345 @@ export class OtherF implements IF { m(): void { ${W}; } }`,
         !!uf && uf.inferred.includes("Fs") && uf.inferred.includes("Unknown"), JSON.stringify(uf));
 }
 
+// ── R803: A FUNCTION REFERENCE HANDED TO AN INVOKER OFF `HOF_INVOKERS` IS CHARGED; A REMOVAL OR STORE IS NOT ──
+//
+// `HOF_INVOKERS` was the GATE: a local function reference passed to any callee it did not name was dropped — no
+// edge, no `Unknown`, no row. Every `cNN` cell below was EXECUTED by node (`fx/r803`, lane tsagent-v041) to run
+// its handler, and was ABSENT with `deny Fs` exit 0 at the base (`v0.40.0`). An unlisted non-local callee now
+// invokes the positions its signature POSITIVELY declares callable, minus a denylist: removal NAMES on any
+// receiver, and the reviewed library's GENERIC VALUE SLOTS (`Map.set`'s `V`, `includes`' `T`, `resolve`'s
+// `T | PromiseLike<T>`, `new Proxy(target: T)`). The `nNN` cells never run their target (EXECUTED) and must stay
+// uncharged — each was calibrated to fire WITHOUT its denylist rule.
+if (blk()) {
+  const d = project({
+    "node_modules/lodash/package.json": `{"name":"lodash","version":"4.17.21","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/lodash/index.d.ts": `export declare function each<T>(xs: T[], fn: (x: T) => void): void;\nexport declare function times(n: number, fn: (i: number) => void): void;\n`,
+    "node_modules/lodash/index.js": "",
+    "node_modules/pq/package.json": `{"name":"pq","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/pq/index.d.ts": `export declare class Queue { add(fn: () => void): Promise<void>; }\n`,
+    "node_modules/pq/index.js": "",
+    "src/f.ts": `import * as fs from "node:fs";
+import * as http from "node:http";
+import { EventEmitter } from "node:events";
+import * as _ from "lodash";
+import { Queue } from "pq";
+export function w(): void { fs.writeFileSync("/tmp/r803", "x"); }
+export function wReq(_q: http.IncomingMessage, r: http.ServerResponse): void { fs.writeFileSync("/tmp/r803", "x"); r.end(); }
+export function wExec(res: () => void): void { fs.writeFileSync("/tmp/r803", "x"); res(); }
+export function c01_on(e: EventEmitter) { e.on("x", w); }
+export function c02_once(e: EventEmitter) { e.once("x", w); }
+export function c03_addl(e: EventEmitter) { e.addListener("x", w); }
+export function c04_proc() { process.once("beforeExit", w); }
+export function c05_srv() { return http.createServer(wReq); }
+export function c06_from() { return Array.from([1], w); }
+export function c07_prom() { return new Promise<void>(wExec); }
+export function c08_each() { _.each([1], w); }
+export function c09_times() { _.times(1, w); }
+export function c10_queue() { return new Queue().add(w); }
+export function c11_evt() { new EventTarget().addEventListener("x", w); }
+export function c12_reg(e: EventEmitter, h: () => void) { e.on("y", h); }
+export function c13_viareg(e: EventEmitter) { c12_reg(e, w); }
+export function c14_bound(e: EventEmitter) { e.on("x", w.bind(null)); }
+export function n21_off(e: EventEmitter) { e.off("x", w); }
+export function n22_rml(e: EventEmitter) { e.removeListener("x", w); }
+export function n23_mapset() { return new Map<string, () => void>().set("k", w); }
+export function n24_push() { const xs: Array<() => void> = []; xs.push(w); return xs; }
+export function n25_incl(xs: Array<() => void>) { return xs.includes(w); }
+export function n26_setadd() { return new Set<() => void>().add(w); }
+export function n27_evrm() { new EventTarget().removeEventListener("x", w); }
+export function n29_resolve() { return new Promise<() => void>((res) => res(w)); }
+export function n30_proxy() { return new Proxy(w, {}); }
+const offB = process.off.bind(process);
+export function n31_offbound() { offB("beforeExit", w); }
+export function n32_assign() { return Object.assign(w, { tag: 1 }); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  for (const fn of ["c01_on", "c02_once", "c03_addl", "c04_proc", "c05_srv", "c06_from", "c07_prom", "c08_each", "c09_times",
+                    "c10_queue", "c11_evt", "c12_reg", "c13_viareg", "c14_bound"])
+    check(`R803 INVOKER: \`${fn}\` hands \`w\` to a callee off HOF_INVOKERS that runs it — Fs, \`deny Fs src.f.${fn}\` exit 1 (ABSENT, exit 0 at the base)`,
+          (row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.f.${fn}`) === 1, JSON.stringify(row(fn)));
+  check("R803 CALLBACK FLOW: a parameter handed to an unlisted invoker is the parameter's invocation — `c12_reg` edges to what its one caller passed, no hedge",
+        (row("c12_reg").calls ?? []).includes("src.f.w") && !(row("c12_reg").inferred ?? []).includes("Unknown"), JSON.stringify(row("c12_reg")));
+  for (const fn of ["n21_off", "n22_rml", "n23_mapset", "n24_push", "n25_incl", "n26_setadd", "n27_evrm", "n29_resolve",
+                    "n30_proxy", "n31_offbound", "n32_assign"])
+    check(`R803 NON-INVOKER: \`${fn}\` removes or stores \`w\` and never runs it — no Fs, \`deny Fs src.f.${fn}\` exit 0`,
+          !(row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.f.${fn}`) === 0, JSON.stringify(row(fn)));
+}
+
+// ── R780: ONE TRANSPARENT-WRAPPER SET — `( )`, `as`, `<T>`, `!`, `satisfies` change no runtime value ─────────
+//
+// The HOF-ref arm already unwrapped (R947). Seventeen other loops answered "is this THAT reference / THAT object?"
+// with five different wrapper sets, and each gap was a spelling the engine went blind on. Every cell EXECUTED by
+// node (`fx/r780`, lane tsagent-v041): the ABSENT ones (`deny <E>` AND `deny Unknown` exit 0 at v0.40.0) are the
+// reflective receiver (`(k.m as F).call(k)`, `Reflect.apply(f as F, …)`) and the process root
+// (`(<any>globalThis).process.env.HOME`); the bind receiver and a wrapped callback argument were opaque `Unknown`.
+if (blk()) {
+  const d = project({
+    "src/f.ts": `import * as fs from "node:fs";
+type F = () => void;
+export function wa(): void { fs.writeFileSync("/tmp/r780", "x"); }
+export class K { m(): void { fs.writeFileSync("/tmp/r780", "x"); } }
+export function run(cb: () => void) { cb(); }
+export function d06_mas(k: K) { (k.m as F).call(k); }
+export function d07_msat(k: K) { (k.m satisfies F).call(k); }
+export function r01_as() { Reflect.apply(wa as F, undefined, []); }
+export function r02_callsat() { (wa satisfies F).call(undefined); }
+export function r03_angle() { (<F>wa).call(undefined); }
+export function b01_as() { [1].forEach((wa as F).bind(null)); }
+export function b02_sat() { setTimeout((wa satisfies F).bind(null), 0); }
+export function f04_paren() { run((wa)); }
+export function e02_gangle() { return (<any>globalThis).process.env.HOME; }
+export function e03_gsat() { return (globalThis satisfies typeof globalThis).process.env.HOME; }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  for (const [fn, eff] of [["d06_mas", "Fs"], ["d07_msat", "Fs"], ["r01_as", "Fs"], ["r02_callsat", "Fs"], ["r03_angle", "Fs"],
+                           ["b01_as", "Fs"], ["b02_sat", "Fs"], ["f04_paren", "Fs"], ["e02_gangle", "Env"], ["e03_gsat", "Env"]])
+    check(`R780 WRAPPER: \`${fn}\` reaches the same body as its bare spelling — ${eff}, \`deny ${eff} src.f.${fn}\` exit 1 (exit 0 at the base)`,
+          (row(fn).inferred ?? []).includes(eff) && gate(`deny ${eff} src.f.${fn}`) === 1, JSON.stringify(row(fn)));
+  check("R780 CALLBACK FLOW: `run((wa))` names `wa` — `run` resolves uniformly, the opaque `callback:param#0` is gone",
+        (row("run").calls ?? []).includes("src.f.wa") && !(row("run").unknownWhy ?? []).includes("callback:param#0"), JSON.stringify(row("run")));
+}
+
+// ── R815: THE REST OF THE CLASS-DEFINITION-TIME FAMILY — static field initialisers, `extends <expr>`, computed keys ──
+//
+// R782/R785 wired decorators and `static {}` blocks to the unit that EVALUATES the class. Three more pieces run at
+// definition and were attributed to a unit that never runs them (EXECUTED, lane fixture `fx/r815`): the definer was
+// ABSENT (`deny Fs` exit 0) and `C.constructor` / the method was charged instead. The `extends` half must ALSO keep
+// the constructor's reach — construction runs the produced class's constructor through `super` — so a dependency
+// mixin's `invisible` stays on the constructor (EXECUTED: `new D3()` writes in the dependency's constructor).
+if (blk()) {
+  const d = project({
+    "node_modules/mixdep/package.json": `{"name":"mixdep","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/mixdep/index.d.ts": `export declare function Partial<T extends new (...a: any[]) => any>(B: T): T;\n`,
+    "node_modules/mixdep/index.js": "",
+    "src/f.ts": `import * as fs from "node:fs";
+import { Partial } from "mixdep";
+export function w(t: string): string { fs.writeFileSync("/tmp/r815-" + t, "x"); return t; }
+function mixin() { w("mixin"); return class {}; }
+export function staticField815() { class C1 { static x = w("static"); } return C1; }
+export function heritage815() { class C2 extends mixin() {} return C2; }
+export function computedKey815() { class C3 { [w("key")]() {} } return C3; }
+export function ctlBlock815() { class C4 { static { w("block"); } } return C4; }
+export function instance815() { class C5 { y = w("inst"); } return new C5(); }
+export class Top815 { static z = w("top"); }
+export function useTop815() { return new Top815(); }
+class Plain { }
+export class D3 extends Partial(Plain) {}
+export function mkD3() { return new D3(); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  for (const fn of ["staticField815", "heritage815", "computedKey815", "ctlBlock815", "instance815"])
+    check(`R815 DEFINER: \`${fn}\` evaluates the class and performs the effect — Fs, \`deny Fs src.f.${fn}\` exit 1`,
+          (row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.f.${fn}`) === 1, JSON.stringify(row(fn)));
+  check("R815 MODULE: a top-level class's static initialiser is the module's — `deny Fs src.f.<module>` exit 1 (0 at the base)",
+        gate("deny Fs src.f.<module>") === 1, JSON.stringify(row("<module>")));
+  check("R815 OVER-CHARGE: `new Top815()` runs no static initialiser — `useTop815` carries no Fs (Fs at the base, via Top815.constructor)",
+        !(row("useTop815").inferred ?? []).includes("Fs"), JSON.stringify(row("useTop815")));
+  check("R815 OVER-CHARGE: a computed key is not the method's — the `C3.[w(\"key\")]` unit carries no Fs",
+        !report.functions.some((e) => e.fn.startsWith("src.f.C3.[") && (e.inferred ?? []).includes("Fs")), "");
+  check("R815 SUPER REACH KEPT: `new D3()` still reaches the dependency mixin's constructor — `invisible` names mixdep on D3.constructor and mkD3",
+        (row("D3.constructor").invisible ?? []).includes("mixdep") && (row("mkD3").invisible ?? []).includes("mixdep"),
+        JSON.stringify([row("D3.constructor"), row("mkD3")]));
+  check("R815 CONTROL: an INSTANCE field is the constructor's — `C5.constructor` keeps Fs",
+        (row("C5.constructor").inferred ?? []).includes("Fs"), JSON.stringify(row("C5.constructor")));
+}
+
+// ── R778: THE INNERMOST `node_modules/<pkg>/` OWNS A FILE — pnpm's store and npm's nested installs ─────────────
+//
+// `declModule` took the FIRST `node_modules/` segment, so a pnpm tree keyed every foreign package as `.pnpm` and a
+// nested `outer/node_modules/inner` as `outer`. With the installer the only variable (EXECUTED: the stub writes the
+// file), npm read `['Fs']` and `deny Fs` exit 1 while pnpm read `[]` + `invisible:['.pnpm']` and exit 0 — a false
+// disclosure hiding a κ-classified effect.
+if (blk()) {
+  const stub = "export declare function outputFileSync(file: string, data: string): void;\n";
+  const mk = (layout) => {
+    const files = { "src/f.ts": `import { outputFileSync } from "fs-extra";\nexport function write778(p: string) { outputFileSync(p, "x"); }\n` };
+    const at = layout === "pnpm" ? "node_modules/.pnpm/fs-extra@11.2.0/node_modules/fs-extra" : "node_modules/fs-extra";
+    files[`${at}/package.json`] = `{"name":"fs-extra","version":"11.2.0","types":"index.d.ts","main":"index.js"}`;
+    files[`${at}/index.d.ts`] = stub;
+    files[`${at}/index.js`] = "";
+    const d = project(files);
+    if (layout === "pnpm") fs.symlinkSync(".pnpm/fs-extra@11.2.0/node_modules/fs-extra", path.join(d, "node_modules/fs-extra"));
+    return d;
+  };
+  const gate = (d, line) => { fs.writeFileSync(path.join(d, "p.pol"), line + "\n"); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  for (const layout of ["npm", "pnpm"]) {
+    const d = mk(layout);
+    const r = entry(scan(d).report, "src.f.write778") ?? {};
+    check(`R778 ${layout}: fs-extra's outputFileSync is Fs and \`deny Fs src.f.write778\` exits 1 (pnpm: [] + invisible ['.pnpm'], exit 0 at the base)`,
+          (r.inferred ?? []).includes("Fs") && !(r.invisible ?? []).includes(".pnpm") && gate(d, "deny Fs src.f.write778") === 1, JSON.stringify(r));
+  }
+  const n = project({
+    "src/f.ts": `import { outputFileSync } from "outer";\nexport function writeNest778(p: string) { outputFileSync(p, "x"); }\n`,
+    "node_modules/outer/package.json": `{"name":"outer","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/outer/index.d.ts": `export { outputFileSync } from "inner";\n`, "node_modules/outer/index.js": "",
+    "node_modules/outer/node_modules/inner/package.json": `{"name":"inner","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/outer/node_modules/inner/index.d.ts": stub, "node_modules/outer/node_modules/inner/index.js": "",
+  });
+  const rn = entry(scan(n).report, "src.f.writeNest778") ?? {};
+  check("R778 NESTED: a declaration under `outer/node_modules/inner` is inner's — `invisible` names `inner`, not `outer`",
+        JSON.stringify(rn.invisible) === JSON.stringify(["inner"]), JSON.stringify(rn));
+}
+
+// ── R873 + R956: TWO OVERRIDE SHAPES THE CLASS-CHA INDEX NEVER SAW — `this.m = …` and a class-expression subclass ──
+//
+// `classOverrides` indexed class DECLARATION members only. A constructor/method that assigns `this.m = () => …` and
+// `new (class extends Base { m(){…} })()` both replace `m` for a value a `Base`-typed `b.m()` can receive, and both
+// were ABSENT at every gate (EXECUTED, lane fixture `fx/r873`). Controls pin the precision: an identity
+// re-binding (`this.m = this.m.bind(this)`) adds no hedge, a sibling subclass's receiver gains nothing, and an
+// assigned value the engine cannot name DISCLOSES (`dispatch:`) rather than certifying the declared body.
+if (blk()) {
+  const d = project({
+    "src/f.ts": `import * as fs from "node:fs";
+const w = (k: string) => fs.writeFileSync("/tmp/r873-" + k, "x");
+export function wrapFn<T extends (...a: any[]) => any>(f: T): T { return ((...a: any[]) => f(...a)) as T; }
+export class BaseC { m(): void { } other(): void { w("other"); } }
+export class SubA extends BaseC { constructor() { super(); this.m = () => { w("a1"); }; } }
+export class SubB extends BaseC { init(): void { this.m = function () { w("a2"); }; } }
+export class SubI extends BaseC { m(): void { } constructor() { super(); this.m = this.m.bind(this); } }
+export class Sib extends BaseC { }
+export function viaBaseA(b: BaseC) { b.m(); }
+export function viaSubI(s: SubI) { s.m(); }
+export function viaSib(s: Sib) { s.m(); }
+export class BaseO { m(): void { } other(): void { w("o"); } }
+export class SubO extends BaseO { constructor() { super(); this.m = wrapFn(this.other.bind(this)); } }
+export function viaBaseO(b: BaseO) { b.m(); }
+export class Base2 { m(): void { } }
+export const inst2: Base2 = new (class X2 extends Base2 { m(): void { w("c1"); } })();
+export function viaBase2(b: Base2) { b.m(); }
+export class Sib2 extends Base2 { }
+export function viaSib2(s: Sib2) { s.m(); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  check("R873 ASSIGNED: `this.m = () => write` in a constructor (and `function(){}` in a method) is an override — `viaBaseA` Fs, `deny Fs` exit 1 (ABSENT, exit 0 at the base)",
+        (row("viaBaseA").inferred ?? []).includes("Fs") && gate("deny Fs src.f.viaBaseA") === 1, JSON.stringify(row("viaBaseA")));
+  check("R873 OPAQUE: an assigned value the engine cannot name discloses `dispatch:` — `deny Unknown src.f.viaBaseO` exit 1 (0 at the base)",
+        (row("viaBaseO").unknownWhy ?? []).some((x) => x.startsWith("dispatch:")) && gate("deny Unknown src.f.viaBaseO") === 1, JSON.stringify(row("viaBaseO")));
+  check("R956 CLASS EXPRESSION: `new (class X2 extends Base2 { m(){ write } })()` reaching `viaBase2` — Fs, `deny Fs` exit 1 (ABSENT, exit 0 at the base)",
+        (row("viaBase2").inferred ?? []).includes("Fs") && gate("deny Fs src.f.viaBase2") === 1, JSON.stringify(row("viaBase2")));
+  for (const fn of ["viaSubI", "viaSib", "viaSib2"])
+    check(`R873/R956 PRECISION: \`${fn}\` gains neither an effect nor a hedge — identity re-binding / a sibling subtree`,
+          !(row(fn).inferred ?? []).length && gate(`deny Unknown src.f.${fn}`) === 0, JSON.stringify(row(fn)));
+}
+
+// ── R966: A FRAMEWORK'S OWN `listen` IS AN ACCEPT ─────────────────────────────────────────────────────────────
+//
+// `NET_ACCEPTING` was asked only of a call κ classified `Net`, and κ classifies node's servers: express/koa/fastify
+// `listen` reached neither the effect nor the accept, so beside `net.connect(80, "ok.example")` the gate
+// `allow Net in <fn> ok.example` exited 0 over a server that answers anyone (EXECUTED in the lane fixture with the
+// real express 5 and fastify 5: a client got the handler's reply). A dependency `listen` κ did not answer now
+// reads as a network accept; a JSON-RPC connection's `listen` (vscode-jsonrpc) is the denylisted non-network one.
+if (blk()) {
+  const d = project({
+    "node_modules/koa/package.json": `{"name":"koa","version":"2.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/koa/index.d.ts": `import type { Server } from "node:http";\nexport default class Koa { listen(port?: number): Server; }\n`,
+    "node_modules/koa/index.js": "",
+    "node_modules/fastify/package.json": `{"name":"fastify","version":"5.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/fastify/index.d.ts": `export interface FastifyInstance { listen(o: { port: number }): Promise<string>; }\nexport default function Fastify(): FastifyInstance;\n`,
+    "node_modules/fastify/index.js": "",
+    "node_modules/vscode-jsonrpc/package.json": `{"name":"vscode-jsonrpc","version":"8.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/vscode-jsonrpc/index.d.ts": `export interface MessageConnection { listen(): void; }\nexport declare function mk(): MessageConnection;\n`,
+    "node_modules/vscode-jsonrpc/index.js": "",
+    "src/f.ts": `import * as net from "node:net";
+import Koa from "koa";
+import Fastify from "fastify";
+import { mk } from "vscode-jsonrpc";
+export function srvKoa(p: number) { net.connect(80, "ok.example"); return new Koa().listen(p); }
+export function srvFastify(p: number) { net.connect(80, "ok.example"); return Fastify().listen({ port: p }); }
+export function rpcOnly() { net.connect(80, "ok.example"); mk().listen(); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  for (const fn of ["srvKoa", "srvFastify"])
+    check(`R966 ACCEPT: \`${fn}\`'s framework listen marks Net incomplete — \`allow Net in src.f.${fn} ok.example\` exit 1 (0 at the base)`,
+          (row(fn).incomplete ?? []).includes("Net") && gate(`allow Net in src.f.${fn} ok.example`) === 1, JSON.stringify(row(fn)));
+  check("R966 DENYLIST: a JSON-RPC `connection.listen()` is not an accept — `allow Net in src.f.rpcOnly ok.example` exit 0",
+        !(row("rpcOnly").incomplete ?? []).includes("Net") && gate("allow Net in src.f.rpcOnly ok.example") === 0, JSON.stringify(row("rpcOnly")));
+}
+
+// ── R936: `(process as any).argv` AND `require("process").env` ARE THE PROCESS OBJECT ──────────────────────────────
+//
+// The argv arm handed `identIsGlobalProcess` the WRAPPED node, which matched an Identifier only, so even
+// `(process).argv` read nothing; `require("process")` is the module-binding spelling of the same global. All ABSENT
+// at v0.40.0 (EXECUTED in the lane fixture `fx/r936`). A project-local `process` parameter still matches nothing.
+if (blk()) {
+  const d = project({
+    "src/f.ts": `import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+export function argvCast() { return (process as any).argv[2]; }
+export function argvAngle() { return (<any>process).argv[2]; }
+export function argvParen() { return (process).argv[2]; }
+export function envReq() { return require("process").env.HOME; }
+export function envReqNode() { return require("node:process").env.HOME; }
+export function shadowed(process: { argv: string[] }) { return (process as any).argv[2]; }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  for (const fn of ["argvCast", "argvAngle", "argvParen", "envReq", "envReqNode"])
+    check(`R936: \`${fn}\` reads the process environment — Env, \`deny Env src.f.${fn}\` exit 1 (ABSENT, exit 0 at the base)`,
+          (row(fn).inferred ?? []).includes("Env") && gate(`deny Env src.f.${fn}`) === 1, JSON.stringify(row(fn)));
+  check("R936 SHADOW: a parameter named `process` is not the process object, wrapped or not — no Env",
+        !(row("shadowed").inferred ?? []).includes("Env"), JSON.stringify(row("shadowed")));
+}
+
+// ── R952 (ts half): A SCOPED `allow` THAT BINDS NO FUNCTION IS A ZERO-MATCH, DISCLOSED LIKE `deny` ───────────────
+//
+// The zero-match pass enrolled deny/forbid/only and never `allow`, so `allow Net in nosuch.fn ok.example` printed
+// `policy ✓`, exited 0 and carried no `zeroMatch` — a gate that cannot fail. Same shape as candor-rust's half:
+// the `matched NO function` stderr line and the verdict's `zeroMatch` entry, exit code unchanged; a SCOPELESS allow
+// stays exempt (it binds every function) and a bound one is not listed.
+if (blk()) {
+  const d = project({ "src/f.ts": `import * as net from "node:net";\nexport function real() { net.connect(80, "evil.example"); }\n` });
+  const run = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    const gj = path.join(d, "g.json");
+    try { fs.unlinkSync(gj); } catch { /* none yet */ }
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", path.join(d, "p.pol"), "--gate-json", gj], { encoding: "utf8" });
+    const v = fs.existsSync(gj) ? JSON.parse(fs.readFileSync(gj, "utf8")) : {};
+    return { status: r.status, line: (r.stderr ?? "").includes(`policy rule matched NO function — \`${line}\``), zm: v.zeroMatch ?? [] };
+  };
+  const u = run("allow Net in nosuch.fn ok.example");
+  check("R952 UNBOUND ALLOW: `allow Net in nosuch.fn ok.example` prints `matched NO function` and rides `zeroMatch`, exit 0 unchanged",
+        u.status === 0 && u.line && JSON.stringify(u.zm) === JSON.stringify(["allow Net in nosuch.fn ok.example"]), JSON.stringify(u));
+  const dn = run("deny Net nosuch.fn");
+  check("R952 PARITY: the unbound `deny` has the same two disclosures (the shape the allow now matches)",
+        dn.status === 0 && dn.line && JSON.stringify(dn.zm) === JSON.stringify(["deny Net nosuch.fn"]), JSON.stringify(dn));
+  const sl = run("allow Net ok.example");
+  check("R952 SCOPELESS: a scopeless allow binds every function — no zero-match, the violation still exits 1",
+        sl.status === 1 && !sl.line && sl.zm.length === 0, JSON.stringify(sl));
+  const b = run("allow Net in src.f.real ok.example");
+  check("R952 BOUND: a scoped allow that binds `real` is not listed — exit 1 on its real violation",
+        b.status === 1 && !b.line && b.zm.length === 0, JSON.stringify(b));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

@@ -10,6 +10,52 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **A function reference handed to an invoker OFF the `HOF_INVOKERS` list is charged** (SOUNDNESS R803).
+  `e.on("x", f)`, `once`/`addListener`/`prependOnceListener`, `process.on`, `http.createServer(h)`,
+  `EventTarget.addEventListener`, `Array.from(xs, f)`, `new Promise(exec)`, lodash `_.each`/`_.times`, rxjs
+  `subscribe` and a dependency's `queue.add(f)` dropped the reference (caller ABSENT, `deny Fs` exit 0, every one
+  EXECUTED). An unlisted non-local callee now invokes the positions its signature positively declares callable,
+  minus a denylist: removal names (`off`/`removeListener`/`removeEventListener`/`removeAllListeners`) on any
+  receiver, and the reviewed library's generic value slots (`Map.set`, `Set.add`, `includes`, `Object.assign`,
+  a promise `resolve`, `new Proxy`). A parameter handed to one is resolved by the callback flow. Gates on
+  callers of real registrations can go from exit 0 to exit 1.
+- ⚠ **One transparent-wrapper set** (SOUNDNESS R780). Parentheses, `as`, `<T>x`, `!` and `satisfies` change no
+  runtime value; seventeen hand-rolled loops answered "is this THAT reference / object?" with five different
+  wrapper sets. `(k.m as F).call(k)`, `Reflect.apply(f as F, …)` and `(<any>globalThis).process.env.HOME` were
+  ABSENT (`deny` and `deny Unknown` exit 0, EXECUTED); `(f as F).bind(t)` and `run((f))` were opaque `Unknown`.
+  All now route through `unwrapArgExpr`. (The R780 HOF-argument spelling itself was already closed by R947.)
+- ⚠ **Class-definition-time work is the definer's** (SOUNDNESS R815). A `static x = …` initialiser, an
+  `extends <expr>` heritage expression and a computed member key `[k()]` run when the class is EVALUATED; they were
+  attributed to `C.constructor` or the method, so the function defining the class read pure (EXECUTED) and every
+  `new C()` was charged for a static initialiser it never runs. Static initialisers join the class's
+  `<static-init>` unit; `extends <expr>` gets a `C.<heritage>` initializer unit reached by both the definer and the
+  constructor (construction runs the produced class's constructor through `super`); computed keys go to the
+  scope around the class or literal. New `<heritage>` rows; `C.constructor` rows that only carried static
+  initialisers disappear.
+- ⚠ **A pnpm or nested `node_modules` layout keys each package by its own name** (SOUNDNESS R778). The package
+  that owns a declaration is the INNERMOST `node_modules/<pkg>/` segment; the first one keyed every foreign package
+  of a pnpm tree as `.pnpm` (a false `invisible:['.pnpm']`, and an fs-extra `Fs` that `deny Fs` read as exit 0) and
+  `outer/node_modules/inner` as `outer`. Flat npm keys do not move. On a pnpm tree, `invisible` and
+  `dispatchesOn` entries and union-row hashes are renamed from `.pnpm#…` to the real package.
+- ⚠ **Two override shapes reach class dispatch** (SOUNDNESS R873, R956). `this.m = () => …` assigned in an instance
+  body, and a class-EXPRESSION subclass (`new (class extends Base { m(){…} })()`), replace `m` for values a
+  `Base`-typed `b.m()` can receive; both were ABSENT at every gate (EXECUTED). The class-CHA index now registers
+  both (minting the body as a unit, its containing function keeping its charges); an assigned value the engine
+  cannot name discloses `dispatch:`; `this.m = this.m.bind(this)` re-installs the same method and adds nothing.
+  New `<callable>`/`<structural>` rows and union rows for such hierarchies.
+- ⚠ **A framework's own `listen` is a network accept** (SOUNDNESS R966). express/koa/fastify `listen` is not
+  node's `Server.listen`, so κ never classified it and the ⟨0.40⟩ accept mark never ran: beside a benign literal,
+  `allow Net ok.example` exited 0 over a server answering anyone (EXECUTED with real express 5 and fastify 5). A
+  dependency member named `listen` that κ does not answer is now `Net` with an `incomplete` surface; JSON-RPC
+  connections (vscode-jsonrpc / vscode-languageserver) are excluded as non-network.
+- ⚠ **`(process as any).argv` and `require("process").env` read the environment** (SOUNDNESS R936). The argv arm
+  never unwrapped (even `(process).argv` read nothing), and `require("process")` / `require("node:process")` is the
+  module-binding spelling of the same global. Both are now the process object; a local `process` still is not.
+- **A scoped `allow` that binds no function is a zero-match** (SOUNDNESS R952, ts half). `allow Net in nosuch.fn
+  ok.example` printed `policy ✓` and exited 0 with nothing said — the zero-match pass enrolled `deny`/`forbid`/`only`
+  and never `allow`. It now prints the same `policy rule matched NO function` line and rides the verdict's
+  `zeroMatch`, exactly as an unbound `deny` does; exit codes unchanged; a scopeless `allow` stays exempt.
+
 ## [0.40.0] — 2026-10-07
 
 - ⚠ **Declares spec 0.40** (was 0.39) — the family floor bump. candor-ts implements both ⟨0.40⟩ halves that
