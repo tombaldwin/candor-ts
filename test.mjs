@@ -6740,7 +6740,10 @@ export function callMay(opts: { pe?: Record<string,string> }) {
     "src/neg.ts": `function writePlain(target: Record<string,string>) { target.FOO = "x"; }
 export function callPlain() { writePlain({}); }`,
     "src/read.ts": `function readParam(src: Record<string,string>) { return src.FOO; }
-export function callRead() { return readParam(process.env); }`,
+export function callRead() { return readParam(process.env); }
+function readDiv(src: Record<string,string>) { return src.FOO; }
+export function callDivEnv() { return readDiv(process.env); }
+export function callDivLit() { return readDiv({ FOO: "x" }); }`,
   });
   const { report } = scan(d);
   const inf = (fn) => entry(report, fn)?.inferred ?? [];
@@ -6751,8 +6754,14 @@ export function callRead() { return readParam(process.env); }`,
         JSON.stringify(entry(report, "src.may.writeMay")));
   check("param-write leaf called with a NON-env object stays PURE (no over-disclosure — the 27:1 guard)",
         entry(report, "src.neg.writePlain") == null, JSON.stringify(entry(report, "src.neg.writePlain")));
-  check("a leaf that only READS its parameter (no write) is NOT tainted by an env arg (stays pure)",
-        entry(report, "src.read.readParam") == null, JSON.stringify(entry(report, "src.read.readParam")));
+  // ⟨R934⟩ a READ through a parameter that EVERY visible call site hands the environment is that
+  // function's own Env — the parameter is a MUST location. Pure before R934 (this assertion was the
+  // opposite); the DIVERGENT twin below is the shape the old posture protected, and it still stays pure.
+  check("⟨R934⟩ a leaf that only READS a parameter every visible site feeds process.env → Env",
+        (entry(report, "src.read.readParam")?.inferred ?? []).includes("Env"), JSON.stringify(entry(report, "src.read.readParam")));
+  check("⟨R934⟩ …a DIVERGENT reader (env at one site, a literal at another) stays pure — no pooling onto the literal caller",
+        entry(report, "src.read.readDiv") == null && entry(report, "src.read.callDivLit") == null,
+        JSON.stringify([entry(report, "src.read.readDiv"), entry(report, "src.read.callDivLit")]));
 }
 
 // ── EFFECT-POLYMORPHISM, the TRANSITIVE closure (a max code review found pass 2c's one-hop/direct model leaked):
@@ -6828,7 +6837,8 @@ export function benignKeys(o: Record<string,unknown>) { return Object.keys(o); }
     // parameter: it is charged only if the TABLE matches the shadow's `Object.assign`.
     "src/shadow.ts": `const Shadow = { assign: (a: any) => a };
 function shadowed(t: any) { const Object = Shadow; return Object.assign(t, {}); }
-export function shadowedEntry() { return shadowed(process.env); }`,
+export function shadowedEntry() { return shadowed(process.env); }
+export function shadowedLit() { return shadowed({}); }`,  // ⟨R934⟩ divergent: \`t\` is 2c-fed, not a MUST location
   });
   const { report } = scan(d);
   const isEnv = (fn) => (entry(report, fn)?.inferred ?? []).includes("Env");
@@ -6922,14 +6932,127 @@ export function c07ShadowModPassZ() { return JSON.stringify(process.env); }`,
   // a consumer that touches no key (`typeof`, `===`, `!`) charges nothing.
   for (const fn of ["src.ev.c02ShadowParamZ", "src.ev.c04TypeofZ", "src.ev.c06TestZ", "src.shadowproc.c03ShadowModZ", "src.shadowproc.c07ShadowModPassZ"])
     check(`R928 CONTROL: ${fn} charges nothing`, row(fn) == null, JSON.stringify(row(fn) ?? null));
-  // The POSTURE, pinned: a project callee that only READS its parameter is not itself charged — the HANDER
-  // is (w18) — because charging the callee pools the effect onto every other caller of it.
-  check("R928 POSTURE: readerHelper (reads a parameter) is not charged; its caller is", row("src.ev.readerHelper") == null,
+  // The POSTURE, REVISED by ⟨R934⟩: a project callee that only READS its parameter is charged when EVERY
+  // visible call site hands it the environment (readerHelper has one caller, w18), because then no other
+  // caller exists for the effect to pool onto. The divergent shape stays uncharged (pinned in the 2c block).
+  check("⟨R934⟩ POSTURE: readerHelper (every visible site passes process.env) is charged, and so is its caller",
+        (row("src.ev.readerHelper")?.inferred ?? []).includes("Env") && inf("src.ev.w18PasserZ").includes("Env"),
         JSON.stringify(row("src.ev.readerHelper") ?? null));
   const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
   check("R928 GATE: `deny Env src.ev.w01ParenZ` fires (exit 0 at 503f449)", ex("w.pol") === 1, `exit ${ex("w.pol")}`);
   check("R928 GATE CONTROL: `deny Env` over the two MAY-aliases stays clean (no fabricated Env)", ex("may.pol") === 0, `exit ${ex("may.pol")}`);
   check("R928 GATE: `deny Unknown` over the dominated rebind fires — disclosed, not silent", ex("mayu.pol") === 1, `exit ${ex("mayu.pol")}`);
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── SOUNDNESS R934 + R935: THE ENVIRONMENT OBJECT STORED IN A PARAMETER OR A FIELD ──────────────────────────
+// The R928 identity stopped at locals: a function reading a parameter every visible call site hands
+// `process.env`, or a field holding it, was ABSENT with `deny Env <fn>` exit 0. EXECUTED on node 22.12.0
+// (`tsagent-v042/fx/env` + `fx/env2`, a planted CANDOR_SECRET_V read back): every `*Q` reader returned the
+// secret; `divLitCallerQ`, `ctl*`, `zeroNoneN`, `fieldExtN`, `owReadN` (after the Object.assign rebind),
+// `leafLitN` and `shadowN` returned a literal. Names: no §3.3 prefix collisions (Q/N suffixes, distinct stems).
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", module: "commonjs", strict: true, skipLibCheck: true,
+                         types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+      include: ["src"],
+    }),
+    "src/envp.ts": `type E = Record<string, string | undefined>;
+const K = "CANDOR_SECRET_V";
+// ---- R934: parameter flow
+function uniReader(e: E) { return e[K]; }                       // every visible caller passes process.env
+export function uniCallerQ() { return uniReader(process.env); }
+function divReader(e: E) { return e[K]; }                        // divergent: env at one site, literal at another
+export function divEnvCallerQ() { return divReader(process.env); }
+export function divLitCallerQ() { return divReader({ [K]: "lit" }); }
+function fwdLeaf(e: E) { return e[K]; }                          // forwarded through a middle frame
+function fwdMid(e: E) { return fwdLeaf(e); }
+export function fwdTopQ() { return fwdMid(process.env); }
+function uniKeys(e: E) { return Object.keys(e).length; }         // whole-object read through a param
+export function uniKeysCallerQ() { return uniKeys(process.env); }
+function uniDestr({ [K]: v }: E) { return v; }                   // destructured parameter (not an identifier)
+export function uniDestrCallerQ() { return uniDestr(process.env); }
+// ---- R935: heap field flow
+const cfg = { env: process.env };
+export function heapConstQ() { return cfg.env[K]; }
+class Holder { env: E = process.env; read() { return this.env[K]; } }
+export function heapClassQ() { return new Holder().read(); }
+class CtorHolder { env: E; constructor() { this.env = process.env; } get() { return this.env[K]; } }
+export function heapCtorQ() { return new CtorHolder().get(); }
+const nested = { inner: { env: process.env } };
+export function heapNestedQ() { return nested.inner.env[K]; }
+const reb = { env: process.env as E };
+export function rebindFieldQ(o: E) { reb.env = o; }
+export function heapRebQ() { return reb.env[K]; }                // MAY: the field is rebound elsewhere
+interface Cfg { env: E }
+const typed: Cfg = { env: process.env };
+export function heapTypedQ() { return typed.env[K]; }
+// ---- controls
+export function ctlPlainQ() { return process.env[K]; }
+const pureCfg = { env: { [K]: "lit" } as E };
+export function ctlPureHeapQ() { return pureCfg.env[K]; }
+function ctlPureReader(e: E) { return e[K]; }
+export function ctlPureCallerQ() { return ctlPureReader({ [K]: "lit" }); }
+`,
+    "src/envn.ts": `type E = Record<string, string | undefined>;
+const K = "CANDOR_SECRET_V";
+// escaped: also handed out as a value → its parameter has unseen bindings → not a location
+function escReader(e: E) { return e[K]; }
+export function escDirectN() { return escReader(process.env); }
+export function escMapN() { return [{ [K]: "lit" } as E].map(escReader); }
+// a zero-argument site makes it divergent
+function zeroReader(e?: E) { return e?.[K]; }
+export function zeroEnvN() { return zeroReader(process.env); }
+export function zeroNoneN() { return zeroReader(); }
+// exported, every visible caller passes env → charged (the 2b UNIFORM precedent)
+export function expReaderN(e: E) { return e[K]; }
+export function expCallerN() { return expReaderN(process.env); }
+// a method of an extended class is excluded (an override's bindings are invisible)
+class Base { m(e: E) { return e[K]; } }
+class Sub extends Base { m(e: E) { return "sub:" + String(e[K]); } }
+export function extCallerN() { return new Base().m(process.env) + new Sub().m({ [K]: "lit" }); }
+// a field of an extended class is excluded
+class FB { env: E = process.env; rd() { return this.env[K]; } }
+class FS extends FB { env: E = { [K]: "lit" }; }
+export function fieldExtN() { return new FS().rd(); }
+// UNSEEN WRITE (the stated over-approximation): Object.assign rebinds the field off the books
+const ow = { env: process.env as E };
+export function owRebindN() { Object.assign(ow, { env: { [K]: "lit" } }); }
+export function owReadN() { return ow.env[K]; }
+// a parameter forwarded divergently from a MUST location
+function midDiv(e: E) { return leafDiv(e); }
+function leafDiv(e: E) { return e[K]; }
+export function midTopN() { return midDiv(process.env); }
+export function leafLitN() { return leafDiv({ [K]: "lit" }); }
+// a project-local process must match nothing
+export function shadowN(process: { env: E }) { const c = { env: process.env }; return c.env[K]; }
+`,
+    "p.pol": "deny Env src.envp.uniReader\ndeny Env src.envp.heapConstQ\n",
+    "neg.pol": "deny Env src.envp.divReader\ndeny Env src.envp.divLitCallerQ\ndeny Env src.envp.ctlPureHeapQ\n"
+             + "deny Env src.envn.zeroReader\ndeny Env src.envn.zeroNoneN\ndeny Env src.envn.owReadN\ndeny Env src.envn.shadowN\n",
+  });
+  const { report } = scan(d);
+  const row = (fn) => entry(report, fn);
+  const inf = (fn) => row(fn)?.inferred ?? [];
+  for (const fn of ["uniReader", "fwdLeaf", "fwdMid", "uniDestr", "heapConstQ", "Holder.read", "CtorHolder.get", "heapNestedQ",
+                    "uniCallerQ", "divEnvCallerQ", "fwdTopQ"])
+    check(`R934/R935: src.envp.${fn} reads the environment → Env`, inf(`src.envp.${fn}`).includes("Env"), JSON.stringify(row(`src.envp.${fn}`) ?? null));
+  check("R935: a field REBOUND elsewhere is a MAY location → Unknown[env-maybe-read], never Env",
+        inf("src.envp.heapRebQ").includes("Unknown") && !inf("src.envp.heapRebQ").includes("Env")
+        && (row("src.envp.heapRebQ")?.unknownWhy ?? []).includes("env-maybe-read"), JSON.stringify(row("src.envp.heapRebQ") ?? null));
+  check("R935: a field rebound by `Object.assign` (off the binding table) is MAY → Unknown, never Env (executed: reads the replacement)",
+        inf("src.envn.owReadN").includes("Unknown") && !inf("src.envn.owReadN").includes("Env"), JSON.stringify(row("src.envn.owReadN") ?? null));
+  for (const fn of ["src.envp.divReader", "src.envp.divLitCallerQ", "src.envp.ctlPureHeapQ", "src.envp.ctlPureReader", "src.envp.ctlPureCallerQ",
+                    "src.envn.escReader", "src.envn.zeroReader", "src.envn.zeroNoneN", "src.envn.Base.m", "src.envn.FB.rd", "src.envn.fieldExtN",
+                    "src.envn.leafDiv", "src.envn.leafLitN", "src.envn.shadowN"])
+    check(`R934/R935 CONTROL: ${fn} charges no Env (divergent / escaped / extended / literal / shadow)`, !inf(fn).includes("Env"), JSON.stringify(row(fn) ?? null));
+  check("R934: an EXPORTED reader every visible site feeds the environment is charged (pass 2b UNIFORM precedent)", inf("src.envn.expReaderN").includes("Env"));
+  check("R934: a middle frame forwarding a MUST parameter to a divergent leaf is charged; the leaf is not",
+        inf("src.envn.midDiv").includes("Env") && !inf("src.envn.leafDiv").includes("Env"));
+  const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
+  check("R934/R935 GATE: `deny Env` scoped to the parameter reader and the field reader fires (exit 0 at 85977fd)", ex("p.pol") === 1, `exit ${ex("p.pol")}`);
+  check("R934/R935 GATE CONTROL: `deny Env` over the divergent / literal / reflectively-rebound / shadow units stays clean", ex("neg.pol") === 0, `exit ${ex("neg.pol")}`);
   fs.rmSync(d, { recursive: true, force: true });
 }
 
@@ -18747,7 +18870,8 @@ export function getSelf() { return self.structuredClone(lit); }`,
 const window = { structuredClone(x: unknown) { return x; } };
 export function shadowBare(t: unknown) { return structuredClone(t); }
 export function shadowWin(t: unknown) { return window.structuredClone(t); }
-export function feedShadows() { return [shadowBare(process.env), shadowWin(process.env)]; }`,
+export function feedShadows() { return [shadowBare(process.env), shadowWin(process.env)]; }
+export function feedShadowsLit() { return [shadowBare({}), shadowWin({})]; }`, // ⟨R934⟩ divergent: 2c decides, not the MUST rule
     // OVER-CHARGE CONTROL — the qualified spelling over an object with no accessor, and over a CLASS
     // instance, whose accessor is prototype-installed and NON-enumerable so a clone never visits it
     // (R115's correct half, which this fix must not move: executed, 0 invocations).

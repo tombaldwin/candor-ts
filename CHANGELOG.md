@@ -10,6 +10,18 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **The environment object is followed into PARAMETERS and heap FIELDS, not only locals** (SOUNDNESS R934,
+  R935). A function that reads a parameter every visible call site hands `process.env` (`function rd(e) { return
+  e.K }` called as `rd(process.env)`; pnpm's `readEnvVar(env, …)` behind `const env = opts.env ?? process.env`),
+  a destructured parameter (`({ K }) => …`), and a reader of a field that holds it (`const cfg = { env:
+  process.env }; … cfg.env.K`, a class field, a constructor `this.env = process.env`) was ABSENT with `deny Env
+  <fn>` exit 0 (EXECUTED). Each is now `Env`. One binding table and one pair of MUST/MAY fixpoints now cover
+  locals, parameters and properties. A parameter fed `process.env` at one site and something else at another
+  (the divergent shared-callee shape) stays uncharged — its env-passing caller is charged, as for a divergent
+  HOF; a function that escapes as a value, a method of an extended class and an interface-declared property are
+  not locations (their bindings are not enumerable). A field rebound elsewhere, or written reflectively
+  (`Object.assign`, a computed-key store), discloses `Unknown[env-maybe-read]` instead of `Env`. Gates scoped to
+  such readers can go from exit 0 to exit 1.
 - ⚠ **A function reference handed to an invoker OFF the `HOF_INVOKERS` list is charged** (SOUNDNESS R803).
   `e.on("x", f)`, `once`/`addListener`/`prependOnceListener`, `process.on`, `http.createServer(h)`,
   `EventTarget.addEventListener`, `Array.from(xs, f)`, `new Promise(exec)`, lodash `_.each`/`_.times`, rxjs
