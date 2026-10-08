@@ -115,7 +115,10 @@ jobs:
     # blocks the release gate (release-preflight [10] reads CI green on HEAD) while looking
     # exactly like a slow job — measured twice on 2026-08-19, at 3h45m and 54m. Gated by
     # release-preflight [7b], which asks every workflow in every released repo.
-    timeout-minutes: 30
+    # 30 → 45 on 2026-10-08: the job had grown to 29m05s/29m10s on the last two green runs and the
+    # v041 wave's tests pushed it over — run 85977fd was CANCELLED at exactly 30m, not failed. The
+    # deadline exists to catch a STUCK runner (hours), not to sit 1% above the normal duration.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v5
