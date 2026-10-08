@@ -6759,8 +6759,12 @@ export function callDivLit() { return readDiv({ FOO: "x" }); }`,
   // opposite); the DIVERGENT twin below is the shape the old posture protected, and it still stays pure.
   check("⟨R934⟩ a leaf that only READS a parameter every visible site feeds process.env → Env",
         (entry(report, "src.read.readParam")?.inferred ?? []).includes("Env"), JSON.stringify(entry(report, "src.read.readParam")));
-  check("⟨R934⟩ …a DIVERGENT reader (env at one site, a literal at another) stays pure — no pooling onto the literal caller",
-        entry(report, "src.read.readDiv") == null && entry(report, "src.read.callDivLit") == null,
+  // ⟨SOUNDNESS R934, the divergent half⟩ THIS ASSERTION WAS THE OPPOSITE until the R934 residual was closed: a
+  // reader one site feeds the environment reads it on that execution (EXECUTED by the spec lane: the planted
+  // secret printed through `readDiv`), so it is charged — the WRITE twin above (`envFed`, any site) always was.
+  // The literal caller inherits it through the ordinary edge: the summary price, not a fabricated edge.
+  check("⟨R934⟩ …a DIVERGENT reader (env at one site, a literal at another) is Env — some execution reads the environment",
+        inf("src.read.readDiv").includes("Env") && inf("src.read.callDivLit").includes("Env"),
         JSON.stringify([entry(report, "src.read.readDiv"), entry(report, "src.read.callDivLit")]));
 }
 
@@ -6851,8 +6855,12 @@ export function shadowedLit() { return shadowed({}); }`,  // ⟨R934⟩ divergen
   check("GUARD: Object.assign/keys on a NON-env object stays PURE (no fabrication)",
         entry(report, "src.neg.benignAssign") == null && entry(report, "src.neg.benignKeys") == null,
         JSON.stringify([entry(report, "src.neg.benignAssign"), entry(report, "src.neg.benignKeys")]));
-  check("GUARD: a project-local `Object` SHADOW does NOT fabricate Env on `Object.assign(envFedParam, …)` (the table never matches a shadow)",
-        entry(report, "src.shadow.shadowed") == null, JSON.stringify(entry(report, "src.shadow.shadowed")));
+  // ⟨R934 divergent half⟩ was "the shadow's caller stays pure": `t` is now an environment location (one site feeds
+  // it process.env), and handing it to ANY callee is a read by the R928 value rule — so this row no longer observes
+  // the 2c table's shadow guard. Nothing does now: the table is asked only of an environment-fed value, and every
+  // such value handed to a callee is already Env by the value rule — the guard can no longer change a row.
+  check("GUARD (post-R934): a reader handed the environment at one site is Env by the value rule, shadow `Object` or not",
+        isEnv("src.shadow.shadowed"), JSON.stringify(entry(report, "src.shadow.shadowed")));
   check("…and the HANDER of process.env is Env by the value rule (R928/R804), shadow or not", isEnv("src.shadow.shadowedEntry"),
         JSON.stringify(entry(report, "src.shadow.shadowedEntry")));
 }
@@ -7029,30 +7037,156 @@ export function leafLitN() { return leafDiv({ [K]: "lit" }); }
 export function shadowN(process: { env: E }) { const c = { env: process.env }; return c.env[K]; }
 `,
     "p.pol": "deny Env src.envp.uniReader\ndeny Env src.envp.heapConstQ\n",
-    "neg.pol": "deny Env src.envp.divReader\ndeny Env src.envp.divLitCallerQ\ndeny Env src.envp.ctlPureHeapQ\n"
-             + "deny Env src.envn.zeroReader\ndeny Env src.envn.zeroNoneN\ndeny Env src.envn.owReadN\ndeny Env src.envn.shadowN\n",
+    "neg.pol": "deny Env src.envp.ctlPureHeapQ\ndeny Env src.envn.owReadN\ndeny Env src.envn.shadowN\n",
+    "div.pol": "deny Env src.envp.divReader\n",
+    "typed.pol": "deny Env src.envp.heapTypedQ\n",
   });
   const { report } = scan(d);
   const row = (fn) => entry(report, fn);
   const inf = (fn) => row(fn)?.inferred ?? [];
   for (const fn of ["uniReader", "fwdLeaf", "fwdMid", "uniDestr", "heapConstQ", "Holder.read", "CtorHolder.get", "heapNestedQ",
-                    "uniCallerQ", "divEnvCallerQ", "fwdTopQ"])
+                    "uniCallerQ", "divEnvCallerQ", "fwdTopQ",
+                    // ⟨R934 divergent half⟩ some site feeds the environment; ⟨R935 receiver half⟩ an interface-typed const
+                    "divReader", "heapTypedQ"])
     check(`R934/R935: src.envp.${fn} reads the environment → Env`, inf(`src.envp.${fn}`).includes("Env"), JSON.stringify(row(`src.envp.${fn}`) ?? null));
   check("R935: a field REBOUND elsewhere is a MAY location → Unknown[env-maybe-read], never Env",
         inf("src.envp.heapRebQ").includes("Unknown") && !inf("src.envp.heapRebQ").includes("Env")
         && (row("src.envp.heapRebQ")?.unknownWhy ?? []).includes("env-maybe-read"), JSON.stringify(row("src.envp.heapRebQ") ?? null));
   check("R935: a field rebound by `Object.assign` (off the binding table) is MAY → Unknown, never Env (executed: reads the replacement)",
         inf("src.envn.owReadN").includes("Unknown") && !inf("src.envn.owReadN").includes("Env"), JSON.stringify(row("src.envn.owReadN") ?? null));
-  for (const fn of ["src.envp.divReader", "src.envp.divLitCallerQ", "src.envp.ctlPureHeapQ", "src.envp.ctlPureReader", "src.envp.ctlPureCallerQ",
-                    "src.envn.escReader", "src.envn.zeroReader", "src.envn.zeroNoneN", "src.envn.Base.m", "src.envn.FB.rd", "src.envn.fieldExtN",
-                    "src.envn.leafDiv", "src.envn.leafLitN", "src.envn.shadowN"])
-    check(`R934/R935 CONTROL: ${fn} charges no Env (divergent / escaped / extended / literal / shadow)`, !inf(fn).includes("Env"), JSON.stringify(row(fn) ?? null));
+  for (const fn of ["src.envp.ctlPureHeapQ", "src.envp.ctlPureReader", "src.envp.ctlPureCallerQ",
+                    "src.envn.Base.m", "src.envn.FB.rd", "src.envn.fieldExtN", "src.envn.shadowN"])
+    check(`R934/R935 CONTROL: ${fn} charges no Env (literal / extended / shadow)`, !inf(fn).includes("Env"), JSON.stringify(row(fn) ?? null));
+  // ⟨R934 divergent half⟩ these were controls while a parameter needed EVERY site: a divergent, an escaped and a
+  // zero-argument-site reader each read the environment on the execution one site gives them (EXECUTED: the
+  // planted secret returned), and an escaped function's hidden sites can only ADD bindings. Their literal-passing
+  // callers inherit Env through the ordinary edge — the summary's price, as for pass 2c's writer.
+  for (const fn of ["src.envn.escReader", "src.envn.zeroReader", "src.envn.leafDiv",
+                    "src.envp.divLitCallerQ", "src.envn.zeroNoneN", "src.envn.leafLitN"])
+    check(`R934 divergent half: ${fn} → Env (some visible site feeds the reader the environment)`, inf(fn).includes("Env"), JSON.stringify(row(fn) ?? null));
   check("R934: an EXPORTED reader every visible site feeds the environment is charged (pass 2b UNIFORM precedent)", inf("src.envn.expReaderN").includes("Env"));
-  check("R934: a middle frame forwarding a MUST parameter to a divergent leaf is charged; the leaf is not",
-        inf("src.envn.midDiv").includes("Env") && !inf("src.envn.leafDiv").includes("Env"));
+  check("R934: a middle frame forwarding a parameter to a divergent leaf is charged, and so is the leaf",
+        inf("src.envn.midDiv").includes("Env") && inf("src.envn.leafDiv").includes("Env"));
   const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
   check("R934/R935 GATE: `deny Env` scoped to the parameter reader and the field reader fires (exit 0 at 85977fd)", ex("p.pol") === 1, `exit ${ex("p.pol")}`);
-  check("R934/R935 GATE CONTROL: `deny Env` over the divergent / literal / reflectively-rebound / shadow units stays clean", ex("neg.pol") === 0, `exit ${ex("neg.pol")}`);
+  check("R934/R935 GATE CONTROL: `deny Env` over the literal / reflectively-rebound / shadow units stays clean", ex("neg.pol") === 0, `exit ${ex("neg.pol")}`);
+  check("R934 GATE (divergent half): `deny Env src.envp.divReader` fires (exit 0 at v0.40.1)", ex("div.pol") === 1, `exit ${ex("div.pol")}`);
+  check("R935 GATE (receiver half): `deny Env src.envp.heapTypedQ` fires over an interface-typed const (exit 0 at v0.40.1)", ex("typed.pol") === 1, `exit ${ex("typed.pol")}`);
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── SOUNDNESS R934 (divergent half) + R935 (receiver half): the residuals the first cut left SILENT ─────────────
+// EXECUTED on node 22.12.0 (`tsagent-v043/fx/a` + `fx/env2`, SECRET=planted read back): `rdDivX` printed the
+// secret through the env site; `viaIfaceX` and `viaArrX` printed it through an interface-typed const and an array
+// element; every MAY row below printed the REPLACEMENT after its rebind ran, so none may be charged Env. Names carry
+// an X suffix and distinct stems (no §3.3 prefix collisions).
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { target: "ES2022", module: "commonjs", strict: true, skipLibCheck: true,
+                         types: ["node"], typeRoots: [path.join(HERE, "node_modules", "@types")] },
+      include: ["src"],
+    }),
+    "src/dv.ts": `type E = Record<string, string | undefined>;
+export function rdDivX(e: E) { return e.SECRET; }
+export function feedEnvX() { return rdDivX(process.env); }
+export function feedLitX() { return rdDivX({ SECRET: "x" }); }
+export function rdRebX(e: E) { e = { SECRET: "r" }; return e.SECRET; }   // in-body rebind: MAY, never Env
+export function feedRebX() { return rdRebX(process.env); }
+export function rdDefX(e: E = process.env) { return e.SECRET; }           // the default is a binding too
+export function feedDefLitX() { return rdDefX({ SECRET: "d" }); }
+export function rdNeverX(e: E) { return e.SECRET; }                        // CONTROL: never fed the environment
+export function feedNeverX() { return rdNeverX({ SECRET: "n" }); }
+`,
+    "src/rc.ts": `type E = Record<string, string | undefined>;
+interface Cfg { env: E }
+interface Cfg2 { env: E }
+const icfg: Cfg = { env: process.env };
+export function viaIfaceX() { return icfg.env.SECRET; }
+const w2: Cfg2 = { env: process.env };
+export function rebW2X() { const alias: Cfg2 = w2; alias.env = { SECRET: "w" }; }
+export function viaRebAliasX() { return w2.env.SECRET; }                   // rebound through the declared member: MAY
+const arr = [process.env];
+export function viaArrX() { return arr[0].SECRET; }
+const arr2 = [process.env, { SECRET: "p" }];
+export function viaArrPureX() { return arr2[1].SECRET; }                   // CONTROL: element 1 is a literal
+const arr3: E[] = [process.env];
+export function mutArr3X() { arr3.unshift({ SECRET: "u" }); }
+export function viaArrMutX() { return arr3[0].SECRET; }                   // the array moves under a method: MAY
+`,
+    "pos.pol": "deny Env src.dv.rdDivX\ndeny Env src.rc.viaIfaceX\ndeny Env src.rc.viaArrX\n",
+    "neg.pol": "deny Env src.dv.rdRebX\ndeny Env src.dv.rdNeverX\ndeny Env src.dv.feedNeverX\n"
+             + "deny Env src.rc.viaRebAliasX\ndeny Env src.rc.viaArrPureX\ndeny Env src.rc.viaArrMutX\n",
+    "unk.pol": "deny Unknown src.dv.rdRebX\ndeny Unknown src.rc.viaRebAliasX\ndeny Unknown src.rc.viaArrMutX\n",
+  });
+  const { report } = scan(d);
+  const row = (fn) => entry(report, fn);
+  const inf = (fn) => row(fn)?.inferred ?? [];
+  for (const fn of ["src.dv.rdDivX", "src.dv.feedEnvX", "src.dv.rdDefX", "src.rc.viaIfaceX", "src.rc.viaArrX"])
+    check(`R934/R935 residual: ${fn} reads the environment → Env`, inf(fn).includes("Env"), JSON.stringify(row(fn) ?? null));
+  check("R934 PRICE: the literal-passing caller of a divergent reader inherits Env through the edge (the summary price, as pass 2c's writer)",
+        inf("src.dv.feedLitX").includes("Env") && inf("src.dv.feedDefLitX").includes("Env"), JSON.stringify([row("src.dv.feedLitX"), row("src.dv.feedDefLitX")]));
+  for (const fn of ["src.dv.rdRebX", "src.rc.viaRebAliasX", "src.rc.viaArrMutX"])
+    check(`R934/R935 MAY: ${fn} is rebound off the read → Unknown[env-maybe-read], never Env`,
+          inf(fn).includes("Unknown") && !inf(fn).includes("Env") && (row(fn)?.unknownWhy ?? []).includes("env-maybe-read"),
+          JSON.stringify(row(fn) ?? null));
+  for (const fn of ["src.dv.rdNeverX", "src.dv.feedNeverX", "src.rc.viaArrPureX"])
+    check(`R934/R935 CONTROL: ${fn} is never the environment → absent`, row(fn) == null, JSON.stringify(row(fn) ?? null));
+  const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
+  check("R934/R935 GATE: `deny Env` over the divergent reader, the interface-typed const and the array element fires (exit 0 at v0.40.1)",
+        ex("pos.pol") === 1, `exit ${ex("pos.pol")}`);
+  check("R934/R935 GATE CONTROL: `deny Env` over the MAY rows and the never-env controls stays clean", ex("neg.pol") === 0, `exit ${ex("neg.pol")}`);
+  check("R934/R935 GATE: `deny Unknown` over the MAY rows fires — disclosed, not silent", ex("unk.pol") === 1, `exit ${ex("unk.pol")}`);
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── SOUNDNESS R1016: a CLASS EXPRESSION's constructor is a unit; construction reaches it ───────────────────────
+// EXECUTED on node 22.12.0 (`tsagent-v043/fx/ce`): importing the module writes NOTHING, and every `useCe*` writes
+// its own witness file — so the constructing functions own the Fs and the evaluating units do not. At v0.40.1 every
+// `useCe*` read `['Unknown']` (`deny Fs` exit 0) and the Fs sat on `<module>` / `<static-init>`. The evaluator
+// keeps a containment edge exactly where the class VALUE escapes (⟨R519⟩): exported, returned, read as a static.
+if (blk()) {
+  const d = project({
+    "src/ce.ts": `import * as fs from "fs";
+const W = (t: string) => fs.writeFileSync("/tmp/candor-r1016-" + t, "x");
+const LA = class { constructor() { W("A"); } };
+export function useCeA() { return new LA(); }
+export class HolderB { static Inner = class { constructor() { W("B"); } }; }
+export function useCeB() { return new HolderB.Inner(); }
+const LC = class { f = W("C"); };
+export function useCeC() { return new LC(); }
+export function mkCeD() { return class { constructor() { W("D"); } }; }
+export function useCeD() { const K = mkCeD(); return new K(); }
+class BaseG { constructor() { /* pure */ } }
+const LG = class extends BaseG { constructor() { super(); W("G"); } };
+export function useCeG() { return new LG(); }
+const LH = class NamedH { constructor() { W("H"); } };
+export function useCeH() { return new LH(); }
+`,
+    "src/ev.ts": `import * as fs from "fs";
+const LP = class { constructor() { fs.writeFileSync("/tmp/candor-r1016-p", "x"); } };
+export function useCeP() { return new LP(); }
+`,
+    "fs.pol": "deny Fs src.ce.useCeA\ndeny Fs src.ce.useCeB\ndeny Fs src.ce.useCeC\ndeny Fs src.ce.useCeD\ndeny Fs src.ce.useCeG\ndeny Fs src.ce.useCeH\n",
+    "def.pol": "deny Fs src.ev.<module>\n",
+  });
+  const { report } = scan(d);
+  const row = (fn) => entry(report, fn);
+  const inf = (fn) => row(fn)?.inferred ?? [];
+  for (const k of ["A", "B", "C", "D", "G", "H"])
+    check(`R1016: useCe${k} constructs a class expression and reaches its constructor → Fs, no Unknown`,
+          inf(`src.ce.useCe${k}`).includes("Fs") && !inf(`src.ce.useCe${k}`).includes("Unknown"), JSON.stringify(row(`src.ce.useCe${k}`) ?? null));
+  check("R1016: the constructor is its own unit (`<class>@…constructor`) and carries the body's Fs",
+        (report.functions ?? []).some((e) => /^src\.ce\.<class>@LA#\d+\.constructor$/.test(e.fn) && e.inferred.includes("Fs")),
+        JSON.stringify((report.functions ?? []).map((e) => e.fn)));
+  check("R1016 DEFINER: a module whose only class expression is const-bound, unexported and only `new`-ed is no longer charged Fs",
+        row("src.ev.<module>") == null, JSON.stringify(row("src.ev.<module>") ?? null));
+  check("R1016 CONTAINMENT KEPT (R519): an ESCAPING class value leaves the evaluator charged — the returned class (mkCeD) and the static (HolderB.<static-init>)",
+        inf("src.ce.mkCeD").includes("Fs") && inf("src.ce.HolderB.<static-init>").includes("Fs"),
+        JSON.stringify([row("src.ce.mkCeD"), row("src.ce.HolderB.<static-init>")]));
+  const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
+  check("R1016 GATE: `deny Fs` over every constructing function fires (exit 0 at v0.40.1)", ex("fs.pol") === 1, `exit ${ex("fs.pol")}`);
+  check("R1016 GATE CONTROL: `deny Fs src.ev.<module>` is clean — the evaluator never constructs (exit 1 at v0.40.1)", ex("def.pol") === 0, `exit ${ex("def.pol")}`);
   fs.rmSync(d, { recursive: true, force: true });
 }
 
@@ -18900,9 +19034,14 @@ export function pClass(k: Klass) { return globalThis.structuredClone(k); }`,
     check(`R281: …and so does the QUALIFIED one, ABSENT from functions[] at 9a0cfd9 — ${what}`,
           has(qualified, e), JSON.stringify(eff(qualified) ?? (report.functions ?? []).map((x) => x.fn)));
   }
+  // ⟨R934 divergent half⟩ This was a control — "a project's OWN structuredClone charges no Env" — that stayed
+  // observable only because the shadow callers' parameter was DIVERGENT and so not an environment location. It is
+  // one now (`feedShadows` hands it process.env), and handing the environment object to any callee is a read by the
+  // R928 VALUE rule, shadow or not; the R281 table's shadow guard is no longer what decides these two rows (the
+  // table is asked only of an environment value, which the value rule already charges wherever it is handed on).
   for (const fn of ["src.shadow.shadowBare", "src.shadow.shadowWin"]) {
-    check(`R281 SHADOW CONTROL: a project's OWN structuredClone charges no Env — ${fn}`,
-          !has(fn, "Env"), JSON.stringify(eff(fn) ?? null));
+    check(`R281 SHADOW (post-R934): a reader handed the environment at one site is Env by the value rule — ${fn}`,
+          has(fn, "Env"), JSON.stringify(eff(fn) ?? null));
   }
   for (const [fn, what] of [
     ["src.pure.pPlain", "an object with no accessor at all"],
@@ -18919,7 +19058,7 @@ export function pClass(k: Klass) { return globalThis.structuredClone(k); }`,
     // (that is what makes `pClass` a real test of R115's exclusion rather than an empty one), so a
     // file-wide `deny Fs` would fire on the fixture's own bait and prove nothing about the callers.
     check("R281 GATE CONTROL: both over-charge callers still gate clean under Fs+Env+Unknown", ex("purepol.pol") === 0, `exit ${ex("purepol.pol")}`);
-    check("R281 GATE CONTROL: the two shadow-calling units still gate clean under `deny Env`", ex("shadowpol.pol") === 0, `exit ${ex("shadowpol.pol")}`);
+    check("R281 GATE (post-R934): the two shadow-calling units, fed the environment at one site, fire `deny Env`", ex("shadowpol.pol") === 1, `exit ${ex("shadowpol.pol")}`);
   }
   fs.rmSync(d, { recursive: true, force: true });
 }

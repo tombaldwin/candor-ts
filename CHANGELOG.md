@@ -10,6 +10,27 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **A parameter fed the environment at SOME visible call site is the environment in its reader** (SOUNDNESS R934,
+  the divergent half). `readDiv(e) { return e.SECRET }` called as `readDiv(process.env)` and `readDiv({…})` printed
+  the planted secret through `readDiv` (EXECUTED) and was ABSENT with `deny Env readDiv` exit 0. The first cut
+  required EVERY site, citing pass 2b's divergent-HOF ruling; that ruling is about a callback whose effect lives in
+  another unit, and pass 2c already charged the WRITE side from any site. The reader is now `Env`; an escaped
+  function qualifies too (hidden sites only add bindings); an in-body rebind (`e = {}`) makes the parameter MAY,
+  which discloses `Unknown[env-maybe-read]`. A caller that hands the reader something else inherits `Env` through
+  the ordinary edge — the summary price pass 2c's writer and an `??`-merging reader already pay.
+- ⚠ **An environment object reached through a const's OWN literal, whatever the const's declared type** (SOUNDNESS
+  R935, the receiver half). `const icfg: Cfg = { env: process.env }; icfg.env.SECRET` and `const arr =
+  [process.env]; arr[0].SECRET` were ABSENT (EXECUTED: both printed the secret). A member read whose receiver is a
+  `const` bound to an object or array literal is keyed on the literal's member. MAY (`Unknown[env-maybe-read]`)
+  where the declared member is written anywhere, or where the array is referenced other than by a literal-index read.
+- ⚠ **A class expression's constructor is a unit** (SOUNDNESS R1016). `new L()` over `const L = class { constructor()
+  { fs.writeFileSync(…) } }`, `new Holder.Inner()` over a `static Inner = class {…}`, and an implicit constructor
+  with an instance field initialiser read `['Unknown']` on the constructing function (`deny Fs` exit 0 over a write
+  that ran). They now edge to `<class>@<anchor>#<n>.constructor` and carry `Fs`. The unit that EVALUATES the class
+  keeps a containment edge to it wherever the class value can escape (exported, returned, `extends`-ed, read as a
+  static); a `const`-bound, unexported class expression referenced only as a `new` callee no longer charges its
+  evaluator (EXECUTED: evaluating it writes nothing) — gates scoped to such an evaluator can go from exit 1 to 0.
+
 ## [0.40.1] — 2026-10-08
 
 - ⚠ **A value laundered through an `any` PARAMETER into a closed dispatch** (SOUNDNESS R958, the intra-project
