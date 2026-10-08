@@ -3721,6 +3721,14 @@ function kappaOfRef(d2, ref) {
 function netEstablishingVerb(member, mod) {
   return NET_ESTABLISHING.has(member) || (/^(node:)?dgram$/.test(mod ?? "") && member === "send");
 }
+// ⟨R966⟩ see the (CLASSIFY) arm. A package whose `listen` is not a network accept: JSON-RPC connections start
+// reading a transport chosen (and, when it is a socket, charged) where the transport was built.
+const NON_NETWORK_LISTEN_PKGS = /^(vscode-jsonrpc|vscode-languageserver(-protocol)?|vscode-languageclient)(\/|$)/;
+function dependencyListenIsAccept(mod, decl) {
+  if (!mod || mod === "<local>" || mod === "<es-lib>" || mod.startsWith("/") || declIsNodeTypes(decl) || isOwnPackageDecl(decl))
+    return false;
+  return !NON_NETWORK_LISTEN_PKGS.test(mod);
+}
 function netAcceptingVerb(member, kMod) {
   return NET_ACCEPTING.has(member) || (/^(node:)?inspector(\/promises)?$/.test(kMod ?? "") && member === "open");
 }
@@ -10221,6 +10229,22 @@ function visitCalls(node) {
               && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))
               && receiverIsProvenNonNetworkStream(node.expression.expression))
             { eff = null; effSuppressed = true; }
+          // ⟨SOUNDNESS R966⟩ A FRAMEWORK'S OWN `listen` IS AN ACCEPT. `NET_ACCEPTING` is asked only of a call κ
+          // classified `Net`, and κ classifies node's servers — so express `app.listen(p)` (declared in
+          // express-serve-static-core), koa `app.listen(p)` and fastify `f.listen({port})` reached neither the effect
+          // nor the accept mark: beside `net.connect(80, "ok.example")`, `allow Net in <fn> ok.example` exited 0
+          // over a server answering anyone (EXECUTED: a client got the handler's reply). An inclusion list decided a
+          // fail-closed question (R781's lesson), so this is the fail-closed reading: a DEPENDENCY member named
+          // `listen` that κ did not answer is a network accept — `Net`, and `netAccepting` marks it `incomplete`.
+          // The failure direction is an over-charge on a non-network `listen`; the one family known to be that is
+          // denylisted by package (a JSON-RPC `connection.listen()` starts reading a transport whose OWN
+          // construction decides whether it is a socket). Measured reach on the pinned roster: 1 unclassified
+          // dependency `listen` (nest's FastifyAdapter), 0 non-network. Not seen: hapi `server.start()`
+          // (`start` is p-queue's and repl's too), Bun.serve/Deno.serve (no types in any roster tree).
+          if (!eff && !effSuppressed && member === "listen" && dependencyListenIsAccept(mod, decl)) {
+            eff = "Net";
+            if (process.env.CANDOR_R966_REACH) console.error(`R966-REACH ${mod}.listen`);
+          }
           if (eff) {
             rec.direct.add(eff);
             // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. DIRECT only

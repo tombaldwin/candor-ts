@@ -43,6 +43,11 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   both (minting the body as a unit, its containing function keeping its charges); an assigned value the engine
   cannot name discloses `dispatch:`; `this.m = this.m.bind(this)` re-installs the same method and adds nothing.
   New `<callable>`/`<structural>` rows and union rows for such hierarchies.
+- ⚠ **A framework's own `listen` is a network accept** (SOUNDNESS R966). express/koa/fastify `listen` is not
+  node's `Server.listen`, so κ never classified it and the ⟨0.40⟩ accept mark never ran: beside a benign literal,
+  `allow Net ok.example` exited 0 over a server answering anyone (EXECUTED with real express 5 and fastify 5). A
+  dependency member named `listen` that κ does not answer is now `Net` with an `incomplete` surface; JSON-RPC
+  connections (vscode-jsonrpc / vscode-languageserver) are excluded as non-network.
 
 ## [0.40.0] — 2026-10-07
 

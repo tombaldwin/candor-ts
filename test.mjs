@@ -23351,6 +23351,45 @@ export function viaSib2(s: Sib2) { s.m(); }`,
           !(row(fn).inferred ?? []).length && gate(`deny Unknown src.f.${fn}`) === 0, JSON.stringify(row(fn)));
 }
 
+// ── R966: A FRAMEWORK'S OWN `listen` IS AN ACCEPT ─────────────────────────────────────────────────────────────
+//
+// `NET_ACCEPTING` was asked only of a call κ classified `Net`, and κ classifies node's servers: express/koa/fastify
+// `listen` reached neither the effect nor the accept, so beside `net.connect(80, "ok.example")` the gate
+// `allow Net in <fn> ok.example` exited 0 over a server that answers anyone (EXECUTED in the lane fixture with the
+// real express 5 and fastify 5: a client got the handler's reply). A dependency `listen` κ did not answer now
+// reads as a network accept; a JSON-RPC connection's `listen` (vscode-jsonrpc) is the denylisted non-network one.
+if (blk()) {
+  const d = project({
+    "node_modules/koa/package.json": `{"name":"koa","version":"2.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/koa/index.d.ts": `import type { Server } from "node:http";\nexport default class Koa { listen(port?: number): Server; }\n`,
+    "node_modules/koa/index.js": "",
+    "node_modules/fastify/package.json": `{"name":"fastify","version":"5.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/fastify/index.d.ts": `export interface FastifyInstance { listen(o: { port: number }): Promise<string>; }\nexport default function Fastify(): FastifyInstance;\n`,
+    "node_modules/fastify/index.js": "",
+    "node_modules/vscode-jsonrpc/package.json": `{"name":"vscode-jsonrpc","version":"8.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/vscode-jsonrpc/index.d.ts": `export interface MessageConnection { listen(): void; }\nexport declare function mk(): MessageConnection;\n`,
+    "node_modules/vscode-jsonrpc/index.js": "",
+    "src/f.ts": `import * as net from "node:net";
+import Koa from "koa";
+import Fastify from "fastify";
+import { mk } from "vscode-jsonrpc";
+export function srvKoa(p: number) { net.connect(80, "ok.example"); return new Koa().listen(p); }
+export function srvFastify(p: number) { net.connect(80, "ok.example"); return Fastify().listen({ port: p }); }
+export function rpcOnly() { net.connect(80, "ok.example"); mk().listen(); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  for (const fn of ["srvKoa", "srvFastify"])
+    check(`R966 ACCEPT: \`${fn}\`'s framework listen marks Net incomplete — \`allow Net in src.f.${fn} ok.example\` exit 1 (0 at the base)`,
+          (row(fn).incomplete ?? []).includes("Net") && gate(`allow Net in src.f.${fn} ok.example`) === 1, JSON.stringify(row(fn)));
+  check("R966 DENYLIST: a JSON-RPC `connection.listen()` is not an accept — `allow Net in src.f.rpcOnly ok.example` exit 0",
+        !(row("rpcOnly").incomplete ?? []).includes("Net") && gate("allow Net in src.f.rpcOnly ok.example") === 0, JSON.stringify(row("rpcOnly")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
