@@ -6232,11 +6232,175 @@ function conversionSourceTracked(e, depth = 0) {
   }
   return true;
 }
+// ---- PARAMETER PROVENANCE: what every VISIBLE call site binds to a parameter (SOUNDNESS R934, R246) ----
+// A parameter's value is whatever its callers pass. For a function whose every reference is a CALL — not
+// handed out as a value, not `.call`/`.apply`/`.bind`-ed — the visible call sites ARE its bindings, and the
+// arguments there say what the parameter can hold. Two consumers ask this ONE index rather than each
+// walking calls: the environment-location model (a parameter every site hands `process.env`, R934) and
+// the `any`-receiver accessor arm (an `any`-typed parameter whose every site passes a typed value, R246).
+// `paramArgs` maps a parameter key (its symbol; a destructured parameter's NODE) to the argument expression
+// at each visible site (`null` where a spread hides the position; the default, or `null` for `undefined`,
+// where the site omits it). `paramFnEscaped(fnSym)` answers whether the function escapes, batched.
+const paramArgs = new Map();
+const paramOwnerOf = new Map();     // param key -> function symbol (for the escape question)
+const paramDeclOf = new Map();      // param key -> its ParameterDeclaration
+let paramFnEscaped;
+// A class some project class `extends` — its members are excluded (an override is invisible here).
+const extendedClassSyms = new Set();
+const classSymOf = (cls) => (cls?.name ? checker.getSymbolAtLocation(cls.name) : cls?.symbol) ?? null;
+{
+  const noteArg = (k, v) => { if (k) (paramArgs.get(k) ?? paramArgs.set(k, []).get(k)).push(v); };
+  const collectHeritage = (node) => {
+    if ((ts.isClassDeclaration(node) || ts.isClassExpression(node)) && node.heritageClauses) {
+      for (const h of node.heritageClauses) if (h.token === ts.SyntaxKind.ExtendsKeyword) {
+        for (const t of h.types) {
+          let s = checker.getSymbolAtLocation(t.expression);
+          if (s && (s.flags & ts.SymbolFlags.Alias)) { try { s = checker.getAliasedSymbol(s); } catch { /* keep */ } }
+          if (s) extendedClassSyms.add(s);
+        }
+      }
+    }
+    ts.forEachChild(node, collectHeritage);
+  };
+  for (const sf of sources) collectHeritage(sf);
+  const calls = [];
+  const collectCalls = (node) => {
+    if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && (node.arguments?.length ?? 0) > 0) calls.push(node);
+    ts.forEachChild(node, collectCalls);
+  };
+  for (const sf of sources) collectCalls(sf);
+  // ⟨R934⟩ the functions whose parameters are eligible locations: a function declaration, a function or
+  // arrow bound to a `const`, a constructor, or a method of a class with no heritage that nothing extends.
+  // Every reference to it must be a CALL (or an export, a `typeof`, a member read that is not
+  // `.call`/`.apply`/`.bind`) — anything else hands it to code that binds its parameters unseen.
+  const fnEligible = new Map();     // declaration -> boolean
+  const fnSymOf = (decl) => {
+    if (ts.isFunctionDeclaration(decl) || ts.isMethodDeclaration(decl)) return decl.name ? checker.getSymbolAtLocation(decl.name) : null;
+    if ((ts.isArrowFunction(decl) || ts.isFunctionExpression(decl)) && ts.isVariableDeclaration(decl.parent)
+        && decl.parent.initializer === decl && ts.isIdentifier(decl.parent.name)
+        && (ts.getCombinedNodeFlags(decl.parent) & ts.NodeFlags.Const)) return checker.getSymbolAtLocation(decl.parent.name);
+    if (ts.isConstructorDeclaration(decl)) return classSymOf(decl.parent);
+    return null;
+  };
+  const declShapeOk = (decl) => {
+    if (!decl?.body || !projectFiles.has(path.resolve(decl.getSourceFile().fileName))) return false;
+    if (ts.isFunctionDeclaration(decl) || ts.isArrowFunction(decl) || ts.isFunctionExpression(decl)) return true;
+    if (ts.isConstructorDeclaration(decl)) return true;
+    if (ts.isMethodDeclaration(decl) && (ts.isClassDeclaration(decl.parent) || ts.isClassExpression(decl.parent)))
+      return !decl.parent.heritageClauses?.length && !extendedClassSyms.has(classSymOf(decl.parent));
+    return false;
+  };
+  const escapedFnSyms = new Set();
+  const escapeScannedSyms = new Set();
+  // One traversal per BATCH of function symbols not yet asked about; the answer is cached.
+  const scanEscapes = (cands0) => {
+    const cands = new Set([...cands0].filter((x) => x && !escapeScannedSyms.has(x)));
+    if (!cands.size) return;
+    for (const c of cands) escapeScannedSyms.add(c);
+    const names = new Set([...cands].map((s) => s.name));
+    const SAFE_MEMBER_BLOCK = new Set(["call", "apply", "bind"]);
+    const visit = (node) => {
+      if (ts.isIdentifier(node) && names.has(node.text)) {
+        let s = checker.getSymbolAtLocation(node);
+        if (s && (s.flags & ts.SymbolFlags.Alias)) { try { s = checker.getAliasedSymbol(s); } catch { /* keep */ } }
+        if (s && cands.has(s) && !escapedFnSyms.has(s)) {
+          // climb the transparent wrappers to the position the value lands in
+          let cur = node;
+          const p0 = node.parent;
+          let safe = false;
+          if (p0 && (ts.isPropertyAccessExpression(p0) || ts.isPropertyAssignment(p0) || ts.isMethodDeclaration(p0)
+              || ts.isFunctionDeclaration(p0) || ts.isClassDeclaration(p0) || ts.isClassExpression(p0)
+              || ts.isVariableDeclaration(p0) || ts.isPropertyDeclaration(p0)) && p0.name === node) {
+            // a declaration name, or `o.name` — a METHOD reference: safe only as the callee of a call
+            if (ts.isPropertyAccessExpression(p0)) {
+              const pp = p0.parent;
+              safe = !!pp && (ts.isCallExpression(pp) || ts.isNewExpression(pp)) && pp.expression === p0;
+            } else safe = true;
+          } else {
+            while (cur.parent && (ts.isParenthesizedExpression(cur.parent) || ts.isNonNullExpression(cur.parent))) cur = cur.parent;
+            const p = cur.parent;
+            if (!p) safe = true;
+            else if ((ts.isCallExpression(p) || ts.isNewExpression(p)) && p.expression === cur) safe = true;
+            else if (ts.isPropertyAccessExpression(p) && p.expression === cur) safe = !SAFE_MEMBER_BLOCK.has(p.name.text);
+            else if (ts.isExportSpecifier(p) || ts.isExportAssignment(p) || ts.isTypeQueryNode(p)
+                     || ts.isTypeOfExpression(p) || ts.isExpressionWithTypeArguments(p) || ts.isImportSpecifier(p)
+                     || ts.isImportClause(p) || ts.isNamespaceImport(p) || ts.isTypeReferenceNode(p)
+                     || ts.isQualifiedName(p)) safe = true;
+            else if (ts.isBinaryExpression(p) && p.right === cur && p.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) safe = true;
+          }
+          if (!safe) escapedFnSyms.add(s);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    for (const sf of sources) visit(sf);
+  };
+  // Seed the parameter bindings: for every call whose resolved declaration is an eligible shape, bind each
+  // identifier parameter to its argument (or default / undefined). Only calls that hand over at least one
+  // argument are recorded here — a site that passes nothing binds `undefined` to every parameter, which
+  // is recorded by the per-declaration site count below.
+  const sitesByDecl = new Map();    // decl -> number of call sites seen
+  for (const call of calls) {
+    let decl;
+    try { decl = checker.getResolvedSignature(call)?.declaration; } catch { decl = null; }
+    if (!decl || !declShapeOk(decl)) continue;
+    if (!fnEligible.has(decl)) fnEligible.set(decl, !!fnSymOf(decl));
+    if (!fnEligible.get(decl)) continue;
+    sitesByDecl.set(decl, (sitesByDecl.get(decl) ?? 0) + 1);
+    const fsym = fnSymOf(decl);
+    let pos = 0, sawSpread = false;
+    const args = call.arguments ?? [];
+    const argAt = [];
+    for (const a of args) { if (ts.isSpreadElement(a)) { sawSpread = true; break; } argAt[pos++] = a; }
+    decl.parameters.forEach((p, i) => {
+      if (p.dotDotDotToken) return;
+      // a DESTRUCTURED parameter reads its keys when the frame is entered — keyed by the parameter node
+      const ps = ts.isIdentifier(p.name) ? checker.getSymbolAtLocation(p.name)
+        : ts.isObjectBindingPattern(p.name) ? p : null;
+      if (!ps) return;
+      paramOwnerOf.set(ps, fsym);
+      if (i < argAt.length && argAt[i]) noteArg(ps, argAt[i]);
+      else if (sawSpread) noteArg(ps, null);
+      else noteArg(ps, p.initializer ?? null);
+    });
+  }
+  // A call site that resolves to the declaration with NO arguments was not collected above; it binds
+  // every parameter to its default or `undefined`. Count them so a zero-argument site is not lost.
+  {
+    const visitZero = (node) => {
+      if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && (node.arguments?.length ?? 0) === 0) {
+        let decl;
+        try { decl = checker.getResolvedSignature(node)?.declaration; } catch { decl = null; }
+        if (decl && sitesByDecl.has(decl)) for (const p of decl.parameters)
+          if (!p.dotDotDotToken && ts.isIdentifier(p.name)) noteArg(checker.getSymbolAtLocation(p.name), p.initializer ?? null);
+          else if (!p.dotDotDotToken && ts.isObjectBindingPattern(p.name)) noteArg(p, p.initializer ?? null);
+      }
+      ts.forEachChild(node, visitZero);
+    };
+    if (sitesByDecl.size) for (const sf of sources) visitZero(sf);
+  }
+  for (const k of paramArgs.keys()) { const d = ts.isParameter(k) ? k : k.valueDeclaration; if (d && ts.isParameter(d)) paramDeclOf.set(k, d); }
+  paramFnEscaped = (fsym) => { if (!fsym) return true; scanEscapes([fsym]); return escapedFnSyms.has(fsym); };
+  // Batch form: answer for many at once with ONE traversal.
+  paramFnEscaped.batch = (fsyms) => scanEscapes(fsyms);
+}
+
 const CONFORMER_REACH = process.env.CANDOR_CONFORMER_REACH ? (k, n) => console.error(`CONFORMER-REACH ${k} ${n}`) : null;
 for (const sf of sources) {
   const convert = (src, tt, at, kind) => {
     if (!tt || !conversionSourceTracked(src)) return;
     let st; try { st = checker.getTypeAtLocation(src); } catch { st = undefined; }
+    // ⟨SOUNDNESS R958, the `any`-PARAMETER half⟩ a source typed `any`/`unknown` names no conformer, so a value
+    // laundered through an `any` parameter reached a closed dispatch silently: `launder(x: any) { qDisp(x) }`
+    // called as `launder(new LocalW())` ran LocalW's `m` (EXECUTED) with `deny Fs` exit 0 on the caller. The
+    // parameter's visible arguments say what it holds — the SAME provenance index R246's accessor arm asks
+    // (`receiverValueTypes`) — so each argument type is recorded as a conversion source. Upcasts only, as
+    // ever (`recordConversion` keeps a target the type is assignable to). A dependency-sourced value and a
+    // lying downcast are untouched: they are R958's by-design residue.
+    if (anyishType(st)) for (const vt of receiverValueTypes(src)) {
+      try { recordConversion(vt, tt); } catch { /* best effort, as the main record below */ }
+      CONFORMER_REACH?.("any-param", `${path.relative(rootDir, sf.fileName)}:${at.getStart()}`);
+    }
     conversionViaAssertion = kind !== "conversion";
     try {
       if (!CONFORMER_REACH) { recordConversion(st, tt); return; }
@@ -6425,7 +6589,7 @@ function keyLiteralNames(t, depth = 0, seen = new Set()) {
 // assertion intervenes), so a typed receiver's lookup is byte-identical to before. This RESOLVES — it adds
 // the accessor edges the value's type declares — and never hedges; a receiver neither rule answers is
 // exactly as it was (the residual is stated in SOUNDNESS R246, not hidden here).
-const anyishType = (t) => !!t && !!(t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown));
+function anyishType(t) { return !!t && !!(t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)); }   // hoisted: the conversion walk asks it first
 function receiverValueTypes(expr, depth = 0, seen = new Set()) {
   if (!expr || depth > 6) return [];
   let t; try { t = checker.getTypeAtLocation(expr); } catch { t = null; }
@@ -8819,159 +8983,6 @@ const envValueLeaves = (expr, out = []) => {
   out.push(e);
   return out;
 };
-
-// ---- PARAMETER PROVENANCE: what every VISIBLE call site binds to a parameter (SOUNDNESS R934, R246) ----
-// A parameter's value is whatever its callers pass. For a function whose every reference is a CALL — not
-// handed out as a value, not `.call`/`.apply`/`.bind`-ed — the visible call sites ARE its bindings, and the
-// arguments there say what the parameter can hold. Two consumers ask this ONE index rather than each
-// walking calls: the environment-location model (a parameter every site hands `process.env`, R934) and
-// the `any`-receiver accessor arm (an `any`-typed parameter whose every site passes a typed value, R246).
-// `paramArgs` maps a parameter key (its symbol; a destructured parameter's NODE) to the argument expression
-// at each visible site (`null` where a spread hides the position; the default, or `null` for `undefined`,
-// where the site omits it). `paramFnEscaped(fnSym)` answers whether the function escapes, batched.
-const paramArgs = new Map();
-const paramOwnerOf = new Map();     // param key -> function symbol (for the escape question)
-const paramDeclOf = new Map();      // param key -> its ParameterDeclaration
-let paramFnEscaped;
-// A class some project class `extends` — its members are excluded (an override is invisible here).
-const extendedClassSyms = new Set();
-const classSymOf = (cls) => (cls?.name ? checker.getSymbolAtLocation(cls.name) : cls?.symbol) ?? null;
-{
-  const noteArg = (k, v) => { if (k) (paramArgs.get(k) ?? paramArgs.set(k, []).get(k)).push(v); };
-  const collectHeritage = (node) => {
-    if ((ts.isClassDeclaration(node) || ts.isClassExpression(node)) && node.heritageClauses) {
-      for (const h of node.heritageClauses) if (h.token === ts.SyntaxKind.ExtendsKeyword) {
-        for (const t of h.types) {
-          let s = checker.getSymbolAtLocation(t.expression);
-          if (s && (s.flags & ts.SymbolFlags.Alias)) { try { s = checker.getAliasedSymbol(s); } catch { /* keep */ } }
-          if (s) extendedClassSyms.add(s);
-        }
-      }
-    }
-    ts.forEachChild(node, collectHeritage);
-  };
-  for (const sf of sources) collectHeritage(sf);
-  const calls = [];
-  const collectCalls = (node) => {
-    if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && (node.arguments?.length ?? 0) > 0) calls.push(node);
-    ts.forEachChild(node, collectCalls);
-  };
-  for (const sf of sources) collectCalls(sf);
-  // ⟨R934⟩ the functions whose parameters are eligible locations: a function declaration, a function or
-  // arrow bound to a `const`, a constructor, or a method of a class with no heritage that nothing extends.
-  // Every reference to it must be a CALL (or an export, a `typeof`, a member read that is not
-  // `.call`/`.apply`/`.bind`) — anything else hands it to code that binds its parameters unseen.
-  const fnEligible = new Map();     // declaration -> boolean
-  const fnSymOf = (decl) => {
-    if (ts.isFunctionDeclaration(decl) || ts.isMethodDeclaration(decl)) return decl.name ? checker.getSymbolAtLocation(decl.name) : null;
-    if ((ts.isArrowFunction(decl) || ts.isFunctionExpression(decl)) && ts.isVariableDeclaration(decl.parent)
-        && decl.parent.initializer === decl && ts.isIdentifier(decl.parent.name)
-        && (ts.getCombinedNodeFlags(decl.parent) & ts.NodeFlags.Const)) return checker.getSymbolAtLocation(decl.parent.name);
-    if (ts.isConstructorDeclaration(decl)) return classSymOf(decl.parent);
-    return null;
-  };
-  const declShapeOk = (decl) => {
-    if (!decl?.body || !projectFiles.has(path.resolve(decl.getSourceFile().fileName))) return false;
-    if (ts.isFunctionDeclaration(decl) || ts.isArrowFunction(decl) || ts.isFunctionExpression(decl)) return true;
-    if (ts.isConstructorDeclaration(decl)) return true;
-    if (ts.isMethodDeclaration(decl) && (ts.isClassDeclaration(decl.parent) || ts.isClassExpression(decl.parent)))
-      return !decl.parent.heritageClauses?.length && !extendedClassSyms.has(classSymOf(decl.parent));
-    return false;
-  };
-  const escapedFnSyms = new Set();
-  const escapeScannedSyms = new Set();
-  // One traversal per BATCH of function symbols not yet asked about; the answer is cached.
-  const scanEscapes = (cands0) => {
-    const cands = new Set([...cands0].filter((x) => x && !escapeScannedSyms.has(x)));
-    if (!cands.size) return;
-    for (const c of cands) escapeScannedSyms.add(c);
-    const names = new Set([...cands].map((s) => s.name));
-    const SAFE_MEMBER_BLOCK = new Set(["call", "apply", "bind"]);
-    const visit = (node) => {
-      if (ts.isIdentifier(node) && names.has(node.text)) {
-        let s = checker.getSymbolAtLocation(node);
-        if (s && (s.flags & ts.SymbolFlags.Alias)) { try { s = checker.getAliasedSymbol(s); } catch { /* keep */ } }
-        if (s && cands.has(s) && !escapedFnSyms.has(s)) {
-          // climb the transparent wrappers to the position the value lands in
-          let cur = node;
-          const p0 = node.parent;
-          let safe = false;
-          if (p0 && (ts.isPropertyAccessExpression(p0) || ts.isPropertyAssignment(p0) || ts.isMethodDeclaration(p0)
-              || ts.isFunctionDeclaration(p0) || ts.isClassDeclaration(p0) || ts.isClassExpression(p0)
-              || ts.isVariableDeclaration(p0) || ts.isPropertyDeclaration(p0)) && p0.name === node) {
-            // a declaration name, or `o.name` — a METHOD reference: safe only as the callee of a call
-            if (ts.isPropertyAccessExpression(p0)) {
-              const pp = p0.parent;
-              safe = !!pp && (ts.isCallExpression(pp) || ts.isNewExpression(pp)) && pp.expression === p0;
-            } else safe = true;
-          } else {
-            while (cur.parent && (ts.isParenthesizedExpression(cur.parent) || ts.isNonNullExpression(cur.parent))) cur = cur.parent;
-            const p = cur.parent;
-            if (!p) safe = true;
-            else if ((ts.isCallExpression(p) || ts.isNewExpression(p)) && p.expression === cur) safe = true;
-            else if (ts.isPropertyAccessExpression(p) && p.expression === cur) safe = !SAFE_MEMBER_BLOCK.has(p.name.text);
-            else if (ts.isExportSpecifier(p) || ts.isExportAssignment(p) || ts.isTypeQueryNode(p)
-                     || ts.isTypeOfExpression(p) || ts.isExpressionWithTypeArguments(p) || ts.isImportSpecifier(p)
-                     || ts.isImportClause(p) || ts.isNamespaceImport(p) || ts.isTypeReferenceNode(p)
-                     || ts.isQualifiedName(p)) safe = true;
-            else if (ts.isBinaryExpression(p) && p.right === cur && p.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) safe = true;
-          }
-          if (!safe) escapedFnSyms.add(s);
-        }
-      }
-      ts.forEachChild(node, visit);
-    };
-    for (const sf of sources) visit(sf);
-  };
-  // Seed the parameter bindings: for every call whose resolved declaration is an eligible shape, bind each
-  // identifier parameter to its argument (or default / undefined). Only calls that hand over at least one
-  // argument are recorded here — a site that passes nothing binds `undefined` to every parameter, which
-  // is recorded by the per-declaration site count below.
-  const sitesByDecl = new Map();    // decl -> number of call sites seen
-  for (const call of calls) {
-    let decl;
-    try { decl = checker.getResolvedSignature(call)?.declaration; } catch { decl = null; }
-    if (!decl || !declShapeOk(decl)) continue;
-    if (!fnEligible.has(decl)) fnEligible.set(decl, !!fnSymOf(decl));
-    if (!fnEligible.get(decl)) continue;
-    sitesByDecl.set(decl, (sitesByDecl.get(decl) ?? 0) + 1);
-    const fsym = fnSymOf(decl);
-    let pos = 0, sawSpread = false;
-    const args = call.arguments ?? [];
-    const argAt = [];
-    for (const a of args) { if (ts.isSpreadElement(a)) { sawSpread = true; break; } argAt[pos++] = a; }
-    decl.parameters.forEach((p, i) => {
-      if (p.dotDotDotToken) return;
-      // a DESTRUCTURED parameter reads its keys when the frame is entered — keyed by the parameter node
-      const ps = ts.isIdentifier(p.name) ? checker.getSymbolAtLocation(p.name)
-        : ts.isObjectBindingPattern(p.name) ? p : null;
-      if (!ps) return;
-      paramOwnerOf.set(ps, fsym);
-      if (i < argAt.length && argAt[i]) noteArg(ps, argAt[i]);
-      else if (sawSpread) noteArg(ps, null);
-      else noteArg(ps, p.initializer ?? null);
-    });
-  }
-  // A call site that resolves to the declaration with NO arguments was not collected above; it binds
-  // every parameter to its default or `undefined`. Count them so a zero-argument site is not lost.
-  {
-    const visitZero = (node) => {
-      if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && (node.arguments?.length ?? 0) === 0) {
-        let decl;
-        try { decl = checker.getResolvedSignature(node)?.declaration; } catch { decl = null; }
-        if (decl && sitesByDecl.has(decl)) for (const p of decl.parameters)
-          if (!p.dotDotDotToken && ts.isIdentifier(p.name)) noteArg(checker.getSymbolAtLocation(p.name), p.initializer ?? null);
-          else if (!p.dotDotDotToken && ts.isObjectBindingPattern(p.name)) noteArg(p, p.initializer ?? null);
-      }
-      ts.forEachChild(node, visitZero);
-    };
-    if (sitesByDecl.size) for (const sf of sources) visitZero(sf);
-  }
-  for (const k of paramArgs.keys()) { const d = ts.isParameter(k) ? k : k.valueDeclaration; if (d && ts.isParameter(d)) paramDeclOf.set(k, d); }
-  paramFnEscaped = (fsym) => { if (!fsym) return true; scanEscapes([fsym]); return escapedFnSyms.has(fsym); };
-  // Batch form: answer for many at once with ONE traversal.
-  paramFnEscaped.batch = (fsyms) => scanEscapes(fsyms);
-}
 
 // ALIASES — MUST and MAY, now over VALUES and to a fixpoint (an alias of an alias is an alias).
 //   MUST (`envAliasSymbols`): EVERY binding of the symbol has a process.env leaf (or a MUST-alias leaf).

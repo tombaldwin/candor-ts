@@ -23440,6 +23440,35 @@ export function shadowCtlD() { return new Cache().open(); }`,
     check(`R241 CONTROL: \`${fn}\` charges nothing`, Object.keys(row(fn)).length === 0, JSON.stringify(row(fn)));
 }
 
+// ── R958 (the `any`-PARAMETER half): A VALUE LAUNDERED THROUGH AN `any` PARAMETER INTO A CLOSED DISPATCH ──────
+// `launder(x: any) { qDisp(x) }` called as `launder(new LocalW())` ran LocalW's `m` (EXECUTED, `tsagent-v042/fx/r958`)
+// and `deny Fs` on the caller was exit 0 at 85977fd: an `any` source names no conformer. The parameter's visible
+// arguments are recorded as conversion sources (the provenance index R246 also asks). Control: the same laundering
+// into a SEPARATE interface with only a PURE class passed stays pure (one closed dispatch per interface — CHA). A dependency-sourced value stays R958's by-design residue.
+if (blk()) {
+  const d = project({
+    "src/a.ts": `import * as fs from "node:fs";
+export interface Sink { m(): void }
+export class PureSink implements Sink { m(): void { } }
+export function qDisp(i: Sink) { i.m(); }
+class LocalW { m(): void { fs.writeFileSync("/tmp/r958-lau", "x"); } }
+function launder(x: any) { qDisp(x); }
+export function qLaunderRun() { launder(new LocalW()); }
+export interface QSink { q(): void }
+export class PureQ implements QSink { q(): void { } }
+export function qQDisp(i: QSink) { i.q(); }
+class QuietW { q(): void { } }
+function launderQuiet(y: unknown) { qQDisp(y as QSink); }
+export function qQuietRun() { launderQuiet(new QuietW()); }`,
+  });
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.a.${fn}`) ?? {};
+  check("R958 any-param: `qLaunderRun` reaches LocalW.m through `launder(x: any)` — Fs (ABSENT/pure at 85977fd)",
+        (row("qLaunderRun").inferred ?? []).includes("Fs"), JSON.stringify(row("qLaunderRun")));
+  check("R958 any-param CONTROL: laundering only a PURE class charges nothing",
+        !(row("qQuietRun").inferred ?? []).length, JSON.stringify(row("qQuietRun")));
+}
+
 // ── R780: ONE TRANSPARENT-WRAPPER SET — `( )`, `as`, `<T>`, `!`, `satisfies` change no runtime value ─────────
 //
 // The HOF-ref arm already unwrapped (R947). Seventeen other loops answered "is this THAT reference / THAT object?"

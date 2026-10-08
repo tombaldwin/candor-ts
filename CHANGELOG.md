@@ -10,6 +10,11 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **A value laundered through an `any` PARAMETER into a closed dispatch** (SOUNDNESS R958, the intra-project
+  half). `launder(x: any) { qDisp(x) }` called as `launder(new LocalW())` ran `LocalW.m` (EXECUTED) with `deny Fs`
+  exit 0 on the caller. The parameter's visible arguments are now recorded as conversion sources (upcasts only),
+  from the same provenance index the R246 accessor arm asks. A dependency-sourced value and a lying downcast stay
+  R958's by-design residue.
 - ⚠ **An accessor reached through an `any`/`unknown` receiver** (SOUNDNESS R246). `(s as any).token = v`,
   `(s as any)[k] = v` and `function w(o: any) { o.token = v }` called with a class instance ran the class's
   setter (EXECUTED) and were ABSENT with `deny Fs` exit 0 — the caller too. The receiver's VALUE is now asked:
