@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.40.1] — 2026-10-08
+
 - ⚠ **A value laundered through an `any` PARAMETER into a closed dispatch** (SOUNDNESS R958, the intra-project
   half). `launder(x: any) { qDisp(x) }` called as `launder(new LocalW())` ran `LocalW.m` (EXECUTED) with `deny Fs`
   exit 0 on the caller. The parameter's visible arguments are now recorded as conversion sources (upcasts only),
