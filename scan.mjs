@@ -6209,12 +6209,13 @@ function recordConformer(c, t) {
   }
   if (ts.isClassDeclaration(t)) {
     if (c.kind === "class" && classInSubtree(c.node, t)) return false;   // nominal: the subtree already answers
-    // R958 — an ASSERTED downcast (`base as Sub`, the target inside the conformer's own subtree) names no new
-    // conformer: the receiver's class arm answers `Sub`'s subtree. Scoped to an ASSERTION on purpose. Without one,
-    // `f(new Base())` into `f(s: Sub)` passed the checker's own (structural) check and the value really IS a
-    // `Base` — refusing that would drop the body that runs. MEASURED: the guard unscoped is load-bearing (a
-    // structurally identical `Base` IS assignable to `Sub`), so its scope decides which of the two it decides.
-    if (c.kind === "class" && conversionViaAssertion && classInSubtree(t, c.node)) return false;
+    // ⟨SOUNDNESS R958, the DOWNCAST half⟩ An asserted downcast (`base as Sub`) IS a new conformer when the value is a
+    // `Base`, and nothing here can tell that apart from a truthful one. A refusal stood here, scoped to assertions,
+    // on the claim that "the receiver's class arm answers `Sub`'s subtree" — but the value's class is `Base`, which
+    // is NOT in `Sub`'s subtree, so `Base.m` was the body that ran and the one no arm named. EXECUTED: `dO(bO as
+    // SubO)` wrote a file through `BaseO.m` with `dO`/`rO` ABSENT and `pure a.dO` exit 0, while `dP(bP)` — the same
+    // value without the `as` — was `Fs`, exit 1. An assertion must not delete a charge the unasserted conversion
+    // makes. On a TRUTHFUL downcast the registration over-charges a `Sub`-typed receiver with `Base`'s override.
     let added = false;
     for (const anc of localAncestorsAndSelf(t)) added = pushUnique(classConformers, anc, c.node) || added;
     if (c.kind === "lit") mintStructuralMembers(c.node, true);
@@ -6287,7 +6288,6 @@ function isConversionPosition(n) {
   return false;
 }
 // R958 — the value under an assertion chain: parentheses, `as`, `<T>`, `!` and `satisfies` change no runtime value.
-let conversionViaAssertion = false;   // set while `convert` records a source read THROUGH an assertion
 const peelAssertions = (e) => unwrapArgExpr(e);   // R780: one wrapper set, not a third copy of it
 // R82 / PART 87: is the conversion's SOURCE type a fact about the VALUE, or only about a generic signature? A
 // call whose declared return type mentions one of its own type parameters (`wrap<T>(x: T): T`) hands back
@@ -6485,21 +6485,19 @@ for (const sf of sources) {
     // called as `launder(new LocalW())` ran LocalW's `m` (EXECUTED) with `deny Fs` exit 0 on the caller. The
     // parameter's visible arguments say what it holds — the SAME provenance index R246's accessor arm asks
     // (`receiverValueTypes`) — so each argument type is recorded as a conversion source. Upcasts only, as
-    // ever (`recordConversion` keeps a target the type is assignable to). A dependency-sourced value and a
-    // lying downcast are untouched: they are R958's by-design residue.
-    if (anyishType(st)) for (const vt of receiverValueTypes(src)) {
+    // ever (`recordConversion` keeps a target the type is assignable to). ⟨R958 widened-local half⟩ and the
+    // same for a source typed `object`/`{}`, and a `const` declared wider than its initializer
+    // (`uninformativeType`). A dependency-sourced value is R958's disclosed residue (`invisible`).
+    if (uninformativeType(st)) for (const vt of receiverValueTypes(src)) {
       try { recordConversion(vt, tt); } catch { /* best effort, as the main record below */ }
       CONFORMER_REACH?.("any-param", `${path.relative(rootDir, sf.fileName)}:${at.getStart()}`);
     }
-    conversionViaAssertion = kind !== "conversion";
-    try {
-      if (!CONFORMER_REACH) { recordConversion(st, tt); return; }
-      const count = () => [...interfaceImpls.values(), ...foreignInterfaceImpls.values(), ...classConformers.values(),
-                           ...depConformers.values()].reduce((a, x) => a + x.length, 0);
-      const before = count();
-      recordConversion(st, tt);
-      if (count() > before) CONFORMER_REACH(kind, `${path.relative(rootDir, sf.fileName)}:${at.getStart()}`);
-    } finally { conversionViaAssertion = false; }
+    if (!CONFORMER_REACH) { recordConversion(st, tt); return; }
+    const count = () => [...interfaceImpls.values(), ...foreignInterfaceImpls.values(), ...classConformers.values(),
+                         ...depConformers.values()].reduce((a, x) => a + x.length, 0);
+    const before = count();
+    recordConversion(st, tt);
+    if (count() > before) CONFORMER_REACH(kind, `${path.relative(rootDir, sf.fileName)}:${at.getStart()}`);
   };
   (function walkConversions(node) {
     if (ts.isExpression(node) && !ts.isSpreadElement(node) && isConversionPosition(node)) {
@@ -6680,6 +6678,19 @@ function keyLiteralNames(t, depth = 0, seen = new Set()) {
 // the accessor edges the value's type declares — and never hedges; a receiver neither rule answers is
 // exactly as it was (the residual is stated in SOUNDNESS R246, not hidden here).
 function anyishType(t) { return !!t && !!(t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)); }   // hoisted: the conversion walk asks it first
+// ⟨SOUNDNESS R958, the WIDENED-LOCAL half⟩ A type that names no member is as silent about the value as `any`: a local
+// declared `object` or `{}` holding `new LocalW()` and asserted into an interface (`qDisp(o as Sink)`) ran
+// `LocalW.m` (EXECUTED) with every unit `[]` and no disclosure — `anyishType` alone let it through. Asked by the
+// conversion walk and the R246 receiver question alike; it only ever lets MORE value types be recorded.
+function uninformativeType(t) {
+  if (!t) return false;
+  if (anyishType(t) || (t.flags & ts.TypeFlags.NonPrimitive)) return true;
+  if (!(t.flags & ts.TypeFlags.Object) || t.isUnion?.() || t.isIntersection?.()) return false;
+  try {
+    return checker.getPropertiesOfType(t).length === 0 && t.getCallSignatures().length === 0
+      && t.getConstructSignatures().length === 0 && !checker.getIndexInfosOfType?.(t)?.length;
+  } catch { return false; }
+}
 function receiverValueTypes(expr, depth = 0, seen = new Set()) {
   if (!expr || depth > 6) return [];
   let t; try { t = checker.getTypeAtLocation(expr); } catch { t = null; }
@@ -6689,10 +6700,18 @@ function receiverValueTypes(expr, depth = 0, seen = new Set()) {
     let ti; try { ti = checker.getTypeAtLocation(inner); } catch { ti = null; }
     return [...(ti && !anyishType(ti) ? [ti] : []), ...below];
   }
-  if (!anyishType(t) || !ts.isIdentifier(expr)) return [];
+  if (!uninformativeType(t) || !ts.isIdentifier(expr)) return [];
   const sym = checker.getSymbolAtLocation(expr);
   const d = sym?.valueDeclaration;
-  if (!sym || !d || !ts.isParameter(d) || seen.has(sym)) return [];
+  if (!sym || !d || seen.has(sym)) return [];
+  // ⟨R958, widened-local half⟩ a `const` declared wider than its initializer holds the initializer's value.
+  if (ts.isVariableDeclaration(d) && ts.isIdentifier(d.name) && d.initializer
+      && (ts.getCombinedNodeFlags(d) & ts.NodeFlags.Const)) {
+    seen.add(sym);
+    let ti; try { ti = checker.getTypeAtLocation(d.initializer); } catch { ti = null; }
+    return [...(ti && !anyishType(ti) ? [ti] : []), ...receiverValueTypes(d.initializer, depth + 1, seen)];
+  }
+  if (!ts.isParameter(d)) return [];
   seen.add(sym);
   const args = paramArgs.get(sym);
   if (!args || paramFnEscaped(paramOwnerOf.get(sym))) return [];
@@ -6700,7 +6719,7 @@ function receiverValueTypes(expr, depth = 0, seen = new Set()) {
   for (const a of args) {
     if (!a) continue;
     let ta; try { ta = checker.getTypeAtLocation(a); } catch { ta = null; }
-    if (ta && !anyishType(ta)) out.push(ta);
+    if (ta && !anyishType(ta)) out.push(ta);   // a VALUE's own type, even `{}`, is a fact about it
     out.push(...receiverValueTypes(a, depth + 1, seen));
   }
   return out;

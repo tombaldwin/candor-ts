@@ -10,6 +10,18 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **An assertion no longer deletes a dispatch candidate** (SOUNDNESS R958, the intra-project half the review re-measured).
+  A lying downcast `dO(bO as SubO)` over a `BaseO` whose `m` writes a file ran `BaseO.m` (EXECUTED) with `dO`/`rO`
+  ABSENT and `pure a.dO` exit 0, while the same value passed without `as` was charged. The assertion-scoped refusal
+  in the conformer pass is removed: the asserted value's class is registered as it would be unasserted. And a value
+  held at a type that names no member — `object`, `{}`, `unknown`, `any` — is followed to what it holds: a `const`
+  to its initializer, a parameter to its visible arguments (previously `any`/`unknown` parameters only). `const o:
+  object = new LocalW(); qDisp(o as Sink)`, the `unknown` twin and `lObj(o: object) { qDisp(o as Sink) }` were all
+  `[]` (EXECUTED: each ran `LocalW.m`); they are now `Fs`. Over the 28-entry corpus: 0 rows change their effect set,
+  3 rows drop the `reflect:accessor:any-receiver` reason beside others (still `Unknown`).
+- **README: a named miss for framework DI** (NestJS provider substitution under a class token — `useClass`,
+  `useValue`, `useFactory` — is silent; interface tokens resolve or disclose). Measured on an executed fixture.
+
 - ⚠ **A parameter fed the environment at SOME visible call site is the environment in its reader** (SOUNDNESS R934,
   the divergent half). `readDiv(e) { return e.SECRET }` called as `readDiv(process.env)` and `readDiv({…})` printed
   the planted secret through `readDiv` (EXECUTED) and was ABSENT with `deny Env readDiv` exit 0. The first cut
