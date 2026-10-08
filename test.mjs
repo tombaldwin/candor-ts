@@ -23219,6 +23219,55 @@ export function e03_gsat() { return (globalThis satisfies typeof globalThis).pro
         (row("run").calls ?? []).includes("src.f.wa") && !(row("run").unknownWhy ?? []).includes("callback:param#0"), JSON.stringify(row("run")));
 }
 
+// ── R815: THE REST OF THE CLASS-DEFINITION-TIME FAMILY — static field initialisers, `extends <expr>`, computed keys ──
+//
+// R782/R785 wired decorators and `static {}` blocks to the unit that EVALUATES the class. Three more pieces run at
+// definition and were attributed to a unit that never runs them (EXECUTED, lane fixture `fx/r815`): the definer was
+// ABSENT (`deny Fs` exit 0) and `C.constructor` / the method was charged instead. The `extends` half must ALSO keep
+// the constructor's reach — construction runs the produced class's constructor through `super` — so a dependency
+// mixin's `invisible` stays on the constructor (EXECUTED: `new D3()` writes in the dependency's constructor).
+if (blk()) {
+  const d = project({
+    "node_modules/mixdep/package.json": `{"name":"mixdep","version":"1.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/mixdep/index.d.ts": `export declare function Partial<T extends new (...a: any[]) => any>(B: T): T;\n`,
+    "node_modules/mixdep/index.js": "",
+    "src/f.ts": `import * as fs from "node:fs";
+import { Partial } from "mixdep";
+export function w(t: string): string { fs.writeFileSync("/tmp/r815-" + t, "x"); return t; }
+function mixin() { w("mixin"); return class {}; }
+export function staticField815() { class C1 { static x = w("static"); } return C1; }
+export function heritage815() { class C2 extends mixin() {} return C2; }
+export function computedKey815() { class C3 { [w("key")]() {} } return C3; }
+export function ctlBlock815() { class C4 { static { w("block"); } } return C4; }
+export function instance815() { class C5 { y = w("inst"); } return new C5(); }
+export class Top815 { static z = w("top"); }
+export function useTop815() { return new Top815(); }
+class Plain { }
+export class D3 extends Partial(Plain) {}
+export function mkD3() { return new D3(); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.f.${fn}`) ?? {};
+  for (const fn of ["staticField815", "heritage815", "computedKey815", "ctlBlock815", "instance815"])
+    check(`R815 DEFINER: \`${fn}\` evaluates the class and performs the effect — Fs, \`deny Fs src.f.${fn}\` exit 1`,
+          (row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.f.${fn}`) === 1, JSON.stringify(row(fn)));
+  check("R815 MODULE: a top-level class's static initialiser is the module's — `deny Fs src.f.<module>` exit 1 (0 at the base)",
+        gate("deny Fs src.f.<module>") === 1, JSON.stringify(row("<module>")));
+  check("R815 OVER-CHARGE: `new Top815()` runs no static initialiser — `useTop815` carries no Fs (Fs at the base, via Top815.constructor)",
+        !(row("useTop815").inferred ?? []).includes("Fs"), JSON.stringify(row("useTop815")));
+  check("R815 OVER-CHARGE: a computed key is not the method's — the `C3.[w(\"key\")]` unit carries no Fs",
+        !report.functions.some((e) => e.fn.startsWith("src.f.C3.[") && (e.inferred ?? []).includes("Fs")), "");
+  check("R815 SUPER REACH KEPT: `new D3()` still reaches the dependency mixin's constructor — `invisible` names mixdep on D3.constructor and mkD3",
+        (row("D3.constructor").invisible ?? []).includes("mixdep") && (row("mkD3").invisible ?? []).includes("mixdep"),
+        JSON.stringify([row("D3.constructor"), row("mkD3")]));
+  check("R815 CONTROL: an INSTANCE field is the constructor's — `C5.constructor` keeps Fs",
+        (row("C5.constructor").inferred ?? []).includes("Fs"), JSON.stringify(row("C5.constructor")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

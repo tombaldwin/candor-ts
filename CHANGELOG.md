@@ -24,6 +24,14 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   wrapper sets. `(k.m as F).call(k)`, `Reflect.apply(f as F, …)` and `(<any>globalThis).process.env.HOME` were
   ABSENT (`deny` and `deny Unknown` exit 0, EXECUTED); `(f as F).bind(t)` and `run((f))` were opaque `Unknown`.
   All now route through `unwrapArgExpr`. (The R780 HOF-argument spelling itself was already closed by R947.)
+- ⚠ **Class-definition-time work is the definer's** (SOUNDNESS R815). A `static x = …` initialiser, an
+  `extends <expr>` heritage expression and a computed member key `[k()]` run when the class is EVALUATED; they were
+  attributed to `C.constructor` or the method, so the function defining the class read pure (EXECUTED) and every
+  `new C()` was charged for a static initialiser it never runs. Static initialisers join the class's
+  `<static-init>` unit; `extends <expr>` gets a `C.<heritage>` initializer unit reached by both the definer and the
+  constructor (construction runs the produced class's constructor through `super`); computed keys go to the
+  scope around the class or literal. New `<heritage>` rows; `C.constructor` rows that only carried static
+  initialisers disappear.
 
 ## [0.40.0] — 2026-10-07
 

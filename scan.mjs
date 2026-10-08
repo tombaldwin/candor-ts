@@ -40,6 +40,9 @@ import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadE
          WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, NET_ACCEPTING, NET_REQUEST_NAMED, FS_USE_VERBS,
          EXEC_USE_VERBS, RESERVED_SIDECAR_SEGMENTS } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
+// ⟨R815⟩ reach marker for the class-definition-time attribution in `enclosing` (declared here, not beside it:
+// `enclosing` runs from module-level code above its own definition, so a later `const` is in its TDZ).
+const R815_REACH = process.env.CANDOR_R815_REACH ? (k) => console.error(`R815-REACH ${k}`) : null;
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -6926,6 +6929,29 @@ function decoratorArgUnit(callNode) {
   }
   return qual;
 }
+// ⟨SOUNDNESS R815⟩ The `extends <expr>` unit of a class that has a constructor unit. The expression runs ONCE, at
+// class definition (so the evaluating unit edges here, pass 2a′) — and every construction then runs the
+// constructor of the class it produced through `super`, implicit or explicit, whose body this scan sees only as
+// the expression's own callees (`mixin()`'s class expression is attributed to `mixin`; a dependency's
+// `PartialType(X)` is the dependency's ledger/`invisible`). So the constructor edges here too. Attributing the
+// expression to the constructor ALONE (the old climb) left the definer silent; attributing it to the definer
+// ALONE drops the super reach — MEASURED: `new D3()` over `class D3 extends Partial(Plain)` from a dependency
+// that writes in its generated constructor (EXECUTED) went from `invisible:['mixdep']` to ABSENT, and nest's six
+// `extends PartialType(…)` DTO constructors lost their `@nestjs/mapped-types` disclosure the same way.
+function heritageUnit(cls, ctorQual) {
+  const qual = ctorQual.replace(/\.constructor$/, ".<heritage>");
+  if (!fns.has(qual)) {
+    const sf = cls.getSourceFile();
+    const h = (cls.heritageClauses ?? []).find((c) => c.token === ts.SyntaxKind.ExtendsKeyword) ?? cls;
+    fns.set(qual, { local: `${fns.get(ctorQual)?.local?.replace(/\.constructor$/, "") ?? "<anonymous>"}.<heritage>`,
+                    direct: new Set(), fsKinds: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
+                    cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), dispatch: new Set(), why: new Set(),
+                    entry: false, unitKind: "initializer",
+                    loc: `${path.relative(rootDir, sf.fileName)}:${sf.getLineAndCharacterOfPosition(h.getStart()).line + 1}:1`,
+                    endLine: sf.getLineAndCharacterOfPosition(h.getEnd()).line + 1 });
+  }
+  return qual;
+}
 // nearest enclosing analyzed function (closures attribute to it — SEMANTICS §2)
 function enclosing(node) {
   let prev = null;
@@ -6965,6 +6991,36 @@ function enclosing(node) {
     if (ts.isDecorator(p)) return null;
     const n = nodeName.get(p);
     if (n) return n;
+    // ⟨SOUNDNESS R815⟩ THE REST OF THE CLASS-DEFINITION-TIME FAMILY R782/R785 started. Three more pieces of a class
+    // run when the class is EVALUATED, not when it is constructed or a member is called — and the climb
+    // attributed each to a unit that never runs it, leaving the evaluating unit silent (EXECUTED, lane fixture
+    // `fx/r815`: the enclosing function ABSENT, `deny Fs` exit 0; the effect fabricated onto `C.constructor` or the
+    // method):
+    //  · a `static x = …` INITIALISER runs at definition, exactly like a `static {}` block, so it lands on the
+    //    same `<static-init>` unit (which pass 2a′ wires from the evaluating unit). Climbing on reached the
+    //    ClassDeclaration, i.e. `C.constructor` — every `new C()` charged, the definer silent. An instance field
+    //    is NOT this (it runs per construction; the constructor is right), and a property that IS a unit
+    //    (`static h = () => …` minted as `C.h`) answered above before reaching here.
+    //  · an `extends <expr>` HERITAGE expression and
+    //  · a COMPUTED member name `[k()]` (class OR object-literal member)
+    //    are evaluated in the scope AROUND the class / literal, by whatever evaluates it — so the climb resumes
+    //    OUTSIDE the container. (The computed name hung under the member's own node, so the method `C3.[w("k")]`
+    //    was charged for its own name.)
+    if (prev && ts.isPropertyDeclaration(p) && p.initializer === prev
+        && (ts.getCombinedModifierFlags(p) & ts.ModifierFlags.Static)
+        && p.parent && (ts.isClassDeclaration(p.parent) || ts.isClassExpression(p.parent)))
+      { R815_REACH?.("static"); return staticBlockUnit(p); }
+    if (ts.isHeritageClause(p) && p.token === ts.SyntaxKind.ExtendsKeyword && p.parent
+        && (ts.isClassDeclaration(p.parent) || ts.isClassExpression(p.parent))) {
+      const ctor = nodeName.get(p.parent);
+      if (ctor) { R815_REACH?.("heritage"); return heritageUnit(p.parent, ctor); }
+      // a class with no constructor unit: the climb already resumes outside it, at the evaluating unit
+    }
+    if (ts.isComputedPropertyName(p) && p.parent?.parent) {
+      const container = p.parent.parent;
+      if (ts.isClassDeclaration(container) || ts.isClassExpression(container)) { R815_REACH?.("ckey"); return enclosing(container.parent); }
+      if (ts.isObjectLiteralExpression(container)) { R815_REACH?.("okey"); return enclosing(container); }
+    }
     // Reached the SourceFile with no named unit: a TOP-LEVEL executable statement. Attribute to the
     // file's synthesized `<module>` initializer unit (minted lazily here) rather than dropping it.
     if (ts.isSourceFile(p)) return moduleUnit(p);
@@ -11376,7 +11432,17 @@ for (const sf of sources) visitCalls(sf);
       }
     }
     for (const m of cls.members ?? [])
-      if (ts.isClassStaticBlockDeclaration(m)) add(staticBlockQual(m), "static");
+      if (ts.isClassStaticBlockDeclaration(m)
+          || (ts.isPropertyDeclaration(m) && m.initializer && (ts.getCombinedModifierFlags(m) & ts.ModifierFlags.Static)))
+        add(staticBlockQual(m), "static");   // R815: a static field initialiser shares the block's unit
+    // R815: the `extends <expr>` unit — run by the definer (here) and reached by every construction (`super`).
+    const ctorQ = nodeName.get(cls);
+    const herQ = ctorQ && ctorQ.endsWith(".constructor") ? ctorQ.replace(/\.constructor$/, ".<heritage>") : null;
+    // Wired only when the expression attributed something: a bare `extends Base` mints the unit (a reference was
+    // attributed) and carries nothing, and an edge to an empty unit is a `calls` entry on every subclass for no answer.
+    const herR = herQ && fns.get(herQ);
+    if (herR && ["direct", "edges", "why", "blind", "hosts", "paths", "cmds", "incomplete", "dispatch", "tables"]
+                  .some((k) => herR[k]?.size)) { add(herQ, "heritage"); fns.get(ctorQ)?.edges.add(herQ); }
     if (!targets.length) continue;
     const from = enclosing(cls.parent);
     const rec = from && fns.get(from);
