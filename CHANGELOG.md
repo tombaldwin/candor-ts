@@ -10,6 +10,24 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **An accessor reached through an `any`/`unknown` receiver** (SOUNDNESS R246). `(s as any).token = v`,
+  `(s as any)[k] = v` and `function w(o: any) { o.token = v }` called with a class instance ran the class's
+  setter (EXECUTED) and were ABSENT with `deny Fs` exit 0 — the caller too. The receiver's VALUE is now asked:
+  the operand under an assertion, and an `any` parameter's arguments at every visible call site. A pinned name
+  resolves to the setter's effects; an unpinned key takes R240(b)'s `reflect:accessor:dynamic-key`, as on a
+  typed receiver. Where neither names the value (an escaped function, no visible caller) a WRITE discloses
+  `Unknown[reflect:accessor:any-receiver]`, only when the project declares a setter with a body and an effect
+  that the write could name. The read (getter) side of the same residue is NOT hedged (priced at 1.45% of
+  roster units; a separate decision).
+- ⚠ **A function reference inside an object literal handed to an invoker** (SOUNDNESS R1031). rxjs
+  `subscribe({ next: h })`, `{ complete: h }`, `{ next }`, `{ next: o.m.bind(o) }` and
+  `addEventListener(t, { handleEvent: h })` dropped the reference (caller ABSENT, EXECUTED). Each member the
+  parameter's DECLARED type makes callable is now treated as R803 treats a bare reference. Descriptors
+  (`Object.defineProperty(o, k, { get })`) and generic store slots (`Object.assign(p, { f })`) admit nothing.
+- ⚠ **The rest of the browser's persistent stores and navigation** (SOUNDNESS R241). `document.cookie` (read or
+  write), a write to any `location` property, `location.assign`/`replace`/`reload`, and every member of
+  IndexedDB, the Cache API, `StorageManager`, the OPFS handles and `CookieStore` read as nothing under
+  `lib: ["DOM"]`; they now disclose `Unknown[native:<Interface>.<member>]`, as `localStorage` already did.
 - ⚠ **The environment object is followed into PARAMETERS and heap FIELDS, not only locals** (SOUNDNESS R934,
   R935). A function that reads a parameter every visible call site hands `process.env` (`function rd(e) { return
   e.K }` called as `rd(process.env)`; pnpm's `readEnvVar(env, …)` behind `const env = opts.env ?? process.env`),

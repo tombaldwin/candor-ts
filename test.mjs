@@ -23304,6 +23304,142 @@ export function n32_assign() { return Object.assign(w, { tag: 1 }); }`,
           !(row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.f.${fn}`) === 0, JSON.stringify(row(fn)));
 }
 
+// ── R1031: A FUNCTION REFERENCE INSIDE AN OBSERVER OBJECT — `subscribe({ next: h })` ─────────────────────────────
+// R803 admits a POSITION the signature declares callable; an object literal's MEMBERS are positions its type
+// declares callable too. EXECUTED against real rxjs 7 (`tsagent-v042/fx/r1031`): `{ next: h }`, `{ complete: h }`,
+// `{ next }` and `{ next: o.m.bind(o) }` ran their handler and were ABSENT, `deny Fs` exit 0 at 85977fd; a
+// descriptor's `get` is INSTALLED and never run by `defineProperty` (executed: no write), and must stay uncharged.
+// The `rxjsish` stub reproduces rxjs's own `subscribe(observerOrNext?: Partial<Observer<T>> | ((value: T) => void))`.
+if (blk()) {
+  const d = project({
+    "node_modules/rxjsish/package.json": `{"name":"rxjsish","version":"7.0.0","types":"index.d.ts","main":"index.js"}`,
+    "node_modules/rxjsish/index.d.ts": `export interface Observer<T> { next: (value: T) => void; error: (err: any) => void; complete: () => void; }
+export declare class Observable<T> { subscribe(observerOrNext?: Partial<Observer<T>> | ((value: T) => void)): { unsubscribe(): void }; }
+export declare function of<T>(...xs: T[]): Observable<T>;
+`,
+    "node_modules/rxjsish/index.js": "",
+    "src/o.ts": `import * as fs from "node:fs";
+import { of } from "rxjsish";
+function onNextW(v: number) { fs.writeFileSync("/tmp/r1031-" + v, "x"); }
+function onDoneW() { fs.writeFileSync("/tmp/r1031-done", "x"); }
+function pureNext(v: number) { return v + 1; }
+function loudGet() { fs.writeFileSync("/tmp/r1031-desc", "x"); return 1; }
+class Obs { handle(v: number) { fs.writeFileSync("/tmp/r1031-b" + v, "x"); } }
+export function bareSubQ() { of(1).subscribe(onNextW); }
+export function objSubQ() { of(2).subscribe({ next: onNextW }); }
+export function objDoneQ() { of(3).subscribe({ complete: onDoneW }); }
+export function objShortQ() { const next = onNextW; of(4).subscribe({ next }); }
+export function objBoundQ() { const o = new Obs(); of(7).subscribe({ next: o.handle.bind(o) }); }
+export function evObjQ(t: EventTarget) { t.addEventListener("x", { handleEvent: onDoneW }); }
+export function ctlPureSubQ() { of(8).subscribe({ next: pureNext }); }
+export function ctlDescQ() { const o = {}; Object.defineProperty(o, "k", { get: loudGet }); return o; }
+export function ctlAssignQ() { return Object.assign(new Promise<void>(() => {}), { unsubscribe: onDoneW }); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.o.${fn}`) ?? {};
+  for (const fn of ["bareSubQ", "objSubQ", "objDoneQ", "objShortQ", "objBoundQ", "evObjQ"])
+    check(`R1031 INVOKER: \`${fn}\` hands a reference inside an observer/listener object — Fs, \`deny Fs src.o.${fn}\` exit 1`,
+          (row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.o.${fn}`) === 1, JSON.stringify(row(fn)));
+  for (const fn of ["ctlPureSubQ", "ctlDescQ", "ctlAssignQ"])
+    check(`R1031 CONTROL: \`${fn}\` (a pure handler / an INSTALLED descriptor accessor / a generic STORE slot) — no Fs, \`deny Fs src.o.${fn}\` exit 0`,
+          !(row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.o.${fn}`) === 0, JSON.stringify(row(fn)));
+}
+
+// ── R246: AN ACCESSOR REACHED THROUGH A RECEIVER WHOSE STATIC TYPE IS `any` ──────────────────────────────────────
+// Accessor lookup asked the receiver's TYPE, and `any` declares nothing. EXECUTED (`tsagent-v042/fx/anyw`, 6 of 6
+// writes observed): `(s as any).token = v`, `(s as any)[k] = v`, `o.token = v` / `o[k] = v` with `o: any` called
+// with a `Sx`, and `(o as Record<…>)[k] = v` with `o: unknown` were ABSENT (`deny Fs` exit 0 — the CALLER too).
+// The assertion's operand and the `any` parameter's visible arguments say what the value is. A PINNED name
+// resolves to the setter (Fs); an unpinned key takes R240(b)'s own `reflect:accessor:dynamic-key` disclosure, as
+// it does on a typed receiver. Controls: an `any` receiver only ever handed `{}`. An ESCAPED `any` parameter is the hedge below.
+if (blk()) {
+  const d = project({
+    "src/a.ts": `import * as fs from "node:fs";
+export class Sx { set token(v: string) { fs.writeFileSync("/tmp/r246-" + v, "x"); } get token() { return "t"; } }
+export function pinnedW(s: Sx) { s["token" as const] = "pinned"; }
+export function assertAnyW(s: Sx, k: string) { (s as any)[k] = "assertany"; }
+export function assertAnyNameW(s: Sx) { (s as any).token = "assertname"; }
+export function anyRecvW(o: any, k: string) { o[k] = "anyrecv"; }
+export function anyNameW(o: any) { o.token = "anyname"; }
+export function anyCallerW() { anyRecvW(new Sx(), "token"); anyNameW(new Sx()); }
+export function unknownRecvW(o: unknown, k: string) { (o as Record<string, string>)[k] = "unknownrec"; }
+export function unknownCallerW() { unknownRecvW(new Sx(), "token"); }
+export function reflAnyW(s: Sx) { Reflect.set(s as any, "token", "refl"); }
+export function ctlAnyW(o: any, k: string) { o[k] = 1; }
+export function ctlCallerW() { ctlAnyW({}, "a"); }
+function escAnyW(o: any) { o.token = "esc"; }
+export function ctlEscW() { [new Sx()].forEach(escAnyW); }`,
+  });
+  const gate = (line) => {
+    fs.writeFileSync(path.join(d, "p.pol"), line + "\n");
+    return scan(d, "--policy", path.join(d, "p.pol")).r.status;
+  };
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.a.${fn}`) ?? {};
+  for (const fn of ["assertAnyNameW", "anyNameW", "anyCallerW", "reflAnyW"])
+    check(`R246 RESOLVED: \`${fn}\` reaches Sx's setter through an \`any\` receiver — Fs, \`deny Fs src.a.${fn}\` exit 1 (ABSENT at 85977fd)`,
+          (row(fn).inferred ?? []).includes("Fs") && gate(`deny Fs src.a.${fn}`) === 1, JSON.stringify(row(fn)));
+  for (const fn of ["assertAnyW", "anyRecvW", "unknownRecvW"])
+    check(`R246 DISCLOSED: \`${fn}\` writes an UNPINNED key on an \`any\` receiver whose value is a Sx — reflect:accessor:dynamic-key, \`deny Unknown src.a.${fn}\` exit 1`,
+          (row(fn).unknownWhy ?? []).includes("reflect:accessor:dynamic-key") && gate(`deny Unknown src.a.${fn}`) === 1, JSON.stringify(row(fn)));
+  for (const fn of ["ctlAnyW", "ctlCallerW"])
+    check(`R246 CONTROL: \`${fn}\` — an \`any\` receiver only ever handed \`{}\` charges nothing`, Object.keys(row(fn)).length === 0, JSON.stringify(row(fn)));
+  // THE HEDGE: an ESCAPED `any` parameter (handed to forEach) has no enumerable bindings; the project declares
+  // an EFFECTFUL setter of the written name, so the write discloses (executed: Sx's setter ran) — and the
+  // caller inherits it. ABSENT, `deny Unknown` exit 0, at 85977fd.
+  check("R246 HEDGE: `escAnyW` (escaped `any` receiver, effectful project setter `token`) is Unknown[reflect:accessor:any-receiver]",
+        (row("escAnyW").unknownWhy ?? []).includes("reflect:accessor:any-receiver") && !(row("escAnyW").inferred ?? []).includes("Fs"), JSON.stringify(row("escAnyW")));
+  check("R246 HEDGE GATE: `deny Unknown src.a.ctlEscW` fires through the forEach edge", gate("deny Unknown src.a.ctlEscW") === 1);
+}
+// …and its CALIBRATION: the same escaped write in a project whose setter of that name is PURE discloses nothing.
+if (blk()) {
+  const d = project({
+    "src/b.ts": `export class Sp { v = ""; set token(x: string) { this.v = x; } }
+function escPureW(o: any) { o.token = "esc"; }
+export function ctlEscPureW() { [new Sp()].forEach(escPureW); }`,
+  });
+  const { report } = scan(d);
+  check("R246 HEDGE CONTROL: a pure project setter arms nothing — `escPureW` and its caller are absent",
+        entry(report, "src.b.escPureW") == null && entry(report, "src.b.ctlEscPureW") == null,
+        JSON.stringify([entry(report, "src.b.escPureW"), entry(report, "src.b.ctlEscPureW")]));
+}
+
+// ── R241: THE REST OF THE BROWSER'S PERSISTENT STORES AND NAVIGATION ─────────────────────────────────────────
+// Under `lib: ["ES2022","DOM"]` all six of the row's spellings — `document.cookie` read and write,
+// `location.href = u`, `location.assign(u)`, `indexedDB.open`, `caches.open`, `navigator.storage.getDirectory`
+// — were ABSENT (deny Unknown exit 0 at 85977fd) while `localStorage.setItem` on the same tree read
+// `Unknown[native:Storage.setItem]`. Now the same answer, from the resolved declaration's interface. Controls:
+// READING `location.href` (no navigation), a pure function, and a PROJECT `class Cache` (resolves `<local>`).
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({ compilerOptions: { target: "ES2022", lib: ["ES2022", "DOM"], module: "commonjs",
+                                      strict: true, skipLibCheck: true, types: [] }, include: ["src"] }),
+    "src/d.ts": `export function cookieReadD() { return document.cookie; }
+export function cookieWriteD(v: string) { document.cookie = "tok=" + v; }
+export function hrefWriteD(u: string) { location.href = u; }
+export function assignD(u: string) { location.assign(u); }
+export function idbOpenD() { return indexedDB.open("db", 1); }
+export function idbPutD(db: IDBDatabase) { db.transaction("s", "readwrite").objectStore("s").put({ a: 1 }, "k"); }
+export async function cachesOpenD() { const c = await caches.open("v1"); await c.put("/x", new Response("y")); }
+export async function opfsD() { return navigator.storage.getDirectory(); }
+export function hrefReadCtlD() { return location.href; }
+export function pureCtlD(x: number) { return x * 2; }
+class Cache { open() { return 1; } }
+export function shadowCtlD() { return new Cache().open(); }`,
+  });
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.d.${fn}`) ?? {};
+  for (const fn of ["cookieReadD", "cookieWriteD", "hrefWriteD", "assignD", "idbOpenD", "idbPutD", "cachesOpenD", "opfsD"])
+    check(`R241: \`${fn}\` touches a browser store / navigates — Unknown[native:…] (ABSENT at 85977fd)`,
+          (row(fn).unknownWhy ?? []).some((w) => w.startsWith("native:")), JSON.stringify(row(fn)));
+  for (const fn of ["hrefReadCtlD", "pureCtlD", "shadowCtlD"])
+    check(`R241 CONTROL: \`${fn}\` charges nothing`, Object.keys(row(fn)).length === 0, JSON.stringify(row(fn)));
+}
+
 // ── R780: ONE TRANSPARENT-WRAPPER SET — `( )`, `as`, `<T>`, `!`, `satisfies` change no runtime value ─────────
 //
 // The HOF-ref arm already unwrapped (R947). Seventeen other loops answered "is this THAT reference / THAT object?"
