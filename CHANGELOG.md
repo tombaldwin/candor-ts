@@ -10,6 +10,11 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **A class expression's definition-time work is wired from the unit that evaluates it** (SOUNDNESS R1060). `export
+  class HB { static Inner = class { static { write } } }` wired the inner `static {}` block from `HB.constructor`, so
+  `new HB()` was charged a write it never performs and the module that performs it at import read nothing (EXECUTED).
+  Gates scoped to the module go 0 → 1; gates scoped to the outer constructor's callers go 1 → 0. Corpus: 0 rows change.
+
 - ⚠ **An assertion no longer deletes a dispatch candidate** (SOUNDNESS R958, the intra-project half the review re-measured).
   A lying downcast `dO(bO as SubO)` over a `BaseO` whose `m` writes a file ran `BaseO.m` (EXECUTED) with `dO`/`rO`
   ABSENT and `pure a.dO` exit 0, while the same value passed without `as` was charged. The assertion-scoped refusal

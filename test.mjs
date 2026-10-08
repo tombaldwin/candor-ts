@@ -7190,6 +7190,39 @@ export function useCeP() { return new LP(); }
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── SOUNDNESS R1060: a class expression's definition-time work is wired from the unit that EVALUATES it ────────────
+// `export class HB { static Inner = class { static { write } } }`: EXECUTED, importing the module writes and `new HB()`
+// does not. At v0.40.1 the block's unit was wired from `HB.constructor` (pass 2a′ climbed from the class's PARENT, a
+// static property, with no child in hand) — `mkHB` Fs, the module ABSENT. CONTROL: an INSTANCE field's class
+// expression is evaluated per construction, so `new D2()` stays charged (EXECUTED: it writes).
+if (blk()) {
+  const d = project({
+    "src/s.ts": `import * as fs from "fs";
+export class HB { static Inner = class { static { fs.writeFileSync("/tmp/candor-r1060-a", "x"); } }; }
+export function mkHBz() { return new HB(); }
+`,
+    "src/t.ts": `import * as fs from "fs";
+export class D2 { x = class { static { fs.writeFileSync("/tmp/candor-r1060-b", "x"); } }; }
+export function mkD2z() { return new D2(); }
+`,
+    "mod.pol": "deny Fs src.s.<module>\n",
+    "ctl.pol": "deny Fs src.s.mkHBz\n",
+  });
+  const { report } = scan(d);
+  const inf = (fn) => entry(report, fn)?.inferred ?? [];
+  check("R1060: the module that evaluates a static class-expression field runs its `static {}` block → Fs", inf("src.s.<module>").includes("Fs"),
+        JSON.stringify(entry(report, "src.s.<module>") ?? null));
+  check("R1060: constructing the OUTER class runs no static block — `HB.constructor` and `mkHBz` are not charged Fs",
+        !inf("src.s.HB.constructor").includes("Fs") && !inf("src.s.mkHBz").includes("Fs"),
+        JSON.stringify([entry(report, "src.s.HB.constructor"), entry(report, "src.s.mkHBz")]));
+  check("R1060 CONTROL: an INSTANCE field's class expression is evaluated per construction — `mkD2z` stays Fs", inf("src.t.mkD2z").includes("Fs"),
+        JSON.stringify(entry(report, "src.t.mkD2z") ?? null));
+  const ex = (pol) => scan(d, "--policy", path.join(d, pol)).r.status;
+  check("R1060 GATE: `deny Fs src.s.<module>` fires (exit 0 at v0.40.1)", ex("mod.pol") === 1, `exit ${ex("mod.pol")}`);
+  check("R1060 GATE: `deny Fs src.s.mkHBz` is clean (exit 1 at v0.40.1 — a fabrication)", ex("ctl.pol") === 0, `exit ${ex("ctl.pol")}`);
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── SOUNDNESS R944: a unit with no name of its own is keyed by ANCHOR PATH + ORDINAL, not by OFFSET ──────
 // `<structural>@N`, `<callable>@N`, `<decorator>@N`, `<decorator-arg>@N` and `[computed@N]` were keyed by
 // the absolute character offset, so a COMMENT LINE above them renamed them — and under ⟨0.40⟩'s AS-EFF-005

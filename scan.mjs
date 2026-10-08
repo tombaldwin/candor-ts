@@ -12396,7 +12396,12 @@ for (const sf of sources) visitCalls(sf);
       if (crec && !crec.edges.has(ceq)) { crec.edges.add(ceq); hit("classexpr"); }
     } else if (ceq && process.env.CANDOR_R1016_REACH) console.error(`R1016-REACH contained-dropped ${ceq}`);
     if (!targets.length) continue;
-    const from = enclosing(cls.parent);
+    // ⟨SOUNDNESS R1060⟩ a class EXPRESSION is asked from itself, as the R1016 edge above is: climbing from its PARENT
+    // starts at a `static X = class {…}` property with no child in hand, so R815's static-initialiser rule never
+    // matched and the inner class's definition-time work was wired from the OUTER class's constructor — `new HB()`
+    // charged for a `static {}` block that runs once, at import (EXECUTED), and the module that runs it silent.
+    // A declaration is still asked from its parent: from itself, `nodeName` would answer its own constructor.
+    const from = ts.isClassExpression(cls) ? enclosing(cls) : enclosing(cls.parent);
     const rec = from && fns.get(from);
     if (!rec) continue;
     for (const [q, k] of targets) if (q !== from && !rec.edges.has(q)) { rec.edges.add(q); hit(k); }
