@@ -10,6 +10,52 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **`process.env` read anywhere in a project is no longer hidden by a JavaScript expando write** (SOUNDNESS R1074).
+  In a JS script the checker records `process.env['K'] = v` as a declaration of the global `process`, and the
+  "is this the ambient global, or a project shadow?" test asked only whether any declaration sat in a project file —
+  so one such line made every `process.env` read in the whole project read as nothing. A shadow is now a declaration
+  that creates a different runtime binding (a non-ambient variable, function, class, parameter or import); an expando,
+  a `declare`, a `.d.ts` and a `declare global` block are not. All eight copies of the test share the one answer.
+  EXECUTED: `deny Env` 0 → 1. Corpus: drizzle-orm (two driver-test scripts assign `process.env['POSTGRES_URL']`) —
+  95 rows gain a concrete `Env`, every direct one read from source.
+- ⚠ **What node's `process` module exports is the process, under any local name** (SOUNDNESS R1075). `import { env }
+  from "node:process"` (and `{ env as e }`, `import * as p`, `import p from`), `import { argv }`, `import { hrtime }`
+  and an imported project alias (`export const myEnv = process.env`) read as nothing; each is now `Env` / `Clock`
+  like its `process.` spelling. EXECUTED: every form printed the planted value with the reader ABSENT. Corpus: rollup
+  (`import { env } from 'node:process'`), 16 rows gain `Env`.
+- ⚠ **A `ProcessEnv`-typed value the location model cannot trace discloses** (SOUNDNESS R935). A `Map`/`Set`/`WeakMap`
+  holding `process.env`, `for…of` over an array of it, an `.map` callback's parameter, and an interface-typed
+  `opts.env` read as nothing (EXECUTED: each printed the planted value). Such a read is now `Unknown[env-maybe-read]` —
+  MAY, never `Env`, since a `ProcessEnv`-typed object may be a copy. A named function's parameter (R934's), a project
+  callee or getter, and a binding whose values the table resolves are not re-asked. Residual: the environment stored
+  under `any`/`Record<…>` is covered by the next entry. Corpus: 5 rows newly `Unknown` (pnpm's `dirs.ts`, git-js's
+  `get env`), 0.012% of 41,924 units.
+- ⚠ **The environment put into a container whose type is lost** (SOUNDNESS R935). `new Map<string, any>([["e",
+  process.env]])`, `rec["e"] = process.env` on a `Record<string, any>`, `arr.push(process.env)` into an `any[]`, and a
+  member write onto an `any` object left every reader ABSENT (EXECUTED: each printed the planted value). The containers
+  are only those the environment is SEEN going into (a builtin collection built or mutated with it, a dynamic-key or
+  `any`-object write); a read discloses `Unknown[env-maybe-read]` only when its receiver is reached from one through an
+  element step. A `const`, unexported container whose every value is the environment RESOLVES: an element's key read
+  is `Env`. Corpus: 0 rows (no instance on the roster; the fixture is the evidence).
+- **A `typeof X`-annotated DI token is read by its VALUE** (SOUNDNESS R1061). `const T: typeof StoreA = StoreB;
+  { provide: T, useClass: Sub }` substitutes StoreB (EXECUTED, NestJS 10); the type-first reading charged StoreA's
+  callers instead — a fabrication on one side and a silence on the other. A reassignable token binding is open.
+- ⚠ **A DI provider TOKEN or SUBSTITUTE named through a binding, a helper or a type** (SOUNDNESS R1061). The token is
+  read through the checker's type (`const TOK = Store`, an imported const, an object member, `.map` over `[Store]`), a
+  helper's parameter is read through its visible call sites (`prov(Store, FileStore)`), `useClass` through a const
+  alias, and a token typed `Function`/`Type<any>` joins the substitute to every project class it is assignable to.
+  A substitute the scan cannot name (`Type<Store>` from an array) makes a dispatch on the token class
+  `Unknown[dispatch:…]`. EXECUTED on NestJS 10: seven forms ran the substitute's write with the caller ABSENT; now
+  `deny Fs` 1 (and `deny Fs Unknown` 1 for the unnameable one). Corpus: 0 effect changes.
+- ⚠ **A class's synthesized units are keyed per CLASS, not per class name** (SOUNDNESS R1067). Two anonymous class
+  expressions' `static {}` blocks shared `<mod>.<anonymous>.<static-init>`, as did same-named class expressions and
+  function-scoped `class K` declarations (static block, implicit constructor, `<heritage>`), so a pure definer was
+  charged its sibling's effect (EXECUTED: six fabrications). A class expression's units are now `<class>@<tag>.…`
+  and a function-scoped declaration's carry `#line:col`, like its methods. And the silent half: a function-scoped
+  class with an explicit constructor kept its field initialisers on an orphan unit, so the constructing function was
+  ABSENT — the class's constructor unit is now its explicit constructor's. Unit KEYS change for those classes (a
+  baseline naming the old key sees a rename); corpus: 27 renamed units, every edge carried over, 0 effects lost.
+
 ## [0.40.2] — 2026-10-09
 
 - ⚠ **A DI provider entry substitutes a class token** (SOUNDNESS R1061). `{ provide: Store, useClass: FileStore }`

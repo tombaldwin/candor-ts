@@ -2644,6 +2644,29 @@ const unaliasGlobal = (expr) => {
 };
 const projectFiles = new Set(fileNames.map((f) => path.resolve(f)));
 const sources = program.getSourceFiles().filter((f) => projectFiles.has(path.resolve(f.fileName)));
+// ⟨SOUNDNESS R1074⟩ DOES A PROJECT DECLARATION SHADOW AN AMBIENT GLOBAL? Eight checks asked "is any declaration of
+// this symbol in a project file?", and that is not the question: in a JavaScript SCRIPT the checker records every
+// expando ASSIGNMENT as a declaration of the global it writes through. One `process.env['K'] = v` in a project
+// `.cjs`/`.mjs`/`.js` script gives the global `process` a declaration in that file, and every `process.env` read
+// in the WHOLE PROJECT then failed the "ambient global" test. MEASURED (EXECUTED, `fx74`): `readSecret() { return
+// process.env.SECRET }` printed the planted value and was ABSENT, `deny Env readSecret` exit 0, beside a one-line
+// script that writes a different key; the same file without the script is `['Env']`. On the pinned corpus, every
+// `process.env` read across drizzle-orm (two driver-test scripts assign `process.env['POSTGRES_URL']`).
+// A shadow is a declaration that CREATES a different runtime binding: a non-ambient variable, function, class,
+// parameter, binding element or import. An expando (an Identifier/PropertyAccess/ElementAccess/BinaryExpression
+// declaration node, or `Object.defineProperty` on the global), a `declare` statement, a `.d.ts` file and a
+// `declare global {}` block all name the global itself and shadow nothing.
+const declShadowsGlobal = (d) => {
+  if (!projectFiles.has(path.resolve(d.getSourceFile().fileName)) || d.getSourceFile().isDeclarationFile) return false;
+  if (!(ts.isVariableDeclaration(d) || ts.isFunctionDeclaration(d) || ts.isClassDeclaration(d) || ts.isParameter(d)
+        || ts.isBindingElement(d) || ts.isImportSpecifier(d) || ts.isImportClause(d) || ts.isNamespaceImport(d)
+        || ts.isImportEqualsDeclaration(d) || ts.isEnumDeclaration(d) || ts.isModuleDeclaration(d))) return false;
+  if (ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient) return false;
+  for (let p = d.parent; p; p = p.parent)
+    if (ts.isModuleDeclaration(p) && (p.flags & ts.NodeFlags.GlobalAugmentation)) return false;
+  return true;
+};
+const projectShadows = (decls) => (decls ?? []).some(declShadowsGlobal);
 
 // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the TARGET's own source candor could NOT analyze — a .ts that
 // FAILED TO PARSE (a syntax error). getSyntacticDiagnostics() reports lexer/parser failures; the source
@@ -3532,7 +3555,7 @@ function determinedUrlObject(expr, call, depth = 0) {
       && (expr.expression.text === "URL" || expr.expression.text === "Request")) {
     const decls = checker.getSymbolAtLocation(expr.expression)?.declarations ?? [];
     if (decls.length === 0
-        || decls.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)))) return null;
+        || projectShadows(decls)) return null;   // ⟨R1074⟩
     const args = expr.arguments ?? [];
     const max = expr.expression.text === "URL" ? 2 : 1;
     if (args.length === 0 || args.length > max) return null;
@@ -4237,6 +4260,10 @@ const classDescendants = new Map();// base ClassDeclaration -> transitive LOCAL 
 // R954 — the conformer registries (filled by the conversion pass after `walkStructural`).
 const classConformers = new Map();   // local ClassDeclaration -> conformer nodes (local class, literal, dep class)
 const depConformers = new Map();     // InterfaceDeclaration (local or foreign) -> dependency ClassDeclarations
+// ⟨R1061⟩ local classes a DI provider substitutes with a value this scan cannot name: a dispatch on one discloses.
+const openSubstitutedClasses = new Set();
+const tokenProviders = new Map();   // ⟨R1061⟩ non-class provider token key -> [{ lit, prop }] (see `injectTokenKey`)
+const tokenDeclIds = new Map();
 const ifaceFlows = new Map();        // local InterfaceDeclaration J -> Set of targets a J-typed value is converted to
 const isProjectNode = (d) => !!d && projectFiles.has(path.resolve(d.getSourceFile().fileName));
 const conversionAddedImpls = new Map(); // InterfaceDeclaration -> Set of implementors the conversion pass added
@@ -4941,6 +4968,42 @@ function descriptorAliasRef(descProp) {
 // True when `node` is lexically inside a FUNCTION body — so its bare local name can collide with a
 // module-level or sibling-scope unit of the same name (see the qual disambiguation below). A namespace/
 // module block and the source file are NOT function scopes (their members are top-level units).
+// ⟨SOUNDNESS R1067/R1074⟩ THE KEYS OF A CLASS'S SYNTHESIZED UNITS, spelled once. A named function's, method's and
+// explicit constructor's qual carries `#line:col` when FUNCTION-SCOPED (above), because two scopes may declare the
+// same name. The units a CLASS mints for itself — its constructor when implicit (instance field initialisers), its
+// `<static-init>` and its `<heritage>` — were keyed on the bare class name, so two function-scoped `class K` in one
+// module shared one unit, and every anonymous class EXPRESSION's static block shared `<anonymous>.<static-init>`.
+// MEASURED (EXECUTED, `fx67`): six pure definers charged `Fs` from a sibling's block or field (`deny Fs` exit 1 over
+// code that writes nothing), and — the silent half — a function-scoped class with an EXPLICIT constructor kept its
+// field initialisers on the bare `K.constructor` unit while `new K()` resolved to the positioned explicit one, so
+// the constructing function was ABSENT and `deny Fs` exited 0 over a write that ran.
+// The class's own `.constructor` unit IS its explicit implementation's when there is one (the top-level spelling
+// already coincided); otherwise it is positioned at the class like any function-scoped unit.
+function classCtorQual(cls) {
+  const sf = cls.getSourceFile();
+  const base = `${moduleOf(sf)}.${namespacePrefixOf(cls)}${cls.name.text}.constructor`;
+  if (!isFunctionScoped(cls)) return base;
+  const impl = (cls.members ?? []).find((m) => ts.isConstructorDeclaration(m) && m.body);
+  const { line, character } = sf.getLineAndCharacterOfPosition((impl ?? cls).getStart());
+  return `${base}#${line + 1}:${character + 1}`;
+}
+// A class EXPRESSION is keyed by its stable tag (`<class>@…`, R944/R1016), never by its own optional name, which is
+// scoped to the class body: `return class Q {…}` twice in one module is two classes.
+function classUnitQual(cls, member) {
+  const sf = cls.getSourceFile();
+  const mod = moduleOf(sf);
+  if (ts.isClassExpression(cls)) return `${mod}.<class>@${stableUnitTag("classexpr", cls)}.${member}`;
+  const name = cls.name ? cls.name.text : "<anonymous>";   // only `export default class {}`: one per module
+  const base = `${mod}.${namespacePrefixOf(cls)}${name}.${member}`;
+  if (!cls.name || !isFunctionScoped(cls)) return base;
+  const { line, character } = sf.getLineAndCharacterOfPosition(cls.getStart());
+  return `${base}#${line + 1}:${character + 1}`;
+}
+// The `<heritage>` unit beside a class's constructor unit — one derivation for its minting and its wiring.
+function heritageQualOf(ctorQual) {
+  return ctorQual && /\.constructor(#\d+:\d+)?$/.test(ctorQual)
+    ? ctorQual.replace(/\.constructor(#\d+:\d+)?$/, ".<heritage>$1") : null;
+}
 function isFunctionScoped(node) {
   for (let p = node.parent; p; p = p.parent) {
     if (ts.isSourceFile(p) || ts.isModuleBlock(p)) return false;
@@ -5057,7 +5120,7 @@ for (const sf of sources) {
         for (const t of h.types) for (const idecl of localInterfaceDecls(t.expression)) climb(idecl);
         for (const t of h.types) for (const idecl of foreignInterfaceDecls(t.expression)) fClimb(idecl);
       }
-      const ctorQual = `${mod}.${namespacePrefixOf(node)}${node.name.text}.constructor`;
+      const ctorQual = classCtorQual(node);
       if (!fns.has(ctorQual)) {
         const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart());
         fns.set(ctorQual, { local: `${node.name.text}.constructor`, direct: new Set(), fsKinds: new Set(), edges: new Set(),
@@ -6586,31 +6649,226 @@ function providerSubstitution(lit) {
     && (p.name.text ?? p.name.getText()) === name);
   const provide = prop("provide");
   if (!provide) return;
-  let tsym; try { tsym = checker.getSymbolAtLocation(peelAssertions(provide.initializer)); } catch { tsym = undefined; }
-  if (tsym && (tsym.flags & ts.SymbolFlags.Alias)) { try { tsym = checker.getAliasedSymbol(tsym); } catch { return; } }
-  const target = (tsym?.declarations ?? []).find((d) => ts.isClassDeclaration(d) && isProjectNode(d));
-  if (!target) return;
-  const instanceOf = (e) => {
-    let s; try { s = checker.getSymbolAtLocation(peelAssertions(e)); } catch { s = undefined; }
-    if (s && (s.flags & ts.SymbolFlags.Alias)) { try { s = checker.getAliasedSymbol(s); } catch { s = undefined; } }
-    if (!s || !(s.flags & ts.SymbolFlags.Class)) return null;
-    try { return checker.getDeclaredTypeOfSymbol(s); } catch { return null; }
-  };
-  const sources = [];
-  for (const key of ["useClass", "useExisting"]) { const p = prop(key); const t = p && instanceOf(p.initializer); if (t) sources.push(t); }
+  const targets = providerTokenClasses(provide.initializer);
+  if (targets === null) { substituteForOpenToken(lit, prop); return; }
+  if (!targets.length) {   // ⟨R1061⟩ a string/symbol token: joined to its `@Inject(token)` parameters after the walk
+    const key = injectTokenKey(provide.initializer);
+    if (key) (tokenProviders.get(key) ?? tokenProviders.set(key, []).get(key)).push({ lit, prop });
+    return;
+  }
+  for (const target of targets) substituteFor(lit, prop, target);
+}
+// ⟨SOUNDNESS R1061⟩ A TOKEN THE CHECKER CANNOT NAME (`provide: someType` typed `Type<any>`, a parameter whose callers
+// escape the scan). The container injects the substitute wherever that token is asked for, which may be ANY class
+// token, so the substitute joins the candidates of every project class whose instance type it is ASSIGNABLE to — the
+// classes it could stand in for without breaking its callers. A union, never a narrowing: a class it cannot
+// conform to keeps its own answer. A token typed `any` (its import unresolved) needs nothing here: a parameter
+// typed by that token is `any` too, and a dispatch on it already discloses.
+function substituteForOpenToken(lit, prop) {
+  const projectClassDecls = substituteForOpenToken.classes ??= (() => {
+    const out = [];
+    const visit = (n) => { if (ts.isClassDeclaration(n) && n.name) out.push(n); ts.forEachChild(n, visit); };
+    for (const sf of sources) visit(sf);
+    return out;
+  })();
+  if (typeof checker.isTypeAssignableTo !== "function") return;
+  const subs = [];
+  for (const key of ["useClass", "useExisting"]) {
+    const p = prop(key);
+    if (!p) continue;
+    let t; try { t = checker.getTypeAtLocation(peelAssertions(p.initializer)); } catch { t = undefined; }
+    for (const u of t?.isUnion?.() ? t.types : [t])
+      for (const sig of u?.getConstructSignatures?.() ?? []) { try { subs.push(sig.getReturnType()); } catch { /* none */ } }
+  }
   const uv = prop("useValue");
-  if (uv) { try { sources.push(checker.getTypeAtLocation(peelAssertions(uv.initializer))); } catch { /* none */ } }
+  if (uv) { try { subs.push(checker.getTypeAtLocation(peelAssertions(uv.initializer))); } catch { /* none */ } }
   const uf = prop("useFactory");
   if (uf) {
     let ft; try { ft = checker.getTypeAtLocation(uf.initializer); } catch { ft = undefined; }
     for (const sig of ft?.getCallSignatures?.() ?? []) {
       let rt; try { rt = sig.getReturnType(); rt = checker.getAwaitedType?.(rt) ?? rt; } catch { rt = undefined; }
-      if (rt) sources.push(rt);
+      if (rt) subs.push(rt);
+    }
+  }
+  for (const st of subs) for (const s of st?.isUnion?.() ? st.types : [st]) {
+    if (!s || (s.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown))) continue;
+    const c = conformerOfSourceType(s);
+    if (!c || c.kind === "iface") continue;
+    for (const cd of projectClassDecls) {
+      if (cd === c.node) continue;
+      let it; try { it = checker.getDeclaredTypeOfSymbol(checker.getSymbolAtLocation(cd.name)); } catch { it = undefined; }
+      if (!it || !(it.getProperties?.().some((m) => m.flags & (ts.SymbolFlags.Method | ts.SymbolFlags.Property)))) continue;
+      let ok = false; try { ok = checker.isTypeAssignableTo(s, it); } catch { ok = false; }
+      if (ok && recordConformer(c, cd)) CONFORMER_REACH?.("di-open-token", `${path.relative(rootDir, lit.getSourceFile().fileName)}:${lit.getStart()}`);
+    }
+  }
+}
+// ⟨SOUNDNESS R1061, the TOKEN half⟩ WHICH CLASS A `provide:` TOKEN NAMES, asked of the CHECKER'S TYPE rather than of
+// the token's spelling. The first cut read the token's symbol and required it to BE a class declaration, so
+// `const TOK = Store6; { provide: TOK, useClass: FileStore6 }` named a variable and registered nothing: EXECUTED on
+// NestJS 10, `FileStore6.save` wrote its file, `runStore6` was ABSENT and `deny Fs`/`deny Fs Unknown` exited 0. The
+// value of the token at runtime is a class CONSTRUCTOR, and its type says which: `typeof Store6` through a const, an
+// import, an object member, a parameter fed at visible sites, or a `.map` over `[Store6]` alike. Returns the project
+// classes the token may be (a union token yields each), [] when the token is provably not a class constructor (a
+// string, a symbol, an `InjectionToken` instance — the interface arm's question), or null when the checker cannot say.
+function providerTokenClasses(expr, depth = 0, deps = false) {
+  const e = peelAssertions(expr);
+  if (!e || depth > 6) return null;
+  let tsym; try { tsym = checker.getSymbolAtLocation(e); } catch { tsym = undefined; }
+  if (tsym && (tsym.flags & ts.SymbolFlags.Alias)) { try { tsym = checker.getAliasedSymbol(tsym); } catch { tsym = undefined; } }
+  const direct = (tsym?.declarations ?? []).find((d) => ts.isClassDeclaration(d) && (isProjectNode(d) || (deps && d.getSourceFile().isDeclarationFile)));
+  if (direct) return [direct];
+  // ⟨R1061⟩ THE VALUE BEFORE THE ANNOTATION. `const T: typeof Store = FileStore` holds FileStore; its type says Store.
+  // A `const` binding answers with its initializer (and a const object literal's member with that member's value);
+  // a reassignable binding's value is not its declaration's, so the type cannot be trusted either — open.
+  const vd = tsym?.valueDeclaration;
+  if (vd && ts.isVariableDeclaration(vd) && isProjectNode(vd)) {
+    if (!(ts.getCombinedNodeFlags(vd) & ts.NodeFlags.Const) || !vd.initializer) return null;
+    if (ts.isIdentifier(vd.name)) return providerTokenClasses(vd.initializer, depth + 1, deps);
+  }
+  if (vd && ts.isPropertyAssignment(vd) && isProjectNode(vd) && ts.isPropertyAccessExpression(e)) {
+    const recv = unwrapArgExpr(e.expression);
+    let rs; try { rs = ts.isIdentifier(recv) ? checker.getSymbolAtLocation(recv) : undefined; } catch { rs = undefined; }
+    const rd = rs?.valueDeclaration;
+    if (rd && ts.isVariableDeclaration(rd) && (ts.getCombinedNodeFlags(rd) & ts.NodeFlags.Const) && rd.initializer
+        && unwrapArgExpr(rd.initializer) === vd.parent) return providerTokenClasses(vd.initializer, depth + 1, deps);
+  }
+  let t; try { t = checker.getTypeAtLocation(e); } catch { return null; }
+  if (!t) return null;
+  const out = [];
+  let open = false;
+  for (const u of t.isUnion?.() ? t.types : [t]) {
+    if (u.flags & (ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFlags.ESSymbolLike | ts.TypeFlags.BooleanLike
+                   | ts.TypeFlags.Undefined | ts.TypeFlags.Null)) continue;
+    if (!u.getConstructSignatures?.().length) {
+      // A type that can HOLD a class without saying which — `Function`, `Object`, `{}`, `object`, `any`, `unknown`.
+      const nm = u.getSymbol?.()?.getName?.();
+      const libRoot = (nm === "Function" || nm === "Object" || nm === "CallableFunction" || nm === "NewableFunction")
+        && (u.getSymbol().declarations ?? []).every((d) => d.getSourceFile().isDeclarationFile && !isProjectNode(d));
+      const emptyObj = (u.flags & ts.TypeFlags.Object) && !u.getProperties?.().length && !u.getCallSignatures?.().length;
+      if (libRoot || emptyObj || (u.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.NonPrimitive | ts.TypeFlags.TypeParameter))) {
+        open = true; continue;
+      }
+      // an object that is not a constructor (an `InjectionToken`, a plain token object) cannot be a class token
+      if ((u.flags & ts.TypeFlags.Object) && !(u.getCallSignatures?.().length)) continue;
+      open = true; continue;
+    }
+    const cd = (u.getSymbol?.()?.declarations ?? []).find((d) => ts.isClassDeclaration(d));
+    if (cd && (isProjectNode(cd) || (deps && cd.getSourceFile().isDeclarationFile))) { if (!out.includes(cd)) out.push(cd); continue; }
+    if (cd) continue;   // a dependency's class as a TOKEN: its own dispatch is the dependency's ledger
+    open = true;        // a constructor TYPE with no class behind it (`Type<any>`, `new () => T`, `Function`)
+  }
+  if (open && ts.isIdentifier(e)) {
+    // a PARAMETER whose type does not say (`token: Type<any>`): the classes its visible call sites pass, when the
+    // function does not escape — a helper `provider(Store, FileStore)` is the shape.
+    let ps = checker.getSymbolAtLocation(e);
+    if (ps && (ps.flags & ts.SymbolFlags.Alias)) { try { ps = checker.getAliasedSymbol(ps); } catch { /* keep */ } }
+    const args = ps && paramArgs.get(ps);
+    if (args?.length && !paramFnEscaped(paramOwnerOf.get(ps))) {
+      const viaArgs = [];
+      for (const a of args) {
+        const r = a ? providerTokenClasses(a, depth + 1, deps) : null;
+        if (r === null) return out.length ? out : null;
+        for (const c of r) if (!viaArgs.includes(c)) viaArgs.push(c);
+      }
+      for (const c of viaArgs) if (!out.includes(c)) out.push(c);
+      return out;
+    }
+  }
+  return open ? (out.length ? out : null) : out;
+}
+function substituteFor(lit, prop, target) {
+  const sources = [];
+  let open = false;   // a substitute this scan cannot name stands in for `target`
+  // ⟨R1061⟩ The INSTANCE types a `useClass`/`useExisting` value constructs, asked as the token is: the class symbol,
+  // else the class(es) the expression's TYPE or its visible call sites name — `const IMPL = FileStore` and a helper
+  // `prov(Store, FileStore)` alike. A constructor value the checker cannot name (`Type<Store>`, `any`) is OPEN.
+  const fromCtorValue = (e) => {
+    const cls = providerTokenClasses(e, 0, true);
+    if (cls === null) { open = true; return; }
+    for (const cd of cls) {
+      let it; try { it = checker.getDeclaredTypeOfSymbol(cd.name ? checker.getSymbolAtLocation(cd.name) : cd.symbol); } catch { it = undefined; }
+      if (it) sources.push(it); else open = true;
+    }
+  };
+  for (const key of ["useClass", "useExisting"]) { const p = prop(key); if (p) fromCtorValue(p.initializer); }
+  const anyish = (t) => !t || !!(t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown));
+  const uv = prop("useValue");
+  if (uv) { let t; try { t = checker.getTypeAtLocation(peelAssertions(uv.initializer)); } catch { t = undefined; } if (anyish(t)) open = true; else sources.push(t); }
+  const uf = prop("useFactory");
+  if (uf) {
+    let ft; try { ft = checker.getTypeAtLocation(uf.initializer); } catch { ft = undefined; }
+    const sigs = ft?.getCallSignatures?.() ?? [];
+    if (!sigs.length) open = true;
+    for (const sig of sigs) {
+      let rt; try { rt = sig.getReturnType(); rt = checker.getAwaitedType?.(rt) ?? rt; } catch { rt = undefined; }
+      if (anyish(rt)) open = true; else sources.push(rt);
     }
   }
   for (const st of sources) for (const s of st?.isUnion?.() ? st.types : [st]) {
     const c = conformerOfSourceType(s);
     if (c && recordConformer(c, target)) CONFORMER_REACH?.("di-provider", `${path.relative(rootDir, lit.getSourceFile().fileName)}:${lit.getStart()}`);
+  }
+  if (open && ts.isClassDeclaration(target)) {
+    for (const a of localAncestorsAndSelf(target)) openSubstitutedClasses.add(a);
+    CONFORMER_REACH?.("di-open-substitute", `${path.relative(rootDir, lit.getSourceFile().fileName)}:${lit.getStart()}`);
+  }
+}
+// ⟨SOUNDNESS R1061, the STRING-TOKEN half⟩ `{ provide: "STORE", useClass: FileStore }` injected as
+// `@Inject("STORE") store: Store` — a parameter typed by a project CLASS under a non-class token. Nothing converts
+// FileStore to Store, so `this.store.save()` resolved to the pure `Store.save`: EXECUTED on NestJS 10, the substitute
+// wrote its file with the caller ABSENT, `deny Fs`/`deny Fs Unknown` exit 0. The token is the join key — its string
+// literal value (so `"STORE"` and `const STORE_TOKEN = "STORE"` match), else the declaration of the unique symbol or
+// const it names. Every provider under the key substitutes the parameter's declared type; a class-typed parameter
+// whose key NO visible provider registers (the list is built where this scan cannot see — a dependency's
+// `forRoot`) is an OPEN substitution and its dispatch discloses.
+function injectTokenKey(expr) {
+  const e = peelAssertions(expr);
+  if (!e) return null;
+  let t; try { t = checker.getTypeAtLocation(e); } catch { t = undefined; }
+  if (t && (t.flags & ts.TypeFlags.StringLiteral)) return `s:${t.value}`;
+  if (t && (t.flags & ts.TypeFlags.NumberLiteral)) return `n:${t.value}`;
+  let sym; try { sym = ts.isPropertyAccessExpression(e) ? checker.getSymbolAtLocation(e.name) : checker.getSymbolAtLocation(e); } catch { sym = undefined; }
+  if (sym && (sym.flags & ts.SymbolFlags.Alias)) { try { sym = checker.getAliasedSymbol(sym); } catch { /* keep */ } }
+  const d = sym?.valueDeclaration;
+  if (!d || !(ts.isVariableDeclaration(d) || ts.isPropertyAssignment(d) || ts.isPropertyDeclaration(d))) return null;
+  if (!tokenDeclIds.has(d)) tokenDeclIds.set(d, tokenDeclIds.size + 1);
+  return `d:${tokenDeclIds.get(d)}`;
+}
+{
+  const injectParams = [];
+  const visitInject = (n) => {
+    if (ts.isParameter(n) && n.type) {
+      for (const dec of ts.getDecorators?.(n) ?? []) {
+        const ce = dec.expression;
+        if (ts.isCallExpression(ce) && ts.isIdentifier(ce.expression) && ce.expression.text === "Inject" && ce.arguments.length === 1) {
+          const key = injectTokenKey(ce.arguments[0]);
+          if (key) injectParams.push({ param: n, key });
+        }
+      }
+    }
+    ts.forEachChild(n, visitInject);
+  };
+  for (const sf of sources) visitInject(sf);
+  for (const { param, key } of injectParams) {
+    let tt; try { tt = checker.getTypeFromTypeNode(param.type); } catch { tt = undefined; }
+    const targets = [];
+    for (const u of tt?.isUnion?.() ? tt.types : [tt]) {
+      const d = (u?.getSymbol?.()?.declarations ?? []).find((x) => (ts.isClassDeclaration(x) || ts.isInterfaceDeclaration(x)) && isProjectNode(x));
+      if (d && !targets.includes(d)) targets.push(d);
+    }
+    if (!targets.length) continue;
+    const provs = tokenProviders.get(key) ?? [];
+    for (const target of targets) {
+      if (!provs.length) {
+        if (ts.isClassDeclaration(target)) {
+          for (const a of localAncestorsAndSelf(target)) openSubstitutedClasses.add(a);
+          CONFORMER_REACH?.("di-inject-unprovided", `${path.relative(rootDir, param.getSourceFile().fileName)}:${param.getStart()}`);
+        }
+        continue;
+      }
+      for (const { lit, prop } of provs) substituteFor(lit, prop, target);
+    }
   }
 }
 // The interface-flow fixpoint: a `J`-typed value converted to `X` carries every conformer of `J` with it.
@@ -7399,13 +7657,11 @@ function moduleUnit(sf) {
 // body's effects otherwise walked up in `enclosing` to the ClassDeclaration, which maps to the
 // `C.constructor` unit, so a static-init effect was MISLABELED as the instance ctor (and carried no
 // unitKind). Mint it as its own unit, lazily, mirroring `moduleUnit`. (An anonymous class expression's
-// static block keys under `<anonymous>`; there is at most one static-init unit per class name.)
+// static block keyed under `<anonymous>` — one unit for every such class in the module, R1067; see `classUnitQual`.)
 // The qual alone, WITHOUT minting — R782/R785's wiring pass asks "does this block's unit exist?" and must
 // not create an empty one to find out. One derivation for both, so the two cannot spell it differently.
 function staticBlockQual(node) {
-  const cls = node.parent;
-  const cname = (ts.isClassDeclaration(cls) || ts.isClassExpression(cls)) && cls.name ? cls.name.text : "<anonymous>";
-  return `${moduleOf(node.getSourceFile())}.${cname}.<static-init>`;
+  return classUnitQual(node.parent, "<static-init>");   // ⟨R1067⟩ one unit per CLASS, not per class name
 }
 function staticBlockUnit(node) {
   const sf = node.getSourceFile();
@@ -7458,7 +7714,8 @@ function decoratorArgUnit(callNode) {
 // that writes in its generated constructor (EXECUTED) went from `invisible:['mixdep']` to ABSENT, and nest's six
 // `extends PartialType(…)` DTO constructors lost their `@nestjs/mapped-types` disclosure the same way.
 function heritageUnit(cls, ctorQual) {
-  const qual = ctorQual.replace(/\.constructor$/, ".<heritage>");
+  const qual = heritageQualOf(ctorQual);
+  if (!qual) return ctorQual;   // not a constructor unit's key: attribute where the climb already was
   if (!fns.has(qual)) {
     const sf = cls.getSourceFile();
     const h = (cls.heritageClauses ?? []).find((c) => c.token === ts.SyntaxKind.ExtendsKeyword) ?? cls;
@@ -8550,8 +8807,8 @@ function isStringifyingSink(call) {
   const member = ex.name?.getText?.();
   // (a) `console.*` — every console method runs its arguments through util.format/inspect.
   if (ts.isIdentifier(ex.expression) && ex.expression.getText() === "console") {
-    const d = declOfSym(checker.getSymbolAtLocation(ex.expression));
-    return !d || !declIsLocal(d);   // the GLOBAL console; a local `const console = …` shadow is not a sink
+    // the GLOBAL console; a local `const console = …` shadow is not a sink (⟨R1074⟩ an expando write is not one)
+    return !projectShadows(checker.getSymbolAtLocation(ex.expression)?.declarations);
   }
   // (b) a logging LEVEL-method on an EXTERNAL receiver — pino/winston/bunyan/log4js/debug, the direct
   // analogue of the SLF4J parameterized call this vein was found on. A LOCAL logger is excluded: its
@@ -9049,6 +9306,30 @@ const declImportsNodeProcess = (decl) => {
 // downstream consult — the fix in one place, per brief §F1 item 3 ("make the two paths share one
 // authority", not patch the losing copy). Populated by the pre-pass immediately below.
 const processAliasSymbols = new Set();
+// ⟨SOUNDNESS R1075⟩ AN IDENTIFIER IMPORTED FROM NODE'S `process` MODULE. `import { env } from "node:process"` binds the
+// environment object itself, `import { argv }` the argument vector, and `import p from` / `import * as p from` the
+// process object — under ANY local name. The identity tests below asked for the spelling `process` (and the default
+// import only when its local name was `process`), so every one of these was ABSENT: EXECUTED (`fx75`), `env.SECRET`,
+// `envAlias.SECRET`, `nsp.env.SECRET` and `procDefault.env.SECRET` each printed the planted value, each function was
+// missing from the report and `deny Env` exited 0; rollup's `src/utils/colors.ts` reads `env.FORCE_COLOR` this way.
+// Asked of the import's TARGET, not its spelling: the alias resolves to node's own `process` variable or to a member
+// of its `Process` interface, which also covers a project re-export of either. Returns "process", the member name,
+// or null. A declaration position (the import specifier itself, an export specifier) is not a reference.
+const processModuleBinding = (id) => {
+  if (!id || !ts.isIdentifier(id)) return null;
+  const p = id.parent;
+  if (p && (ts.isImportSpecifier(p) || ts.isExportSpecifier(p) || ts.isImportClause(p) || ts.isNamespaceImport(p)
+            || ts.isImportEqualsDeclaration(p) || ts.isNamespaceExport?.(p))) return null;
+  let sym = checker.getSymbolAtLocation(id);
+  if (!sym || !(sym.flags & ts.SymbolFlags.Alias)) return null;
+  try { sym = checker.getAliasedSymbol(sym); } catch { return null; }
+  const decls = sym?.declarations ?? [];
+  const external = (d) => !projectFiles.has(path.resolve(d.getSourceFile().fileName));
+  if (decls.some((d) => external(d) && ts.isVariableDeclaration(d) && ts.isIdentifier(d.name) && d.name.text === "process")) return "process";
+  const m = decls.find((d) => external(d) && (ts.isPropertySignature(d) || ts.isMethodSignature(d) || ts.isPropertyDeclaration(d))
+    && d.parent && ts.isInterfaceDeclaration(d.parent) && d.parent.name.text === "Process");
+  return m && m.name && ts.isIdentifier(m.name) ? m.name.text : null;
+};
 const identIsGlobalProcess = (id0) => {
   // ⟨SOUNDNESS R936⟩ through the ONE transparent-wrapper set (R780): `(process as any).argv`, `(<any>process).argv`
   // and even `(process).argv` were ABSENT because the argv arm handed this the wrapped node and this matched an
@@ -9070,14 +9351,15 @@ const identIsGlobalProcess = (id0) => {
     const root = unwrapArgExpr(id.expression);   // R780: `(<any>globalThis).process` is the same object
     if (ts.isIdentifier(root) && (root.text === "globalThis" || root.text === "global")) {
       const gd = checker.getSymbolAtLocation(root)?.declarations ?? [];
-      return !gd.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+      return !projectShadows(gd);   // ⟨R1074⟩
     }
   }
   if (!ts.isIdentifier(id)) return false;
+  if (processModuleBinding(id) === "process") return true;   // ⟨R1075⟩ `import p from "node:process"`, any name
   if (id.text === "process") {
     const decls = checker.getSymbolAtLocation(id)?.declarations ?? [];
     if (decls.some(declImportsNodeProcess)) return true;                       // `import process from 'node:process'`
-    if (!decls.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)))) return true; // ambient global
+    if (!projectShadows(decls)) return true; // ambient global ⟨R1074⟩: an expando write is not a shadow
   }
   // A local binding under ANY name (`p`, `process`, whatever) whose sole initializer is confirmed —
   // by the pre-pass below — to be the global process object itself.
@@ -9108,7 +9390,7 @@ const identIsGlobalProcess = (id0) => {
       const root = unwrapArgExpr(node.initializer);   // R780
       if (ts.isIdentifier(root) && (root.text === "globalThis" || root.text === "global")) {
         const gd = checker.getSymbolAtLocation(root)?.declarations ?? [];
-        if (!gd.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)))) {
+        if (!projectShadows(gd)) {   // ⟨R1074⟩
           for (const el of node.name.elements) {
             const propName = el.propertyName ? (ts.isIdentifier(el.propertyName) ? el.propertyName.text : null)
                                              : (ts.isIdentifier(el.name) ? el.name.text : null);
@@ -9152,6 +9434,7 @@ const unwrapEnvTransparent = (e) => unwrapArgExpr(e);   // R780: one wrapper set
 // project-local `process` (a parameter, a module `const`) matches nothing.
 const isProcessEnvExpr = (expr) => {
   if (!expr) return false;
+  if (ts.isIdentifier(expr) && processModuleBinding(expr) === "env") return true;   // ⟨R1075⟩ `import { env } from "node:process"`
   let obj = null;
   if (ts.isPropertyAccessExpression(expr) && expr.name.text === "env") obj = expr.expression;
   else if (ts.isElementAccessExpression(expr) && expr.argumentExpression
@@ -9169,7 +9452,8 @@ const isProcessEnvExpr = (expr) => {
 // it "flooded a scala-library scan with a spurious 14k Env" — JVM `-D` config read pervasively at
 // class-init. `argv` is read once in a main.)
 const isProcessArgvExpr = (expr) =>
-  expr && ts.isPropertyAccessExpression(expr) && expr.name.text === "argv" && identIsGlobalProcess(expr.expression);
+  expr && ((ts.isPropertyAccessExpression(expr) && expr.name.text === "argv" && identIsGlobalProcess(expr.expression))
+           || (ts.isIdentifier(expr) && processModuleBinding(expr) === "argv"));   // ⟨R1075⟩ `import { argv } from "node:process"`
 
 // The LEAVES a value can come from: through the transparent wrappers, both arms of `?:`, either side of
 // `??`/`||`, the right of `&&`/`,`, and the right of an assignment expression. A merge is a MAY-flow, and
@@ -9242,6 +9526,15 @@ const envValueLeaves = (expr, out = []) => {
 // this adds the READERS and removes nothing.
 const envAliasSymbols = new Set();
 const envMayAliasSymbols = new Set();
+// ⟨SOUNDNESS R1075⟩ the symbol a REFERENCE names, through an import: `import { myEnv } from "./cfg"` over
+// `export const myEnv = process.env` is the exported const, whose symbol is in the alias sets — the import's own
+// alias symbol never is. EXECUTED (`fx75c`): `viaExportedAlias() { return myEnv.SECRET }` printed the planted value
+// and was ABSENT, `deny Env` exit 0, while the same read in the declaring module is `['Env']`.
+const envValueSymAt = (id) => {
+  let sym = checker.getSymbolAtLocation(id);
+  if (sym && (sym.flags & ts.SymbolFlags.Alias)) { try { sym = checker.getAliasedSymbol(sym); } catch { /* unresolved */ } }
+  return sym;
+};
 // ⟨R935⟩ property locations, kept apart from the local sets so a property name never reaches the
 // identifier-keyed consumers (2c's `envSourceKind`, the alias-binding inert rule) by accident.
 const envPropMustSymbols = new Set();
@@ -9267,6 +9560,7 @@ const envLocKey = (sym) => sym?.declarations?.[0] ?? null;
 // MAY discloses `Unknown[env-maybe-read]`, as every other location does. A `let` binding, a receiver that is a
 // parameter or a property, and a read through iteration (`for…of`, `.map`) are not resolved here.
 const envDeclWritten = new Set();
+let envBindingTable = null;   // ⟨R935⟩ the binding table, published for the typed floor (`envFloorOpaque`)
 const envLitElems = new Map();   // array-literal element node -> true while every reference is an index read
 const envConstLiteral = (id) => {
   if (!id || !ts.isIdentifier(id)) return null;
@@ -9467,7 +9761,7 @@ const envLiteralMember = (n) => {
     for (const v of vals) note(ps, v);
   }
   const leafIn = (leaf, set, propSet) => isProcessEnvExpr(leaf)
-    || (ts.isIdentifier(leaf) && set.has(checker.getSymbolAtLocation(leaf)))
+    || (ts.isIdentifier(leaf) && set.has(envValueSymAt(leaf)))   // ⟨R1075⟩ through an import
     || (!!propSet && propSet.has(memberSymOf(leaf)) && !(propSet === envPropMustSymbols && envLitDowngraded(leaf)));
   // ⟨R935⟩ a literal member read through a receiver whose DECLARED member is written elsewhere is MAY at best.
   function envLitDowngraded(n) {
@@ -9527,17 +9821,18 @@ const envLiteralMember = (n) => {
     return changed;
   };
   for (let n = 0; mustTry() && n < 64; n++) { /* to fixpoint */ }
+  envBindingTable = { bindings, memberSymOf, paramSyms };   // ⟨R935⟩ the floor below asks what each location holds
 }
 // True when `id` is an identifier resolving to a confirmed process.env alias local.
 const identIsEnvAlias = (id) => {
   if (!id || !ts.isIdentifier(id)) return false;
-  const sym = checker.getSymbolAtLocation(id);
+  const sym = envValueSymAt(id);   // ⟨R1075⟩ through an import
   return !!sym && envAliasSymbols.has(sym);
 };
 // MAY-read: a MAY-alias (ever-bound to process.env but reassignable). A superset of the MUST set.
 const identIsEnvMayAlias = (id) => {
   if (!id || !ts.isIdentifier(id)) return false;
-  const sym = checker.getSymbolAtLocation(id);
+  const sym = envValueSymAt(id);   // ⟨R1075⟩ through an import
   return !!sym && envMayAliasSymbols.has(sym);
 };
 // The env kind of an expression's VALUE: "env" if some leaf is process.env or a MUST-alias, "may" if
@@ -9594,7 +9889,19 @@ const envRefKind = (node) => {
   }
   if (!ts.isIdentifier(node)) return null;
   // ⟨R934⟩ MUST-parameters are in `envAliasSymbols` but never in the MAY set, so the name filter reads both.
-  envAliasNames ??= new Set([...envMayAliasSymbols, ...envAliasSymbols].map((s) => s.name));
+  envAliasNames ??= (() => {
+    const names = new Set([...envMayAliasSymbols, ...envAliasSymbols].map((s) => s.name));
+    // ⟨R1075⟩ …and the LOCAL name of every import that resolves to one (`import { myEnv as e }`).
+    const visit = (n) => {
+      if ((ts.isImportSpecifier(n) || ts.isImportClause(n)) && n.name) {
+        const t = envValueSymAt(n.name);
+        if (t && (envAliasSymbols.has(t) || envMayAliasSymbols.has(t))) names.add(n.name.text);
+      }
+      if (!ts.isFunctionLike(n) && !ts.isClassLike(n)) ts.forEachChild(n, visit);
+    };
+    if (names.size) for (const sf of sources) visit(sf);
+    return names;
+  })();
   if (!envAliasNames.has(node.text)) return null;
   const p = node.parent;
   if (!p) return null;
@@ -9607,17 +9914,351 @@ const envRefKind = (node) => {
   if (ts.isBinaryExpression(p) && p.left === node && envIsAssignOp(p.operatorToken.kind)) return null;
   if ((ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p))
       && (p.operator === ts.SyntaxKind.PlusPlusToken || p.operator === ts.SyntaxKind.MinusMinusToken)) return null;
-  const sym = ts.isShorthandPropertyAssignment(p) && p.name === node
+  let sym = ts.isShorthandPropertyAssignment(p) && p.name === node
     ? checker.getShorthandAssignmentValueSymbol(p) : checker.getSymbolAtLocation(node);
+  if (sym && (sym.flags & ts.SymbolFlags.Alias)) { try { sym = checker.getAliasedSymbol(sym); } catch { /* unresolved */ } }   // ⟨R1075⟩
   if (!sym) return null;
   if (envAliasSymbols.has(sym)) return "env";
   return envMayAliasSymbols.has(sym) ? "may" : null;
+};
+// ⟨SOUNDNESS R935, the CONTAINER / ITERATION / OPEN-PROPERTY half⟩ A FLOOR UNDER THE LOCATION MODEL, KEYED ON THE
+// TYPE. Three lanes closed R935 one storage kind at a time — a value-bearing declaration, then a const literal
+// receiver — and each left the next kind silent: `const m = new Map([["e", process.env]]); m.get("e")!.SECRET`,
+// a `Set`/`WeakMap`, `for (const x of arr) x.SECRET`, `arr.map((x) => x.SECRET)`, all EXECUTED (`fx35`), each
+// printed the planted value, each reader ABSENT with `deny Env` and `deny Env Unknown` exit 0. Every one is a value
+// whose PROVENANCE the binding table cannot enumerate, and the set of such storage kinds is open; a ninth special
+// case would leave a tenth. What every one of them still carries is node's `NodeJS.ProcessEnv` TYPE, which the
+// checker propagated from `process.env` through the container's inferred type argument.
+// So: an expression whose type is `ProcessEnv`, which the location model above did NOT resolve, and whose value
+// comes from somewhere this pass cannot see into, is POSSIBLY the environment — `Unknown[env-maybe-read]`, the MAY
+// posture every other location uses. Never `Env`: a `ProcessEnv`-typed object can be a copy or a literal.
+// "Somewhere this pass cannot see into" is the part that keeps it from re-asking settled questions:
+//   · a PARAMETER of a named function or method is R934's — a caller that hands it the environment is charged at
+//     its own call, and a parameter no visible site feeds is not charged there either. A CALLBACK's parameter
+//     (an arrow or function expression passed as an argument) is not: its caller is the HOF — `Array.map`,
+//     `Set.forEach` — and nothing in the scan ever charges that call.
+//   · a call to a PROJECT function with a body is judged inside the callee, whose `return` is a consumer there.
+//   · a `const`/`let` is opaque only if its initializer is (or it has none); otherwise its initializer is either
+//     resolved or itself floored where it is evaluated.
+// RESIDUAL, stated: the type is the carrier, so an environment object stored under `any`, `unknown`, `object` or
+// `Record<…>` (`new Map<string, any>([["e", process.env]])`) is outside the floor.
+const isProcessEnvType = (t0) => {
+  let t = t0;
+  try { t = checker.getNonNullableType(t0); } catch { /* keep */ }
+  for (const u of t?.isUnion?.() ? t.types : [t]) {
+    const sy = u?.aliasSymbol ?? u?.symbol;
+    if (sy && sy.getName() === "ProcessEnv"
+        && (sy.declarations ?? []).some((d) => !projectFiles.has(path.resolve(d.getSourceFile().fileName)))) return true;
+  }
+  return false;
+};
+// Is this ProcessEnv-typed value's provenance OPAQUE to the binding table? A location the table enumerates is opaque
+// only if one of its bindings is (a `null` binding is a value the table could not name — a reflective or compound
+// write — except on a plain variable, where it is the `undefined` of a declaration with no initializer).
+const envFloorOpaque = (e, depth, seen = new Set()) => {
+  const x = unwrapEnvTransparent(e);
+  if (!x || depth > 6) return false;
+  if (ts.isAwaitExpression(x)) return envFloorOpaque(x.expression, depth + 1, seen);
+  if (isProcessEnvExpr(x)) return false;
+  if (ts.isObjectLiteralExpression(x) || ts.isArrayLiteralExpression(x)) return false;
+  let t = null;
+  try { t = checker.getTypeAtLocation(x); } catch { return false; }
+  if (!isProcessEnvType(t)) return false;
+  const tbl = envBindingTable;
+  const viaBindings = (key, nullOpaque) => {
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return (tbl.bindings.get(key) ?? []).some((v) => {
+      if (v === null || v === undefined) return nullOpaque;
+      if (typeof v === "symbol") return false;                                   // ENV_DESTRUCTURED: resolved
+      if (typeof v === "object" && "same" in v) return tbl.bindings.has(v.same) ? viaBindings(v.same, nullOpaque) : false;
+      return envValueLeaves(v).some((l) => envFloorOpaque(l, depth + 1, seen));
+    });
+  };
+  if (ts.isCallExpression(x) || ts.isNewExpression(x)) {
+    let d = null;
+    try { d = checker.getResolvedSignature(x)?.declaration ?? null; } catch { d = null; }
+    return !(d && projectFiles.has(path.resolve(d.getSourceFile().fileName)) && d.body);
+  }
+  if (ts.isPropertyAccessExpression(x) || ts.isElementAccessExpression(x)) {
+    if (envPropKind(x)) return false;
+    // a project GETTER with a body is judged inside it, as a project callee is (its `return` is a consumer there)
+    let ps = null;
+    try { ps = ts.isPropertyAccessExpression(x) ? checker.getSymbolAtLocation(x.name) : null; } catch { ps = null; }
+    if ((ps?.declarations ?? []).some((dd) => ts.isGetAccessorDeclaration(dd) && dd.body && isProjectNode(dd))) return false;
+    const key = tbl ? tbl.memberSymOf(x) : null;
+    if (key && tbl.bindings.has(key)) return viaBindings(key, true);
+    return true;   // an interface member, a dynamic index, a dependency's field: the table cannot enumerate it
+  }
+  if (!ts.isIdentifier(x)) return false;
+  const sym = envValueSymAt(x);
+  if (!sym || envAliasSymbols.has(sym) || envMayAliasSymbols.has(sym)) return false;
+  let d = sym.valueDeclaration ?? sym.declarations?.[0];
+  if (!d) return false;
+  while (d && ts.isBindingElement(d)) d = d.parent?.parent;   // a destructured name answers as its pattern's root
+  if (!d) return false;
+  if (ts.isParameter(d)) {
+    const f = d.parent;
+    return !!f && (ts.isArrowFunction(f) || ts.isFunctionExpression(f)) && !!f.parent
+      && (ts.isCallExpression(f.parent) || ts.isNewExpression(f.parent)) && (f.parent.arguments ?? []).includes(f);
+  }
+  if (ts.isVariableDeclaration(d)) {
+    if (d.parent?.parent && (ts.isForOfStatement(d.parent.parent) || ts.isForInStatement(d.parent.parent))) return true;
+    if (!ts.isIdentifier(d.name)) return d.initializer ? envValueLeaves(d.initializer).some((l) => envFloorOpaque(l, depth + 1, seen)) : true;
+    if (tbl && tbl.bindings.has(sym)) return viaBindings(sym, false);
+    return d.initializer ? envValueLeaves(d.initializer).some((l) => envFloorOpaque(l, depth + 1, seen)) : true;
+  }
+  return false;
+};
+const envTypeFloorKind = (node) => {
+  if (!(ts.isIdentifier(node) || ts.isCallExpression(node) || ts.isPropertyAccessExpression(node)
+        || ts.isElementAccessExpression(node))) return null;
+  const p = node.parent;
+  if (!p) return null;
+  // not a value REFERENCE: a declared name, the member-name side of an access, a write target, a type position
+  if (ts.isIdentifier(node)) {
+    if ((ts.isVariableDeclaration(p) || ts.isParameter(p) || ts.isBindingElement(p) || ts.isPropertyAssignment(p)
+         || ts.isPropertyDeclaration(p) || ts.isFunctionDeclaration(p) || ts.isMethodDeclaration(p)
+         || ts.isPropertySignature(p) || ts.isShorthandPropertyAssignment(p)) && p.name === node) return null;
+    if (ts.isBindingElement(p) && p.propertyName === node) return null;
+    if ((ts.isPropertyAccessExpression(p) || ts.isQualifiedName(p)) && p.name === node) return null;
+    if (ts.isTypeQueryNode(p) || ts.isExportSpecifier(p) || ts.isImportSpecifier(p) || ts.isImportClause(p)
+        || ts.isNamespaceImport(p) || ts.isImportEqualsDeclaration(p) || ts.isExportAssignment(p)) return null;
+  }
+  if (ts.isBinaryExpression(p) && p.left === node && envIsAssignOp(p.operatorToken.kind)) return null;
+  if (ts.isDeleteExpression(p) || ((ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p))
+      && (p.operator === ts.SyntaxKind.PlusPlusToken || p.operator === ts.SyntaxKind.MinusMinusToken))) return null;
+  if (isDestructuringAssignTarget(node)) return null;
+  // a TYPE position spelled as an expression: `interface E extends NodeJS.ProcessEnv`, `implements …`
+  {
+    let q = node;
+    while (q.parent && ts.isPropertyAccessExpression(q.parent) && q.parent.expression === q) q = q.parent;
+    const ew = q.parent;
+    if (ew && ts.isExpressionWithTypeArguments(ew) && ew.parent && ts.isHeritageClause(ew.parent)
+        && (ew.parent.token === ts.SyntaxKind.ImplementsKeyword || ts.isInterfaceDeclaration(ew.parent.parent))) return null;
+  }
+  // a binding whose initializer is the floored value is judged at the initializer, not again at every use
+  if (!envFloorOpaque(node, 0)) return null;
+  if (ENVLOC_REACH) { const sf = node.getSourceFile(); ENVLOC_REACH(`floor ${ts.SyntaxKind[node.kind]} ${path.relative(rootDir, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart()).line + 1}`); }
+  return "may";
 };
 // ⟨R928/R804⟩ Does the CONSUMER of this env value provably touch no key? Climb through what passes the
 // value on unchanged (the transparent wrappers, both arms of `?:`, either side of `??`/`||`, the right of
 // `&&`/`,`) to the node that consumes it, then answer from a CLOSED list of non-reading consumers.
 // Everything not on it charges: that is the direction a list must fail in here (a missing entry is an
 // over-charge on code that already names the environment, never a silence).
+// ⟨SOUNDNESS R935, the UNTYPED-CONTAINER half⟩ THE ENVIRONMENT STORED WHERE ITS TYPE IS LOST. The ProcessEnv floor
+// above rides on the type, so `new Map<string, any>([["e", process.env]])`, `rec["e"] = process.env` on a
+// `Record<string, any>`, `arr.push(process.env)` into an `any[]`, and `objAny.cfg = { env: process.env }` on an `any`
+// object left every reader of the container ABSENT (EXECUTED, `fxany`: each printed the planted value, `deny Env` and
+// `deny Env Unknown` exit 0). Narrowed to where the escape is SEEN rather than to every `any` read:
+//   · the CONTAINERS are only those the environment value is actually put into — a builtin collection built with it
+//     (`new Map|Set|WeakMap|Array(…)`) or mutated with it (`set`/`add`/`push`/`unshift`/`splice`), an element or
+//     dynamic-key write (`c[k] = env`, a `Record` index), or a member write onto an `any`/`unknown` object — named by
+//     the root binding of the receiver. An object literal under a static key is a LOCATION the table above already
+//     enumerates, and a call argument (`spawn(cmd, { env })`) is charged at the call and stored nowhere visible;
+//   · a READ discloses only when its receiver is reached FROM such a container through at least one element step
+//     (a member/element read, a method call's result, a `for…of` variable, a callback parameter of a method called on
+//     it, a parameter whose visible call site passes one) — `m.size` on the container itself reads no key — and its
+//     value is not a primitive. MAY (`Unknown[env-maybe-read]`): which element is the environment is not known.
+const ENV_COLLECTION_CTORS = new Set(["Map", "Set", "WeakMap", "WeakSet", "Array", "WeakRef"]);
+const ENV_COLLECTION_MUTATORS = new Set(["set", "add", "push", "unshift", "splice", "fill"]);
+let envTaintedRoots = null;
+const envRootSym = (e0) => {
+  let e = unwrapEnvTransparent(e0);
+  for (let g = 0; e && g < 16 && (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e) || ts.isCallExpression(e)); g++)
+    e = unwrapEnvTransparent(ts.isCallExpression(e) ? (ts.isPropertyAccessExpression(e.expression) ? e.expression.expression : null) : e.expression);
+  if (!e || !ts.isIdentifier(e)) return null;
+  const sym = envValueSymAt(e);
+  return sym && (sym.flags & (ts.SymbolFlags.Variable | ts.SymbolFlags.Property)) ? sym : null;
+};
+const envIsCollectionType = (e) => {
+  let t; try { t = checker.getNonNullableType(checker.getTypeAtLocation(e)); } catch { return false; }
+  const nm = (t?.getSymbol?.() ?? t?.aliasSymbol)?.getName?.();
+  return ["Map", "Set", "WeakMap", "WeakSet", "Array", "ReadonlyArray"].includes(nm) || !!checker.isArrayType?.(t);
+};
+const envAnyish = (e) => {
+  let t; try { t = checker.getTypeAtLocation(e); } catch { return false; }
+  if (!t) return false;
+  if (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return true;
+  return !!(t.getStringIndexType?.() || t.getNumberIndexType?.());
+};
+const computeEnvTaint = () => {
+  const roots = new Set();
+  const seed = (n) => {
+    let cur = n;
+    for (let g = 0; g < 24; g++) {
+      const p = cur.parent;
+      if (!p) return;
+      if ((ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isTypeAssertionExpression(p) || ts.isNonNullExpression(p)
+           || ts.isSatisfiesExpression?.(p)) && p.expression === cur) { cur = p; continue; }
+      if (ts.isConditionalExpression(p) && p.condition !== cur) { cur = p; continue; }
+      if (ts.isBinaryExpression(p) && (p.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken || p.operatorToken.kind === ts.SyntaxKind.BarBarToken)) { cur = p; continue; }
+      if (ts.isArrayLiteralExpression(p) || ts.isSpreadElement(p)) { cur = p; continue; }
+      if ((ts.isPropertyAssignment(p) && p.initializer === cur) || ts.isShorthandPropertyAssignment(p)) {
+        // a STATIC member of an object literal is a location — unless the literal itself lands in a container (climb on)
+        cur = p.parent; continue;
+      }
+      if (ts.isNewExpression(p) && (p.arguments ?? []).includes(cur)) {
+        const c = unwrapEnvTransparent(p.expression);
+        if (ts.isIdentifier(c) && ENV_COLLECTION_CTORS.has(c.text) && identIsGlobal(c)) { cur = p; continue; }
+        return;
+      }
+      if (ts.isCallExpression(p) && (p.arguments ?? []).includes(cur)) {
+        const ce = unwrapEnvTransparent(p.expression);
+        if (ts.isPropertyAccessExpression(ce) && ENV_COLLECTION_MUTATORS.has(ce.name.text) && envIsCollectionType(ce.expression)) {
+          const r = envRootSym(ce.expression); if (r) roots.add(r);
+        }
+        return;
+      }
+      if (ts.isBinaryExpression(p) && p.right === cur && p.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        const l = unwrapEnvTransparent(p.left);
+        const dyn = ts.isElementAccessExpression(l) ? (!l.argumentExpression || !ts.isNumericLiteral(l.argumentExpression) || envAnyish(l.expression))
+          : ts.isPropertyAccessExpression(l) && envAnyish(l.expression);
+        if (dyn) { const r = envRootSym(l.expression); if (r) roots.add(r); }
+        return;
+      }
+      if (ts.isVariableDeclaration(p) && p.initializer === cur) {
+        // only a value that went through a CONTAINER on the way (an array/collection) — a bare alias or a static
+        // object literal is the binding table's question
+        if (cur !== n && ts.isIdentifier(p.name) && (ts.isNewExpression(cur) || ts.isArrayLiteralExpression(cur)
+            || (ts.isObjectLiteralExpression(cur) && envAnyish(p.name)))) {
+          const sym = checker.getSymbolAtLocation(p.name); if (sym) roots.add(sym);
+        }
+        return;
+      }
+      return;
+    }
+  };
+  const visit = (n) => {
+    if (envRefKind(n)) seed(n);
+    ts.forEachChild(n, visit);
+  };
+  for (const sf of sources) visit(sf);
+  return roots;
+};
+// How many element steps separate `e` from a tainted container (-1: not reached from one).
+const envFromTainted = (e0, steps, depth, seen) => {
+  const e = unwrapEnvTransparent(e0);
+  if (!e || depth > 8) return -1;
+  if (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) return envFromTainted(e.expression, steps + 1, depth + 1, seen);
+  if (ts.isCallExpression(e)) {
+    const ce = unwrapEnvTransparent(e.expression);
+    return ts.isPropertyAccessExpression(ce) ? envFromTainted(ce.expression, steps + 1, depth + 1, seen) : -1;
+  }
+  if (!ts.isIdentifier(e)) return -1;
+  const sym = envValueSymAt(e);
+  if (!sym || seen.has(sym)) return -1;
+  seen.add(sym);
+  if (envTaintedRoots.has(sym)) { envTaintHitRoot = sym; return steps; }
+  const d = sym.valueDeclaration;
+  if (!d) return -1;
+  if (ts.isVariableDeclaration(d)) {
+    const loop = d.parent?.parent;
+    if (loop && ts.isForOfStatement(loop)) return ts.isIdentifier(d.name) ? envFromTainted(loop.expression, steps + 1, depth + 1, seen) : -1;
+    return d.initializer && ts.isIdentifier(d.name) ? envFromTainted(d.initializer, steps, depth + 1, seen) : -1;
+  }
+  if (ts.isParameter(d) && ts.isIdentifier(d.name)) {
+    const f = d.parent;
+    if ((ts.isArrowFunction(f) || ts.isFunctionExpression(f)) && f.parent && ts.isCallExpression(f.parent) && f.parent.arguments.includes(f)) {
+      const ce = unwrapEnvTransparent(f.parent.expression);
+      return ts.isPropertyAccessExpression(ce) && f.parameters[0] === d ? envFromTainted(ce.expression, steps + 1, depth + 1, seen) : -1;
+    }
+    let best = -1;
+    for (const a of paramArgs.get(sym) ?? []) {
+      const r = a ? envFromTainted(a, steps, depth + 1, new Set(seen)) : -1;
+      if (r >= 0 && (best < 0 || r > best)) best = r;   // the farthest site: MUST only if every reached site is one step
+    }
+    return best;
+  }
+  return -1;
+};
+let envTaintHitRoot = null;
+// ⟨R935⟩ THE RESOLUTION: a container whose every value is the environment and that never escapes. A `const`, not
+// exported, whose initializer is empty or holds only environment values (`new Map([[k, env]…])`, `[env]`, `{}`), every
+// mutation stores the environment (`set(k, env)`, `add(env)`, `push(env)`, `c[k] = env`), and every other reference
+// is a read-only method or element read — then an ELEMENT (exactly one step in) IS the environment, and its member
+// read is `Env`, not `Unknown`. Anything else stays MAY.
+const ENV_CONTAINER_READERS = new Set(["get", "has", "at", "find", "findLast", "values", "forEach", "map", "filter", "some",
+  "every", "reduce", "includes", "indexOf", "keys", "entries", "size", "length", "slice", "flatMap"]);
+const envAllEnvMemo = new Map();
+const envContainerAllEnv = (sym) => {
+  if (envAllEnvMemo.has(sym)) return envAllEnvMemo.get(sym);
+  envAllEnvMemo.set(sym, false);
+  const d = sym.valueDeclaration;
+  const isEnv = (x) => !!x && envRefKind(unwrapEnvTransparent(x)) === "env";
+  if (!d || !ts.isVariableDeclaration(d) || !ts.isIdentifier(d.name) || !(ts.getCombinedNodeFlags(d) & ts.NodeFlags.Const)
+      || !projectFiles.has(path.resolve(d.getSourceFile().fileName))) return false;
+  const st = d.parent?.parent;
+  if (st && ts.isVariableStatement(st) && st.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return false;
+  const init = unwrapEnvTransparent(d.initializer);
+  const litOk = (lit, tuple) => ts.isArrayLiteralExpression(lit) && lit.elements.every((el) => tuple
+    ? (ts.isArrayLiteralExpression(el) && el.elements.length === 2 && isEnv(el.elements[1])) : isEnv(el));
+  let ok = false;
+  if (init && ts.isArrayLiteralExpression(init)) ok = litOk(init, false);
+  else if (init && ts.isObjectLiteralExpression(init)) ok = init.properties.length === 0;
+  else if (init && ts.isNewExpression(init) && ts.isIdentifier(init.expression)) {
+    const a0 = init.arguments?.[0] ? unwrapEnvTransparent(init.arguments[0]) : null;
+    const nm = init.expression.text;
+    ok = !a0 || ((nm === "Map" || nm === "WeakMap") ? litOk(a0, true) : (nm === "Set" || nm === "WeakSet") ? litOk(a0, false) : false);
+  }
+  if (!ok) return false;
+  let clean = true;
+  const visit = (n) => {
+    if (!clean) return;
+    if (ts.isIdentifier(n) && n.text === d.name.text && n !== d.name && envValueSymAt(n) === sym) {
+      let cur = n;
+      while (cur.parent && (ts.isParenthesizedExpression(cur.parent) || ts.isNonNullExpression(cur.parent) || ts.isAsExpression(cur.parent))) cur = cur.parent;
+      const p = cur.parent;
+      if (p && ts.isPropertyAccessExpression(p) && p.expression === cur) {
+        const call = p.parent && ts.isCallExpression(p.parent) && p.parent.expression === p ? p.parent : null;
+        const m = p.name.text;
+        if (call && (m === "set")) clean = isEnv(call.arguments[1]);
+        else if (call && (m === "add" || m === "push" || m === "unshift")) clean = call.arguments.every((x) => isEnv(x));
+        else if (!ENV_CONTAINER_READERS.has(m)) clean = false;
+      } else if (p && ts.isElementAccessExpression(p) && p.expression === cur) {
+        const asg = p.parent && ts.isBinaryExpression(p.parent) && p.parent.left === p ? p.parent : null;
+        if (asg) clean = asg.operatorToken.kind === ts.SyntaxKind.EqualsToken && isEnv(asg.right);
+      } else if (p && ts.isForOfStatement(p) && p.expression === cur) { /* iteration reads */ }
+      else if (p && ts.isTypeQueryNode(p)) { /* type position */ }
+      else clean = false;   // passed, returned, aliased, spread: escapes
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(d.getSourceFile());
+  envAllEnvMemo.set(sym, clean);
+  return clean;
+};
+const envTaintKind = (node) => {
+  if (!(ts.isIdentifier(node) || ts.isCallExpression(node) || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)
+        || ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node))) return null;
+  const p = node.parent;
+  // only the RECEIVER of a member read
+  if (!p || !((ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p)) && p.expression === node)) return null;
+  if (ts.isBinaryExpression(p.parent) && p.parent.left === p && envIsAssignOp(p.parent.operatorToken.kind)) return null;
+  if (ts.isCallExpression(p.parent) && p.parent.expression === p) return null;   // a method call on it, not a key read
+  envTaintedRoots ??= computeEnvTaint();
+  if (!envTaintedRoots.size) return null;
+  let t; try { t = checker.getTypeAtLocation(node); } catch { return null; }
+  if (t && (t.flags & (ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFlags.BooleanLike | ts.TypeFlags.BigIntLike
+                       | ts.TypeFlags.ESSymbolLike | ts.TypeFlags.Undefined | ts.TypeFlags.Null | ts.TypeFlags.Void))) return null;
+  if (envIsCollectionType(node)) return null;   // a nested container is reached, not read
+  // a member the LOCATION model enumerates (a const literal's element at a literal index, a declared property) has
+  // its own answer — env, may, or provably not — and the taint does not overrule it
+  {
+    const u = unwrapEnvTransparent(node);
+    if ((ts.isPropertyAccessExpression(u) || ts.isElementAccessExpression(u)) && envBindingTable) {
+      const key = envBindingTable.memberSymOf(u);
+      if (key && envBindingTable.bindings.has(key)) return null;
+    }
+  }
+  envTaintHitRoot = null;
+  const steps = envFromTainted(node, 0, 0, new Set());
+  if (steps < 1) return null;
+  const must = steps === 1 && envTaintHitRoot && envContainerAllEnv(envTaintHitRoot);
+  if (ENVLOC_REACH) { const sf = node.getSourceFile(); ENVLOC_REACH(`taint ${must ? "env" : "may"} ${path.relative(rootDir, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart()).line + 1}`); }
+  return must ? "env" : "may";
+};
 const envConsumerInert = (node) => {
   let cur = node;
   for (;;) {
@@ -9714,7 +10355,7 @@ const ENV_TOUCHING_BUILTIN = new Set([
 // BARE-identifier global builtins that enumerate every key of an object argument (deep-clone reads them all).
 const ENV_TOUCHING_GLOBAL = new Set(["structuredClone"]);
 const identIsGlobal = (id) => // an identifier that is the ambient global (no project-local declaration shadows it)
-  !(checker.getSymbolAtLocation(id)?.declarations ?? []).some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+  !projectShadows(checker.getSymbolAtLocation(id)?.declarations);   // ⟨R1074⟩
 // THE `globalThis.` QUALIFIER, WHICH DEFEATED FIVE TEXT-KEYED ARMS AT ONCE (SOUNDNESS row id pending —
 // filed by the coordinator, not invented here). Every arm below
 // recognises a whole-object builtin by the callee's TEXT (`Object.assign`, `Reflect.set`, `Object.keys`),
@@ -10493,6 +11134,12 @@ function visitCalls(node) {
             const confAt = isSuperReceiver(confRecv) ? null
               : (localReceiverClass(confRecv) ?? (ts.isClassDeclaration(decl.parent) ? decl.parent : null));
             const confBodies = confAt ? conformerBodies(confAt, decl.name?.getText?.()) : [];
+            // ⟨SOUNDNESS R1061⟩ the receiver's class is a DI token whose substitute the scan cannot name: the body that
+            // runs may be none of the candidates above — disclose, as a dispatch over an open family does.
+            if (confAt && openSubstitutedClasses.has(confAt)) {
+              rec.direct.add("Unknown");
+              rec.why.add(dispatchWhy(`${moduleOf(confAt.getSourceFile())}.${namespacePrefixOf(confAt)}${confAt.name?.getText?.() ?? "<anonymous>"}`, decl.name?.getText?.()));
+            }
             if (allOverrides.length > 0 || confBodies.length > 0) {
               // PRECISION: scope the fan-out to the RECEIVER's static-type subtree. A base-member
               // dispatch on a receiver statically typed as subclass `Cat` can only ever bind to a
@@ -11450,7 +12097,7 @@ function visitCalls(node) {
     // ⟨R934⟩ a DESTRUCTURED parameter that every visible call site hands the environment reads its keys
     // as the frame is entered — the destructuring IS the read, in this function's frame.
     if (ts.isParameter(node) && ts.isObjectBindingPattern(node.name) && envAliasSymbols.has(node)) { markEnv(); ENVLOC_REACH?.("param-pattern env"); }
-    const kind = envRefKind(node);
+    const kind = envRefKind(node) ?? envTypeFloorKind(node) ?? envTaintKind(node);   // ⟨R935⟩ floor, then untyped containers
     if (kind && ENVLOC_REACH && !envConsumerInert(node)) {
       const vd = ts.isIdentifier(node) ? checker.getSymbolAtLocation(node)?.valueDeclaration : null;
       const where = `${path.relative(process.cwd(), node.getSourceFile().fileName)}:${node.getStart() >= 0 ? node.getSourceFile().getLineAndCharacterOfPosition(node.getStart()).line + 1 : 0}`;
@@ -11572,8 +12219,9 @@ function visitCalls(node) {
     // `globalThis.process.hrtime.bigint` → "hrtime.bigint", `(global as any).process.send` → "send". Reuses
     // `identIsGlobalProcess` (which handles bare `process` AND `globalThis`/`global.process`, unwrapping casts,
     // and rejects a project-local `const process = {…}` shadow so a pure local method never fabricates Clock/Ipc).
+    // ⟨R1075⟩ …or rooted at a MEMBER imported from node's `process` module: `import { hrtime } from "node:process";
+    // hrtime()` / `hrtime.bigint()` were ABSENT while `process.hrtime()` charged Clock (EXECUTED-shape, `fx75b`).
     const processMemberPath = () => {
-      if (!ts.isPropertyAccessExpression(callee)) return null;
       const outer = [];
       let n = callee;
       while (ts.isPropertyAccessExpression(n)) {
@@ -11581,7 +12229,8 @@ function visitCalls(node) {
         outer.push(n.name.text);
         n = n.expression;
       }
-      return null;
+      const im = ts.isIdentifier(n) ? processModuleBinding(n) : null;
+      return im && im !== "process" ? [im, ...outer.reverse()].join(".") : null;
     };
     const pmp = processMemberPath();
     // R114 — THE MEMBER SET IS THE SHARED CONSTANT, read on the LAST segment of the path. This arm and
@@ -11652,7 +12301,7 @@ function visitCalls(node) {
       }
       // Not an import at all: the ambient global, unless the project declares its own.
       if (callee.text !== "fetch") return false;
-      return !(sym0.declarations ?? []).some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+      return !projectShadows(sym0.declarations);   // ⟨R1074⟩
     })())
       geff = "Net";
     // the fully-qualified global fetch — `globalThis.fetch`/`window.fetch`/`self.fetch` — is a
@@ -11742,8 +12391,7 @@ function visitCalls(node) {
     // never a concrete effect. (Found by real-world corpus testing; sibling of the node:vm fix.)
     if (ts.isIdentifier(callee) && callee.text === "require"
         && node.arguments?.length === 1 && !ts.isStringLiteralLike(node.arguments[0])
-        && !(checker.getSymbolAtLocation(callee)?.declarations ?? [])
-             .some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)))) {
+        && !projectShadows(checker.getSymbolAtLocation(callee)?.declarations)) {   // ⟨R1074⟩
       const owner = enclosing(node);
       if (owner) { fns.get(owner).direct.add("Unknown"); fns.get(owner).why.add("reflect:require"); }
     }
@@ -11781,7 +12429,7 @@ function visitCalls(node) {
           try { sym = checker.getAliasedSymbol(sym); } catch { /* unresolved import — treat as external */ }
         }
         const decls = sym?.declarations ?? [];
-        return !decls.some((d) => projectFiles.has(path.resolve(d.getSourceFile().fileName)));
+        return !projectShadows(decls);   // ⟨R1074⟩
       };
       const fromCreateRequire = (expr) => {
         if (!ts.isIdentifier(expr)) return false;
@@ -12474,7 +13122,7 @@ for (const sf of sources) visitCalls(sf);
         add(staticBlockQual(m), "static");   // R815: a static field initialiser shares the block's unit
     // R815: the `extends <expr>` unit — run by the definer (here) and reached by every construction (`super`).
     const ctorQ = nodeName.get(cls);
-    const herQ = ctorQ && ctorQ.endsWith(".constructor") ? ctorQ.replace(/\.constructor$/, ".<heritage>") : null;
+    const herQ = heritageQualOf(ctorQ);
     // Wired only when the expression attributed something: a bare `extends Base` mints the unit (a reference was
     // attributed) and carries nothing, and an edge to an empty unit is a `calls` entry on every subclass for no answer.
     const herR = herQ && fns.get(herQ);
