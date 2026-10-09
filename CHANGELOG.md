@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.40.2] — 2026-10-09
+
 - ⚠ **A DI provider entry substitutes a class token** (SOUNDNESS R1061). `{ provide: Store, useClass: FileStore }`
   (and `useValue`, `useFactory` — sync or async — and `useExisting`) is read as a conversion of the substitute to
   `Store`, so a `store: Store` dispatch is charged the union of the declared class and the substitute. EXECUTED on
