@@ -7395,6 +7395,10 @@ export function clockImp() { return hrtime(); }
 // `.map` callback each printed the planted value with the reader ABSENT, `deny Env` and `deny Env Unknown` exit 0. The
 // floor discloses `Unknown[env-maybe-read]` (never Env: a ProcessEnv-typed object may be a copy). CONTROLS: a COPY bound
 // by a literal, a named function's parameter no visible site feeds, and a resolved non-env array element stay absent.
+// ⟨v045, the one graph⟩ STRENGTHENED, not weakened: every container here is a `const`, unexported, read only through
+// `get`/`for…of`/`.map`, and every value put into it is the environment, so its provenance IS enumerable — the graph
+// RESOLVES each reader to `Env` (re-executed `tsagent-v045/fx1` s02/s20/s42 and this block's shapes: each printed the
+// planted value). The old floor's "never Env" was about a value whose provenance it could NOT see; that still holds.
 if (blk()) {
   const d = project({ "src/ev.ts": `const m = new Map([["e", process.env]]);
 export function viaMapCtor() { return m.get("e")!.SECRET; }
@@ -7419,8 +7423,8 @@ export function ctlArrLit() { return arr2[1].SECRET; }
   const { report } = scan(d);
   const gate = (line) => { fs.writeFileSync(path.join(d, "p.pol"), line + "\n"); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
   for (const fn of ["viaMapCtor", "viaMapSet", "viaSetIter", "viaForOf", "viaArrMap", "viaWeakMap", "viaModuleHeld"])
-    check(`R935: \`${fn}\` discloses — \`deny Env Unknown src.ev.${fn}\` exit 1 (0 at v0.40.2)`,
-          gate(`deny Env Unknown src.ev.${fn}`) === 1 && (entry(report, `src.ev.${fn}`)?.unknownWhy ?? []).includes("env-maybe-read"),
+    check(`R935: \`${fn}\` reads the environment out of an all-environment container — \`deny Env src.ev.${fn}\` exit 1 (0 at v0.40.2; MAY at v0.40.3)`,
+          gate(`deny Env src.ev.${fn}`) === 1 && gate(`deny Env Unknown src.ev.${fn}`) === 1,
           JSON.stringify(entry(report, `src.ev.${fn}`) ?? null));
   for (const fn of ["ctlCopy", "ctlUnfed", "ctlArrLit"])
     check(`R935 CONTROL: \`${fn}\` is not the environment — absent`, entry(report, `src.ev.${fn}`) == null
@@ -7550,6 +7554,150 @@ export function ctlAnyParam(x: any) { return x.SECRET; }
   for (const fn of ["ctlCleanMap", "ctlSize", "ctlAnyParam"])
     check(`R935 UNTYPED CONTROL: \`${fn}\` reads no environment key — absent`,
           !(entry(report, `src.an.${fn}`)?.inferred ?? []).length, JSON.stringify(entry(report, `src.an.${fn}`) ?? null));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── SOUNDNESS R935 (v045): the edges the location model was missing — a call's RESULT, DESTRUCTURING, a PROMISE, a
+// constructor PARAMETER PROPERTY, and the open slots (a global-object slot, an `any` member a type declares) ─────────────
+// EXECUTED (`tsagent-v045/fx1`, node 22.12.0, `SECRET=planted`): every positive printed the planted value and was ABSENT on
+// published 0.40.3 with `deny Env` and `deny Env Unknown` both exit 0. Every control printed the literal it holds.
+if (blk()) {
+  const d = project({ "src/rt.ts": `function getEnv() { return process.env; }
+function getEnvAny(): any { return process.env; }
+function ident<T>(x: T): T { return x; }
+async function getEnvLater() { return process.env; }
+function twoRet(c: boolean): any { if (c) return process.env; return { SECRET: "x" }; }
+const vConst = getEnv();
+export function readConstResult() { return vConst.SECRET; }
+const aLit = [getEnv()];
+export function readArrResult() { return aLit[0].SECRET; }
+const oLit = { env: getEnv() };
+export function readObjResult() { return oLit.env.SECRET; }
+const pushed: any[] = []; pushed.push(getEnv());
+export function readPushedResult() { return pushed[0].SECRET; }
+class Fld { env = getEnv(); }
+const fld = new Fld();
+export function readFieldResult() { return fld.env.SECRET; }
+const viaId = ident(process.env);
+export function readIdentResult() { return viaId.SECRET; }
+const anyRes = getEnvAny();
+export function readAnyResult() { return anyRes.SECRET; }
+const later = getEnvLater();
+export async function readAsyncResult() { return (await later).SECRET; }
+const pr = Promise.resolve(process.env);
+export async function readPromise() { return (await pr).SECRET; }
+const src1 = { env: process.env }; const { env: renamed } = src1;
+export function readDestrRenamed() { return renamed.SECRET; }
+const [firstEl] = [process.env];
+export function readDestrArray() { return firstEl.SECRET; }
+const src2 = { env: process.env };
+export function readDestrLocal() { const { env } = src2; return env.SECRET; }
+class PBox<T> { constructor(public v: T) {} }
+const pbox = new PBox(process.env);
+export function readParamProp() { return pbox.v.SECRET; }
+(globalThis as any).envSlot = process.env;
+export function readGlobalSlot() { return (globalThis as any).envSlot.SECRET; }
+const typedAny: { env?: any } = {}; typedAny.env = process.env;
+export function readTypedAny() { return typedAny.env.SECRET; }
+const mixedRet = twoRet(false);
+export function readTwoRet() { return mixedRet.SECRET; }
+class QBox { constructor(public v: any) {} }
+const qEnv = new QBox(process.env);
+const qLit = new QBox({ SECRET: "x" });
+export function readQEnv() { return qEnv.v.SECRET; }
+export function ctlQLit() { return qLit.v.SECRET; }
+const litId = ident({ SECRET: "x" });
+export function ctlIdentLit() { return litId.SECRET; }
+const { other: otherLit } = { env: process.env, other: { SECRET: "x" } };
+export function ctlDestrOther() { return otherLit.SECRET; }
+const [lit0] = [{ SECRET: "x" }, process.env];
+export function ctlDestrArrLit() { return lit0.SECRET; }
+const prLit = Promise.resolve({ SECRET: "x" });
+export async function ctlPromiseLit() { return (await prLit).SECRET; }
+(globalThis as any).litSlot = { SECRET: "x" };
+export function ctlGlobalLit() { return (globalThis as any).litSlot.SECRET; }
+export function ctlCallerOnly() { const e = getEnv(); return typeof e; }
+const { env: mergedEnv = {} } = typeof process === "undefined" ? ({} as any) : process;
+export function readMergedProcess() { return (mergedEnv as any).SECRET; }
+const avAlias = process.argv;
+export function readArgvAlias() { return avAlias[2]; }
+const avHolder = { argv: process.argv };
+export function readArgvProp() { return avHolder.argv[2]; }
+function getArgv() { return process.argv; }
+const avRet = getArgv();
+export function readArgvResult() { return avRet[2]; }
+const { argv: avDestr } = process;
+export function readArgvDestr() { return avDestr[2]; }
+function mkAnyMap(): Map<string, any> { const m = new Map<string, any>(); m.set("e", process.env); return m; }
+const retMap = mkAnyMap();
+export function readRetContainer() { return retMap.get("e").SECRET; }
+const recW: Record<string, any> = {}; recW.e = process.env; const { e: recDestr } = recW;
+export function readDestrContainer() { return recDestr.SECRET; }
+class MBox { constructor(public m: Map<string, any>) {} }
+const mbox = new MBox(new Map<string, any>([["e", process.env]]));
+export function readPPropContainer() { return mbox.m.get("e").SECRET; }
+const argvBox: any = {}; argvBox.a = process.argv;
+export function readArgvAnyBox() { return argvBox.a[2]; }
+function putVia(m: Map<string, any>, v: any) { m.set("e", v); }
+const filled = new Map<string, any>(); putVia(filled, process.env);
+export function readFilledViaParam() { return filled.get("e").SECRET; }
+const pushedAny: any[] = []; pushedAny.push(getEnv());
+const [pushedFirst] = pushedAny;
+export function readDestrPushed() { return pushedFirst.SECRET; }
+const allEnv = new Map<string, any>([["e", getEnv()]]);
+function elemOut(): any { return allEnv.get("e"); }
+const elemRet = elemOut();
+export function readElemReturned() { return elemRet.SECRET; }
+const elemPromise = Promise.resolve(allEnv.get("e"));
+export async function readElemAwaited() { return (await elemPromise).SECRET; }
+const opaqueOv = Object.values({ e: process.env })[0];
+export function readOpaqueFloor() { return opaqueOv.SECRET; }
+class HoldsE { e: any; constructor(e: any) { this.e = e; } }
+const holdEnv = new HoldsE(process.env);
+const holdLit = new HoldsE({ SECRET: "x" });
+export function readHeldEnv() { return holdEnv.e.SECRET; }
+export function ctlHeldLit() { return holdLit.e.SECRET; }
+class HoldsL { e: any; constructor(e: any) { this.e = e; } }
+const onlyLit = new HoldsL({ SECRET: "x" });
+export function ctlHeldOnlyLit() { return onlyLit.e.SECRET; }
+export function readOptsExported(o: { env: NodeJS.ProcessEnv }) { return o.env.SECRET; }
+export function callOptsExported() { return readOptsExported({ env: { SECRET: "x" } }); }
+function readOptsLocal(o: { env: NodeJS.ProcessEnv }) { return o.env.SECRET; }
+export function ctlOptsLocal() { return readOptsLocal({ env: { SECRET: "x" } }); }
+` });
+  const { report } = scan(d);
+  const gate = (line) => { fs.writeFileSync(path.join(d, "p.pol"), line + "\n"); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  for (const fn of ["readConstResult", "readArrResult", "readObjResult", "readPushedResult", "readFieldResult", "readIdentResult",
+                    "readAnyResult", "readAsyncResult", "readPromise", "readDestrRenamed", "readDestrArray", "readDestrLocal", "readParamProp",
+                    // ⟨R1089⟩ consola's merged-`process` destructure, and a STORED argv (alias, property, call result, destructure)
+                    "readMergedProcess", "readArgvAlias", "readArgvProp", "readArgvResult", "readArgvDestr",
+                    // ⟨the one graph⟩ two former walkers' constructs COMPOSED (`tsagent-v045/fx7`, executed, ABSENT at d1f87a3)
+                    "readElemReturned", "readElemAwaited"])
+    check(`R935 v045: \`${fn}\` reads the environment — \`deny Env src.rt.${fn}\` exit 1 (0 at v0.40.3)`,
+          gate(`deny Env src.rt.${fn}`) === 1, JSON.stringify(entry(report, `src.rt.${fn}`) ?? null));
+  for (const fn of ["readGlobalSlot", "readTypedAny", "readTwoRet", "readQEnv",
+                    // ⟨the one graph⟩ composed constructs that DISCLOSE (`fx7`, executed, ABSENT at d1f87a3), the typed floor,
+                    // and ⟨R1090⟩ a field bound through a constructor parameter that one site feeds the environment and one a literal
+                    "readRetContainer", "readDestrContainer", "readPPropContainer", "readArgvAnyBox", "readFilledViaParam",
+                    "readDestrPushed", "readOpaqueFloor", "readHeldEnv", "ctlHeldLit",
+                    // an EXPORTED function's parameter: its member is not enumerated by the visible sites (callers outside
+                    // the project), so the typed floor still discloses it
+                    "readOptsExported"])
+    check(`R935 v045: \`${fn}\` may read it — \`deny Env Unknown src.rt.${fn}\` exit 1, never a concrete \`Env\``,
+          gate(`deny Env Unknown src.rt.${fn}`) === 1 && !(entry(report, `src.rt.${fn}`)?.inferred ?? []).includes("Env"),
+          JSON.stringify(entry(report, `src.rt.${fn}`) ?? null));
+  for (const fn of ["ctlIdentLit", "ctlDestrOther", "ctlDestrArrLit", "ctlPromiseLit", "ctlGlobalLit",
+                    // a NON-exported function whose every visible site passes a literal `env`: resolved, not disclosed
+                    // (`Unknown` at d1f87a3 through the interface member; executed, it reads the literal)
+                    "ctlOptsLocal"])
+    check(`R935 v045 CONTROL: \`${fn}\` reads a literal — absent`,
+          !(entry(report, `src.rt.${fn}`)?.inferred ?? []).length, JSON.stringify(entry(report, `src.rt.${fn}`) ?? null));
+  check("R1090 CONTROL: a field bound through `this.e = e` whose every `new` site passes a LITERAL is absent (was `Env` through R934's in-frame SOME, pooled onto the heap)",
+        !(entry(report, "src.rt.ctlHeldOnlyLit")?.inferred ?? []).length, JSON.stringify(entry(report, "src.rt.ctlHeldOnlyLit") ?? null));
+  check("R935 v045 CONTROL: a constructor argument that is a LITERAL, beside one that is the environment, is MAY — never `Env`",
+        !(entry(report, "src.rt.ctlQLit")?.inferred ?? []).includes("Env"), JSON.stringify(entry(report, "src.rt.ctlQLit") ?? null));
+  check("R935 v045 CONTROL: a CALLER of an environment-returning function gains nothing in its own `direct` (it inherits through the edge)",
+        !(entry(report, "src.rt.ctlCallerOnly")?.direct ?? []).length, JSON.stringify(entry(report, "src.rt.ctlCallerOnly") ?? null));
   fs.rmSync(d, { recursive: true, force: true });
 }
 
