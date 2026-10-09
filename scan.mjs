@@ -6718,6 +6718,21 @@ function providerTokenClasses(expr, depth = 0, deps = false) {
   if (tsym && (tsym.flags & ts.SymbolFlags.Alias)) { try { tsym = checker.getAliasedSymbol(tsym); } catch { tsym = undefined; } }
   const direct = (tsym?.declarations ?? []).find((d) => ts.isClassDeclaration(d) && (isProjectNode(d) || (deps && d.getSourceFile().isDeclarationFile)));
   if (direct) return [direct];
+  // ⟨R1061⟩ THE VALUE BEFORE THE ANNOTATION. `const T: typeof Store = FileStore` holds FileStore; its type says Store.
+  // A `const` binding answers with its initializer (and a const object literal's member with that member's value);
+  // a reassignable binding's value is not its declaration's, so the type cannot be trusted either — open.
+  const vd = tsym?.valueDeclaration;
+  if (vd && ts.isVariableDeclaration(vd) && isProjectNode(vd)) {
+    if (!(ts.getCombinedNodeFlags(vd) & ts.NodeFlags.Const) || !vd.initializer) return null;
+    if (ts.isIdentifier(vd.name)) return providerTokenClasses(vd.initializer, depth + 1, deps);
+  }
+  if (vd && ts.isPropertyAssignment(vd) && isProjectNode(vd) && ts.isPropertyAccessExpression(e)) {
+    const recv = unwrapArgExpr(e.expression);
+    let rs; try { rs = ts.isIdentifier(recv) ? checker.getSymbolAtLocation(recv) : undefined; } catch { rs = undefined; }
+    const rd = rs?.valueDeclaration;
+    if (rd && ts.isVariableDeclaration(rd) && (ts.getCombinedNodeFlags(rd) & ts.NodeFlags.Const) && rd.initializer
+        && unwrapArgExpr(rd.initializer) === vd.parent) return providerTokenClasses(vd.initializer, depth + 1, deps);
+  }
   let t; try { t = checker.getTypeAtLocation(e); } catch { return null; }
   if (!t) return null;
   const out = [];
@@ -10032,6 +10047,218 @@ const envTypeFloorKind = (node) => {
 // `&&`/`,`) to the node that consumes it, then answer from a CLOSED list of non-reading consumers.
 // Everything not on it charges: that is the direction a list must fail in here (a missing entry is an
 // over-charge on code that already names the environment, never a silence).
+// ⟨SOUNDNESS R935, the UNTYPED-CONTAINER half⟩ THE ENVIRONMENT STORED WHERE ITS TYPE IS LOST. The ProcessEnv floor
+// above rides on the type, so `new Map<string, any>([["e", process.env]])`, `rec["e"] = process.env` on a
+// `Record<string, any>`, `arr.push(process.env)` into an `any[]`, and `objAny.cfg = { env: process.env }` on an `any`
+// object left every reader of the container ABSENT (EXECUTED, `fxany`: each printed the planted value, `deny Env` and
+// `deny Env Unknown` exit 0). Narrowed to where the escape is SEEN rather than to every `any` read:
+//   · the CONTAINERS are only those the environment value is actually put into — a builtin collection built with it
+//     (`new Map|Set|WeakMap|Array(…)`) or mutated with it (`set`/`add`/`push`/`unshift`/`splice`), an element or
+//     dynamic-key write (`c[k] = env`, a `Record` index), or a member write onto an `any`/`unknown` object — named by
+//     the root binding of the receiver. An object literal under a static key is a LOCATION the table above already
+//     enumerates, and a call argument (`spawn(cmd, { env })`) is charged at the call and stored nowhere visible;
+//   · a READ discloses only when its receiver is reached FROM such a container through at least one element step
+//     (a member/element read, a method call's result, a `for…of` variable, a callback parameter of a method called on
+//     it, a parameter whose visible call site passes one) — `m.size` on the container itself reads no key — and its
+//     value is not a primitive. MAY (`Unknown[env-maybe-read]`): which element is the environment is not known.
+const ENV_COLLECTION_CTORS = new Set(["Map", "Set", "WeakMap", "WeakSet", "Array", "WeakRef"]);
+const ENV_COLLECTION_MUTATORS = new Set(["set", "add", "push", "unshift", "splice", "fill"]);
+let envTaintedRoots = null;
+const envRootSym = (e0) => {
+  let e = unwrapEnvTransparent(e0);
+  for (let g = 0; e && g < 16 && (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e) || ts.isCallExpression(e)); g++)
+    e = unwrapEnvTransparent(ts.isCallExpression(e) ? (ts.isPropertyAccessExpression(e.expression) ? e.expression.expression : null) : e.expression);
+  if (!e || !ts.isIdentifier(e)) return null;
+  const sym = envValueSymAt(e);
+  return sym && (sym.flags & (ts.SymbolFlags.Variable | ts.SymbolFlags.Property)) ? sym : null;
+};
+const envIsCollectionType = (e) => {
+  let t; try { t = checker.getNonNullableType(checker.getTypeAtLocation(e)); } catch { return false; }
+  const nm = (t?.getSymbol?.() ?? t?.aliasSymbol)?.getName?.();
+  return ["Map", "Set", "WeakMap", "WeakSet", "Array", "ReadonlyArray"].includes(nm) || !!checker.isArrayType?.(t);
+};
+const envAnyish = (e) => {
+  let t; try { t = checker.getTypeAtLocation(e); } catch { return false; }
+  if (!t) return false;
+  if (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return true;
+  return !!(t.getStringIndexType?.() || t.getNumberIndexType?.());
+};
+const computeEnvTaint = () => {
+  const roots = new Set();
+  const seed = (n) => {
+    let cur = n;
+    for (let g = 0; g < 24; g++) {
+      const p = cur.parent;
+      if (!p) return;
+      if ((ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isTypeAssertionExpression(p) || ts.isNonNullExpression(p)
+           || ts.isSatisfiesExpression?.(p)) && p.expression === cur) { cur = p; continue; }
+      if (ts.isConditionalExpression(p) && p.condition !== cur) { cur = p; continue; }
+      if (ts.isBinaryExpression(p) && (p.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken || p.operatorToken.kind === ts.SyntaxKind.BarBarToken)) { cur = p; continue; }
+      if (ts.isArrayLiteralExpression(p) || ts.isSpreadElement(p)) { cur = p; continue; }
+      if ((ts.isPropertyAssignment(p) && p.initializer === cur) || ts.isShorthandPropertyAssignment(p)) {
+        // a STATIC member of an object literal is a location — unless the literal itself lands in a container (climb on)
+        cur = p.parent; continue;
+      }
+      if (ts.isNewExpression(p) && (p.arguments ?? []).includes(cur)) {
+        const c = unwrapEnvTransparent(p.expression);
+        if (ts.isIdentifier(c) && ENV_COLLECTION_CTORS.has(c.text) && identIsGlobal(c)) { cur = p; continue; }
+        return;
+      }
+      if (ts.isCallExpression(p) && (p.arguments ?? []).includes(cur)) {
+        const ce = unwrapEnvTransparent(p.expression);
+        if (ts.isPropertyAccessExpression(ce) && ENV_COLLECTION_MUTATORS.has(ce.name.text) && envIsCollectionType(ce.expression)) {
+          const r = envRootSym(ce.expression); if (r) roots.add(r);
+        }
+        return;
+      }
+      if (ts.isBinaryExpression(p) && p.right === cur && p.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        const l = unwrapEnvTransparent(p.left);
+        const dyn = ts.isElementAccessExpression(l) ? (!l.argumentExpression || !ts.isNumericLiteral(l.argumentExpression) || envAnyish(l.expression))
+          : ts.isPropertyAccessExpression(l) && envAnyish(l.expression);
+        if (dyn) { const r = envRootSym(l.expression); if (r) roots.add(r); }
+        return;
+      }
+      if (ts.isVariableDeclaration(p) && p.initializer === cur) {
+        // only a value that went through a CONTAINER on the way (an array/collection) — a bare alias or a static
+        // object literal is the binding table's question
+        if (cur !== n && ts.isIdentifier(p.name) && (ts.isNewExpression(cur) || ts.isArrayLiteralExpression(cur)
+            || (ts.isObjectLiteralExpression(cur) && envAnyish(p.name)))) {
+          const sym = checker.getSymbolAtLocation(p.name); if (sym) roots.add(sym);
+        }
+        return;
+      }
+      return;
+    }
+  };
+  const visit = (n) => {
+    if (envRefKind(n)) seed(n);
+    ts.forEachChild(n, visit);
+  };
+  for (const sf of sources) visit(sf);
+  return roots;
+};
+// How many element steps separate `e` from a tainted container (-1: not reached from one).
+const envFromTainted = (e0, steps, depth, seen) => {
+  const e = unwrapEnvTransparent(e0);
+  if (!e || depth > 8) return -1;
+  if (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) return envFromTainted(e.expression, steps + 1, depth + 1, seen);
+  if (ts.isCallExpression(e)) {
+    const ce = unwrapEnvTransparent(e.expression);
+    return ts.isPropertyAccessExpression(ce) ? envFromTainted(ce.expression, steps + 1, depth + 1, seen) : -1;
+  }
+  if (!ts.isIdentifier(e)) return -1;
+  const sym = envValueSymAt(e);
+  if (!sym || seen.has(sym)) return -1;
+  seen.add(sym);
+  if (envTaintedRoots.has(sym)) { envTaintHitRoot = sym; return steps; }
+  const d = sym.valueDeclaration;
+  if (!d) return -1;
+  if (ts.isVariableDeclaration(d)) {
+    const loop = d.parent?.parent;
+    if (loop && ts.isForOfStatement(loop)) return ts.isIdentifier(d.name) ? envFromTainted(loop.expression, steps + 1, depth + 1, seen) : -1;
+    return d.initializer && ts.isIdentifier(d.name) ? envFromTainted(d.initializer, steps, depth + 1, seen) : -1;
+  }
+  if (ts.isParameter(d) && ts.isIdentifier(d.name)) {
+    const f = d.parent;
+    if ((ts.isArrowFunction(f) || ts.isFunctionExpression(f)) && f.parent && ts.isCallExpression(f.parent) && f.parent.arguments.includes(f)) {
+      const ce = unwrapEnvTransparent(f.parent.expression);
+      return ts.isPropertyAccessExpression(ce) && f.parameters[0] === d ? envFromTainted(ce.expression, steps + 1, depth + 1, seen) : -1;
+    }
+    let best = -1;
+    for (const a of paramArgs.get(sym) ?? []) {
+      const r = a ? envFromTainted(a, steps, depth + 1, new Set(seen)) : -1;
+      if (r >= 0 && (best < 0 || r > best)) best = r;   // the farthest site: MUST only if every reached site is one step
+    }
+    return best;
+  }
+  return -1;
+};
+let envTaintHitRoot = null;
+// ⟨R935⟩ THE RESOLUTION: a container whose every value is the environment and that never escapes. A `const`, not
+// exported, whose initializer is empty or holds only environment values (`new Map([[k, env]…])`, `[env]`, `{}`), every
+// mutation stores the environment (`set(k, env)`, `add(env)`, `push(env)`, `c[k] = env`), and every other reference
+// is a read-only method or element read — then an ELEMENT (exactly one step in) IS the environment, and its member
+// read is `Env`, not `Unknown`. Anything else stays MAY.
+const ENV_CONTAINER_READERS = new Set(["get", "has", "at", "find", "findLast", "values", "forEach", "map", "filter", "some",
+  "every", "reduce", "includes", "indexOf", "keys", "entries", "size", "length", "slice", "flatMap"]);
+const envAllEnvMemo = new Map();
+const envContainerAllEnv = (sym) => {
+  if (envAllEnvMemo.has(sym)) return envAllEnvMemo.get(sym);
+  envAllEnvMemo.set(sym, false);
+  const d = sym.valueDeclaration;
+  const isEnv = (x) => !!x && envRefKind(unwrapEnvTransparent(x)) === "env";
+  if (!d || !ts.isVariableDeclaration(d) || !ts.isIdentifier(d.name) || !(ts.getCombinedNodeFlags(d) & ts.NodeFlags.Const)
+      || !projectFiles.has(path.resolve(d.getSourceFile().fileName))) return false;
+  const st = d.parent?.parent;
+  if (st && ts.isVariableStatement(st) && st.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return false;
+  const init = unwrapEnvTransparent(d.initializer);
+  const litOk = (lit, tuple) => ts.isArrayLiteralExpression(lit) && lit.elements.every((el) => tuple
+    ? (ts.isArrayLiteralExpression(el) && el.elements.length === 2 && isEnv(el.elements[1])) : isEnv(el));
+  let ok = false;
+  if (init && ts.isArrayLiteralExpression(init)) ok = litOk(init, false);
+  else if (init && ts.isObjectLiteralExpression(init)) ok = init.properties.length === 0;
+  else if (init && ts.isNewExpression(init) && ts.isIdentifier(init.expression)) {
+    const a0 = init.arguments?.[0] ? unwrapEnvTransparent(init.arguments[0]) : null;
+    const nm = init.expression.text;
+    ok = !a0 || ((nm === "Map" || nm === "WeakMap") ? litOk(a0, true) : (nm === "Set" || nm === "WeakSet") ? litOk(a0, false) : false);
+  }
+  if (!ok) return false;
+  let clean = true;
+  const visit = (n) => {
+    if (!clean) return;
+    if (ts.isIdentifier(n) && n.text === d.name.text && n !== d.name && envValueSymAt(n) === sym) {
+      let cur = n;
+      while (cur.parent && (ts.isParenthesizedExpression(cur.parent) || ts.isNonNullExpression(cur.parent) || ts.isAsExpression(cur.parent))) cur = cur.parent;
+      const p = cur.parent;
+      if (p && ts.isPropertyAccessExpression(p) && p.expression === cur) {
+        const call = p.parent && ts.isCallExpression(p.parent) && p.parent.expression === p ? p.parent : null;
+        const m = p.name.text;
+        if (call && (m === "set")) clean = isEnv(call.arguments[1]);
+        else if (call && (m === "add" || m === "push" || m === "unshift")) clean = call.arguments.every((x) => isEnv(x));
+        else if (!ENV_CONTAINER_READERS.has(m)) clean = false;
+      } else if (p && ts.isElementAccessExpression(p) && p.expression === cur) {
+        const asg = p.parent && ts.isBinaryExpression(p.parent) && p.parent.left === p ? p.parent : null;
+        if (asg) clean = asg.operatorToken.kind === ts.SyntaxKind.EqualsToken && isEnv(asg.right);
+      } else if (p && ts.isForOfStatement(p) && p.expression === cur) { /* iteration reads */ }
+      else if (p && ts.isTypeQueryNode(p)) { /* type position */ }
+      else clean = false;   // passed, returned, aliased, spread: escapes
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(d.getSourceFile());
+  envAllEnvMemo.set(sym, clean);
+  return clean;
+};
+const envTaintKind = (node) => {
+  if (!(ts.isIdentifier(node) || ts.isCallExpression(node) || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)
+        || ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node))) return null;
+  const p = node.parent;
+  // only the RECEIVER of a member read
+  if (!p || !((ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p)) && p.expression === node)) return null;
+  if (ts.isBinaryExpression(p.parent) && p.parent.left === p && envIsAssignOp(p.parent.operatorToken.kind)) return null;
+  if (ts.isCallExpression(p.parent) && p.parent.expression === p) return null;   // a method call on it, not a key read
+  envTaintedRoots ??= computeEnvTaint();
+  if (!envTaintedRoots.size) return null;
+  let t; try { t = checker.getTypeAtLocation(node); } catch { return null; }
+  if (t && (t.flags & (ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFlags.BooleanLike | ts.TypeFlags.BigIntLike
+                       | ts.TypeFlags.ESSymbolLike | ts.TypeFlags.Undefined | ts.TypeFlags.Null | ts.TypeFlags.Void))) return null;
+  if (envIsCollectionType(node)) return null;   // a nested container is reached, not read
+  // a member the LOCATION model enumerates (a const literal's element at a literal index, a declared property) has
+  // its own answer — env, may, or provably not — and the taint does not overrule it
+  {
+    const u = unwrapEnvTransparent(node);
+    if ((ts.isPropertyAccessExpression(u) || ts.isElementAccessExpression(u)) && envBindingTable) {
+      const key = envBindingTable.memberSymOf(u);
+      if (key && envBindingTable.bindings.has(key)) return null;
+    }
+  }
+  envTaintHitRoot = null;
+  const steps = envFromTainted(node, 0, 0, new Set());
+  if (steps < 1) return null;
+  const must = steps === 1 && envTaintHitRoot && envContainerAllEnv(envTaintHitRoot);
+  if (ENVLOC_REACH) { const sf = node.getSourceFile(); ENVLOC_REACH(`taint ${must ? "env" : "may"} ${path.relative(rootDir, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart()).line + 1}`); }
+  return must ? "env" : "may";
+};
 const envConsumerInert = (node) => {
   let cur = node;
   for (;;) {
@@ -11870,7 +12097,7 @@ function visitCalls(node) {
     // ⟨R934⟩ a DESTRUCTURED parameter that every visible call site hands the environment reads its keys
     // as the frame is entered — the destructuring IS the read, in this function's frame.
     if (ts.isParameter(node) && ts.isObjectBindingPattern(node.name) && envAliasSymbols.has(node)) { markEnv(); ENVLOC_REACH?.("param-pattern env"); }
-    const kind = envRefKind(node) ?? envTypeFloorKind(node);   // ⟨R935⟩ the typed floor answers only what is unresolved
+    const kind = envRefKind(node) ?? envTypeFloorKind(node) ?? envTaintKind(node);   // ⟨R935⟩ floor, then untyped containers
     if (kind && ENVLOC_REACH && !envConsumerInert(node)) {
       const vd = ts.isIdentifier(node) ? checker.getSymbolAtLocation(node)?.valueDeclaration : null;
       const where = `${path.relative(process.cwd(), node.getSourceFile().fileName)}:${node.getStart() >= 0 ? node.getSourceFile().getLineAndCharacterOfPosition(node.getStart()).line + 1 : 0}`;

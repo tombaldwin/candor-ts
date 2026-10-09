@@ -7514,6 +7514,69 @@ export class Svc2 {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── SOUNDNESS R935: the environment stored where its type is lost (`any` / `Record<…>` / `unknown` containers) ─────────
+// EXECUTED (`tsagent-v044/fxany`): each reader printed the planted value, ABSENT, `deny Env` and `deny Env Unknown` exit 0.
+// A container whose every value is the environment and that never escapes RESOLVES (an element's key read is `Env`);
+// a mixed container DISCLOSES; the container's own `size` and an unrelated `any` read stay clean.
+if (blk()) {
+  const d = project({ "src/an.ts": `const mAny = new Map<string, any>([["e", process.env]]);
+export function readMapAny() { return mAny.get("e").SECRET; }
+const mUnk = new Map<string, unknown>(); mUnk.set("e", process.env);
+export function readMapUnknown() { return (mUnk.get("e") as any).SECRET; }
+const rec: Record<string, any> = {}; rec["e"] = process.env;
+export function readRecDyn() { return rec["e"].SECRET; }
+const arrAny: any[] = []; arrAny.push(process.env);
+export function readArrPush() { for (const x of arrAny) return x.SECRET; return undefined; }
+export function readArrCb() { return arrAny.map((x) => x.SECRET)[0]; }
+function deep(o: any) { return o.SECRET; }
+export function readViaParam() { return deep(mAny.get("e")); }
+const objAny: any = {}; objAny.cfg = { env: process.env };
+export function readObjAnyDeep() { return objAny.cfg.env.SECRET; }
+const mixed = new Map<string, any>([["e", process.env], ["x", { SECRET: "lit" }]]);
+export function readMixed(k: string) { return mixed.get(k).SECRET; }
+const clean = new Map<string, any>([["e", { SECRET: "lit" }]]);
+export function ctlCleanMap() { return clean.get("e").SECRET; }
+export function ctlSize() { return mAny.size; }
+export function ctlAnyParam(x: any) { return x.SECRET; }
+` });
+  const { report } = scan(d);
+  const gate = (line) => { fs.writeFileSync(path.join(d, "p.pol"), line + "\n"); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  for (const fn of ["readMapAny", "readMapUnknown", "readRecDyn", "readArrPush", "readArrCb", "readViaParam"])
+    check(`R935 UNTYPED: \`${fn}\` reads the environment out of an all-environment container — \`deny Env src.an.${fn}\` exit 1 (0 at v0.40.2)`,
+          gate(`deny Env src.an.${fn}`) === 1, JSON.stringify(entry(report, `src.an.${fn}`) ?? null));
+  for (const fn of ["readObjAnyDeep", "readMixed"])
+    check(`R935 UNTYPED: \`${fn}\` may read it — \`deny Env Unknown src.an.${fn}\` exit 1 (0 at v0.40.2)`,
+          gate(`deny Env Unknown src.an.${fn}`) === 1, JSON.stringify(entry(report, `src.an.${fn}`) ?? null));
+  for (const fn of ["ctlCleanMap", "ctlSize", "ctlAnyParam"])
+    check(`R935 UNTYPED CONTROL: \`${fn}\` reads no environment key — absent`,
+          !(entry(report, `src.an.${fn}`)?.inferred ?? []).length, JSON.stringify(entry(report, `src.an.${fn}`) ?? null));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── SOUNDNESS R1061: a `typeof X`-annotated token whose VALUE is another class ─────────────────────────────────────────
+// EXECUTED on NestJS 10 (`tsagent-v044/fxdi/src/tof.ts`): `const TB: typeof StoreTA = StoreTB; { provide: TB, useClass:
+// SubTB }` substituted StoreTB (its write ran through `runTofB`), not StoreTA — the annotation is a claim, the value
+// decides.
+if (blk()) {
+  const d = project({ "src/tof.ts": `import * as fs from "fs";
+export class StoreTA { save(): void {} }
+export class StoreTB { save(): void {} }
+export class SubTB { save(): void { fs.writeFileSync("/tmp/candor-r1061-tof", "x"); } }
+const TB: typeof StoreTA = StoreTB;
+export const prov = [StoreTA, { provide: TB, useClass: SubTB }];
+export class SvcTof { constructor(private b: StoreTB, private a: StoreTA) {}
+  runTofB() { this.b.save(); }
+  runTofA() { this.a.save(); } }
+` });
+  const { report } = scan(d);
+  const gate = (line) => { fs.writeFileSync(path.join(d, "p.pol"), line + "\n"); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  check("R1061 typeof-token: the VALUE's class is substituted — `deny Fs src.tof.SvcTof.runTofB` exit 1",
+        gate("deny Fs src.tof.SvcTof.runTofB") === 1, JSON.stringify(entry(report, "src.tof.SvcTof.runTofB") ?? null));
+  check("R1061 typeof-token CONTROL: the ANNOTATED class is not — `deny Fs Unknown src.tof.SvcTof.runTofA` stays 0",
+        gate("deny Fs Unknown src.tof.SvcTof.runTofA") === 0, JSON.stringify(entry(report, "src.tof.SvcTof.runTofA") ?? null));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── SOUNDNESS R944: a unit with no name of its own is keyed by ANCHOR PATH + ORDINAL, not by OFFSET ──────
 // `<structural>@N`, `<callable>@N`, `<decorator>@N`, `<decorator-arg>@N` and `[computed@N]` were keyed by
 // the absolute character offset, so a COMMENT LINE above them renamed them — and under ⟨0.40⟩'s AS-EFF-005

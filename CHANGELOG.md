@@ -28,8 +28,18 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   `opts.env` read as nothing (EXECUTED: each printed the planted value). Such a read is now `Unknown[env-maybe-read]` —
   MAY, never `Env`, since a `ProcessEnv`-typed object may be a copy. A named function's parameter (R934's), a project
   callee or getter, and a binding whose values the table resolves are not re-asked. Residual: the environment stored
-  under `any`/`Record<…>` is outside the floor. Corpus: 5 rows newly `Unknown` (pnpm's `dirs.ts`, git-js's
+  under `any`/`Record<…>` is covered by the next entry. Corpus: 5 rows newly `Unknown` (pnpm's `dirs.ts`, git-js's
   `get env`), 0.012% of 41,924 units.
+- ⚠ **The environment put into a container whose type is lost** (SOUNDNESS R935). `new Map<string, any>([["e",
+  process.env]])`, `rec["e"] = process.env` on a `Record<string, any>`, `arr.push(process.env)` into an `any[]`, and a
+  member write onto an `any` object left every reader ABSENT (EXECUTED: each printed the planted value). The containers
+  are only those the environment is SEEN going into (a builtin collection built or mutated with it, a dynamic-key or
+  `any`-object write); a read discloses `Unknown[env-maybe-read]` only when its receiver is reached from one through an
+  element step. A `const`, unexported container whose every value is the environment RESOLVES: an element's key read
+  is `Env`. Corpus: 0 rows (no instance on the roster; the fixture is the evidence).
+- **A `typeof X`-annotated DI token is read by its VALUE** (SOUNDNESS R1061). `const T: typeof StoreA = StoreB;
+  { provide: T, useClass: Sub }` substitutes StoreB (EXECUTED, NestJS 10); the type-first reading charged StoreA's
+  callers instead — a fabrication on one side and a silence on the other. A reassignable token binding is open.
 - ⚠ **A DI provider TOKEN or SUBSTITUTE named through a binding, a helper or a type** (SOUNDNESS R1061). The token is
   read through the checker's type (`const TOK = Store`, an imported const, an object member, `.map` over `[Store]`), a
   helper's parameter is read through its visible call sites (`prov(Store, FileStore)`), `useClass` through a const
