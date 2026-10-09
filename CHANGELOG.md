@@ -21,6 +21,17 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   result or a destructure of `process.argv` read in another function was ABSENT; it is now `Env`. And `const { env, argv }
   = cond ? {} : process` (consola's `utils/color.ts`) is the process object on one path: `Env`, not absent.
   Corpus (28 pinned repos vs published 0.40.3): ADDED 5 / REMOVED 0 / CHANGED 1, all six a concrete `Env` traced to source.
+- ⚠ **The environment's location model is one graph** (SOUNDNESS R935/R1090). Five walkers that each listed the syntax
+  that carries the value — the binding table, the typed floor, the untyped-container taint, its reach, and the
+  all-environment container test — are one value-flow graph with one evaluator, and flow through library code is one
+  fallback (a container ELEMENT node per allocation). Nine shapes that composed two walkers' constructs (an untyped
+  container returned by a function, destructured, held by a parameter property, filled through a parameter, its
+  element returned or awaited, argv in an `any` box) were ABSENT (executed) and now read `Env` or `Unknown`. A
+  container whose every value is the environment and that nothing else can write now RESOLVES its readers to `Env`
+  (was `Unknown`). **A field bound through `this.e = e` is MUST only when every `new` site passes the environment**
+  (R1090): a literal at one site makes it `Unknown` (was `Env`, also over the literal instance), and literal-only
+  sites leave it absent. A non-exported function whose every visible caller fills a `ProcessEnv` member with a
+  literal is resolved (was `Unknown`); an exported one still discloses.
 
 ## [0.40.3] — 2026-10-09
 

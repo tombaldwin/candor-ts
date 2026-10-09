@@ -7395,6 +7395,10 @@ export function clockImp() { return hrtime(); }
 // `.map` callback each printed the planted value with the reader ABSENT, `deny Env` and `deny Env Unknown` exit 0. The
 // floor discloses `Unknown[env-maybe-read]` (never Env: a ProcessEnv-typed object may be a copy). CONTROLS: a COPY bound
 // by a literal, a named function's parameter no visible site feeds, and a resolved non-env array element stay absent.
+// ⟨v045, the one graph⟩ STRENGTHENED, not weakened: every container here is a `const`, unexported, read only through
+// `get`/`for…of`/`.map`, and every value put into it is the environment, so its provenance IS enumerable — the graph
+// RESOLVES each reader to `Env` (re-executed `tsagent-v045/fx1` s02/s20/s42 and this block's shapes: each printed the
+// planted value). The old floor's "never Env" was about a value whose provenance it could NOT see; that still holds.
 if (blk()) {
   const d = project({ "src/ev.ts": `const m = new Map([["e", process.env]]);
 export function viaMapCtor() { return m.get("e")!.SECRET; }
@@ -7419,8 +7423,8 @@ export function ctlArrLit() { return arr2[1].SECRET; }
   const { report } = scan(d);
   const gate = (line) => { fs.writeFileSync(path.join(d, "p.pol"), line + "\n"); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
   for (const fn of ["viaMapCtor", "viaMapSet", "viaSetIter", "viaForOf", "viaArrMap", "viaWeakMap", "viaModuleHeld"])
-    check(`R935: \`${fn}\` discloses — \`deny Env Unknown src.ev.${fn}\` exit 1 (0 at v0.40.2)`,
-          gate(`deny Env Unknown src.ev.${fn}`) === 1 && (entry(report, `src.ev.${fn}`)?.unknownWhy ?? []).includes("env-maybe-read"),
+    check(`R935: \`${fn}\` reads the environment out of an all-environment container — \`deny Env src.ev.${fn}\` exit 1 (0 at v0.40.2; MAY at v0.40.3)`,
+          gate(`deny Env src.ev.${fn}`) === 1 && gate(`deny Env Unknown src.ev.${fn}`) === 1,
           JSON.stringify(entry(report, `src.ev.${fn}`) ?? null));
   for (const fn of ["ctlCopy", "ctlUnfed", "ctlArrLit"])
     check(`R935 CONTROL: \`${fn}\` is not the environment — absent`, entry(report, `src.ev.${fn}`) == null
@@ -7624,22 +7628,72 @@ const avRet = getArgv();
 export function readArgvResult() { return avRet[2]; }
 const { argv: avDestr } = process;
 export function readArgvDestr() { return avDestr[2]; }
+function mkAnyMap(): Map<string, any> { const m = new Map<string, any>(); m.set("e", process.env); return m; }
+const retMap = mkAnyMap();
+export function readRetContainer() { return retMap.get("e").SECRET; }
+const recW: Record<string, any> = {}; recW.e = process.env; const { e: recDestr } = recW;
+export function readDestrContainer() { return recDestr.SECRET; }
+class MBox { constructor(public m: Map<string, any>) {} }
+const mbox = new MBox(new Map<string, any>([["e", process.env]]));
+export function readPPropContainer() { return mbox.m.get("e").SECRET; }
+const argvBox: any = {}; argvBox.a = process.argv;
+export function readArgvAnyBox() { return argvBox.a[2]; }
+function putVia(m: Map<string, any>, v: any) { m.set("e", v); }
+const filled = new Map<string, any>(); putVia(filled, process.env);
+export function readFilledViaParam() { return filled.get("e").SECRET; }
+const pushedAny: any[] = []; pushedAny.push(getEnv());
+const [pushedFirst] = pushedAny;
+export function readDestrPushed() { return pushedFirst.SECRET; }
+const allEnv = new Map<string, any>([["e", getEnv()]]);
+function elemOut(): any { return allEnv.get("e"); }
+const elemRet = elemOut();
+export function readElemReturned() { return elemRet.SECRET; }
+const elemPromise = Promise.resolve(allEnv.get("e"));
+export async function readElemAwaited() { return (await elemPromise).SECRET; }
+const opaqueOv = Object.values({ e: process.env })[0];
+export function readOpaqueFloor() { return opaqueOv.SECRET; }
+class HoldsE { e: any; constructor(e: any) { this.e = e; } }
+const holdEnv = new HoldsE(process.env);
+const holdLit = new HoldsE({ SECRET: "x" });
+export function readHeldEnv() { return holdEnv.e.SECRET; }
+export function ctlHeldLit() { return holdLit.e.SECRET; }
+class HoldsL { e: any; constructor(e: any) { this.e = e; } }
+const onlyLit = new HoldsL({ SECRET: "x" });
+export function ctlHeldOnlyLit() { return onlyLit.e.SECRET; }
+export function readOptsExported(o: { env: NodeJS.ProcessEnv }) { return o.env.SECRET; }
+export function callOptsExported() { return readOptsExported({ env: { SECRET: "x" } }); }
+function readOptsLocal(o: { env: NodeJS.ProcessEnv }) { return o.env.SECRET; }
+export function ctlOptsLocal() { return readOptsLocal({ env: { SECRET: "x" } }); }
 ` });
   const { report } = scan(d);
   const gate = (line) => { fs.writeFileSync(path.join(d, "p.pol"), line + "\n"); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
   for (const fn of ["readConstResult", "readArrResult", "readObjResult", "readPushedResult", "readFieldResult", "readIdentResult",
                     "readAnyResult", "readAsyncResult", "readPromise", "readDestrRenamed", "readDestrArray", "readDestrLocal", "readParamProp",
                     // ⟨R1089⟩ consola's merged-`process` destructure, and a STORED argv (alias, property, call result, destructure)
-                    "readMergedProcess", "readArgvAlias", "readArgvProp", "readArgvResult", "readArgvDestr"])
+                    "readMergedProcess", "readArgvAlias", "readArgvProp", "readArgvResult", "readArgvDestr",
+                    // ⟨the one graph⟩ two former walkers' constructs COMPOSED (`tsagent-v045/fx7`, executed, ABSENT at d1f87a3)
+                    "readElemReturned", "readElemAwaited"])
     check(`R935 v045: \`${fn}\` reads the environment — \`deny Env src.rt.${fn}\` exit 1 (0 at v0.40.3)`,
           gate(`deny Env src.rt.${fn}`) === 1, JSON.stringify(entry(report, `src.rt.${fn}`) ?? null));
-  for (const fn of ["readGlobalSlot", "readTypedAny", "readTwoRet", "readQEnv"])
+  for (const fn of ["readGlobalSlot", "readTypedAny", "readTwoRet", "readQEnv",
+                    // ⟨the one graph⟩ composed constructs that DISCLOSE (`fx7`, executed, ABSENT at d1f87a3), the typed floor,
+                    // and ⟨R1090⟩ a field bound through a constructor parameter that one site feeds the environment and one a literal
+                    "readRetContainer", "readDestrContainer", "readPPropContainer", "readArgvAnyBox", "readFilledViaParam",
+                    "readDestrPushed", "readOpaqueFloor", "readHeldEnv", "ctlHeldLit",
+                    // an EXPORTED function's parameter: its member is not enumerated by the visible sites (callers outside
+                    // the project), so the typed floor still discloses it
+                    "readOptsExported"])
     check(`R935 v045: \`${fn}\` may read it — \`deny Env Unknown src.rt.${fn}\` exit 1, never a concrete \`Env\``,
           gate(`deny Env Unknown src.rt.${fn}`) === 1 && !(entry(report, `src.rt.${fn}`)?.inferred ?? []).includes("Env"),
           JSON.stringify(entry(report, `src.rt.${fn}`) ?? null));
-  for (const fn of ["ctlIdentLit", "ctlDestrOther", "ctlDestrArrLit", "ctlPromiseLit", "ctlGlobalLit"])
+  for (const fn of ["ctlIdentLit", "ctlDestrOther", "ctlDestrArrLit", "ctlPromiseLit", "ctlGlobalLit",
+                    // a NON-exported function whose every visible site passes a literal `env`: resolved, not disclosed
+                    // (`Unknown` at d1f87a3 through the interface member; executed, it reads the literal)
+                    "ctlOptsLocal"])
     check(`R935 v045 CONTROL: \`${fn}\` reads a literal — absent`,
           !(entry(report, `src.rt.${fn}`)?.inferred ?? []).length, JSON.stringify(entry(report, `src.rt.${fn}`) ?? null));
+  check("R1090 CONTROL: a field bound through `this.e = e` whose every `new` site passes a LITERAL is absent (was `Env` through R934's in-frame SOME, pooled onto the heap)",
+        !(entry(report, "src.rt.ctlHeldOnlyLit")?.inferred ?? []).length, JSON.stringify(entry(report, "src.rt.ctlHeldOnlyLit") ?? null));
   check("R935 v045 CONTROL: a constructor argument that is a LITERAL, beside one that is the environment, is MAY — never `Env`",
         !(entry(report, "src.rt.ctlQLit")?.inferred ?? []).includes("Env"), JSON.stringify(entry(report, "src.rt.ctlQLit") ?? null));
   check("R935 v045 CONTROL: a CALLER of an environment-returning function gains nothing in its own `direct` (it inherits through the edge)",
