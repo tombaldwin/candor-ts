@@ -7553,6 +7553,100 @@ export function ctlAnyParam(x: any) { return x.SECRET; }
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── SOUNDNESS R935 (v045): the edges the location model was missing — a call's RESULT, DESTRUCTURING, a PROMISE, a
+// constructor PARAMETER PROPERTY, and the open slots (a global-object slot, an `any` member a type declares) ─────────────
+// EXECUTED (`tsagent-v045/fx1`, node 22.12.0, `SECRET=planted`): every positive printed the planted value and was ABSENT on
+// published 0.40.3 with `deny Env` and `deny Env Unknown` both exit 0. Every control printed the literal it holds.
+if (blk()) {
+  const d = project({ "src/rt.ts": `function getEnv() { return process.env; }
+function getEnvAny(): any { return process.env; }
+function ident<T>(x: T): T { return x; }
+async function getEnvLater() { return process.env; }
+function twoRet(c: boolean): any { if (c) return process.env; return { SECRET: "x" }; }
+const vConst = getEnv();
+export function readConstResult() { return vConst.SECRET; }
+const aLit = [getEnv()];
+export function readArrResult() { return aLit[0].SECRET; }
+const oLit = { env: getEnv() };
+export function readObjResult() { return oLit.env.SECRET; }
+const pushed: any[] = []; pushed.push(getEnv());
+export function readPushedResult() { return pushed[0].SECRET; }
+class Fld { env = getEnv(); }
+const fld = new Fld();
+export function readFieldResult() { return fld.env.SECRET; }
+const viaId = ident(process.env);
+export function readIdentResult() { return viaId.SECRET; }
+const anyRes = getEnvAny();
+export function readAnyResult() { return anyRes.SECRET; }
+const later = getEnvLater();
+export async function readAsyncResult() { return (await later).SECRET; }
+const pr = Promise.resolve(process.env);
+export async function readPromise() { return (await pr).SECRET; }
+const src1 = { env: process.env }; const { env: renamed } = src1;
+export function readDestrRenamed() { return renamed.SECRET; }
+const [firstEl] = [process.env];
+export function readDestrArray() { return firstEl.SECRET; }
+const src2 = { env: process.env };
+export function readDestrLocal() { const { env } = src2; return env.SECRET; }
+class PBox<T> { constructor(public v: T) {} }
+const pbox = new PBox(process.env);
+export function readParamProp() { return pbox.v.SECRET; }
+(globalThis as any).envSlot = process.env;
+export function readGlobalSlot() { return (globalThis as any).envSlot.SECRET; }
+const typedAny: { env?: any } = {}; typedAny.env = process.env;
+export function readTypedAny() { return typedAny.env.SECRET; }
+const mixedRet = twoRet(false);
+export function readTwoRet() { return mixedRet.SECRET; }
+class QBox { constructor(public v: any) {} }
+const qEnv = new QBox(process.env);
+const qLit = new QBox({ SECRET: "x" });
+export function readQEnv() { return qEnv.v.SECRET; }
+export function ctlQLit() { return qLit.v.SECRET; }
+const litId = ident({ SECRET: "x" });
+export function ctlIdentLit() { return litId.SECRET; }
+const { other: otherLit } = { env: process.env, other: { SECRET: "x" } };
+export function ctlDestrOther() { return otherLit.SECRET; }
+const [lit0] = [{ SECRET: "x" }, process.env];
+export function ctlDestrArrLit() { return lit0.SECRET; }
+const prLit = Promise.resolve({ SECRET: "x" });
+export async function ctlPromiseLit() { return (await prLit).SECRET; }
+(globalThis as any).litSlot = { SECRET: "x" };
+export function ctlGlobalLit() { return (globalThis as any).litSlot.SECRET; }
+export function ctlCallerOnly() { const e = getEnv(); return typeof e; }
+const { env: mergedEnv = {} } = typeof process === "undefined" ? ({} as any) : process;
+export function readMergedProcess() { return (mergedEnv as any).SECRET; }
+const avAlias = process.argv;
+export function readArgvAlias() { return avAlias[2]; }
+const avHolder = { argv: process.argv };
+export function readArgvProp() { return avHolder.argv[2]; }
+function getArgv() { return process.argv; }
+const avRet = getArgv();
+export function readArgvResult() { return avRet[2]; }
+const { argv: avDestr } = process;
+export function readArgvDestr() { return avDestr[2]; }
+` });
+  const { report } = scan(d);
+  const gate = (line) => { fs.writeFileSync(path.join(d, "p.pol"), line + "\n"); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  for (const fn of ["readConstResult", "readArrResult", "readObjResult", "readPushedResult", "readFieldResult", "readIdentResult",
+                    "readAnyResult", "readAsyncResult", "readPromise", "readDestrRenamed", "readDestrArray", "readDestrLocal", "readParamProp",
+                    // ⟨R1089⟩ consola's merged-`process` destructure, and a STORED argv (alias, property, call result, destructure)
+                    "readMergedProcess", "readArgvAlias", "readArgvProp", "readArgvResult", "readArgvDestr"])
+    check(`R935 v045: \`${fn}\` reads the environment — \`deny Env src.rt.${fn}\` exit 1 (0 at v0.40.3)`,
+          gate(`deny Env src.rt.${fn}`) === 1, JSON.stringify(entry(report, `src.rt.${fn}`) ?? null));
+  for (const fn of ["readGlobalSlot", "readTypedAny", "readTwoRet", "readQEnv"])
+    check(`R935 v045: \`${fn}\` may read it — \`deny Env Unknown src.rt.${fn}\` exit 1, never a concrete \`Env\``,
+          gate(`deny Env Unknown src.rt.${fn}`) === 1 && !(entry(report, `src.rt.${fn}`)?.inferred ?? []).includes("Env"),
+          JSON.stringify(entry(report, `src.rt.${fn}`) ?? null));
+  for (const fn of ["ctlIdentLit", "ctlDestrOther", "ctlDestrArrLit", "ctlPromiseLit", "ctlGlobalLit"])
+    check(`R935 v045 CONTROL: \`${fn}\` reads a literal — absent`,
+          !(entry(report, `src.rt.${fn}`)?.inferred ?? []).length, JSON.stringify(entry(report, `src.rt.${fn}`) ?? null));
+  check("R935 v045 CONTROL: a constructor argument that is a LITERAL, beside one that is the environment, is MAY — never `Env`",
+        !(entry(report, "src.rt.ctlQLit")?.inferred ?? []).includes("Env"), JSON.stringify(entry(report, "src.rt.ctlQLit") ?? null));
+  check("R935 v045 CONTROL: a CALLER of an environment-returning function gains nothing in its own `direct` (it inherits through the edge)",
+        !(entry(report, "src.rt.ctlCallerOnly")?.direct ?? []).length, JSON.stringify(entry(report, "src.rt.ctlCallerOnly") ?? null));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── SOUNDNESS R1061: a `typeof X`-annotated token whose VALUE is another class ─────────────────────────────────────────
 // EXECUTED on NestJS 10 (`tsagent-v044/fxdi/src/tof.ts`): `const TB: typeof StoreTA = StoreTB; { provide: TB, useClass:
 // SubTB }` substituted StoreTB (its write ran through `runTofB`), not StoreTA — the annotation is a claim, the value

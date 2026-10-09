@@ -10,6 +10,18 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **A stored `process.env` is followed through a function's RETURN, DESTRUCTURING, a PROMISE, and a constructor
+  PARAMETER PROPERTY** (SOUNDNESS R935). `const v = getEnv(); f() { return v.SECRET }`, the result put in an array,
+  object literal, class field or `any[]`, `ident(process.env)`, an `async` callee, `Promise.resolve(process.env)`,
+  `const { env: e } = cfg`, `const [e] = [process.env]` and `class B { constructor(public v) {} }` each left the reader
+  ABSENT (executed). They are now `Env`; a call's returned parameter is read as THAT site's argument, so `ident({})`
+  is not the environment. A slot on the global object and an `any` member a type declares now disclose
+  `Unknown[env-maybe-read]`. A parameter property is MUST only when every `new` site passes the environment.
+- ⚠ **A stored `process.argv` is a location like the environment** (SOUNDNESS R1089): an alias, a property, a call
+  result or a destructure of `process.argv` read in another function was ABSENT; it is now `Env`. And `const { env, argv }
+  = cond ? {} : process` (consola's `utils/color.ts`) is the process object on one path: `Env`, not absent.
+  Corpus (28 pinned repos vs published 0.40.3): ADDED 5 / REMOVED 0 / CHANGED 1, all six a concrete `Env` traced to source.
+
 ## [0.40.3] — 2026-10-09
 
 - ⚠ **`process.env` read anywhere in a project is no longer hidden by a JavaScript expando write** (SOUNDNESS R1074).
