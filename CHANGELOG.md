@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.40.3] — 2026-10-09
+
 - ⚠ **`process.env` read anywhere in a project is no longer hidden by a JavaScript expando write** (SOUNDNESS R1074).
   In a JS script the checker records `process.env['K'] = v` as a declaration of the global `process`, and the
   "is this the ambient global, or a project shadow?" test asked only whether any declaration sat in a project file —
