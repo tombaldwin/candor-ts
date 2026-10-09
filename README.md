@@ -185,6 +185,20 @@ functions analyzed): its DI-style fs injection means many functions read `Unknow
 that's the contract working, not noise. The report says "can reach", never "does"; an absent
 literal is never a claim of absence.
 
+**Framework dependency injection (spec §2's bounded-CHA clause).** rimraf's injection is a function-valued
+parameter, which reads `Unknown`. A DI *container* is measured separately, on NestJS 10 with an executed fixture:
+
+- a provider entry `{ provide: Store, useClass | useValue | useFactory | useExisting: … }` whose token is a project
+  CLASS is read as a conversion: the substitute joins `Store`'s candidates, so `this.store.save()` is charged the
+  union of `Store.save` and the substitute's `save` (SOUNDNESS R1061 — silent before, all three forms executed);
+- a parameter typed by an INTERFACE (`@Inject("SINK") sink: Sink`) dispatches over the project's visible
+  implementors of `Sink`, so a `useClass` that `implements Sink` is charged; a `useValue` object literal that
+  implements nothing reads `Unknown` (`dispatch:`).
+
+**Named miss:** a provider list the scan cannot see (built at runtime, or imported from an unscanned package), a
+token that is a variable rather than the class itself, and a substitute supplied by a dependency are not
+substitutions to this engine. Gate a DI-heavy service with `deny <E> Unknown` as well as `deny <E>`.
+
 ## Cross-engine consistency — machine-checked
 
 candor-ts is one of the **four code engines** (with the reference engine candor-java, the Rust

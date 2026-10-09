@@ -10,6 +10,60 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- ⚠ **A DI provider entry substitutes a class token** (SOUNDNESS R1061). `{ provide: Store, useClass: FileStore }`
+  (and `useValue`, `useFactory` — sync or async — and `useExisting`) is read as a conversion of the substitute to
+  `Store`, so a `store: Store` dispatch is charged the union of the declared class and the substitute. EXECUTED on
+  NestJS 10: all three forms wrote a file through the substitute while the calling method was ABSENT, `deny Fs` and
+  `deny Fs Unknown` exit 0; now exit 1. Corpus: 1 hit (nest `CatsModule`), one new edge to a pure body, 0 effect changes.
+
+- **The engine lends a scanned project nothing but `@types/node`** (SOUNDNESS R1062). The engine added its own
+  `@types` directory as a type root, and the compiler resolves a target's uninstalled bare import through a type
+  root — so whatever sat beside the engine (in a development tree, eslint's `@types/estree`) answered the target's
+  `import … from "estree"`. On vitest, scanned without node_modules, four rows that a clean `npm install candor-ts`
+  reports as `Unknown` were absent when the same code ran from the repository. The fallback root now holds
+  `@types/node` alone. A clean install's report is unchanged (measured byte-identical on vitest).
+- **The package pins its type dependencies exactly and ships `npm-shrinkwrap.json`** (SOUNDNESS R1062): `typescript`
+  6.0.3, `@types/node` 25.9.2 and `undici-types` 7.24.6 are what every install resolves, as the tests ran. A scan
+  that loads a different version (pnpm and yarn ignore a shrinkwrap) prints a stderr note. Measured: `@types/node`
+  25.9.9 against 25.9.2 changes no vitest row; the pin removes the variable rather than a known difference.
+
+- ⚠ **A class expression's definition-time work is wired from the unit that evaluates it** (SOUNDNESS R1060). `export
+  class HB { static Inner = class { static { write } } }` wired the inner `static {}` block from `HB.constructor`, so
+  `new HB()` was charged a write it never performs and the module that performs it at import read nothing (EXECUTED).
+  Gates scoped to the module go 0 → 1; gates scoped to the outer constructor's callers go 1 → 0. Corpus: 0 rows change.
+
+- ⚠ **An assertion no longer deletes a dispatch candidate** (SOUNDNESS R958, the intra-project half the review re-measured).
+  A lying downcast `dO(bO as SubO)` over a `BaseO` whose `m` writes a file ran `BaseO.m` (EXECUTED) with `dO`/`rO`
+  ABSENT and `pure a.dO` exit 0, while the same value passed without `as` was charged. The assertion-scoped refusal
+  in the conformer pass is removed: the asserted value's class is registered as it would be unasserted. And a value
+  held at a type that names no member — `object`, `{}`, `unknown`, `any` — is followed to what it holds: a `const`
+  to its initializer, a parameter to its visible arguments (previously `any`/`unknown` parameters only). `const o:
+  object = new LocalW(); qDisp(o as Sink)`, the `unknown` twin and `lObj(o: object) { qDisp(o as Sink) }` were all
+  `[]` (EXECUTED: each ran `LocalW.m`); they are now `Fs`. Over the 28-entry corpus: 0 rows change their effect set,
+  3 rows drop the `reflect:accessor:any-receiver` reason beside others (still `Unknown`).
+- **README: framework DI** — what the engine reads of a provider list, and the named miss beyond it.
+
+- ⚠ **A parameter fed the environment at SOME visible call site is the environment in its reader** (SOUNDNESS R934,
+  the divergent half). `readDiv(e) { return e.SECRET }` called as `readDiv(process.env)` and `readDiv({…})` printed
+  the planted secret through `readDiv` (EXECUTED) and was ABSENT with `deny Env readDiv` exit 0. The first cut
+  required EVERY site, citing pass 2b's divergent-HOF ruling; that ruling is about a callback whose effect lives in
+  another unit, and pass 2c already charged the WRITE side from any site. The reader is now `Env`; an escaped
+  function qualifies too (hidden sites only add bindings); an in-body rebind (`e = {}`) makes the parameter MAY,
+  which discloses `Unknown[env-maybe-read]`. A caller that hands the reader something else inherits `Env` through
+  the ordinary edge — the summary price pass 2c's writer and an `??`-merging reader already pay.
+- ⚠ **An environment object reached through a const's OWN literal, whatever the const's declared type** (SOUNDNESS
+  R935, the receiver half). `const icfg: Cfg = { env: process.env }; icfg.env.SECRET` and `const arr =
+  [process.env]; arr[0].SECRET` were ABSENT (EXECUTED: both printed the secret). A member read whose receiver is a
+  `const` bound to an object or array literal is keyed on the literal's member. MAY (`Unknown[env-maybe-read]`)
+  where the declared member is written anywhere, or where the array is referenced other than by a literal-index read.
+- ⚠ **A class expression's constructor is a unit** (SOUNDNESS R1016). `new L()` over `const L = class { constructor()
+  { fs.writeFileSync(…) } }`, `new Holder.Inner()` over a `static Inner = class {…}`, and an implicit constructor
+  with an instance field initialiser read `['Unknown']` on the constructing function (`deny Fs` exit 0 over a write
+  that ran). They now edge to `<class>@<anchor>#<n>.constructor` and carry `Fs`. The unit that EVALUATES the class
+  keeps a containment edge to it wherever the class value can escape (exported, returned, `extends`-ed, read as a
+  static); a `const`-bound, unexported class expression referenced only as a `new` callee no longer charges its
+  evaluator (EXECUTED: evaluating it writes nothing) — gates scoped to such an evaluator can go from exit 1 to 0.
+
 ## [0.40.1] — 2026-10-08
 
 - ⚠ **A value laundered through an `any` PARAMETER into a closed dispatch** (SOUNDNESS R958, the intra-project

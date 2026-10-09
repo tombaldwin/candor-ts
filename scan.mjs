@@ -1653,11 +1653,60 @@ if (NO_SOURCES) {
 // types). Resolved via the module system, NOT a fixed relative path — npm HOISTS dependencies, so
 // in an npx/install tree @types/node sits BESIDE candor-ts, not inside it (the second probe's
 // catch). The TARGET's own @types win when present.
+// ⟨SOUNDNESS R1062⟩ THE ENGINE'S OWN TYPE PACKAGES ARE PART OF THE ENGINE. The compiler (and its `lib.*.d.ts`),
+// `@types/node` (the fallback root below) and `undici-types` (which `@types/node` re-exports `fetch`/`WebSocket`
+// from) decide resolutions, so a different version is, in principle, a different engine. A fresh install of the
+// published v0.40.1 resolved `@types/node` 25.9.9 against a tested 25.9.2 — MEASURED to move nothing on vitest
+// (the four-row difference first blamed on it was the type-ROOT leak below), and unmeasured everywhere else. The
+// package now pins them exactly and ships `npm-shrinkwrap.json`; this note covers the installs that ignore a
+// shrinkwrap (pnpm, yarn) or a hand-edited tree. Advisory: an untested version is not a wrong verdict, but it is
+// not the one this build's tests measured, and the operator should be told.
+{
+  try {
+    const lockPath = ["npm-shrinkwrap.json", "package-lock.json"].map((f) => path.join(ENGINE_DIR, f)).find((f) => fs.existsSync(f));
+    if (lockPath) {
+      const lock = JSON.parse(fs.readFileSync(lockPath, "utf8")).packages ?? {};
+      const req = createRequire(path.join(ENGINE_DIR, "scan.mjs"));
+      const loaded = (name, from) => {
+        try { return JSON.parse(fs.readFileSync(createRequire(from).resolve(`${name}/package.json`), "utf8")).version; }
+        catch { return null; }
+      };
+      const nodeTypesPkg = (() => { try { return req.resolve("@types/node/package.json"); } catch { return null; } })();
+      const seen = [["typescript", ts.version], ["@types/node", loaded("@types/node", path.join(ENGINE_DIR, "scan.mjs"))],
+                    ["undici-types", nodeTypesPkg ? loaded("undici-types", nodeTypesPkg) : null]];
+      for (const [name, got] of seen) {
+        const want = lock[`node_modules/${name}`]?.version;
+        if (want && got && want !== got)
+          console.error(`candor-ts: note — this install loaded ${name} ${got}; candor-ts ${PKG_VERSION} was tested `
+            + `with ${want}, and type packages change verdicts (SOUNDNESS R1062). Reinstall with npm, which honours the `
+            + `shipped npm-shrinkwrap.json.`);
+      }
+    }
+  } catch { /* advisory only */ }
+}
 if (!compilerOptions.typeRoots) {
   const roots = [path.join(rootDir, "node_modules", "@types")];
   try {
     const req = createRequire(path.join(ENGINE_DIR, "scan.mjs"));
-    roots.push(path.dirname(path.dirname(req.resolve("@types/node/package.json"))));
+    const nodeTypes = path.dirname(req.resolve("@types/node/package.json"));
+    const engineTypes = path.dirname(nodeTypes);
+    // ⟨SOUNDNESS R1062⟩ …AND ONLY @types/node. A type ROOT is not just where `types: ["node"]` is looked up: the
+    // compiler also resolves a TARGET's bare import (`import type { Node } from "estree"`) through it when the
+    // target has no package of that name installed. The engine's directory holds whatever else was installed
+    // beside it — in a development tree, eslint's `@types/estree` — so vitest (scanned without node_modules) had
+    // its `estree` imports resolved against the ENGINE's copy, and four rows that are `Unknown` from a clean
+    // `npm install candor-ts` were absent from the same source run out of the repo (MEASURED; the `@types/node`
+    // version, 25.9.2 vs 25.9.9, moved nothing). A verdict must not depend on the engine's neighbours, so when
+    // that directory holds anything but `node`, the root is a private directory holding `node` alone.
+    let others = [];
+    try { others = fs.readdirSync(engineTypes).filter((n) => n !== "node" && !n.startsWith(".")); } catch { others = []; }
+    if (!others.length) roots.push(engineTypes);
+    else {
+      const shim = fs.mkdtempSync(path.join(os.tmpdir(), "candor-ts-types-"));
+      fs.symlinkSync(nodeTypes, path.join(shim, "node"), "junction");
+      process.on("exit", () => { try { fs.rmSync(shim, { recursive: true, force: true }); } catch { /* best effort */ } });
+      roots.push(shim);
+    }
   } catch {}
   compilerOptions.typeRoots = roots;
 }
@@ -4023,6 +4072,7 @@ const fns = new Map();           // qualified name -> { direct, edges, hosts, ta
 const bodylessDecls = new Map(); // qual -> {node, mod, abstract, owner, member}
 const unlistedSeen = new Map();  // the κ-coverage ledger: unlisted npm package -> call-site count
 const nodeName = new WeakMap();  // declaration node -> qualified name
+const classExprCtorQual = new Map();   // ⟨R1016⟩ ClassExpression -> its constructor unit (see `mintClassExprCtor`)
 // ⟨scan-boundary, export-alias⟩ `module.exports = { thing: _internalImplName }` / `exports.thing =
 // _internalImplName` — a RENAMED re-export whose RHS NAMES an EXISTING declaration rather than being an
 // inline function. `localName` mints a CJS unit for `module.exports = function(){}` and
@@ -4563,6 +4613,7 @@ const STABLE_KEY_SHAPES = {
   callable: new Set([ts.SyntaxKind.ArrowFunction, ts.SyntaxKind.FunctionExpression]),
   decorator: new Set([ts.SyntaxKind.ArrowFunction, ts.SyntaxKind.FunctionExpression]),
   "decorator-arg": new Set([ts.SyntaxKind.CallExpression]),
+  classexpr: new Set([ts.SyntaxKind.ClassExpression]),   // ⟨R1016⟩ a class expression's constructor unit
   computed: null,   // a descriptor member of any shape — counted over EVERY node under the anchor
 };
 const stableKeySanitise = (s) => s.replace(/[^A-Za-z0-9_$]/g, "_");
@@ -5134,6 +5185,7 @@ for (const sf of sources) {
         // (a wholly-unresolvable target leaves only the minted unit — nothing to join a forcing site to.)
       }
     }
+    if (ts.isClassExpression(node)) mintClassExprCtor(node);   // ⟨R1016⟩
     ts.forEachChild(node, collect);
   })(sf);
 }
@@ -5265,6 +5317,93 @@ for (const { mod, name, ident } of exportAliasCandidates) {
   }
 }
 
+// ⟨SOUNDNESS R1016⟩ A CLASS EXPRESSION'S CONSTRUCTOR IS A UNIT, as a class declaration's always was. Without one,
+// `const L = class { constructor() { fs.writeFileSync(…) } }; new L()` and `new Holder.Inner()` over a
+// `static Inner = class {…}` had nothing to edge to: the constructing function read `['Unknown']` (`deny Fs` exit 0
+// on a write that ran — EXECUTED), and the body's `Fs` fell through `enclosing` to whatever EVALUATES the class
+// (`<module>`, `Holder.<static-init>`), which never constructs it (EXECUTED: importing the module writes nothing).
+// The unit holds what runs at construction — the explicit constructor's body and parameters, and every INSTANCE
+// field initialiser that is not itself a function value (that one runs when called, and stays where it was) —
+// so `new` resolves to it through the checker like any constructor, and an implicit constructor is found through
+// the constructed value's TYPE (`classExprCtorOfNew`). Minted only where there is something to hold.
+//
+// WHETHER THE EVALUATING UNIT KEEPS THE CHARGE is ⟨R519⟩'s question, and its answer stands: minting is an
+// ADDITION unless every construction is provably one this scan edges. A class VALUE that escapes — exported,
+// returned, passed, stored, `extends`-ed, read as a static — can be constructed where no edge reaches it (another
+// package, which cannot name an anonymous class's constructor; an `any`-typed `new`), so pass 2a′ keeps the
+// evaluator's containment edge for it. Only a `const`-bound, unexported class expression whose every reference
+// is a `new` callee (or a type position, or an `instanceof` operand) drops it — there, every run of the body is
+// a `new` the scan resolved, and the evaluator's charge was the fabrication R1016 measured.
+function mintClassExprCtor(cls) {
+  const ctor = (cls.members ?? []).find((m) => ts.isConstructorDeclaration(m) && m.body);
+  const fieldInit = (cls.members ?? []).some((m) => ts.isPropertyDeclaration(m) && m.initializer
+    && !(ts.getCombinedModifierFlags(m) & ts.ModifierFlags.Static)
+    && !ts.isArrowFunction(m.initializer) && !ts.isFunctionExpression(m.initializer));
+  if (!ctor && !fieldInit) return null;
+  const sf = cls.getSourceFile();
+  const local = `<class>@${stableUnitTag("classexpr", cls)}.constructor`;
+  const qual = `${moduleOf(sf)}.${local}`;
+  if (!fns.has(qual)) {
+    const at = ctor ?? cls;
+    const { line, character } = sf.getLineAndCharacterOfPosition(at.getStart());
+    fns.set(qual, { local, direct: new Set(), fsKinds: new Set(), edges: new Set(), hosts: new Set(), tables: new Set(),
+                    cmds: new Set(), paths: new Set(), blind: new Set(), incomplete: new Set(), dispatch: new Set(),
+                    why: new Set(), entry: false,
+                    loc: `${path.relative(rootDir, sf.fileName)}:${line + 1}:${character + 1}`,
+                    endLine: sf.getLineAndCharacterOfPosition(at.getEnd()).line + 1 });
+  }
+  if (ctor) nodeName.set(ctor, qual);
+  classExprCtorQual.set(cls, qual);
+  if (process.env.CANDOR_R1016_REACH) console.error(`R1016-REACH mint ${qual}`);
+  return qual;
+}
+// The class-expression constructor unit a `new X(…)` runs, read off the constructed value's TYPE — the route an
+// IMPLICIT constructor needs (the signature then has no declaration, or names the BASE's), and harmless beside an
+// explicit one, which the signature already names.
+function classExprCtorOfNew(node) {
+  if (!classExprCtorQual.size || !ts.isNewExpression(node) || !node.expression) return null;
+  let vd;
+  try { vd = checker.getTypeAtLocation(node.expression)?.getSymbol?.()?.valueDeclaration; } catch { vd = undefined; }
+  return vd && ts.isClassExpression(vd) ? (classExprCtorQual.get(vd) ?? null) : null;
+}
+// Does this class expression's VALUE reach anything but a `new` this scan resolves? (see `mintClassExprCtor`)
+function classExprEscapes(cls) {
+  let top = cls;
+  while (top.parent && (ts.isParenthesizedExpression(top.parent) || ts.isAsExpression(top.parent)
+         || ts.isNonNullExpression(top.parent) || (ts.isSatisfiesExpression?.(top.parent) ?? false))) top = top.parent;
+  const vd = top.parent;
+  if (!vd || !ts.isVariableDeclaration(vd) || vd.initializer !== top || !ts.isIdentifier(vd.name)
+      || !(ts.getCombinedNodeFlags(vd) & ts.NodeFlags.Const)
+      || (ts.getCombinedModifierFlags(vd) & ts.ModifierFlags.Export)) return true;
+  const syms = new Set();
+  const outer = checker.getSymbolAtLocation(vd.name);
+  if (!outer) return true;
+  syms.add(outer);
+  if (cls.name) { const inner = checker.getSymbolAtLocation(cls.name); if (inner) syms.add(inner); }
+  const names = new Set([vd.name.text, cls.name?.text].filter(Boolean));
+  let escapes = false;
+  (function visit(n) {
+    if (escapes) return;
+    if (ts.isIdentifier(n) && names.has(n.text) && n !== vd.name && n !== cls.name) {
+      let sym; try { sym = checker.getSymbolAtLocation(n); } catch { sym = undefined; }
+      if (sym && (sym.flags & ts.SymbolFlags.Alias)) { try { sym = checker.getAliasedSymbol(sym); } catch { /* keep */ } }
+      const p0 = n.parent;
+      if (p0 && ts.isShorthandPropertyAssignment(p0) && p0.name === n) { escapes = true; return; }
+      if (sym && syms.has(sym)) {
+        let cur = n;
+        while (cur.parent && (ts.isParenthesizedExpression(cur.parent) || ts.isNonNullExpression(cur.parent)
+               || ts.isAsExpression(cur.parent) || (ts.isSatisfiesExpression?.(cur.parent) ?? false))) cur = cur.parent;
+        const p = cur.parent;
+        const safe = !!p && ((ts.isNewExpression(p) && p.expression === cur)
+          || ts.isTypeQueryNode(p)
+          || (ts.isBinaryExpression(p) && p.right === cur && p.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword));
+        if (!safe) { escapes = true; return; }
+      }
+    }
+    ts.forEachChild(n, visit);
+  })(vd.getSourceFile());
+  return escapes;
+}
 // ⟨SOUNDNESS R956⟩ A class EXPRESSION's member has no unit (`localName` names class DECLARATION members only), so
 // its body folded into whatever evaluates the expression and no dispatch could land on it. An override needs an
 // addressable body: mint it the way a structural implementor's member is minted — keyed by `stableUnitTag`, with
@@ -6119,12 +6258,13 @@ function recordConformer(c, t) {
   }
   if (ts.isClassDeclaration(t)) {
     if (c.kind === "class" && classInSubtree(c.node, t)) return false;   // nominal: the subtree already answers
-    // R958 — an ASSERTED downcast (`base as Sub`, the target inside the conformer's own subtree) names no new
-    // conformer: the receiver's class arm answers `Sub`'s subtree. Scoped to an ASSERTION on purpose. Without one,
-    // `f(new Base())` into `f(s: Sub)` passed the checker's own (structural) check and the value really IS a
-    // `Base` — refusing that would drop the body that runs. MEASURED: the guard unscoped is load-bearing (a
-    // structurally identical `Base` IS assignable to `Sub`), so its scope decides which of the two it decides.
-    if (c.kind === "class" && conversionViaAssertion && classInSubtree(t, c.node)) return false;
+    // ⟨SOUNDNESS R958, the DOWNCAST half⟩ An asserted downcast (`base as Sub`) IS a new conformer when the value is a
+    // `Base`, and nothing here can tell that apart from a truthful one. A refusal stood here, scoped to assertions,
+    // on the claim that "the receiver's class arm answers `Sub`'s subtree" — but the value's class is `Base`, which
+    // is NOT in `Sub`'s subtree, so `Base.m` was the body that ran and the one no arm named. EXECUTED: `dO(bO as
+    // SubO)` wrote a file through `BaseO.m` with `dO`/`rO` ABSENT and `pure a.dO` exit 0, while `dP(bP)` — the same
+    // value without the `as` — was `Fs`, exit 1. An assertion must not delete a charge the unasserted conversion
+    // makes. On a TRUTHFUL downcast the registration over-charges a `Sub`-typed receiver with `Base`'s override.
     let added = false;
     for (const anc of localAncestorsAndSelf(t)) added = pushUnique(classConformers, anc, c.node) || added;
     if (c.kind === "lit") mintStructuralMembers(c.node, true);
@@ -6197,7 +6337,6 @@ function isConversionPosition(n) {
   return false;
 }
 // R958 — the value under an assertion chain: parentheses, `as`, `<T>`, `!` and `satisfies` change no runtime value.
-let conversionViaAssertion = false;   // set while `convert` records a source read THROUGH an assertion
 const peelAssertions = (e) => unwrapArgExpr(e);   // R780: one wrapper set, not a third copy of it
 // R82 / PART 87: is the conversion's SOURCE type a fact about the VALUE, or only about a generic signature? A
 // call whose declared return type mentions one of its own type parameters (`wrap<T>(x: T): T`) hands back
@@ -6395,21 +6534,19 @@ for (const sf of sources) {
     // called as `launder(new LocalW())` ran LocalW's `m` (EXECUTED) with `deny Fs` exit 0 on the caller. The
     // parameter's visible arguments say what it holds — the SAME provenance index R246's accessor arm asks
     // (`receiverValueTypes`) — so each argument type is recorded as a conversion source. Upcasts only, as
-    // ever (`recordConversion` keeps a target the type is assignable to). A dependency-sourced value and a
-    // lying downcast are untouched: they are R958's by-design residue.
-    if (anyishType(st)) for (const vt of receiverValueTypes(src)) {
+    // ever (`recordConversion` keeps a target the type is assignable to). ⟨R958 widened-local half⟩ and the
+    // same for a source typed `object`/`{}`, and a `const` declared wider than its initializer
+    // (`uninformativeType`). A dependency-sourced value is R958's disclosed residue (`invisible`).
+    if (uninformativeType(st)) for (const vt of receiverValueTypes(src)) {
       try { recordConversion(vt, tt); } catch { /* best effort, as the main record below */ }
       CONFORMER_REACH?.("any-param", `${path.relative(rootDir, sf.fileName)}:${at.getStart()}`);
     }
-    conversionViaAssertion = kind !== "conversion";
-    try {
-      if (!CONFORMER_REACH) { recordConversion(st, tt); return; }
-      const count = () => [...interfaceImpls.values(), ...foreignInterfaceImpls.values(), ...classConformers.values(),
-                           ...depConformers.values()].reduce((a, x) => a + x.length, 0);
-      const before = count();
-      recordConversion(st, tt);
-      if (count() > before) CONFORMER_REACH(kind, `${path.relative(rootDir, sf.fileName)}:${at.getStart()}`);
-    } finally { conversionViaAssertion = false; }
+    if (!CONFORMER_REACH) { recordConversion(st, tt); return; }
+    const count = () => [...interfaceImpls.values(), ...foreignInterfaceImpls.values(), ...classConformers.values(),
+                         ...depConformers.values()].reduce((a, x) => a + x.length, 0);
+    const before = count();
+    recordConversion(st, tt);
+    if (count() > before) CONFORMER_REACH(kind, `${path.relative(rootDir, sf.fileName)}:${at.getStart()}`);
   };
   (function walkConversions(node) {
     if (ts.isExpression(node) && !ts.isSpreadElement(node) && isConversionPosition(node)) {
@@ -6429,8 +6566,52 @@ for (const sf of sources) {
       let tt; try { tt = checker.getTypeFromTypeNode(node.type); } catch { tt = undefined; }
       convert(peelAssertions(node.expression), tt, node, "assertion");
     }
+    if (ts.isObjectLiteralExpression(node)) providerSubstitution(node);   // ⟨R1061⟩
     ts.forEachChild(node, walkConversions);
   })(sf);
+}
+// ⟨SOUNDNESS R1061⟩ A DEPENDENCY-INJECTION PROVIDER IS A CONVERSION THE CHECKER NEVER SEES. NestJS (and Angular,
+// which shares the shape) wires `{ provide: Store, useClass: FileStore }` — or `useValue: <obj>`, `useFactory: () =>
+// <obj>`, `useExisting: Other` — and the container then hands the substitute to every `store: Store` parameter. No
+// expression converts the substitute to `Store`, so a `this.store.save()` resolved to `Store.save` alone: EXECUTED on
+// NestJS 10, `FileStore.save` wrote a file while the calling method was ABSENT and `deny Fs`/`deny Fs Unknown` exited 0
+// for all three provider forms. The provider entry IS the conversion, so the substitute is registered as a conformer
+// of the token class — the union of the declared class and the visible substitute, through the R874/R954 conformer
+// arm every class dispatch already asks. Registered directly, without the checker's assignability test, because the
+// container does not apply one (a token class with a private member is not structurally assignable from its
+// substitute, and is still what gets injected). Only a token that names a LOCAL class registers; a string or symbol
+// token types its parameter by an interface or `any`, which the interface arm already answers or discloses.
+function providerSubstitution(lit) {
+  const prop = (name) => lit.properties.find((p) => ts.isPropertyAssignment(p) && p.name && !ts.isComputedPropertyName(p.name)
+    && (p.name.text ?? p.name.getText()) === name);
+  const provide = prop("provide");
+  if (!provide) return;
+  let tsym; try { tsym = checker.getSymbolAtLocation(peelAssertions(provide.initializer)); } catch { tsym = undefined; }
+  if (tsym && (tsym.flags & ts.SymbolFlags.Alias)) { try { tsym = checker.getAliasedSymbol(tsym); } catch { return; } }
+  const target = (tsym?.declarations ?? []).find((d) => ts.isClassDeclaration(d) && isProjectNode(d));
+  if (!target) return;
+  const instanceOf = (e) => {
+    let s; try { s = checker.getSymbolAtLocation(peelAssertions(e)); } catch { s = undefined; }
+    if (s && (s.flags & ts.SymbolFlags.Alias)) { try { s = checker.getAliasedSymbol(s); } catch { s = undefined; } }
+    if (!s || !(s.flags & ts.SymbolFlags.Class)) return null;
+    try { return checker.getDeclaredTypeOfSymbol(s); } catch { return null; }
+  };
+  const sources = [];
+  for (const key of ["useClass", "useExisting"]) { const p = prop(key); const t = p && instanceOf(p.initializer); if (t) sources.push(t); }
+  const uv = prop("useValue");
+  if (uv) { try { sources.push(checker.getTypeAtLocation(peelAssertions(uv.initializer))); } catch { /* none */ } }
+  const uf = prop("useFactory");
+  if (uf) {
+    let ft; try { ft = checker.getTypeAtLocation(uf.initializer); } catch { ft = undefined; }
+    for (const sig of ft?.getCallSignatures?.() ?? []) {
+      let rt; try { rt = sig.getReturnType(); rt = checker.getAwaitedType?.(rt) ?? rt; } catch { rt = undefined; }
+      if (rt) sources.push(rt);
+    }
+  }
+  for (const st of sources) for (const s of st?.isUnion?.() ? st.types : [st]) {
+    const c = conformerOfSourceType(s);
+    if (c && recordConformer(c, target)) CONFORMER_REACH?.("di-provider", `${path.relative(rootDir, lit.getSourceFile().fileName)}:${lit.getStart()}`);
+  }
 }
 // The interface-flow fixpoint: a `J`-typed value converted to `X` carries every conformer of `J` with it.
 for (let changed = true, g = 0; changed && g++ < 32; ) {
@@ -6590,6 +6771,19 @@ function keyLiteralNames(t, depth = 0, seen = new Set()) {
 // the accessor edges the value's type declares — and never hedges; a receiver neither rule answers is
 // exactly as it was (the residual is stated in SOUNDNESS R246, not hidden here).
 function anyishType(t) { return !!t && !!(t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)); }   // hoisted: the conversion walk asks it first
+// ⟨SOUNDNESS R958, the WIDENED-LOCAL half⟩ A type that names no member is as silent about the value as `any`: a local
+// declared `object` or `{}` holding `new LocalW()` and asserted into an interface (`qDisp(o as Sink)`) ran
+// `LocalW.m` (EXECUTED) with every unit `[]` and no disclosure — `anyishType` alone let it through. Asked by the
+// conversion walk and the R246 receiver question alike; it only ever lets MORE value types be recorded.
+function uninformativeType(t) {
+  if (!t) return false;
+  if (anyishType(t) || (t.flags & ts.TypeFlags.NonPrimitive)) return true;
+  if (!(t.flags & ts.TypeFlags.Object) || t.isUnion?.() || t.isIntersection?.()) return false;
+  try {
+    return checker.getPropertiesOfType(t).length === 0 && t.getCallSignatures().length === 0
+      && t.getConstructSignatures().length === 0 && !checker.getIndexInfosOfType?.(t)?.length;
+  } catch { return false; }
+}
 function receiverValueTypes(expr, depth = 0, seen = new Set()) {
   if (!expr || depth > 6) return [];
   let t; try { t = checker.getTypeAtLocation(expr); } catch { t = null; }
@@ -6599,10 +6793,18 @@ function receiverValueTypes(expr, depth = 0, seen = new Set()) {
     let ti; try { ti = checker.getTypeAtLocation(inner); } catch { ti = null; }
     return [...(ti && !anyishType(ti) ? [ti] : []), ...below];
   }
-  if (!anyishType(t) || !ts.isIdentifier(expr)) return [];
+  if (!uninformativeType(t) || !ts.isIdentifier(expr)) return [];
   const sym = checker.getSymbolAtLocation(expr);
   const d = sym?.valueDeclaration;
-  if (!sym || !d || !ts.isParameter(d) || seen.has(sym)) return [];
+  if (!sym || !d || seen.has(sym)) return [];
+  // ⟨R958, widened-local half⟩ a `const` declared wider than its initializer holds the initializer's value.
+  if (ts.isVariableDeclaration(d) && ts.isIdentifier(d.name) && d.initializer
+      && (ts.getCombinedNodeFlags(d) & ts.NodeFlags.Const)) {
+    seen.add(sym);
+    let ti; try { ti = checker.getTypeAtLocation(d.initializer); } catch { ti = null; }
+    return [...(ti && !anyishType(ti) ? [ti] : []), ...receiverValueTypes(d.initializer, depth + 1, seen)];
+  }
+  if (!ts.isParameter(d)) return [];
   seen.add(sym);
   const args = paramArgs.get(sym);
   if (!args || paramFnEscaped(paramOwnerOf.get(sym))) return [];
@@ -6610,7 +6812,7 @@ function receiverValueTypes(expr, depth = 0, seen = new Set()) {
   for (const a of args) {
     if (!a) continue;
     let ta; try { ta = checker.getTypeAtLocation(a); } catch { ta = null; }
-    if (ta && !anyishType(ta)) out.push(ta);
+    if (ta && !anyishType(ta)) out.push(ta);   // a VALUE's own type, even `{}`, is a fact about it
     out.push(...receiverValueTypes(a, depth + 1, seen));
   }
   return out;
@@ -7327,6 +7529,12 @@ function enclosing(node) {
         && (ts.getCombinedModifierFlags(p) & ts.ModifierFlags.Static)
         && p.parent && (ts.isClassDeclaration(p.parent) || ts.isClassExpression(p.parent)))
       { R815_REACH?.("static"); return staticBlockUnit(p); }
+    // ⟨R1016⟩ an INSTANCE field initialiser of a class expression runs at construction — its constructor unit.
+    if (prev && ts.isPropertyDeclaration(p) && p.initializer === prev
+        && !(ts.getCombinedModifierFlags(p) & ts.ModifierFlags.Static)
+        && !ts.isArrowFunction(prev) && !ts.isFunctionExpression(prev)
+        && p.parent && ts.isClassExpression(p.parent) && classExprCtorQual.has(p.parent))
+      return classExprCtorQual.get(p.parent);
     if (ts.isHeritageClause(p) && p.token === ts.SyntaxKind.ExtendsKeyword && p.parent
         && (ts.isClassDeclaration(p.parent) || ts.isClassExpression(p.parent))) {
       const ctor = nodeName.get(p.parent);
@@ -9040,6 +9248,74 @@ const envPropMustSymbols = new Set();
 const envPropMaySymbols = new Set();
 // ⟨R935⟩ a property location's identity: its first declaration node (see `memberSymOf` for why not the symbol).
 const envLocKey = (sym) => sym?.declarations?.[0] ?? null;
+// ⟨SOUNDNESS R935, the RECEIVER half⟩ THE LOCATION A MEMBER READ NAMES IS THE OBJECT THE RECEIVER HOLDS, not the
+// member its DECLARED TYPE declares. The first cut keyed a read on the checker's property symbol, which is the
+// literal's own property only when the binding's type was INFERRED from the literal. Give the binding a type —
+// `const icfg: Cfg = { env: process.env }` — and `icfg.env` resolves to `Cfg`'s `PropertySignature`, an open set
+// that is no location at all, so `viaIface() { return icfg.env.SECRET }` was ABSENT with `deny Env viaIface` exit
+// 0 over a read that printed the planted secret (EXECUTED). An ARRAY literal had no location to key at all:
+// `const arr = [process.env]; arr[0].SECRET`, same measurement. Where the receiver is an identifier bound by a
+// `const` to an object or array literal, the object IS that literal, so the read is keyed on the literal's own
+// member — the last property of that name (a later spread makes it unresolvable), or the element at a literal
+// index with no spread or hole before it. Everything that can REBIND such a member off the books is a binding
+// the fixpoint must see, or the location is charged over a replaced value:
+//   · an OBJECT literal's member is written through its declared member too (`icfg.env = {}` names `Cfg.env`,
+//     as does any other `Cfg`-typed object), so a read resolved this way is MAY wherever that declared member
+//     is ever written or reflectively written (`envDeclWritten`, filled by the binding walk below);
+//   · an ARRAY's elements move under any method call or escape, so an element is MUST only while every
+//     reference to the array is a literal-index READ; any other reference makes every element MAY.
+// MAY discloses `Unknown[env-maybe-read]`, as every other location does. A `let` binding, a receiver that is a
+// parameter or a property, and a read through iteration (`for…of`, `.map`) are not resolved here.
+const envDeclWritten = new Set();
+const envLitElems = new Map();   // array-literal element node -> true while every reference is an index read
+const envConstLiteral = (id) => {
+  if (!id || !ts.isIdentifier(id)) return null;
+  let sym = checker.getSymbolAtLocation(id);
+  if (sym && (sym.flags & ts.SymbolFlags.Alias)) { try { sym = checker.getAliasedSymbol(sym); } catch { return null; } }
+  const d = sym?.valueDeclaration;
+  if (!d || !ts.isVariableDeclaration(d) || !ts.isIdentifier(d.name) || !d.initializer
+      || !(ts.getCombinedNodeFlags(d) & ts.NodeFlags.Const)
+      || !projectFiles.has(path.resolve(d.getSourceFile().fileName))) return null;
+  const lit = unwrapArgExpr(d.initializer);
+  return lit && (ts.isObjectLiteralExpression(lit) || ts.isArrayLiteralExpression(lit)) ? lit : null;
+};
+const envMemberName = (p) => (p.name && (ts.isIdentifier(p.name) || ts.isStringLiteralLike(p.name)
+  || ts.isNumericLiteral(p.name) || ts.isPrivateIdentifier(p.name))) ? p.name.text : null;
+// -> { key, declKey } for a member read whose receiver is a const literal, else null.
+const envLiteralMember = (n) => {
+  let recv, name = null, idx = null;
+  if (ts.isPropertyAccessExpression(n)) { recv = n.expression; name = n.name.text; }
+  else if (ts.isElementAccessExpression(n) && n.argumentExpression) {
+    recv = n.expression;
+    if (ts.isStringLiteralLike(n.argumentExpression)) name = n.argumentExpression.text;
+    else if (ts.isNumericLiteral(n.argumentExpression)) idx = Number(n.argumentExpression.text);
+    else return null;
+  } else return null;
+  const lit = envConstLiteral(unwrapArgExpr(recv));
+  if (!lit) return null;
+  if (ts.isArrayLiteralExpression(lit)) {
+    if (idx === null || !Number.isInteger(idx) || idx >= lit.elements.length) return null;
+    for (let i = 0; i <= idx; i++) {
+      const el = lit.elements[i];
+      if (ts.isSpreadElement(el) || ts.isOmittedExpression(el)) return null;
+    }
+    return { key: lit.elements[idx], declKey: null };
+  }
+  const want = name ?? (idx !== null ? String(idx) : null);
+  if (want === null) return null;
+  let hit = null;
+  for (const p of lit.properties) {
+    if (ts.isSpreadAssignment(p)) hit = p;
+    else if (envMemberName(p) === want) hit = p;
+  }
+  if (!hit || !(ts.isPropertyAssignment(hit) || ts.isShorthandPropertyAssignment(hit))) return null;
+  const key = envLocKey(checker.getSymbolAtLocation(hit.name));
+  if (!key) return null;
+  let raw = null;
+  try { raw = ts.isPropertyAccessExpression(n) ? checker.getSymbolAtLocation(n.name)
+    : (n.argumentExpression ? checker.getSymbolAtLocation(n.argumentExpression) : null); } catch { raw = null; }
+  return { key, declKey: envLocKey(raw) };
+};
 {
   const ENV_DESTRUCTURED = Symbol("env-destructured");
   const bindings = new Map(); // symbol -> [value expr | null | ENV_DESTRUCTURED | { same: symbol }]
@@ -9056,7 +9332,7 @@ const envLocKey = (sym) => sym?.declarations?.[0] ?? null;
   const memberRawSym = (n) => (ts.isPropertyAccessExpression(n) ? checker.getSymbolAtLocation(n.name)
     : (ts.isElementAccessExpression(n) && n.argumentExpression && ts.isStringLiteralLike(n.argumentExpression))
       ? checker.getSymbolAtLocation(n.argumentExpression) : null) ?? null;
-  const memberSymOf = (n) => envLocKey(memberRawSym(n));
+  const memberSymOf = (n) => envLiteralMember(n)?.key ?? envLocKey(memberRawSym(n));
   // Is this property symbol a location whose bindings we can enumerate? Every declaration must be
   // value-bearing, in a project file, and not a member of an extended class.
   const propEligible = (sym) => {
@@ -9073,7 +9349,12 @@ const envLocKey = (sym) => sym?.declarations?.[0] ?? null;
     if (!ok) propIneligible.add(sym);
     return ok;
   };
-  const noteProp = (sym, v) => { if (propEligible(sym)) { const k = envLocKey(sym); propSyms.add(k); note(k, v); } };
+  const noteProp = (sym, v) => {
+    if (propEligible(sym)) { const k = envLocKey(sym); propSyms.add(k); note(k, v); }
+    else if (sym && v !== undefined) envDeclWritten.add(envLocKey(sym));   // ⟨R935⟩ see `envLiteralMember`
+  };
+  // ⟨R935⟩ a WRITE through a member that is not itself a location still rebinds whatever object it lands on.
+  const noteWrite = (sym, v) => { if (sym) { envDeclWritten.add(envLocKey(sym)); noteProp(sym, v); } };
   const collect = (node) => {
     if (ts.isVariableDeclaration(node) && node.name && ts.isIdentifier(node.name)) {
       note(checker.getSymbolAtLocation(node.name), node.initializer ?? null);
@@ -9091,7 +9372,10 @@ const envLocKey = (sym) => sym?.declarations?.[0] ?? null;
                && (ts.isPropertyAccessExpression(node.left) || ts.isElementAccessExpression(node.left))) {
       // ⟨R935⟩ an assignment to a property location; a compound operator (`+=`) binds a non-environment.
       const s = memberRawSym(node.left);
-      if (s) noteProp(s, LOGICAL_ASSIGN.has(node.operatorToken.kind) ? node.right : null);
+      if (s) noteWrite(s, LOGICAL_ASSIGN.has(node.operatorToken.kind) ? node.right : null);
+      // ⟨R935⟩ …and the const literal's own member, when the receiver resolves to one.
+      const lm = envLiteralMember(node.left);
+      if (lm && !ts.isArrayLiteralExpression(lm.key.parent)) { propSyms.add(lm.key); note(lm.key, LOGICAL_ASSIGN.has(node.operatorToken.kind) ? node.right : null); }
     } else if (ts.isPropertyAssignment(node) && ts.isObjectLiteralExpression(node.parent)) {
       const s = checker.getSymbolAtLocation(node.name);
       if (s && (s.flags & ts.SymbolFlags.Property)) noteProp(s, node.initializer);
@@ -9126,27 +9410,80 @@ const envLocKey = (sym) => sym?.declarations?.[0] ?? null;
     if (reflectTarget) {
       let props = [];
       try { props = checker.getTypeAtLocation(reflectTarget)?.getProperties?.() ?? []; } catch { props = []; }
-      for (const ps of props) if (propEligible(ps)) noteProp(ps, null);
+      for (const ps of props) { envDeclWritten.add(envLocKey(ps)); if (propEligible(ps)) noteProp(ps, null); }
+      // ⟨R935⟩ a const object literal written reflectively: every member of the literal itself is rebound.
+      const tl = envConstLiteral(unwrapArgExpr(reflectTarget));
+      if (tl && ts.isObjectLiteralExpression(tl)) for (const p of tl.properties) {
+        const k = (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) ? envLocKey(checker.getSymbolAtLocation(p.name)) : null;
+        if (k) { propSyms.add(k); note(k, null); }
+      }
+    }
+    // ⟨R935⟩ an ARRAY literal bound by a `const`: each element is a location holding its own value.
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+        && (ts.getCombinedNodeFlags(node) & ts.NodeFlags.Const)) {
+      const al = unwrapArgExpr(node.initializer);
+      if (al && ts.isArrayLiteralExpression(al)) {
+        for (const el of al.elements) if (!ts.isSpreadElement(el) && !ts.isOmittedExpression(el)) {
+          propSyms.add(el); note(el, el); envLitElems.set(el, al);
+        }
+      }
     }
     ts.forEachChild(node, collect);
   };
   for (const sf of sources) collect(sf);
-  // ⟨R934⟩ the parameter bindings come from the shared PARAMETER PROVENANCE index above.
-  for (const [ps, vals] of paramArgs) { paramSyms.add(ps); for (const v of vals) note(ps, v); }
+  // ⟨R935⟩ an array literal's elements are MUST only while every reference to the array is a literal-index READ.
+  if (envLitElems.size) {
+    const arrs = new Set(envLitElems.values());
+    const names = new Set([...arrs].map((a) => a.parent?.name?.text).filter(Boolean));
+    const opened = new Set();
+    const visitRefs = (node) => {
+      if (ts.isIdentifier(node) && names.has(node.text)) {
+        const lit = envConstLiteral(node);
+        if (lit && arrs.has(lit) && !opened.has(lit) && !(lit.parent?.name === node)) {
+          let cur = node;
+          while (cur.parent && (ts.isParenthesizedExpression(cur.parent) || ts.isNonNullExpression(cur.parent)
+                 || ts.isAsExpression(cur.parent) || ts.isSatisfiesExpression?.(cur.parent))) cur = cur.parent;
+          const p = cur.parent;
+          const indexRead = p && ts.isElementAccessExpression(p) && p.expression === cur && p.argumentExpression
+            && ts.isNumericLiteral(p.argumentExpression)
+            && !(p.parent && ts.isBinaryExpression(p.parent) && p.parent.left === p && p.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && p.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment)
+            && !(p.parent && (ts.isDeleteExpression(p.parent) || ts.isPrefixUnaryExpression(p.parent) || ts.isPostfixUnaryExpression(p.parent)))
+            && !isDestructuringAssignTarget(p);
+          const typeOnly = p && (ts.isTypeQueryNode(p) || ts.isExportSpecifier(p));
+          if (!indexRead && !typeOnly) opened.add(lit);
+        }
+      }
+      ts.forEachChild(node, visitRefs);
+    };
+    for (const sf of sources) visitRefs(sf);
+    for (const [el, al] of envLitElems) if (opened.has(al)) note(el, null);
+  }
+  // ⟨R934⟩ the parameter bindings come from the shared PARAMETER PROVENANCE index above. What `collect` noted for
+  // a parameter BEFORE this line is its in-body REASSIGNMENTS (`e = {}`); kept apart, because the two kinds of
+  // binding answer different questions below.
+  const paramAssigns = new Map();
+  for (const [ps, vals] of paramArgs) {
+    paramSyms.add(ps); paramAssigns.set(ps, [...(bindings.get(ps) ?? [])]);
+    for (const v of vals) note(ps, v);
+  }
   const leafIn = (leaf, set, propSet) => isProcessEnvExpr(leaf)
     || (ts.isIdentifier(leaf) && set.has(checker.getSymbolAtLocation(leaf)))
-    || (!!propSet && propSet.has(memberSymOf(leaf)));
+    || (!!propSet && propSet.has(memberSymOf(leaf)) && !(propSet === envPropMustSymbols && envLitDowngraded(leaf)));
+  // ⟨R935⟩ a literal member read through a receiver whose DECLARED member is written elsewhere is MAY at best.
+  function envLitDowngraded(n) {
+    const lm = (ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)) ? envLiteralMember(n) : null;
+    return !!lm && !!lm.declKey && lm.declKey !== lm.key && envDeclWritten.has(lm.declKey);
+  }
   const hasEnvLeaf = (v, set, propSet) => v === ENV_DESTRUCTURED
     || (!!v && typeof v === "object" && "same" in v ? set.has(v.same) || propSet?.has(v.same) === true
         : (!!v && typeof v === "object" && envValueLeaves(v).some((l) => leafIn(l, set, propSet))));
 
 
-  // MAY: least fixpoint of "some binding has a leaf that is process.env or already MAY" — LOCALS and
-  // PROPERTIES (a property's MAY reads a local's MAY and vice versa). Parameters never join MAY (above).
+  // MAY: least fixpoint of "some binding has a leaf that is process.env or already MAY" — LOCALS, PROPERTIES
+  // and (⟨R934⟩, see MUST below) PARAMETERS: a property's MAY reads a local's MAY and vice versa.
   for (let changed = true, n = 0; changed && n < 64; n++) {
     changed = false;
     for (const [sym, vals] of bindings) {
-      if (paramSyms.has(sym)) continue;
       const isProp = propSyms.has(sym);
       const set = isProp ? envPropMaySymbols : envMayAliasSymbols;
       if (!set.has(sym) && vals.some((v) => hasEnvLeaf(v, envMayAliasSymbols, envPropMaySymbols))) { set.add(sym); changed = true; }
@@ -9154,24 +9491,37 @@ const envLocKey = (sym) => sym?.declarations?.[0] ?? null;
   }
   // MUST: least fixpoint (from empty) of "every binding has a leaf that is process.env or already MUST" —
   // least, so a cycle that never touches process.env directly stays MAY (the disclosing side). Locals and
-  // properties start from their MAY sets; parameters are tried directly (MUST-only). A parameter whose
-  // function escapes is dropped before it can join.
-  const paramCands = [...paramSyms].filter((s) => bindings.get(s)?.some((v) => v !== null));
-  let batched = false;
+  // properties start from their MAY sets.
+  //
+  // ⟨SOUNDNESS R934, the DIVERGENT half⟩ A PARAMETER IS THE ENVIRONMENT IN ITS READER'S FRAME WHEN *SOME* VISIBLE
+  // CALL SITE HANDS IT THE ENVIRONMENT — not every one. The first cut of R934 required every site, citing pass
+  // 2b's divergent-HOF ruling, and left `readDiv(e) { return e.SECRET }` called as `readDiv(process.env)` and
+  // `readDiv({…})` ABSENT with `deny Env readDiv` exit 0 over a read that printed the planted secret (EXECUTED).
+  // 2b's ruling does not transfer: it is about a CALLBACK, whose effect is another unit's body, so the HOF
+  // performs nothing itself and pooling the callbacks onto it would invent an effect no execution of the HOF's
+  // own code performs. Here the read is in the callee's OWN body, and an execution in which it reads the
+  // environment exists — that is the all-paths merge `envValueLeaves` already charges for `(o ?? process.env).X`.
+  // Pass 2c, in this same file, already answers the WRITE side this way (`envFed` is set by ANY site, and the
+  // writer is charged `Env`), so the read side requiring every site was the same question answered twice.
+  // The price is the one every summary pays: a caller handing the callee `{}` inherits `Env` through the
+  // ordinary edge, exactly as a caller of 2c's `populate` and of an `??`-merging reader already does.
+  // Because SOME suffices, whether the function escapes no longer matters — hidden sites can only add bindings.
+  // An in-body REASSIGNMENT (`e = {}`) is the flow-insensitive rebind the local-alias rule exists for: the
+  // parameter is then MUST only if every reassignment is also the environment, and otherwise MAY, which
+  // discloses `Unknown[env-maybe-read]` on the reader rather than charging over a value that was replaced.
   const mustTry = () => {
     let changed = false;
     for (const sym of envMayAliasSymbols) {
+      if (paramSyms.has(sym)) continue;
       if (!envAliasSymbols.has(sym) && bindings.get(sym).every((v) => hasEnvLeaf(v, envAliasSymbols, envPropMustSymbols))) { envAliasSymbols.add(sym); changed = true; }
     }
     for (const sym of envPropMaySymbols) {
       if (!envPropMustSymbols.has(sym) && bindings.get(sym).every((v) => hasEnvLeaf(v, envAliasSymbols, envPropMustSymbols))) { envPropMustSymbols.add(sym); changed = true; }
     }
-    for (const sym of paramCands) {
+    for (const sym of paramSyms) {
       if (envAliasSymbols.has(sym)) continue;
-      if (!bindings.get(sym).every((v) => hasEnvLeaf(v, envAliasSymbols, envPropMustSymbols))) continue;
-      const fsym = paramOwnerOf.get(sym);
-      if (!batched) { batched = true; paramFnEscaped.batch(paramCands.map((p) => paramOwnerOf.get(p)).filter(Boolean)); }
-      if (paramFnEscaped(fsym)) continue;
+      const must = (v) => hasEnvLeaf(v, envAliasSymbols, envPropMustSymbols);
+      if (!(paramArgs.get(sym) ?? []).some(must) || !(paramAssigns.get(sym) ?? []).every(must)) continue;
       envAliasSymbols.add(sym); changed = true;
     }
     return changed;
@@ -9195,6 +9545,8 @@ const identIsEnvMayAlias = (id) => {
 // ⟨R935⟩ a member reference `o.p` / `o["p"]` whose property is an environment location.
 const envMemberSym = (n) => {
   if (!(envPropMaySymbols.size > 0)) return null;
+  const lm = envLiteralMember(n);   // ⟨R935⟩ the object the receiver holds, before the member its type declares
+  if (lm && envPropMaySymbols.has(lm.key)) return lm.key;
   if (ts.isPropertyAccessExpression(n)) return envLocKey(checker.getSymbolAtLocation(n.name));
   if (ts.isElementAccessExpression(n) && n.argumentExpression && ts.isStringLiteralLike(n.argumentExpression))
     return envLocKey(checker.getSymbolAtLocation(n.argumentExpression));
@@ -9203,7 +9555,11 @@ const envMemberSym = (n) => {
 const envPropKind = (n) => {
   const s = envMemberSym(n);
   if (!s || !envPropMaySymbols.has(s)) return null;
-  return envPropMustSymbols.has(s) ? "env" : "may";
+  if (!envPropMustSymbols.has(s)) return "may";
+  // ⟨R935⟩ resolved through the receiver: MAY wherever the declared member is written off the literal.
+  const lm = envLiteralMember(n);
+  if (lm && lm.key === s && lm.declKey && lm.declKey !== s && envDeclWritten.has(lm.declKey)) return "may";
+  return "env";
 };
 const envValueKind = (expr) => {
   let kind = null;
@@ -9641,6 +9997,12 @@ function visitCalls(node) {
       }
       const sig = checker.getResolvedSignature(node);
       let decl = sig && sig.declaration;
+      // ⟨R1016⟩ a construction of a class expression runs its constructor unit, whatever the signature names.
+      const classExprCtor = rec ? classExprCtorOfNew(node) : null;
+      if (classExprCtor && classExprCtor !== owner) {
+        rec.edges.add(classExprCtor);
+        if (process.env.CANDOR_R1016_REACH) console.error(`R1016-REACH new ${owner} -> ${classExprCtor}`);
+      }
       // ⟨R103⟩ A WRITABLE SLOT IS AN INCOMPLETE CANDIDATE SET — see `openCallSlot`, and see the class-
       // override fan-out below, which is the authority this converges on rather than a second rule: it
       // edges to every candidate it CAN name and adds `Unknown` when the set it enumerated is not
@@ -9660,8 +10022,8 @@ function visitCalls(node) {
       if (!decl) {
         // `new C()` on a class with an IMPLICIT constructor resolves to no declaration — edge to
         // the class's (synthesized) ctor unit via the class identifier before concluding Unknown.
-        let edged = false, externalClass = false;
-        if (ts.isNewExpression(node) && node.expression && ts.isIdentifier(node.expression)) {
+        let edged = !!classExprCtor, externalClass = false;   // ⟨R1016⟩
+        if (!edged && ts.isNewExpression(node) && node.expression && ts.isIdentifier(node.expression)) {
           const cd = realDecl(checker.getSymbolAtLocation(node.expression));
           const t = cd && nodeName.get(cd);
           if (t) { rec.edges.add(t); edged = true; }
@@ -12118,8 +12480,21 @@ for (const sf of sources) visitCalls(sf);
     const herR = herQ && fns.get(herQ);
     if (herR && ["direct", "edges", "why", "blind", "hosts", "paths", "cmds", "incomplete", "dispatch", "tables"]
                   .some((k) => herR[k]?.size)) { add(herQ, "heritage"); fns.get(ctorQ)?.edges.add(herQ); }
+    // ⟨R1016⟩ the containment edge to a class expression's constructor, unless its value cannot escape a `new`.
+    // Asked from the class itself rather than its parent, so a `static X = class {…}` lands on `<static-init>`.
+    const ceq = ts.isClassExpression(cls) ? classExprCtorQual.get(cls) : null;
+    if (ceq && classExprEscapes(cls)) {
+      const cfrom = enclosing(cls);
+      const crec = cfrom && cfrom !== ceq ? fns.get(cfrom) : null;
+      if (crec && !crec.edges.has(ceq)) { crec.edges.add(ceq); hit("classexpr"); }
+    } else if (ceq && process.env.CANDOR_R1016_REACH) console.error(`R1016-REACH contained-dropped ${ceq}`);
     if (!targets.length) continue;
-    const from = enclosing(cls.parent);
+    // ⟨SOUNDNESS R1060⟩ a class EXPRESSION is asked from itself, as the R1016 edge above is: climbing from its PARENT
+    // starts at a `static X = class {…}` property with no child in hand, so R815's static-initialiser rule never
+    // matched and the inner class's definition-time work was wired from the OUTER class's constructor — `new HB()`
+    // charged for a `static {}` block that runs once, at import (EXECUTED), and the module that runs it silent.
+    // A declaration is still asked from its parent: from itself, `nodeName` would answer its own constructor.
+    const from = ts.isClassExpression(cls) ? enclosing(cls) : enclosing(cls.parent);
     const rec = from && fns.get(from);
     if (!rec) continue;
     for (const [q, k] of targets) if (q !== from && !rec.edges.has(q)) { rec.edges.add(q); hit(k); }
