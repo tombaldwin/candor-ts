@@ -7288,6 +7288,232 @@ export class SvcDi {
   fs.rmSync(d, { recursive: true, force: true });
 }
 
+// ── SOUNDNESS R1067: a CLASS's synthesized units are keyed per class, not per class NAME ─────────────────────────────
+// EXECUTED (`tsagent-v044/fx67`, each function called alone with a fresh marker directory): two anonymous class
+// expressions' `static {}` blocks shared `<mod>.<anonymous>.<static-init>`, so the PURE `mkB` was charged `Fs` from
+// `mkA`'s block; the same fusion held for same-named class expressions, function-scoped `class K` declarations (static
+// block, implicit constructor, `<heritage>`) and anonymous static field initialisers — six pure definers `deny Fs` exit 1
+// at v0.40.2. And the SILENT half: a function-scoped class with an EXPLICIT constructor kept its field initialiser on the
+// bare `H.constructor` while `new H()` resolved to the positioned explicit one — `explWrite` ABSENT, `deny Fs` exit 0
+// over a write that ran. Every writer below wrote; every `Pure` twin wrote nothing.
+if (blk()) {
+  const d = project({ "src/fx.ts": `import * as fs from "fs";
+function w(tag: string): number { fs.writeFileSync("/tmp/candor-r1067-" + tag, "x"); return 1; }
+export function mkA() { return class { static { w("mkA"); } }; }
+export function mkB() { return class { static { globalThis.toString(); } }; }
+export function exprWrite() { return class Q { static { w("exprWrite"); } }; }
+export function exprPure() { return class Q { static { globalThis.toString(); } }; }
+export function declWrite() { class K { static { w("declWrite"); } } return K; }
+export function declPure() { class K { static { globalThis.toString(); } } return K; }
+export function sfWrite() { return class { static v = w("sfWrite"); }; }
+export function sfPure() { return class { static v = 1; }; }
+export function implWrite() { class J { x = w("implWrite"); } return new J(); }
+export function implPure() { class J { x = 1; } return new J(); }
+export function explWrite() { class H { x = w("explWrite"); constructor() { } } return new H(); }
+export function explPure() { class H { x = 1; constructor() { } } return new H(); }
+function base(tag: string) { w(tag); return class {}; }
+export function herWrite() { class G extends base("herWrite") { } return G; }
+export function herPure() { class G extends Object { } return G; }
+export class Top { y = w("ctlTop"); constructor() { } }
+export function ctlTop() { return new Top(); }
+export function ctlLocalCtor() { class P { constructor() { w("ctlLocalCtor"); } } return new P(); }
+export function ctlLocalMethod() { class M { run() { w("ctlLocalMethod"); } } new M().run(); }
+export function ctlNested() { return class { static Inner = class { static { w("ctlNested"); } }; }; }
+` });
+  const { report } = scan(d);
+  const gate = (fn) => { fs.writeFileSync(path.join(d, "p.pol"), `deny Fs src.fx.${fn}\n`); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  for (const fn of ["mkA", "exprWrite", "declWrite", "sfWrite", "implWrite", "explWrite", "herWrite", "ctlTop", "ctlLocalCtor", "ctlLocalMethod", "ctlNested"])
+    check(`R1067: \`${fn}\` performs the write — \`deny Fs src.fx.${fn}\` exit 1${fn === "explWrite" ? " (ABSENT, exit 0 at v0.40.2)" : ""}`,
+          gate(fn) === 1, JSON.stringify(entry(report, `src.fx.${fn}`) ?? null));
+  for (const fn of ["mkB", "exprPure", "declPure", "sfPure", "implPure", "explPure", "herPure"])
+    check(`R1067 FABRICATION: \`${fn}\` writes nothing — no Fs from a same-named sibling class (Fs at v0.40.2)`,
+          !((entry(report, `src.fx.${fn}`)?.inferred ?? []).includes("Fs")), JSON.stringify(entry(report, `src.fx.${fn}`) ?? null));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── SOUNDNESS R1074: a JavaScript expando WRITE through `process` is not a project shadow of it ──────────────────────
+// EXECUTED (`tsagent-v044/fx74`): `readSecret() { return process.env.SECRET }` printed the planted value and was ABSENT,
+// `deny Env` exit 0, because a one-line script `process.env['OTHER'] = 'z'` in the same project gave the global `process`
+// a declaration in a project file — and "declared in a project file" was the whole shadow test. CONTROLS: a module-local
+// `const process` and a parameter named `process` are real shadows and stay uncharged.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": `{"compilerOptions":{"target":"es2022","module":"commonjs","allowJs":true,"strict":true},"include":["src"]}`,
+    "src/a.ts": `export function readSecret() { return process.env.SECRET; }\n`,
+    "src/b.js": `process.env['OTHER'] = 'z';\n`,
+    "src/c.ts": `const process = { env: { SECRET: "fake" } as Record<string, string> };
+export function readLocalShadow() { return process.env.SECRET; }
+export function readParamShadow(process: { env: Record<string, string> }) { return process.env.SECRET; }
+`,
+  });
+  const { report } = scan(d, "--allow-js");
+  fs.writeFileSync(path.join(d, "p.pol"), "deny Env src.a.readSecret\n");
+  check("R1074: an expando write in a JS script does not hide the global — `deny Env src.a.readSecret` exit 1 (0 at v0.40.2)",
+        scan(d, "--allow-js", "--policy", path.join(d, "p.pol")).r.status === 1, JSON.stringify(entry(report, "src.a.readSecret") ?? null));
+  for (const fn of ["readLocalShadow", "readParamShadow"])
+    check(`R1074 CONTROL: a real shadow (\`${fn}\`) reads its own object — no Env`,
+          !((entry(report, `src.c.${fn}`)?.inferred ?? []).includes("Env")), JSON.stringify(entry(report, `src.c.${fn}`) ?? null));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── SOUNDNESS R1075: what node's `process` MODULE exports is the process — under any local name, through any import ──
+// EXECUTED (`tsagent-v044/fx75`, `fx75c`): `import { env } from "node:process"`, `{ env as e }`, `import * as p`,
+// `import p from`, and an imported project alias `export const myEnv = process.env` each printed the planted value with
+// the reading function ABSENT and `deny Env` exit 0; `import { argv }` and `import { hrtime }` read as nothing while
+// `process.argv` / `process.hrtime()` charge Env / Clock.
+if (blk()) {
+  const d = project({
+    "src/mine.ts": `export const myEnv = process.env;\n`,
+    "src/im.ts": `import { env } from "node:process";
+import { env as envAlias, argv, hrtime } from "process";
+import * as nsp from "node:process";
+import procDefault from "node:process";
+import { myEnv, myEnv as renamedEnv } from "./mine";
+export function readNamed() { return env.SECRET; }
+export function readRenamed() { return envAlias.SECRET; }
+export function readNs() { return nsp.env.SECRET; }
+export function readDefault() { return procDefault.env.SECRET; }
+export function readArgvImp() { return argv[2]; }
+export function readImported() { return myEnv.SECRET; }
+export function readImportedRenamed() { return renamedEnv.SECRET; }
+export function clockImp() { return hrtime(); }
+`,
+  });
+  const { report } = scan(d);
+  for (const fn of ["readNamed", "readRenamed", "readNs", "readDefault", "readArgvImp", "readImported", "readImportedRenamed"])
+    check(`R1075: \`${fn}\` reads the process environment — Env (ABSENT at v0.40.2)`,
+          (entry(report, `src.im.${fn}`)?.inferred ?? []).includes("Env"), JSON.stringify(entry(report, `src.im.${fn}`) ?? null));
+  check("R1075: `hrtime()` imported from node:process reads the clock — Clock (ABSENT at v0.40.2)",
+        (entry(report, "src.im.clockImp")?.inferred ?? []).includes("Clock"), JSON.stringify(entry(report, "src.im.clockImp") ?? null));
+  check("R1075 CONTROL: importing the bindings reads nothing — `src.im.<module>` carries no Env",
+        !((entry(report, "src.im.<module>")?.inferred ?? []).includes("Env")), JSON.stringify(entry(report, "src.im.<module>") ?? null));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── SOUNDNESS R935: a ProcessEnv-typed value whose provenance the location model cannot enumerate is MAY ──────────────
+// EXECUTED (`tsagent-v044/fx35`): a `Map`/`Set`/`WeakMap` holding `process.env`, `for…of` over an array of it, and an
+// `.map` callback each printed the planted value with the reader ABSENT, `deny Env` and `deny Env Unknown` exit 0. The
+// floor discloses `Unknown[env-maybe-read]` (never Env: a ProcessEnv-typed object may be a copy). CONTROLS: a COPY bound
+// by a literal, a named function's parameter no visible site feeds, and a resolved non-env array element stay absent.
+if (blk()) {
+  const d = project({ "src/ev.ts": `const m = new Map([["e", process.env]]);
+export function viaMapCtor() { return m.get("e")!.SECRET; }
+const m2 = new Map<string, NodeJS.ProcessEnv>(); m2.set("e", process.env);
+export function viaMapSet() { return m2.get("e")!.SECRET; }
+const st = new Set([process.env]);
+export function viaSetIter() { for (const x of st) return x.SECRET; return undefined; }
+const arr = [process.env];
+export function viaForOf() { for (const x of arr) return x.SECRET; return undefined; }
+export function viaArrMap() { return arr.map((x) => x.SECRET)[0]; }
+const wm = new WeakMap<object, NodeJS.ProcessEnv>([[globalThis, process.env]]);
+export function viaWeakMap() { return wm.get(globalThis)!.SECRET; }
+const held = m.get("e")!;
+export function viaModuleHeld() { return held.SECRET; }
+const copy: NodeJS.ProcessEnv = { ...process.env, EXTRA: "1" };
+export function ctlCopy() { return copy.EXTRA; }
+function unfed(e: NodeJS.ProcessEnv) { return e.EXTRA; }
+export function ctlUnfed() { return unfed({ EXTRA: "1" }); }
+const arr2 = [process.env, { SECRET: "lit" } as NodeJS.ProcessEnv];
+export function ctlArrLit() { return arr2[1].SECRET; }
+` });
+  const { report } = scan(d);
+  const gate = (line) => { fs.writeFileSync(path.join(d, "p.pol"), line + "\n"); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  for (const fn of ["viaMapCtor", "viaMapSet", "viaSetIter", "viaForOf", "viaArrMap", "viaWeakMap", "viaModuleHeld"])
+    check(`R935: \`${fn}\` discloses — \`deny Env Unknown src.ev.${fn}\` exit 1 (0 at v0.40.2)`,
+          gate(`deny Env Unknown src.ev.${fn}`) === 1 && (entry(report, `src.ev.${fn}`)?.unknownWhy ?? []).includes("env-maybe-read"),
+          JSON.stringify(entry(report, `src.ev.${fn}`) ?? null));
+  for (const fn of ["ctlCopy", "ctlUnfed", "ctlArrLit"])
+    check(`R935 CONTROL: \`${fn}\` is not the environment — absent`, entry(report, `src.ev.${fn}`) == null
+          || !(entry(report, `src.ev.${fn}`).inferred ?? []).length, JSON.stringify(entry(report, `src.ev.${fn}`) ?? null));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
+// ── SOUNDNESS R1061: a provider TOKEN or SUBSTITUTE named through a binding, a helper or a type ───────────────────────
+// EXECUTED on NestJS 10 (`tsagent-v044/fxdi`): `{ provide: TOK, useClass: FileStore6 }` with `const TOK = Store6`, an
+// imported const token, an object-member token, a `.map` over `[Store9]`, a helper `prov(Store10, FileStore10)`, a
+// `useClass` through `const IMPL = FileStore11`, and a `Function`-typed token each ran the substitute's write while the
+// injected caller was ABSENT, `deny Fs`/`deny Fs Unknown` exit 0. A substitute nobody can name (`Type<Store16>` read
+// out of an array) DISCLOSES. CONTROL: a pure substitute and an unsubstituted token stay clean.
+if (blk()) {
+  const d = project({ "src/tok.ts": `export class Store7 { save(): void { /* pure */ } }
+export const TOK7 = Store7;
+`, "src/di2.ts": `import * as fs from "fs";
+import { Store7, TOK7 } from "./tok";
+type Type<T> = new (...a: any[]) => T;
+const w = (k: string) => fs.writeFileSync("/tmp/candor-r1061x-" + k, "x");
+export class Store6 { save(): void { /* pure */ } }
+export class FileStore6 { save(): void { w("s6"); } }
+const TOK6 = Store6;
+export class FileStore7 { save(): void { w("s7"); } }
+export class Store8 { save(): void { /* pure */ } }
+export class FileStore8 { save(): void { w("s8"); } }
+const TOKENS = { S8: Store8 };
+export class Store9 { save(): void { /* pure */ } }
+export class FileStore9 { save(): void { w("s9"); } }
+export class Store10 { save(): void { /* pure */ } }
+export class FileStore10 { save(): void { w("s10"); } }
+function prov(token: Type<any>, impl: Type<any>) { return { provide: token, useClass: impl }; }
+export class Store11 { save(): void { /* pure */ } }
+export class FileStore11 { save(): void { w("s11"); } }
+const IMPL11 = FileStore11;
+export class Store13 { save(): void { /* pure */ } }
+export class PureStore13 { save(): void { /* pure */ } }
+const TOK13 = Store13;
+export class Store14 { persist14(): void { /* pure */ } }
+export class FileStore14 { persist14(): void { w("s14"); } }
+const T14: Function = Store14;
+export class Store15 { save(): void { /* pure */ } }
+export class Store16 { keep16(): void { /* pure */ } }
+export class FileStore16 { keep16(): void { w("s16"); } }
+const impls16: Type<Store16>[] = [FileStore16];
+function register16(impl: Type<Store16>) { return { provide: Store16, useClass: impl }; }
+function Inject(_t: unknown): ParameterDecorator { return () => {}; }
+export class StoreS { save(): void { /* pure */ } }
+export class FileStoreS { save(): void { w("sS"); } }
+export const STORE_TOKEN = "STORE";
+export class StoreU { save(): void { /* pure */ } }
+export const strProviders = [{ provide: STORE_TOKEN, useClass: FileStoreS }];
+export class SvcS2 {
+  constructor(@Inject("STORE") private st: StoreS, @Inject("NOWHERE") private su: StoreU) {}
+  runStrTok() { this.st.save(); }
+  runUnprovided() { this.su.save(); }
+}
+export const providers = [{ provide: TOK6, useClass: FileStore6 }, { provide: TOK7, useClass: FileStore7 },
+  { provide: TOKENS.S8, useClass: FileStore8 }, ...[Store9].map((t) => ({ provide: t, useClass: FileStore9 })),
+  prov(Store10, FileStore10), { provide: Store11, useClass: IMPL11 }, { provide: TOK13, useClass: PureStore13 },
+  { provide: T14, useClass: FileStore14 }, Store15, register16(impls16[0])];
+export class Svc2 {
+  constructor(private s6: Store6, private s7: Store7, private s8: Store8, private s9: Store9, private s10: Store10,
+              private s11: Store11, private s13: Store13, private s14: Store14, private s15: Store15, private s16: Store16) {}
+  runS6() { this.s6.save(); }
+  runS7() { this.s7.save(); }
+  runS8() { this.s8.save(); }
+  runS9() { this.s9.save(); }
+  runS10x() { this.s10.save(); }
+  runS11x() { this.s11.save(); }
+  runS13x() { this.s13.save(); }
+  runS14x() { this.s14.persist14(); }
+  runS15x() { this.s15.save(); }
+  runS16x() { this.s16.keep16(); }
+}
+` });
+  const { report } = scan(d);
+  const gate = (line) => { fs.writeFileSync(path.join(d, "p.pol"), line + "\n"); return scan(d, "--policy", path.join(d, "p.pol")).r.status; };
+  for (const fn of ["runS6", "runS7", "runS8", "runS9", "runS10x", "runS11x", "runS14x"])
+    check(`R1061: \`deny Fs src.di2.Svc2.${fn}\` fires — the provider's substitute is a candidate (exit 0 at v0.40.2)`,
+          gate(`deny Fs src.di2.Svc2.${fn}`) === 1, JSON.stringify(entry(report, `src.di2.Svc2.${fn}`) ?? null));
+  check("R1061: an unnameable substitute DISCLOSES — `deny Fs Unknown src.di2.Svc2.runS16x` exit 1 (0 at v0.40.2)",
+        gate("deny Fs Unknown src.di2.Svc2.runS16x") === 1, JSON.stringify(entry(report, "src.di2.Svc2.runS16x") ?? null));
+  check("R1061: a STRING token joins its `@Inject(\"STORE\")` class-typed parameter — `deny Fs src.di2.SvcS2.runStrTok` exit 1 (0 at v0.40.2)",
+        gate("deny Fs src.di2.SvcS2.runStrTok") === 1, JSON.stringify(entry(report, "src.di2.SvcS2.runStrTok") ?? null));
+  check("R1061: an `@Inject` token no visible provider registers DISCLOSES — `deny Fs Unknown src.di2.SvcS2.runUnprovided` exit 1",
+        gate("deny Fs Unknown src.di2.SvcS2.runUnprovided") === 1, JSON.stringify(entry(report, "src.di2.SvcS2.runUnprovided") ?? null));
+  for (const fn of ["runS13x", "runS15x"])
+    check(`R1061 CONTROL: \`${fn}\` — a pure substitute / an unsubstituted token — \`deny Fs Unknown\` stays 0`,
+          gate(`deny Fs Unknown src.di2.Svc2.${fn}`) === 0, JSON.stringify(entry(report, `src.di2.Svc2.${fn}`) ?? null));
+  fs.rmSync(d, { recursive: true, force: true });
+}
+
 // ── SOUNDNESS R944: a unit with no name of its own is keyed by ANCHOR PATH + ORDINAL, not by OFFSET ──────
 // `<structural>@N`, `<callable>@N`, `<decorator>@N`, `<decorator-arg>@N` and `[computed@N]` were keyed by
 // the absolute character offset, so a COMMENT LINE above them renamed them — and under ⟨0.40⟩'s AS-EFF-005
@@ -23855,8 +24081,10 @@ export function mkD3() { return new D3(); }`,
   check("R815 SUPER REACH KEPT: `new D3()` still reaches the dependency mixin's constructor — `invisible` names mixdep on D3.constructor and mkD3",
         (row("D3.constructor").invisible ?? []).includes("mixdep") && (row("mkD3").invisible ?? []).includes("mixdep"),
         JSON.stringify([row("D3.constructor"), row("mkD3")]));
-  check("R815 CONTROL: an INSTANCE field is the constructor's — `C5.constructor` keeps Fs",
-        (row("C5.constructor").inferred ?? []).includes("Fs"), JSON.stringify(row("C5.constructor")));
+  // ⟨R1067⟩ a function-scoped class's constructor unit is POSITIONED (`C5.constructor#L:C`), like its methods.
+  const c5 = report.functions.find((e) => e.fn.startsWith("src.f.C5.constructor#")) ?? {};
+  check("R815 CONTROL: an INSTANCE field is the constructor's — `C5.constructor#…` keeps Fs",
+        (c5.inferred ?? []).includes("Fs"), JSON.stringify(c5));
 }
 
 // ── R778: THE INNERMOST `node_modules/<pkg>/` OWNS A FILE — pnpm's store and npm's nested installs ─────────────

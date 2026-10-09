@@ -195,9 +195,15 @@ parameter, which reads `Unknown`. A DI *container* is measured separately, on Ne
   implementors of `Sink`, so a `useClass` that `implements Sink` is charged; a `useValue` object literal that
   implements nothing reads `Unknown` (`dispatch:`).
 
-**Named miss:** a provider list the scan cannot see (built at runtime, or imported from an unscanned package), a
-token that is a variable rather than the class itself, and a substitute supplied by a dependency are not
-substitutions to this engine. Gate a DI-heavy service with `deny <E> Unknown` as well as `deny <E>`.
+- the TOKEN is read through the checker's type, so `const TOK = Store`, an imported token, `TOKENS.store` and a
+  `.map` over `[Store]` name `Store`; a helper's `token`/`impl` parameter is read through its visible call sites; a
+  token typed `Function`/`Type<any>` joins its substitute to every project class it is assignable to (R1061);
+- a substitute the scan cannot name (`useClass: impls[i]` typed `Type<Store>`, a `useValue` typed `any`) makes a
+  dispatch on the token class read `Unknown` (`dispatch:`).
+
+**Named miss:** a provider list the scan cannot see at all (one imported from an unscanned package) and a substitute
+supplied by a dependency for a token the dependency owns. Gate a DI-heavy service with `deny <E> Unknown` as well as
+`deny <E>`.
 
 ## Cross-engine consistency — machine-checked
 
