@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.40.4] — 2026-10-10
+
 - ⚠ **A stored `process.env` is followed through a function's RETURN, DESTRUCTURING, a PROMISE, and a constructor
   PARAMETER PROPERTY** (SOUNDNESS R935). `const v = getEnv(); f() { return v.SECRET }`, the result put in an array,
   object literal, class field or `any[]`, `ident(process.env)`, an `async` callee, `Promise.resolve(process.env)`,
