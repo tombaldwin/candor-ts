@@ -10,6 +10,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.40.6] — 2026-10-11
+
+- **Version-only cut to keep the family on one build line — no change to candor-ts since 0.40.5.**
+  The source is identical to the v0.40.5 tag (`3ca4b9a`); only `package.json` and the shrinkwrap's
+  root `version` move. candor-rust carries R1098 and the drop-glue per-row fixes, candor-swift R1109,
+  and candor-spec a SPEC §3.1/§6.2 clarification (a class filter is answered as written; a
+  present-and-empty `netClass` is read as absent) that codifies how every engine, this one included,
+  already answered.
+
+
 ## [0.40.5] — 2026-10-11
 
 - **Version-only cut to keep the family on one build line — no change to candor-ts since 0.40.4.**
