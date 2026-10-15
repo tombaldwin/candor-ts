@@ -10,6 +10,19 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.40.11] — 2026-10-15
+
+- **Version-only cut to keep the family on one build line — no change to candor-ts since 0.40.10.** The source is
+  identical to the v0.40.10 tag (`903ce21`); only `package.json` and the shrinkwrap's root `version` move.
+  candor-rust closes two silent under-reports in candor-scan (a compound assignment `a += b` on an effectful
+  `AddAssign`-family impl, R1177; a trait default inherited by one of two same-named implementors, R1171). candor-java
+  charges the elements' `compareTo` when a collection of project values is sorted or ordered (R1179) and discloses a
+  collection handed to a chained dependency (R1174). candor-swift makes its report the same on every run (a 0.40.10
+  report could differ between identical runs on some projects, R1175) and reaches the `==`/`hash`/`isEqual` witnesses
+  a comparison runs in more shapes (R1175, R1176, R1185). candor-spec carries the register only (`SPEC.md` and
+  `conformance/` are unchanged since 0.40.10).
+
+
 ## [0.40.10] — 2026-10-14
 
 - **Version-only cut to keep the family on one build line — no change to candor-ts since 0.40.9.** The source is
