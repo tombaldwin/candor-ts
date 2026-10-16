@@ -10,6 +10,19 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.40.12] — 2026-10-16
+
+- **Version-only cut to keep the family on one build line — no change to candor-ts since 0.40.11.** The source is
+  identical to the v0.40.11 tag (`edfd7a1`); only `package.json` and the shrinkwrap's root `version` move.
+  candor-rust closes silent under-reports in candor-scan: a macro-made operator impl no longer takes the call edge
+  from a hand-written one (R1180, so bigdecimal's operator code gets its real edges back), a macro-made
+  compound-assignment impl gets a unit (R1182), and a value handed to a chained dependency's bit-operator or
+  conversion body is disclosed (R1181, R1186, R1196, R1197). candor-java charges a comparator where a sorted
+  container or a sort runs it and follows more ordering shapes (R1184, R1188, R1189, R1195, R1198), and discloses as
+  `Unknown` a framework member its generated table cannot vouch for (R1193). candor-swift is a version-only cut too.
+  candor-spec carries the register only (`SPEC.md` and `conformance/` are unchanged since 0.40.11).
+
+
 ## [0.40.11] — 2026-10-15
 
 - **Version-only cut to keep the family on one build line — no change to candor-ts since 0.40.10.** The source is
