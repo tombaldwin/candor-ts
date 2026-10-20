@@ -375,7 +375,17 @@ const RULE_KIND_VOCAB = ["deny", "pure", "forbid", "only", "allow"];
 const DROPPED = (why) => `policy line NOT HONOURED — DROPPED (${why}); it is absent from the parse, so the `
                        + `policy that ran is the one without it`;
 
+// R1224 (ruled 2026-10-20): a U+FEFF at OFFSET 0 of a POLICY file is an encoding mark, not policy text,
+// and is stripped before line-splitting — four-way. ONLY there, and only ONE: a BOM anywhere else (a later
+// line's start, mid-token, or a second one at offset 1) stays a token character, so its line is still not a
+// rule and is dropped exactly as before. It is stripped in the two functions every policy reader feeds —
+// `parsePolicy` and `policyRefusalUnevaluated` — rather than at each `readFileSync` (scan --policy, the
+// peek, gate, whatif, fix, fix-gate, unverified, MCP, LSP), so a reader added later cannot miss it.
+// `.candor/config` and report JSON are NOT covered by this ruling (R1250).
+export const stripPolicyBom = (text) => (typeof text === "string" && text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text);
+
 export function parsePolicy(text, aliases = null) {
+  text = stripPolicyBom(text);
   const deny = [], allow = [], forbid = [], only = [];
   // ⟨0.24⟩ every line this parser could not honour AS WRITTEN, and every alias a rule RESOLVED THROUGH.
   // `aliasesUsed` is recorded at the point of USE, never from the alias map: a config defining ten aliases
@@ -1342,7 +1352,7 @@ export function evaluatePolicy(pol, functions, callgraph, incomplete = new Map()
 export function policyRefusalUnevaluated(policyText, errors) {
   const fatal = new Map(policyErrorUnevaluated(errors).map((e) => [e.rule, e.why]));
   const out = [];
-  for (const raw of policyText.split(/\r?\n/)) {
+  for (const raw of stripPolicyBom(policyText).split(/\r?\n/)) {
     const line = raw.split("#", 1)[0].trim();
     if (!line) continue;
     out.push({ rule: line,

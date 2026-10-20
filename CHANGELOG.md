@@ -10,6 +10,27 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ A UTF-8 BOM at byte 0 of a policy file is now stripped before the policy is read (R1224, ruled
+  2026-10-20, four-way).** Before, the first rule of a BOM'd policy was dropped as an "unknown rule kind":
+  a one-rule policy refused at exit 2 and a multi-rule one silently lost its first rule (exit 0 where that
+  rule fires). Now that rule is evaluated. Only ONE BOM, only at offset 0: a BOM at the start of a later line,
+  or a second one right after the first, is still a token character and its line is still ignored. Every
+  policy route reads through `parsePolicy` (scan `--policy`, the peek, `gate`, `whatif`, `fix`, `fix-gate`,
+  `unverified`, MCP, LSP), so all of them change together. `.candor/config` and report JSON are unchanged
+  (R1250 is separate).
+- **⚠ A coercion operand behind `as any` (or `as unknown as T`, `<any>x`, or an `any` parameter whose every
+  call site is visible) now reaches the value's real coercion hooks (R1248, the `as any` half).**
+  `(x as any) + 1`, `(a as any) < b`, `-(x as any)`, `` `${x as any}` ``, `String(x as any)` and
+  `JSON.stringify(x as any)` ran `V.valueOf`/`toString`/`toJSON`, but the caller was ABSENT and `deny Fs`
+  exited 0, because the operand was typed at the cast (`any`) and `any` declares no members. The value type
+  now comes from the same helper the accessor arm already used (R246/R780). Executed fixture: 12 of 12 subjects
+  went from ABSENT to charged, `deny Fs <fn>` went 0→1 on each, and 4 executed-pure controls (a primitive
+  behind the cast, a class with no local hook, and its `JSON.stringify`) stayed pure. No new coercion SITES
+  were added.
+- The comment above `coercionTargets` no longer claims an inherited `Object.prototype.toString` "provably
+  does nothing". It now names the two silent exceptions, `Error.prototype.toString` (reads `name`/`message`)
+  and `@@toStringTag`, and points at R1248. Comment only.
+
 ## [0.40.13] — 2026-10-19
 
 - **Version-only cut to keep the family on one build line — no change to candor-ts since 0.40.12.** The source is

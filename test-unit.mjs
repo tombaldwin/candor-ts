@@ -24,7 +24,7 @@ import {
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
   discoverConfigPolicy, evaluatePolicy, reasonClass, parseUnknownAliases, parseNetPartners,
-  resolveReasonClasses, sortViolations, reportUnits,
+  resolveReasonClasses, sortViolations, reportUnits, policyRefusalUnevaluated,
 } from "./policy.mjs";
 import {
   isTestPath, kappa, kappaKnows, fsKind, commandHeadEffects, hostLiteral, tablesInSql,
@@ -124,6 +124,34 @@ test("parsePolicy: Unknown[class…] / * / dynamic", () => {
   assert.deepEqual(parsePolicy("deny Net Unknown[*] dom\n").deny[0].unknownClasses, []); // * ⇒ all
   assert.deepEqual(parsePolicy("deny Net Unknown[dynamic] dom\n").deny[0].unknownClasses,
     ["dispatch", "indirect", "native", "reflect", "unresolved"]);
+});
+// R1224 (ruled 2026-10-20): a U+FEFF at OFFSET 0 of a policy FILE is an encoding mark and is stripped
+// before line-splitting; anywhere else it stays a token character and its line is dropped as before. The
+// policy is decoded from real UTF-8 BYTES (EF BB BF), the way every reader gets it, so the test cannot pass
+// on a string literal the file would never produce. Pre-fix the byte-0 rule was dropped as an unknown rule
+// kind — a one-rule BOM'd policy refused at exit 2, and a multi-rule one silently lost its first rule.
+test("R1224 policy BOM: stripped at byte 0 only, and only once", () => {
+  const dec = (hex) => Buffer.from(hex.replace(/ /g, ""), "hex").toString("utf8");
+  const BOM = "efbbbf", RULE = Buffer.from("deny Fs m.writer_fn\n").toString("hex");
+  const NET = Buffer.from("deny Net m\n").toString("hex");
+  // byte-0 BOM: the rule is EVALUATED, nothing is dropped
+  const p0 = parsePolicy(dec(BOM + RULE + NET));
+  assert.deepEqual(p0.deny.map((r) => [r.effects, r.scope]), [[["Fs"], "m.writer_fn"], [["Net"], "m"]]);
+  assert.deepEqual(p0.errors, []);
+  assert.deepEqual(p0.ignored, []);
+  // a BOM at the start of a LATER line is not an encoding mark: that line is still dropped
+  const pm = parsePolicy(dec(NET + BOM + RULE));
+  assert.deepEqual(pm.deny.map((r) => r.scope), ["m"]);
+  assert.equal(pm.ignored.length, 1);
+  assert.equal(pm.ignored[0].line, 2);
+  assert.equal(pm.ignored[0].text, "\uFEFFdeny Fs m.writer_fn");
+  // a DOUBLED BOM strips only the first; the second stays a token character
+  const p2 = parsePolicy(dec(BOM + BOM + RULE));
+  assert.deepEqual(p2.deny, []);
+  assert.equal(p2.ignored.length, 1);
+  assert.equal(p2.ignored[0].text, "\uFEFFdeny Fs m.writer_fn");
+  // the refusal list reads the same text, so line 1's `rule` carries no BOM
+  assert.deepEqual(policyRefusalUnevaluated(dec(BOM + RULE), []).map((e) => e.rule), ["deny Fs m.writer_fn"]);
 });
 test("config unknown-alias: resolves a user name, rejects a reserved one", () => {
   const aliases = parseUnknownAliases(

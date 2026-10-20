@@ -522,6 +522,46 @@ export function plainJson(): string { return JSON.stringify({ a: 1 }); }`,
         eff("src.a.plainJson").length === 0, JSON.stringify(eff("src.a.plainJson")));
 }
 
+// ── 2f-ter. R1248 (the `as any` half): the coercion OPERAND typed at the cast ─────────────────────────
+// `(x as any) + 1`, `(a as any) < b`, `` `${x as any}` ``, `String(x as any)`, `JSON.stringify(x as any)`
+// and an `any` parameter fed only a V all ran V's hook (EXECUTED, lane fixture tsagent-a/asany: 12 of 12
+// subjects wrote the marker file) and were ABSENT on 0.40.13: `mayCoerceObject`/`coercionTargets` read the
+// checker's type AT the cast (`any`), which declares no member. The value type comes from the same
+// `receiverValueTypes` the accessor arm uses (R246/R780). Controls: a primitive behind the cast, a class
+// with no local coercion member, and `JSON.stringify` of it — all executed as writing nothing — stay pure.
+if (blk()) {
+  const d = project({
+    "src/c.ts": `import * as fsm from "node:fs";
+export class V {
+  valueOf(): number { fsm.appendFileSync("/tmp/x", "v"); return 1; }
+  toString(): string { fsm.appendFileSync("/tmp/x", "s"); return "v"; }
+  toJSON(): string { fsm.appendFileSync("/tmp/x", "j"); return "j"; }
+}
+export class P { n = 1; }
+export function alphaPlus(x: V): unknown { return (x as any) + 1; }
+export function bravoLess(a: V, b: number): boolean { return (a as any) < b; }
+export function charlieTmpl(x: V): string { return \`\${x as any}\`; }
+export function deltaStr(x: V): string { return String(x as any); }
+export function echoJson(x: V): string { return JSON.stringify(x as any); }
+export function foxtrotUnk(x: V): number { return (x as unknown as number) * 2; }
+export function golfAngle(x: V): unknown { return (<any>x) + 1; }
+export function hotelHelper(o: any): unknown { return o + 1; }
+export function indiaCaller(x: V): unknown { return hotelHelper(x); }
+export function julietPrim(): unknown { return (5 as any) + 1; }
+export function kiloPlain(p: P): unknown { return (p as any) + 1; }
+export function limaPlainJson(p: P): string { return JSON.stringify(p as any); }`,
+  });
+  const { report } = scan(d);
+  const eff = (fn) => entry(report, fn)?.inferred ?? [];
+  for (const fn of ["alphaPlus", "bravoLess", "charlieTmpl", "deltaStr", "echoJson", "foxtrotUnk", "golfAngle",
+                    "hotelHelper", "indiaCaller"])
+    check(`R1248 as-any coercion: ${fn} carries the hook's Fs`, eff(`src.c.${fn}`).includes("Fs"),
+          JSON.stringify(entry(report, `src.c.${fn}`) ?? null));
+  for (const fn of ["julietPrim", "kiloPlain", "limaPlainJson"])
+    check(`R1248 no-fabrication: ${fn} stays pure`, !entry(report, `src.c.${fn}`),
+          JSON.stringify(entry(report, `src.c.${fn}`) ?? null));
+}
+
 // ── 2f-bis. IMPLICIT STRINGIFICATION reached through DISPATCH or a SINK ────────────────────────────
 // The four-way common-mode vein (candor-spec SOUNDNESS-VEIN-implicit-stringify.md), found on HikariCP
 // by the dynamic oracle and reproduced in all four engines. §2f above resolves the coercion member on
@@ -2553,6 +2593,23 @@ if (blk()) {
   const g = scan(d, "--policy", path.join(d, "pol")).r.stdout;
   check("[17] bare-CR policy: rule after \\r is enforced (not dropped)",
         g.includes("[AS-EFF-006]") && g.includes("src.h.hop"), g);
+}
+if (blk()) {
+  // R1224 (ruled 2026-10-20): a UTF-8 BOM at BYTE 0 of a policy file is an encoding mark, stripped before
+  // line-splitting, so its first rule is ENFORCED (pre-fix: dropped as an unknown rule kind — exit 2 for a
+  // one-rule policy, a silently lost first rule otherwise). A BOM at the start of a LATER line is still a
+  // token character, so that line stays dropped. `project` writes UTF-8, so "\uFEFF" lands as EF BB BF.
+  const d = project({
+    "src/h.ts": `import * as cp from "node:child_process";\nexport function hop() { cp.execSync("ls"); }`,
+    "pol0": "\uFEFFdeny Exec hop\ndeny Net nope\n",
+    "polmid": "deny Net nope\n\uFEFFdeny Exec hop\n",
+  });
+  const r0 = scan(d, "--policy", path.join(d, "pol0")).r;
+  check("R1224 byte-0 BOM policy: first rule enforced (exit 1)",
+        r0.status === 1 && r0.stdout.includes("src.h.hop"), `${r0.status} ${r0.stdout}${r0.stderr}`);
+  const rm = scan(d, "--policy", path.join(d, "polmid")).r;
+  check("R1224 mid-file BOM line still ignored (exit 0)",
+        rm.status === 0 && rm.stderr.includes("unknown rule kind"), `${rm.status} ${rm.stderr}`);
 }
 
 // ── 4. honest Unknown: a callback parameter never reads pure ──────────────────────────────────────

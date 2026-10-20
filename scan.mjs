@@ -8832,10 +8832,21 @@ function isStringifyingSink(call) {
 // CallExpression path does for ordinary virtual dispatch.
 //
 // Why this needs NO `Unknown` fallback and NO ≤12 family bound (unlike ordinary dispatch): the
-// coercion protocol has a KNOWN-PURE terminal. A class that declares no `toString` does not leave the
-// call unresolved — it inherits `Object.prototype.toString`, a builtin that provably does nothing.
-// So "no local member found" is a genuine PURE resolution here, not a dropped target, and there is no
-// allResolved gate to satisfy and nothing to bound away. That is what keeps this from turning every
+// coercion protocol USUALLY has a pure terminal. A class that declares no `toString` does not leave the
+// call unresolved — it inherits `Object.prototype.toString`, a builtin that calls no user code IN THE
+// COMMON CASE. So "no local member found" is treated as a PURE resolution here, not a dropped target,
+// and there is no allResolved gate to satisfy and nothing to bound away.
+//
+// THAT TERMINAL IS NOT PROVABLY PURE, and the known exceptions are SILENT today (SOUNDNESS R1248, EXECUTED
+// on 0.40.13): the inherited builtin reads properties of the receiver, so a LOCAL getter on them runs.
+//   - `Error.prototype.toString` reads `this.name` and `this.message` — an `Error` subclass with an
+//     effectful `message`/`name` getter runs it under `String(err)`, `` `${err}` `` or `err.toString()`;
+//   - `Object.prototype.toString` reads `this[Symbol.toStringTag]` — a local `get [Symbol.toStringTag]()`
+//     runs under `Object.prototype.toString.call(o)` (and under `String(o)` when nothing overrides it).
+// Neither is modelled here: no edge to the getter, no `Unknown`. Element recursion below is the one
+// exception already special-cased. Modelling these belongs to the planned SITE-table restructure
+// (R1248's report), which owns "what a builtin body reads" as one group — not to a patch on this
+// function. That is what keeps this from turning every
 // template literal in every program into an Unknown. (Residual, disclosed: an EXTERNAL class
 // implementing a local interface is outside `interfaceImpls` — the same node_modules opacity the whole
 // engine carries, covered by the κ ledger, not newly introduced here.)
@@ -8909,6 +8920,14 @@ function coercionTargets(expr, names, withPrimitive, outExternal) {
     }
   };
   visit(t, 0);
+  // R1248 (the `as any` half) — the operand's VALUE type, when an assertion or an `any` parameter threw
+  // the static one away. `(x as any) + 1`, `` `${x as any}` ``, `String(x as any)` and
+  // `JSON.stringify(x as any)` ran V's `valueOf`/`toString`/`toJSON` (EXECUTED) while the checker typed
+  // the operand `any`, which declares no member — so nothing was found and the caller was ABSENT. The
+  // accessor arm already recovers the real type through the same assertion (R246/R780); this is that one
+  // helper, asked here too. It only ever ADDS types: for a typed operand with no assertion it returns
+  // nothing, so that lookup is byte-identical to before.
+  for (const vt of receiverValueTypes(expr)) visit(vt, 0);
   return out;
 }
 // Charge `rec` for COERCING `expr`: an edge to every LOCAL coercion member (as before), plus the
@@ -8933,7 +8952,14 @@ function arrayElementTypeOf(expr) {
 // it: edging there would be at best inert and the type-narrowing keeps `coercionTargets` from widening a
 // huge `string | Foo` into spurious work. An object/union-containing-object is a candidate.
 function mayCoerceObject(expr) {
-  const t = checker.getTypeAtLocation(expr);
+  if (typeMayCoerceObject(checker.getTypeAtLocation(expr))) return true;
+  // R1248 — `any` names no object, but the value under `x as any` (or in an `any` parameter whose every
+  // call site is visible) has a type that does: ask the same value-type question `coercionTargets` asks,
+  // so the gate and the lookup cannot disagree. A primitive behind the cast (`(5 as any) + 1`) still
+  // answers false here.
+  return receiverValueTypes(expr).some(typeMayCoerceObject);
+}
+function typeMayCoerceObject(t) {
   if (!t) return false;
   const parts = t.isUnionOrIntersection?.() ? t.types : [t];
   const PRIM = ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFlags.BigIntLike
@@ -15076,7 +15102,7 @@ if (policyPath) {
     // so §3.1 binds it exactly as it binds the gate: over a policy no route will honour, `outOfScope: []`
     // claims a look taken against rules that never stood, and the `denied` set it would look for is the
     // parser's SALVAGE of an unhonourable file — the rewriting `fatalPolicyErrors` exists to refuse.
-    // candor-java already withheld here; this engine, candor-rust and candor-swift did not.
+    // When this rung landed only candor-java withheld here; all four engines do now (the guard below is ts's half).
     // R154: the ALIAS-DEFINITION errors count under that same rule, and the gate already folds them into
     // its own refusal (`parseErrs` below). `unknown-alias corp = reflect,nativ` keeps `corp` in the map, so
     // `pol.errors` alone is EMPTY and the peek would have published `outOfScope`/`scannedUnder` against a
