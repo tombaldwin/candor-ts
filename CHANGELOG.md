@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.40.14] — 2026-10-21
+
 - **⚠ A UTF-8 BOM at byte 0 of a policy file is now stripped before the policy is read (R1224, ruled
   2026-10-20, four-way).** Before, the first rule of a BOM'd policy was dropped as an "unknown rule kind":
   a one-rule policy refused at exit 2 and a multi-rule one silently lost its first rule (exit 0 where that
