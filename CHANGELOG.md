@@ -10,6 +10,9 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **Version-only cut to keep the family on one build line — no change to candor-ts since 0.40.14.** Only the
+  engine's version string moves. The family fixes in this cut: candor-java brings back R1235 with the R1239 union-reason chain and fixes R1337 (a cause-message constructor no longer charges every project `getMessage`); candor-rust closes the R1265/R1319 dispatch silences, R1347 (a projection receiver, an aliased local trait, a std-supertrait member) and hedges R1324 (a union entry whose contributor dispatches further).
+
 ## [0.40.14] — 2026-10-21
 
 - **⚠ A UTF-8 BOM at byte 0 of a policy file is now stripped before the policy is read (R1224, ruled
