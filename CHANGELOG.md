@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.40.16] — 2026-10-24
+
 - **0.40.16 family patch: no change to candor-ts.** Version aligned with the family line. Open against this engine, recorded in candor-spec SOUNDNESS: the PART 102 consumer duty (R1356, R1365), the reasonless foreign union (R1358) and the 12-implementor over-hedge (R1369, NOTSILENT).
 
 ## [0.40.15] — 2026-10-22
