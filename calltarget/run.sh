@@ -4,7 +4,11 @@
 #   bash calltarget/run.sh <work-dir>            generate, build, execute ground truth, scan, gate, compare
 #   bash calltarget/run.sh <work-dir> --reuse    skip generate/build/ground truth (an existing <work-dir>/m)
 #
-# 8,099 generated programs over lang × location × call kind × receiver typing × implementors × effect; each
+# 8,762 generated programs over lang × location × call kind × receiver typing × implementors × effect — 8,099 hook
+# cells plus (round 2) 663 NON-INVOKING LOOK-ALIKES with their positive twins (`la_*`/`pos_*`/`cp_*`: `const` vs
+# `using`, object spread vs iteration and vs a copy of an own getter, `in`/`===`/`typeof`, a stored function value,
+# a data property, a reassigned parameter) and dispatch CONTROLS (`wx_*`: an unrelated class with the same member, an
+# exact-type value, the re-key leg); each
 # one EXECUTED under node to observe whether the effect really happens, then scanned on 13 arms (one tree,
 # split modules, a dependency unchained / chained flat / chained pnpm) and every gated unit judged by the GATE
 # (`deny E <unit>` and `deny E Unknown <unit>`), not by the row. Verdicts: CHARGED / DISCLOSED / DISC-INV /

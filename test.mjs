@@ -17664,8 +17664,12 @@ export function pJoin(a: string, b: string) { return path.join(a, b); }`,
     ["src.gap.viaMember", "a PROPERTY-ACCESS source `{...holder.inner}` — no binding, so no initializer to read"],
     ["src.gap.viaParam", "a PARAMETER `{...s}` — R115's own pinned gap, still open and still pinned"],
   ]) {
-    check(`R120 PINNED GAP (asserts TODAY'S WRONG ANSWER on purpose, R110's idiom): ${what} reads PURE, and executed that program invokes the getter once. The residual is an OPEN list, which is the correction this row exists to make (${fn})`,
-          eff(fn) === undefined, JSON.stringify(eff(fn) ?? null));
+    // ⟨call-target round 2, R1435⟩ CLOSED: the copy readers ask the target oracle, which names the structural
+    // literal as a conformer of `Session` — its getter has no minted unit, so it is DISCLOSED (the minted-unit rule),
+    // and the class getter a copy never runs is still not charged.
+    check(`R120 PINNED GAP CLOSED (call-target round 2): ${what} now discloses the literal's getter — \`Unknown[reflect:accessor:]\`, no \`Fs\` off the class getter (${fn})`,
+          (eff(fn)?.inferred ?? []).includes("Unknown") && !(eff(fn)?.inferred ?? []).includes("Fs")
+            && (eff(fn)?.unknownWhy ?? []).some((w) => w.startsWith("reflect:accessor:")), JSON.stringify(eff(fn) ?? null));
   }
   check("R120 R115 NOT UNDONE: `{...new Session()}` still charges nothing — a class accessor is prototype-installed and non-enumerable (executed 0). A fix that reached the cross-module case by weakening `classBodiedGetter` would pass every row above and re-open the fabrication R115 closed",
         eff("src.keep.cloneInstance") === undefined, JSON.stringify(eff("src.keep.cloneInstance") ?? null));
@@ -17971,7 +17975,10 @@ export function pJoin(a: string, b: string) { return path.join(a, b); }`,
     ["src.fab.cloneCE", "a CLASS EXPRESSION's accessor — `ts.isClassExpression`, the second half of the narrowing predicate"],
     ["src.fab.cloneAbs", "an ABSTRACT accessor — the concrete override lands on the subclass prototype, executed 0"],
   ]) {
-    check(`R115: charges nothing — ${what} (${fn})`, eff(fn) === undefined,
+    // ⟨call-target round 2⟩ "nothing CHARGED", not "absent": with the target oracle the copy readers see the tree's
+    // structural `Session` literal (`src/structural.ts`) as a value `s: Session` can hold, and its unminted getter is
+    // disclosed — the class getter a copy never runs is still not charged, which is what R115 fixed.
+    check(`R115: charges nothing — ${what} (${fn})`, !(eff(fn)?.inferred ?? []).some((e) => e !== "Unknown"),
           JSON.stringify(eff(fn) ?? null));
   }
 
@@ -18019,8 +18026,8 @@ export function pJoin(a: string, b: string) { return path.join(a, b); }`,
         (eff("src.structural.cloneStructural")?.inferred ?? []).includes("Unknown")
           && (eff("src.structural.cloneStructural")?.unknownWhy ?? []).some((w) => w.startsWith("reflect:accessor:")),
         JSON.stringify(eff("src.structural.cloneStructural")));
-  check("R115 PINNED GAP (asserts TODAY'S WRONG ANSWER on purpose, R110's idiom): a structural literal arriving through a PARAMETER has no initializer to read, so `{...s}` over one reads PURE. Executed, that program invokes the getter once. Pinned rather than hidden so closing it shows up as an expectation that changed. Before this fix the spelling was charged only by COINCIDENCE — the CLASS getter's effects stood in for the literal's",
-        eff("src.structural.cloneStructuralParam") === undefined,
+  check("R115 PINNED GAP CLOSED (call-target round 2, R1435): a structural literal arriving through a PARAMETER — `{...s}` now discloses the literal's getter (the target oracle names the conformer; its getter has no unit, so `Unknown[reflect:accessor:token]`), and still no `Fs` off the class getter",
+        (eff("src.structural.cloneStructuralParam")?.inferred ?? []).includes("Unknown") && !(eff("src.structural.cloneStructuralParam")?.inferred ?? []).includes("Fs"),
         JSON.stringify(eff("src.structural.cloneStructuralParam")));
 
   // OVER-CHARGE CONTROL for the direction this fix did NOT intend.
@@ -18030,7 +18037,11 @@ export function pJoin(a: string, b: string) { return path.join(a, b); }`,
     ["src.pure.pKeys", "`Object.keys(s)` likewise"],
     ["src.pure.pJoin", "and ordinary `path.join` in the same scan, so a run that reported nothing at all could not pass this block"],
   ]) {
-    check(`R115 OVER-CHARGE CONTROL: ${what} (${fn})`, eff(fn) === undefined, JSON.stringify(eff(fn) ?? null));
+    // ⟨call-target round 2⟩ nothing CHARGED: `JSON.stringify(s)` / `Object.entries(s)` copy, and a `Session` value may
+    // be the tree's structural literal, whose getter is disclosed; `Object.keys` reads names only (the table has no
+    // row for it) and `path.join` is unrelated, so both stay absent.
+    check(`R115 OVER-CHARGE CONTROL: ${what} (${fn})`, fn === "src.pure.pKeys" || fn === "src.pure.pJoin" ? eff(fn) === undefined
+          : !(eff(fn)?.inferred ?? []).some((e) => e !== "Unknown"), JSON.stringify(eff(fn) ?? null));
   }
 
   // THE GATE, on its own two-module tree with a SCOPED deny, so the exit code is about the CALLER and
@@ -20952,8 +20963,11 @@ export function nestClone() { return structuredClone({ a: lit4 }); }`,
     ["src.nested.nestArr", "`JSON.stringify([lit])`"],
     ["src.nested.nestClone", "`structuredClone({ a: lit })`"],
   ]) {
-    check(`R252 RESIDUAL, pinned rather than described: ${what} invokes the getter ONE LEVEL DOWN (executed: 1) and is still reported as nothing — \`enumerateGetters\` asks the ARGUMENT's own property list. Red here means someone closed it`,
-          (eff(fn)?.inferred ?? []).length === 0, JSON.stringify(eff(fn) ?? null));
+    // ⟨call-target round 2⟩ CLOSED by the site table's nested rows (`JSON.stringify` / `structuredClone` with a `{}` /
+    // `[]` argument shape, EXECUTED by the oracle): the literal's getter has no unit, so it is disclosed.
+    check(`R252 RESIDUAL CLOSED (call-target round 2): ${what} invokes the getter ONE LEVEL DOWN (executed: 1) and now discloses it`,
+          (eff(fn)?.inferred ?? []).includes("Unknown") && (eff(fn)?.unknownWhy ?? []).some((w) => w.startsWith("reflect:accessor:")),
+          JSON.stringify(eff(fn) ?? null));
   }
   {
     const ex = (p) => scan(d, "--policy", path.join(d, p)).r.status;
@@ -24585,6 +24599,72 @@ export function passData(x: HO1) { [0].forEach(x.h as any); }`;
   check("call-target round 1 CONTROL: with `CANDOR_CT_ORACLE_OFF=1` the same tree reads `getterIface` and `refBase` uncharged (the switch is the measurement's same-file control)",
         off.status === 0 && !(entry(offRep, "src.a.getterIface")?.inferred ?? []).includes("Fs") && !(entry(offRep, "src.a.refBase")?.inferred ?? []).includes("Fs"),
         JSON.stringify([entry(offRep, "src.a.getterIface"), entry(offRep, "src.a.refBase")]));
+}
+
+// ── ⟨call-target round 2; SOUNDNESS R1248, R1435, R1434⟩ THE EXECUTED SITE TABLE, THE COPY READERS ON THE ORACLE ─────
+// CHARGE cases: sites R1248 lists as EXECUTED silent (`==`, `Number(x)`, `Math.abs`, nested `JSON.stringify`, `await`
+// and async `return` of a thenable, `new Set(x)`, `yield*`, `arr.sort()`, `k in o`, `o[k]`, `instanceof`,
+// `Promise.all([t])`) and R1435's copy/lookup readers over an interface (`const { g } = x`, `Reflect.get`). NO-CHARGE
+// cases: the matrix's non-invoking look-alikes (each executed and observed to run nothing), the `new C()` exact-type
+// copy, R1434's `any` parameter reassigned before the read, and a project's own `Object` shadowing the builtin. The
+// table itself is re-executed and compared (`oracle.cjs --check`).
+if (blk()) {
+  const W = `fs.writeFileSync("/tmp/x", "x")`;
+  const SRC = `import * as fs from "node:fs";
+export class V2 { valueOf(): number { ${W}; return 1; } toString(): string { ${W}; return "v"; } toJSON(): unknown { ${W}; return 1; } }
+export class T2 { then(r: (v: number) => void): void { ${W}; r(1); } }
+export class It2 { *[Symbol.iterator]() { ${W}; yield 1; } }
+export class H2 { static [Symbol.hasInstance](x: unknown): boolean { ${W}; return false; } }
+export function eqeq(x: V2) { return x == (1 as any); }
+export function num(x: V2) { return Number(x); }
+export function mathAbs(x: V2) { return Math.abs(x as any); }
+export function jsonNest(x: V2) { return JSON.stringify({ a: x }); }
+export async function awaitThen(x: T2) { await x; }
+export async function returnThen(x: T2) { return x; }
+export function promAll(x: T2) { return Promise.all([x]); }
+export function newSet(x: It2) { return new Set(x); }
+export function* yieldStar(x: It2) { yield* x; }
+export function sortArr(x: V2[]) { return x.sort(); }
+export function inKey(x: V2) { return (x as any) in {}; }
+export function elemKey(x: V2) { return ({} as any)[x as any]; }
+export function inst(x: unknown) { return x instanceof H2; }
+export interface G2 { readonly g: number; }
+export class GC2 implements G2 { get g(): number { ${W}; return 1; } }
+export function destrIface(x: G2) { const { g } = x; return g; }
+export function reflectIface(x: G2) { return Reflect.get(x, "g"); }
+// look-alikes: each runs nothing
+export function strictEq(x: V2) { return x === (1 as any); }
+export function typeOf(x: V2) { return typeof x; }
+export function tagged(x: V2) { return ((s: TemplateStringsArray, ...a: unknown[]) => 0)\`\${x}\`; }
+export function forIn(x: It2) { for (const k in x) void k; }
+export function objSpreadIter(x: It2) { return { ...x }; }
+export function storedRef(x: V2) { const f = x.toString; return f; }
+export function storedArrow(x: V2) { const f = (): string => String(x); return f; }
+export function spreadClassInst() { return { ...new GC2() }; }
+export function anyAfter(x: any) { x = { g: 1 }; return x.g; }
+export function anyBefore(x: any) { const v = x.g; x = { g: 1 }; return v; }
+export function feed() { anyAfter(new GC2()); anyBefore(new GC2()); }
+const Object2 = { assign: (a: any, b: any) => a };
+export function shadowAssign(x: G2) { const Object = Object2; return Object.assign({}, x); }`;
+  const d = project({ "package.json": `{"name":"ct2","version":"1.0.0"}`, "src/a.ts": SRC });
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.a.${fn}`);
+  const inf = (fn) => row(fn)?.inferred ?? [];
+  for (const fn of ["eqeq", "num", "mathAbs", "jsonNest", "awaitThen", "returnThen", "promAll", "newSet", "yieldStar", "sortArr",
+                    "inKey", "elemKey", "inst", "destrIface", "reflectIface", "anyBefore"])
+    check(`call-target round 2: \`${fn}\` reaches the hook body the platform runs there — Fs (absent at 0.40.17)`, inf(fn).includes("Fs"), JSON.stringify(row(fn)));
+  for (const fn of ["strictEq", "typeOf", "tagged", "forIn", "objSpreadIter", "storedRef", "storedArrow", "spreadClassInst", "anyAfter", "shadowAssign"])
+    check(`call-target round 2 NO FABRICATION: \`${fn}\` runs no hook (a look-alike the site table has no row for, an exact-type copy, a reassigned \`any\`, a shadowed \`Object\`) — no Fs`,
+          !inf(fn).includes("Fs"), JSON.stringify(row(fn)));
+  const off = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out", path.join(d, "off")], { encoding: "utf8", env: { ...process.env, CANDOR_CT2_OFF: "1" } });
+  const offRep = JSON.parse(fs.readFileSync(path.join(d, "off.json"), "utf8"));
+  check("call-target round 2 CONTROL: with `CANDOR_CT2_OFF=1` the table is restricted to its 0.40.17 rows — `eqeq` and `newSet` read uncharged, `destrIface` uncharged, and the 0.40.17 template row still charges",
+        off.status === 0 && !(entry(offRep, "src.a.eqeq")?.inferred ?? []).includes("Fs") && !(entry(offRep, "src.a.newSet")?.inferred ?? []).includes("Fs")
+          && !(entry(offRep, "src.a.destrIface")?.inferred ?? []).includes("Fs"),
+        JSON.stringify([entry(offRep, "src.a.eqeq"), entry(offRep, "src.a.newSet"), entry(offRep, "src.a.destrIface")]));
+  const chk = spawnSync("node", [path.join(HERE, "calltarget", "sitetable", "oracle.cjs"), "--check", path.join(HERE, "scan.mjs")], { encoding: "utf8" });
+  check("call-target round 2: the embedded site table is what the executed oracle produces on this node (`oracle.cjs --check`)",
+        chk.status === 0, (chk.stdout + chk.stderr).slice(0, 1200));
 }
 
 console.log(`\ntest: ${pass} passed, ${fail} failed`);

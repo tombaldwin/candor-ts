@@ -1,30 +1,30 @@
-caller units with the effect executed: 9655  SILENT: 3316
-by arm: {'ts-same-U': 216, 'ts-mod-U': 72, 'ts-dimp-U': 336, 'ts-dimp-C': 336, 'ts-dimp-P': 336, 'ts-dsite-C': 212, 'ts-dsite-P': 212, 'js-same-U': 300, 'js-mod-U': 126, 'js-dimp-U': 390, 'js-dimp-C': 390, 'js-dimp-P': 390}
+caller units with the effect executed: 9830  SILENT: 2379
+by arm: {'ts-dimp-U': 137, 'ts-dimp-C': 137, 'ts-dimp-P': 137, 'ts-dsite-C': 226, 'ts-dsite-P': 226, 'js-same-U': 228, 'js-mod-U': 118, 'js-dimp-U': 390, 'js-dimp-C': 390, 'js-dimp-P': 390}
 
-bucket                                                                                          row                js-dimp-C js-dimp-P js-dimp-U js-mod-U js-same-U ts-dimp-C ts-dimp-P ts-dimp-U ts-dsite-C ts-dsite-P ts-mod-U ts-same-U
-J1 JS prototype/Object.assign member is no coercion/iteration/accessor target                   -                        120       120       120       44       132         0         0         0          0          0        0         0 | total 536
-J2 JS prototype member passed by reference                                                      -                          0         0         0        8        24         0         0         0          0          0        0         0 | total 32
-S1 no site arm (==, Number(), nested JSON, await thenable)                                      R1248                    144       144       144       48       144       216       216       216         64         64       72       216 | total 1688
-T2 getter through an interface/type-literal receiver                                            -                          0         0         0        0         0        12        12        12         10         10        0         0 | total 56
-T3 iteration target: own [Symbol.iterator] only, no CHA/override                                -                          0         0         0        0         0        84        84        84         16         16        0         0 | total 284
-T4 hook member NOT declared on the abstraction (x.toString() on I)                              R1311 c_expl               0         0         0        4         0        12        12        12         26         26        0         0 | total 92
-T4c `${x}` over a DEP abstraction lacking toString (chained/split)                              R1309-shape               18        18        18        0         0        12        12        12          0          0        0         0 | total 90
-T5 coercion over a type parameter `T extends I`                                                 R1311 c_gentostr           0         0         0        0         0         0         0         0         10         10        0         0 | total 20
-T7 dep site dispatching on a dep CONCRETE class, consumer subclass overrides (chained)          -                          0         0         0        0         0         0         0         0         34         34        0         0 | total 68
-T8 dep-side hook over a dep interface, consumer implementor (chained)                           R1309                      0         0         0        0         0         0         0         0         52         52        0         0 | total 104
-T9 other                                                                                        ?                        108       108       108       22         0         0         0         0          0          0        0         0 | total 346
+bucket                                                                                          row                js-dimp-C js-dimp-P js-dimp-U js-mod-U js-same-U ts-dimp-C ts-dimp-P ts-dimp-U ts-dsite-C ts-dsite-P
+J1 JS prototype/Object.assign member is no coercion/iteration/accessor target                   -                        120       120       120       44       132         0         0         0          0          0 | total 536
+J2 JS prototype member passed by reference                                                      -                          0         0         0        8        24         0         0         0          0          0 | total 32
+S1 no site arm (==, Number(), nested JSON, await thenable)                                      R1248                    144       144       144       40        72         0         0         0         54         54 | total 652
+T2 getter through an interface/type-literal receiver                                            -                          0         0         0        0         0        12        12        12         10         10 | total 56
+T3 iteration target: own [Symbol.iterator] only, no CHA/override                                -                          0         0         0        0         0        84        84        84         16         16 | total 284
+T4 hook member NOT declared on the abstraction (x.toString() on I)                              R1311 c_expl               0         0         0        4         0        12        12        12         26         26 | total 92
+T4c `${x}` over a DEP abstraction lacking toString (chained/split)                              R1309-shape               18        18        18        0         0        12        12        12          0          0 | total 90
+T5 coercion over a type parameter `T extends I`                                                 R1311 c_gentostr           0         0         0        0         0         0         0         0         10         10 | total 20
+T7 dep site dispatching on a dep CONCRETE class, consumer subclass overrides (chained)          -                          0         0         0        0         0         0         0         0         40         40 | total 80
+T8 dep-side hook over a dep interface, consumer implementor (chained)                           R1309                      0         0         0        0         0         0         0         0         52         52 | total 104
+T9 other                                                                                        ?                        108       108       108       22         0        17        17        17         18         18 | total 433
 
 distinct shapes (E and N collapsed) per bucket:
   104  J1 JS prototype/Object.assign member is no coercion/iteration/accessor target
     8  J2 JS prototype member passed by reference
-  384  S1 no site arm (==, Number(), nested JSON, await thenable)
+  158  S1 no site arm (==, Number(), nested JSON, await thenable)
    16  T2 getter through an interface/type-literal receiver
    64  T3 iteration target: own [Symbol.iterator] only, no CHA/override
    34  T4 hook member NOT declared on the abstraction (x.toString() on I)
    15  T4c `${x}` over a DEP abstraction lacking toString (chained/split)
    10  T5 coercion over a type parameter `T extends I`
-   34  T7 dep site dispatching on a dep CONCRETE class, consumer subclass overrides (chained)
+   46  T7 dep site dispatching on a dep CONCRETE class, consumer subclass overrides (chained)
    52  T8 dep-side hook over a dep interface, consumer implementor (chained)
-   65  T9 other
+  152  T9 other
 
 E-axis: shapes whose verdict differs by effect: 0

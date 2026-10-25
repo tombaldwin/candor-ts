@@ -42,6 +42,10 @@ import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadE
 import { emitSurface } from "./surface.mjs";
 // ⟨R815⟩ reach marker for the class-definition-time attribution in `enclosing` (declared here, not beside it:
 // `enclosing` runs from module-level code above its own definition, so a later `const` is in its TDZ).
+// ⟨call-target round 2⟩ `CANDOR_CT2_OFF=1` — the round-2 measurement switch (the site table restricted to its `r0`
+// rows, the copy/lookup getter readers without the target oracle, R1434's round-1 reassignment rule). Read by the
+// conversion walk, so it is defined before anything runs.
+const CT2 = !process.env.CANDOR_CT2_OFF;
 const R815_REACH = process.env.CANDOR_R815_REACH ? (k) => console.error(`R815-REACH ${k}`) : null;
 // ⟨R934/R935⟩ reach marker: a charge that came from a PARAMETER or PROPERTY environment location.
 const R246_REACH = process.env.CANDOR_R246_REACH ? (k) => console.error(`R246-REACH ${k}`) : null;
@@ -7045,36 +7049,58 @@ function uninformativeType(t) {
       && t.getConstructSignatures().length === 0 && !checker.getIndexInfosOfType?.(t)?.length;
   } catch { return false; }
 }
-// Is parameter `p` the target of an assignment anywhere in its function's body (`p = …`, `p += …`, `p++`, or a
-// destructuring target)? Cached per declaration.
-const paramReassignedCache = new Map();
-function paramReassigned(p) {
-  if (paramReassignedCache.has(p)) return paramReassignedCache.get(p);
-  let hit = false;
+// The assignments to parameter `p` in its function's body (`p = …`, `p += …`, `p++`, or a destructuring target), as
+// nodes; `null` when the question is not answered here (a destructured parameter). Cached per declaration.
+// (`var` and a function declaration below, not `const`: the conversion walk asks `receiverValueTypes` — and through it
+// this — before the module body reaches these lines.)
+var paramAssignsCache;
+function paramAssigns(p) {
+  paramAssignsCache ??= new Map();
+  if (paramAssignsCache.has(p)) return paramAssignsCache.get(p);
+  const out = [];
   const sym = ts.isIdentifier(p.name) ? checker.getSymbolAtLocation(p.name) : null;
   const isP = (e) => { e = e && skipParens(e); return !!e && ts.isIdentifier(e) && checker.getSymbolAtLocation(e) === sym; };
   const body = p.parent?.body;
   const visit = (n) => {
-    if (hit) return;
     if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
         && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
       const l = skipParens(n.left);
-      if (isP(l)) { hit = true; return; }
-      if (ts.isObjectLiteralExpression(l) || ts.isArrayLiteralExpression(l)) {
+      if (isP(l)) out.push(n);
+      else if (ts.isObjectLiteralExpression(l) || ts.isArrayLiteralExpression(l)) {
+        let hit = false;
         const scan = (x) => { if (isP(x)) hit = true; else ts.forEachChild(x, scan); };
         scan(l);
+        if (hit) out.push(n);
       }
     }
     if ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n))
-        && (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) && isP(n.operand)) { hit = true; return; }
+        && (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) && isP(n.operand)) out.push(n);
     ts.forEachChild(n, visit);
   };
-  if (sym && body) visit(body);
-  else hit = !sym;            // a destructured parameter: not answered here, so not a fact
-  paramReassignedCache.set(p, hit);
-  return hit;
+  const res = sym && body ? (visit(body), out) : null;
+  paramAssignsCache.set(p, res);
+  return res;
 }
-const skipParens = (e) => { while (e && (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e) || ts.isSatisfiesExpression?.(e) || ts.isTypeAssertionExpression?.(e))) e = e.expression; return e; };
+// ⟨call-target round 2, R1434⟩ Does the call-site value of parameter `p` still reach `use`? Not when an assignment to
+// `p` DOMINATES the use: a plain statement `p = …;` in a block that encloses the use, earlier in that block, so every
+// path to the use runs it first (got's `options = cloneRaw(options)` at the top of the body). Anything weaker — an
+// assignment after the use, in a branch, in a loop body the use precedes, inside a condition — leaves the caller's
+// value possible there, and it is kept: dropping a value that can arrive is how a getter read goes silent
+// (`for (…) { v += x.k; x = y; }` runs the caller's getter on the first pass — a check that killed on any assignment in
+// the loop moved that CHARGED read to a disclosure). A destructured parameter (no symbol to follow) is not a fact.
+function paramValueKilledAt(p, use) {
+  const as = paramAssigns(p);
+  if (as === null) return true;
+  if (!as.length || !use) return false;
+  for (const a of as) {
+    const st = a.parent && ts.isExpressionStatement(a.parent) ? a.parent : null;
+    const blk = st?.parent;
+    if (!st || !blk || !ts.isBlock(blk) || use.getStart() < st.getEnd()) continue;
+    for (let c = use.parent; c; c = c.parent) { if (c === blk) return true; if (c === p.parent) break; }
+  }
+  return false;
+}
+function skipParens(e) { while (e && (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e) || ts.isSatisfiesExpression?.(e) || ts.isTypeAssertionExpression?.(e))) e = e.expression; return e; }
 // Can a value of type `vt` be what an expression statically typed `t` holds? The checker's own assignability; a
 // type parameter is asked through its constraint. Fails OPEN (true) when the checker cannot answer.
 function valueFitsStatic(vt, t) {
@@ -7117,7 +7143,11 @@ function receiverValueTypes(expr, depth = 0, seen = new Set(), ungated = false) 
   // cloneRaw(options)` then `options[k]` read the CALLER's `Options` getters — a body that read never runs), and a
   // value the use site's narrowed type excludes is not there either. Both checks apply to the ungated question
   // only, so the `any` receiver R246 answers is exactly as it was.
-  if (ungated && !uninformativeType(t) && paramReassigned(d)) return [];
+  // ⟨call-target round 2, R1434⟩ …and the `any` receiver R246 answers takes the same check: an `any` parameter the body
+  // reassigned before the use (got's `options = cloneRaw(options)`, here untyped) held the CALLER's value only until the
+  // assignment, and charging the caller's getters after it charged a body that read never runs. Flow-ordered, so a use
+  // BEFORE the assignment keeps the value (a CHARGED read is not moved to the R246 residue's disclosure).
+  if (CT2 ? paramValueKilledAt(d, expr) : (ungated && !uninformativeType(t) && (paramAssigns(d) === null || paramAssigns(d).length > 0))) return [];
   const out = [];
   for (const a of args) {
     if (!a) continue;
@@ -7259,12 +7289,41 @@ function descentBodies(decl, recvExpr, accept = null) {
   if (!res.wide) probeR871("accessor", decl, res.bodies.length + res.unminted.length + res.external.length - direct);
   return res;
 }
+// ⟨call-target round 2⟩ The local class a value is EXACTLY, when the expression says so: `new C(…)` of a class
+// declaration, directly or through a `const` binding initialised with one. Such a value runs C's own (or inherited)
+// member and nothing else — no override below C, no structural conformer of C, no other call-site value — so the
+// oracle answers it without the descent (`{ ...new Session() }` copies an instance whose getter is on the prototype:
+// executed 0; with a structural `Session` literal elsewhere in the project, the descent disclosed it).
+function exactLocalClassOf(expr, depth = 0) {
+  const e = expr && skipParens(expr);
+  if (!e || depth > 4) return null;
+  if (ts.isNewExpression(e)) {
+    let sym; try { sym = checker.getSymbolAtLocation(e.expression); } catch { sym = null; }
+    if (sym && (sym.flags & ts.SymbolFlags.Alias)) { try { sym = checker.getAliasedSymbol(sym); } catch { /* unresolved */ } }
+    const d = (sym?.declarations ?? []).find((x) => ts.isClassDeclaration(x));
+    return d && declIsLocal(d) && (sym.declarations ?? []).length === 1 ? d : null;
+  }
+  if (ts.isIdentifier(e)) {
+    let sym; try { sym = checker.getSymbolAtLocation(e); } catch { sym = null; }
+    const d = sym?.valueDeclaration;
+    if (d && ts.isVariableDeclaration(d) && d.initializer && (ts.getCombinedNodeFlags(d) & ts.NodeFlags.Const))
+      return exactLocalClassOf(d.initializer, depth + 1);
+  }
+  return null;
+}
 function bodiesFor(valueExpr, key, opts = {}) {
   const { accept = null, elements = false, reader = "coercion" } = opts;
   const reach = CT_ORACLE ? { iface: "all", cls: true, descent: "scoped", typeParams: true, ungated: true }
     : (CT_LEGACY_REACH[reader] ?? { iface: null, cls: false, descent: "none" });
   const { res, add } = oracleCollector(accept);
   if (!valueExpr) return res;
+  const exact = CT2 && CT_ORACLE ? exactLocalClassOf(valueExpr) : null;
+  if (exact) {
+    let ty; try { ty = checker.getTypeAtLocation(valueExpr); } catch { ty = null; }
+    for (const d of ty ? oracleMemberDecls(ty, key) : []) add(d);
+    res.add = add;
+    return res;
+  }
   const texts = key.texts ?? [key.name];
   const superRecv = isSuperReceiver(valueExpr);
   const addWithDescent = (d, root) => {
@@ -7348,13 +7407,23 @@ function chargeOracleBodies(rec, res, memberText, ownerDecl = null, legacyDisclo
 // checker resolved, every override and implementor accessor `bodiesFor` names (an interface, type-literal,
 // generic or field receiver reaches its implementors' getters — R1408 T2, silent at 0.40.16), and every type
 // the receiver's VALUE is shown to carry (R246). The override descent of each hit is `recordAccessorHit`'s.
-function accessorsAt(propNode, kind /* "get" | "set" */) {
+// ⟨call-target round 2⟩ ONE answer for every accessor reader: the bodies the oracle names for (`recv`, `name`), as the
+// hit list `recordAccessorHit` takes. `copy` is the property-COPY operations (spread, rest, `Object.assign`'s
+// sources, `Object.entries`/`values`, `JSON.stringify`, `structuredClone`): a copy reads OWN enumerable properties
+// only, so a getter declared in a class body (installed on the prototype, non-enumerable — R115, executed 0) is
+// never run by one, while an object-literal getter (own, enumerable — executed 1) is. A LOOKUP (`x.k`, `Reflect.get`,
+// a destructured key) finds either.
+const classBodiedDecl = (d) => !!d?.parent && (ts.isClassDeclaration(d.parent) || ts.isClassExpression(d.parent));
+function oracleAccessorHits(recv, name, kind, copy = false) {
+  if (!recv || name == null) return [];
   const want = kind === "get" ? ts.isGetAccessorDeclaration : ts.isSetAccessorDeclaration;
-  const fromOracle = (recv, name) => {
-    const r = bodiesFor(recv, { name }, { accept: want, reader: "accessor" });
-    return [...r.bodies, ...r.unminted].map((decl) => ({ decl, local: true }))
-      .concat(r.external.map((decl) => ({ decl, local: false })));
-  };
+  const accept = copy ? (d) => want(d) && !classBodiedDecl(d) : want;
+  const r = bodiesFor(recv, { name }, { accept, reader: "accessor" });
+  return [...r.bodies, ...r.unminted].map((decl) => ({ decl, local: true }))
+    .concat(r.external.map((decl) => ({ decl, local: false })));
+}
+function accessorsAt(propNode, kind /* "get" | "set" */) {
+  const fromOracle = (recv, name) => oracleAccessorHits(recv, name, kind);
   if (ts.isElementAccessExpression(propNode)) {
     // `c["prop"]` carries no `.name`; resolve the key to the property NAMES it can hold and look each
     // one up on the receiver's type. Returns `null` — distinct from `[]` — when the key is NOT pinned
@@ -7677,9 +7746,14 @@ function enumerateGetters(owner, type, srcExpr) {
   // R246 — the copied VALUE's types too, when its static type is `any`/`unknown` or asserted away.
   const vprops = srcExpr ? receiverValueTypes(srcExpr).flatMap((vt) => propertiesAcrossArms(vt)) : [];
   if ((type && type.getProperties) || vprops.length) {
+    const named = new Set();
     for (const p of [...(type?.getProperties ? propertiesAcrossArms(type) : []), ...vprops]) {   // R259 — the disjunction, not the intersection
-      if (classBodiedGetter(p)) continue; // prototype + non-enumerable → not copied by a spread
-      for (const hit of accessorsFromSym(p, "get")) recordAccessorHit(owner, hit, p.getName(), srcExpr);
+      // ⟨call-target round 2⟩ every name the source can carry is asked of the target oracle as well, so an
+      // interface-, type-literal- or generic-typed source reaches its IMPLEMENTORS' own getters (an object literal
+      // behind `x: I` — silent at 0.40.17: the property signature is no accessor, and the reader stopped there).
+      const hits = classBodiedGetter(p) ? [] : accessorsFromSym(p, "get");   // prototype + non-enumerable → not copied
+      if (CT2 && srcExpr && !named.has(p.getName())) { named.add(p.getName()); hits.push(...oracleAccessorHits(srcExpr, p.getName(), "get", true)); }
+      for (const hit of dedupeHits(hits)) recordAccessorHit(owner, hit, p.getName(), srcExpr);
     }
   }
   // The structural arm: `const o: SomeClass = { get k(){…} }` — the BINDING's initializer is an object
@@ -7828,9 +7902,11 @@ function enumerateTargetAccessors(owner, targetExpr, keys, kind /* "get" | "set"
   // provable" — and it keeps the tolerance the old `keys && !keys.has(…)` line had for a caller that
   // passes nothing. `keys.has` below is now unguarded, so a future third call site omitting the
   // argument would throw rather than take this branch.
+  // ⟨call-target round 2⟩ a lookup reaches the implementors' accessors the oracle names, not only the declared type's.
+  const hitsOf = (p) => dedupeHits([...accessorsFromSym(p, kind), ...(CT2 ? oracleAccessorHits(targetExpr, p.getName(), kind) : [])]);
   if (!keys) {
     for (const p of tprops) {      // R259 — the disjunction, not the intersection
-      if (!accessorsFromSym(p, kind).length) continue;
+      if (!hitsOf(p).length) continue;
       if (!keyCouldNameAccessor(p, unprovable.keyType ?? null)) continue;
       const rec = fns.get(owner);
       rec.direct.add("Unknown");
@@ -7851,7 +7927,7 @@ function enumerateTargetAccessors(owner, targetExpr, keys, kind /* "get" | "set"
     // not a copy, so it finds a prototype getter too (executed: class 1). The exclusion belongs to
     // `enumerateGetters`, whose callers really are copies, and to nothing here.
     if (!keys.has(p.getName())) continue;                      // proven not touched by this operation
-    for (const hit of accessorsFromSym(p, kind)) recordAccessorHit(owner, hit, p.getName(), targetExpr);
+    for (const hit of hitsOf(p)) recordAccessorHit(owner, hit, p.getName(), targetExpr);
   }
 }
 
@@ -9002,9 +9078,6 @@ function isCoercionMemberDecl(m) {
 // populations, both named (the SITE table is an allowlist by necessity — treating every external call
 // as a stringifying sink would charge every argument of every call and flood; the denylist rule is
 // applied to the TARGETS instead, in `chargeCoercion`, where a forgotten case over-discloses).
-// The `Object.prototype` members a class commonly overrides and an explicit call reaches through an abstraction
-// that does not declare them (coercion arm 6).
-const OBJECT_PROTO_HOOKS = new Set(["toString", "valueOf", "toLocaleString"]);
 const LOG_LEVEL_METHODS = new Set(["log", "info", "warn", "error", "debug", "trace", "fatal", "verbose", "silly"]);
 function isStringifyingSink(call) {
   const ex = call.expression;
@@ -9075,22 +9148,8 @@ function isStringifyingSink(call) {
 // missed: a TYPE PARAMETER through its constraint (`${x}` with `T extends I` — R1311 `c_gentostr`, silent at
 // 0.40.16), a dependency interface a local class implements, the value types of a TYPED parameter, and a
 // local coercion member with no minted unit (disclosed now, where it was skipped).
-function chargeCoercion(rec, expr, names, withPrimitive) {
-  if (!rec) return;
-  const keys = [...(withPrimitive ? [{ sym: ["__@toPrimitive"], texts: ["[Symbol.toPrimitive]"] }] : []),
-    ...names.map((name) => ({ name }))];
-  for (const key of keys) {
-    const r = bodiesFor(expr, key, { accept: isCoercionMemberDecl, elements: true, reader: "coercion" });
-    chargeOracleBodies(rec, r, key.name ?? key.texts[0]);
-    for (const d of r.external) chargeExternalDecl(rec, d);
-  }
-}
-// The numeric-element type of an array-like — the gate for treating a `.join()`/`.toString()` receiver
-// as an array stringification rather than an ordinary method call on a local object.
-function arrayElementTypeOf(expr) {
-  const t = checker.getTypeAtLocation(expr);
-  return t && checker.getIndexTypeOfType?.(t, ts.IndexKind.Number);
-}
+// ⟨call-target round 2⟩ The lookup itself is `chargeHookMembers` (the site-table section): the same oracle question,
+// asked for whichever hooks the table says a site runs rather than for a name list each caller passed.
 // True when `expr`'s type is an OBJECT type that could carry a coercion method (so `a + b` may trigger
 // one). A pure primitive operand (string/number/boolean/bigint/null/undefined) never invokes
 // toString/valueOf in `+` (string+string concatenates, number+number adds — no method call), so we skip
@@ -9124,6 +9183,542 @@ function typeMayCoerceObject(t) {
     if (part.isUnionOrIntersection?.()) return true; // nested — let `chargeCoercion` sort it out
   }
   return false;
+}
+// ---- ⟨call-target round 2⟩ THE SITE TABLE ------------------------------------------------------------------------
+// WHICH syntax forms and builtin call positions make the PLATFORM invoke a member the program may supply, and which
+// members. Until round 2 this was ~20 hand lists across the implicit readers (the coercion operator sets, the
+// `String`/`JSON.stringify`/`Object.assign`/`Object.entries`/`values`/`structuredClone`/`Reflect.get`/`set`/`Array.from`
+// text matches, the array `join`/`toString`/`toLocaleString` list, the iteration and `using` triggers), written from
+// memory and never enumerated against ECMA-262 — and a site no list named produced no edge and no `Unknown` (R1248:
+// `==`, `Number(x)`, nested `JSON.stringify`, `await` on a thenable, `new Set(x)`, `yield*`, `arr.sort()`, `k in o`,
+// `o[k]`, `instanceof`, `s.split(r)`, … each EXECUTED silent on 0.40.13).
+//
+// The table below is GENERATED by `calltarget/sitetable/oracle.cjs`, which EXECUTES every syntax form (operator grids
+// from TypeScript's own SyntaxKind ranges) and every argument / receiver-element position of every ECMA-262 builtin
+// reachable from `globalThis`, with a probe object whose every hook records that it ran; a row is an observed
+// invocation, a position where nothing ran is absent. `calltarget/sitetable/embed.py` calibrates it against the
+// 0.40.17 hand entries (every one reproduced, or the embed refuses) and marks those rows `r0`.
+// `node calltarget/sitetable/oracle.cjs --check scan.mjs` re-executes it and fails on any difference. Do not edit
+// the block by hand.
+//
+// The key is the SyntaxKind (and operator) of the site, or the DECLARATION identity of the builtin the checker
+// resolved the call to (`ObjectConstructor.assign`, `StringConstructor.(call)`, `Array.join`, `Reflect.get`) — never
+// the callee's TEXT, so a project's own `const Object = { assign() {} }` is not a site (the old getter line matched
+// `Object.assign` by text and fabricated there) and `globalThis.Object.assign` is one without a second spelling rule.
+//
+// Hooks route to the readers that already answer "which bodies run": a member hook (`toString`, `valueOf`,
+// `[Symbol.toPrimitive]`, `toJSON`, `toLocaleString`, `then`, `[Symbol.hasInstance]`, `[Symbol.split]`, …) to the
+// coercion lookup over the target oracle; `[Symbol.iterator]`/`[Symbol.asyncIterator]` to the iteration reader;
+// `[Symbol.dispose]`/`[Symbol.asyncDispose]` to the disposal reader; `get:own` (a COPY: own enumerable getters) to
+// `enumerateGetters`; a keyed `get:*`/`set:*` (a LOOKUP) and the copy target's `set:*` to `enumerateTargetAccessors`.
+// NOT in the table, by design and named: the logging sinks (`console.*`, a library logger's level methods —
+// `isStringifyingSink`: host and library code, not ECMA-262); a builtin body's reads of `this`/argument properties
+// (`Error.prototype.toString` → `message`, `@@toStringTag`, `@@species`, a `Map` subclass's `set` run by its
+// constructor — R1248's second table, not built); callbacks handed to a builtin (the HOF reader, #10).
+// <<CT-SITE-TABLE generated by calltarget/sitetable/oracle.cjs + embed.py — regenerate, never edit
+const CT_SITE_TABLE = {
+ "generatedBy": "calltarget/sitetable/oracle.cjs", "node": "v22.12.0",
+ "syntax": {
+  "BinaryExpression:LessThanToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:GreaterThanToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:LessThanEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:GreaterThanEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:EqualsEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "BinaryExpression:ExclamationEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "BinaryExpression:PlusToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:MinusToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:AsteriskToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:AsteriskAsteriskToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:SlashToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:PercentToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:LessThanLessThanToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:GreaterThanGreaterThanToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:GreaterThanGreaterThanGreaterThanToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:AmpersandToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:BarToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:CaretToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:PlusEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:MinusEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:AsteriskEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:AsteriskAsteriskEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:SlashEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:PercentEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["left", "right"]},
+  "BinaryExpression:LessThanLessThanEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "BinaryExpression:GreaterThanGreaterThanEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "BinaryExpression:GreaterThanGreaterThanGreaterThanEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "BinaryExpression:AmpersandEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "BinaryExpression:BarEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "BinaryExpression:CaretEqualsToken": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"], "right": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "BinaryExpression:InKeyword": {"left": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "BinaryExpression:InstanceOfKeyword": {"right": ["[Symbol.hasInstance]"]},
+  "PrefixUnaryExpression:PlusToken": {"operand": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["operand"]},
+  "PrefixUnaryExpression:MinusToken": {"operand": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["operand"]},
+  "PrefixUnaryExpression:TildeToken": {"operand": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["operand"]},
+  "PrefixUnaryExpression:PlusPlusToken": {"operand": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "PostfixUnaryExpression:PlusPlusToken": {"operand": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "PrefixUnaryExpression:MinusMinusToken": {"operand": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "PostfixUnaryExpression:MinusMinusToken": {"operand": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "TemplateExpression": {"span": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": ["span"]},
+  "ForOfStatement": {"expression": ["[Symbol.iterator]"], "r0": ["expression"]},
+  "SpreadElement": {"expression": ["[Symbol.iterator]"], "r0": ["expression"]},
+  "SpreadElement:call": {"expression": ["[Symbol.iterator]"], "r0": ["expression"]},
+  "SpreadAssignment": {"expression": ["get:own"], "r0": ["expression"]},
+  "ArrayBindingPattern": {"initializer": ["[Symbol.iterator]"], "r0": ["initializer"]},
+  "ArrayLiteralExpression:assign": {"right": ["[Symbol.iterator]"]},
+  "ObjectBindingPattern:key-own": {"initializer": ["get:own"]},
+  "ObjectBindingPattern:key-proto": {"initializer": ["get:proto"]},
+  "ObjectBindingPattern:rest": {"initializer": ["get:own"], "r0": ["initializer"]},
+  "ObjectLiteralExpression:assign-rest": {"right": ["get:own"]},
+  "PropertyAccessExpression:own": {"expression": ["get:own"]},
+  "PropertyAccessExpression:proto": {"expression": ["get:proto"]},
+  "PropertyAccessExpression:assign": {"expression": ["set:proto"]},
+  "ElementAccessExpression": {"argumentExpression": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "ComputedPropertyName": {"expression": ["[Symbol.toPrimitive]", "toString", "valueOf"]},
+  "AwaitExpression": {"expression": ["then"]},
+  "ForOfStatement:await": {"expression": ["[Symbol.asyncIterator]", "[Symbol.iterator]"], "r0": ["expression"]},
+  "ReturnStatement:async": {"expression": ["then"]},
+  "YieldExpression:asterisk": {"expression": ["[Symbol.iterator]"]},
+  "VariableDeclarationList:using": {"initializer": ["[Symbol.dispose]"], "source": "ECMA-262 DisposeResources (not executable on this node)", "r0": ["initializer"]},
+  "VariableDeclarationList:await-using": {"initializer": ["[Symbol.asyncDispose]", "[Symbol.dispose]"], "source": "ECMA-262 DisposeResources (not executable on this node)", "r0": ["initializer"]}
+ },
+ "builtins": {
+  "ObjectConstructor.assign": [{"arg": 0, "shape": "", "hooks": ["set:own", "set:proto"], "r0": true}, {"arg": 1, "shape": "", "hooks": ["get:own"], "r0": true}, {"arg": 2, "shape": "", "hooks": ["get:own"], "rest": true, "r0": true}],
+  "ObjectConstructor.create": [{"arg": 1, "shape": "", "hooks": ["get:own"]}],
+  "ObjectConstructor.defineProperties": [{"arg": 1, "shape": "", "hooks": ["get:own"]}],
+  "ObjectConstructor.defineProperty": [{"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ObjectConstructor.entries": [{"arg": 0, "shape": "", "hooks": ["get:own"], "r0": true}],
+  "ObjectConstructor.fromEntries": [{"arg": 0, "shape": "", "hooks": ["[Symbol.iterator]"]}],
+  "ObjectConstructor.getOwnPropertyDescriptor": [{"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ObjectConstructor.hasOwn": [{"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ObjectConstructor.values": [{"arg": 0, "shape": "", "hooks": ["get:own"], "r0": true}],
+  "ArrayConstructor.from": [{"arg": 0, "shape": "", "hooks": ["[Symbol.iterator]"], "r0": true}],
+  "ArrayConstructor.fromAsync": [{"arg": 0, "shape": "", "hooks": ["[Symbol.asyncIterator]", "[Symbol.iterator]"]}, {"arg": 0, "shape": "[]", "hooks": ["then"]}],
+  "StringConstructor.fromCharCode": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "StringConstructor.fromCodePoint": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "StringConstructor.(call)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": true}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "StringConstructor.(new)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "NumberConstructor.parseFloat": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "NumberConstructor.parseInt": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "NumberConstructor.(call)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "NumberConstructor.(new)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "SymbolConstructor.for": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "SymbolConstructor.(call)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "BigIntConstructor.asIntN": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "BigIntConstructor.asUintN": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "BigIntConstructor.(call)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "PromiseConstructor.all": [{"arg": 0, "shape": "", "hooks": ["[Symbol.iterator]"]}, {"arg": 0, "shape": "[]", "hooks": ["then"]}],
+  "PromiseConstructor.allSettled": [{"arg": 0, "shape": "", "hooks": ["[Symbol.iterator]"]}, {"arg": 0, "shape": "[]", "hooks": ["then"]}],
+  "PromiseConstructor.any": [{"arg": 0, "shape": "", "hooks": ["[Symbol.iterator]"]}, {"arg": 0, "shape": "[]", "hooks": ["then"]}],
+  "PromiseConstructor.race": [{"arg": 0, "shape": "", "hooks": ["[Symbol.iterator]"]}, {"arg": 0, "shape": "[]", "hooks": ["then"]}],
+  "PromiseConstructor.resolve": [{"arg": 0, "shape": "", "hooks": ["then"]}],
+  "MapConstructor.(new)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.iterator]"]}],
+  "SetConstructor.(new)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.iterator]"]}],
+  "WeakMapConstructor.(new)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.iterator]"]}],
+  "WeakSetConstructor.(new)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.iterator]"]}],
+  "DateConstructor.UTC": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 3, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 3, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 4, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 4, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 5, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 5, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 6, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 6, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "DateConstructor.parse": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "DateConstructor.(new)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "RegExpConstructor.(call)": [{"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "RegExpConstructor.(new)": [{"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ErrorConstructor.prepareStackTrace": [{"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ErrorConstructor.(call)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ErrorConstructor.(new)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ArrayBufferConstructor.(new)": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "JSON.parse": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "JSON.rawJSON": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "JSON.stringify": [{"arg": 0, "shape": "", "hooks": ["get:own", "toJSON"], "r0": true}, {"arg": 0, "shape": "[]", "hooks": ["get:own", "toJSON"]}, {"arg": 0, "shape": "{}", "hooks": ["get:own", "toJSON"]}],
+  "Math.abs": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.acos": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.acosh": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.asin": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.asinh": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.atan": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.atan2": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.atanh": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.cbrt": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.ceil": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.clz32": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.cos": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.cosh": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.exp": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.expm1": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.floor": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.fround": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.hypot": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 2, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.imul": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.log": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.log10": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.log1p": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.log2": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.max": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 2, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.min": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 2, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.pow": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.round": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.sign": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.sin": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.sinh": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.sqrt": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.tan": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.tanh": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Math.trunc": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Reflect.defineProperty": [{"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Reflect.deleteProperty": [{"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Reflect.get": [{"arg": 0, "shape": "", "hooks": ["get:own", "get:proto"], "keyArg": 1, "r0": true}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Reflect.getOwnPropertyDescriptor": [{"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Reflect.has": [{"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Reflect.set": [{"arg": 0, "shape": "", "hooks": ["set:own", "set:proto"], "keyArg": 1, "r0": true}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Array.at": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Array.copyWithin": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 2, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Array.fill": [{"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Array.flat": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Array.join": [{"arg": "this", "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": true}, {"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Array.slice": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Array.sort": [{"arg": "this", "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Array.splice": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Array.toLocaleString": [{"arg": "this", "shape": "[]", "hooks": ["toLocaleString", "toString"], "r0": true}],
+  "Array.toSorted": [{"arg": "this", "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Array.toSpliced": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Array.toString": [{"arg": "this", "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": true}],
+  "Array.with": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ReadonlyArray.at": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ReadonlyArray.copyWithin": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 2, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ReadonlyArray.fill": [{"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ReadonlyArray.flat": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ReadonlyArray.join": [{"arg": "this", "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": true}, {"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ReadonlyArray.slice": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ReadonlyArray.sort": [{"arg": "this", "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ReadonlyArray.splice": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ReadonlyArray.toLocaleString": [{"arg": "this", "shape": "[]", "hooks": ["toLocaleString", "toString"], "r0": true}],
+  "ReadonlyArray.toSorted": [{"arg": "this", "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ReadonlyArray.toSpliced": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "ReadonlyArray.toString": [{"arg": "this", "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "r0": true}],
+  "ReadonlyArray.with": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.anchor": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.at": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.charAt": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.charCodeAt": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.codePointAt": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.concat": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.endsWith": [{"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.fontcolor": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.fontsize": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.includes": [{"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.indexOf": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.lastIndexOf": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.link": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.localeCompare": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.match": [{"arg": 0, "shape": "", "hooks": ["[Symbol.match]"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.matchAll": [{"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.normalize": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.padEnd": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.padStart": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.repeat": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.replace": [{"arg": 0, "shape": "", "hooks": ["[Symbol.replace]"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.replaceAll": [{"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.search": [{"arg": 0, "shape": "", "hooks": ["[Symbol.search]"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.slice": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.split": [{"arg": 0, "shape": "", "hooks": ["[Symbol.split]"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.startsWith": [{"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"], "rest": true}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.substr": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.substring": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.toLocaleLowerCase": [{"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "String.toLocaleUpperCase": [{"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Number.toExponential": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Number.toFixed": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Number.toLocaleString": [{"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Number.toPrecision": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Number.toString": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setDate": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setFullYear": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setHours": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 3, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 3, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setMilliseconds": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setMinutes": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setMonth": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setSeconds": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setTime": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setUTCDate": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setUTCFullYear": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setUTCHours": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 3, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 3, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setUTCMilliseconds": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setUTCMinutes": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 2, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setUTCMonth": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setUTCSeconds": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.setYear": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.toLocaleDateString": [{"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.toLocaleString": [{"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Date.toLocaleTimeString": [{"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "RegExp.compile": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "RegExp.exec": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "RegExp.test": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Object.__lookupGetter__": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Object.__lookupSetter__": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Object.hasOwnProperty": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "Object.propertyIsEnumerable": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "parseInt": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 1, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "parseFloat": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "isNaN": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "isFinite": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "encodeURI": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "encodeURIComponent": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "decodeURI": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "decodeURIComponent": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "escape": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "unescape": [{"arg": 0, "shape": "", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}, {"arg": 0, "shape": "[]", "hooks": ["[Symbol.toPrimitive]", "toString", "valueOf"]}],
+  "structuredClone": [{"arg": 0, "shape": "", "hooks": ["get:own"], "r0": true}, {"arg": 0, "shape": "[]", "hooks": ["get:own"]}, {"arg": 0, "shape": "{}", "hooks": ["get:own"]}]
+ }
+};
+// CT-SITE-TABLE>>
+// The SyntaxKind NAME a table key uses: the token's own name, not a range alias on the same value
+// (`FirstBinaryOperator`, `LastCompoundAssignment`) — the oracle's rule, so the two cannot drift.
+const CT_SK_NAME = (() => {
+  const m = new Map();
+  for (const n of Object.keys(ts.SyntaxKind)) {
+    const v = ts.SyntaxKind[n];
+    if (typeof v === "number" && !/^(First|Last)/.test(n) && !m.has(v)) m.set(v, n);
+  }
+  return m;
+})();
+// ⟨CANDOR_CT2_OFF⟩ the round-2 measurement switch: the table is restricted to the rows 0.40.17's lists recognised
+// (`r0`, marked by the calibration), the copy/lookup getter readers ask no oracle, and R1434's reassignment check is
+// the round-1 one. A measurement control with declared deviations (CHANGELOG), not a mode.
+function ctSyntaxRow(key, role) {
+  const row = Object.hasOwn(CT_SITE_TABLE.syntax, key) ? CT_SITE_TABLE.syntax[key] : null;
+  if (!row || !Object.hasOwn(row, role) || role === "r0" || role === "source") return null;
+  if (!CT2 && !(row.r0 ?? []).includes(role)) return null;
+  return row[role];
+}
+const CT_ITER_HOOKS = new Set(["[Symbol.iterator]", "[Symbol.asyncIterator]"]);
+const CT_DISPOSE_HOOKS = new Set(["[Symbol.dispose]", "[Symbol.asyncDispose]"]);
+const ctAccessorHook = (h) => /^(get|set):/.test(h);
+const ctMethodHook = (h) => !CT_ITER_HOOKS.has(h) && !CT_DISPOSE_HOOKS.has(h) && !ctAccessorHook(h);
+const ctHookKey = (h) => h.startsWith("[Symbol.") ? { sym: [`__@${h.slice(8, -1)}`], texts: [h] } : { name: h };
+// The builtin a call RESOLVES to, as the table names it: `<lib interface>.<member>` (`(call)` / `(new)` for a call or
+// construct signature), `<namespace>.<fn>` (`Reflect.get`), or a global function's name. Only a declaration in the
+// TypeScript standard library, or a GLOBAL function of `@types/node` (`structuredClone`), is a builtin.
+function builtinSiteKey(call) {
+  let d; try { d = checker.getResolvedSignature(call)?.declaration; } catch { d = null; }
+  if (!d || !d.parent) return null;
+  const mod = declModule(d);
+  const p = d.parent;
+  if (mod === "<es-lib>" && ts.isInterfaceDeclaration(p)) {
+    const m = ts.isCallSignatureDeclaration(d) ? "(call)" : ts.isConstructSignatureDeclaration(d) ? "(new)" : d.name?.getText?.();
+    // a host global reached through the global object (`window.structuredClone`, `self.structuredClone`) resolves to
+    // the DOM's `WindowOrWorkerGlobalScope` member: the same global function as the bare spelling
+    if (m && /GlobalScope$/.test(p.name.text) && ts.isMethodSignature(d)) return m;
+    return m ? `${p.name.text}.${m}` : null;
+  }
+  if (ts.isFunctionDeclaration(d) && d.name) {
+    const global = ts.isSourceFile(p) && !ts.isExternalModule(p)
+      || (ts.isModuleBlock(p) && ts.isModuleDeclaration(p.parent) && !!(p.parent.flags & ts.NodeFlags.GlobalAugmentation));
+    if (!global && ts.isModuleBlock(p) && ts.isModuleDeclaration(p.parent) && ts.isIdentifier(p.parent.name))
+      return mod === "<es-lib>" ? `${p.parent.name.text}.${d.name.text}` : null;
+    if (global && (mod === "<es-lib>" || /[\\/]@types[\\/]node[\\/]/.test(d.getSourceFile().fileName))) return d.name.text;
+  }
+  return null;
+}
+// The member hooks of a site, resolved over the target oracle (the coercion lookup generalised from its three names
+// to any hook the table names). A primitive operand runs no member, so every hook but `toJSON` (consulted on any
+// value, as before) is asked only where an object can arrive. Returns whether any body was named (edged or disclosed).
+const ctStaticDecl = (d) => !!d && ts.canHaveModifiers(d) && !!(ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Static);
+function chargeHookMembers(rec, expr, hooks) {
+  if (!rec || !expr) return false;
+  let named = false;
+  for (const h of hooks) {
+    if (h !== "toJSON" && !mayCoerceObject(expr)) continue;
+    const key = ctHookKey(h);
+    // `x instanceof C` runs C's STATIC `[Symbol.hasInstance]` (own or inherited) — never an instance member
+    const accept = h === "[Symbol.hasInstance]" ? (d) => isCoercionMemberDecl(d) && ctStaticDecl(d) : isCoercionMemberDecl;
+    const r = bodiesFor(expr, key, { accept, elements: true, reader: "coercion" });
+    chargeOracleBodies(rec, r, key.name ?? key.texts[0]);
+    for (const d of r.external) chargeExternalDecl(rec, d);
+    if (r.units.length || r.unminted.length || r.wide || r.external.length) named = true;
+  }
+  return named;
+}
+// ⟨call-target round 2, MEASUREMENT ONLY⟩ THE DISCLOSURE FALLBACK the proposed site clause would require
+// (`candor-spec/proposals/call-target-site-and-wire.md` §1.3), OFF unless `CANDOR_CT_SITE_FALLBACK=A|B`. At a
+// recognised site whose operand is OPAQUE — `any`/`unknown`/`{}`/`object` or an unconstrained type parameter, with no
+// value type shown — and that named no body, disclose `Unknown` naming the hook. Option B binds iteration, thenables,
+// conversion, accessor runs and disposal; option A also binds formatting, equality and copying. Not shipped: Tom
+// chooses A or B from the counts it produces (`CANDOR_CT_FALLBACK_REACH=1` prints one `CT-FALLBACK` line per site).
+// REACH PROBE (`CANDOR_CT_SITE_REACH=1`): one `CT-SITE <class> <named|none|-> <table key>` line per recognised site
+// charged — the §1.4 table's "(1) recognised sites by class" and whether the oracle named any body there.
+const CT_SITE_REACH = process.env.CANDOR_CT_SITE_REACH
+  ? (cls, named, key) => console.error(`CT-SITE ${cls} ${named === null ? "-" : named ? "named" : "none"} ${key ?? "?"}`) : null;
+const CT_FALLBACK = process.env.CANDOR_CT_SITE_FALLBACK || "";
+const CT_FALLBACK_REACH = !!process.env.CANDOR_CT_FALLBACK_REACH;
+function ctOpaque(expr) {
+  let t; try { t = checker.getTypeAtLocation(expr); } catch { t = null; }
+  if (!t) return false;
+  if (t.flags & ts.TypeFlags.TypeParameter) {
+    let c; try { c = checker.getBaseConstraintOfType(t); } catch { c = null; }
+    if (c && c !== t && !uninformativeType(c)) return false;
+  } else if (!uninformativeType(t)) return false;
+  return receiverValueTypes(expr, 0, new Set(), true).length === 0;
+}
+function ctFallback(rec, expr, cls, hook, named) {
+  if ((!CT_FALLBACK && !CT_FALLBACK_REACH) || named || !rec || !ctOpaque(expr)) return;
+  const inB = !["format", "eq", "copy"].includes(cls);
+  if (CT_FALLBACK_REACH) console.error(`CT-FALLBACK ${cls} ${inB ? "B" : "A"} ${hook}`);
+  if (CT_FALLBACK === "A" || (CT_FALLBACK === "B" && inB)) {
+    rec.direct.add("Unknown");
+    rec.why.add(`callback:opaque-operand:${cls}:${hook}`);
+  }
+}
+// The class of a coercion site, for the fallback's two widths (the proposal's vocabulary): a string-producing site
+// is formatting; `==`/`!=` is equality; a numeric operator, a key conversion or a builtin's argument conversion is
+// conversion; `then` is a deferred force.
+function ctCoerceClass(key, methods) {
+  if (methods.includes("then")) return "then";
+  if (methods.includes("toJSON")) return "format";
+  if (/^BinaryExpression:(Exclamation|Equals)EqualsToken$/.test(key)) return "eq";
+  if (key === "TemplateExpression" || key === "BinaryExpression:PlusToken" || key === "BinaryExpression:PlusEqualsToken"
+      || key === "StringConstructor.(call)" || /^(Array|ReadonlyArray)\.(join|toString|toLocaleString)$/.test(key)) return "format";
+  return "convert";
+}
+// Charge one site: `operand` in a position the table says runs `hooks`. `ctx.node` is the site (for the owner and
+// the opaque-iteration hedge), `ctx.keyExpr` the key argument of a keyed lookup, `ctx.sources` a copy target's
+// sources, `ctx.key` the table key (the fallback's class).
+function chargeSiteHooks(owner, operand, hooks, ctx = {}) {
+  if (!owner || !operand || !hooks) return;
+  const rec = fns.get(owner);
+  if (!rec) return;
+  const methods = hooks.filter(ctMethodHook);
+  if (methods.length) {
+    const cls = ctCoerceClass(ctx.key ?? "", methods), named = chargeHookMembers(rec, operand, methods);
+    CT_SITE_REACH?.(cls, named, ctx.key);
+    ctFallback(rec, operand, cls, methods.join("|"), named);
+  }
+  if (hooks.some((h) => CT_ITER_HOOKS.has(h))) {
+    const isAsync = hooks.includes("[Symbol.asyncIterator]");
+    const targets = iterationTargets(operand, isAsync);
+    chargeOracleBodies(rec, targets, isAsync ? "[Symbol.asyncIterator]" : "[Symbol.iterator]");
+    // Opaque-iterable honesty: a param/`any`/type-parameter iterable runs caller-supplied iterator code — disclose
+    // Unknown (the `call:param` posture). Skipped when a MINTED local unit was resolved (the minted-unit rule).
+    noteOpaqueIteration(ctx.node ?? operand, operand, targets.units.length > 0 || (!CT_ORACLE && targets.unminted.length > 0));
+    const named = targets.units.length > 0 || targets.unminted.length > 0 || targets.external.length > 0;
+    CT_SITE_REACH?.("iterate", named, ctx.key);
+    ctFallback(rec, operand, "iterate", isAsync ? "[Symbol.asyncIterator]" : "[Symbol.iterator]", named || !!opaqueIterableWhy(operand));
+  }
+  const disp = hooks.filter((h) => CT_DISPOSE_HOOKS.has(h));
+  if (disp.length) {
+    const texts = disp.includes("[Symbol.asyncDispose]") ? ["[Symbol.asyncDispose]", "[Symbol.dispose]"] : ["[Symbol.dispose]"];
+    const prefixes = texts.map((t) => `__@${t.slice(8, -1)}`);
+    const r = bodiesFor(operand, { sym: prefixes, texts }, { reader: "using" });
+    chargeOracleBodies(rec, r, texts[0]);
+    CT_SITE_REACH?.("dispose", r.units.length > 0 || r.unminted.length > 0 || r.external.length > 0, ctx.key);
+    ctFallback(rec, operand, "dispose", texts[0], r.units.length > 0 || r.unminted.length > 0 || r.wide);
+  }
+  const acc = hooks.filter(ctAccessorHook);
+  if (acc.length) {
+    const kind = acc[0].startsWith("get:") ? "get" : "set";
+    CT_SITE_REACH?.("keyExpr" in ctx ? "accessor" : "copy", null, ctx.key);
+    ctFallback(rec, operand, "keyExpr" in ctx ? "accessor" : "copy", acc.join("|"), false);
+    if ("keyExpr" in ctx) {
+      // a LOOKUP keyed by an argument (`Reflect.get(t, k)` / `Reflect.set(t, k, v)`): one runtime key, at most one
+      // accessor — R240(b)'s own `dynamic-key` tag when the key is not a literal (R247, R251)
+      const k = ctx.keyExpr;
+      enumerateTargetAccessors(owner, operand, k && ts.isStringLiteralLike(k) ? new Set([k.text]) : null, kind,
+                               { why: "dynamic-key", keyType: k ? checker.getTypeAtLocation(k) : null });
+    } else if (kind === "get") {
+      enumerateGetters(owner, checker.getTypeAtLocation(operand), operand);   // a COPY: own enumerable getters
+    } else {
+      // a copy's TARGET (`Object.assign(t, …sources)`): every key the sources carry is written (R116, R247)
+      enumerateTargetAccessors(owner, operand, provenCopiedKeys(ctx.sources ?? []), "set", { why: "dynamic-keyset", keyType: null });
+    }
+  }
+}
+// The syntax sites at `node`, from the table: [table key, operand, hooks]. One place reads the AST for the implicit
+// readers, so a form the table names cannot be missed by a reader that forgot to look.
+function syntaxSitesAt(node) {
+  const out = [];
+  const put = (key, role, operand) => { const h = operand && ctSyntaxRow(key, role); if (h) out.push([key, operand, h]); };
+  const K = ts.SyntaxKind;
+  if (ts.isBinaryExpression(node)) {
+    const op = node.operatorToken.kind;
+    if (op === K.EqualsToken) {
+      // a destructuring ASSIGNMENT: `[a] = x` iterates x; `({ ...r } = x)` copies it
+      if (ts.isArrayLiteralExpression(node.left)) put("ArrayLiteralExpression:assign", "right", node.right);
+      else if (ts.isObjectLiteralExpression(node.left) && node.left.properties.some(ts.isSpreadAssignment))
+        put("ObjectLiteralExpression:assign-rest", "right", node.right);
+    } else {
+      const key = `BinaryExpression:${CT_SK_NAME.get(op)}`;
+      put(key, "left", node.left); put(key, "right", node.right);
+    }
+  } else if (ts.isPrefixUnaryExpression(node)) put(`PrefixUnaryExpression:${CT_SK_NAME.get(node.operator)}`, "operand", node.operand);
+  else if (ts.isPostfixUnaryExpression(node)) put(`PostfixUnaryExpression:${CT_SK_NAME.get(node.operator)}`, "operand", node.operand);
+  else if (ts.isTemplateExpression(node)) {
+    const key = ts.isTaggedTemplateExpression(node.parent) ? "TaggedTemplateExpression" : "TemplateExpression";
+    for (const span of node.templateSpans) put(key, "span", span.expression);
+  } else if (ts.isForOfStatement(node)) put(node.awaitModifier ? "ForOfStatement:await" : "ForOfStatement", "expression", node.expression);
+  else if (ts.isSpreadElement(node))
+    put(node.parent && (ts.isCallExpression(node.parent) || ts.isNewExpression(node.parent)) ? "SpreadElement:call" : "SpreadElement", "expression", node.expression);
+  else if (ts.isSpreadAssignment(node)) put("SpreadAssignment", "expression", node.expression);
+  else if (ts.isVariableDeclaration(node) && node.initializer) {
+    if (ts.isArrayBindingPattern(node.name)) put("ArrayBindingPattern", "initializer", node.initializer);
+    else if (ts.isObjectBindingPattern(node.name) && node.name.elements.some((e) => e.dotDotDotToken)) put("ObjectBindingPattern:rest", "initializer", node.initializer);
+  } else if (ts.isVariableStatement(node)) {
+    // COMPARE THE BLOCK-SCOPE BITS, DO NOT MASK THEM (round 1): `NodeFlags.AwaitUsing` is `Const | Using`, so a mask
+    // reads every `const` as `await using` (55 fabricated dispose edges on typeorm).
+    const bs = node.declarationList.flags & ts.NodeFlags.BlockScoped;
+    const key = bs === ts.NodeFlags.AwaitUsing ? "VariableDeclarationList:await-using" : bs === ts.NodeFlags.Using ? "VariableDeclarationList:using" : null;
+    if (key) for (const d of node.declarationList.declarations) put(key, "initializer", d.initializer);
+  } else if (ts.isElementAccessExpression(node)) put("ElementAccessExpression", "argumentExpression", node.argumentExpression);
+  else if (ts.isComputedPropertyName(node)) put("ComputedPropertyName", "expression", node.expression);
+  else if (ts.isAwaitExpression(node)) put("AwaitExpression", "expression", node.expression);
+  else if (ts.isYieldExpression(node) && node.asteriskToken) put("YieldExpression:asterisk", "expression", node.expression);
+  else if (ts.isReturnStatement(node) && node.expression) {
+    const fn = ts.findAncestor(node, ts.isFunctionLike);
+    if (fn && (ts.getCombinedModifierFlags(fn) & ts.ModifierFlags.Async)) put("ReturnStatement:async", "expression", node.expression);
+  } else if (ts.isArrowFunction(node) && node.body && !ts.isBlock(node.body) && (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Async)) {
+    put("ReturnStatement:async", "expression", node.body);   // `async () => x` returns x, as `return x` does
+  }
+  return out;
+}
+// The builtin sites at a call or `new`: [table key, operand, hooks, ctx] per row. A rest parameter's row applies to
+// every argument from its position on; `this` rows are the receiver (an array's ELEMENTS — `arr.join()`); a `[]` /
+// `{}` row reaches into an array or object LITERAL argument's elements or values (nested `JSON.stringify` — R1248),
+// and for a member hook into an array-TYPED argument's elements too (the coercion lookup's `elements` walk).
+function builtinSitesAt(node) {
+  const key = builtinSiteKey(node);
+  // own keys only: `Object.toString` / `Object.valueOf` are real builtin keys AND inherited members of a plain object
+  const rows = key && Object.hasOwn(CT_SITE_TABLE.builtins, key) ? CT_SITE_TABLE.builtins[key] : null;
+  if (!rows) return [];
+  let decl; try { decl = checker.getResolvedSignature(node)?.declaration; } catch { decl = null; }
+  const params = decl?.parameters ?? [];
+  const restAt = params.findIndex((p) => p.dotDotDotToken);
+  const args = node.arguments ?? [];
+  const out = [];
+  const nested = (e, shape) => {
+    e = e && unwrapArgExpr(e);
+    if (!e) return [];
+    if (shape === "[]" && ts.isArrayLiteralExpression(e)) return e.elements.map((x) => ts.isSpreadElement(x) ? null : x).filter(Boolean);
+    if (shape === "{}" && ts.isObjectLiteralExpression(e))
+      return e.properties.map((p) => ts.isPropertyAssignment(p) ? p.initializer : ts.isShorthandPropertyAssignment(p) ? p.name : null).filter(Boolean);
+    return [];
+  };
+  for (const r of rows) {
+    if (!CT2 && !r.r0) continue;
+    const ctx = { key, node };
+    if (r.keyArg != null) ctx.keyExpr = args[r.keyArg] ?? null;
+    let operands;
+    if (r.arg === "this") operands = ts.isPropertyAccessExpression(node.expression) ? [node.expression.expression] : [];
+    // a `rest` row (the oracle saw the hook at a position past the declared count) binds the whole tail, whichever
+    // overload the checker picked (`Object.assign(t, a, b, c)` resolves to a four-parameter overload with no rest)
+    else operands = (r.rest || (restAt >= 0 && r.arg >= restAt)) ? args.slice(r.arg) : (args[r.arg] ? [args[r.arg]] : []);
+    // a spread argument hands over its ELEMENTS (`Math.max(...xs)`): the element walk of the array it spreads
+    operands = operands.map((o) => (ts.isSpreadElement(o) ? o.expression : o));
+    if (r.hooks.some(ctAccessorHook) && r.hooks.some((h) => h.startsWith("set:")) && r.keyArg == null) ctx.sources = args.slice(1);
+    for (const o of operands) {
+      if (r.shape === "" || (r.arg === "this" && r.shape === "[]")) out.push([key, o, r.hooks, ctx]);
+      else {
+        for (const inner of nested(o, r.shape)) out.push([key, inner, r.hooks, ctx]);
+        // the type-level element walk: an array-typed argument's elements, for member hooks (the lookup's own walk)
+        if (r.shape === "[]" && r.hooks.every(ctMethodHook) && !ts.isArrayLiteralExpression(unwrapArgExpr(o) ?? o)) out.push([key, o, r.hooks, ctx]);
+      }
+    }
+  }
+  return out;
 }
 // Does iterating `expr` FORCE an OPAQUE (caller-supplied) iterable? Forcing an iterable runs its
 // `[Symbol.iterator]`/`next` body, which — when the iterable is a PARAMETER / `any` / a bare type-
@@ -9181,6 +9776,17 @@ function noteOpaqueIteration(node, iterExpr, localResolved) {
   if (!rec) return;
   rec.direct.add("Unknown");
   rec.why.add(why);
+}
+
+// ⟨call-target round 2⟩ The object-spread hedge under its own label (see the implicit-sites arm).
+function noteOpaqueCopy(node, expr) {
+  const owner = enclosing(node);
+  const why = owner && opaqueIterableWhy(expr);
+  if (!why) return;
+  const rec = fns.get(owner);
+  if (!rec) return;
+  rec.direct.add("Unknown");
+  rec.why.add(why.replace("callback:opaque-iterable", "callback:opaque-copy"));
 }
 
 // An argument node that is a FUNCTION-typed VALUE (has ≥1 call signature) — a callback — regardless of
@@ -12813,117 +13419,13 @@ function visitCalls(node) {
         if (owner) { const r = fns.get(owner); r.direct.add("Fs"); r.incomplete.add("Fs"); }
       }
     }
-    // Object.assign(target, ...sources) copies each SOURCE's own enumerable props → invokes their
-    // getters (the object-spread twin). Enumerate the sources' local getters.
-    //
-    // R116 — …AND THE TARGET'S SETTERS, which the copy invokes for every key it writes. See
-    // `enumerateTargetSetters`: the source arm and the target arm are the two halves of one operation
-    // and only one of them existed.
-    // THE `globalThis.` QUALIFIER (SOUNDNESS row id pending — filed by the coordinator) — the SAME
-    // text, recognised through the qualifier too. `globalBuiltinCallee`
-    // is the one authority for that question (`envTouchingBuiltinCall` reads it as well); a second
-    // private copy is how the next spelling gets missed.
-    const ct116 = globalBuiltinCallee(callee) ?? callee.getText().replace(/\s+/g, "");
-    if (ct116 === "Object.assign") {
-      const owner = enclosing(node);
-      const sources = (node.arguments ?? []).slice(1);
-      for (const src of sources) {
-        enumerateGetters(owner, checker.getTypeAtLocation(src), src);
-      }
-      // SHADOW-GUARDED, like the `Reflect.set` arm below. The getter line above is NOT — it matches
-      // `Object.assign` by TEXT, so a project's own `const Object = { assign(){} }` reaches it. That is
-      // pre-existing and is REPORTED rather than silently widened here (it is a fabrication-direction
-      // question of its own), but the charge this fix ADDS does not inherit the hole.
-      if (globalBuiltinCallee(callee) === "Object.assign")
-        enumerateTargetAccessors(owner, (node.arguments ?? [])[0], provenCopiedKeys(sources), "set",
-                                 { why: "dynamic-keyset", keyType: null });   // R247 — copies string AND symbol keys
-    }
-    // SOUNDNESS R252 — THE OTHER BUILTINS THAT READ EVERY OWN ENUMERABLE **VALUE**, AND THE COMMENT
-    // THAT RULED THEM OUT ON THE WRONG HALF OF THE QUESTION.
-    //
-    // `Object.entries`/`Object.values`/`JSON.stringify`/`structuredClone` each read every own enumerable
-    // property's VALUE, so each invokes an own enumerable getter exactly as a spread or an
-    // `Object.assign` SOURCE does. They are the same operation as the line above; nothing routed them
-    // through it. Executed: caller ABSENT from `functions[]` in all four, `deny Fs` and `pure` scoped to
-    // the caller both exit 0 over a tree containing nothing but the literal and the call.
-    //
-    // WHY IT SURVIVED, and it is the constraint on the fix rather than trivia. R115's comment states
-    // "`JSON.stringify(c)` and `Object.entries(c)` STAYING PURE IS CORRECT … (executed: 0 invocations on
-    // a class instance)". That is TRUE — a class accessor is installed on the prototype and is
-    // non-enumerable, so these never visit it — and it is FALSE for an object LITERAL, whose getter is an
-    // OWN enumerable property. The sentence measured the case in front of it and then read as a general
-    // ruling. §K, in a comment written by the commit that needed it.
-    //
-    // SO THE CLASS-INSTANCE ANSWER MUST NOT MOVE — it is correct, and it is this fix's over-charge
-    // control. That is why this routes through `enumerateGetters` rather than growing a private loop:
-    // `classBodiedGetter` is exactly R115's exclusion, so the correct half is preserved BY CONSTRUCTION
-    // instead of by a second implementation that has to remember to agree (§G).
-    //
-    // GROUND TRUTH EXECUTED, node 22.12.0, counting real getter invocations — object LITERAL vs CLASS
-    // instance. The zeroes are as load-bearing as the ones: they are the rest of the sweep, and they are
-    // why this list is four names and not "every whole-object builtin".
-    //     Object.entries 1/0   Object.values 1/0   JSON.stringify 1/0   structuredClone 1/0
-    //     Object.keys 0/0      Object.getOwnPropertyNames 0/0      Object.getOwnPropertyDescriptors 0/0
-    //     Object.freeze 0/0    Object.seal 0/0     for..in 0/0     console.log 0/0   String(o) 0/0
-    //     `${o}` 0/0           util.inspect(o) 0/0                 assert.deepStrictEqual 0/0
-    // `Object.keys` and `getOwnPropertyNames` read NAMES, never values; a descriptor read returns the
-    // accessor function itself without calling it; `console.log`/`util.inspect` print `[Getter]`.
-    // (`Object.assign` and spread are the line above; `{...o}`/rest are the object-literal arm.)
-    //
-    // RESIDUALS, stated as the open list they are: `console.log("%j", o)` and
-    // `util.inspect(o, {getters: true})` DO invoke (executed 1) and are option/format-string dependent;
-    // and every one of these reads NESTED objects too — `JSON.stringify({ a: lit })` and
-    // `structuredClone([lit])` invoke the getter one level down (executed 1), which no arm here reaches
-    // because `enumerateGetters` asks the ARGUMENT's own property list.
-    // R281 — `structuredClone` asks `globalBareCallee`, the SAME authority the Env arm asks, so the two
-    // consumers of `ENV_TOUCHING_GLOBAL` cannot drift the way they just did. The identifier-only test
-    // this replaces was copied here by R252 from the Env arm six commits after `f58dc0f` had fixed the
-    // identical hole one table over.
-    if (["Object.entries", "Object.values", "JSON.stringify"].includes(globalBuiltinCallee(callee))
-        || globalBareCallee(callee) === "structuredClone") {
-      const arg = (node.arguments ?? [])[0];
-      if (arg) enumerateGetters(enclosing(node), checker.getTypeAtLocation(arg), arg);
-    }
-    // R116 §9 — WIDENED PAST THE ROW'S OWN TRIGGER, by grepping the MECHANISM ("a builtin that writes a
-    // property into a caller-supplied target") rather than the one call the row named. `Reflect.set(t, k,
-    // v)` is specified to run the setter the property lookup finds, and it was silent for the same reason
-    // — EXECUTED, 1 setter invocation for both the literal-key and the runtime-key spelling, and both
-    // ABSENT from `functions[]` before this. A literal key names exactly one property; a runtime key can
-    // name any, so it falls to the unprovable branch and charges every setter the target declares.
-    // (`Object.defineProperty`/`defineProperties` are deliberately NOT here: a descriptor INSTALLS a
-    // property and bypasses the setter — executed, 0 invocations — and the engine already indexes those
-    // through `definePropAccessors`. `Object.create`/`structuredClone`/spread all build fresh objects.)
-    //
-    // SHADOW-GUARDED with `identIsGlobal`, which the `Object.assign` line above still is not — a
-    // project's own `const Object = …` would match its text test. Left as it is rather than widened
-    // silently: it is a separate (fabrication-direction) question, it is REPORTED rather than folded in
-    // here, and this new arm does not inherit the hole.
-    //
-    // SOUNDNESS R251 — `Reflect.get(t, k)` IS THE SAME ARM, AND IT DID NOT EXIST. Found the way R116's
-    // own `Reflect.set` sibling was: by grepping the MECHANISM rather than the name. The two are one
-    // table entry apart in `ENV_TOUCHING_BUILTIN` above, and only one of them had an accessor arm.
-    // EXECUTED: 1 getter invocation for the literal-key spelling AND for the runtime-key one, on an
-    // object literal AND on a class instance; the caller was ABSENT from `functions[]` in all four.
-    //
-    // ONE key-set expression for both directions, deliberately, because two spellings of one question
-    // is what R247 was filed to close and a second copy here would reopen it (§G / F1-3). Today it is a
-    // string-literal test: a literal key names exactly one property, anything else falls to the
-    // unprovable branch and DISCLOSES. It is knowingly weaker than `accessorsAt`, which pins a key
-    // whose TYPE names a finite set (R240(a): `const k = "token"`, a literal union, a string enum) — so
-    // `s[k] = v` resolves a pinned key while `Reflect.set(s, k, v)` discloses `Unknown` for it. That
-    // residual fails in the DISCLOSE direction, not the silent one, so it is a precision gap and is
-    // REPORTED as its own row rather than folded into this fix's pricing.
-    const reflectKeySet = (k) => (k && ts.isStringLiteralLike(k) ? new Set([k.text]) : null);
-    for (const [name, kind] of [["Reflect.set", "set"], ["Reflect.get", "get"]]) {
-      if (globalBuiltinCallee(callee) !== name) continue;
-      const k = (node.arguments ?? [])[1];
-      // R247 — an unprovable key here answers with R240(b)'s OWN tag, because `Reflect.set(t, k, v)` and
-      // `t[k] = v` are one operation: one runtime key, at most one setter (executed above). R251 —
-      // `Reflect.get(t, k)` and `t[k]` are that same one operation on the read side, so it takes the
-      // same tag; a `deny Unknown[reflect]` written for one already selects the other.
-      enumerateTargetAccessors(enclosing(node), (node.arguments ?? [])[0], reflectKeySet(k), kind,
-                               { why: "dynamic-key", keyType: k ? checker.getTypeAtLocation(k) : null });
-    }
+    // ⟨call-target round 2⟩ THE BUILTIN SITES — `Object.assign`'s sources (copy) and target (setters, R116/R247),
+    // `Object.entries`/`values`/`JSON.stringify`/`structuredClone` (copy, R252/R281), `Reflect.get`/`set` (a keyed
+    // lookup, R251/R247), `String(x)`, `Number(x)`, `Array.from`/`new Set(x)`/`Promise.all` (iteration), nested
+    // `JSON.stringify`, `arr.sort()` … — are the SITE TABLE's builtin rows, keyed by the declaration the call resolves
+    // to, and charged after this block (`builtinSitesAt`). The executed per-builtin tables that justified each of the
+    // old text matches (getter invocations per builtin, literal vs class instance, the zero rows) are what the oracle
+    // now re-executes on every regeneration.
   }
   // GET/SET ACCESSOR access (the silent-pure-accessor fix): a property read that resolves to a
   // getter, or a property assignment whose target resolves to a setter, is effectively a call into
@@ -13090,194 +13592,72 @@ function visitCalls(node) {
     if (owner) {
       const recvType = checker.getTypeAtLocation(node.initializer);
       for (const el of node.name.elements) {
-        if (el.dotDotDotToken) { enumerateGetters(owner, recvType, node.initializer); continue; } // `...rest` copies every
-        // remaining prop → invokes every (remaining) getter; enumerate all (the bound ones double-handle).
+        if (el.dotDotDotToken) continue;   // `...rest` is a COPY: the site table's `ObjectBindingPattern:rest` row
         const key = el.propertyName ?? el.name; // `{prop}` shorthand, or `{prop: alias}`
         const keyName = ts.isIdentifier(key) ? key.text
           : ts.isStringLiteralLike(key) ? key.text : null;
         if (keyName === null) continue; // computed key (`{[k]: v}`) — unresolvable to one property
-        for (const sym of propertySymbolsAcrossArms(recvType, keyName))   // R259
-        for (const hit of accessorsFromSym(sym, "get"))
-          recordAccessorHit(owner, hit, keyName);
+        // ⟨call-target round 2⟩ a destructured key is a LOOKUP (`const { k } = x` is `x.k`): the implementors' getters the
+        // oracle names run too, exactly as `accessorsAt` answers the property-access spelling.
+        const dh = [];
+        for (const sym of propertySymbolsAcrossArms(recvType, keyName)) dh.push(...accessorsFromSym(sym, "get"));   // R259
+        if (CT2) dh.push(...oracleAccessorHits(node.initializer, keyName, "get"));
+        for (const hit of dedupeHits(dh)) recordAccessorHit(owner, hit, keyName);
       }
     }
   }
-  // ITERATION desugaring (HIGH): `for (const x of bag)`, `for await (…)`, `[...bag]`, `const [a]=bag`,
-  // `Array.from(bag)` all lower to `bag[Symbol.iterator]().next()`. Edge the enclosing fn to the
-  // iterable's local `[Symbol.iterator]`/`[Symbol.asyncIterator]` method (and the produced iterator's
-  // local `next`). A built-in iterable (array/string/Map) resolves non-local → no edge → stays pure.
-  {
-    let iterExpr = null, iterAsync = false;
-    if (ts.isForOfStatement(node)) { iterExpr = node.expression; iterAsync = !!node.awaitModifier; }
-    else if (ts.isSpreadElement(node)) iterExpr = node.expression; // [...bag] / f(...bag)
-    else if (ts.isSpreadAssignment(node)) {
-      // {...bag} — object spread is NOT iteration (copies own enumerable props, no [Symbol.iterator]). But the
-      // copy DOES invoke each source getter — enumerate them (the silent-pure object-spread hole).
-      enumerateGetters(enclosing(node), checker.getTypeAtLocation(node.expression), node.expression);
-      // ⟨call-target round 1⟩ …and it asks NO iteration target. It used to fall through to the iteration reader on
-      // the reasoning that the type's own declaration names no `[Symbol.iterator]`; the target oracle names the
-      // implementors' (measured: `{ ...this.opts }` with `opts: Opts extends GlobOptions` edged to
-      // `Glob.[Symbol.iterator]`, a body the spread never runs). The opaque-value hedge the fall-through raised is
-      // kept as it was: an opaque source's own getters are caller-chosen code the copy does run.
-      const owner0 = enclosing(node);
-      if (owner0) noteOpaqueIteration(node, node.expression, false);
-    }
-    else if (ts.isVariableDeclaration(node) && ts.isArrayBindingPattern(node.name) && node.initializer)
-      iterExpr = node.initializer; // const [a] = bag
-    else if (ts.isCallExpression(node) && node.arguments?.[0]
-             && node.expression.getText() === "Array.from")
-      iterExpr = node.arguments[0]; // Array.from(bag) — the iterable form (arg0 is iterated)
-    if (iterExpr) {
-      const owner = enclosing(node);
-      if (owner) {
-        const targets = iterationTargets(iterExpr, iterAsync);
-        chargeOracleBodies(fns.get(owner), targets, iterAsync ? "[Symbol.asyncIterator]" : "[Symbol.iterator]");
-        // Opaque-iterable honesty: a param/`any`/type-parameter iterable runs caller-supplied iterator
-        // code — disclose Unknown, mirroring the opaque-callback `call:param` posture (cardinal-sin
-        // guard). Skipped when iteration already resolved a LOCAL unit (real effect already edged) — a
-        // MINTED one: a named body with no unit resolves nothing (the minted-unit rule; the 0.40.16 reader
-        // counted it, which the switch-off control reproduces).
-        noteOpaqueIteration(node, iterExpr, targets.units.length > 0 || (!CT_ORACLE && targets.unminted.length > 0));
-      }
-    }
-  }
-  // `using r = expr` / `await using r = expr` (MED): the scope-exit guarantees `r[Symbol.dispose]()` /
-  // `r[Symbol.asyncDispose]()`. Edge the enclosing fn to the resolved LOCAL dispose method.
-  if (ts.isVariableStatement(node)) {
-    const fl = node.declarationList.flags;
-    // ⟨call-target round 1⟩ COMPARE THE BLOCK-SCOPE BITS, DO NOT MASK THEM: `NodeFlags.AwaitUsing` is `Const | Using`,
-    // so `fl & AwaitUsing` is true of EVERY `const` — this arm read `const q = ds.createQueryRunner()` as `await
-    // using q = …` and edged to `[Symbol.asyncDispose]`. Inert while it asked only the type's own declaration (an
-    // interface signature has no unit); the target oracle names the implementors' bodies, and the independent
-    // edge checker caught 55 fabricated edges on typeorm before this line was fixed.
-    const bs = fl & ts.NodeFlags.BlockScoped;
-    const isUsing = bs === ts.NodeFlags.Using || bs === ts.NodeFlags.AwaitUsing;
-    if (isUsing) {
-      const isAwait = bs === ts.NodeFlags.AwaitUsing;
-      const prefixes = isAwait ? ["__@asyncDispose", "__@dispose"] : ["__@dispose"];
-      const owner = enclosing(node);
-      // ⟨call-target round 1⟩ the dispose bodies from the TARGET ORACLE (an interface- or base-typed resource
-      // reaches its implementors' and overrides' `[Symbol.dispose]`, not only its own declaration's).
-      const texts = isAwait ? ["[Symbol.asyncDispose]", "[Symbol.dispose]"] : ["[Symbol.dispose]"];
-      for (const d of node.declarationList.declarations) {
-        if (!d.initializer || !owner) continue;
-        chargeOracleBodies(fns.get(owner), bodiesFor(d.initializer, { sym: prefixes, texts }, { reader: "using" }), texts[0]);
-      }
-    }
-  }
-  // IMPLICIT VALUE-COERCION desugaring (HIGH): the JS coercion protocol invokes a user method the AST
-  // walk never visits as a CallExpression. Resolve the operand's type's coercion member and edge to it
-  // when LOCAL (a built-in/external member resolves non-local → no edge → stays pure). NEVER fabricate.
+  // ⟨call-target round 2⟩ THE IMPLICIT SITES — every syntax form and builtin call position at which the platform runs
+  // a member the program may supply, from the executed SITE TABLE (`CT_SITE_TABLE`, `syntaxSitesAt`,
+  // `builtinSitesAt`), each charged by the reader that answers which bodies run there (`chargeSiteHooks`). This
+  // replaced the iteration triggers (for-of, spread, array binding, `Array.from` by text), the `using` arm, and the
+  // coercion arms' operator sets (`ARITH`, `COMPOUND_ARITH`, `+`/`+=`, unary `-`/`+`/`~`, templates, `String(x)` and
+  // `JSON.stringify(x)` by text, the array `join`/`toString`/`toLocaleString` list). Their rules stand where they were
+  // TARGET rules: a primitive operand runs no member (`mayCoerceObject`); a tagged template's substitutions are not
+  // coerced (the table has no `TaggedTemplateExpression` row because the oracle saw nothing run); `const` is not
+  // `using` (block-scope bits compared, not masked); an object spread is a COPY, never iteration (round 1: `{
+  // ...this.opts }` edged to `Glob.[Symbol.iterator]`); a builtin iterable resolves to the es-lib and stays pure.
   {
     const owner = enclosing(node);
-    const recOf = () => owner && fns.get(owner);
-    // 1+2. BINARY operators. `+` with an OBJECT operand triggers toString/valueOf (string+string,
-    // number+number have no coercion method — stay pure, gated by mayCoerceObject). Arithmetic
-    // (`-`/`*`/`/`/`%`/`**`) and relational (`<`/`>`/`<=`/`>=`) coerce to a NUMBER → valueOf (then
-    // toString). `[Symbol.toPrimitive]` is preferred by JS over both — always consulted.
-    if (ts.isBinaryExpression(node) && owner) {
-      const op = node.operatorToken.kind;
-      const K = ts.SyntaxKind;
-      const ARITH = new Set([K.MinusToken, K.AsteriskToken, K.SlashToken, K.PercentToken,
-        K.AsteriskAsteriskToken, K.LessThanToken, K.GreaterThanToken, K.LessThanEqualsToken,
-        K.GreaterThanEqualsToken, K.AmpersandToken, K.BarToken, K.CaretToken,
-        K.LessThanLessThanToken, K.GreaterThanGreaterThanToken, K.GreaterThanGreaterThanGreaterThanToken]);
-      const COMPOUND_ARITH = new Set([K.MinusEqualsToken, K.AsteriskEqualsToken, K.SlashEqualsToken,
-        K.PercentEqualsToken, K.AsteriskAsteriskEqualsToken]);
-      if (op === K.PlusToken || op === K.PlusEqualsToken) {
-        // string concat / `+` arithmetic: an OBJECT operand is coerced via toString OR valueOf (the
-        // order depends on the hint, but EITHER may run — edge to both when local). string+string and
-        // number+number have only primitive operands → mayCoerceObject false → no edge (pure).
-        for (const operand of [node.left, node.right]) {
-          if (mayCoerceObject(operand))
-            chargeCoercion(recOf(), operand, ["valueOf", "toString"], true);
-        }
-      } else if (ARITH.has(op) || COMPOUND_ARITH.has(op)) {
-        for (const operand of [node.left, node.right]) {
-          if (mayCoerceObject(operand))
-            chargeCoercion(recOf(), operand, ["valueOf", "toString"], true);
-        }
+    if (owner) {
+      for (const [key, operand, hooks] of syntaxSitesAt(node)) {
+        chargeSiteHooks(owner, operand, hooks, { key, node });
+        // An object SPREAD of an opaque value (`any`, a type parameter, a caller-supplied `Iterable`): its own getters
+        // are caller-chosen code the copy runs — the hedge round 1 kept when spread stopped falling through to the
+        // iteration reader, now under its own reason (it read `callback:opaque-iterable:*`, an iteration's label, on
+        // a copy — R1408's mislabel; the class, `callback:`, is unchanged).
+        if (key === "SpreadAssignment") noteOpaqueCopy(node, operand);
       }
+      if (ts.isCallExpression(node) || ts.isNewExpression(node))
+        for (const [, operand, hooks, ctx] of builtinSitesAt(node)) chargeSiteHooks(owner, operand, hooks, ctx);
     }
-    // 2. UNARY arithmetic `-x` / `+x` / `~x` coerces the operand to a number → valueOf (then toString /
-    // [Symbol.toPrimitive]). (`!x` is boolean coercion — no method call; excluded.)
-    if (ts.isPrefixUnaryExpression(node) && owner
-        && (node.operator === ts.SyntaxKind.MinusToken || node.operator === ts.SyntaxKind.PlusToken
-            || node.operator === ts.SyntaxKind.TildeToken)
-        && mayCoerceObject(node.operand)) {
-      chargeCoercion(recOf(), node.operand, ["valueOf", "toString"], true);
-    }
-    // 1. TEMPLATE expression `` `${x}` ``: each interpolated substitution is string-coerced → toString
-    // (then [Symbol.toPrimitive]/valueOf). (A TaggedTemplate is handled separately below — the tag fn
-    // receives the raw substitution values, no per-sub coercion, so we exclude tagged templates here.)
-    if (ts.isTemplateExpression(node) && owner && !ts.isTaggedTemplateExpression(node.parent)) {
-      for (const span of node.templateSpans)
-        if (mayCoerceObject(span.expression))
-          chargeCoercion(recOf(), span.expression, ["toString", "valueOf"], true);
-    }
-    // 5. ARRAY stringification through an EXPLICIT es-lib call: `parts.join("/")` /
-    // `entries.toString()` / `entries.toLocaleString()`. Resolution lands on the pure `Array.prototype`
-    // builtin, so the ELEMENTS' `toString` — which join genuinely invokes on each one — is never walked.
-    // Gated on the receiver having a NUMERIC INDEX type, so a `.join()`/`.toString()` on an ordinary
-    // local object (already resolved by the normal call path) is not re-charged with its own coercion.
-    if (ts.isCallExpression(node) && owner && ts.isPropertyAccessExpression(node.expression)
-        && ["join", "toString", "toLocaleString"].includes(node.expression.name?.getText?.())
-        && arrayElementTypeOf(node.expression.expression)) {
-      chargeCoercion(recOf(), node.expression.expression, ["toString", "valueOf"], true);
-    }
-    // 6. ⟨call-target round 1, R1311 `c_expl` / T4⟩ AN EXPLICIT CALL OF AN `Object.prototype` MEMBER the
-    // abstraction does not declare: `x.toString()` with `x: I` where `I` names no `toString`. The checker resolves
-    // it to the es-lib `Object.toString` — a pure builtin — and the call arm stops there, while the value's class
-    // declares its own `toString` and that is the body that runs (EXECUTED: silent at 0.40.16 on interface,
-    // abstract, base-class, structural, generic and field receivers alike). The bodies come from the target oracle
-    // through the coercion lookup, which asks exactly this question; an array receiver is case 5's.
-    else if (CT_ORACLE && ts.isCallExpression(node) && owner && ts.isPropertyAccessExpression(node.expression)
-        && OBJECT_PROTO_HOOKS.has(node.expression.name?.getText?.())) {
+    const recOf = () => owner && fns.get(owner);
+    // ⟨call-target round 1, R1311 `c_expl` / T4⟩ AN EXPLICIT CALL OF AN `Object.prototype` MEMBER the abstraction does
+    // not declare: `x.toString()` with `x: I` where `I` names no `toString`. The checker resolves it to the es-lib
+    // `Object` member — a pure builtin — and the call arm stops there, while the value's class declares its own and
+    // that is the body that runs (EXECUTED: silent at 0.40.16 on interface, abstract, base-class, structural, generic
+    // and field receivers alike). ⟨round 2⟩ ANY member of the es-lib `Object` interface, read off the declaration
+    // the call resolved to rather than a three-name list (`OBJECT_PROTO_HOOKS`): an override of `hasOwnProperty` or
+    // `isPrototypeOf` is the same question. An array receiver's `toString`/`toLocaleString` resolve to the es-lib
+    // `Array` interface and are the table's `this[]` rows.
+    if (CT_ORACLE && ts.isCallExpression(node) && owner && ts.isPropertyAccessExpression(node.expression)) {
       const recv = node.expression.expression;
       let rd; try { rd = checker.getResolvedSignature(node)?.declaration; } catch { rd = null; }
       if (rd && declModule(rd) === "<es-lib>" && rd.parent && ts.isInterfaceDeclaration(rd.parent)
           && rd.parent.name?.text === "Object" && !isSuperReceiver(recv) && mayCoerceObject(recv))
-        chargeCoercion(recOf(), recv, [node.expression.name.text], false);
+        chargeHookMembers(recOf(), recv, [node.expression.name.text]);
     }
-    // 1+4. CALL forms `String(x)` (→ toString) and `JSON.stringify(x)` (→ toJSON). These resolve to the
-    // es-lib `StringConstructor`/`JSON.stringify` signature (not the user method), so the CallExpression
-    // walk above never follows the coercion. Edge to the argument's LOCAL toString / toJSON.
-    if (ts.isCallExpression(node) && owner && node.arguments?.[0]) {
-      const callee = node.expression.getText().replace(/\s+/g, "");
-      const arg0 = node.arguments[0];
-      if (callee === "String" && ts.isIdentifier(node.expression) && mayCoerceObject(arg0))
-        chargeCoercion(recOf(), arg0, ["toString", "valueOf"], true);
-      // 4. STRINGIFYING SINK: a call that hands its arguments to a formatter which invokes
-      // `toString`/`toJSON` INSIDE the library — `console.log("entry: %s", e)`, `logger.warn("{}", e)`.
-      // This is the shape the four-way vein was found on (HikariCP → SLF4J `MessageFormatter` →
-      // `PoolEntry.toString` → the clock): statically the site resolves cleanly to the LOG call, so the
-      // Log effect lands and everything looks accounted for, while the argument's own effect is absorbed
-      // silently. No coercion node exists at the call site for the AST walk to see.
-      //
-      // The SITE table is deliberately small and named (console + the logging level-methods, mirroring
-      // the candor-java reference fix); the DENYLIST-over-allowlist rule applies to the TARGETS, which is
-      // where a forgotten case must land on the safe side: we never enumerate which `toString`s are
-      // effectful, we edge to whatever local one exists and let the effect analysis decide. A sink whose
-      // argument is a string/number/plain-object/library type resolves to no local member and therefore
-      // contributes NOTHING — the mechanism is inert on the overwhelming majority of log calls.
-      //
-      // Over-approximation, disclosed: Node only runs a user `toString` for a `%s` specifier position
-      // (a bare extra argument goes through `util.inspect`, which does not). We charge every object-typed
-      // argument rather than parsing the format string, because the format string is frequently not a
-      // literal and an under-charge here is the cardinal sin while an over-charge is merely conservative.
-      else if (isStringifyingSink(node)) {
-        for (const arg of node.arguments) {
-          if (mayCoerceObject(arg)) chargeCoercion(recOf(), arg, ["toString", "valueOf"], true);
-          // A structured logger (pino/bunyan/winston) JSON-serializes its argument → `toJSON`.
-          chargeCoercion(recOf(), arg, ["toJSON"], false);
-        }
+    // STRINGIFYING SINK: a call that hands its arguments to a formatter which invokes `toString`/`toJSON` INSIDE the
+    // library — `console.log("entry: %s", e)`, `logger.warn("{}", e)`. Host and library code, not ECMA-262, so not a
+    // site-table row: the population is named in `isStringifyingSink` (HikariCP → SLF4J `MessageFormatter` →
+    // `PoolEntry.toString` is the shape the four-way vein was found on). Over-approximation, disclosed: Node runs a
+    // user `toString` only for a `%s` position; every object-typed argument is charged rather than parsing a format
+    // string that is frequently not a literal.
+    if (ts.isCallExpression(node) && owner && node.arguments?.length && isStringifyingSink(node)) {
+      for (const arg of node.arguments) {
+        chargeHookMembers(recOf(), arg, ["[Symbol.toPrimitive]", "toString", "valueOf"]);
+        // A structured logger (pino/bunyan/winston) JSON-serializes its argument → `toJSON`.
+        chargeHookMembers(recOf(), arg, ["toJSON"]);
       }
-      // `"" + x` is covered by the binary arm; `String(x)` is the explicit conversion form.
-      else if (callee === "JSON.stringify")
-        // toJSON is consulted regardless of operand shape (JSON.stringify checks for it on any value);
-        // a plain object with no LOCAL toJSON resolves to nothing → pure (no fabrication). NO Symbol-
-        // toPrimitive here — JSON.stringify uses toJSON only, not the primitive-coercion protocol.
-        chargeCoercion(recOf(), arg0, ["toJSON"], false);
     }
   }
   // TAGGED TEMPLATE (LOW): `` tag`…` `` calls `tag(strings, ...subs)`. getResolvedSignature resolves

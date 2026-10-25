@@ -305,6 +305,139 @@ def js_strip(s):
     s = re.sub(r" = \(\): void =>", " = () =>", s)
     return s
 
+
+# ---------------------------------------------------------------- round 2: look-alikes and dispatch controls
+# A LOOK-ALIKE is syntax that resembles a hook site but runs no user code (`const` vs `using`, object spread vs
+# iteration, `in` vs a getter read, `===` vs `==`, a function value stored and never invoked, a data property, a
+# parameter the body reassigns). Each family has a POSITIVE twin that does run the hook, so a CLEAN look-alike
+# is evidence only beside a twin the engine charges. CONTROLS (`wx_*`): a dispatch that must not reach a body
+# outside the receiver's static subtree (FABLE-REVIEW §3.1/§3.2): an UNRELATED class with the same member, a value
+# of EXACT type (constructed in the site), and the RE-KEY leg (a value typed by an open subclass the consumer's
+# override does not extend). Ground truth is executed like every other cell.
+def la_hooks(i):
+    kt = K_table(i)
+    disp = dict(a="[Symbol.dispose](): void;", impl=lambda b: f"[Symbol.dispose](): void {{ {b} }}",
+                base="[Symbol.dispose](): void { }")
+    adisp = dict(a="[Symbol.asyncDispose](): Promise<void>;",
+                 impl=lambda b: f"async [Symbol.asyncDispose](): Promise<void> {{ {b} }}",
+                 base="async [Symbol.asyncDispose](): Promise<void> { }")
+    dprop = dict(a=f"h_{i}: (() => void) | null; m_{i}(): void;",
+                 impl=lambda b: f"h_{i}: (() => void) | null = null; m_{i}(): void {{ {b} }}",
+                 base=f"h_{i}: (() => void) | null = null; m_{i}(): void {{ }}",
+                 obj=lambda b: f"h_{i}: null as (() => void) | null, m_{i}(): void {{ {b} }}")
+    return dict(disp=disp, adisp=adisp, iter=kt["iter"], get=kt["getter"], valof=kt["plus"], tostr=kt["tpl"],
+                meth=kt["meth"], dprop=dprop)
+
+# kind -> (hook family, site body over x, positive?: fn(R) -> does the hook RUN when the value is effectful, async, axis)
+def la_table(i):
+    g, m = f"g_{i}", f"m_{i}"
+    return {
+        # disposal: `const` is not `using`
+        "la_const_disp":  ("disp",  lambda x: f"const r = {x}; void r;", lambda R: False, False),
+        "pos_using":      ("disp",  lambda x: f"using r = {x}; void r;", lambda R: True, False),
+        "la_const_adisp": ("adisp", lambda x: f"const r = {x}; void r;", lambda R: False, True),
+        "pos_ausing":     ("adisp", lambda x: f"await using r = {x}; void r;", lambda R: True, True),
+        # iteration: object spread, for-in, an array literal holding x, a stored iterator method — none iterate x
+        "la_ospread_it":  ("iter",  lambda x: f"void ({{ ...{x} }});", lambda R: False, False),
+        "la_forin":       ("iter",  lambda x: f"for (const k in {x}) {{ void k; }}", lambda R: False, False),
+        "la_arrlit":      ("iter",  lambda x: f"const [a] = [{x}]; void a;", lambda R: False, False),
+        "la_iter_ref":    ("iter",  lambda x: f"const it = {x}[Symbol.iterator]; void it;", lambda R: False, False),
+        "pos_arrbind":    ("iter",  lambda x: f"const [a] = {x}; void a;", lambda R: True, False),
+        "la_reassign_it": ("iter",  lambda x: f"{x} = [1] as any; for (const v of {x}) {{ void v; }}", lambda R: False, False),
+        # getters: `in`, Reflect.has, Object.keys run none; a copy runs only an OWN (object-literal) getter
+        "la_in":          ("get",   lambda x: f'void ("{g}" in {x});', lambda R: False, False),
+        "la_reflect_has": ("get",   lambda x: f'void Reflect.has({x}, "{g}");', lambda R: False, False),
+        "la_keys":        ("get",   lambda x: f"void Object.keys({x});", lambda R: False, False),
+        "la_reassign_get": ("get",  lambda x: f"{x} = {{ {g}: 1 }} as any; void {x}.{g};", lambda R: False, False),
+        "pos_reflect_get": ("get",  lambda x: f'void Reflect.get({x}, "{g}");', lambda R: True, False),
+        "pos_destr":      ("get",   lambda x: f"const {{ {g}: v }} = {x}; void v;", lambda R: True, False),
+        "cp_ospread_get": ("get",   lambda x: f"void ({{ ...{x} }});", lambda R: R == "objlit", False),
+        "cp_assign_get":  ("get",   lambda x: f"void Object.assign({{}}, {x});", lambda R: R == "objlit", False),
+        "cp_rest_get":    ("get",   lambda x: f"const {{ ...r }} = {x}; void r;", lambda R: R == "objlit", False),
+        "cp_values_get":  ("get",   lambda x: f"void Object.values({x});", lambda R: R == "objlit", False),
+        # coercion: `===`, typeof, a stored toString, an arrow never called
+        "la_eqeqeq":      ("valof", lambda x: f"void ({x} === (1 as any));", lambda R: False, False),
+        "la_typeof":      ("valof", lambda x: f"void (typeof {x});", lambda R: False, False),
+        "la_tostr_ref":   ("tostr", lambda x: f"const f = {x}.toString; void f;", lambda R: False, False),
+        "la_tostr_arrow": ("tostr", lambda x: f"const f = (): string => String({x}); void f;", lambda R: False, False),
+        # function values created and stored, never invoked; a data property holding no function
+        "la_stored_ref":  ("meth",  lambda x: f"const f = {x}.{m}; void f;", lambda R: False, False),
+        "la_stored_arrow": ("meth", lambda x: f"const f = (): void => {x}.{m}(); void f;", lambda R: False, False),
+        "la_stored_bind": ("meth",  lambda x: f"const f = {x}.{m}.bind({x}); void f;", lambda R: False, False),
+        "la_dataprop":    ("dprop", lambda x: f"const f = {x}.h_{i}; if (f) f();", lambda R: False, False),
+    }
+LA_R = ["iface", "cls", "any", "objlit"]
+WX_KINDS = ["wx_unrel", "wx_unrel_brand", "wx_exact", "wx_rekey", "wx_rekey_pos"]
+def la_combos():
+    out = []
+    kinds = list(la_table("0").keys())
+    for L in ("same", "dimp", "dsite"):
+        for K in kinds:
+            for R in LA_R:
+                if K.startswith("la_reassign") and R not in ("any", "iface"): continue
+                for N in ("one", "pure"):
+                    out.append((K, R, N, L, "Fs"))
+        for K in WX_KINDS:
+            out.append((K, "cls", "one", L, "Fs"))
+    return out
+
+def la_fragments(i, K, R, N, E):
+    A, B, Ec, Pc, S, Q = (f"{p}_{i}" for p in ("A", "B", "E", "P", "S", "Q"))
+    body = EFF_BODY[E]
+    out = dict(abs=[], impl=[], site=[], q=[], exports_abs=[], exports_impl=[], exports_site=[], wait=60)
+    if K.startswith("wx_"):
+        m = f"m_{i}"
+        out["axis"] = "control"
+        out["abs"].append(f"export class {B} {{ {m}(): void {{ }} }}")
+        out["exports_abs"].append(B)
+        if K in ("wx_rekey", "wx_rekey_pos"):
+            out["abs"].append(f"export class Mid_{i} extends {B} {{ }}"); out["exports_abs"].append(f"Mid_{i}")
+        if K == "wx_exact":
+            out["site"].append(f"export function {S}(): void {{ const v = new {B}(); v.{m}(); }}")
+        elif K in ("wx_rekey", "wx_rekey_pos"):
+            out["site"].append(f"export function {S}(v: Mid_{i}): void {{ v.{m}(); }}")
+        else:
+            out["site"].append(f"export function {S}(v: {B}): void {{ v.{m}(); }}")
+        out["exports_site"].append(S)
+        brand = "#p = 0; " if K == "wx_unrel_brand" else ""
+        ext = {"wx_unrel": "", "wx_unrel_brand": "", "wx_exact": f" extends {B}", "wx_rekey": f" extends {B}",
+               "wx_rekey_pos": f" extends Mid_{i}"}[K]
+        out["impl"].append(f"export class {Ec}{ext} {{ {brand}{m}(): void {{ {body} }} }}"); out["exports_impl"].append(Ec)
+        call = {"wx_exact": f"{S}(); void new {Ec}();", "wx_rekey_pos": f"{S}(new {Ec}());",
+                "wx_rekey": f"{S}(new Mid_{i}()); void new {Ec}();"}.get(K, f"{S}(new {B}()); void new {Ec}();")
+        out["q"].append(f"export function {Q}(): void {{ {call} }}")
+        out["impl_needs"] = ["abs"]; out["site_needs"] = ["abs"]; out["q_needs"] = ["site", "impl", "abs"]
+        out["site_fn"], out["q_fn"] = S, Q
+        out["expect"] = K == "wx_rekey_pos"
+        return out
+    fam, site, pos, asyn = la_table(i)[K]
+    h = la_hooks(i)[fam]
+    out["axis"] = "lookalike" if K.startswith("la_") else ("positive" if K.startswith("pos_") else "copy")
+    if R in ("iface", "any", "objlit"):
+        out["abs"].append(f"export interface {A} {{ {h['a']} }}"); out["exports_abs"].append(A)
+    else:
+        out["abs"].append(f"export class {B} {{ {h['base']} }}"); out["exports_abs"].append(B)
+    def mk(name, b):
+        if R == "objlit":
+            mem = h.get("obj", h["impl"])(b)
+            return f"const {name}_lit = {{ {mem} }};\nexport const {name}: {A} = {name}_lit;"
+        hdr = f"export class {name}" + (f" implements {A}" if R in ("iface", "any") else f" extends {B}")
+        return hdr + " { " + h["impl"](b) + " }"
+    runtime_eff = N == "one"
+    nm = Ec if runtime_eff else Pc
+    out["impl"].append(mk(nm, body if runtime_eff else "void 0;")); out["exports_impl"].append(nm)
+    rty = {"iface": A, "objlit": A, "any": "any", "cls": B}[R]
+    a_kw = "async " if asyn else ""
+    ret = "Promise<void>" if asyn else "void"
+    out["site"].append(f"export {a_kw}function {S}(x: {rty}): {ret} {{ {site('x')} }}"); out["exports_site"].append(S)
+    out["impl_needs"] = ["abs"]; out["site_needs"] = ["abs"]; out["q_needs"] = ["site", "impl"]
+    val = nm if R == "objlit" else f"new {nm}()"
+    if asyn: out["q"].append(f"export async function {Q}(): Promise<void> {{ await {S}({val}); }}")
+    else: out["q"].append(f"export function {Q}(): void {{ {S}({val}); }}")
+    out["site_fn"], out["q_fn"] = S, Q
+    out["expect"] = runtime_eff and pos(R)
+    return out
+
 # ---------------------------------------------------------------- locations
 # Each location maps the four roles to (package, file). "C" = the scanned consumer, "D" = the dependency.
 LOCS_TS = {
@@ -322,7 +455,7 @@ def tsconfig(allow_js):
     return json.dumps({"compilerOptions": {"target": "ES2022", "module": "commonjs", "outDir": "build", "rootDir": "src",
                                            "strict": False, "noEmitOnError": False, "skipLibCheck": True,
                                            "esModuleInterop": True, "declaration": True, "allowJs": allow_js,
-                                           "checkJs": False, "types": ["node"], "lib": ["ES2022", "DOM"]},
+                                           "checkJs": False, "types": ["node"], "lib": ["ES2022", "DOM", "ESNext.Disposable"]},
                        "include": ["src"]}, indent=1)
 
 def main():
@@ -363,6 +496,21 @@ def main():
                         for t in fr[role]:
                             add((lang, L, pkg), fname, cell, role, t)
                     cell["_fr"] = fr
+    # ---- call-target round 2: the NON-INVOKING LOOK-ALIKE axis and the dispatch CONTROLS (appended after the
+    # main loop so every existing cell keeps its id). Executed ground truth decides every verdict.
+    for (K, R, N, L, E) in la_combos():
+        cid += 1
+        i = f"{cid:05d}"
+        fr = la_fragments(i, K, R, N, E)
+        cell = dict(id=i, lang="ts", L=L, K=K, R=R, N=N, E=E, expect_effect=fr["expect"], site_fn=fr["site_fn"],
+                    q_fn=fr["q_fn"], wait=fr.get("wait", 0), site_in_consumer=(LOCS_TS[L]["site"][0] == "C"), axis=fr["axis"])
+        cells.append(cell)
+        loc = LOCS_TS[L]
+        for role in ("abs", "impl", "site", "q"):
+            pkg, f = loc[role]
+            for t in fr[role]:
+                add(("ts", L, pkg), f"c{i}_{f}.ts", cell, role, t)
+        cell["_fr"] = fr
     # emit packages
     for (lang, L, pkg), fmap in files.items():
         pass

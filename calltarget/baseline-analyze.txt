@@ -1,4 +1,4 @@
-TOTAL units 29702 {'CHARGED': 5891, 'CLEAN': 7018, 'DISCLOSED': 5328, 'OVERDISC': 4436, 'SILENT': 4954, 'DISC-INV': 2075}
+TOTAL units 32133 {'CHARGED': 7527, 'CLEAN': 8468, 'DISCLOSED': 5410, 'OVERDISC': 5128, 'FABRICATED': 14, 'DISC-INV': 2350, 'SILENT': 3236}
 row/gate mismatches (row charged != deny E fired): 0
 INVALID 0 []
 
@@ -7,16 +7,16 @@ key                                         CHARGED  DISCLOSED   DISC-INV     SI
 js-dimp-C                                         0       1116          0        456        294        756          0
 js-dimp-P                                         0       1116          0        456        294        756          0
 js-dimp-U                                         0       1116          0        456        294        756          0
-js-mod-U                                         92        180          0        252        224        126          0
-js-same-U                                       528        444          0        600        696        354          0
-ts-dimp-C                                      1338        384          0        672        834        636          0
-ts-dimp-P                                      1338        384          0        672        834        636          0
-ts-dimp-U                                         0        282       1722        390       1302        168          0
-ts-dsite-C                                       81         61          0        212        126         52          0
-ts-dsite-P                                       81         61          0        212        126         52          0
-ts-dsite-U                                        1          0        353          0        178          0          0
-ts-mod-U                                        608         46          0        144        454         36          0
-ts-same-U                                      1824        138          0        432       1362        108          0
+js-mod-U                                        108        180          0        236        220        130          0
+js-same-U                                       672        444          0        456        666        384          0
+ts-dimp-C                                      1772        398          0        274       1002        856          4
+ts-dimp-P                                      1772        398          0        274       1002        856          4
+ts-dimp-U                                         0        296       1972        176       1660        202          0
+ts-dsite-C                                       81         72          0        226        300         74          0
+ts-dsite-P                                       81         72          0        226        300         74          0
+ts-dsite-U                                        1          0        378          0        374          0          0
+ts-mod-U                                        752         46          0          0        432         58          0
+ts-same-U                                      2288        156          0          0       1630        226          6
 
 == by arm x role
 key                                         CHARGED  DISCLOSED   DISC-INV     SILENT      CLEAN   OVERDISC FABRICATED
@@ -26,31 +26,35 @@ key                                         CHARGED  DISCLOSED   DISC-INV     SI
 ('js-dimp-P', 'site')                             0        396          0        390        261        264          0
 ('js-dimp-U', 'q')                                0        720          0         66         33        492          0
 ('js-dimp-U', 'site')                             0        396          0        390        261        264          0
-('js-mod-U', 'q')                                48         88          0        126        112         63          0
-('js-mod-U', 'site')                             44         92          0        126        112         63          0
-('js-same-U', 'q')                              270        216          0        300        348        177          0
-('js-same-U', 'site')                           258        228          0        300        348        177          0
-('ts-dimp-C', 'q')                              669        192          0        336        417        318          0
-('ts-dimp-C', 'site')                           669        192          0        336        417        318          0
-('ts-dimp-P', 'q')                              669        192          0        336        417        318          0
-('ts-dimp-P', 'site')                           669        192          0        336        417        318          0
-('ts-dimp-U', 'q')                                0        141       1002         54        651         84          0
-('ts-dimp-U', 'site')                             0        141        720        336        651         84          0
-('ts-dsite-C', 'q')                              81         61          0        212        126         52          0
-('ts-dsite-P', 'q')                              81         61          0        212        126         52          0
-('ts-dsite-U', 'q')                               1          0        353          0        178          0          0
-('ts-mod-U', 'q')                               304         23          0         72        227         18          0
-('ts-mod-U', 'site')                            304         23          0         72        227         18          0
-('ts-same-U', 'q')                              912         69          0        216        681         54          0
-('ts-same-U', 'site')                           912         69          0        216        681         54          0
+('js-mod-U', 'q')                                56         88          0        118        110         65          0
+('js-mod-U', 'site')                             52         92          0        118        110         65          0
+('js-same-U', 'q')                              342        216          0        228        333        192          0
+('js-same-U', 'site')                           330        228          0        228        333        192          0
+('ts-dimp-C', 'q')                              886        199          0        137        501        428          2
+('ts-dimp-C', 'site')                           886        199          0        137        501        428          2
+('ts-dimp-P', 'q')                              886        199          0        137        501        428          2
+('ts-dimp-P', 'site')                           886        199          0        137        501        428          2
+('ts-dimp-U', 'q')                                0        148       1035         39        830        101          0
+('ts-dimp-U', 'site')                             0        148        937        137        830        101          0
+('ts-dsite-C', 'q')                              81         72          0        226        300         74          0
+('ts-dsite-P', 'q')                              81         72          0        226        300         74          0
+('ts-dsite-U', 'q')                               1          0        378          0        374          0          0
+('ts-mod-U', 'q')                               376         23          0          0        216         29          0
+('ts-mod-U', 'site')                            376         23          0          0        216         29          0
+('ts-same-U', 'q')                             1144         78          0          0        815        113          3
+('ts-same-U', 'site')                          1144         78          0          0        815        113          3
 
 == by K (all arms)
 key                                         CHARGED  DISCLOSED   DISC-INV     SILENT      CLEAN   OVERDISC FABRICATED
-await                                             0         90         64        674        455         63          0
+await                                           400         98        124        206        197        321          0
 callm                                           332        364        112         20        232        286          0
+cp_assign_get                                     0          2          1          8         75          2          0
+cp_ospread_get                                    0          2          1          8         55         22          0
+cp_rest_get                                       0          2          1          8         75          2          0
+cp_values_get                                     0          2          1          8         75          2          0
 defer                                           372        324        112         20        232        286          0
 elem                                            348        364        112          4        214        304          0
-eqeq                                              0         90         64        674        455         63          0
+eqeq                                            400         94        124        210        381        137          0
 fnparam                                          11         18          0          0          9         20          0
 fnprop                                          244        508         76          0         78        440          0
 fnreg                                             0         22          7          0          7         22          0
@@ -58,10 +62,34 @@ getter                                          156        360         22       
 hofref                                          372        324        112         20        232        286          0
 iter                                            156        368         52        252        296        222          0
 json                                            400         94        124        210        381        137          0
-jsonnest                                          0         90         64        674        455         63          0
+jsonnest                                        400         94        124        210        381        137          0
+la_arrlit                                         0          0          0          0         88          0          0
+la_const_adisp                                    0          0          0          0         88          0          0
+la_const_disp                                     0          0          0          0         88          0          0
+la_dataprop                                       0          0          0          0         20         68          0
+la_eqeqeq                                         0          0          0          0         88          0          0
+la_forin                                          0          0          0          0         88          0          0
+la_in                                             0          0          0          0         88          0          0
+la_iter_ref                                       0          0          0          0         88          0          0
+la_keys                                           0          0          0          0         88          0          0
+la_ospread_it                                     0          0          0          0         68         20          0
+la_reassign_get                                   0          0          0          0         40          2          2
+la_reassign_it                                    0          0          0          0         22         20          2
+la_reflect_has                                    0          0          0          0         88          0          0
+la_stored_arrow                                   0          0          0          0         88          0          0
+la_stored_bind                                    0          0          0          0         68         20          0
+la_stored_ref                                     0          0          0          0         88          0          0
+la_tostr_arrow                                    0          0          0          0         88          0          0
+la_tostr_ref                                      0          0          0          0         88          0          0
+la_typeof                                         0          0          0          0         88          0          0
 meth                                            348        364        112          4        214        304          0
-numcall                                           0         90         64        674        455         63          0
+numcall                                         400         94        124        210        381        137          0
 plus                                            400         94        124        210        381        137          0
+pos_arrbind                                       6         10          6         22         34         10          0
+pos_ausing                                        6          2          7         29         42          2          0
+pos_destr                                         6         20          4         14         24         20          0
+pos_reflect_get                                   6         20          4         14         24         20          0
+pos_using                                         6          2          7         29         42          2          0
 spread                                          156        368         52        252        296        222          0
 static                                           20          0          6          0         26          0          0
 str                                             400         94        124        210        381        137          0
@@ -69,36 +97,41 @@ thenref                                         372        324        112       
 tpl                                             400         94        124        210        381        137          0
 tpl_u                                           352         90        106        280        455         63          0
 unplus                                          400         94        124        210        381        137          0
+wx_exact                                          0          0          0          0          5          0          6
+wx_rekey                                          0          0          0          0          7          0          4
+wx_rekey_pos                                      6          0          3          2          0          0          0
+wx_unrel                                          0          0          0          0         11          0          0
+wx_unrel_brand                                    0          0          0          0         11          0          0
 xtostr                                          348        364        112          4        214        304          0
 xtostr_u                                        304        336         94         94        298        220          0
 
 == by R (all arms)
 key                                         CHARGED  DISCLOSED   DISC-INV     SILENT      CLEAN   OVERDISC FABRICATED
-('js', 'jcls_doc')                              272        610          0        262        534        610          0
-('js', 'jcls_untyped')                          144        714          0        286        396        748          0
+('js', 'jcls_doc')                              336        610          0        198        518        626          0
+('js', 'jcls_untyped')                          192        714          0        238        384        760          0
 ('js', 'jmixin_untyped')                          8        744          0        340        170        376          0
-('js', 'jobj_untyped')                          108        548          0        488        280        292          0
+('js', 'jobj_untyped')                          156        548          0        440        274        298          0
 ('js', 'jproto_doc')                             80        594          0        470        235        337          0
 ('js', 'jproto_untyped')                          8        762          0        374        187        385          0
 ('ts', '-')                                      31         40         13          0         42         42          0
-('ts', 'abs')                                   608        152        248        268        946        264          0
-('ts', 'any')                                   336        572        140        228        328        310          0
-('ts', 'cls')                                   608         92        248        328       1120         90          0
-('ts', 'conc')                                  312         36        102        122        528         44          0
-('ts', 'field')                                 632          0        254        390        474        164          0
-('ts', 'gen')                                   680        116        248        232        416        222          0
-('ts', 'iface')                                 680         36        260        300        456        182          0
-('ts', 'objlit')                                584         48        200        444        450        188          0
-('ts', 'struct')                                488        228        260        300        456        182          0
-('ts', 'union')                                 312         36        102        122          0          0          0
+('ts', 'abs')                                   768        168        272         68        862        348          0
+('ts', 'any')                                   506        592        171         62        747        452          0
+('ts', 'cls')                                   784        108        283        167       1601        160         10
+('ts', 'conc')                                  392         36        114         30        508         64          0
+('ts', 'field')                                 792          0        278        206        418        220          0
+('ts', 'gen')                                   840        116        272         48        360        278          0
+('ts', 'iface')                                 850         48        292        141        929        266          4
+('ts', 'objlit')                                744         66        257        308        833        278          0
+('ts', 'struct')                                648        228        284        116        400        238          0
+('ts', 'union')                                 392         36        114         30          0          0          0
 
 == by E
 key                                         CHARGED  DISCLOSED   DISC-INV     SILENT      CLEAN   OVERDISC FABRICATED
-('Exec', 'dimp')                                892       1466        574       1034       1284       1236          0
-('Exec', 'same')                                784        194          0        344        686        154          0
-('Fs', 'dimp')                                  892       1466        574       1034       1284       1236          0
-('Fs', 'dsite')                                 163        122        353        424        430        104          0
-('Fs', 'mod')                                   700        226          0        396        678        162          0
-('Fs', 'same')                                  784        194          0        344        686        154          0
-('Net', 'dimp')                                 892       1466        574       1034       1284       1236          0
-('Net', 'same')                                 784        194          0        344        686        154          0
+('Exec', 'dimp')                               1180       1466        654        666       1168       1352          0
+('Exec', 'same')                                976        194          0        152        654        186          0
+('Fs', 'dimp')                                 1184       1508        664        760       2210       1478          8
+('Fs', 'dsite')                                 163        144        378        452        974        148          0
+('Fs', 'mod')                                   860        226          0        236        652        188          0
+('Fs', 'same')                                 1008        212          0        152        988        238          6
+('Net', 'dimp')                                1180       1466        654        666       1168       1352          0
+('Net', 'same')                                 976        194          0        152        654        186          0
