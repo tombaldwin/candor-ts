@@ -3834,6 +3834,9 @@ function chargeInvokedRef(rec, node, invokedRef, args, whyTag) {
   // unit, but an aliased local var resolves to its VARIABLE decl (not a unit), which dropped the
   // edge silent-pure. `resolveFnRefUnit` chases the initializer alias to the real fn.
   const t = (d2 && nodeName.get(d2)) || resolveFnRefUnit(invokedRef);
+  // ⟨call-target round 1, R1408 T1⟩ `b.m.call(b)` invokes whatever `m` the value holds: every body the target
+  // oracle names, beside the declared one (which may be an abstract member with no body, or one of several).
+  if (ts.isPropertyAccessExpression(invokedRef) || ts.isElementAccessExpression(invokedRef)) chargeMemberRefTargets(rec, invokedRef);
   if (t) rec.edges.add(t);
   else {
     // Not a project unit — but the invoked reference may be a κ-modeled BUILTIN function
@@ -5318,7 +5321,7 @@ for (const { mod, name, ident } of exportAliasCandidates) {
         // `Base` declares NO toString (it inherits the pure `Object.prototype.toString`) has no
         // classOverrides entry at all, yet a `Base`-typed operand can be a `Sub` at runtime and run its
         // effectful toString. Index every local class under each of its local ancestors so
-        // coercionTargets can fan out over the receiver's subtree.
+        // the coercion lookup (`chargeCoercion`) can fan out over the receiver's subtree.
         for (let anc = localBaseClassOf(node), guard = 0; anc && guard++ < 64; anc = localBaseClassOf(anc)) {
           if (!classDescendants.has(anc)) classDescendants.set(anc, []);
           const arr = classDescendants.get(anc);
@@ -7042,7 +7045,50 @@ function uninformativeType(t) {
       && t.getConstructSignatures().length === 0 && !checker.getIndexInfosOfType?.(t)?.length;
   } catch { return false; }
 }
-function receiverValueTypes(expr, depth = 0, seen = new Set()) {
+// Is parameter `p` the target of an assignment anywhere in its function's body (`p = …`, `p += …`, `p++`, or a
+// destructuring target)? Cached per declaration.
+const paramReassignedCache = new Map();
+function paramReassigned(p) {
+  if (paramReassignedCache.has(p)) return paramReassignedCache.get(p);
+  let hit = false;
+  const sym = ts.isIdentifier(p.name) ? checker.getSymbolAtLocation(p.name) : null;
+  const isP = (e) => { e = e && skipParens(e); return !!e && ts.isIdentifier(e) && checker.getSymbolAtLocation(e) === sym; };
+  const body = p.parent?.body;
+  const visit = (n) => {
+    if (hit) return;
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+        && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+      const l = skipParens(n.left);
+      if (isP(l)) { hit = true; return; }
+      if (ts.isObjectLiteralExpression(l) || ts.isArrayLiteralExpression(l)) {
+        const scan = (x) => { if (isP(x)) hit = true; else ts.forEachChild(x, scan); };
+        scan(l);
+      }
+    }
+    if ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n))
+        && (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) && isP(n.operand)) { hit = true; return; }
+    ts.forEachChild(n, visit);
+  };
+  if (sym && body) visit(body);
+  else hit = !sym;            // a destructured parameter: not answered here, so not a fact
+  paramReassignedCache.set(p, hit);
+  return hit;
+}
+const skipParens = (e) => { while (e && (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e) || ts.isSatisfiesExpression?.(e) || ts.isTypeAssertionExpression?.(e))) e = e.expression; return e; };
+// Can a value of type `vt` be what an expression statically typed `t` holds? The checker's own assignability; a
+// type parameter is asked through its constraint. Fails OPEN (true) when the checker cannot answer.
+function valueFitsStatic(vt, t) {
+  try {
+    let tt = t;
+    if (tt && (tt.flags & ts.TypeFlags.TypeParameter)) tt = checker.getBaseConstraintOfType(tt) ?? tt;
+    if (!tt || anyishType(tt) || typeof checker.isTypeAssignableTo !== "function") return true;
+    return checker.isTypeAssignableTo(vt, tt);
+  } catch { return true; }
+}
+// `ungated` (the target oracle's question): answer for a TYPED receiver too. The value a parameter typed `I`
+// holds is as much a fact as the value an `any` parameter holds, and the gate below made precise typing LESS
+// sound (a getter through `x: I` silent where the same body through `x: any` was charged — measured).
+function receiverValueTypes(expr, depth = 0, seen = new Set(), ungated = false) {
   if (!expr || depth > 6) return [];
   let t; try { t = checker.getTypeAtLocation(expr); } catch { t = null; }
   const inner = peelAssertions(expr);
@@ -7051,7 +7097,7 @@ function receiverValueTypes(expr, depth = 0, seen = new Set()) {
     let ti; try { ti = checker.getTypeAtLocation(inner); } catch { ti = null; }
     return [...(ti && !anyishType(ti) ? [ti] : []), ...below];
   }
-  if (!uninformativeType(t) || !ts.isIdentifier(expr)) return [];
+  if ((!uninformativeType(t) && !ungated) || !ts.isIdentifier(expr)) return [];
   const sym = checker.getSymbolAtLocation(expr);
   const d = sym?.valueDeclaration;
   if (!sym || !d || seen.has(sym)) return [];
@@ -7066,45 +7112,266 @@ function receiverValueTypes(expr, depth = 0, seen = new Set()) {
   seen.add(sym);
   const args = paramArgs.get(sym);
   if (!args || paramFnEscaped(paramOwnerOf.get(sym))) return [];
+  // ⟨call-target round 1⟩ For a TYPED parameter the call-site value is a fact only where it is still the value: a
+  // parameter the body ASSIGNS holds something else after the assignment (measured on got: `options =
+  // cloneRaw(options)` then `options[k]` read the CALLER's `Options` getters — a body that read never runs), and a
+  // value the use site's narrowed type excludes is not there either. Both checks apply to the ungated question
+  // only, so the `any` receiver R246 answers is exactly as it was.
+  if (ungated && !uninformativeType(t) && paramReassigned(d)) return [];
   const out = [];
   for (const a of args) {
     if (!a) continue;
     let ta; try { ta = checker.getTypeAtLocation(a); } catch { ta = null; }
-    if (ta && !anyishType(ta)) out.push(ta);   // a VALUE's own type, even `{}`, is a fact about it
+    if (ta && !anyishType(ta) && !(ungated && !uninformativeType(t) && !valueFitsStatic(ta, t))) out.push(ta);   // a VALUE's own type, even `{}`, is a fact about it
     out.push(...receiverValueTypes(a, depth + 1, seen));
   }
   return out;
 }
 const dedupeHits = (hits) => { const seen = new Set(); return hits.filter((h) => !seen.has(h.decl) && seen.add(h.decl)); };
+// ── THE TARGET ORACLE (call-target round 1; SOUNDNESS R1408, R1311) ─────────────────────────────────────────
+//
+// "Which bodies can run when member M is invoked on the value V evaluates to?" had THIRTEEN readers, each with
+// its own subset of the answer (calltarget-analysis/ts §1, measured 2026-10-24 over 8,099 executed cells):
+// the coercion reader walked LOCAL interfaces and class descendants but no type parameter; the accessor reader
+// walked class overrides and no interface implementor; the iteration and `using` readers walked only the
+// type's OWN declaration; a member REFERENCE (`setTimeout(b.m)`, `b.m.call(b)`) edged to the declared body and
+// no override. Same receiver, same member, four answers — and typing a parameter MORE precisely made the
+// engine LESS sound, because the value-provenance answer was gated on the static type being uninformative.
+//
+// This is the one answer those readers now ask. The bodies are:
+//   · the member the value's type declares, and every override of it inside that type's own subtree
+//     (`dispatchDescent` — the SAME scoping `memberDispatchBodies` gives the explicit call arm, so a sibling
+//     subclass never enters and a `super.m` names one body and descends nowhere);
+//   · for an INTERFACE arm, every visible implementor (`interfaceImpls`, and `foreignInterfaceImpls` for a
+//     dependency's interface a local class implements), the member each supplies or inherits from a local
+//     ancestor, and every subclass of a class implementor;
+//   · for a CLASS arm, every local subclass that declares the member where the class itself does not (the
+//     `toString` a subclass adds over a base that inherits `Object.prototype.toString`);
+//   · a type parameter through its constraint, a union/intersection through every arm;
+//   · and all of that again over every type the value is SHOWN to carry: an assertion's operand, a `const`
+//     initializer, and what every visible call site passes to a parameter (`receiverValueTypes`) — asked
+//     whatever the static type says, not only when it says nothing.
+//
+// THE MINTED-UNIT RULE. A local body the oracle names but this scan minted no unit for cannot carry an edge,
+// and counting it as resolved suppresses whatever hedge the reader had with nothing in its place. Measured on
+// the analysis prototype's first run: a JS object-literal `[Symbol.iterator]` with no unit took the opaque-
+// iterable `Unknown` away and supplied no edge — 24 cells went DISCLOSED -> SILENT. So such a body is returned
+// in `unminted`, never in `units`, and `chargeOracleBodies` DISCLOSES it (`dispatch:<owner>.<member>`). A
+// declaration with NO body (an interface signature, an `abstract` member, an overload) is not a body and is
+// neither: it names where to look, which is the walk above.
+//
+// What it does NOT answer (call-target rounds 2 and 3, by design): whether a SITE invokes user code at all
+// (`==`, `Number(x)`, nested JSON, `await` — R1248's site table), and any body in another scan (the chained
+// WIRE: `dispatchesOn` and the published unions — R1417/R1418/R1419). External declarations it meets are
+// returned in `external` for the reader's own boundary handling, exactly as each reader treated them before.
+//
+// `CANDOR_CT_ORACLE_OFF=1` restricts every reader to the reach it had at 0.40.16 (the matrix's same-file
+// control); it is a measurement switch, not a mode.
+const CT_ORACLE = !process.env.CANDOR_CT_ORACLE_OFF;
+// The reach a reader had BEFORE the oracle — read only with the switch off. Each line is a measured statement
+// of what that reader used to ask, not a policy: with the switch on every reader gets everything.
+const CT_LEGACY_REACH = {
+  coercion: { iface: "local", cls: true, descent: "unscoped" },
+  accessor: { iface: null, cls: false, descent: "scoped" },
+  iteration: { iface: null, cls: false, descent: "none", values: false },
+  using: { iface: null, cls: false, descent: "none", values: false },
+  memberref: null,
+};
+// A declaration that IS a body (something can run), as opposed to one that only names a member.
+function isBodyDecl(d) {
+  if (!d) return false;
+  if (ts.isMethodDeclaration(d) || ts.isGetAccessorDeclaration(d) || ts.isSetAccessorDeclaration(d)
+      || ts.isFunctionDeclaration(d) || ts.isConstructorDeclaration(d)) return !!d.body;
+  if (ts.isArrowFunction(d) || ts.isFunctionExpression(d)) return true;
+  // A property is a body only when it HOLDS one: `m = () => …`, `m: function () {…}`. A data property (`h = null`,
+  // later assigned a function elsewhere) names no body here (measured: node-slack-sdk's `pingHandler: … | null =
+  // null`, passed by reference, was disclosed as an unminted body).
+  if (ts.isPropertyDeclaration(d) || ts.isPropertyAssignment(d)) { const i = propFnInit(d); return !!i; }
+  return false;
+}
+function propFnInit(d) {
+  let i = d?.initializer;
+  while (i && (ts.isParenthesizedExpression(i) || ts.isAsExpression(i) || ts.isSatisfiesExpression?.(i))) i = i.expression;
+  return i && (ts.isArrowFunction(i) || ts.isFunctionExpression(i)) ? i : null;
+}
+// The member declarations `key` names on type `ty`: a plain name, or a well-known-symbol prefix list.
+function oracleMemberDecls(ty, key) {
+  let p = null;
+  try {
+    p = key.sym ? wellKnownSymbolMember(ty, key.sym) : (ty.getProperty?.(key.name) ?? checker.getPropertyOfType(ty, key.name));
+  } catch { p = null; }
+  return p?.declarations ?? [];
+}
+// The member an implementor (a class, class expression or object literal) supplies under one of `texts`, or
+// inherits from the nearest LOCAL ancestor that declares it. An ancestor declaring the name in a kind `accept`
+// refuses SHADOWS anything further up (a getter there hides a method above), so the walk stops with nothing.
+function oracleImplMember(impl, texts, accept) {
+  for (let cur = impl, g = 0; cur && g++ < 64; cur = ts.isClassLike(cur) ? localBaseClassOf(cur) : null) {
+    const named = (cur.members ?? cur.properties ?? []).filter((x) => texts.includes(x.name?.getText?.())
+      && !ts.isConstructorDeclaration(x) && !(ts.canHaveModifiers(x) && (ts.getCombinedModifierFlags(x) & ts.ModifierFlags.Static)));
+    if (named.length) return named.find((x) => !accept || accept(x)) ?? null;
+    if (!ts.isClassLike(cur)) return null;
+  }
+  return null;
+}
+// The local class a type's instances belong to, or null — the root a dispatch scopes its descent to.
+function oracleLocalClassOf(ty) {
+  return (ty?.getSymbol?.()?.declarations ?? []).find((d) => ts.isClassDeclaration(d) && declIsLocal(d)) ?? null;
+}
+// The overrides a dispatch that resolved to `decl` can run, scoped to `rootClass`'s subtree (`memberDispatchBodies`,
+// conformers included). The one descent every oracle reader shares; `super` dispatches nowhere.
+function dispatchDescent(decl, rootClass, recvExpr, mode = "scoped") {
+  if (!decl || isSuperReceiver(recvExpr) || mode === "none") return [];
+  if (mode === "unscoped") return overrideDescent(decl);
+  return memberDispatchBodies(decl, rootClass);
+}
+// Sort named declarations into the three outcomes every reader distinguishes: a minted local body (an edge), a
+// local body with no unit (a disclosure), and a declaration in another scan (the reader's boundary handling).
+// A local declaration with no body and no unit adds nothing: it is a place to look, and the walk has looked.
+function oracleCollector(accept) {
+  const res = { units: [], bodies: [], unminted: [], external: [], wide: false };
+  const add = (d) => {
+    if (!d || res.bodies.includes(d) || res.unminted.includes(d) || res.external.includes(d)) return;
+    if (accept && !accept(d)) return;
+    if (!declIsLocal(d)) { res.external.push(d); return; }
+    // A declaration this scan minted a unit for is edged whatever its shape: an `abstract` member's unit is the
+    // producer's own class-override answer and carries that answer's hedge (measured: dropping it as "not a
+    // body" took a dependency site's `dispatch:` disclosure away and left 28 chained matrix cells SILENT).
+    const fi = (ts.isPropertyDeclaration(d) || ts.isPropertyAssignment(d)) ? propFnInit(d) : null;
+    const u = callTargetUnit(d) ?? (fi ? callTargetUnit(fi) : undefined);
+    if (u) { res.bodies.push(d); if (!res.units.includes(u)) res.units.push(u); }
+    else if (isBodyDecl(d)) res.unminted.push(d);
+  };
+  return { res, add };
+}
+// The override half alone, for a reader that already holds the declaration a dispatch resolved to (the copy and
+// reflective-set accessor readers enumerate a type's properties rather than name one member). The bound is the
+// explicit arm's (`CHA_FANOUT_LIMIT` over the receiver-scoped one-level count): past it the answer is too wide
+// to call complete and is DISCLOSED, with every edge it found kept beside the disclosure.
+function descentBodies(decl, recvExpr, accept = null) {
+  const { res, add } = oracleCollector(accept);
+  const root = localReceiverClass(recvExpr);
+  for (const b of dispatchDescent(decl, root, recvExpr)) add(b);
+  const one = classOverrides.get(decl) ?? [];
+  if (isSuperReceiver(recvExpr)) { probeR871("super-accessor", decl, one.length); return res; }
+  const direct = (root ? one.filter((om) => classInSubtree(overrideOwner(om), root)) : one).length;
+  res.wide = direct > CHA_FANOUT_LIMIT;
+  if (!res.wide) probeR871("accessor", decl, res.bodies.length + res.unminted.length + res.external.length - direct);
+  return res;
+}
+function bodiesFor(valueExpr, key, opts = {}) {
+  const { accept = null, elements = false, reader = "coercion" } = opts;
+  const reach = CT_ORACLE ? { iface: "all", cls: true, descent: "scoped", typeParams: true, ungated: true }
+    : (CT_LEGACY_REACH[reader] ?? { iface: null, cls: false, descent: "none" });
+  const { res, add } = oracleCollector(accept);
+  if (!valueExpr) return res;
+  const texts = key.texts ?? [key.name];
+  const superRecv = isSuperReceiver(valueExpr);
+  const addWithDescent = (d, root) => {
+    add(d);
+    if (d && declIsLocal(d)) for (const b of dispatchDescent(d, root, valueExpr, reach.descent)) add(b);
+  };
+  const seen = new Set();
+  const visit = (ty, depth) => {
+    if (!ty || depth > 4 || seen.has(ty)) return;
+    seen.add(ty);
+    if ((ty.flags & ts.TypeFlags.TypeParameter) && reach.typeParams) {
+      let c; try { c = checker.getBaseConstraintOfType(ty); } catch { c = null; }
+      if (c && c !== ty) visit(c, depth + 1);
+      return;
+    }
+    if (ty.isUnionOrIntersection?.()) { for (const p of ty.types) visit(p, depth + 1); return; }
+    const root = oracleLocalClassOf(ty);
+    for (const d of oracleMemberDecls(ty, key)) addWithDescent(d, root);
+    if (!superRecv) {
+      for (const d of (ty.getSymbol?.() ?? ty.aliasSymbol)?.declarations ?? []) {
+        if (ts.isInterfaceDeclaration(d) && reach.iface && (reach.iface === "all" || declIsLocal(d))) {
+          // ⟨R574⟩ a dependency's interface whose value this package's OWN product returned (`const g = mk(); g.m`)
+          // is that package's implementation, not one of ours: our implementors are not candidates for it.
+          const fm = declIsLocal(d) ? null : declModule(d);
+          const ownProduct = fm && !fm.startsWith("<")
+            && packageProducedReceiver(valueExpr, fm.startsWith("@types/") ? fm.slice("@types/".length) : fm);
+          const impls = [...(interfaceImpls.get(d) ?? []),
+            ...(reach.iface === "all" && !ownProduct ? foreignInterfaceImpls.get(d) ?? [] : [])];
+          for (const c of impls) {
+            const cls = ts.isClassLike(c) ? c : null;
+            addWithDescent(oracleImplMember(c, texts, accept), cls);
+            if (cls) for (const sub of classDescendants.get(cls) ?? []) addWithDescent(oracleImplMember(sub, texts, accept), sub);
+          }
+        } else if (ts.isClassDeclaration(d) && reach.cls && declIsLocal(d)) {
+          for (const sub of classDescendants.get(d) ?? []) addWithDescent(oracleImplMember(sub, texts, accept), sub);
+        }
+      }
+    }
+    // An array's own coercion member is the pure es-lib builtin, which coerces every ELEMENT (`join`).
+    if (elements) { const el = checker.getIndexTypeOfType?.(ty, ts.IndexKind.Number); if (el) visit(el, depth + 1); }
+  };
+  let t0; try { t0 = checker.getTypeAtLocation(valueExpr); } catch { t0 = null; }
+  visit(t0, 0);
+  if (reach.values !== false) for (const vt of receiverValueTypes(valueExpr, 0, new Set(), reach.ungated)) visit(vt, 0);
+  res.add = add;
+  return res;
+}
+// A member REFERENCE `recv.m` / `recv["m"]` handed to something that invokes it — a HOF, a timer, a promise
+// continuation, `.call`/`.apply`/`Reflect.apply` (R1408 T1). The reference resolves to ONE declaration, and the
+// arms that follow it edge to that body alone: a base- or abstract-class receiver never reached the override the
+// value actually holds (EXECUTED: `setTimeout(b.m)` with `b: Base` holding a `Sub` — the caller silent while the
+// same report charged `Sub.m`). The oracle names every body; an interface member's implementors are named too,
+// beside the wire join (`chargeMemberRefDispatch`), which still owns `dispatchesOn` and the chained half.
+const isInvocableMemberDecl = (d) => isCoercionMemberDecl(d);
+function chargeMemberRefTargets(rec, ref) {
+  if (!CT_ORACLE || !rec || !ref) return false;
+  const name = ts.isPropertyAccessExpression(ref) ? ref.name.text
+    : ts.isElementAccessExpression(ref) ? accessedMemberName(ref) : null;
+  if (!name || isSuperReceiver(ref.expression)) return false;
+  return chargeOracleBodies(rec, bodiesFor(ref.expression, { name }, { accept: isInvocableMemberDecl, reader: "memberref" }), name);
+}
+// Apply an oracle answer to `rec`: an edge into every minted body, and a DISCLOSURE for every named body that
+// has no unit (the minted-unit rule). Returns whether anything was edged.
+// REACH PROBE (`CANDOR_CT_REACH=1`), counted on the ANSWER, not on entry: an oracle reply that edged a body or
+// disclosed one. For `bin/corpus-ab.py --mark CT-REACH`.
+const CT_REACH = process.env.CANDOR_CT_REACH ? (m, res) => {
+  if (res.units.length || res.unminted.length || res.wide)
+    console.error(`CT-REACH ${m} units=${res.units.length} unminted=${res.unminted.length}${res.wide ? " wide" : ""}`);
+} : null;
+function chargeOracleBodies(rec, res, memberText, ownerDecl = null, legacyDiscloses = false) {
+  if (!rec) return false;
+  CT_REACH?.(memberText, res);
+  for (const u of res.units) rec.edges.add(u);
+  if ((res.unminted.length && (CT_ORACLE || legacyDiscloses)) || res.wide) {
+    rec.direct.add("Unknown");
+    rec.why.add(dispatchWhy(memberOwnerQual(ownerDecl ?? res.unminted[0] ?? res.bodies[0]), memberText));
+  }
+  return res.units.length > 0;
+}
+// The accessor bodies a forcing site `recv.key` / `recv[k]` runs, from the target oracle: the accessor the
+// checker resolved, every override and implementor accessor `bodiesFor` names (an interface, type-literal,
+// generic or field receiver reaches its implementors' getters — R1408 T2, silent at 0.40.16), and every type
+// the receiver's VALUE is shown to carry (R246). The override descent of each hit is `recordAccessorHit`'s.
 function accessorsAt(propNode, kind /* "get" | "set" */) {
+  const want = kind === "get" ? ts.isGetAccessorDeclaration : ts.isSetAccessorDeclaration;
+  const fromOracle = (recv, name) => {
+    const r = bodiesFor(recv, { name }, { accept: want, reader: "accessor" });
+    return [...r.bodies, ...r.unminted].map((decl) => ({ decl, local: true }))
+      .concat(r.external.map((decl) => ({ decl, local: false })));
+  };
   if (ts.isElementAccessExpression(propNode)) {
     // `c["prop"]` carries no `.name`; resolve the key to the property NAMES it can hold and look each
     // one up on the receiver's type. Returns `null` — distinct from `[]` — when the key is NOT pinned
     // to a finite name set, so the caller can tell "pinned, and none of them is an accessor" (nothing
-    // to charge) from "we do not know which property this is" (a disclosure question).
+    // to charge) from "we do not know which property this is" (a disclosure question). R259's every-arm
+    // lookup is the oracle's union walk.
     const arg = propNode.argumentExpression;
     const texts = arg && ts.isStringLiteralLike(arg) ? new Set([arg.text])
                 : arg ? keyLiteralNames(checker.getTypeAtLocation(arg)) : null;
     if (!texts) return null;
-    const recvType = checker.getTypeAtLocation(propNode.expression);
     const out = [];
-    // R259 — every ARM's symbol for the name, not just the union's own (which is null unless the
-    // property is common to all of them).
-    for (const t of texts) for (const sym of propertySymbolsAcrossArms(recvType, t))
-      out.push(...accessorsFromSym(sym, kind));
-    // R246 — and every type the receiver's VALUE can carry under an assertion or an `any` parameter.
-    for (const vt of receiverValueTypes(propNode.expression))
-      for (const t of texts) for (const sym of propertySymbolsAcrossArms(vt, t)) out.push(...accessorsFromSym(sym, kind));
+    for (const t of texts) out.push(...fromOracle(propNode.expression, t));
     return dedupeHits(out);
   }
   const direct = accessorsFromSym(checker.getSymbolAtLocation(propNode.name ?? propNode), kind);
-  if (direct.length || !ts.isPropertyAccessExpression(propNode)) return direct;
-  // R246 — `(s as any).token = v` / `o.token = v` with `o: any`: the checker resolves no symbol at all.
-  const out = [];
-  const name = propNode.name.text;
-  for (const vt of receiverValueTypes(propNode.expression))
-    for (const sym of propertySymbolsAcrossArms(vt, name)) out.push(...accessorsFromSym(sym, kind));
-  return dedupeHits(out);
+  if (!ts.isPropertyAccessExpression(propNode)) return direct;
+  return dedupeHits([...direct, ...fromOracle(propNode.expression, propNode.name.text)]);
 }
 // A `Object.defineProperty` descriptor accessor for the forcing site `recv.key` (read → get, assign →
 // set), consulted ONLY when the type-level `accessorsAt` came up empty (the checker types target.key as
@@ -7139,76 +7406,6 @@ function definePropForceTarget(propNode, kind /* "get" | "set" */) {
   const out = [];
   for (const k of keyTexts) { const n = byKey.get(k)?.[kind]; if (n) out.push(n); }
   return out;
-}
-// Record a resolved accessor HIT (read or write) as an edge from `owner`: into the accessor UNIT when
-// it's a local declaration we minted; otherwise Unknown (a resolved-but-unseen accessor body — never
-// silent-pure, SPEC §4). `label` tags the §-why disclosure.
-// SOUNDNESS R282 — AND THE OVERRIDES, WHICH THIS NEVER ASKED FOR. The edge above lands on the
-// declaration RESOLUTION picked — for a base-typed receiver that is the BASE's accessor — and nothing
-// here consulted `classOverrides`, so a subclass override's effects never reached the caller. The
-// method path one arm over (`allOverrides` at the CallExpression site) does exactly this, off the SAME
-// index, which already keys accessor declarations: `classOverrides`'s own indexing loop matches
-// `isGetAccessorDeclaration`/`isSetAccessorDeclaration` explicitly. The index knew; the consumer never
-// asked. §F1 question 3 — separate implementations of one question, and this is the one that drifted.
-//
-// THE ROW THAT FILED THIS NAMED `abstract get` — A DECLARATION WITH NO BODY — AND THAT IS THE TRIGGER,
-// NOT THE CLASS. A CONCRETE base accessor WITH a body fails identically, and that is the shape real code
-// has. EXECUTED, node 22.12.0, counting real `fs.appendFileSync` calls, receiver typed as the base:
-//
-//     abstract class T { abstract get val(): string; }                     1 real write, `leak` ABSENT
-//     class T { get val() { return "b"; } }  + override get val()          1 real write, `leak` ABSENT
-//     class T { m() { return "b"; } }        + override m()                1 real write, `leak` ['Fs']  ← the control
-//
-// In a tree containing nothing else, `pure src.only.leak` and `deny Fs src.only.leak` both exit 0 with
-// the scope BINDING, `deny Unknown` exits 0, and blanket `deny Fs` exits 1 only INCIDENTALLY — via the
-// independently-reported `src.only.TImpl.get val` unit, never via the caller, which was not judged at all.
-//
-// Bounded exactly as the method path is, and the bounds are the point rather than trivia: the fan-out is
-// scoped to the RECEIVER's static-type subtree when the receiver pins a local class (a sibling
-// subclass's override is type-impossible on this path, and charging it would be fabrication-adjacent);
-// past `CHA_FANOUT_LIMIT`, or with any override not minted as a unit, it DISCLOSES rather than silently
-// dropping what it could not enumerate. A base accessor no subclass overrides has no index entry, so
-// today's answer is preserved byte-for-byte there.
-// ⟨SOUNDNESS R871⟩ The same one-level read as the method arm, with the same consequence one member kind over:
-// `Base get v <- Mid get v <- Leaf get v`, a `Base`-typed `b.v` reached `Mid`'s getter and never `Leaf`'s
-// (EXECUTED: the caller was ABSENT over a real write). Bodies from `memberDispatchBodies`; the bound stays on
-// the one-level scoped count, and a transitive set past it also discloses — the method arm's rule verbatim.
-function accessorOverrideFanOut(rec, decl, recvExpr) {
-  const allOverrides = classOverrides.get(decl) ?? [];
-  // R954 — a conformer converted to the receiver's class runs its own accessor here too.
-  const confAt = isSuperReceiver(recvExpr) ? null
-    : (localReceiverClass(recvExpr) ?? (decl?.parent && ts.isClassDeclaration(decl.parent) ? decl.parent : null));
-  const confBodies = confAt ? conformerBodies(confAt, decl.name?.getText?.()) : [];
-  if (allOverrides.length === 0 && confBodies.length === 0) return;
-  if (isSuperReceiver(recvExpr)) { probeR871("super-accessor", decl, allOverrides.length); return; } // `super.v` names one accessor; it does not dispatch
-  // SOUNDNESS-PRESERVING FALLBACK, the method path's verbatim: a receiver we cannot pin to a LOCAL
-  // class (a union, an interface, `any`, an external type) keeps the FULL override set.
-  const rootClass = localReceiverClass(recvExpr);
-  const direct = rootClass ? allOverrides.filter((om) => classInSubtree(overrideOwner(om), rootClass)) : allOverrides;
-  const overrides = memberDispatchBodies(decl, rootClass);
-  if (direct.length <= CHA_FANOUT_LIMIT) probeR871("accessor", decl, overrides.length - direct.length);
-  if (overrides.length === 0) return;
-  const ownerQual = (d) => (d.parent?.name
-    ? `${moduleOf(d.parent.getSourceFile())}.${namespacePrefixOf(d.parent)}${d.parent.name.getText()}`
-    : null);
-  if (direct.length > CHA_FANOUT_LIMIT) {
-    rec.direct.add("Unknown");                       // override family too wide to enumerate soundly
-    rec.why.add(dispatchWhy(ownerQual(decl), decl.name?.getText?.()));
-    return;
-  }
-  let allResolved = overrides.filter((om) => !confBodies.includes(om)).length <= CHA_FANOUT_LIMIT;
-  const targets = [];
-  for (const om of overrides) {
-    const ot = nodeName.get(om);
-    if (ot) targets.push(ot);
-    else if (confBodies.includes(om) && isExternalConformerBody(om)) { if (!chargeConformerBody(rec, om)) allResolved = false; }
-    else allResolved = false;
-  }
-  for (const ot of targets) rec.edges.add(ot);       // (EDGE) into each override — effects propagate
-  if (!allResolved) {
-    rec.direct.add("Unknown");                       // an override we could not name is not a pure one
-    rec.why.add(dispatchWhy(ownerQual(decl), decl.name?.getText?.()));
-  }
 }
 // ⟨SOUNDNESS R867⟩ THE CONSUMER'S OWN IMPLEMENTORS OF A DEPENDENCY'S CLASS METHOD. A call that resolves to a
 // FOREIGN class method (`b.m()`, `b: dep.BaseO`) used to read that dependency's body alone — joined from
@@ -7271,12 +7468,54 @@ function foreignOverrideFanOut(rec, decl, recvExpr) {
     rec.why.add(why());
   }
 }
+// Record a resolved accessor HIT (read or write) as an edge from `owner`: into the accessor UNIT when
+// it's a local declaration we minted; otherwise Unknown (a resolved-but-unseen accessor body — never
+// silent-pure, SPEC §4). `label` tags the §-why disclosure.
+// SOUNDNESS R282 — AND THE OVERRIDES, WHICH THIS NEVER ASKED FOR. The edge above lands on the
+// declaration RESOLUTION picked — for a base-typed receiver that is the BASE's accessor — and nothing
+// here consulted `classOverrides`, so a subclass override's effects never reached the caller. The
+// method path one arm over (`allOverrides` at the CallExpression site) does exactly this, off the SAME
+// index, which already keys accessor declarations: `classOverrides`'s own indexing loop matches
+// `isGetAccessorDeclaration`/`isSetAccessorDeclaration` explicitly. The index knew; the consumer never
+// asked. §F1 question 3 — separate implementations of one question, and this is the one that drifted.
+//
+// THE ROW THAT FILED THIS NAMED `abstract get` — A DECLARATION WITH NO BODY — AND THAT IS THE TRIGGER,
+// NOT THE CLASS. A CONCRETE base accessor WITH a body fails identically, and that is the shape real code
+// has. EXECUTED, node 22.12.0, counting real `fs.appendFileSync` calls, receiver typed as the base:
+//
+//     abstract class T { abstract get val(): string; }                     1 real write, `leak` ABSENT
+//     class T { get val() { return "b"; } }  + override get val()          1 real write, `leak` ABSENT
+//     class T { m() { return "b"; } }        + override m()                1 real write, `leak` ['Fs']  ← the control
+//
+// In a tree containing nothing else, `pure src.only.leak` and `deny Fs src.only.leak` both exit 0 with
+// the scope BINDING, `deny Unknown` exits 0, and blanket `deny Fs` exits 1 only INCIDENTALLY — via the
+// independently-reported `src.only.TImpl.get val` unit, never via the caller, which was not judged at all.
+//
+// Bounded exactly as the method path is, and the bounds are the point rather than trivia: the fan-out is
+// scoped to the RECEIVER's static-type subtree when the receiver pins a local class (a sibling
+// subclass's override is type-impossible on this path, and charging it would be fabrication-adjacent);
+// past `CHA_FANOUT_LIMIT`, or with any override not minted as a unit, it DISCLOSES rather than silently
+// dropping what it could not enumerate. A base accessor no subclass overrides has no index entry, so
+// today's answer is preserved byte-for-byte there.
+// ⟨SOUNDNESS R871⟩ The same one-level read as the method arm, with the same consequence one member kind over:
+// `Base get v <- Mid get v <- Leaf get v`, a `Base`-typed `b.v` reached `Mid`'s getter and never `Leaf`'s
+// (EXECUTED: the caller was ABSENT over a real write). Bodies from `memberDispatchBodies`.
+// ⟨call-target round 1⟩ The fan-out that lived here as `accessorOverrideFanOut` is now the target oracle's
+// `descentBodies` + `chargeOracleBodies`, shared with every other implicit reader. One change in what a WIDE
+// family does: past the bound the edges it found are KEPT beside the disclosure (the old copy dropped them and
+// kept only `Unknown`) — a bound is a statement that the answer is incomplete, not a reason to forget its part.
 function recordAccessorHit(owner, hit, label, recvExpr = null) {
   const rec = fns.get(owner);
   const t = nodeName.get(hit.decl);
   if (hit.local && t) {
     rec.edges.add(t); // (EDGE) into the accessor unit — effects propagate
-    accessorOverrideFanOut(rec, hit.decl, recvExpr);  // R282 — …and into every override it may bind to
+    // R282 — …and into every override it may bind to (the oracle's descent, scoped to the receiver's subtree;
+    // a conformer's body declared in a dependency is charged as a direct call to it, R954).
+    const d = descentBodies(hit.decl, recvExpr);
+    let open = false;
+    for (const b of d.external) if (!(isExternalConformerBody(b) && chargeConformerBody(rec, b))) open = true;
+    if (open) d.wide = true;                         // an override this scan cannot answer is not a pure one
+    chargeOracleBodies(rec, d, hit.decl.name?.getText?.(), hit.decl, true);
   } else {
     rec.direct.add("Unknown");
     rec.why.add(`reflect:accessor:${label}`); // a defineProperty runtime accessor (descriptor get/set unseen) — metaprogramming, canonical `reflect:`
@@ -7927,21 +8166,27 @@ const declIsLocal = (decl) => decl && projectFiles.has(path.resolve(decl.getSour
 // case (`[Symbol.iterator]() { return this }` + a separate effectful `next()`) needs the `next` edge —
 // so we edge to BOTH whenever each is a LOCAL unit. A built-in iterable (plain array/string/Map: the
 // es-lib/@types iterator) resolves non-local → no edge → stays pure (the precision invariant).
+// ⟨call-target round 1, R1408 T3⟩ The iterator methods come from the TARGET ORACLE. This reader used to look
+// only at the iterable type's OWN declaration, so `for (const v of x)` over an interface, a type parameter, a
+// field, a structural type or a BASE class — whose own declaration is a signature or a base body — reached no
+// implementor and no override: silent. Returns the oracle's answer (`units` edged, `unminted` disclosed).
 function iterationTargets(expr, isAsync) {
-  const t = checker.getTypeAtLocation(expr);
-  const iterPrefixes = isAsync ? ["__@asyncIterator", "__@iterator"] : ["__@iterator"];
-  const iterDecl = declOfSym(wellKnownSymbolMember(t, iterPrefixes));
-  if (!iterDecl) return [];
-  const out = [];
-  if (declIsLocal(iterDecl)) out.push(iterDecl);
-  // the iterator's next(): the return type of the [Symbol.iterator] method
-  try {
-    const sig = checker.getSignatureFromDeclaration(iterDecl);
-    const ret = sig && checker.getReturnTypeOfSignature(sig);
-    const nextDecl = declOfSym(ret && ret.getProperties().find((p) => p.getName() === "next"));
-    if (nextDecl && declIsLocal(nextDecl) && !out.includes(nextDecl)) out.push(nextDecl);
-  } catch { /* unresolved iterator shape — the iterator-method edge already covers the common case */ }
-  return out;
+  const key = isAsync ? { sym: ["__@asyncIterator", "__@iterator"], texts: ["[Symbol.asyncIterator]", "[Symbol.iterator]"] }
+    : { sym: ["__@iterator"], texts: ["[Symbol.iterator]"] };
+  const r = bodiesFor(expr, key, { reader: "iteration" });
+  let t0; try { t0 = checker.getTypeAtLocation(expr); } catch { t0 = null; }
+  const iterDecls = [...(t0 ? [declOfSym(wellKnownSymbolMember(t0, key.sym))] : []), ...r.bodies, ...r.unminted, ...r.external];
+  // the iterator's next(): the return type of each [Symbol.iterator] method
+  for (const iterDecl of iterDecls) {
+    if (!iterDecl) continue;
+    try {
+      const sig = checker.getSignatureFromDeclaration(iterDecl);
+      const ret = sig && checker.getReturnTypeOfSignature(sig);
+      const nextDecl = declOfSym(ret && ret.getProperties().find((p) => p.getName() === "next"));
+      if (nextDecl && declIsLocal(nextDecl)) r.add(nextDecl);
+    } catch { /* unresolved iterator shape — the iterator-method edge already covers the common case */ }
+  }
+  return r;
 }
 // Edge `rec` to each LOCAL desugared target that is a minted unit. Local-only by design: an external
 // iterable/disposer is OPAQUE (the curated-κ caveat — same as an unmatched external call), never a
@@ -8749,57 +8994,17 @@ function isCoercionMemberDecl(m) {
     || ts.isPropertyDeclaration(m) || ts.isPropertyAssignment(m)
     || ts.isFunctionDeclaration(m) || ts.isFunctionExpression(m) || ts.isArrowFunction(m));
 }
-// Find member `name` declared on LOCAL class/structural-implementor `cls` or the nearest local ancestor
-// that declares it. `cls` comes from `coercionChaClasses`, which (since PART 87) reads the SAME
-// `interfaceImpls` registry the ordinary interface-CHA dispatch site reads — and that registry now holds
-// structural implementors (`ObjectLiteralExpression`, `.properties`) alongside nominal classes
-// (`ClassDeclaration`/`ClassExpression`, `.members`), never guaranteed to be one shape.
-//
-// ⟨CARDINAL SIN FIX, coercion-CHA structural gap⟩ this used to read only `cur.members`, so a structural
-// implementor's `.properties` was invisible: `(undefined ?? []).find(...)` always empty, never a match,
-// never a crash — "degrades gracefully" in the sense of not throwing, but it silently dropped every
-// coercion member a structural implementor declared. MEASURED (candor-attack2, 2026-09-01): an interface
-// implemented ONLY structurally, with an effectful `toString`, coerced via a template literal — PRE-PART-
-// 87 this correctly charged `<module>` with Fs (the un-minted object-literal body was walked inline, as
-// part of whatever textually contained it); POST-PART-87 the SAME `toString` is extracted into its own
-// addressable unit by `mintStructuralMembers` (correct — it is no longer folded into an enclosing scope's
-// direct effects) but this function could never find it to edge to it, so the extraction cost the
-// disclosure it used to get for free and `<module>`/`stringify` both vanished from `functions[]` PURE.
-// The general interface-CHA dispatch site already has the fix's own shape for this (`cls.members ??
-// cls.properties ?? []`, its own PART 87 comment) — this mirrors it rather than inventing a second rule.
-function localClassMember(cls, name) {
-  for (let cur = cls, guard = 0; cur && guard++ < 64; cur = localBaseClassOf(cur)) {
-    const memberNodes = cur.members ?? cur.properties ?? [];
-    const m = memberNodes.find((x) => x.name?.getText?.() === name && isCoercionMemberDecl(x));
-    if (m && declIsLocal(m)) return m;
-  }
-  return null;
-}
-// The CHA universe for a coercion operand's type: the LOCAL classes a value of this type can actually
-// be at runtime. An INTERFACE-typed operand (`e: Entry`) reaches its local implementors; a BASE-CLASS-
-// typed operand (`b: Base`) reaches its local subclasses. Both indexes are the ones ordinary dispatch
-// already uses (interfaceImpls / the classDescendants sibling of classOverrides) — no parallel machinery.
-function coercionChaClasses(part) {
-  const out = [];
-  const sym = part.getSymbol?.() ?? part.aliasSymbol;
-  for (const d of sym?.declarations ?? []) {
-    if (!declIsLocal(d)) continue;
-    // ⟨SOUNDNESS R872⟩ …and every LOCAL SUBCLASS of an implementor: `SubO extends BaseO` is an `I` at runtime
-    // although only `BaseO` carries the `implements` clause, so its `toString` is a body `${i}` can run.
-    // `localClassMember` resolves each to its nearest declaration, so a subclass that declares nothing adds
-    // nothing new.
-    if (ts.isInterfaceDeclaration(d)) for (const c of interfaceImpls.get(d) ?? []) {
-      for (const x of [c, ...(ts.isClassDeclaration(c) ? classDescendants.get(c) ?? [] : [])])
-        if (!out.includes(x)) out.push(x);
-    }
-    else if (ts.isClassDeclaration(d)) for (const c of classDescendants.get(d) ?? []) { if (!out.includes(c)) out.push(c); }
-  }
-  return out;
-}
+// ⟨call-target round 1⟩ `localClassMember` and `coercionChaClasses` — this reader's own copy of "which local
+// classes can a value of this type be, and which member does each run" — lived here. Their two lessons are now
+// the target oracle's: a structural implementor carries its members in `.properties`, not `.members` (the
+// PART 87 cardinal-sin fix, `oracleImplMember`), and a subclass of an implementor is an implementor (R872).
 // A call that hands its arguments to a formatter which stringifies them INSIDE the library. Two
 // populations, both named (the SITE table is an allowlist by necessity — treating every external call
 // as a stringifying sink would charge every argument of every call and flood; the denylist rule is
-// applied to the TARGETS instead, in coercionTargets, where a forgotten case over-discloses).
+// applied to the TARGETS instead, in `chargeCoercion`, where a forgotten case over-discloses).
+// The `Object.prototype` members a class commonly overrides and an explicit call reaches through an abstraction
+// that does not declare them (coercion arm 6).
+const OBJECT_PROTO_HOOKS = new Set(["toString", "valueOf", "toLocaleString"]);
 const LOG_LEVEL_METHODS = new Set(["log", "info", "warn", "error", "debug", "trace", "fatal", "verbose", "silly"]);
 function isStringifyingSink(call) {
   const ex = call.expression;
@@ -8866,79 +9071,19 @@ function isStringifyingSink(call) {
 // resolve to the es-lib `Object.prototype.toString` — a provably-pure terminal, excluded by
 // `chargeExternalDecl`'s `<es-lib>` guard — so the overwhelming majority of template literals are
 // untouched, exactly as before.
-function coercionTargets(expr, names, withPrimitive, outExternal) {
-  const t = checker.getTypeAtLocation(expr);
-  if (!t) return [];
-  const out = [];
-  const push = (d) => { if (d && declIsLocal(d) && isCoercionMemberDecl(d) && !out.includes(d)) out.push(d); };
-  // The far side of the boundary: a coercion member DECLARED in another package. Same shape gate as
-  // `push` (a member whose body could be charged), inverted on locality.
-  const pushExt = (d) => {
-    if (!outExternal || !d || declIsLocal(d) || !isCoercionMemberDecl(d) || outExternal.includes(d)) return;
-    outExternal.push(d);
-  };
-  const seen = new Set();
-  // Widen unions/intersections so each branch's coercion member is considered (a `Foo | string` operand
-  // can be a Foo at runtime → its local toString runs). A primitive/literal constituent has no LOCAL
-  // member and contributes nothing.
-  const visit = (ty, depth) => {
-    if (!ty || depth > 3) return;
-    const parts = ty.isUnionOrIntersection?.() ? ty.types : [ty];
-    for (const part of parts) {
-      if (!part || !part.getProperty || seen.has(part)) continue;
-      seen.add(part);
-      if (withPrimitive) {
-        const pd = declOfSym(wellKnownSymbolMember(part, ["__@toPrimitive"]));
-        if (pd && declIsLocal(pd) && !out.includes(pd)) out.push(pd);
-        else pushExt(pd);
-      }
-      for (const n of names) { const md = declOfSym(part.getProperty(n)); push(md); pushExt(md); }
-      // CHA fan-out over the LOCAL runtime classes of this type.
-      for (const cls of coercionChaClasses(part)) {
-        if (withPrimitive) {
-          const ct = checker.getTypeAtLocation(cls);
-          const pd = ct && declOfSym(wellKnownSymbolMember(ct, ["__@toPrimitive"]));
-          if (pd && declIsLocal(pd) && !out.includes(pd)) out.push(pd);
-        }
-        for (const n of names) push(localClassMember(cls, n));
-      }
-      // A member resolved on a LOCAL BASE class that local subclasses OVERRIDE: the base-typed operand
-      // can be any subclass at runtime. Reuse the ordinary-dispatch override index.
-      for (const n of names) {
-        const md = declOfSym(part.getProperty(n));
-        if (md) for (const ov of overrideDescent(md)) push(ov);   // ⟨R871⟩ transitively — see `overrideDescent`
-      }
-      // ELEMENT recursion. Stringifying an ARRAY is not a leaf: `Array.prototype.toString` delegates to
-      // `join`, which coerces EVERY ELEMENT — so `` `${entries}` ``/`entries.join(", ")`/`String(entries)`
-      // all run each element's `toString`, and `JSON.stringify(entries)` runs each element's `toJSON`.
-      // The array's OWN member resolves to the pure es-lib builtin, so without this the whole element
-      // population is silently absorbed. Bounded depth (nested arrays) + a seen-set (recursive types).
-      // Only the numeric index type is followed: named PROPERTIES are deliberately NOT recursed, because
-      // `Object.prototype.toString` does not look at them — see the residual note at the call site.
-      const el = checker.getIndexTypeOfType?.(part, ts.IndexKind.Number);
-      if (el) visit(el, depth + 1);
-    }
-  };
-  visit(t, 0);
-  // R1248 (the `as any` half) — the operand's VALUE type, when an assertion or an `any` parameter threw
-  // the static one away. `(x as any) + 1`, `` `${x as any}` ``, `String(x as any)` and
-  // `JSON.stringify(x as any)` ran V's `valueOf`/`toString`/`toJSON` (EXECUTED) while the checker typed
-  // the operand `any`, which declares no member — so nothing was found and the caller was ABSENT. The
-  // accessor arm already recovers the real type through the same assertion (R246/R780); this is that one
-  // helper, asked here too. It only ever ADDS types: for a typed operand with no assertion it returns
-  // nothing, so that lookup is byte-identical to before.
-  for (const vt of receiverValueTypes(expr)) visit(vt, 0);
-  return out;
-}
-// Charge `rec` for COERCING `expr`: an edge to every LOCAL coercion member (as before), plus the
-// cross-package treatment of every member that resolves into a DEPENDENCY. One helper so no coercion
-// site can be wired to only half of it — the boundary half went missing at all ten sites at once
-// precisely because the two halves lived apart.
+// ⟨call-target round 1⟩ Asked of the TARGET ORACLE, which is what closes the shapes this reader's own CHA
+// missed: a TYPE PARAMETER through its constraint (`${x}` with `T extends I` — R1311 `c_gentostr`, silent at
+// 0.40.16), a dependency interface a local class implements, the value types of a TYPED parameter, and a
+// local coercion member with no minted unit (disclosed now, where it was skipped).
 function chargeCoercion(rec, expr, names, withPrimitive) {
   if (!rec) return;
-  const ext = [];
-  edgeToTargets(rec, coercionTargets(expr, names, withPrimitive, ext));
-  for (const d of ext) chargeExternalDecl(rec, d);
+  const keys = [...(withPrimitive ? [{ sym: ["__@toPrimitive"], texts: ["[Symbol.toPrimitive]"] }] : []),
+    ...names.map((name) => ({ name }))];
+  for (const key of keys) {
+    const r = bodiesFor(expr, key, { accept: isCoercionMemberDecl, elements: true, reader: "coercion" });
+    chargeOracleBodies(rec, r, key.name ?? key.texts[0]);
+    for (const d of r.external) chargeExternalDecl(rec, d);
+  }
 }
 // The numeric-element type of an array-like — the gate for treating a `.join()`/`.toString()` receiver
 // as an array stringification rather than an ordinary method call on a local object.
@@ -8949,12 +9094,12 @@ function arrayElementTypeOf(expr) {
 // True when `expr`'s type is an OBJECT type that could carry a coercion method (so `a + b` may trigger
 // one). A pure primitive operand (string/number/boolean/bigint/null/undefined) never invokes
 // toString/valueOf in `+` (string+string concatenates, number+number adds — no method call), so we skip
-// it: edging there would be at best inert and the type-narrowing keeps `coercionTargets` from widening a
+// it: edging there would be at best inert and the type-narrowing keeps `chargeCoercion` from widening a
 // huge `string | Foo` into spurious work. An object/union-containing-object is a candidate.
 function mayCoerceObject(expr) {
   if (typeMayCoerceObject(checker.getTypeAtLocation(expr))) return true;
   // R1248 — `any` names no object, but the value under `x as any` (or in an `any` parameter whose every
-  // call site is visible) has a type that does: ask the same value-type question `coercionTargets` asks,
+  // call site is visible) has a type that does: ask the same value-type question `chargeCoercion` asks,
   // so the gate and the lookup cannot disagree. A primitive behind the cast (`(5 as any) + 1`) still
   // answers false here.
   return receiverValueTypes(expr).some(typeMayCoerceObject);
@@ -8967,9 +9112,16 @@ function typeMayCoerceObject(t) {
     | ts.TypeFlags.ESSymbolLike;
   for (const part of parts) {
     if (!part) continue;
+    // ⟨call-target round 1, R1311⟩ a TYPE PARAMETER coerces as its constraint does, and an unconstrained one
+    // may be any object. It read false here, so `${x}` over `T extends I` never reached the target lookup.
+    if ((part.flags & ts.TypeFlags.TypeParameter) && CT_ORACLE) {
+      let c; try { c = checker.getBaseConstraintOfType(part); } catch { c = null; }
+      if (!c || c === part || (c.flags & (ts.TypeFlags.Unknown | ts.TypeFlags.Any)) || typeMayCoerceObject(c)) return true;
+      continue;
+    }
     if (part.flags & PRIM) continue;           // a pure primitive branch never coerces via a method
     if (part.flags & ts.TypeFlags.Object) return true;
-    if (part.isUnionOrIntersection?.()) return true; // nested — let coercionTargets sort it out
+    if (part.isUnionOrIntersection?.()) return true; // nested — let `chargeCoercion` sort it out
   }
   return false;
 }
@@ -11116,10 +11268,18 @@ function visitCalls(node) {
             // implementor gains neither an effect nor a hedge) and CONTROL 5 (a COMPUTED key resolves
             // nothing), each on both element-access spellings and both declaration sites.
             if (ts.isElementAccessExpression(a) && accessedMemberName(a)) {
+              if (argIsCallable(a) && !(hofListed && !hofInvokesArg(calleeName, argIdx, node)))
+                chargeMemberRefTargets(rec, a);   // ⟨call-target round 1⟩ the bodies it can name, at an invoked position
               chargeMemberRefDispatch(rec, a, refSlotDecl(a), false, "R587-REACH");
               return;
             }
             if (!ts.isIdentifier(a) && !ts.isPropertyAccessExpression(a)) return;
+            // ⟨call-target round 1, R1408 T1⟩ every body the referenced member can be, from the target oracle —
+            // additive beside the declared body below (an abstract member has none; a base body is one of many).
+            // The POSITION guard is the one the opaque-callback branch applies below (a seed or a thisArg is not
+            // invoked).
+            if (ts.isPropertyAccessExpression(a) && argIsCallable(a) && !(hofListed && !hofInvokesArg(calleeName, argIdx, node)))
+              chargeMemberRefTargets(rec, a);
             const d2 = realDecl(checker.getSymbolAtLocation(a));
             const t = (d2 && nodeName.get(d2)) || resolveFnRefUnit(a); // pin direct fn OR a local alias chain
             if (t) { if (!hofListed) HOF_REACH?.("edge", `${hofName}->${t}`);
@@ -12951,10 +13111,16 @@ function visitCalls(node) {
     if (ts.isForOfStatement(node)) { iterExpr = node.expression; iterAsync = !!node.awaitModifier; }
     else if (ts.isSpreadElement(node)) iterExpr = node.expression; // [...bag] / f(...bag)
     else if (ts.isSpreadAssignment(node)) {
-      iterExpr = node.expression; // {...bag} — object spread is NOT iteration (copies own enumerable
-      // props, no [Symbol.iterator]); wellKnownSymbolMember finds none and edges nothing for iteration.
-      // But the copy DOES invoke each source getter — enumerate them (the silent-pure object-spread hole).
+      // {...bag} — object spread is NOT iteration (copies own enumerable props, no [Symbol.iterator]). But the
+      // copy DOES invoke each source getter — enumerate them (the silent-pure object-spread hole).
       enumerateGetters(enclosing(node), checker.getTypeAtLocation(node.expression), node.expression);
+      // ⟨call-target round 1⟩ …and it asks NO iteration target. It used to fall through to the iteration reader on
+      // the reasoning that the type's own declaration names no `[Symbol.iterator]`; the target oracle names the
+      // implementors' (measured: `{ ...this.opts }` with `opts: Opts extends GlobOptions` edged to
+      // `Glob.[Symbol.iterator]`, a body the spread never runs). The opaque-value hedge the fall-through raised is
+      // kept as it was: an opaque source's own getters are caller-chosen code the copy does run.
+      const owner0 = enclosing(node);
+      if (owner0) noteOpaqueIteration(node, node.expression, false);
     }
     else if (ts.isVariableDeclaration(node) && ts.isArrayBindingPattern(node.name) && node.initializer)
       iterExpr = node.initializer; // const [a] = bag
@@ -12965,11 +13131,13 @@ function visitCalls(node) {
       const owner = enclosing(node);
       if (owner) {
         const targets = iterationTargets(iterExpr, iterAsync);
-        edgeToTargets(fns.get(owner), targets);
+        chargeOracleBodies(fns.get(owner), targets, iterAsync ? "[Symbol.asyncIterator]" : "[Symbol.iterator]");
         // Opaque-iterable honesty: a param/`any`/type-parameter iterable runs caller-supplied iterator
         // code — disclose Unknown, mirroring the opaque-callback `call:param` posture (cardinal-sin
-        // guard). Skipped when iteration already resolved a LOCAL unit (real effect already edged).
-        noteOpaqueIteration(node, iterExpr, targets.length > 0);
+        // guard). Skipped when iteration already resolved a LOCAL unit (real effect already edged) — a
+        // MINTED one: a named body with no unit resolves nothing (the minted-unit rule; the 0.40.16 reader
+        // counted it, which the switch-off control reproduces).
+        noteOpaqueIteration(node, iterExpr, targets.units.length > 0 || (!CT_ORACLE && targets.unminted.length > 0));
       }
     }
   }
@@ -12977,16 +13145,23 @@ function visitCalls(node) {
   // `r[Symbol.asyncDispose]()`. Edge the enclosing fn to the resolved LOCAL dispose method.
   if (ts.isVariableStatement(node)) {
     const fl = node.declarationList.flags;
-    const isUsing = (fl & ts.NodeFlags.Using) || (fl & ts.NodeFlags.AwaitUsing);
+    // ⟨call-target round 1⟩ COMPARE THE BLOCK-SCOPE BITS, DO NOT MASK THEM: `NodeFlags.AwaitUsing` is `Const | Using`,
+    // so `fl & AwaitUsing` is true of EVERY `const` — this arm read `const q = ds.createQueryRunner()` as `await
+    // using q = …` and edged to `[Symbol.asyncDispose]`. Inert while it asked only the type's own declaration (an
+    // interface signature has no unit); the target oracle names the implementors' bodies, and the independent
+    // edge checker caught 55 fabricated edges on typeorm before this line was fixed.
+    const bs = fl & ts.NodeFlags.BlockScoped;
+    const isUsing = bs === ts.NodeFlags.Using || bs === ts.NodeFlags.AwaitUsing;
     if (isUsing) {
-      const isAwait = !!(fl & ts.NodeFlags.AwaitUsing);
+      const isAwait = bs === ts.NodeFlags.AwaitUsing;
       const prefixes = isAwait ? ["__@asyncDispose", "__@dispose"] : ["__@dispose"];
       const owner = enclosing(node);
+      // ⟨call-target round 1⟩ the dispose bodies from the TARGET ORACLE (an interface- or base-typed resource
+      // reaches its implementors' and overrides' `[Symbol.dispose]`, not only its own declaration's).
+      const texts = isAwait ? ["[Symbol.asyncDispose]", "[Symbol.dispose]"] : ["[Symbol.dispose]"];
       for (const d of node.declarationList.declarations) {
         if (!d.initializer || !owner) continue;
-        const t = checker.getTypeAtLocation(d.initializer);
-        const disposeDecl = declOfSym(wellKnownSymbolMember(t, prefixes));
-        if (disposeDecl && declIsLocal(disposeDecl)) edgeToTargets(fns.get(owner), [disposeDecl]);
+        chargeOracleBodies(fns.get(owner), bodiesFor(d.initializer, { sym: prefixes, texts }, { reader: "using" }), texts[0]);
       }
     }
   }
@@ -13049,6 +13224,20 @@ function visitCalls(node) {
         && ["join", "toString", "toLocaleString"].includes(node.expression.name?.getText?.())
         && arrayElementTypeOf(node.expression.expression)) {
       chargeCoercion(recOf(), node.expression.expression, ["toString", "valueOf"], true);
+    }
+    // 6. ⟨call-target round 1, R1311 `c_expl` / T4⟩ AN EXPLICIT CALL OF AN `Object.prototype` MEMBER the
+    // abstraction does not declare: `x.toString()` with `x: I` where `I` names no `toString`. The checker resolves
+    // it to the es-lib `Object.toString` — a pure builtin — and the call arm stops there, while the value's class
+    // declares its own `toString` and that is the body that runs (EXECUTED: silent at 0.40.16 on interface,
+    // abstract, base-class, structural, generic and field receivers alike). The bodies come from the target oracle
+    // through the coercion lookup, which asks exactly this question; an array receiver is case 5's.
+    else if (CT_ORACLE && ts.isCallExpression(node) && owner && ts.isPropertyAccessExpression(node.expression)
+        && OBJECT_PROTO_HOOKS.has(node.expression.name?.getText?.())) {
+      const recv = node.expression.expression;
+      let rd; try { rd = checker.getResolvedSignature(node)?.declaration; } catch { rd = null; }
+      if (rd && declModule(rd) === "<es-lib>" && rd.parent && ts.isInterfaceDeclaration(rd.parent)
+          && rd.parent.name?.text === "Object" && !isSuperReceiver(recv) && mayCoerceObject(recv))
+        chargeCoercion(recOf(), recv, [node.expression.name.text], false);
     }
     // 1+4. CALL forms `String(x)` (→ toString) and `JSON.stringify(x)` (→ toJSON). These resolve to the
     // es-lib `StringConstructor`/`JSON.stringify` signature (not the user method), so the CallExpression

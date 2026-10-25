@@ -10,6 +10,28 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ One target oracle for the implicit readers (call-target round 1; SOUNDNESS R1408, R1311).** "Which bodies can
+  run when member M is invoked on this value?" had a separate answer in the coercion, accessor, iteration, `using`
+  and member-reference readers, each with a different subset. They now ask one function, `bodiesFor`: the declared
+  member and every override in the receiver's subtree, every visible implementor of an interface arm (and its
+  subclasses), every local subclass of a class arm, a type parameter through its constraint, and the value types
+  the visible call sites pass — for a TYPED parameter too, not only an `any` one. Newly charged, all executed in the
+  call-target matrix: a getter read through an interface / type literal / generic / field receiver (T2); `for…of`
+  and spread over an interface, generic, field, structural or base-class iterable (T3); a member REFERENCE through a
+  base or abstract class — `setTimeout(b.m)`, `xs.forEach(b.m)`, `.then(b.m)`, `b.m.call(b)` (T1); `${x}`,
+  `String(x)`, `+x`, `"" + x` over `T extends I` (R1311 `c_gentostr`); and an explicit `x.toString()` /
+  `valueOf()` / `toLocaleString()` through an abstraction that does not declare it (R1311 `c_expl`, T4). The
+  minted-unit rule: a body the oracle names but this scan minted no unit for is DISCLOSED
+  (`Unknown[dispatch:…]`), never counted as resolved. Retired: `coercionChaClasses`, `localClassMember`,
+  `accessorOverrideFanOut`, the accessor reader's two private value-type walks, and the iteration / `using` readers'
+  own-declaration lookups. `CANDOR_CT_ORACLE_OFF=1` is the measurement switch. The matrix is now in the repo
+  (`calltarget/run.sh`). Three over-charges removed on the way, each found by an independent edge checker over
+  the corpus A/B: a plain `const x = …` was read as `await using` (`NodeFlags.AwaitUsing` is `Const | Using`, and
+  the flag was masked, not compared) and edged to `[Symbol.asyncDispose]` — on typeorm this charged `Rand` to
+  `MysqlDriver.connect`, `AuroraMysqlDriver.connect` and `SapDriver.connect`, which no longer carry it; object
+  spread `{ ...x }` no longer asks for an iteration target; and a typed parameter's call-site value is not used
+  where the body reassigns the parameter or the use site's narrowed type excludes it.
+
 ## [0.40.16] — 2026-10-24
 
 - **0.40.16 family patch: no change to candor-ts.** Version aligned with the family line. Open against this engine, recorded in candor-spec SOUNDNESS: the PART 102 consumer duty (R1356, R1365), the reasonless foreign union (R1358) and the 12-implementor over-hedge (R1369, NOTSILENT).

@@ -24536,6 +24536,57 @@ if (blk()) {
         b.status === 1 && !b.line && b.zm.length === 0, JSON.stringify(b));
 }
 
+// ── ⟨call-target round 1; SOUNDNESS R1408, R1311⟩ ONE TARGET ORACLE FOR THE IMPLICIT READERS ──────────────────────
+// Every CHARGE case below is a call-target matrix shape EXECUTED to write the file and SILENT at 0.40.16 (the
+// matrix is `calltarget/run.sh`); every NO-CHARGE case is a fabrication the oracle's first corpus A/B produced,
+// caught by an independent edge checker, and closed before it shipped.
+if (blk()) {
+  const W = `fs.writeFileSync("/tmp/x", "x")`;
+  const SRC = `import * as fs from "node:fs";
+export interface IO1 { readonly g: number; tag(): number; [Symbol.iterator](): Iterator<number>; }
+export class EO1 implements IO1 { get g() { ${W}; return 1; } tag() { return 1; } toString() { ${W}; return "s"; } *[Symbol.iterator]() { ${W}; yield 1; } }
+export class BO1 { m(): void { } }
+export class SO1 extends BO1 { override m(): void { ${W}; } }
+export abstract class AO1 { abstract m(): void; }
+export class CO1 extends AO1 { m(): void { ${W}; } }
+export function getterIface(x: IO1) { return x.g; }
+export function iterIface(x: IO1) { for (const v of x) void v; }
+export function spreadIface(x: IO1) { return [...x]; }
+export function tostrUndeclared(x: IO1) { return x.toString(); }
+export function tplGeneric<T extends IO1>(x: T) { return \`\${x}\`; }
+export function refBase(b: BO1) { setTimeout(b.m, 0); }
+export function callBase(b: BO1) { b.m.call(b); }
+export function refAbstract(a: AO1) { [0].forEach(a.m); }
+export function qo1() { getterIface(new EO1()); iterIface(new EO1()); spreadIface(new EO1()); tostrUndeclared(new EO1());
+  tplGeneric(new EO1()); refBase(new SO1()); callBase(new SO1()); refAbstract(new CO1()); }
+export interface QRO1 { query(): void; [Symbol.asyncDispose](): Promise<void>; }
+export class PgO1 implements QRO1 { query() { } async [Symbol.asyncDispose]() { ${W}; } }
+export function mkO1(): QRO1 { return new PgO1(); }
+export function constNotUsing() { const q = mkO1(); q.query(); }
+export async function awaitUsing() { await using q = mkO1(); q.query(); }
+export interface OptsO1 { a?: number }
+export class GO1<O extends OptsO1> implements OptsO1 { constructor(public opts: O) { } *[Symbol.iterator]() { ${W}; yield 1; } copy() { return { ...this.opts }; } }
+export class HO1 { h: (() => void) | null = null; }
+export function passData(x: HO1) { [0].forEach(x.h as any); }`;
+  const d = project({ "package.json": `{"name":"ct1","version":"1.0.0"}`, "src/a.ts": SRC });
+  const { report } = scan(d);
+  const row = (fn) => entry(report, `src.a.${fn}`);
+  const inf = (fn) => row(fn)?.inferred ?? [];
+  for (const fn of ["getterIface", "iterIface", "spreadIface", "tostrUndeclared", "tplGeneric", "refBase", "callBase", "refAbstract", "awaitUsing"])
+    check(`call-target round 1: \`${fn}\` reaches the implementor/override body that runs — Fs`, inf(fn).includes("Fs"), JSON.stringify(row(fn)));
+  check("call-target round 1 NO FABRICATION: a plain `const q = mk()` is not `await using` — `constNotUsing` gains no Fs (the block-scope bits are compared, not masked)",
+        !inf("constNotUsing").includes("Fs"), JSON.stringify(row("constNotUsing")));
+  check("call-target round 1 NO FABRICATION: object spread `{ ...this.opts }` runs no `[Symbol.iterator]` — `GO1.copy` gains no Fs",
+        !inf("GO1.copy").includes("Fs"), JSON.stringify(row("GO1.copy")));
+  check("call-target round 1 MINTED-UNIT RULE: a DATA property passed by reference (`h = null`) is not an unminted body — `passData` carries no `dispatch:…HO1.h`",
+        !(row("passData")?.unknownWhy ?? []).some((w) => w.includes("HO1.h")), JSON.stringify(row("passData")));
+  const off = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--out", path.join(d, "off")], { encoding: "utf8", env: { ...process.env, CANDOR_CT_ORACLE_OFF: "1" } });
+  const offRep = JSON.parse(fs.readFileSync(path.join(d, "off.json"), "utf8"));
+  check("call-target round 1 CONTROL: with `CANDOR_CT_ORACLE_OFF=1` the same tree reads `getterIface` and `refBase` uncharged (the switch is the measurement's same-file control)",
+        off.status === 0 && !(entry(offRep, "src.a.getterIface")?.inferred ?? []).includes("Fs") && !(entry(offRep, "src.a.refBase")?.inferred ?? []).includes("Fs"),
+        JSON.stringify([entry(offRep, "src.a.getterIface"), entry(offRep, "src.a.refBase")]));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
