@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.40.17] — 2026-10-25
+
 - **⚠ One target oracle for the implicit readers (call-target round 1; SOUNDNESS R1408, R1311).** "Which bodies can
   run when member M is invoked on this value?" had a separate answer in the coercion, accessor, iteration, `using`
   and member-reference readers, each with a different subset. They now ask one function, `bodiesFor`: the declared
