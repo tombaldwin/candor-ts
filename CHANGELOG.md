@@ -49,6 +49,13 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   without the oracle, the round-1 reassignment rule): on the call-target matrix it reproduces published 0.40.17
   unit-for-unit. `CANDOR_CT_SITE_FALLBACK=A|B` (OFF by default, not shipped) is the proposed site clause's disclosure
   fallback, for pricing only.
+- Measured, in gate terms. Call-target matrix (8,762 executed cells, caller units, vs published 0.40.17): `deny <E>` /
+  `deny <E> Unknown` SILENT 3,433 → 2,379, FABRICATED 9 → 7, no unit toward silence, pure/sibling controls move only
+  CLEAN → OVERDISC (512 — 258 `await` over a pure thenable whose `then` calls its callback parameter, 222 `==` /
+  `Number()` / nested JSON over a dependency interface — the R613 shape, the rest unminted object-literal getters).
+  Corpus A/B vs npm 0.40.17 (28 entries + 8 chained): 0 rows gain a concrete effect, 0 lose one, 0 lose `Unknown`;
+  6 rows newly `Unknown` (the existing opaque-iterable hedge at newly recognised `new Set(x)` sites, and copy
+  disclosures), 0.011% of 56,365 analysed units; 0 `deny` gate flips 1 → 0.
 
 ## [0.40.17] — 2026-10-25
 
