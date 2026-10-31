@@ -43,6 +43,13 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   `any`-receiver residue (`Unknown[reflect:accessor:any-receiver]` where a project accessor of that name has effects).
   The check is dominance, not "assigned anywhere": a read before the assignment, or in a loop body the assignment
   follows, keeps the caller's value (the round-1 typed-parameter rule moves to the same test).
+- **⚠ A CommonJS `require` binding is an import, not an escape (J3).** `const { f } = require("./m")` and
+  `const f = require("./m").f` were read by parameter provenance as handing `f` to unseen code, so a JS function
+  imported that way lost its callers' argument types and an untyped `${x}` / `x.k` / `for…of x` inside it read SILENT
+  (`deny <E>` exit 0 over an executed effect). They now bind like `import { f }`, provided every use of the local is a
+  call; a binding the importer passes on (`xs.forEach(f)`) still escapes. Matrix (JS split-module arm): caller SILENT
+  2,379 → 2,337, 36 DISCLOSED → CHARGED, 0 toward silence, 0 new FABRICATED, controls 10 OVERDISC → CLEAN and 8 CLEAN
+  → OVERDISC. Corpus A/B: no change (the TypeScript roster is scanned without `--allow-js`, so no row reaches it).
 - The object-spread opaque-value hedge reads `callback:opaque-copy:*` (it read an iteration's
   `callback:opaque-iterable:*`); the class (`callback:` → `indirect`) is unchanged.
 - `CANDOR_CT2_OFF=1` is the round-2 measurement switch (the table restricted to its 0.40.17 rows, the copy readers
