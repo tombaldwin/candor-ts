@@ -50,6 +50,15 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   call; a binding the importer passes on (`xs.forEach(f)`) still escapes. Matrix (JS split-module arm): caller SILENT
   2,379 → 2,337, 36 DISCLOSED → CHARGED, 0 toward silence, 0 new FABRICATED, controls 10 OVERDISC → CLEAN and 8 CLEAN
   → OVERDISC. Corpus A/B: no change (the TypeScript roster is scanned without `--allow-js`, so no row reaches it).
+  Fabrication control on real CommonJS (`--allow-js`, eslint, npm, mocha, eslint-plugin-react, knex, express, vs the
+  round-2 build): 0 rows added, 0 concrete effects gained or lost, 2 new call edges (npm `jsonError` → `Npm.get loaded`,
+  genuine; knex `wrap` → `Builder.toString`, a real `value + ''` site on a branch an object never reaches — no effect).
+  A caller passing a declared `Object` (JSDoc `{Object}`) no longer silences the `any`-receiver hedge it found removed.
+- **⚠ A constructor value runs static members, not the subclasses' instance accessors.** `this.k` / `const { k } = this`
+  in a static method (or any `typeof C` value) was answered with every subclass's INSTANCE accessor `k` — on published
+  0.40.17 a static method reading `this.description` was charged the effects of the instance getter `get description`,
+  which never runs there (`deny <E>` 1 → 0 on such methods; executed fixture). Found by the CommonJS A/B on npm's
+  `BaseCommand.getUsage`; one npm row (`StagePublish.<static-init>`) loses an `Unknown` it carried only through that edge.
 - The object-spread opaque-value hedge reads `callback:opaque-copy:*` (it read an iteration's
   `callback:opaque-iterable:*`); the class (`callback:` → `indirect`) is unchanged.
 - `CANDOR_CT2_OFF=1` is the round-2 measurement switch (the table restricted to its 0.40.17 rows, the copy readers
