@@ -24667,6 +24667,53 @@ export function shadowAssign(x: G2) { const Object = Object2; return Object.assi
         chk.status === 0, (chk.stdout + chk.stderr).slice(0, 1200));
 }
 
+// ── ⟨call-target round 2, J3⟩ A COMMONJS `require` BINDING IS AN IMPORT, NOT AN ESCAPE ──────────────────────────────
+// EXECUTED (`~/candor-handoff/calltarget-round2/ts/j3fix/`, each consumer run under node in a fresh cwd): `qDestr` and
+// `qProp` write the file, `qPure` does not, `qEscapes` writes it through `esc(new E())`. On published 0.40.17 the
+// `require`-destructured `tpl` and the `require(..).getr` binding were refused parameter provenance (the import
+// binding was read as an escape), so `${x}` read SILENT and `x.g` only disclosed. The one variable is the import
+// spelling: the ESM `import` and `const m = require(..); m.f(x)` spellings always charged.
+if (blk()) {
+  const d = project({
+    "tsconfig.json": JSON.stringify({ compilerOptions: { target: "ES2022", module: "commonjs", allowJs: true, checkJs: false, outDir: "build", types: ["node"] }, include: ["src"] }),
+    "package.json": `{"name":"j3fx","version":"1.0.0"}`,
+    "src/e.js": `const fs = require("node:fs");
+class E { toString() { fs.writeFileSync("ctmark.txt", "x"); return "e"; } get g() { fs.writeFileSync("ctmark.txt", "g"); return 1; } }
+class P { toString() { return "p"; } get g() { return 1; } }
+module.exports = { E, P };`,
+    "src/s.js": `function tpl(x) { void \`\${x}\`; }
+function getr(x) { void x.g; }
+function tplEsc(x) { void \`\${x}\`; }
+function tplPure(x) { void \`\${x}\`; }
+module.exports = { tpl, getr, tplEsc, tplPure };`,
+    "src/q.js": `const { E, P } = require("./e");
+const { tpl } = require("./s");
+const getr = require("./s").getr;
+const { tplEsc: esc } = require("./s");
+const { tplPure } = require("./s");
+function qDestr() { tpl(new E()); }
+function qProp() { getr(new E()); }
+function qEscapes() { esc(new E()); [new P()].forEach(esc); }
+function qPure() { tplPure(new P()); }
+module.exports = { qDestr, qProp, qEscapes, qPure };`,
+  });
+  const r = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "tsconfig.json"), "--allow-js", "--out", path.join(d, "r")], { encoding: "utf8" });
+  const rep = JSON.parse(fs.readFileSync(path.join(d, "r.json"), "utf8"));
+  const inf = (fn) => (entry(rep, fn)?.inferred ?? []);
+  check("J3: `const { tpl } = require(\"./s\")` is an import — `${x}` in `tpl` reaches the caller's `E.toString` (Fs; SILENT at 0.40.17)",
+        r.status === 0 && inf("src.s.tpl").includes("Fs") && inf("src.q.qDestr").includes("Fs"), JSON.stringify([entry(rep, "src.s.tpl"), entry(rep, "src.q.qDestr")]));
+  check("J3: `const getr = require(\"./s\").getr` is an import — `x.g` reaches `E.get g` (Fs; only disclosed at 0.40.17)",
+        inf("src.s.getr").includes("Fs"), JSON.stringify(entry(rep, "src.s.getr")));
+  check("J3 CONTROL: a binding the importer then hands to `forEach` still escapes — `tplEsc` gains no Fs from provenance",
+        !inf("src.s.tplEsc").includes("Fs"), JSON.stringify(entry(rep, "src.s.tplEsc")));
+  check("J3 CONTROL: the pure twin (`tplPure(new P())`) is not charged",
+        !inf("src.s.tplPure").includes("Fs"), JSON.stringify(entry(rep, "src.s.tplPure")));
+  const off = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "tsconfig.json"), "--allow-js", "--out", path.join(d, "off")], { encoding: "utf8", env: { ...process.env, CANDOR_CT2_OFF: "1" } });
+  const offRep = JSON.parse(fs.readFileSync(path.join(d, "off.json"), "utf8"));
+  check("J3 CONTROL: with `CANDOR_CT2_OFF=1` `tpl` reads uncharged again (the 0.40.17 answer — the pin fails on the pre-fix rule)",
+        off.status === 0 && !(entry(offRep, "src.s.tpl")?.inferred ?? []).includes("Fs"), JSON.stringify(entry(offRep, "src.s.tpl")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

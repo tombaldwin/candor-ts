@@ -6508,12 +6508,44 @@ const classSymOf = (cls) => (cls?.name ? checker.getSymbolAtLocation(cls.name) :
     for (const c of cands) escapeScannedSyms.add(c);
     const names = new Set([...cands].map((s) => s.name));
     const SAFE_MEMBER_BLOCK = new Set(["call", "apply", "bind"]);
-    const visit = (node) => {
-      if (ts.isIdentifier(node) && names.has(node.text)) {
-        let s = checker.getSymbolAtLocation(node);
-        if (s && (s.flags & ts.SymbolFlags.Alias)) { try { s = checker.getAliasedSymbol(s); } catch { /* keep */ } }
-        if (s && cands.has(s) && !escapedFnSyms.has(s)) {
-          // climb the transparent wrappers to the position the value lands in
+    // ⟨call-target round 2, J3⟩ THE COMMONJS IMPORT IS AN IMPORT, NOT AN ESCAPE. `const { S } = require("./s")` and
+    // `const S = require("./s").S` bind the exported function to a local exactly as `import { S } from "./s"` does,
+    // and the ESM spelling was always safe (`ImportSpecifier`). The CommonJS spellings fell through to "anything
+    // else hands it to code that binds its parameters unseen", so every function a JS module `require`s was refused
+    // parameter provenance and `${x}` / `x.k` / `for…of x` over an untyped receiver read SILENT one file away
+    // (MEASURED, `~/candor-handoff/calltarget-round2/ts/j3/`: an instrumented engine printed the escape at the
+    // BindingElement / the `.S` PropertyAccess; `const sm = require(…); sm.S(x)` and ESM `import` charged). It is
+    // safe only when the LOCAL it binds is itself used safely: every reference to the local is checked by the same
+    // position rule, so `const { S } = require("./s"); xs.forEach(S)` still escapes.
+    const isRequireCall = (e) => {
+      e = e && skipParens(e);
+      return !!e && ts.isCallExpression(e) && ts.isIdentifier(e.expression) && e.expression.text === "require"
+        && e.arguments.length === 1 && ts.isStringLiteralLike(e.arguments[0]) && !projectShadows(checker.getSymbolAtLocation(e.expression)?.declarations);
+    };
+    const constDecl = (d) => !!d && ts.isVariableDeclaration(d) && !!(ts.getCombinedNodeFlags(d) & ts.NodeFlags.Const);
+    const requireImportLocal = (node) => {
+      const p0 = node.parent;
+      if (p0 && ts.isBindingElement(p0) && (p0.name === node || p0.propertyName === node) && ts.isIdentifier(p0.name)
+          && !p0.dotDotDotToken && ts.isObjectBindingPattern(p0.parent) && constDecl(p0.parent.parent)
+          && isRequireCall(p0.parent.parent.initializer)) return p0.name;
+      if (p0 && ts.isPropertyAccessExpression(p0) && p0.name === node && isRequireCall(p0.expression)
+          && constDecl(p0.parent) && p0.parent.initializer === p0 && ts.isIdentifier(p0.parent.name)) return p0.parent.name;
+      return null;
+    };
+    const localUsesSafe = (local) => {
+      const L = checker.getSymbolAtLocation(local);
+      if (!L) return false;
+      let ok = true;
+      const walk = (n) => {
+        if (!ok) return;
+        if (ts.isIdentifier(n) && n !== local && n.text === local.text && checker.getSymbolAtLocation(n) === L && !posSafe(n)) { ok = false; return; }
+        ts.forEachChild(n, walk);
+      };
+      walk(local.getSourceFile());
+      return ok;
+    };
+    // The position a reference to the function lands in: safe when it can only CALL it (or name, export or type it).
+    const posSafe = (node) => {
           let cur = node;
           const p0 = node.parent;
           let safe = false;
@@ -6537,6 +6569,15 @@ const classSymOf = (cls) => (cls?.name ? checker.getSymbolAtLocation(cls.name) :
                      || ts.isQualifiedName(p)) safe = true;
             else if (ts.isBinaryExpression(p) && p.right === cur && p.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) safe = true;
           }
+          return safe;
+    };
+    const visit = (node) => {
+      if (ts.isIdentifier(node) && names.has(node.text)) {
+        let s = checker.getSymbolAtLocation(node);
+        if (s && (s.flags & ts.SymbolFlags.Alias)) { try { s = checker.getAliasedSymbol(s); } catch { /* keep */ } }
+        if (s && cands.has(s) && !escapedFnSyms.has(s)) {
+          let safe = posSafe(node);
+          if (!safe && CT2) { const local = requireImportLocal(node); safe = !!local && localUsesSafe(local); }
           if (!safe) escapedFnSyms.add(s);
         }
       }
