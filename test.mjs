@@ -24696,6 +24696,14 @@ function qProp() { getr(new E()); }
 function qEscapes() { esc(new E()); [new P()].forEach(esc); }
 function qPure() { tplPure(new P()); }
 module.exports = { qDestr, qProp, qEscapes, qPure };`,
+    // the eslint `isSerializable` shape: a `require`d reader of `val[k]` whose only caller passes a JSDoc `{Object}` —
+    // a declared type that admits any object, so the `any`-receiver hedge must survive J3 making the caller visible
+    "src/ser.js": `function readAll(val) { for (const k in val) void val[k]; }
+module.exports = { readAll };`,
+    "src/feed.js": `const { readAll } = require("./ser");
+/** @param {string|Object} item */
+function feed(item) { readAll(item); }
+module.exports = { feed };`,
   });
   const r = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "tsconfig.json"), "--allow-js", "--out", path.join(d, "r")], { encoding: "utf8" });
   const rep = JSON.parse(fs.readFileSync(path.join(d, "r.json"), "utf8"));
@@ -24706,6 +24714,8 @@ module.exports = { qDestr, qProp, qEscapes, qPure };`,
         inf("src.s.getr").includes("Fs"), JSON.stringify(entry(rep, "src.s.getr")));
   check("J3 CONTROL: a binding the importer then hands to `forEach` still escapes — `tplEsc` gains no Fs from provenance",
         !inf("src.s.tplEsc").includes("Fs"), JSON.stringify(entry(rep, "src.s.tplEsc")));
+  check("J3 CONTROL: a caller passing a JSDoc `{Object}` value does not silence `readAll`'s `val[k]` hedge — `Object` admits any object (eslint `isSerializable`, measured)",
+        (entry(rep, "src.ser.readAll")?.unknownWhy ?? []).includes("reflect:accessor:any-receiver"), JSON.stringify(entry(rep, "src.ser.readAll")));
   check("J3 CONTROL: the pure twin (`tplPure(new P())`) is not charged",
         !inf("src.s.tplPure").includes("Fs"), JSON.stringify(entry(rep, "src.s.tplPure")));
   const off = spawnSync("node", [path.join(HERE, "scan.mjs"), path.join(d, "tsconfig.json"), "--allow-js", "--out", path.join(d, "off")], { encoding: "utf8", env: { ...process.env, CANDOR_CT2_OFF: "1" } });

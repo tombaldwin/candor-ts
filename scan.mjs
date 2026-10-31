@@ -7190,13 +7190,27 @@ function receiverValueTypes(expr, depth = 0, seen = new Set(), ungated = false) 
   // BEFORE the assignment keeps the value (a CHARGED read is not moved to the R246 residue's disclosure).
   if (CT2 ? paramValueKilledAt(d, expr) : (ungated && !uninformativeType(t) && (paramAssigns(d) === null || paramAssigns(d).length > 0))) return [];
   const out = [];
+  let opaque = false;
   for (const a of args) {
     if (!a) continue;
     let ta; try { ta = checker.getTypeAtLocation(a); } catch { ta = null; }
     if (ta && !anyishType(ta) && !(ungated && !uninformativeType(t) && !valueFitsStatic(ta, t))) out.push(ta);   // a VALUE's own type, even `{}`, is a fact about it
-    out.push(...receiverValueTypes(a, depth + 1, seen));
+    // ⟨call-target round 2, J3⟩ …except the es-lib `Object` interface, which is a DECLARED type that admits every
+    // object: a site passing an `Object`-typed (or JSDoc `{Object}`) value says nothing about which getters it carries.
+    // The type is still recorded (it names no accessor, so it charges nothing); the answer is marked OPAQUE so the
+    // `any`-receiver residue keeps its disclosure. MEASURED: once J3 made eslint's `require`d `isSerializable(val)`
+    // visible, its caller's `item: string|Object` silenced the `reflect:accessor:any-receiver` hedge on `val[property]`.
+    if (CT2 && ta && (ta.isUnion?.() ? ta.types : [ta]).some(esLibObjectType)) opaque = true;
+    const sub = receiverValueTypes(a, depth + 1, seen);
+    if (sub.opaque) opaque = true;
+    out.push(...sub);
   }
+  if (opaque) out.opaque = true;
   return out;
+}
+function esLibObjectType(t) {
+  const sym = t?.getSymbol?.();
+  return !!sym && sym.name === "Object" && (sym.declarations ?? []).some((d) => declModule(d) === "<es-lib>" && ts.isInterfaceDeclaration(d));
 }
 const dedupeHits = (hits) => { const seen = new Set(); return hits.filter((h) => !seen.has(h.decl) && seen.add(h.decl)); };
 // ── THE TARGET ORACLE (call-target round 1; SOUNDNESS R1408, R1311) ─────────────────────────────────────────
@@ -9827,7 +9841,7 @@ function noteOpaqueCopy(node, expr) {
   const rec = fns.get(owner);
   if (!rec) return;
   rec.direct.add("Unknown");
-  rec.why.add(why.replace("callback:opaque-iterable", "callback:opaque-copy"));
+  rec.why.add(CT2 ? why.replace("callback:opaque-iterable", "callback:opaque-copy") : why);
 }
 
 // An argument node that is a FUNCTION-typed VALUE (has ≥1 call signature) — a callback — regardless of
@@ -13492,7 +13506,8 @@ function visitCalls(node) {
       // project accessors of that kind have effects.
       if (!(hits && hits.length)) {
         let rt1; try { rt1 = checker.getTypeAtLocation(node.expression); } catch { rt1 = null; }
-        if (anyishType(rt1) && !receiverValueTypes(node.expression).length) {
+        const vts1 = anyishType(rt1) ? receiverValueTypes(node.expression) : null;
+        if (vts1 && (!vts1.length || vts1.opaque)) {
           const owner1 = enclosing(node);
           const nm1 = ts.isPropertyAccessExpression(node) ? node.name.text
             : (node.argumentExpression && ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : null);
