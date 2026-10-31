@@ -7396,6 +7396,7 @@ function bodiesFor(valueExpr, key, opts = {}) {
     }
     if (ty.isUnionOrIntersection?.()) { for (const p of ty.types) visit(p, depth + 1); return; }
     const root = oracleLocalClassOf(ty);
+    let ctorSide = false; try { ctorSide = (ty.getConstructSignatures?.() ?? []).length > 0; } catch { ctorSide = false; }
     for (const d of oracleMemberDecls(ty, key)) addWithDescent(d, root);
     if (!superRecv) {
       for (const d of (ty.getSymbol?.() ?? ty.aliasSymbol)?.declarations ?? []) {
@@ -7412,7 +7413,10 @@ function bodiesFor(valueExpr, key, opts = {}) {
             addWithDescent(oracleImplMember(c, texts, accept), cls);
             if (cls) for (const sub of classDescendants.get(cls) ?? []) addWithDescent(oracleImplMember(sub, texts, accept), sub);
           }
-        } else if (ts.isClassDeclaration(d) && reach.cls && declIsLocal(d)) {
+        } else if (ts.isClassDeclaration(d) && reach.cls && declIsLocal(d) && !(CT2 && ctorSide)) {
+          // (a CONSTRUCTOR value — `typeof C`, `this` in a static method — runs C's STATIC members: the subclasses'
+          // INSTANCE members are not candidates. MEASURED on npm's `BaseCommand.getUsage`: `const { description, name } =
+          // this` in a static method edged to the instance getters `get description` / `get name`, which never run there.)
           for (const sub of classDescendants.get(d) ?? []) addWithDescent(oracleImplMember(sub, texts, accept), sub);
         }
       }

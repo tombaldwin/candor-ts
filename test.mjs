@@ -24724,6 +24724,25 @@ module.exports = { feed };`,
         off.status === 0 && !(entry(offRep, "src.s.tpl")?.inferred ?? []).includes("Fs"), JSON.stringify(entry(offRep, "src.s.tpl")));
 }
 
+// ── ⟨call-target round 2⟩ A CONSTRUCTOR VALUE RUNS STATIC MEMBERS, NOT THE SUBCLASSES' INSTANCE ACCESSORS ─────────────
+// Found by the --allow-js A/B over npm (`BaseCommand.getUsage`: `const { description, name } = this` in a static method).
+// EXECUTED: `Cmd.usage()` and `Cmd.usage2()` write nothing (they read the static `description`); `inst(new Sub())` writes.
+// Published 0.40.17 already charged `usage2` (`this.description` in a static method) Fs; round 2 added `usage`.
+if (blk()) {
+  const W = `fs.writeFileSync("/tmp/x", "x")`;
+  const d = project({ "package.json": `{"name":"ctor","version":"1.0.0"}`, "src/a.ts": `import * as fs from "node:fs";
+export class Cmd { static description = "d"; get description(): string { ${W}; return "i"; }
+  static usage() { const { description } = this; return description; }
+  static usage2() { return this.description; } }
+export class Sub extends Cmd { get description(): string { ${W}; return "s"; } }
+export function inst(c: Cmd) { const { description } = c; return description; }` });
+  const { report } = scan(d);
+  const inf = (fn) => (entry(report, `src.a.${fn}`)?.inferred ?? []);
+  for (const fn of ["Cmd.usage", "Cmd.usage2"])
+    check(`call-target round 2 NO FABRICATION: \`${fn}\` reads a STATIC member through \`this\` — no instance getter runs, no Fs`, !inf(fn).includes("Fs"), JSON.stringify(entry(report, `src.a.${fn}`)));
+  check("call-target round 2 CONTROL: the instance read `const { description } = c` still reaches the overrides — Fs", inf("inst").includes("Fs"), JSON.stringify(entry(report, "src.a.inst")));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
