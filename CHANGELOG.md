@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.40.18] — 2026-10-31
+
 - **⚠ The implicit sites come from an EXECUTED site table (call-target round 2; SOUNDNESS R1248, R1435, R1434).** Which
   syntax forms and builtin call positions make the platform run a member the program may supply was ~20 hand lists
   in the coercion, iteration, `using` and copy readers (operator sets, `String`/`JSON.stringify`/`Object.assign`/
