@@ -1741,6 +1741,61 @@ export function handler(): void { leaf(); }
   fs.rmSync(R, { recursive: true, force: true });
 }
 
+// ---- FRESHNESS (MCP-STALE-REPORT): a report older than the source the agent just edited must not answer
+//      as if it were current. Every row sets mtimes EXPLICITLY (utimes), so none depends on wall-clock races.
+{
+  const FR = scratch("candor-mcpfresh-");
+  fs.mkdirSync(`${FR}/src`, { recursive: true });
+  fs.writeFileSync(`${FR}/src/app.ts`, `import * as http from "node:http";\nexport function leaf(): void { http.get("http://x"); }\n`);
+  fs.writeFileSync(`${FR}/deny.policy`, "deny Fs\n");
+  execFileSync("node", [`${HERE}/scan.mjs`, `${FR}/src`, "--out", `${FR}/.candor/report`], { stdio: "ignore" });
+  const FP2 = `${FR}/.candor/report`;
+  const setT = (f, secsFromNow) => { const t = new Date(Date.now() + secsFromNow * 1000); fs.utimesSync(f, t, t); };
+  const call = async (name, args, env = {}) => {
+    const r = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }], [], { CANDOR_REPORT: FP2, ...env });
+    const c = r[0].result.content; return { c, doc: JSON.parse(c[c.length - 1].text), head: c[0].text, isError: r[0].result.isError };
+  };
+  // fresh: source older than the report
+  setT(`${FR}/src/app.ts`, -100); setT(`${FP2}.json`, -10);
+  let g = await call("candor_gate", { policy: `${FR}/deny.policy` });
+  ok("freshness: CONTROL — a current report answers unchanged (ok present, no `stale`, one content item)",
+     g.doc.ok === true && !("stale" in g.doc) && g.c.length === 1, JSON.stringify(g.doc).slice(0, 200));
+  // the agent edits the file AFTER the scan
+  setT(`${FR}/src/app.ts`, +50);
+  g = await call("candor_gate", { policy: `${FR}/deny.policy` });
+  ok("freshness: a source edited after the scan WITHDRAWS candor_gate's ok:true (the stale green is the sin)",
+     !("ok" in g.doc) && g.doc.stale?.newerSourceCount === 1 && g.doc.stale.newerSources[0] === "src/app.ts", JSON.stringify(g.doc).slice(0, 300));
+  ok("freshness: …and the FIRST content item is a plain-text STALE REPORT notice",
+     /^candor: STALE REPORT/.test(g.head) && /re-scan/i.test(g.head), g.head);
+  const w = await call("candor_where", { effect: "Net" });
+  ok("freshness: a descriptive tool keeps its answer and gains `stale` (the data is still the OLD code, labelled)",
+     Array.isArray(w.doc.directly) && w.doc.stale && /^candor: STALE/.test(w.head));
+  const sh = await call("candor_show", { fn: "leaf" });
+  ok("freshness: an array-shaped result (candor_show) is wrapped, not given a property on an array",
+     Array.isArray(sh.doc.result) && sh.doc.stale?.newerSourceCount === 1, JSON.stringify(sh.doc).slice(0, 200));
+  ok("freshness: ESCAPE HATCH — CANDOR_MCP_FRESHNESS=off restores the unannotated answer",
+     !("stale" in (await call("candor_where", { effect: "Net" }, { CANDOR_MCP_FRESHNESS: "off" })).doc));
+  // a re-scan clears it (report newer than the edit)
+  setT(`${FP2}.json`, +100);
+  g = await call("candor_gate", { policy: `${FR}/deny.policy` });
+  ok("freshness: re-scanning clears it — ok is back and `stale` is gone", g.doc.ok === true && !("stale" in g.doc));
+  // new file, not in the report
+  fs.writeFileSync(`${FR}/src/added.ts`, "export const x = 1;\n"); setT(`${FR}/src/added.ts`, +200);
+  ok("freshness: a NEW source file added after the scan is stale too (not only edits to analysed files)",
+     (await call("candor_where", { effect: "Net" })).doc.stale?.newerSources?.includes("src/added.ts"));
+  fs.rmSync(`${FR}/src/added.ts`);
+  // not source / not scanned: no false alarm
+  fs.mkdirSync(`${FR}/node_modules/x`, { recursive: true }); fs.writeFileSync(`${FR}/node_modules/x/i.js`, "1"); setT(`${FR}/node_modules/x/i.js`, +300);
+  fs.writeFileSync(`${FR}/README.md`, "hi"); setT(`${FR}/README.md`, +300);
+  ok("freshness: OVER-CHARGE CONTROL — node_modules and non-source files newer than the report do not make it stale",
+     !("stale" in (await call("candor_where", { effect: "Net" })).doc));
+  // the resource route is the sibling: same rule
+  setT(`${FR}/src/app.ts`, +400);
+  const rr = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "resources/read", params: { uri: "candor://report" } }], [], { CANDOR_REPORT: FP2 });
+  ok("freshness: the SIBLING route (resources/read) tags a stale report too", rr[0]?.result?.contents?.[0]?._meta?.candorStale?.newerSourceCount === 1, JSON.stringify(rr[0]).slice(0, 200));
+  fs.rmSync(FR, { recursive: true, force: true });
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 // KEEP THE EVIDENCE ON FAILURE. A failing row prints the path to its fixture tree, and the sweep
 // would delete it on the way out — at exactly the moment someone needs to look. scratch.mjs has

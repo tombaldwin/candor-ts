@@ -10,6 +10,17 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **MCP: a report older than the source it describes no longer answers as current (MCP-STALE-REPORT).** `candor_*`
+  tools answered from whatever report was on disk, so after an edit `candor_gate` could still say `ok:true` about code
+  that no longer existed. A report records unit NAMES (`analyzed.digest`), not the bytes it read, so freshness is by
+  time: a source file (ts/js/rs/swift/java/kt/scala/groovy, outside node_modules/build output) modified after the
+  OLDEST report file for the prefix makes the answer STALE. A stale answer gets a leading plain-text
+  `candor: STALE REPORT …` content item and a `stale` key (array results wrap as `{result, stale}`), and a stale
+  `ok:true` is WITHDRAWN (`ok` absent, the existing "cannot evaluate" convention). `resources/read` tags the item
+  `_meta.candorStale`. Limits: an edit made while the scan was still running, or a tool that restores old mtimes, is not
+  seen; a `touch` or branch switch reads stale (safe direction). `CANDOR_MCP_FRESHNESS=off` disables it. This server
+  also fronts `candor mcp` for java/rust/swift reports (no other engine ships an MCP server).
+
 ## [0.40.18] — 2026-10-31
 
 - **⚠ The implicit sites come from an EXECUTED site table (call-target round 2; SOUNDNESS R1248, R1435, R1434).** Which

@@ -140,6 +140,7 @@ export const refusalSentence = (m) =>
 // because the loaders and the ⟨0.24⟩ judged-nothing check must read the same file set — a helper reading a
 // narrower one would answer about a report the gate never gated.
 const reportFilesAt = (prefix) => (fs.existsSync(`${prefix}.json`) ? [`${prefix}.json`] : siblings(prefix, isReport));
+export const reportFiles = reportFilesAt;   // the MCP freshness check dates the same files the loader reads
 
 // ⟨0.28⟩ SPEC §3.3.1 (3) — the FILES a gate `--report` locator names, for the verdict-sink guard:
 // `reportFilesAt`'s expansion (the SAME enumeration `loadGateReport` below reads — kept adjacent so the

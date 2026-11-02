@@ -71,6 +71,72 @@ function resolvePrefix(args) {
   if (!Q.hasReport(p)) throw new Error(`no report at \`${p}\` (.json or .<crate>.scan.json) — run a candor scan first`);
   return p;
 }
+// ---- FRESHNESS — is this report still about the code the agent is looking at? ------------------------
+// This server only READS a report (it never scans — SPEC §7.12), so an agent that edits a file and then
+// asks `candor_where`/`candor_gate` was answered from whatever scan last ran: a verdict about code that no
+// longer exists, in the same bytes as a verdict about the code that does. A report records WHAT it found
+// (`analyzed.digest` fingerprints the sorted analysed unit NAMES, not file contents), never the bytes it
+// read, so content-hash freshness is not available from the report. What IS available, cheaply and with a
+// known direction of error, is TIME: a source file whose mtime is later than the report's cannot have been
+// scanned in its present form.
+//   · false STALE (a `touch`, a comment edit, a branch switch that rewrote files) — safe: the agent re-scans.
+//   · false FRESH (an edit that landed WHILE the scan was running, so its mtime precedes the report's write;
+//     a tool that restores old mtimes) — not caught. Stated, not hidden.
+// A stale answer must not read as a clean one: see `withFreshness`. Off with CANDOR_MCP_FRESHNESS=off
+// (a CI checkout whose files are all newer than a cached report would otherwise be stale forever).
+const FRESH_SRC = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|rs|swift|java|kt|kts|scala|groovy)$/;
+const FRESH_SKIP = new Set(["node_modules", ".git", ".candor", "target", "build", "dist", "out", ".gradle", ".build", "coverage", "vendor", ".next"]);
+const FRESH_WALK_LIMIT = 200000;
+function freshness(prefix) {
+  if (process.env.CANDOR_MCP_FRESHNESS === "off") return { checked: false, reason: "disabled (CANDOR_MCP_FRESHNESS=off)", off: true };
+  let reportMs = Infinity, reports = [];
+  try {
+    reports = fs.existsSync(`${prefix}.json`) ? [`${prefix}.json`] : Q.reportFiles(prefix);
+    for (const f of reports) reportMs = Math.min(reportMs, fs.statSync(f).mtimeMs);   // the OLDEST: conservative
+  } catch (e) { return { checked: false, reason: `cannot stat the report (${e.code ?? e.message})` }; }
+  if (!reports.length || !Number.isFinite(reportMs)) return { checked: false, reason: "no report file to date" };
+  const dir = nodePath.resolve(nodePath.dirname(prefix));
+  const root = nodePath.basename(dir) === ".candor" ? nodePath.dirname(dir) : dir;
+  const newer = []; let newerCount = 0, seen = 0, truncated = false;
+  const stack = [root];
+  while (stack.length) {
+    const d = stack.pop();
+    let ents; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; }
+    for (const e of ents) {
+      if (++seen > FRESH_WALK_LIMIT) { truncated = true; break; }
+      if (e.isDirectory()) { if (!FRESH_SKIP.has(e.name) && !e.name.startsWith(".git")) stack.push(nodePath.join(d, e.name)); continue; }
+      if (!e.isFile() || !FRESH_SRC.test(e.name) || e.name.endsWith(".d.ts")) continue;
+      const full = nodePath.join(d, e.name);
+      let m; try { m = fs.statSync(full).mtimeMs; } catch { continue; }
+      if (m > reportMs) { newerCount++; if (newer.length < 5) newer.push(nodePath.relative(root, full)); }
+    }
+    if (truncated) break;
+  }
+  if (newerCount) return { checked: true, stale: true, reportWritten: new Date(reportMs).toISOString(), newerCount, newerSources: newer, truncated };
+  if (truncated) return { checked: false, reason: `source tree larger than ${FRESH_WALK_LIMIT} entries — freshness not checked` };
+  return { checked: true, stale: false };
+}
+// Put the disclosure where an agent that reads only the first line still sees it, AND in the structured
+// result. A stale GREEN is withdrawn: `ok` is removed (the convention this server already uses for "this
+// route cannot evaluate" — check for the PRESENCE of `ok`); `ok:false` stays, it only gets the caveat.
+function withFreshness(prefix, out) {
+  const f = freshness(prefix);
+  if (f.off || (f.checked && !f.stale)) return { content: [{ type: "text", text: JSON.stringify(out) }] };
+  if (!f.stale) {   // could not check: disclose, never imply fresh
+    const note = { notChecked: f.reason };
+    const body = out && typeof out === "object" && !Array.isArray(out) ? { ...out, freshness: note } : { result: out, freshness: note };
+    return { content: [{ type: "text", text: JSON.stringify(body) }] };
+  }
+  const stale = { reportWritten: f.reportWritten, newerSourceCount: f.newerCount, newerSources: f.newerSources,
+                  remedy: "re-scan (`candor scan .`) and ask again — this answer describes the code as it was at the last scan" };
+  let body;
+  if (out && typeof out === "object" && !Array.isArray(out)) { body = { ...out, stale }; if (body.ok === true) delete body.ok; }
+  else body = { result: out, stale };
+  const head = `candor: STALE REPORT — ${f.newerCount} source file(s) changed after this report was written (${f.reportWritten})`
+    + `${f.newerSources.length ? `, e.g. ${f.newerSources.join(", ")}` : ""}. The answer below describes the OLD code`
+    + `${out && typeof out === "object" && out.ok === true ? "; its ok:true has been withdrawn" : ""}. Re-scan before relying on it.`;
+  return { content: [{ type: "text", text: head }, { type: "text", text: JSON.stringify(body) }] };
+}
 // Resolve a BASELINE prefix (candor_diff / candor_gains): the EXISTENCE check stays loud — a typo'd
 // baseline that loads [] would diff/gain as an authoritative empty, a silent all-clear on the
 // supply-chain alarm — but the --root confinement deliberately does NOT apply. A baseline is read-only
@@ -860,7 +926,9 @@ function handle(msg) {
       try { encoded = new URL(uri).searchParams.get("prefix"); } catch { /* not URL-shaped — default */ }
       const prefix = resolvePrefix(encoded ? { report: encoded } : {});
       const r = readResource(uri, prefix);
-      return result(id, { contents: [{ uri: params?.uri, ...r }] });
+      // The report resource is the report's own bytes and cannot carry a caveat inline; tag the item.
+      const fr = uri.startsWith("candor://report") ? freshness(prefix) : { checked: true, stale: false };
+      return result(id, { contents: [{ uri: params?.uri, ...r, ...(fr.stale ? { _meta: { candorStale: { reportWritten: fr.reportWritten, newerSourceCount: fr.newerCount, newerSources: fr.newerSources } } } : {}) }] });
     } catch (e) { return error(id, -32602, `candor: ${e.message}`); }
   }
   if (method === "tools/list") {
@@ -930,7 +998,7 @@ function handle(msg) {
       const out = t.run(args, prefix);
       // Minified, not pretty-printed: the consumer is an AGENT (it parses the JSON), so the indentation
       // was ~25-30% of every result's tokens for no benefit. The CLI keeps its human-readable shapes.
-      return result(id, { content: [{ type: "text", text: JSON.stringify(out) }] });
+      return result(id, t.noReport ? { content: [{ type: "text", text: JSON.stringify(out) }] } : withFreshness(prefix, out));
     } catch (e) {
       // A tool-level failure is reported in the result (isError), not as a protocol error.
       return result(id, { content: [{ type: "text", text: `candor: ${e.message}` }], isError: true });
