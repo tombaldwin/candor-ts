@@ -10,6 +10,27 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **`accept` lines for KNOWN policy violations (SPEC §6.2 ⟨0.41⟩, port of the candor-java reference; the declared
+  `spec` stays ⟨0.40⟩ until the family floor moves).** `accept <fn> <Effect>… for <rule tokens> because <reason>` takes
+  ONE named row out of `violations` and lists it in a new `accepted` verdict key (statuses `accepted`, `exceeded`,
+  `ambiguous`, `unjudged`). A row is accepted only when the entry names the producing rule LINE (by its raw tokens), the
+  unit's exact `fn` (no prefix, no suffix folding), and covers every effect of the row (an `Unknown` only under an
+  explicit `Unknown[class,…]` containing every class of the row's `reasonClass`). Anything this engine cannot read
+  exactly stays red: a malformed line is ignored and listed in `ignored`; a positional key (a function-scoped unit
+  `f#<line>:<col>`, an anchor-path ordinal, a nameless unit's `<callable>@…` tag) is refused — accept the enclosing
+  function instead, and its entry also covers the nested units it lists in `calls`, but only when the same entry accepts
+  the enclosing row in the same run and the nested unit's effects are a subset; two units sharing a name under different
+  hashes are accepted by neither; `allow` and `only` lines cannot be accepted; a typo'd effect or class on an accept line
+  is the exit-2 policy error. A STALE entry is a new violation, `AS-EFF-012` (exit 1), whose message names the policy
+  line and says to delete it. The human channel prints `N violation(s) accepted by policy; M new` on every run that
+  accepted anything. An all-accepted run beside an unevaluated rule or an incomplete analysis exits 2, and the exit-2
+  incomplete document drops `violations` and `accepted` only when the policy carries `accept` entries. Every route that
+  evaluates a policy applies it: `scan --policy`, `gate --report` (byte-equal `accepted`), the MCP `candor_gate` tool,
+  and the LSP diagnostics (an accepted unit is not squiggled); `unverified` and `candor_unverified` no longer call a
+  layer clean while an accepted violation is in it. Without `accept` lines every verdict, report and exit code is
+  byte-identical (630 cells: 21 policies × 2 targets × the scan route, both `gate --report` forms, `parsepolicy`,
+  `fix-gate`, `unverified`, `whatif` and `fix`). Pinned by conformance PART 105.
+
 - **MCP: a report older than the source it describes no longer answers as current (MCP-STALE-REPORT).** `candor_*`
   tools answered from whatever report was on disk, so after an edit `candor_gate` could still say `ok:true` about code
   that no longer existed. A report records unit NAMES (`analyzed.digest`), not the bytes it read, so freshness is by

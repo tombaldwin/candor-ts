@@ -27,7 +27,7 @@ import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, d
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
          policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules,
          fatalPolicyErrors, refusalVerdict, sortViolations,
-         unanswerableScoped, wholePolicyUnanswerable, reportUnits, noteSyntheticHits } from "./policy.mjs";
+         unanswerableScoped, wholePolicyUnanswerable, reportUnits, noteSyntheticHits, settleAccept, announceAccepted, acceptedUnitsOver } from "./policy.mjs";
 import { hasReport, refusalMarkerFor, refusalSentence } from "./query-core.mjs";
 import { printAgents, writeStdoutSync, writeSinkAtomic, isCandorConfigSink } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
@@ -1410,7 +1410,10 @@ switch (cmd) {
     const ppErrs = [];
     const ppAliases = parseUnknownAliases(discoverConfigText(policyVocabularyAnchor(args[0], process.cwd())), ppErrs);
     const ppPol = parsePolicy(text, ppAliases);
-    emit({ ...ppPol, errors: [...ppErrs, ...ppPol.errors] });
+    // ⟨0.41⟩ the witness shape is PINNED and diffed across engines: the resolved `accept` entries are not part
+    // of it (a malformed line is already visible as an `ignored` row, a typo'd token as an `errors` entry).
+    const { accept: _ppAccept, ...ppWitness } = ppPol;   // eslint-disable-line no-unused-vars
+    emit({ ...ppWitness, errors: [...ppErrs, ...ppPol.errors] });
     break;
   }
   case "show": {
@@ -2271,6 +2274,16 @@ switch (cmd) {
     const upol = loadPolicyOrDie(policyFile, ptext);
     const r = coreUnverified(ufns, upol, scopeMatches,
                              uci >= 0 ? args[uci + 1] : null, ucg);
+    // ⟨0.41⟩ …and a unit carrying an ACCEPTED violation is not clean: the all-clear is WITHDRAWN (`ok` false),
+    // exactly as an unevaluated rule withdraws it. The EXIT does not move — this verb answers about Unknown
+    // holes (§3.3.1 `--strict`), not about violations — so it keeps reading the holes-only verdict.
+    const uHolesOk = r.ok;
+    const uAccepted = acceptedUnitsOver(upol, ufns);
+    if (uAccepted.length) {
+      r.ok = false;
+      console.error(`candor-ts: unverified: ${uAccepted.length} function(s) carry a violation that a policy \`accept\` line took `
+        + `out of the gate (${uAccepted.join(", ")}). NOT described as clean: an accepted violation is still a violation, only a reviewed one.`);
+    }
     // ⟨0.24⟩ SPEC §3.2 — see `advisoryAnswer`, and this is the SHARPEST case in the family: the verb whose
     // entire job is "your green gate is not provably green" was certifying a set it knows it cannot see all
     // of. A function in an unparsed file is absent from `functions`, so it cannot be enumerated as an
@@ -2318,7 +2331,7 @@ switch (cmd) {
     // ⟨0.32⟩ …and the class nothing OPENED — see the fix-gate exit above.
     // ⟨0.33⟩ …and the class something DID open, under a narrower deny set — see the fix-gate exit above.
     process.exit(uUnan.length || uComp.unreadable.length || uComp.outOfScope?.length || uUnread.length
-                || uUnasked.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !r.ok ? 1 : 0));
+                || uUnasked.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !uHolesOk ? 1 : 0));
     break; // unreachable
   }
   case "gate": {
@@ -2546,8 +2559,17 @@ switch (cmd) {
     // kinds, now disclosed as `unevaluated` instead of short-circuiting (`1503368`), and handing them to the
     // matcher would be the very evaluation-on-partial-evidence they are unanswerable FOR — `allow` would
     // fire AS-EFF-008 "no visible literal" on every report entry whose surface the wire does not carry.
-    const gviol = evaluatePolicy(gwp.answerable,
-                                 g.functions, {}, new Map(), new Set(), gnet, gwithhold, gunits);
+    const gviolRaw = evaluatePolicy(gwp.answerable,
+                                    g.functions, {}, new Map(), new Set(), gnet, gwithhold, gunits);
+    // ⟨0.41⟩ SPEC §6.2 `accept`: the SAME settle the scan route runs, over the same rows (§3.1 ⟨0.41⟩ puts
+    // `accepted` in the evaluated projection). A rule this route could not answer — `forbid`, `only`, `allow`,
+    // an unanswerable filter — is in `gunevaluated`, so its entries are `unjudged` here and accepted on the
+    // scan route. The count line prints on every run that accepted a row, including one that exits 2.
+    const gaccept = settleAccept(gwp.answerable, gviolRaw, g.functions, { unevaluated: gunevaluated });
+    const gviol = gaccept.violations;
+    gviol.zeroMatch = gviolRaw.zeroMatch;
+    gviol.syntheticHits = gviolRaw.syntheticHits;
+    announceAccepted(gaccept);
     // ⟨0.39⟩ see scan.mjs's twin — one printer, both verdict routes.
     noteSyntheticHits(gviol);
     // Route the human output exactly as a scan does: to stderr whenever stdout carries the verdict
@@ -2606,7 +2628,11 @@ switch (cmd) {
     if (g.netPartners?.length) gverdictObj.netPartners = g.netPartners;
     // ⟨0.32⟩ SPEC §2 — the sort key includes the unit identity. See `sortViolations`; the SAME call
     // is made on the scan route, because §3.1 makes the two documents byte-equal.
-    gverdictObj.violations = sortViolations(gviol);
+    // ⟨0.41⟩ …unless this is an exit-2 INCOMPLETE verdict over a policy with `accept` entries and nothing left
+    // red: it "makes no claim about violations", so the key is absent (see the scan route's twin). Without
+    // `accept` entries the document keeps its `violations: []`.
+    if (!(gincomplete && (gpol.accept ?? []).length && gviol.length === 0))
+      gverdictObj.violations = sortViolations(gviol);
     if (gunevaluated.length) gverdictObj.unevaluated = gunevaluated;
     // ⟨0.27⟩ SPEC §4 `zeroMatch` — the same list the stderr lines above carry, in the machine channel,
     // in the same position the scan route puts it (§3.1's byte-equality MUST binds the two documents).
@@ -2618,6 +2644,8 @@ switch (cmd) {
     // not be answered, this carries text that never became a rule at all. Omitted when empty; `ok` and
     // the exit do not consult it (the line-level leniency is unchanged, only disclosed).
     if (gpol.ignored?.length) gverdictObj.ignored = gpol.ignored;
+    // ⟨0.41⟩ SPEC §6.2 `accepted` — same key and position as the scan route; omitted from every exit-2 document.
+    if (gaccept.accepted && !gincomplete) gverdictObj.accepted = gaccept.accepted;
     if (gincomplete) {
       gverdictObj.incomplete = true;
       if (g.unanalyzed.length) gverdictObj.unanalyzed = g.unanalyzed;

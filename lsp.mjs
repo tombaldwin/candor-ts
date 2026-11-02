@@ -50,7 +50,7 @@ import { createRequire } from "node:module";
 import nodePath from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as Q from "./query-core.mjs";
-import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, policyZeroRules, reportUnits } from "./policy.mjs";
+import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, policyZeroRules, reportUnits, settleAccept } from "./policy.mjs";
 
 // Version: from the sibling package.json when running inside the npm package; a single-file BUNDLE of
 // this server (the IDE-plugin embedding) has no sibling package.json — fall back rather than crash.
@@ -705,8 +705,11 @@ function diagnosticsFor(docPath) {
   // the squiggle is absent either way, and the message is the only thing standing in for it.
   for (const u of dunevaluated)
     warnOnce(`candor-lsp: ${u.why}\n  NO diagnostics are drawn for that rule — their ABSENCE here is the refusal, not an all-clear.`);
-  const violations = evaluatePolicy(dwp.answerable, fns, Q.loadCallgraph(reportPrefix),
-                                    new Map(), new Set(), dnet, dwithhold, dunits);
+  // ⟨0.41⟩ SPEC §6.2 `accept`: the editor draws what the gate would — a violation a named, reasoned `accept`
+  // line took out of `violations` is NOT squiggled (it would contradict the verdict that judges the commit),
+  // and a stale entry is an AS-EFF-012 row like any other. Same `settleAccept` as the CLI and MCP routes.
+  const violations = settleAccept(dwp.answerable, evaluatePolicy(dwp.answerable, fns, Q.loadCallgraph(reportPrefix),
+                                    new Map(), new Set(), dnet, dwithhold, dunits), fns, { unevaluated: dunevaluated }).violations;
   const locByFn = new Map(fns.filter((e) => e.loc).map((e) => [e.fn, locParts(e.loc)]));
   const out = [];
   for (const v of violations) {

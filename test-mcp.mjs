@@ -1796,6 +1796,39 @@ export function handler(): void { leaf(); }
   fs.rmSync(FR, { recursive: true, force: true });
 }
 
+// ── ⟨0.41⟩ SPEC §6.2 `accept` ON THE AGENT CHANNEL — candor_gate IS A REPORT ROUTE, SO IT SETTLES THE SAME ROWS ─────
+// A fix on `scan --policy` and `gate --report` that left this tool answering the un-accepted gate would be the
+// family's most common defect: one policy, three answers. Hand-written report, so twins and positions are exact.
+{
+  const A = scratch("candor-mcp-accept-");
+  const rep = { candor: { version: "handwritten", spec: "0.40" }, package: "dao", analyzed: { count: 3, digest: "0" },
+    functions: [{ fn: "dao.a", hash: "ha", inferred: ["Fs"], direct: ["Fs"] }, { fn: "dao.ab", hash: "hab", inferred: ["Fs"], direct: ["Fs"] },
+                { fn: "dao.k", hash: "hk", inferred: ["Clock"], direct: ["Clock"] }] };
+  fs.writeFileSync(`${A}/r.json`, JSON.stringify(rep));
+  const pol = (name, lines) => fs.writeFileSync(`${A}/${name}`, lines.join("\n") + "\n");
+  pol("one.pol", ["deny Fs dao", "accept dao.a Fs for deny Fs dao because known"]);
+  pol("two.pol", ["deny Fs dao", "accept dao.a Fs for deny Fs dao because known", "accept dao.ab Fs for deny Fs dao because known"]);
+  pol("stale.pol", ["deny Fs dao", "accept dao.k Fs for deny Fs dao because gone"]);
+  pol("fwd.pol", ["deny Fs dao", "forbid dao -> infra", "accept dao.a Fs for deny Fs dao because known"]);
+  const call = (id, name, tool = "candor_gate") => ({ jsonrpc: "2.0", id, method: "tools/call",
+    params: { name: tool, arguments: { report: `${A}/r`, policy: `${A}/${name}` } } });
+  const rr = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    call(2, "one.pol"), call(3, "two.pol"), call(4, "stale.pol"), call(5, "fwd.pol"), call(6, "two.pol", "candor_unverified")], [], { CANDOR_REPORT: `${A}/r` });
+  const t = (id) => JSON.parse(rr.find((r) => r.id === id).result.content[0].text);
+  ok("⟨0.41⟩ candor_gate: `accept dao.a` takes `dao.a` out of `violations`; the prefix cousin `dao.ab` STAYS RED; `accepted` lists the entry",
+     t(2).ok === false && eq(t(2).violations.map((v) => v.fn), ["dao.ab"]) && t(2).accepted?.[0]?.fn === "dao.a" && t(2).accepted[0].status === "accepted",
+     JSON.stringify(t(2)).slice(0, 300));
+  ok("⟨0.41⟩ candor_gate: every violation accepted ⇒ ok:true, `violations: []`, both entries listed",
+     t(3).ok === true && t(3).violations.length === 0 && t(3).accepted.length === 2, JSON.stringify(t(3)).slice(0, 300));
+  ok("⟨0.41⟩ candor_gate: a STALE entry is an AS-EFF-012 row (delete-the-line remedy) and the real violations stay",
+     t(4).ok === false && t(4).violations.some((v) => v.rule === "AS-EFF-012" && v.fn === "dao.k" && /Delete line 2/.test(v.detail))
+     && t(4).violations.filter((v) => v.rule === "AS-EFF-006").length === 2, JSON.stringify(t(4)).slice(0, 300));
+  ok("⟨0.41⟩ candor_gate: beside a `forbid` this route cannot answer, the entry for the answerable deny rule is still accepted and the document carries `unevaluated`",
+     t(5).violations.map((v) => v.fn).join() === "dao.ab" && t(5).unevaluated?.length === 1, JSON.stringify(t(5)).slice(0, 300));
+  ok("⟨0.41⟩ candor_unverified: a layer carrying an ACCEPTED violation is not described as clean (`ok` false)", t(6).ok === false, JSON.stringify(t(6)).slice(0, 200));
+  fs.rmSync(A, { recursive: true, force: true });
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 // KEEP THE EVIDENCE ON FAILURE. A failing row prints the path to its fixture tree, and the sweep
 // would delete it on the way out — at exactly the moment someone needs to look. scratch.mjs has

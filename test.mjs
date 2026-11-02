@@ -24743,6 +24743,113 @@ export function inst(c: Cmd) { const { description } = c; return description; }`
   check("call-target round 2 CONTROL: the instance read `const { description } = c` still reaches the overrides — Fs", inf("inst").includes("Fs"), JSON.stringify(entry(report, "src.a.inst")));
 }
 
+// ── ⟨0.41⟩ SPEC §6.2 `accept` — A KNOWN VIOLATION, WRITTEN DOWN WHERE A REVIEWER READS IT ─────────────────────────
+// The cardinal direction is a NEW violation silently accepted, so most rows here are OVER-ACCEPT detectors (the
+// expected exit is 1) — and each was shown able to FAIL against a deliberately broken build (prefix match, no
+// effect-subset, rule line left out of the key, twins accepted, class filter ignored; see CHANGELOG ⟨0.41⟩).
+// EXECUTED ground truth for the fixture: `a`, `ab` and the arrow inside `a` really call `fs.readFileSync`.
+if (blk()) {
+  const mkdao = (extra = "") => project({
+    "package.json": `{"name":"acc","version":"1.0.0"}`,
+    "src/dao.ts": `import * as fs from "node:fs";
+export function a(): void { const f = () => { fs.readFileSync("/y"); }; f(); }
+export function ab(): void { fs.readFileSync("/z"); }
+export function pure1(): number { return 1; }
+export function both(): number { fs.readFileSync("/q"); return Date.now(); }
+${extra}`,
+  });
+  const d = mkdao();
+  const gate = (policyLines, ...extra) => {
+    const pf = path.join(d, `pol-${Math.random().toString(36).slice(2)}`);
+    fs.writeFileSync(pf, policyLines.join("\n") + "\n");
+    const gj = pf + ".json";
+    const r = spawnSync("node", [path.join(HERE, "scan.mjs"), d, "--policy", pf, "--gate-json", gj, "--out", pf + ".rep", ...extra], { encoding: "utf8" });
+    let doc = null; try { doc = JSON.parse(fs.readFileSync(gj, "utf8")); } catch { /* null */ }
+    const g = spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", pf + ".rep", "--policy", pf, "--gate-json", gj + ".r"], { encoding: "utf8" });
+    let rdoc = null; try { rdoc = JSON.parse(fs.readFileSync(gj + ".r", "utf8")); } catch { /* null */ }
+    return { r, doc, g, rdoc, pf };
+  };
+  const fnsOf = (doc) => (doc?.violations ?? []).map((v) => `${v.rule}:${v.fn}`).sort();
+  const D = "deny Fs src";
+  // control: no accept line ⇒ no `accepted` key, the three Fs units red (a, its arrow, ab) + both
+  const c = gate([D]);
+  const nested = (c.doc?.violations ?? []).map((v) => v.fn).find((n) => /#\d+:\d+$/.test(n)) ?? "?";
+  check("⟨0.41⟩ CONTROL (no accept line): exit 1, the Fs units are red, `accepted` ABSENT", c.r.status === 1 && !("accepted" in (c.doc ?? {}))
+        && fnsOf(c.doc).includes("AS-EFF-006:src.dao.a") && fnsOf(c.doc).includes("AS-EFF-006:src.dao.ab") && nested !== "?", JSON.stringify(c.doc)?.slice(0, 200));
+  // accept `a`: a AND the arrow nested in it are accepted; `ab` — a prefix cousin — stays red
+  const a1 = gate([D, "accept src.dao.a Fs for deny Fs src because known since 2026"]);
+  check("⟨0.41⟩ accept `a`: `a` and its nested arrow leave `violations`; the prefix cousin `ab` STAYS RED (exact fn, no prefix)",
+        a1.r.status === 1 && fnsOf(a1.doc).includes("AS-EFF-006:src.dao.ab") && !fnsOf(a1.doc).includes("AS-EFF-006:src.dao.a")
+        && !fnsOf(a1.doc).includes(`AS-EFF-006:${nested}`), JSON.stringify(a1.doc?.violations));
+  const accA = (a1.doc?.accepted ?? []).find((i) => i.fn === "src.dao.a");
+  check("⟨0.41⟩ the `accepted` item carries rule, line, policyRule (single-spaced), because and status",
+        accA?.status === "accepted" && accA.line === 2 && accA.policyRule === D && accA.because === "known since 2026" && accA.rule === "AS-EFF-006"
+        && (a1.doc.accepted ?? []).some((i) => i.fn === nested && i.enclosing === "src.dao.a" && i.status === "accepted"), JSON.stringify(a1.doc?.accepted));
+  check("⟨0.41⟩ BOTH ROUTES AGREE: `gate --report` over the report that scan wrote carries the same `accepted` and violations (§3.1)",
+        JSON.stringify(a1.rdoc?.accepted) === JSON.stringify(a1.doc?.accepted) && JSON.stringify(a1.rdoc?.violations) === JSON.stringify(a1.doc?.violations) && a1.g.status === a1.r.status,
+        `${a1.g.status}/${a1.r.status} ${JSON.stringify(a1.rdoc?.accepted)}`);
+  check("⟨0.41⟩ the human channel prints the accepted COUNT (2 = `a` + its arrow)", /2 violation\(s\) accepted by policy; 2 new/.test(a1.r.stderr), a1.r.stderr.slice(-300));
+  // accept every Fs unit: exit 0
+  const all = gate([D, "accept src.dao.a Fs for deny Fs src because k", "accept src.dao.ab Fs for deny Fs src because k"]);
+  check("⟨0.41⟩ every Fs violation accepted but `both` (Fs + Clock under `deny Fs`) — `both` is Fs-only under THIS rule, so it is the one left red",
+        all.r.status === 1 && fnsOf(all.doc).join() === "AS-EFF-006:src.dao.both", JSON.stringify(all.doc?.violations));
+  const ok0 = gate([D, "accept src.dao.a Fs for deny Fs src because k", "accept src.dao.ab Fs for deny Fs src because k", "accept src.dao.both Fs for deny Fs src because k"]);
+  check("⟨0.41⟩ all accepted ⇒ exit 0, ok:true, `violations: []`, three entries + the nested arrow", ok0.r.status === 0 && ok0.doc?.ok === true && ok0.doc.violations.length === 0
+        && ok0.doc.accepted.length === 4, JSON.stringify(ok0.doc));
+  // exceeded: the unit now does MORE than was accepted
+  const ex = gate(["deny Fs Clock src", "accept src.dao.both Fs for deny Fs Clock src because k"]);
+  check("⟨0.41⟩ OVER-ACCEPT: an entry listing only Fs does NOT cover a unit doing Fs AND Clock — `exceeded`, still red, and NOT also stale",
+        ex.r.status === 1 && (ex.doc?.accepted ?? []).some((i) => i.fn === "src.dao.both" && i.status === "exceeded")
+        && !fnsOf(ex.doc).some((x) => x.startsWith("AS-EFF-012")) && fnsOf(ex.doc).includes("AS-EFF-006:src.dao.both"), JSON.stringify(ex.doc));
+  // the rule line is in the key: an entry for another rule line accepts nothing under this one
+  const rl = gate(["deny Fs src", "deny Fs Clock src", "accept src.dao.both Fs Clock for deny Fs Clock src because k"]);
+  check("⟨0.41⟩ OVER-ACCEPT: the rule line is part of the key — an entry for `deny Fs Clock src` accepts only THAT line's row of `both`; the row `deny Fs src` produced stays red",
+        rl.r.status === 1 && (rl.doc?.violations ?? []).some((v) => v.fn === "src.dao.both" && /deny Fs src`$/.test(v.detail))
+        && !(rl.doc?.violations ?? []).some((v) => v.fn === "src.dao.both" && /deny Fs Clock src`$/.test(v.detail)), JSON.stringify(rl.doc));
+  // stale: a fixed unit ⇒ AS-EFF-012, exit 1, the message names the line and says delete it
+  const st = gate([D, "accept src.dao.pure1 Fs for deny Fs src because was fixed"]);
+  const stRow = (st.doc?.violations ?? []).find((v) => v.rule === "AS-EFF-012");
+  check("⟨0.41⟩ a STALE entry fails: AS-EFF-012 on the entry's fn, exit 1, the message names the policy line and says deleting it is the remedy",
+        st.r.status === 1 && stRow?.fn === "src.dao.pure1" && /line 2/.test(stRow.detail) && /Delete line 2/.test(stRow.detail) && !("accepted" in st.doc && st.doc.accepted.some((i) => i.fn === "src.dao.pure1")), JSON.stringify(st.doc));
+  // malformed ⇒ ignored and the violation stays; a typo'd effect is the exit-2 policy error
+  const mf = gate([D, "accept src.dao.a Fs for deny Fs src", "accept src.dao.a Fs for deny Fs other because x", "accept src.dao.a for deny Fs src because x",
+                   "accept src.dao.a Net[unknown-host] for deny Fs src because x", "accept src.dao.a Unknown for deny Fs src because x",
+                   "accept src.dao.a Fs for deny Fs src because #1"]);
+  check("⟨0.41⟩ a malformed accept (no reason / names no rule / no effect / `Net[x]` / bare `Unknown` / a `#`-only reason) is IGNORED, listed in `ignored`, and the violation STAYS",
+        mf.r.status === 1 && !("accepted" in (mf.doc ?? {})) && fnsOf(mf.doc).includes("AS-EFF-006:src.dao.a")
+        && [2, 3, 4, 5, 6, 7].every((n) => (mf.doc.ignored ?? []).some((g) => g.line === n)), JSON.stringify(mf.doc?.ignored));
+  const ty = gate([D, "accept src.dao.a Fss for deny Fs src because x"]);
+  check("⟨0.41⟩ a typo'd effect on an accept line is the POLICY ERROR (exit 2, refusal document with no `violations`/`accepted`), as `deny Nett app` is",
+        ty.r.status === 2 && ty.doc?.refused === true && !("violations" in ty.doc) && !("accepted" in ty.doc) && ty.g.status === 2, `${ty.r.status} ${JSON.stringify(ty.doc)?.slice(0, 200)}`);
+  // allow / only / forbid-with-effects refused; positional keys refused
+  const al = gate([D, "allow Fs in src /tmp", "accept src.dao.a Fs for allow Fs in src /tmp because x"]);
+  check("⟨0.41⟩ an `accept` naming an `allow` rule is ignored (its row names no value)", (al.doc?.ignored ?? []).some((g) => g.line === 3), JSON.stringify(al.doc?.ignored));
+  const po = gate([D, "accept src.dao.<callable>@12 Fs for deny Fs src because x", `accept ${nested} Fs for deny Fs src because x`]);
+  check("⟨0.41⟩ OVER-ACCEPT: a POSITIONAL key (`<callable>@…`, `f#<line>:<col>`) is refused — ignored, not honoured", [2, 3].every((n) => (po.doc?.ignored ?? []).some((g) => g.line === n))
+        && !("accepted" in (po.doc ?? {})), JSON.stringify(po.doc?.ignored));
+  // an accept-only policy still refuses
+  const ao = gate(["accept src.dao.a Fs for deny Fs src because x"]);
+  check("⟨0.41⟩ a policy holding ONLY `accept` lines still refuses at exit 2 (a directive is not a rule)", ao.r.status === 2 && ao.doc?.refused === true && ao.g.status === 2, `${ao.r.status}`);
+  // `unverified` must not call a layer with an accepted violation clean
+  const uv = spawnSync("node", [path.join(HERE, "query.mjs"), "unverified", "--report", a1.pf + ".rep", "--policy", a1.pf, "--strict"], { encoding: "utf8" });
+  let uvDoc = null; try { uvDoc = JSON.parse(uv.stdout); } catch { /* null */ }
+  check("⟨0.41⟩ `unverified` does not describe a unit carrying an ACCEPTED violation as clean (ok withdrawn); the exit does not move (no Unknown hole)",
+        uvDoc?.ok === false && uv.status === 0 && /accept/.test(uv.stderr), `${uv.status} ${uv.stdout.slice(0, 120)} ${uv.stderr.slice(0, 200)}`);
+  // twins: two reports sharing a fn name under different hashes ⇒ the entry accepts NEITHER (gate --report)
+  const twinRep = path.join(d, "twin"); fs.mkdirSync(twinRep);
+  const mkrep = (hash) => ({ candor: { version: "x", spec: "0.40" }, package: "p", analyzed: { count: 2 },
+    functions: [{ fn: "src.t.go", hash, inferred: ["Fs"], direct: ["Fs"], unresolved: false }] });
+  fs.writeFileSync(path.join(twinRep, "a.json"), JSON.stringify(mkrep("pa#go")));
+  fs.writeFileSync(path.join(twinRep, "b.json"), JSON.stringify(mkrep("pb#go")));
+  const tp = path.join(d, "twin.pol"); fs.writeFileSync(tp, `deny Fs src\naccept src.t.go Fs for deny Fs src because x\n`);
+  // the locator is a PREFIX: both siblings are read from `<prefix>.<anything>.scan.json`
+  for (const n of ["a", "b"]) fs.renameSync(path.join(twinRep, `${n}.json`), path.join(twinRep, `rep.${n}.scan.json`));
+  const tg3 = spawnSync("node", [path.join(HERE, "query.mjs"), "gate", "--report", path.join(twinRep, "rep"), "--policy", tp, "--json"], { encoding: "utf8" });
+  let tdoc = null; try { tdoc = JSON.parse(tg3.stdout); } catch { /* null */ }
+  check("⟨0.41⟩ OVER-ACCEPT: two units sharing a name under different hashes — the entry accepts NEITHER (`ambiguous`), both rows stay red",
+        tg3.status === 1 && tdoc?.violations?.length === 2 && (tdoc.accepted ?? []).some((i) => i.fn === "src.t.go" && i.status === "ambiguous"), `${tg3.status} ${tg3.stdout.slice(0, 300)}`);
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

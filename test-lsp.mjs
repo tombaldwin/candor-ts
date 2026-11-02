@@ -1543,6 +1543,34 @@ export function handler(): void { leaf(); }
   fs.rmSync(C.U, { recursive: true, force: true });
 }
 
+// ── ⟨0.41⟩ SPEC §6.2 `accept` IN THE EDITOR — a violation a named, reasoned line accepted is NOT squiggled ────────
+// The editor draws what the gate would. Fixture: leaf() performs Net and mid()/handler() inherit it, so `deny Net`
+// has three rows; accepting only `app.leaf` clears its squiggle and leaves the other two.
+{
+  const X = scratch("candor-lsp-accept-");
+  fs.mkdirSync(path.join(X, "src")); fs.mkdirSync(path.join(X, ".candor"));
+  fs.writeFileSync(path.join(X, "src", "app.ts"), `import http from "node:http";
+export function leaf(): void { http.get("http://x"); }
+export function mid(): void { leaf(); }
+export function handler(): void { mid(); }
+`);
+  execFileSync("node", [path.join(HERE, "scan.mjs"), path.join(X, "src"), "--out", path.join(X, ".candor", "report")], { stdio: "ignore" });
+  fs.writeFileSync(path.join(X, "arch.policy"), "deny Net\naccept app.leaf Net for deny Net because known\n");
+  fs.writeFileSync(path.join(X, ".candor", "config"), "policy arch.policy\n");
+  const XD = pathToFileURL(path.join(X, "src", "app.ts")).href;
+  const { inbound: xr } = await lspSession([
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { rootUri: pathToFileURL(X).href } },
+    { jsonrpc: "2.0", method: "initialized", params: {} },
+    { jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: XD, languageId: "typescript", version: 1, text: "" } } },
+    { jsonrpc: "2.0", id: 4, method: "shutdown" },
+  ], 3);
+  const xd = xr.find((r) => r.method === "textDocument/publishDiagnostics")?.params?.diagnostics ?? [];
+  ok("⟨0.41⟩ the accepted unit (`leaf`, line 1) draws NO squiggle; the two inheriting units still do",
+     !xd.some((g) => g.range.start.line === 1 && g.code === "AS-EFF-006") && xd.filter((g) => g.code === "AS-EFF-006").length === 2,
+     JSON.stringify(xd.map((g) => [g.code, g.range.start.line])));
+  fs.rmSync(X, { recursive: true, force: true });
+}
+
 console.log(`\ntest-lsp: ${pass} passed, ${fail} failed`);
 // KEEP THE EVIDENCE ON FAILURE. A failing row prints the path to its fixture tree, and the sweep
 // would delete it on the way out — at exactly the moment someone needs to look. scratch.mjs has

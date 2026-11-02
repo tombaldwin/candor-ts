@@ -22,7 +22,7 @@ import * as Q from "./query-core.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses,
          parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText,
          unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, reportUnits,
-         policyZeroRules } from "./policy.mjs";
+         policyZeroRules, settleAccept, acceptedUnitsOver } from "./policy.mjs";
 
 const VERSION = createRequire(import.meta.url)("./package.json").version; // single-sourced, like scan.mjs
 
@@ -575,7 +575,13 @@ const TOOLS = {
       // to suppress a certain violation).
       if (wp.onlyUnanswerable)
         throw new Error(`this policy asks only questions a report cannot answer — ${wp.unevaluated[0].why}`);
-      const v = evaluatePolicy(wp.answerable, gfns, cg, new Map(), new Set(), gnet, withhold, gunits);
+      // ⟨0.41⟩ SPEC §6.2 `accept`: this tool is a REPORT route exactly as `gate --report` is, so it settles the
+      // same rows the same way — a route left out is a route answering a different gate. `unevaluated` is the
+      // whole list so far (scoped + whole-policy kinds), so an entry on a rule this route cannot judge is
+      // `unjudged` here and accepted at scan time, as on the CLI.
+      const vRaw = evaluatePolicy(wp.answerable, gfns, cg, new Map(), new Set(), gnet, withhold, gunits);
+      const acc = settleAccept(wp.answerable, vRaw, gfns, { unevaluated });
+      const v = acc.violations;
       // ⟨0.21⟩ COMPLETENESS MANIFEST — this tool implemented no incompleteness rule at all: it answered
       // `{ok:true, violations:[]}` over a report DECLARING `unanalyzed`, where the CLI exits 2. A gate
       // cannot be green over code candor never analyzed, and the manifest travels ON the report, so the
@@ -666,12 +672,17 @@ const TOOLS = {
       // `unevaluated` — WHICH rules went unenforced and why — which is exactly what an agent needs to fix it.
       // The document is still fail-closed to the naivest possible reader (`ok` is false), and it is the same
       // shape the agent would get from `--gate-json`, so one consumer parses both routes.
-      if (v.length) return { ok: false, violations: v, ...(unevaluated.length ? { unevaluated } : {}), ...ignored, ...inc, ...judged };
+      // ⟨0.41⟩ `accepted` rides VERDICT documents only: omitted from the refusal and the incomplete document.
+      const accepted = acc.accepted && !incomplete ? { accepted: acc.accepted } : {};
+      if (v.length) return { ok: false, violations: v, ...(unevaluated.length ? { unevaluated } : {}), ...ignored, ...accepted, ...inc, ...judged };
       if (unevaluated.length)
         return { ok: false, refused: true,
                  reason: `${unevaluated.length} policy rule(s) could not be evaluated against this report`,
                  unevaluated, ...inc, ...judged };
-      return { ok: !incomplete, violations: v, ...ignored, ...inc, ...judged };
+      // an exit-2 incomplete verdict over a policy WITH `accept` entries and nothing left red makes no claim
+      // about violations (§6.2) — the key is absent; without entries the document is byte-identical.
+      if (incomplete && (pol.accept ?? []).length) return { ok: false, ...ignored, ...inc, ...judged };
+      return { ok: !incomplete, violations: v, ...ignored, ...accepted, ...inc, ...judged };
     },
   },
   candor_unverified: {
@@ -739,7 +750,11 @@ const TOOLS = {
       // ⟨0.33⟩ …and the FOURTH cause — computed by `reportCompleteness` above (structurally `[]` when
       // `upol.deny` is empty), never re-derived here.
       const uUnasked = ucomp.unaskedRules ?? [];
-      return Q.advisoryAnswer(Q.unverified(loadReportLoud(p), upol, scopeMatches),
+      // ⟨0.41⟩ `unverified` MUST NOT describe a unit carrying an ACCEPTED violation as clean (§6.2): the
+      // all-clear is withdrawn, as on the CLI. Computed from the gate's own rows, never a second copy.
+      const uBody = Q.unverified(loadReportLoud(p), upol, scopeMatches);
+      if (acceptedUnitsOver(upol, loadReportLoud(p)).length) uBody.ok = false;
+      return Q.advisoryAnswer(uBody,
                               ucomp.unanalyzed, ucomp.judgedNothing, ucomp.unreadable, ucomp.noManifest,
                               ucomp.outOfScope ?? [], uUnread, uUnasked);
     },

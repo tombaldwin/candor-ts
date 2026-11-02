@@ -24,7 +24,7 @@ import {
 import {
   parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
   discoverConfigPolicy, evaluatePolicy, reasonClass, parseUnknownAliases, parseNetPartners,
-  resolveReasonClasses, sortViolations, reportUnits, policyRefusalUnevaluated,
+  resolveReasonClasses, sortViolations, reportUnits, policyRefusalUnevaluated, settleAccept, positionalKey,
 } from "./policy.mjs";
 import {
   isTestPath, kappa, kappaKnows, fsKind, commandHeadEffects, hostLiteral, tablesInSql,
@@ -1858,4 +1858,105 @@ test("mustHedge: EVERY arm of the seven-way OR-chain independently raises the he
   assert.equal(mustHedge(null), false,
     "CONTROL: a null completeness object must not hedge (the `!!(c && …)` guard)");
   assert.equal(mustHedge(undefined), false, "CONTROL: same, undefined");
+});
+
+// ── ⟨0.41⟩ SPEC §6.2 `accept`: the pure core (parse + settle). The CLI-level rows live in test.mjs. ──────────────────
+const accGate = (policyText, functions, opts = {}) => {
+  const pol = parsePolicy(policyText);
+  const rows = evaluatePolicy(pol, functions, opts.cg ?? {});
+  return { pol, ...settleAccept(pol, rows, functions, opts) };
+};
+test("⟨0.41⟩ accept: a line is an entry only when it names a parsed deny/pure/forbid line; the rest are `ignored`", () => {
+  const p = parsePolicy([
+    "deny Fs dao", "forbid dao -> infra", "allow Net in dao ok.example",
+    "accept dao.a Fs for deny Fs dao because r",             // 4 entry
+    "accept dao.a for forbid dao -> infra because r",        // 5 entry (forbid takes no effects)
+    "accept dao.a Fs for forbid dao -> infra because r",     // 6 forbid with effects
+    "accept dao.a for deny Fs dao because r",                // 7 deny without effects
+    "accept dao.a Net for allow Net in dao ok.example because r", // 8 allow
+    "accept dao.a Fs for deny Fs other because r",           // 9 names no rule
+    "accept dao.a Fs for deny Fs dao because",               // 10 no reason
+    "accept dao.a Unknown[*] for deny Fs dao because r",     // 11 alias
+    "accept dao.a Unknown[dynamic] for deny Fs dao because r", // 12 alias
+    "accept dao.a Net[unknown-host] for deny Fs dao because r", // 13 bracket on a concrete effect
+    "accept dao.<callable>@3 Fs for deny Fs dao because r",  // 14 positional
+  ].join("\n"));
+  assert.deepEqual(p.accept.map((e) => e.line), [4, 5]);
+  assert.deepEqual(p.ignored.map((g) => g.line).sort((a, b) => a - b), [6, 7, 8, 9, 10, 11, 12, 13, 14]);
+  assert.deepEqual(p.errors.filter((e) => e.kind !== "rule-kind"), []);
+});
+test("⟨0.41⟩ accept: a typo'd effect or class is a FATAL policy error (exit 2), not an ignored line", () => {
+  const e1 = parsePolicy("deny Fs dao\naccept dao.a Fss for deny Fs dao because r").errors;
+  const e2 = parsePolicy("deny Unknown dao\naccept dao.a Unknown[dispatchh] for deny Unknown dao because r").errors;
+  assert.deepEqual(e1.map((e) => e.kind), ["effect-name"]);
+  assert.deepEqual(e2.map((e) => e.kind), ["reason-class/alias"]);
+});
+test("⟨0.41⟩ accept: the rule key is the RAW lexed tokens, so `deny Fs dao extra` is named only by itself", () => {
+  const fns = [{ fn: "dao.a", inferred: ["Fs"], direct: ["Fs"] }];
+  const wrong = accGate("deny Fs dao extra\naccept dao.a Fs for deny Fs dao because r", fns);
+  assert.equal(wrong.pol.accept, undefined);          // names no parsed line ⇒ no entry
+  const right = accGate("deny   Fs\tdao extra # c\naccept dao.a  Fs for deny Fs dao extra because r", fns);
+  assert.equal(right.violations.length, 0);
+  assert.equal(right.accepted[0].policyRule, "deny Fs dao extra");
+});
+test("⟨0.41⟩ accept: matching is per producing LINE — an entry for one deny line leaves the other line's row red", () => {
+  const fns = [{ fn: "dao.b", inferred: ["Fs", "Clock"], direct: ["Fs", "Clock"] }];
+  const r = accGate("deny Fs dao\ndeny Fs Clock dao\naccept dao.b Fs Clock for deny Fs Clock dao because r", fns);
+  assert.equal(r.violations.length, 1);
+  assert.match(r.violations[0].detail, /deny Fs dao`$/);
+  assert.equal(r.acceptedRows, 1);
+});
+test("⟨0.41⟩ accept: an `Unknown` is covered only by an explicit class list containing EVERY class of its reasonClass", () => {
+  const fns = [{ fn: "dao.c", inferred: ["Unknown"], direct: ["Unknown"], unknownWhy: ["dispatch:dao.I.m", "native:strlen"] }];
+  const covered = (cls) => accGate(`deny Unknown dao\naccept dao.c Unknown[${cls}] for deny Unknown dao because r`, fns);
+  assert.equal(covered("dispatch").violations.length, 1, "dispatch alone does not cover a dispatch+native hole");
+  assert.equal(covered("dispatch").accepted[0].status, "exceeded");
+  assert.equal(covered("dispatch,native").violations.length, 0);
+  assert.equal(covered("dispatch,native,reflect").violations.length, 0, "extra classes are harmless");
+  assert.equal(accGate("deny Unknown dao\naccept dao.c Unknown for deny Unknown dao because r", fns).violations.length, 1);
+});
+test("⟨0.41⟩ accept: positional nested units — accepted only under an entry that accepts the enclosing row AND covers the nested effects", () => {
+  const fns = [
+    { fn: "dao.a", loc: "dao.ts:1:1", inferred: ["Fs", "Net"], direct: [], calls: ["dao.f#2:5"] },
+    { fn: "dao.f#2:5", loc: "dao.ts:2:5", inferred: ["Fs", "Net"], direct: ["Fs", "Net"] },
+  ];
+  const ok = accGate("deny Fs Net dao\naccept dao.a Fs Net for deny Fs Net dao because r", fns);
+  assert.equal(ok.violations.length, 0);
+  assert.deepEqual(ok.accepted.map((i) => [i.fn, i.enclosing ?? null]), [["dao.a", null], ["dao.f#2:5", "dao.a"]]);
+  // the nested unit does MORE than its (inconsistent) enclosing row: it stays red — the subset condition
+  const more = [{ ...fns[0], inferred: ["Fs"] }, fns[1]];
+  const sub = accGate("deny Fs Net dao\naccept dao.a Fs for deny Fs Net dao because r", more);
+  assert.deepEqual(sub.violations.map((v) => v.fn), ["dao.f#2:5"]);
+  // the enclosing entry did NOT accept its own row (exceeded) ⇒ the nested row is not accepted either
+  const exceeded = accGate("deny Fs Net dao\naccept dao.a Fs for deny Fs Net dao because r", fns);
+  assert.deepEqual(exceeded.violations.map((v) => v.fn).sort(), ["dao.a", "dao.f#2:5"]);
+  // a nested unit that does not START after its parent is not read as contained
+  const wrongOrder = [{ ...fns[0], loc: "dao.ts:9:1" }, fns[1]];
+  assert.equal(accGate("deny Fs Net dao\naccept dao.a Fs Net for deny Fs Net dao because r", wrongOrder).violations.length, 1);
+});
+test("⟨0.41⟩ accept: twins (same fn, different hash) are accepted by NEITHER; `unjudged` when the rule is unevaluated", () => {
+  const twins = [{ fn: "dao.t", hash: "h1", inferred: ["Fs"], direct: ["Fs"] }, { fn: "dao.t", hash: "h2", inferred: ["Fs"], direct: ["Fs"] }];
+  const r = accGate("deny Fs dao\naccept dao.t Fs for deny Fs dao because r", twins);
+  assert.equal(r.violations.length, 2);
+  assert.equal(r.accepted[0].status, "ambiguous");
+  const one = [{ fn: "dao.t", hash: "h1", inferred: ["Fs"], direct: ["Fs"] }];
+  const u = accGate("deny Fs dao\naccept dao.t Fs for deny Fs dao because r", one, { unevaluated: [{ rule: "deny  Fs dao", why: "x" }] });
+  assert.equal(u.violations.length, 1);
+  assert.equal(u.accepted[0].status, "unjudged");
+});
+test("⟨0.41⟩ accept: a stale entry is an AS-EFF-012 row naming the line; an exceeded one is NOT also stale; without entries nothing moves", () => {
+  const fns = [{ fn: "dao.a", inferred: ["Fs"], direct: ["Fs"] }];
+  const st = accGate("deny Fs dao\naccept dao.z Fs for deny Fs dao because r", fns);
+  assert.deepEqual(st.violations.map((v) => v.rule).sort(), ["AS-EFF-006", "AS-EFF-012"]);
+  assert.match(st.violations.find((v) => v.rule === "AS-EFF-012").detail, /Delete line 2/);
+  const none = accGate("deny Fs dao", fns);
+  assert.equal(none.accepted, null);
+  assert.equal(none.violations.length, 1);
+  assert.equal(Object.keys(none.violations[0]).includes("lineRaw"), false, "the producing-line tag must not serialise");
+});
+test("⟨0.41⟩ accept: this engine's positional spellings are refused, a declared name is not", () => {
+  for (const k of ["a.f#2:35", "m.<callable>@~#3", "m.<decorator>@C#1", "m.<structural>@50.get", "m.<class>@x.constructor", "m.[computed@4]"])
+    assert.equal(positionalKey(k), true, k);
+  for (const k of ["dao.index.a", "m.C.method", "m.C.constructor", "m.<module>", "m.<anonymous>.m", "pkg.@scope.thing"])
+    assert.equal(positionalKey(k), false, k);
 });

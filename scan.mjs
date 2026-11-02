@@ -30,7 +30,7 @@ import { execFileSync } from "node:child_process";
 import os from "node:os";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText,
          reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules, fatalPolicyErrors, refusalVerdict, sortViolations,
-         netClassResolver, resolveReasonClasses, noteSyntheticHits } from "./policy.mjs";
+         netClassResolver, resolveReasonClasses, noteSyntheticHits, settleAccept, announceAccepted } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade, canonicalDenySet, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents, writeStdoutSync, writeSinkAtomic, resolveSinkArtifact, isCandorConfigSink } from "./contract.mjs";
 import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadEffects, hostLiteral,
@@ -16328,6 +16328,11 @@ let gateZeroMatch = [];
 // ⟨0.28⟩ SPEC §6.2 `ignored` — the policy lines the parse DROPPED, for the verdict document. Declared
 // beside `gateZeroMatch` and for the same reason: the verdict is assembled long after the policy block.
 let gateIgnored = [];
+// ⟨0.41⟩ SPEC §6.2 `accepted` — what the policy's `accept` lines took out of `violations`, for the verdict
+// document (null: no `accept` line became an entry, so the key is OMITTED and the verdict is byte-identical),
+// and whether ANY entry exists (the exit-2 incomplete document drops `violations` only then).
+let gateAccepted = null;
+let gateAcceptAny = false;
 // ⟨0.24⟩ the `.candor/config` that supplied POLICY VOCABULARY this verdict actually used — named on the
 // document (SPEC §3.1 `99eb4e9`), null when no alias was referenced so the verdict stays byte-identical.
 let policyVocabulary = null;
@@ -16710,7 +16715,15 @@ if (policyPath !== null) {
       // ⟨0.27⟩ captured BEFORE the concat below — `concat` returns a plain array, so the `zeroMatch`
       // property riding `gateOut` would be silently lost with it (see the gateZeroMatch declaration).
       gateZeroMatch = gateOut.zeroMatch ?? [];
-      gateViolations = gateViolations.concat(gateOut);
+      // ⟨0.41⟩ SPEC §6.2 `accept`: the rows a named, reasoned line takes out of `violations`, and one AS-EFF-012
+      // per STALE entry. Applied to the POLICY rows only — an AS-EFF-005 baseline regression is already in
+      // `gateViolations` and, having no policy line, can never be accepted. The human count line prints on
+      // EVERY run that accepted a row, including the ones that go on to exit 2.
+      const acceptSt = settleAccept(gatePolicy, gateOut, functions);
+      gateAccepted = acceptSt.accepted;
+      gateAcceptAny = (gatePolicy.accept ?? []).length > 0;
+      announceAccepted(acceptSt);
+      gateViolations = gateViolations.concat(acceptSt.violations);
       // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
       // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
       // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).
@@ -16830,7 +16843,12 @@ if (gateJsonPath) {
   if (envelope.netPartners) verdictObj.netPartners = [envelope.netPartners];
   // ⟨0.32⟩ SPEC §2 — the sort key includes the unit identity. See `sortViolations`; the SAME call
   // is made on the `gate --report` route, because §3.1 makes the two documents byte-equal.
-  verdictObj.violations = sortViolations(gateViolations);
+  // ⟨0.41⟩ …except that an exit-2 INCOMPLETE verdict "makes no claim about violations" when it holds none AND
+  // the policy carries `accept` entries (SPEC §6.2: `accepted` rides VERDICT documents only, and a document
+  // with no `violations` cannot exit 1). Only then: with no `accept` entry the incomplete document keeps the
+  // `violations: []` every engine has always written, so a policy without the directive stays byte-identical.
+  if (!(incomplete && gateAcceptAny && gateViolations.length === 0))
+    verdictObj.violations = sortViolations(gateViolations);
   // ⟨0.24⟩ …and when a certain violation DOMINATED a policy refusal, the refusal is disclosed here rather
   // than deleted (SPEC §3.1: "the RAW policy line, verbatim", one entry per rule, omitted when empty). A
   // consumer reading exit 1 must be able to see that the POLICY half of the gate never ran — the same
@@ -16850,6 +16868,9 @@ if (gateJsonPath) {
   // when nothing was dropped, so a clean policy's verdict stays byte-identical. Never consulted for `ok`
   // or the exit code — the line-level leniency is UNCHANGED, only disclosed.
   if (gateIgnored.length) verdictObj.ignored = gateIgnored;
+  // ⟨0.41⟩ SPEC §6.2 `accepted` — omitted from every exit-2 document (a refusal or an incomplete verdict
+  // makes no claim about violations, so none about which were accepted) and when no entry exists.
+  if (gateAccepted && !incomplete) verdictObj.accepted = gateAccepted;
   // ⟨0.21⟩ (Gap 2) the machine-legible incompleteness: the units candor couldn't analyze, so a CI/agent
   // reading the JSON learns WHY the gate can't certify (the stderr warning alone used to hide this from a
   // machine). `incomplete:true` + the list; the run exits 2 (could-not-fully-evaluate) below. ok:false +
