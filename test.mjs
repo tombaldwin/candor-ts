@@ -24861,6 +24861,50 @@ export function v(): void { fs.readFileSync("/new"); }
         tg3.status === 1 && tdoc?.violations?.length === 2 && (tdoc.accepted ?? []).some((i) => i.fn === "src.t.go" && i.status === "ambiguous"), `${tg3.status} ${tg3.stdout.slice(0, 300)}`);
 }
 
+// ── ⟨0.41⟩ SPEC §6.2 `accepts` — THE VERB THAT PRINTS A PROPOSED POLICY (PART 106 is the cross-engine pin) ───────────
+// It runs this engine's OWN gate in-process over the proposal (`gateCore`), so the checks here are the verb's own
+// contract: stale lines go, an over-wide entry narrows, an exceeded one is PROPOSED in a comment, only
+// `--adopt --because` writes a line for a row no entry names, nothing is written, and the usage errors name `accepts`.
+if (blk()) {
+  const A = scratch("candor-ts-accepts-");
+  const rep = { candor: { version: "handwritten", spec: "0.40" }, package: "dao", analyzed: { count: 2, digest: "0" },
+    functions: [{ fn: "dao.a", hash: "ha", inferred: ["Fs"], direct: ["Fs"] }, { fn: "dao.b", hash: "hb", inferred: ["Fs", "Rand"], direct: ["Fs", "Rand"] }] };
+  fs.writeFileSync(`${A}/r.json`, JSON.stringify(rep));
+  const pol = (name, text) => { fs.writeFileSync(`${A}/${name}`, text); return `${A}/${name}`; };
+  const P = pol("p.pol", "deny Fs Rand dao\naccept dao.a Fs Rand for deny Fs Rand dao because known\naccept dao.gone Fs for deny Fs Rand dao because old\naccept dao.b Fs for deny Fs Rand dao because x\n");
+  const cwd = fs.mkdtempSync(path.join(A, "cwd-"));
+  const run = (args) => spawnSync("node", [path.join(HERE, "query.mjs"), "accepts", "--report", `${A}/r.json`, ...args], { encoding: "utf8", cwd });
+  const before = fs.readFileSync(P, "utf8");
+  const r1 = run(["--policy", P]);
+  check("⟨0.41⟩ accepts: narrows an over-wide entry to the row it accepted", r1.status === 0 && r1.stdout.includes("accept dao.a Fs for deny Fs Rand dao because known\n"), r1.stdout + r1.stderr);
+  check("⟨0.41⟩ accepts: deletes the stale line", !r1.stdout.includes("dao.gone"), r1.stdout);
+  check("⟨0.41⟩ accepts: keeps the exceeded line as written and PROPOSES the wider one in a comment (a comment accepts nothing)",
+    r1.stdout.includes("accept dao.b Fs for deny Fs Rand dao because x\n# candor-accepts: exceeded (adds Rand) — REPLACE the line above with: accept dao.b Fs Rand for deny Fs Rand dao because x\n"), r1.stdout);
+  check("⟨0.41⟩ accepts: writes no file — the policy is byte-identical and the working directory is empty", fs.readFileSync(P, "utf8") === before && fs.readdirSync(cwd).length === 0);
+  const j = JSON.parse(run(["--policy", P, "--json"]).stdout);
+  check("⟨0.41⟩ accepts --json: the plan's `text` is the stdout bytes and `after` is the gate's verdict over it",
+    j.text === r1.stdout && j.mode === "refresh" && j.after.exit === 1 && j.removed.length === 1 && j.narrowed.length === 1 && j.proposals.length === 1, JSON.stringify(j).slice(0, 300));
+  fs.writeFileSync(`${A}/again.pol`, r1.stdout);
+  check("⟨0.41⟩ accepts: a second run over its own output prints it unchanged (its own comment is regenerated, not stacked)", run(["--policy", `${A}/again.pol`]).stdout === r1.stdout);
+  const P2 = pol("p2.pol", "deny Fs dao\n");
+  const ad = run(["--policy", P2, "--adopt", "--because", "pre-existing  at adoption"]);
+  check("⟨0.41⟩ accepts --adopt: appends one line per unnamed violation carrying the OPERATOR's reason, single-spaced",
+    ad.stdout === "deny Fs dao\naccept dao.a Fs for deny Fs dao because pre-existing at adoption\naccept dao.b Fs for deny Fs dao because pre-existing at adoption\n", ad.stdout);
+  check("⟨0.41⟩ accepts without --adopt writes no line for a new violation, and lists it under `unnamed`",
+    run(["--policy", P2]).stdout === "deny Fs dao\n" && JSON.parse(run(["--policy", P2, "--json"]).stdout).unnamed.length === 2);
+  check("⟨0.41⟩ accepts --adopt over an EXCEEDED row proposes and does not create (widening a known acceptance is another decision)",
+    !/^accept dao\.b .* because pre/m.test(run(["--policy", P, "--adopt", "--because", "pre"]).stdout));
+  check("⟨0.41⟩ accepts: --because without --adopt, --adopt without --because, a `#` reason and --strict are exit-2 usage errors",
+    run(["--policy", P2, "--because", "x"]).status === 2 && run(["--policy", P2, "--adopt"]).status === 2
+    && run(["--policy", P2, "--adopt", "--because", "see #12"]).status === 2 && run(["--policy", P2, "--strict"]).status === 2);
+  const av = spawnSync("node", [path.join(HERE, "query.mjs"), "accept"], { encoding: "utf8" });
+  check("⟨0.41⟩ `accept` written as a verb is exit 2 and the message names `accepts`", av.status === 2 && /accepts/.test(av.stderr), av.stderr);
+  const e0 = run(["--policy", pol("empty.pol", "")]);
+  check("⟨0.41⟩ accepts: a policy holding no rules is exit 2 with no proposal, and the message names the shell-redirect trap", e0.status === 2 && e0.stdout === "" && /redirect/.test(e0.stderr), e0.stderr);
+  const in0 = spawnSync("node", [path.join(HERE, "query.mjs"), "accepts", "--report", `${A}/r.json`, "--policy", pol("crlf.pol", "deny Fs dao\r\naccept dao.gone Fs for deny Fs dao because old\r\n# note\r\n")], { encoding: "utf8", cwd });
+  check("⟨0.41⟩ accepts: every other line is kept byte for byte (CRLF terminators included)", in0.stdout === "deny Fs dao\r\n# note\r\n", JSON.stringify(in0.stdout));
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);

@@ -725,6 +725,22 @@ const parseLoc = (loc) => {
   return m ? { file: m[1], line: +m[2], col: +m[3] } : null;
 };
 
+/** (hash, fn) TWINS: the names two units of this run share with different hashes (an `interfaceUnion` is not a
+ *  unit). One definition, used by the settle below and by `accepts` (which must not write a line for a twin). */
+export function twinNames(functions) {
+  const hashesByName = new Map();
+  for (const f of functions) {
+    if (f?.interfaceUnion === true) continue;
+    if (!hashesByName.has(f.fn)) hashesByName.set(f.fn, new Set());
+    hashesByName.get(f.fn).add(typeof f.hash === "string" ? f.hash : "");
+  }
+  return new Set([...hashesByName].filter(([, h]) => h.size > 1).map(([n]) => n));
+}
+
+/** `accepts` reads the ENTRIES and the rows each took directly from the gate's own settle, rather than
+ *  re-deriving them: it sets `armed`, runs the gate, and reads `last`. Inert (one boolean test) otherwise. */
+export const settleProbe = { armed: false, last: null };
+
 /**
  * Decide which of `rows` the policy's `accept` entries take out of `violations`. `rows` is exactly what
  * `evaluatePolicy` returned (each deny/forbid row remembers its producing LINE in a non-enumerable
@@ -741,16 +757,13 @@ const parseLoc = (loc) => {
  */
 export function settleAccept(pol, rows, functions = [], { unevaluated = [] } = {}) {
   const entries = pol?.accept;
-  if (!entries?.length) return { violations: rows, accepted: null, acceptedRows: 0, acceptedUnits: new Set(), notes: [] };
+  if (!entries?.length) {
+    if (settleProbe.armed) settleProbe.last = { entries: [], directBy: new Map(), twin: twinNames(functions) };
+    return { violations: rows, accepted: null, acceptedRows: 0, acceptedUnits: new Set(), notes: [] };
+  }
   const uneval = new Set((unevaluated ?? []).map((u) => ruleKey(u.rule)));
   // (hash, fn) TWINS: two units of this run sharing a name. An entry on such a name accepts NEITHER.
-  const hashesByName = new Map();
-  for (const f of functions) {
-    if (f?.interfaceUnion === true) continue;
-    if (!hashesByName.has(f.fn)) hashesByName.set(f.fn, new Set());
-    hashesByName.get(f.fn).add(typeof f.hash === "string" ? f.hash : "");
-  }
-  const twin = new Set([...hashesByName].filter(([, h]) => h.size > 1).map(([n]) => n));
+  const twin = twinNames(functions);
   const usable = (e) => !uneval.has(e.ruleKey) && !twin.has(e.fn);
   const covers = (e, r) => {
     for (const x of r.effects ?? []) {
@@ -866,6 +879,7 @@ export function settleAccept(pol, rows, functions = [], { unevaluated = [] } = {
         + `Delete line ${e.line}: left in place it would accept whatever a later edit puts under that key` });
   }
   items.sort((a, b) => a.line - b.line || byCodePoint(a.fn, b.fn) || byCodePoint(a.hash ?? "", b.hash ?? ""));
+  if (settleProbe.armed) settleProbe.last = { entries, directBy, twin };
   return { violations: out, accepted: items, acceptedRows, acceptedUnits, notes };
 }
 
