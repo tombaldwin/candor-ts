@@ -24835,6 +24835,17 @@ ${extra}`,
   let uvDoc = null; try { uvDoc = JSON.parse(uv.stdout); } catch { /* null */ }
   check("⟨0.41⟩ `unverified` does not describe a unit carrying an ACCEPTED violation as clean (ok withdrawn); the exit does not move (no Unknown hole)",
         uvDoc?.ok === false && uv.status === 0 && /accept/.test(uv.stderr), `${uv.status} ${uv.stdout.slice(0, 120)} ${uv.stderr.slice(0, 200)}`);
+  // OVER-ACCEPT: a SEPARATE top-level function a covered unit merely CALLS is not "nested" — its key is not positional,
+  // so an entry on the caller never reaches it (measured on 89f2d62: v stays in `violations`).
+  const sep = project({ "package.json": `{"name":"sep","version":"1.0.0"}`, "src/m.ts": `import * as fs from "node:fs";
+export function u(): void { v(); }
+export function v(): void { fs.readFileSync("/new"); }
+` });
+  const sp = path.join(sep, "pol"); fs.writeFileSync(sp, "deny Fs src\naccept src.m.u Fs for deny Fs src because k\n");
+  const sg = spawnSync("node", [path.join(HERE, "scan.mjs"), sep, "--policy", sp, "--gate-json", path.join(sep, "gj"), "--out", path.join(sep, "rep")], { encoding: "utf8" });
+  const sd = JSON.parse(fs.readFileSync(path.join(sep, "gj"), "utf8"));
+  check("⟨0.41⟩ OVER-ACCEPT: an entry on `u` does NOT cover a separate top-level `v` that `u` calls — `v` stays red", sg.status === 1
+        && sd.violations.map((x) => x.fn).join() === "src.m.v" && sd.accepted.length === 1, JSON.stringify(sd));
   // twins: two reports sharing a fn name under different hashes ⇒ the entry accepts NEITHER (gate --report)
   const twinRep = path.join(d, "twin"); fs.mkdirSync(twinRep);
   const mkrep = (hash) => ({ candor: { version: "x", spec: "0.40" }, package: "p", analyzed: { count: 2 },
