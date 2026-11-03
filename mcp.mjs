@@ -19,6 +19,8 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
+import { accepts as acceptsVerb, reasonOf } from "./accepts.mjs";
+import { runAcceptsGate } from "./gate-core.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses,
          parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText,
          unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, reportUnits,
@@ -683,6 +685,49 @@ const TOOLS = {
       // about violations (§6.2) — the key is absent; without entries the document is byte-identical.
       if (incomplete && (pol.accept ?? []).length) return { ok: false, ...ignored, ...inc, ...judged };
       return { ok: !incomplete, violations: v, ...ignored, ...accepted, ...inc, ...judged };
+    },
+  },
+  candor_accepts: {
+    description: "SPEC §6.2 ⟨0.41⟩ `accepts`: PROPOSE a refreshed policy — stale `accept` lines deleted, over-wide ones narrowed, exceeded ones proposed in a comment — as `{ mode, text, removed, narrowed, proposals, unnamed, unjudged, ignored, after, written:false, notes }`. It is the engine's own `accepts` verb (run in-process through the same code as `candor-ts-query accepts --json`, so the proposal is the CLI's, not a second implementation) and it WRITES NO FILE: `text` is the proposed policy, for a human to diff and commit. With `adopt:true` it also proposes a new `accept` line for each violation no entry names, and then `because` is REQUIRED — the operator's reason, written on every line it creates. NEVER INVENT A REASON: the engine does not compose one and neither may you; if the operator has not given you a reason, ask them. The reason you pass is echoed back as `adoptedBecause` so the operator can see exactly what was written in their name. Uses `policy` if given, else the repo's checked-in .candor/config policy. A stale report yields the STALE header like every tool here (re-scan first: a proposal over old code would accept the wrong rows). An incomplete or refused gate yields a tool error and no proposal.",
+    schema: { type: "object", properties: {
+      policy: { type: "string", description: "path to a §6.2 policy file (optional; defaults to the repo's .candor/config `policy`)" },
+      adopt: { type: "boolean", description: "also propose `accept` lines for violations no entry names (requires `because`)" },
+      because: { type: "string", description: "with `adopt`: the OPERATOR's reason, verbatim, written on every created line. Never invent one." },
+      ...reportArg }, required: [] },
+    run: (a, p) => {
+      if (a.adopt !== undefined && typeof a.adopt !== "boolean") throw new Error("`adopt` must be true or false");
+      if (a.because !== undefined && typeof a.because !== "string") throw new Error("`because` must be a string");
+      const adopt = a.adopt === true;
+      if (adopt && (a.because === undefined || a.because.trim() === ""))
+        throw new Error("`adopt` needs `because` — the reason written on every line it creates is the OPERATOR's, never one the engine or an agent composes. Ask the operator for it.");
+      if (!adopt && a.because !== undefined)
+        throw new Error("`because` only applies with `adopt:true` (it is the reason written on each created line)");
+      let polPath;
+      if (a.policy) { confinedPolicyRead(a.policy, p); polPath = nodePath.resolve(a.policy); }
+      else {
+        const cfg = configPolicy(p);
+        if (!cfg) throw new Error("no policy: pass `policy`, or check one into the repo's .candor/config (spec §3.4)");
+        confinedPolicyRead(cfg.policyPath, p, cfg.repoRoot);
+        polPath = nodePath.resolve(cfg.policyPath);
+      }
+      // The engine's OWN `accepts` and OWN gate, in-process — the same two calls `candor-ts-query accepts` makes — so the
+      // proposal cannot differ from the CLI's, and this server (query-only, Fs only) spawns nothing.
+      let areason = null, diag = "";
+      const e0 = console.error;
+      console.error = (...x) => { diag += x.join(" ") + "\n"; };   // keep the verb's own complaints off the server's stderr
+      let r;
+      try {
+        if (adopt) areason = reasonOf(a.because);
+        if (!adopt || areason !== null)
+          r = acceptsVerb({ policyPath: polPath, raw: fs.readFileSync(polPath), adopt, because: areason, json: true, runGate: (lines, probe) => runAcceptsGate(p, polPath, lines, probe) });
+      } finally { console.error = e0; }
+      if (!r) throw new Error(`\`because\` is not a usable reason: ${diag.trim()}`);
+      if (r.exit !== 0) throw new Error(`no proposal (accepts exited ${r.exit}): ${(r.stderr || "").trim().slice(0, 2000)}`);
+      let plan;
+      try { plan = JSON.parse(r.stdout.toString("utf8")); } catch { throw new Error("accepts produced no parsable proposal"); }
+      return { ...plan,
+               ...(adopt ? { adoptedBecause: a.because, reasonNotice: "this reason was supplied by the caller of this tool and is written on every created line; the engine did not verify it — the operator should confirm it before the proposal is taken" } : {}),
+               written: false, notes: (r.stderr || "").split("\n").filter(Boolean) };
     },
   },
   candor_unverified: {

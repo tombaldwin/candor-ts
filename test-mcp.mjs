@@ -1829,6 +1829,51 @@ export function handler(): void { leaf(); }
   fs.rmSync(A, { recursive: true, force: true });
 }
 
+// ── ⟨0.41⟩ `candor_accepts` ON THE AGENT CHANNEL — the engine's own `accepts`, no file written, an operator reason or nothing ──
+{
+  const A = scratch("candor-mcp-accepts-");
+  const rep = { candor: { version: "handwritten", spec: "0.40" }, package: "dao", analyzed: { count: 3, digest: "0" },
+    functions: [{ fn: "dao.a", hash: "ha", inferred: ["Fs"], direct: ["Fs"] }, { fn: "dao.ab", hash: "hab", inferred: ["Fs"], direct: ["Fs"] },
+                { fn: "dao.k", hash: "hk", inferred: ["Clock"], direct: ["Clock"] }] };
+  fs.writeFileSync(`${A}/r.json`, JSON.stringify(rep));
+  const polBody = "deny Fs dao\naccept dao.a Fs for deny Fs dao because known\naccept dao.k Fs for deny Fs dao because gone\n";
+  fs.writeFileSync(`${A}/p.pol`, polBody);
+  const before = fs.readFileSync(`${A}/p.pol`, "utf8");
+  const c = (id, args) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "candor_accepts", arguments: { report: `${A}/r`, policy: `${A}/p.pol`, ...args } } });
+  const rr = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    c(2, {}), c(3, { adopt: true }), c(4, { adopt: true, because: "   " }), c(5, { because: "x" }),
+    c(6, { adopt: true, because: "legacy dao, tracked in the ADR" }), c(8, { adopt: true, because: "a # comment" }), { jsonrpc: "2.0", id: 7, method: "tools/list" }], [], { CANDOR_REPORT: `${A}/r` });
+  const by = (id) => rr.find((r) => r.id === id).result;
+  const t = (id) => JSON.parse(by(id).content[0].text);
+  ok("⟨0.41⟩ candor_accepts: refresh returns the proposal (stale line removed), writes NO file, says so",
+     t(2).mode === "refresh" && t(2).written === false && t(2).removed.length === 1 && !/dao\.k Fs/.test(t(2).text) && fs.readFileSync(`${A}/p.pol`, "utf8") === before,
+     JSON.stringify(t(2)).slice(0, 300));
+  ok("⟨0.41⟩ candor_accepts: `adopt` WITHOUT `because` is a loud tool error — an agent cannot adopt on a reason it did not get",
+     by(3).isError === true && /needs `because`/.test(by(3).content[0].text) && by(4).isError === true, by(3).content[0].text.slice(0, 200));
+  ok("⟨0.41⟩ candor_accepts: `because` without `adopt` is refused", by(5).isError === true && /only applies with `adopt/.test(by(5).content[0].text), by(5).content[0].text.slice(0, 200));
+  ok("⟨0.41⟩ candor_accepts: adopt+because proposes a line for the unnamed violation carrying the operator's reason, ECHOES it as `adoptedBecause`, and still writes nothing",
+     t(6).mode === "adopt" && t(6).adoptedBecause === "legacy dao, tracked in the ADR" && t(6).created?.length === 1
+     && /because legacy dao, tracked in the ADR/.test(t(6).text) && t(6).written === false && fs.readFileSync(`${A}/p.pol`, "utf8") === before,
+     JSON.stringify(t(6)).slice(0, 300));
+  ok("⟨0.41⟩ candor_accepts: a `because` containing `#` is refused (it would truncate the policy line)", by(8).isError === true && /not a usable reason/.test(by(8).content[0].text), by(8).content[0].text.slice(0, 200));
+  ok("⟨0.41⟩ candor_accepts: listed in tools/list with `because` described as the operator's reason",
+     by(7).tools.some((x) => x.name === "candor_accepts" && /OPERATOR/.test(x.inputSchema.properties.because.description)), "");
+  // freshness: a source newer than the report ⇒ the STALE header rides the proposal
+  const FR = scratch("candor-mcp-accepts-stale-");
+  fs.mkdirSync(`${FR}/.candor`, { recursive: true });
+  fs.writeFileSync(`${FR}/.candor/report.json`, JSON.stringify(rep));
+  fs.writeFileSync(`${FR}/p.pol`, polBody);
+  const old = new Date(Date.now() - 3600e3);
+  fs.utimesSync(`${FR}/.candor/report.json`, old, old);
+  fs.writeFileSync(`${FR}/a.ts`, "export const x = 1;\n");
+  const sr = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "candor_accepts", arguments: { report: `${FR}/.candor/report`, policy: `${FR}/p.pol` } } }], [], {});
+  ok("⟨0.41⟩ candor_accepts: over a STALE report the answer carries the STALE REPORT header (a proposal over old code accepts the wrong rows)",
+     /STALE REPORT/.test(sr.find((r) => r.id === 2).result.content[0].text), JSON.stringify(sr.find((r) => r.id === 2)).slice(0, 300));
+  fs.rmSync(A, { recursive: true, force: true });
+  fs.rmSync(FR, { recursive: true, force: true });
+}
+
 console.log(`\ntest-mcp: ${pass} passed, ${fail} failed`);
 // KEEP THE EVIDENCE ON FAILURE. A failing row prints the path to its fixture tree, and the sweep
 // would delete it on the way out — at exactly the moment someone needs to look. scratch.mjs has

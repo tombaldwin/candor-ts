@@ -130,7 +130,7 @@ Tools: `candor_impact` (backward blast radius), `candor_reachable` (what runs at
 `candor_where` (effect surface), `candor_path` (how an effect is reached), `candor_callers`,
 `candor_show`, `candor_map`, `candor_containment`, `candor_blindspots`, `candor_whatif` (pre-edit
 gate check — a given-but-unreadable policy is a loud error, never a clean verdict), `candor_gate`
-(the checked-in `.candor/config` policy verdict), `candor_diff`/`candor_gains` (baseline deltas).
+(the checked-in `.candor/config` policy verdict), `candor_accepts` (the §6.2 ⟨0.41⟩ proposal that refreshes or adopts `accept` lines; writes no file, and `adopt` needs the operator's `because`), `candor_diff`/`candor_gains` (baseline deltas).
 Each takes an optional `report` prefix (else `$CANDOR_REPORT`); `--root <dir>` locks the server to
 one workspace. The server is **query-only** — it never scans (the analyzer self-boundary, spec
 §7.12: an agent or a hook produces the report; the server reads it, Fs only). The query logic is

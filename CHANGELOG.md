@@ -10,6 +10,12 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **MCP `candor_accepts` (SPEC §6.2 ⟨0.41⟩).** An agent using candor through MCP can now ask for the proposed policy that refreshes (or, with
+  `adopt:true`, adopts) `accept` lines. It runs this engine's own `accepts --json` and returns its plan (`text`, `removed`, `narrowed`,
+  `proposals`, `unnamed`, `after`, `written:false`); it writes no file. `adopt` requires an explicit `because`, which is echoed back as
+  `adoptedBecause` with a notice that the caller supplied it; the tool description tells the agent never to invent one. A stale report carries
+  the STALE REPORT header like every other tool, and an incomplete or refused gate is a tool error with no proposal.
+
 - **`accepts` proposes nothing for an `exceeded` entry whose `Unknown` row carries no reason class (SPEC §6.2 ⟨0.41⟩, PART 106 q33).**
   It used to write the comment `exceeded (adds )` and the replacement line `Unknown[]`, which the gate does not honour (a
   second red run). The line is kept as it is and stderr says the row's classes are not carried.
