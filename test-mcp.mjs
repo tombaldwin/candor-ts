@@ -1825,7 +1825,7 @@ export function handler(): void { leaf(); }
      && t(4).violations.filter((v) => v.rule === "AS-EFF-006").length === 2, JSON.stringify(t(4)).slice(0, 300));
   ok("⟨0.41⟩ candor_gate: beside a `forbid` this route cannot answer, the entry for the answerable deny rule is still accepted and the document carries `unevaluated`",
      t(5).violations.map((v) => v.fn).join() === "dao.ab" && t(5).unevaluated?.length === 1, JSON.stringify(t(5)).slice(0, 300));
-  ok("⟨0.41⟩ candor_unverified: a layer carrying an ACCEPTED violation is not described as clean (`ok` false)", t(6).ok === false, JSON.stringify(t(6)).slice(0, 200));
+  ok("⟨0.41⟩ candor_unverified: a layer carrying an ACCEPTED violation is not described as clean (`ok` omitted, `accepted` names the units)", !("ok" in t(6)) && Array.isArray(t(6).accepted) && t(6).accepted.length > 0, JSON.stringify(t(6)).slice(0, 200));
   fs.rmSync(A, { recursive: true, force: true });
 }
 

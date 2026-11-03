@@ -874,14 +874,25 @@ export function settleAccept(pol, rows, functions = [], { unevaluated = [] } = {
 // rows (the report route's evaluation, `gate --report` over the same bytes) pushed through `settleAccept` —
 // never a second copy of "what would be accepted". Empty when the policy holds no entry.
 export function acceptedUnitsOver(pol, fns) {
-  if (!pol?.accept?.length) return [];
+  return acceptReviewOver(pol, fns).accepted;
+}
+
+// ⟨0.41⟩ …and the STALE entries of the same dry settle, for `fix-gate`: a stale `accept` line is a finding the
+// gate exits 1 on, and an advisory verb may be less certain than the gate, never more (§3.3.1). Returns
+// `{accepted: [fn…] (code-point sorted), stale: [{fn, detail}]}` — `detail` is the AS-EFF-012 message verbatim.
+export function acceptReviewOver(pol, fns) {
+  if (!pol?.accept?.length) return { accepted: [], stale: [] };
   const wp = wholePolicyUnanswerable(pol, "a report route");
   const units = reportUnits(fns);
   const net = reportNetClasses(fns, { authoritative: true, units });
   const { unevaluated, withhold } = unanswerableScoped(pol, fns, resolveReasonClasses(fns, {}, units), net, units);
   unevaluated.push(...wp.unevaluated);
   const rows = evaluatePolicy(wp.answerable, fns, {}, new Map(), new Set(), net, withhold, units);
-  return [...settleAccept(wp.answerable, rows, fns, { unevaluated }).acceptedUnits].sort();
+  const st = settleAccept(wp.answerable, rows, fns, { unevaluated });
+  return {
+    accepted: [...st.acceptedUnits].sort(byCodePoint),
+    stale: st.violations.filter((v) => v.rule === "AS-EFF-012").map((v) => ({ fn: v.fn, detail: v.detail })),
+  };
 }
 /** The human-channel line SPEC §6.2 requires on every run with at least one accepted row. */
 export function announceAccepted(st, say = console.error) {

@@ -753,7 +753,8 @@ const TOOLS = {
       // ⟨0.41⟩ `unverified` MUST NOT describe a unit carrying an ACCEPTED violation as clean (§6.2): the
       // all-clear is withdrawn, as on the CLI. Computed from the gate's own rows, never a second copy.
       const uBody = Q.unverified(loadReportLoud(p), upol, scopeMatches);
-      if (acceptedUnitsOver(upol, loadReportLoud(p)).length) uBody.ok = false;
+      { const acc = acceptedUnitsOver(upol, loadReportLoud(p));
+        if (acc.length) { delete uBody.ok; uBody.accepted = acc; } }
       return Q.advisoryAnswer(uBody,
                               ucomp.unanalyzed, ucomp.judgedNothing, ucomp.unreadable, ucomp.noManifest,
                               ucomp.outOfScope ?? [], uUnread, uUnasked);

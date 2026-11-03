@@ -16868,9 +16868,10 @@ if (gateJsonPath) {
   // when nothing was dropped, so a clean policy's verdict stays byte-identical. Never consulted for `ok`
   // or the exit code — the line-level leniency is UNCHANGED, only disclosed.
   if (gateIgnored.length) verdictObj.ignored = gateIgnored;
-  // ⟨0.41⟩ SPEC §6.2 `accepted` — omitted from every exit-2 document (a refusal or an incomplete verdict
-  // makes no claim about violations, so none about which were accepted) and when no entry exists.
-  if (gateAccepted && !incomplete) verdictObj.accepted = gateAccepted;
+  // ⟨0.41⟩ SPEC §6.2 `accepted` — omitted from every exit-2 document (a refusal or an incomplete verdict that
+  // holds no violation makes no claim about violations, so none about which were accepted) and when no entry
+  // exists. An incomplete document that still holds a violation is exit 1 and a verdict: it CARRIES the key.
+  if (gateAccepted && !(incomplete && gateViolations.length === 0)) verdictObj.accepted = gateAccepted;
   // ⟨0.21⟩ (Gap 2) the machine-legible incompleteness: the units candor couldn't analyze, so a CI/agent
   // reading the JSON learns WHY the gate can't certify (the stderr warning alone used to hide this from a
   // machine). `incomplete:true` + the list; the run exits 2 (could-not-fully-evaluate) below. ok:false +

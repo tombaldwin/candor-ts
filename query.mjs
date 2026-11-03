@@ -27,7 +27,7 @@ import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, d
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
          policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules,
          fatalPolicyErrors, refusalVerdict, sortViolations,
-         unanswerableScoped, wholePolicyUnanswerable, reportUnits, noteSyntheticHits, settleAccept, announceAccepted, acceptedUnitsOver } from "./policy.mjs";
+         unanswerableScoped, wholePolicyUnanswerable, reportUnits, noteSyntheticHits, settleAccept, announceAccepted, acceptedUnitsOver, acceptReviewOver } from "./policy.mjs";
 import { hasReport, refusalMarkerFor, refusalSentence } from "./query-core.mjs";
 import { printAgents, writeStdoutSync, writeSinkAtomic, isCandorConfigSink } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
@@ -2180,7 +2180,16 @@ switch (cmd) {
     const cg = loadCallgraph(prefix);
     if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix-gate needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
     const fgpol = loadPolicyOrDie(policyFile, ptext);
-    const fgr = coreFixGate(cg, loadReportOrDie(prefix), fgpol, scopeMatches);
+    const fgfns = loadReportOrDie(prefix);
+    const fgr = coreFixGate(cg, fgfns, fgpol, scopeMatches);
+    // ⟨0.41⟩ SPEC §6.2: a STALE `accept` entry is a finding the gate exits 1 on, so this verb carries it:
+    // `staleAccepts`, `ok: false`, and `--strict` exits 1 (the exit reads `fgr.ok` below).
+    { const stale = acceptReviewOver(fgpol, fgfns).stale;
+      if (stale.length) {
+        fgr.ok = false;
+        fgr.staleAccepts = stale;
+        for (const s of stale) console.error(`candor-ts: fix-gate: ${s.detail}`);
+      } }
     // ⟨0.24⟩ SPEC §3.2 — see `advisoryAnswer`. Over a report declaring `unanalyzed` this OMITS `ok`, adds
     // the manifest, and `--strict` (the CI form) exits 2 — could-not-fully-evaluate, the same code the gate
     // uses for the same situation — rather than the 1 that would claim a finding or the 0 that certified.
@@ -2280,7 +2289,10 @@ switch (cmd) {
     const uHolesOk = r.ok;
     const uAccepted = acceptedUnitsOver(upol, ufns);
     if (uAccepted.length) {
-      r.ok = false;
+      // §6.2 ⟨0.41⟩: `ok` is OMITTED (true would describe the layer as clean, false would assert an Unknown hole
+      // beside a list that names none) and `accepted` names the units, code-point sorted.
+      delete r.ok;
+      r.accepted = uAccepted;
       console.error(`candor-ts: unverified: ${uAccepted.length} function(s) carry a violation that a policy \`accept\` line took `
         + `out of the gate (${uAccepted.join(", ")}). NOT described as clean: an accepted violation is still a violation, only a reviewed one.`);
     }
@@ -2645,7 +2657,7 @@ switch (cmd) {
     // the exit do not consult it (the line-level leniency is unchanged, only disclosed).
     if (gpol.ignored?.length) gverdictObj.ignored = gpol.ignored;
     // ⟨0.41⟩ SPEC §6.2 `accepted` — same key and position as the scan route; omitted from every exit-2 document.
-    if (gaccept.accepted && !gincomplete) gverdictObj.accepted = gaccept.accepted;
+    if (gaccept.accepted && !(gincomplete && gviol.length === 0)) gverdictObj.accepted = gaccept.accepted;
     if (gincomplete) {
       gverdictObj.incomplete = true;
       if (g.unanalyzed.length) gverdictObj.unanalyzed = g.unanalyzed;

@@ -24833,8 +24833,8 @@ ${extra}`,
   // `unverified` must not call a layer with an accepted violation clean
   const uv = spawnSync("node", [path.join(HERE, "query.mjs"), "unverified", "--report", a1.pf + ".rep", "--policy", a1.pf, "--strict"], { encoding: "utf8" });
   let uvDoc = null; try { uvDoc = JSON.parse(uv.stdout); } catch { /* null */ }
-  check("⟨0.41⟩ `unverified` does not describe a unit carrying an ACCEPTED violation as clean (ok withdrawn); the exit does not move (no Unknown hole)",
-        uvDoc?.ok === false && uv.status === 0 && /accept/.test(uv.stderr), `${uv.status} ${uv.stdout.slice(0, 120)} ${uv.stderr.slice(0, 200)}`);
+  check("⟨0.41⟩ `unverified` does not describe a unit carrying an ACCEPTED violation as clean (`ok` OMITTED, `accepted` names the units); the exit does not move (no Unknown hole)",
+        uvDoc !== null && !("ok" in uvDoc) && Array.isArray(uvDoc.accepted) && uvDoc.accepted.length > 0 && uv.status === 0 && /accept/.test(uv.stderr), `${uv.status} ${uv.stdout.slice(0, 120)} ${uv.stderr.slice(0, 200)}`);
   // OVER-ACCEPT: a SEPARATE top-level function a covered unit merely CALLS is not "nested" — its key is not positional,
   // so an entry on the caller never reaches it (measured on 89f2d62: v stays in `violations`).
   const sep = project({ "package.json": `{"name":"sep","version":"1.0.0"}`, "src/m.ts": `import * as fs from "node:fs";
