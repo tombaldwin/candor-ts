@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.41.0] — 2026-11-03
+
 - **MCP `candor_accepts` (SPEC §6.2 ⟨0.41⟩).** An agent using candor through MCP can now ask for the proposed policy that refreshes (or, with
   `adopt:true`, adopts) `accept` lines. It runs this engine's own `accepts --json` and returns its plan (`text`, `removed`, `narrowed`,
   `proposals`, `unnamed`, `after`, `written:false`); it writes no file. `adopt` requires an explicit `because`, which is echoed back as
