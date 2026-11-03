@@ -188,6 +188,11 @@ export function accepts({ policyPath, raw, adopt, because, json, runGate }) {
             for (const x of r.effects) { if (x === "Unknown") unk = true; else conc.add(x); }
             for (const c of r.classes) cls.add(c);
           }
+      if (unk && cls.size === 0) {
+        // SPEC §6.2 ⟨0.41⟩: no class to name, so no line could cover the row — keep the line, propose nothing.
+        say(`candor-ts accepts: line ${L} (\`${e.fn}\`) is EXCEEDED by an \`Unknown\` whose reason classes this report does not carry — no wider line can be written for it; kept as is, and the row stays red.`);
+        continue;
+      }
       const prop = canon(conc, unk ? cls : null);
       const have = new Set(e.effects); have.delete("Unknown");
       let adds = [...conc].filter((x) => !have.has(x));

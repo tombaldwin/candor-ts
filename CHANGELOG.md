@@ -10,6 +10,10 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **`accepts` proposes nothing for an `exceeded` entry whose `Unknown` row carries no reason class (SPEC §6.2 ⟨0.41⟩, PART 106 q33).**
+  It used to write the comment `exceeded (adds )` and the replacement line `Unknown[]`, which the gate does not honour (a
+  second red run). The line is kept as it is and stderr says the row's classes are not carried.
+
 - **`accepts` — refresh or adopt `accept` lines as a PROPOSED policy (SPEC §6.2 ⟨0.41⟩, PART 106; port of the candor-java
   reference).** `candor-ts-query accepts [--report <locator>] [--policy <file>] [--json] [--adopt --because <reason>]`
   prints the policy with stale `accept` lines deleted, over-wide accepted entries narrowed to the rows they accepted, an
