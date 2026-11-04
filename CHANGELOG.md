@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.41.1] — 2026-11-04
+
 - `candor-ts-query accepts` (and MCP `candor_accepts`) with no report: still refuses (the current scan, not the baseline, is what the CI gate judges), but now names the config's `baseline` it did not use and why, and prints the two commands that work (`candor-ts . --out .candor/report`, then `candor-ts-query accepts --report .candor/report …`). The policy already came from `.candor/config`.
 - `candor-ts-query accepts`: every violation the proposal leaves red now carries its reason and remedy on stderr, grouped by reason (positional key, `(hash, fn)` twin, unwritable name, `Unknown` with no reason class, ambiguous entry). The JSON plan is unchanged.
 
