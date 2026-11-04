@@ -7,7 +7,7 @@
 // query.mjs, run in-process over the same bytes through `runGate`), so "the same parse and the same matching" holds by
 // construction and not by a second implementation that could drift. The proposed text is then gated again to report
 // `after`. An entry whose state the gate did not name is KEPT, never deleted. Writes no file.
-import { positionalKey } from "./policy.mjs";
+import { positionalKey, discoverConfigText } from "./policy.mjs";
 
 const RULE_KINDS = new Set(["deny", "pure", "forbid", "allow", "only"]);
 const MARK = "# candor-accepts:";
@@ -190,7 +190,7 @@ export function accepts({ policyPath, raw, adopt, because, json, runGate }) {
           }
       if (unk && cls.size === 0) {
         // SPEC §6.2 ⟨0.41⟩: no class to name, so no line could cover the row — keep the line, propose nothing.
-        say(`candor-ts accepts: line ${L} (\`${e.fn}\`) is EXCEEDED by an \`Unknown\` whose reason classes this report does not carry — no wider line can be written for it; kept as is, and the row stays red.`);
+        say(`candor-ts accepts: line ${L} (\`${e.fn}\`) is EXCEEDED by an \`Unknown\` whose reason classes this report does not carry — no wider line can be written for it; kept as is, and the row stays red. Remedy: re-scan with the current engine so the report carries its reason classes, then run \`accepts\` again; or fix the violation.`);
         continue;
       }
       const prop = canon(conc, unk ? cls : null);
@@ -206,13 +206,18 @@ export function accepts({ policyPath, raw, adopt, because, json, runGate }) {
       proposals.set(L, { ...item(L, e.fn, e.ruleKey, e.because), adds, text });
       proposalComment.set(L, `${MARK} exceeded (adds ${adds.join(" ")})${REPLACE}${text}`);
     } else if (st === "unjudged") unjudged.push(item(L, e.fn, e.ruleKey, null));
-    // ambiguous, or a state the gate did not name: kept byte for byte
+    else if (st === "ambiguous")
+      // kept byte for byte — and said, so the row it leaves red has a cause
+      say(`candor-ts accepts: line ${L} (\`${e.fn}\`) is AMBIGUOUS — two units share that name with different hashes, so the entry accepts NEITHER; kept as written. Remedy: rename one of the two, or gate the modules separately.`);
+    // a state the gate did not name: kept byte for byte
   }
   const ignoredOut = [...ignored].sort((a, b) => a - b).map((line) => ({ line }));
 
   // ---- adoption candidates: the rows no entry names (computed in both modes: `unnamed`) ---------------
   const cands = [];
   const seen = new Set();
+  const refused = new Map();   // reason key -> the fns no entry could be written for (⟨0.41.1⟩: said on stderr, never in the plan)
+  const refuse = (why, fn) => { if (!refused.has(why)) refused.set(why, new Set()); refused.get(why).add(fn); };
   for (const v of rowsOf(d)) {
     const prod = [];
     for (const [L, rows] of per) if (rows.some((w) => rowKey(w) === rowKey(v) && (w.hash ?? null) === (v.hash ?? null))) prod.push(L);
@@ -222,11 +227,12 @@ export function accepts({ policyPath, raw, adopt, because, json, runGate }) {
       const named = entries.some((e) => e.fn === v.fn && e.ruleKey === rule);
       if (named || seen.has(`${rule}\0${v.fn}`)) continue;
       seen.add(`${rule}\0${v.fn}`);
-      if (twins.has(v.fn)) continue;
-      if (positionalKey(v.fn) || /[#\t\n\v\f\r ]/.test(v.fn)) continue;
+      if (twins.has(v.fn)) { refuse("twin", v.fn); continue; }
+      if (positionalKey(v.fn)) { refuse("positional", v.fn); continue; }
+      if (/[#\t\n\v\f\r ]/.test(v.fn)) { refuse("unwritable", v.fn); continue; }
       const conc = new Set(v.effects);
       const unk = conc.delete("Unknown");
-      if (unk && v.classes.length === 0) continue;
+      if (unk && v.classes.length === 0) { refuse("noclass", v.fn); continue; }
       cands.push({ line: L, fn: v.fn, hash: v.hash, rule, effects: canon(conc, unk ? v.classes : null) });
     }
   }
@@ -287,10 +293,56 @@ export function accepts({ policyPath, raw, adopt, because, json, runGate }) {
     + `after the proposal the gate exits ${g1.rc} with ${viol} violation(s), ${acc} accepted.`);
   for (const u of unjudged)
     say(`candor-ts accepts: line ${u.line} (\`${u.fn}\` under \`${u.policyRule}\`) kept UNJUDGED — this route cannot evaluate that rule, so nothing is known about the entry. Gate at scan time.`);
+  for (const [key, why, remedy] of REFUSED_WHY) {
+    const fns = [...(refused.get(key) ?? [])].sort(cp);
+    if (!fns.length) continue;
+    const shown = fns.slice(0, 5).map((f) => `\`${f}\``);
+    say(`candor-ts accepts: ${fns.length} violation(s) get NO accept line — ${why}: ${shown.join(", ")}${fns.length > shown.length ? `, … and ${fns.length - shown.length} more` : ""}. Remedy: ${remedy}.`);
+  }
   for (const L of ignored) say(`candor-ts accepts: line ${L} is IGNORED by the gate and kept as written — repairing it is yours.`);
   if (created.length) say("candor-ts accepts: --adopt wrote lines keyed by function name alone. A same-named unit in ANOTHER module gated under the same file "
     + "is accepted on this reason — keep one policy file per separately-gated module (and per engine).");
   say(`candor-ts accepts: nothing was written. To take the proposal: write it to ANOTHER path (not onto the policy — a shell redirect onto it `
     + `empties it first), then \`diff ${policyPath} <that path>\` and commit.`);
   return { exit: 0, stdout, stderr };
+}
+
+/** ⟨0.41.1⟩ Every violation the proposal leaves red because NO line could be written for it, with the reason and the remedy, so
+ *  "after the proposal the gate exits 1 with N violation(s)" is never a number with no cause. Human channel only: the plan is
+ *  unchanged. Up to five names per reason, then a count. */
+const REFUSED_WHY = [
+  ["positional", "keyed by POSITION (`#<n>`, `<…>@…`, `[computed@…]`), which an `accept` line cannot name — inserting an unrelated closure would re-point it at a different unit",
+    "give it a NAME (extract the arrow/anonymous function to a named one), re-scan, and run `accepts` again; or fix the violation"],
+  ["twin", "a (hash, fn) TWIN — two units with this name and different hashes, so no line could name one of them",
+    "rename one of the two, or gate the modules separately; or fix the violation"],
+  ["unwritable", "named with a `#` or whitespace, which cannot be written on a policy line", "rename it, or fix the violation"],
+  ["noclass", "carries an `Unknown` whose reason class this report does not carry, so no `Unknown[…]` line would cover it",
+    "re-scan with the current engine so the report carries its reason classes, then run `accepts` again; or fix the violation"],
+];
+
+/** ⟨0.41.1⟩ `accepts` with no report named and none discovered. The refusal says which report each choice would judge and prints
+ *  commands that run. It does not fall back to the config's `baseline`: that is the PREVIOUS recorded scan, and a refresh against
+ *  it would delete the entries of code written since and adopt only what the baseline held — a proposal the CI gate, which judges
+ *  the CURRENT scan, would then contradict. The policy is discovered as the gate discovers it, so it is not the missing piece.
+ *  `mcp`: the agent-channel server only reads (SPEC §7.12), so the commands are for the operator's shell. */
+export function noReportMessage({ locator = null, fromDir = ".", mcp = false } = {}) {
+  let base = process.env.CANDOR_BASELINE || null;
+  if (!base) {
+    try {
+      const t = discoverConfigText(fromDir);
+      for (const raw of (t ?? "").split(/\r?\n/)) {
+        const m = raw.split("#", 1)[0].trim().match(/^(\S+)\s*(.*)$/);
+        if (m && m[1].toLowerCase() === "baseline" && m[2].trim()) { base = m[2].trim(); break; }
+      }
+    } catch { /* best effort: a config that cannot be read is named by the gate, not here */ }
+  }
+  const cur = ".candor/report";
+  let m = `candor-ts accepts: no report to judge — no report files found${locator ? ` at \`${locator}\`` : ""} (and no --report / CANDOR_REPORT).\n`
+    + `  \`accepts\` reads a REPORT; it does not scan${mcp ? " (this server only reads — run these in a shell, then call this tool again)" : ""}. The report that matches what CI gates is the CURRENT scan:\n`
+    + `      candor-ts . --out ${cur}     # exits 1 when the policy has violations, but the report is still written (\`|| true\` under \`set -e\`)\n`
+    + `      candor-ts-query accepts --report ${cur} --adopt --because <reason>\n`;
+  if (base)
+    m += `  The config's baseline \`${base}\` is the PREVIOUS recorded scan, so it is not used unasked (a refresh against it deletes entries `
+      + `for code written since). To judge it on purpose: candor-ts-query accepts --report ${base} ...\n`;
+  return m;
 }

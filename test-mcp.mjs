@@ -1870,6 +1870,18 @@ export function handler(): void { leaf(); }
     { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "candor_accepts", arguments: { report: `${FR}/.candor/report`, policy: `${FR}/p.pol` } } }], [], {});
   ok("⟨0.41⟩ candor_accepts: over a STALE report the answer carries the STALE REPORT header (a proposal over old code accepts the wrong rows)",
      /STALE REPORT/.test(sr.find((r) => r.id === 2).result.content[0].text), JSON.stringify(sr.find((r) => r.id === 2)).slice(0, 300));
+  // ⟨0.41.1⟩ no report anywhere: the SAME refusal text the CLI prints (commands that work, the baseline not used)
+  const NR = scratch("candor-mcp-accepts-noreport-");
+  fs.mkdirSync(`${NR}/.candor`, { recursive: true });
+  fs.writeFileSync(`${NR}/.candor/policy`, "deny Fs dao\n");
+  fs.writeFileSync(`${NR}/.candor/config`, "policy .candor/policy\nbaseline .candor/baseline.json\n");
+  const nrr = await mcpSession([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "candor_accepts", arguments: { adopt: true, because: "x" } } }], [`${NR}/.candor/report`], { CANDOR_REPORT: "" });
+  const nrt = nrr.find((r) => r.id === 2).result;
+  ok("⟨0.41.1⟩ candor_accepts with no report: a tool error carrying the CLI's refusal (the two commands, the unused baseline and why)",
+     nrt.isError === true && /candor-ts \. --out \.candor\/report/.test(nrt.content[0].text) && /candor-ts-query accepts --report \.candor\/report --adopt --because/.test(nrt.content[0].text)
+     && /baseline\.json/.test(nrt.content[0].text) && /PREVIOUS/.test(nrt.content[0].text), nrt.content[0].text.slice(0, 400));
+  fs.rmSync(NR, { recursive: true, force: true });
   fs.rmSync(A, { recursive: true, force: true });
   fs.rmSync(FR, { recursive: true, force: true });
 }

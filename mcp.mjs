@@ -19,7 +19,7 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
-import { accepts as acceptsVerb, reasonOf } from "./accepts.mjs";
+import { accepts as acceptsVerb, reasonOf, noReportMessage } from "./accepts.mjs";
 import { runAcceptsGate } from "./gate-core.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses,
          parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText,
@@ -45,7 +45,7 @@ const within = (abs, root) => abs === root || abs.startsWith(root + nodePath.sep
 // hasReport is the shared query-core check — the SAME predicate (Q.isReport) the loader uses, so a
 // prefix whose only sibling is `.encountered-*`/`.calibrated.json` can't pass existence yet load zero
 // functions (an authoritative-empty result — a silent under-report; review find).
-function resolvePrefix(args) {
+function resolvePrefix(args, tool = null) {
   const p = args?.report || DEFAULT_PREFIX;
   if (!p) throw new Error("no report prefix: pass `report`, set $CANDOR_REPORT, or give one as the CLI arg");
   if (WORKSPACE_ROOT && !within(nodePath.resolve(p), WORKSPACE_ROOT))
@@ -70,7 +70,11 @@ function resolvePrefix(args) {
   // the truth about which of the two situations this is.
   const m = Q.refusalMarkerFor(p);
   if (m) throw new Error(Q.refusalSentence(m));
-  if (!Q.hasReport(p)) throw new Error(`no report at \`${p}\` (.json or .<crate>.scan.json) — run a candor scan first`);
+  if (!Q.hasReport(p)) {
+    // ⟨0.41.1⟩ `candor_accepts` over no report: the same refusal text the CLI prints (commands that work, the baseline not used).
+    if (tool === "candor_accepts" && !args?.report) throw new Error(noReportMessage({ locator: clip(p), fromDir: nodePath.dirname(nodePath.resolve(p)), mcp: true }).trimEnd());
+    throw new Error(`no report at \`${p}\` (.json or .<crate>.scan.json) — run a candor scan first`);
+  }
   return p;
 }
 // ---- FRESHNESS — is this report still about the code the agent is looking at? ------------------------
@@ -1025,7 +1029,7 @@ function handle(msg) {
         return result(id, { content: [{ type: "text", text: `candor: ${params.name} has no policy-relative verdict — its schema declares no \`policy\` property, and it never reads one; apply a policy to an existing report with \`candor_gate\`, or use \`candor_whatif\`/\`candor_fix\`/\`candor_unverified\` for a policy-relative pre-edit check.` }], isError: true });
       // A log-only tool (candor_activity) needs no report — resolving one would wrongly demand a
       // scan before the gate's own activity can be read.
-      const prefix = t.noReport ? null : resolvePrefix(args);
+      const prefix = t.noReport ? null : resolvePrefix(args, params.name);
       // A tool that targets a `fn` gets a clear "not found" rather than a silently-empty result —
       // an agent must distinguish "no such function" from "found, nothing calls it".
       //

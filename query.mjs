@@ -27,7 +27,7 @@ import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, d
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
          policyVocabularyAnchor, policyErrorText, policyUnreadable, policyZeroRules,
          fatalPolicyErrors, refusalVerdict, unanswerableScoped, wholePolicyUnanswerable, reportUnits, acceptedUnitsOver, acceptReviewOver, } from "./policy.mjs";
-import { accepts as acceptsVerb, reasonOf } from "./accepts.mjs";
+import { accepts as acceptsVerb, reasonOf, noReportMessage } from "./accepts.mjs";
 import { gateCore, runAcceptsGate } from "./gate-core.mjs";
 import { hasReport, refusalMarkerFor, refusalSentence } from "./query-core.mjs";
 import { printAgents, writeStdoutSync, writeSinkAtomic, isCandorConfigSink } from "./contract.mjs";
@@ -2383,6 +2383,11 @@ switch (cmd) {
     if (aadopt) { areason = reasonOf(abecause); if (areason === null) process.exit(2); }
     const apol = resolvePolicy(apolicy, null).policyFile;
     if (!apol) { console.error("candor-ts accepts: a policy is required — pass `--policy <file>` or set CANDOR_POLICY / a .candor/config `policy` key."); process.exit(2); }
+    if (areport === null && !process.env.CANDOR_REPORT) {
+      // ⟨0.41.1⟩ no report named and none discovered: still a refusal, but one that names the commands that work.
+      const dp = discoverReportPrefix();
+      if (dp === null || (!refusalMarkerFor(dp) && !hasReport(dp))) { console.error(noReportMessage().trimEnd()); process.exit(2); }
+    }
     const aprefix = requireReport(areport !== null ? locatorToPrefix(areport) : discoverReportPrefix());
     let araw;
     try { araw = fs.readFileSync(apol); }

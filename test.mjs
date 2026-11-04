@@ -24905,6 +24905,47 @@ if (blk()) {
   check("⟨0.41⟩ accepts: every other line is kept byte for byte (CRLF terminators included)", in0.stdout === "deny Fs dao\r\n# note\r\n", JSON.stringify(in0.stdout));
 }
 
+// ── ⟨0.41.1⟩ `accepts` field fixes: the no-report refusal names working commands; every unhandled row carries its reason ──
+if (blk()) {
+  const A = scratch("candor-ts-accepts-fieldfix-");
+  const q = (cwd, args, env = {}) => spawnSync("node", [path.join(HERE, "query.mjs"), "accepts", ...args], { encoding: "utf8", cwd, env: { ...process.env, CANDOR_REPORT: "", CANDOR_POLICY: "", CANDOR_BASELINE: "", ...env } });
+  const proj = fs.mkdtempSync(path.join(A, "proj-"));
+  fs.mkdirSync(`${proj}/.candor`);
+  fs.writeFileSync(`${proj}/.candor/policy`, "deny Fs dao\n");
+  fs.writeFileSync(`${proj}/.candor/config`, "policy .candor/policy\nbaseline .candor/baseline.json\n");
+  const nr = q(proj, ["--adopt", "--because", "x"]);
+  check("⟨0.41.1⟩ accepts with no report still refuses (exit 2, no proposal)", nr.status === 2 && nr.stdout === "", nr.stdout + nr.stderr);
+  check("⟨0.41.1⟩ accepts no-report refusal names the configured baseline it did not use, and why",
+    nr.stderr.includes(".candor/baseline.json") && /PREVIOUS/.test(nr.stderr) && /not used/.test(nr.stderr), nr.stderr);
+  check("⟨0.41.1⟩ accepts no-report refusal prints the two commands that work in THIS engine",
+    nr.stderr.includes("candor-ts . --out .candor/report") && nr.stderr.includes("candor-ts-query accepts --report .candor/report --adopt --because"), nr.stderr);
+  const bare = fs.mkdtempSync(path.join(A, "bare-"));
+  const nb = q(bare, ["--policy", `${proj}/.candor/policy`]);
+  check("⟨0.41.1⟩ accepts no-report with no config: the same two commands, no baseline sentence",
+    nb.status === 2 && nb.stderr.includes("candor-ts . --out .candor/report") && !/PREVIOUS/.test(nb.stderr), nb.stderr);
+  const ex = q(proj, ["--report", `${A}/nothing-here`]);
+  check("⟨0.41.1⟩ accepts: an explicit --report that matches nothing keeps the loader's own wording", ex.status === 2 && !/PREVIOUS/.test(ex.stderr) && /no report files/.test(ex.stderr), ex.stderr);
+
+  const fns = [
+    { fn: "dao.f.<anonymous>#0", hash: "c0", inferred: ["Fs"], direct: ["Fs"] },
+    { fn: "dao.t", hash: "t1", inferred: ["Fs"], direct: ["Fs"] }, { fn: "dao.t", hash: "t2", inferred: ["Fs"], direct: ["Fs"] },
+    { fn: "dao.sp ace", hash: "sp", inferred: ["Fs"], direct: ["Fs"] },
+    { fn: "dao.u", hash: "u", inferred: ["Unknown"] },
+    { fn: "dao.w", hash: "w1", inferred: ["Fs"], direct: ["Fs"] }, { fn: "dao.w", hash: "w2", inferred: ["Fs"], direct: ["Fs"] },
+  ];
+  fs.writeFileSync(`${A}/rr.json`, JSON.stringify({ candor: { version: "handwritten", spec: "0.40" }, package: "dao", analyzed: { count: 7, digest: "0" }, functions: fns }));
+  fs.writeFileSync(`${A}/rr.pol`, "deny Fs Unknown dao\naccept dao.t Fs for deny Fs Unknown dao because twin\n");
+  const rr = q(bare, ["--report", `${A}/rr.json`, "--policy", `${A}/rr.pol`, "--adopt", "--because", "x"]);
+  const lineFor = (tok) => rr.stderr.split("\n").find((l) => l.includes("`" + tok + "`") && l.includes("Remedy:"));
+  check("⟨0.41.1⟩ accepts: exits 0 and the proposal is unchanged by the summary", rr.status === 0, rr.stderr);
+  for (const [what, tok] of [["positional", "dao.f.<anonymous>#0"], ["twin", "dao.w"], ["unwritable", "dao.sp ace"], ["no class", "dao.u"]])
+    check(`⟨0.41.1⟩ accepts: a ${what} row left red carries its reason AND a remedy on stderr`, !!lineFor(tok), rr.stderr);
+  check("⟨0.41.1⟩ accepts: the ambiguous entry says what it is, with a remedy", /line 2 .*AMBIGUOUS.*Remedy/.test(rr.stderr), rr.stderr);
+  const rj = JSON.parse(q(bare, ["--report", `${A}/rr.json`, "--policy", `${A}/rr.pol`, "--json"]).stdout);
+  check("⟨0.41.1⟩ accepts --json: the plan carries no new key (stderr-only change)",
+    Object.keys(rj).sort().join() === ["after", "ignored", "mode", "narrowed", "proposals", "removed", "text", "unjudged", "unnamed"].sort().join(), Object.keys(rj).join());
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
