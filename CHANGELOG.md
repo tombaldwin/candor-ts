@@ -10,6 +10,11 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.41.2] — 2026-11-05
+
+- **No change to candor-ts.** The version moves with the 0.41.2 family patch (a candor-java fix).
+
+
 ## [0.41.1] — 2026-11-04
 
 - `candor-ts-query accepts` (and MCP `candor_accepts`) with no report: still refuses (the current scan, not the baseline, is what the CI gate judges), but now names the config's `baseline` it did not use and why, and prints the two commands that work (`candor-ts . --out .candor/report`, then `candor-ts-query accepts --report .candor/report …`). The policy already came from `.candor/config`.
