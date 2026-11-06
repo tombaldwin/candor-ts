@@ -10,6 +10,9 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **No change to candor-ts.** The version moves with the 0.41.3 family patch (a candor-java fix).
+
+
 ## [0.41.2] — 2026-11-05
 
 - **A scan no longer hangs at exit on Node 24.** `scan.mjs` ended a gate verdict (a violation, exit 1; a refusal or
