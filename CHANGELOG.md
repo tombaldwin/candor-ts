@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.41.2] — 2026-11-05
+
 - **A scan no longer hangs at exit on Node 24.** `scan.mjs` ended a gate verdict (a violation, exit 1; a refusal or
   an incomplete verdict, exit 2; `--json`) with `process.exit()`, which on Node 24 can deadlock in platform
   shutdown: a V8 background worker parked waiting for a GC that the joining main thread never runs
@@ -33,11 +35,6 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 - **The `--workspace` and `--dep-inits` dependency re-scans have a deadline (600 s).** They had none, so one child
   that never returned hung the whole scan. On expiry the child is killed, stderr names the dependency, and it is
   handled as a dependency that failed to scan: not chained, so its calls read Unknown/invisible.
-
-## [0.41.2] — 2026-11-05
-
-- **No change to candor-ts.** The version moves with the 0.41.2 family patch (a candor-java fix).
-
 
 ## [0.41.1] — 2026-11-04
 
