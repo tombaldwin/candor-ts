@@ -40,6 +40,18 @@ import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadE
          WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, NET_ACCEPTING, NET_REQUEST_NAMED, FS_USE_VERBS,
          EXEC_USE_VERBS, RESERVED_SIDECAR_SEGMENTS } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
+// ── EXIT BY FALLING OFF THE END, NEVER `process.exit()` FROM HERE DOWN ────────────────────────────────────
+// Everything below runs inside the `scan:` block, and every exit site is `{ process.exitCode = N; break scan; }`.
+// `process.exit()` on Node 24 can DEADLOCK: it disposes the V8 platform while the isolate is still alive, and
+// joins the background workers — one of which may be parked in `CollectionBarrier::AwaitCollectionBackground`
+// waiting for a GC that only the (now joining) main thread can run (nodejs/node#64274, open; #64560 is a
+// duplicate). MEASURED: candor-spec CI on ubuntu-26.04 (Node 24.22.2) hung in PARTs 38, 98 and 104 across six
+// runs, always on a gate that exits through `process.exit` (violation → 1, refusal → 2), always with the verdict
+// already written; reproduced here with `--stress-concurrent-allocation` — main thread in
+// `WorkerThreadsTaskRunner::Shutdown → uv_thread_join`, a V8Worker in `AwaitCollectionBackground`. A NATURAL exit
+// disposes the isolate first and does not hang. The only `process.exit` calls left are inside functions that
+// run before any analysis (engine pin, config load) and the crash handler, which also exits naturally now.
+scan: {
 // ⟨R815⟩ reach marker for the class-definition-time attribution in `enclosing` (declared here, not beside it:
 // `enclosing` runs from module-level code above its own definition, so a later `const` is in its TDZ).
 // ⟨call-target round 2⟩ `CANDOR_CT2_OFF=1` — the round-2 measurement switch (the site table restricted to its `r0`
@@ -94,10 +106,11 @@ process.on("uncaughtException", (e) => {
       + "written, so this is 'could not evaluate' (exit 2), not a clean tree and not a violation. "
       + "Re-run with a larger stack — `node --stack-size=4000 scan.mjs …` — or scan the offending "
       + "file on its own to find it.");
-    process.exit(2);
+    process.exitCode = 2;   // returning lets the process exit NATURALLY — see EXIT BY FALLING OFF THE END
+    return;
   }
   console.error(e?.stack ?? String(e));
-  process.exit(1);
+  process.exitCode = 1;
 });
 
 /** The `deps` / `CANDOR_DEPS` separator set — ASCII whitespace plus `:` and `,`.
@@ -118,7 +131,7 @@ const DEP_SEPARATORS = /[ \t\n\r:,]+/;
 if (process.argv.includes("--version") || process.argv.includes("-V")) {
   console.log(`candor-ts ${PKG_VERSION} (spec ${SPEC_VERSION})`);
   console.log("upgrade: npm install -g candor-ts@latest");
-  process.exit(0);
+  { process.exitCode = 0; break scan; }
 }
 
 // --mcp: a MODE, in the same place and for the same reason as --version above — it hands the process
@@ -139,7 +152,7 @@ if (process.argv.includes("--mcp")) {
   const server = fileURLToPath(new URL("./mcp.mjs", import.meta.url));
   const rest = process.argv.slice(2).filter((a) => a !== "--mcp");
   const r = spawnSync(process.execPath, [server, ...rest], { stdio: "inherit" });
-  process.exit(r.status ?? 0);
+  { process.exitCode = r.status ?? 0; break scan; }
 }
 
 // -h / --help: a print-and-exit MODE (like --version), handled before the arg walk so `-h` (a single
@@ -197,7 +210,7 @@ EXAMPLES
 
 Docs: candor.poly.io   ·   Verify an install: candor doctor
 See https://github.com/tombaldwin/candor`);
-  process.exit(0);
+  { process.exitCode = 0; break scan; }
 }
 
 // ---- args ----------------------------------------------------------------------------------------
@@ -925,7 +938,7 @@ const disarmUnwrittenOutReports = () => {
       + "one stream and a consumer parsing it gets neither. Send one to a file, or run the scan twice.");
     console.log(JSON.stringify(refusalVerdict(SPEC_VERSION,
       "--json and --gate-json - both name stdout — a report and a verdict cannot share one stream", null), null, 1));
-    process.exit(2);
+    { process.exitCode = 2; break scan; }
   }
   for (const [other, flag] of (gate && singleSink ? runInputs(preTarget, policy) : [])) {
     if (gate && sameArtifact(gate, other)) {
@@ -933,7 +946,7 @@ const disarmUnwrittenOutReports = () => {
         + `(exit 2). The verdict is armed before the policy is read, so this would overwrite your policy `
         + `and then gate on the wreckage. Nothing was written; give the verdict its own path.`);
       refuseEarly(`--gate-json ${gate} names the same file as ${flag} ${other}`);
-      process.exit(2);
+      { process.exitCode = 2; break scan; }
     }
   }
   // ⟨0.28⟩ …AND THE TARGET EXPANDS TO THE FILES THE RUN WILL PARSE (see `sinkIsParsedSourceUnderTarget`).
@@ -945,7 +958,7 @@ const disarmUnwrittenOutReports = () => {
       + `(${path.join(targetContainmentRoot(preTarget) ?? ".", ".candor", "verdict.json")}, say) is the `
       + `recommended layout and stays permitted.`);
     refuseEarly(`--gate-json ${gate} is a source file under the scan target ${preTarget}`);
-    process.exit(2);
+    { process.exitCode = 2; break scan; }
   }
   // `.candor/config` is never a verdict sink, wherever it is — the SHAPE predicate `isCandorConfigSink`
   // (contract.mjs), shared with query.mjs's `gate --report` sink; the diagnostic and the `refuseEarly`
@@ -958,12 +971,12 @@ const disarmUnwrittenOutReports = () => {
       + `is armed before the config is read, so this would destroy the config that configures this `
       + `run. Nothing was written; give the verdict its own path.`);
     refuseEarly(`--gate-json ${gate} is a .candor/config`);   // ⟨0.28⟩ report stream too
-    process.exit(2);
+    { process.exitCode = 2; break scan; }
   }
   if (gate && singleSink && sameArtifact(gate, process.env.CANDOR_CONFIG)) {
     console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as CANDOR_CONFIG — refusing (exit 2).`);
     refuseEarly(`--gate-json ${gate} names the same file as CANDOR_CONFIG`);   // ⟨0.28⟩
-    process.exit(2);
+    { process.exitCode = 2; break scan; }
   }
   // ⟨0.28⟩ A REPEATED `--gate-json` IS REFUSED, AND EVERY PATH NAMED GETS THE REFUSAL. Placed after the
   // input-collision guards above and before arming: a sink that is an INPUT is refused having written
@@ -1017,7 +1030,7 @@ const disarmUnwrittenOutReports = () => {
     }
     if (offending.size === distinct.length) {
       refuseEarly(`every named --gate-json path collides with an input`);   // ⟨0.28⟩ report stream
-      process.exit(2);
+      { process.exitCode = 2; break scan; }
     }
   }
   if (distinct.length > 1) {
@@ -1039,7 +1052,7 @@ const disarmUnwrittenOutReports = () => {
     // isn't in the list, refuseEarlyToStream's report arm handles the `--json` case; when it is, the
     // verdict is already there and `--json` was refused earlier (line 333), so nothing more is owed.
     if (!distinct.includes("-")) refuseEarly(`--gate-json was given more than once (${list})`);
-    process.exit(2);
+    { process.exitCode = 2; break scan; }
   }
   if (gate && gate !== "-") armGateJsonFailClosed(gate);
   // ⟨0.28⟩ …AND ARM THE REPORT SET, still before the arg loop below can exit on an unknown flag.
@@ -1093,7 +1106,7 @@ const disarmUnwrittenOutReports = () => {
       for (const p of namedOuts) armOutPrefixFailClosed(p, inputs);
     }
     refuseEarly(`--out was given more than once (${list}) — a run writes one report set to one prefix`);
-    process.exit(2);
+    { process.exitCode = 2; break scan; }
   }
   if (preOut && !preWantJson) armOutPrefixFailClosed(preOut, runInputs(preTarget, policy));
 }
@@ -1125,7 +1138,7 @@ for (let i = 0; i < argv.length; i++) {
     if (v === undefined || v.startsWith("--")) {
       console.error(`candor-ts: ${a} requires a value (${usage})`);
       refuseEarly(`${a} requires a value`);
-      process.exit(2);
+      { process.exitCode = 2; break scan; }
     }
     if (a === "--out") { outPrefix = v; noteRefusalPrefix(v); }
     else if (a === "--policy") policyPath = v; else gateJsonPath = v;
@@ -1140,21 +1153,21 @@ for (let i = 0; i < argv.length; i++) {
     // ⟨0.27⟩ §3.3 names an unknown flag as a broken-gate-config exit-2 cause; the stream sink gets the
     // refusal document too (see refuseEarlyToStream — the file sink is already armed).
     refuseEarly(`unknown flag ${a}`);
-    process.exit(2);
+    { process.exitCode = 2; break scan; }
   }
   else if (target === null) target = a;
   else if (outPrefix === null) { outPrefix = a; noteRefusalPrefix(a); } // legacy positional prefix
   else {
     console.error(`candor-ts: unexpected extra argument ${a} (${usage})`);
     refuseEarly(`unexpected extra argument ${a}`);
-    process.exit(2);
+    { process.exitCode = 2; break scan; }
   }
 }
-if (wantAgents) { printAgents(); process.exit(0); }
+if (wantAgents) { printAgents(); { process.exitCode = 0; break scan; } }
 if (target === null) {
   console.error(usage);
   refuseEarly("no scan target");
-  process.exit(2);
+  { process.exitCode = 2; break scan; }
 }
 
 // ---- .candor/config (candor-spec §config; the checked-in alternative to the CANDOR_* env vars) -----
@@ -1498,7 +1511,7 @@ if (!stat) {
   // own refusal (measured, while getting this wrong: an unreadable dep wrote its refusal and then
   // exited 0). rust's equivalent is typed `-> !`, which is why the same slip could not happen there.
   refuseEarly(`no such path: ${target}`);
-  process.exit(2);
+  { process.exitCode = 2; break scan; }
 }
 let usedTsconfig = null;   // the tsconfig this run actually read, so a later disclosure can name the
                            // cause that APPLIES rather than the one that usually does.
@@ -1645,7 +1658,7 @@ if (NO_SOURCES && !(policyPath && excludedFiles.length)) {
   refuseEarly(`no TypeScript sources under ${target} — candor-ts reads .ts/.tsx/.mts/.cts `
             + `(and .js with --allow-js); point it at a project directory or a TypeScript file. `
             + `Exit 2 (unevaluable): a target this engine cannot read is not a clean scan.`);
-  process.exit(2);
+  { process.exitCode = 2; break scan; }
 }
 if (NO_SOURCES) {
   console.error(`candor-ts: no TypeScript sources under ${target} — reading what this scan excluded, `
@@ -1734,7 +1747,7 @@ if (!wantJson) {
           + `FILE as ${label} ${other} — refusing (exit 2). Writing the report there would destroy an `
           + `input of this run. Nothing was scanned; give the report set its own prefix.`);
         refuseEarly(`the report set at ${outPrefix} would overwrite ${label} ${other}`);
-        process.exit(2);
+        { process.exitCode = 2; break scan; }
       }
     }
   }
@@ -1862,6 +1875,19 @@ function dropUnanswered(dir, candidates, answered, ownFiles, nameOf, flag) {
   return dropped;
 }
 const workspaceDepFileName = (real) => failedDepName(real);
+// A CHILD RE-SCAN IS BOUNDED. The two dependency re-scans below ran with no `timeout` (the ⟨0.29⟩ peek always had
+// one), so one child that never returned — a pathological package, or the Node 24 exit deadlock described at
+// EXIT BY FALLING OFF THE END — hung this scan, and the CI job around it, with no output. On expiry the child is
+// killed and the dependency is treated exactly as a dependency that failed to scan: not chained (its calls read
+// Unknown/invisible, as an unchained dependency's do), any previous run's cached report for it swept by
+// `dropUnanswered`, and this line names it, so the cut-short scan is DISCLOSED rather than silent.
+const DEP_SCAN_TIMEOUT_MS = 600_000;
+function noteDepScanTimeout(e, which, flag) {
+  if (e?.code === "ETIMEDOUT" || (e?.signal && e?.status === null))
+    console.error(`candor-ts: ${flag} the dependency scan of ${which} did not finish within ${DEP_SCAN_TIMEOUT_MS / 1000}s `
+      + `(${e.code ?? e.signal}) — killed; it is NOT chained this run (its calls read Unknown/invisible, as an unchained `
+      + `dependency's do)`);
+}
 
 let workspaceDepsDir = null;
 if (wantWorkspace) {
@@ -1902,7 +1928,7 @@ if (wantWorkspace) {
       for (const real of depPaths) {
         try {
           const out = execFileSync(process.execPath, [selfPath, real, "--json"],
-            { env: { ...process.env, CANDOR_DEPS: workspaceDepsDir },
+            { env: { ...process.env, CANDOR_DEPS: workspaceDepsDir }, timeout: DEP_SCAN_TIMEOUT_MS,
               maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
           // ⟨ownership, half 1⟩ ONE derivation, shared with `failedDepName`, and TOTAL. The sweep's rule is
           // "a file candor would have OVERWRITTEN on success is the file it removes on failure", which is
@@ -1928,7 +1954,7 @@ if (wantWorkspace) {
           // not the same as rewritten, and keying it on a byte change would make a stable repeat run
           // delete the cache it had just verified.
           names.add(name); answered.add(real); ownFiles.add(file);
-        } catch { /* a dep that fails to scan is skipped — see the ownership sweep below */ }
+        } catch (e) { noteDepScanTimeout(e, real, "--workspace"); /* a dep that fails to scan is skipped — see the ownership sweep below */ }
       }
       if (!anyChanged) break;   // fixpoint reached: transitive effects fully propagated
     }
@@ -1999,12 +2025,12 @@ if (wantDepInits) {
     const file = depCacheFileName(depInitsDir, pkg);
     try {
       const out = execFileSync(process.execPath, [selfPath2, dir, "--json", "--allow-js"],
-        { env: { ...process.env },
+        { env: { ...process.env }, timeout: DEP_SCAN_TIMEOUT_MS,
           maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
       fs.writeFileSync(file, out);
       answered.add(pkg); ownFiles.add(file);
       scanned.push(pkg);
-    } catch { /* a dep that fails to scan is skipped — see the ownership sweep below */ }
+    } catch (e) { noteDepScanTimeout(e, pkg, "--dep-inits"); /* a dep that fails to scan is skipped — see the ownership sweep below */ }
   }
   // The name is the package name the CONSUMER imports, which is what the writer above keys on, so the
   // derivation is the writer's own and has no second source to disagree with.
@@ -2253,7 +2279,7 @@ const corruptDepPkgs = new Set();
       // one was not — three exits for one rule, two of them answered on the machine channel and one
       // silent, which a conformance row (PART 36 b8) caught immediately once the cause was posed at all.
       refuseEarly(`configured dependency ${tok} is not a readable file or directory`);
-      process.exit(2);
+      { process.exitCode = 2; break scan; }
     }
   }
   for (const f of files) {
@@ -2277,7 +2303,7 @@ const corruptDepPkgs = new Set();
       console.error(`        reduced coverage: its callers would serialise \`inferred: []\`, a purity claim`);
       console.error(`        about code this scan never saw.`);
       refuseEarly(`configured dependency report ${f} could not be read`);
-      process.exit(2);
+      { process.exitCode = 2; break scan; }
     }
     let parsed;
     try {
@@ -2287,7 +2313,7 @@ const corruptDepPkgs = new Set();
       console.error(`        failing (exit 2, unevaluable). Same reason as an unreadable one: a report`);
       console.error(`        that cannot be parsed makes no claim, and continuing would publish one.`);
       refuseEarly(`configured dependency report ${f} is not valid JSON`);
-      process.exit(2);
+      { process.exitCode = 2; break scan; }
     }
     try {
       const d = parsed;
@@ -15360,7 +15386,7 @@ function typingsInterfaceImpls() {
     // otherwise leave stdout empty for the whole class of trust-marker contradictions. The latch is
     // still unset at this point; the helper writes the fail-closed doc as stdout's only content.
     refuseEarly(`${contradictions.length} report entr${contradictions.length === 1 ? "y contradicts its" : "ies contradict their"} own trust markers`);
-    process.exit(2);
+    { process.exitCode = 2; break scan; }
   }
 }
 
@@ -16074,7 +16100,7 @@ if (NO_SOURCES && !(Array.isArray(outOfScopeFindings) && outOfScopeFindings.leng
   refuseEarly(`no analyzable TypeScript source under ${target} — candor-ts reads `
             + `.ts/.tsx/.mts/.cts (and .js with --allow-js); point it at a project directory or a `
             + `TypeScript file.`);
-  process.exit(2);
+  { process.exitCode = 2; break scan; }
 }
 if (outOfScopeFindings) {
   envelope.outOfScope = outOfScopeFindings;
@@ -16161,7 +16187,7 @@ if (wantJson) {
   } catch (e) {
     console.error(`candor-ts: could not write the report to ${outPrefix} (${e.message}) — refusing (exit 2)`);
     refuseEarly(`could not write the report to ${outPrefix}: ${e.message}`);
-    process.exit(2);
+    { process.exitCode = 2; break scan; }
   }
 }
 // Type-hierarchy sidecar (SPEC §4 / 0.7): each project class/interface (qualified `mod.Name`, matching
@@ -16401,7 +16427,7 @@ if (baselinePath !== null) {
     // previous run's `ok: true` and reports a pass, which is the stale-artifact false green this format
     // exists to refuse. java, rust and swift all overwrite on this branch; ts alone did not.
     writeRefusal(`.candor/config declares \`baseline ${baselinePath}\` but that file is not there`);
-    process.exit(2);
+    { process.exitCode = 2; break scan; }
   } else if (baselinePath !== "" && !fs.existsSync(baselinePath)) {
     console.error(`candor-ts: CANDOR_BASELINE ${baselinePath} does not exist — the regression guard is `
       + `not active (record one: candor-ts <target> --out <prefix>, then point at the report .json).`);
@@ -16416,7 +16442,7 @@ if (baselinePath !== null) {
       // the armed placeholder, but `--gate-json -` is not armed, so without this write the stream carried
       // NOTHING on this cause. Writing here also replaces the placeholder with the specific reason.
       writeRefusal(`baseline ${shownB} exists but could not be parsed — guard NOT evaluated`);
-      process.exit(2);
+      { process.exitCode = 2; break scan; }
     }
     const baseVersion = !Array.isArray(root) && root.candor && typeof root.candor === "object"
       && typeof root.candor.version === "string" ? root.candor.version : null;
@@ -16424,14 +16450,14 @@ if (baselinePath !== null) {
       console.error(`candor-ts: the baseline ${shownB} has no provenance header (a legacy/bare-array report) — `
         + `a baseline is comparable only to its producing build (§2.1). Failing (exit 2); regenerate it with this build.`);
       writeRefusal(`baseline ${shownB} has no provenance header — guard NOT evaluated`);   // ⟨0.27⟩ see above
-      process.exit(2);
+      { process.exitCode = 2; break scan; }
     }
     if (baseVersion !== ENGINE_VERSION) {
       console.error(`candor-ts: the baseline ${shownB} was produced by engine build ${baseVersion} but this is `
         + `build ${ENGINE_VERSION} — an engine swap is baseline-invalidating and the gate cannot evaluate `
         + `(exit 2; never a silent skip, never a bogus AS-EFF-005 wave). Regenerate deliberately with this build.`);
       writeRefusal(`baseline ${shownB} was produced by engine build ${baseVersion}, not this build — guard NOT evaluated`);   // ⟨0.27⟩ see above
-      process.exit(2);
+      { process.exitCode = 2; break scan; }
     }
     const base = new Map();
     for (const e of arr) {
@@ -16458,7 +16484,7 @@ if (baselinePath !== null) {
           + `(corrupt/truncated?) — failing (exit 2); a broken sidecar must not silently narrow the guard to `
           + `report-only. Regenerate the baseline with this build.`);
         writeRefusal(`baseline callgraph ${sidecarPath} could not be parsed — guard NOT evaluated`);   // ⟨0.27⟩ see above
-        process.exit(2);
+        { process.exitCode = 2; break scan; }
       }
       // The node set = every caller key + every callee (a pure leaf appears only as a callee), exactly
       // as `gains` computes cgNodes. Non-array edge values are tolerated (skipped), matching loadCallgraph.
@@ -16776,7 +16802,7 @@ if (policyRefusal && !gateViolations.length) {
   // Nothing was established, so the refusal IS the whole answer and takes its documented shape (no
   // `violations` key — an absent key, because the gate is making no claim about violations).
   writeRefusal(policyRefusal.why, policyRefusal.unevaluated);
-  process.exit(2);
+  { process.exitCode = 2; break scan; }
 }
 // ⟨0.32⟩ THE THIRD CAUSE OF AN INCOMPLETE VERDICT — a class this scan did not READ. ⟨0.30⟩ keys on what
 // the peek FOUND, and a peek that could not open a file finds nothing, which is byte-identical to
@@ -16913,7 +16939,7 @@ if (gateViolations.length) {
   if (policyRefusal)
     console.error(`candor-ts: …and the policy at ${policyPath === "" ? "(configured empty)" : policyPath} could not be evaluated (disclosed above and under \`unevaluated\`) — the violation(s) named are certain regardless of how it would have resolved`);
   console.error("→ candor-ts-query fix-gate names the remedy for each");
-  process.exit(1);
+  { process.exitCode = 1; break scan; }
 }
 // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a CONFIGURED gate over code candor could NOT fully analyze (unparsed
 // .ts) cannot certify — exit 2 (could-not-evaluate), the fail-closed posture (matches candor-scan's
@@ -16923,7 +16949,7 @@ if (gateViolations.length) {
 const gateConfigured = policyPath !== null || baselinePath !== null;
 if (gateConfigured && unanalyzedUnits.length) {
   console.error(`candor-ts: gate NOT certified — ${unanalyzedUnits.length} source file(s) could not be analyzed (see above); a gate cannot be green over unanalyzed code`);
-  process.exit(2);
+  { process.exitCode = 2; break scan; }
 }
 // ⟨0.30⟩ THE SCOPE HALF OF THE SAME POSTURE. `unanalyzed` above is "I opened this file and could not read
 // it"; this is "I never opened it, and when I looked afterwards it performed the effect you denied". Both
@@ -16939,7 +16965,7 @@ if (gateConfigured && Array.isArray(outOfScopeFindings) && outOfScopeFindings.le
   console.error(`candor-ts: gate NOT certified — ${n} function(s) OUTSIDE this scan's scope perform an `
     + `effect this policy denies (named above); the gate did not judge them, so the verdict is `
     + `incomplete rather than a pass`);
-  process.exit(2);
+  { process.exitCode = 2; break scan; }
 }
 // ⟨0.32⟩ THE THIRD CAUSE, on the exit code. AFTER the unanalyzed and outOfScope arms deliberately: a
 // concrete denied effect outside the scan is a better message than "something went unread", and a real
@@ -16950,7 +16976,9 @@ if (gateConfigured && unreadClasses.length) {
   console.error(`candor-ts: gate NOT certified — this scan did not READ ${unreadClasses.join(", ")}. `
     + `Their effects are absent because nothing looked, not because there are none, so the verdict is `
     + `INCOMPLETE rather than a pass.`);
-  process.exit(2);
+  { process.exitCode = 2; break scan; }
 }
 if (policyPath !== null) console.error("candor-ts: policy ✓");
 if (baselinePath !== null && fs.existsSync(baselinePath)) console.error("candor-ts: baseline ✓"); // absent = inactive (noted above)
+
+}   // scan: — EXIT BY FALLING OFF THE END (top of this block)

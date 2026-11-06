@@ -1960,3 +1960,30 @@ test("⟨0.41⟩ accept: this engine's positional spellings are refused, a decla
   for (const k of ["dao.index.a", "m.C.method", "m.C.constructor", "m.<module>", "m.<anonymous>.m", "pkg.@scope.thing"])
     assert.equal(positionalKey(k), false, k);
 });
+
+// EXIT BY FALLING OFF THE END (scan.mjs). On Node 24 `process.exit()` can deadlock in platform shutdown — a
+// background worker parked for a GC the joining main thread will never run (nodejs/node#64274) — and candor-spec
+// CI hung on it in PARTs 38, 98 and 104. scan.mjs therefore ends through `{ process.exitCode = N; break scan; }`.
+// A `process.exit(` added at module level would bring the hang back silently (it reproduces only under load, on
+// some runs), so the rule is pinned structurally: every remaining call must sit inside a FUNCTION, and those are
+// named here so a new one is a decision, not an accident.
+test("scan.mjs: no module-level process.exit — the verdict exits by falling off the end", async () => {
+  const ts = (await import("typescript")).default;
+  const src = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "scan.mjs"), "utf8");
+  const sf = ts.createSourceFile("scan.mjs", src, ts.ScriptTarget.Latest, true);
+  const inFn = [], topLevel = [];
+  const visit = (n) => {
+    if (ts.isCallExpression(n) && n.expression.getText(sf) === "process.exit") {
+      let p = n.parent, fn = null;
+      while (p && !fn) { if (ts.isFunctionLike(p)) fn = p; p = p.parent; }
+      const line = sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+      if (!fn) topLevel.push(line);
+      else inFn.push(fn.name?.getText(sf) ?? (ts.isArrowFunction(fn) && ts.isCallExpression(fn.parent) ? fn.parent.expression.getText(sf) : "<anon>"));
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  assert.deepEqual(topLevel, [], `module-level process.exit at line(s) ${topLevel.join(", ")} — use { process.exitCode = N; break scan; }`);
+  // The pre-analysis refusals (engine pin, config load) — they run before any heavy JIT work. Nothing else.
+  assert.deepEqual([...new Set(inFn)].sort(), ["enforceEnginePin", "loadCandorConfig"]);
+});
