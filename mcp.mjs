@@ -21,6 +21,7 @@ import nodePath from "node:path";
 import * as Q from "./query-core.mjs";
 import { accepts as acceptsVerb, reasonOf, noReportMessage } from "./accepts.mjs";
 import { runAcceptsGate } from "./gate-core.mjs";
+import { exitNaturally } from "./contract.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses,
          parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText,
          unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, reportUnits,
@@ -1090,4 +1091,4 @@ process.stdin.on("data", (chunk) => {
     try { handle(msg); } catch (e) { if (msg.id !== undefined) error(msg.id, -32603, e.message); }
   }
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", () => exitNaturally(0));   // see contract.mjs — never process.exit

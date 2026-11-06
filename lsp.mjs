@@ -50,6 +50,7 @@ import { createRequire } from "node:module";
 import nodePath from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as Q from "./query-core.mjs";
+import { exitNaturally } from "./contract.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, policyZeroRules, reportUnits, settleAccept } from "./policy.mjs";
 
 // Version: from the sibling package.json when running inside the npm package; a single-file BUNDLE of
@@ -1065,7 +1066,7 @@ function handle(msg) {
   }
   if (method === "shutdown" && activityTimer) clearInterval(activityTimer);
   if (method === "shutdown") return result(id, null);
-  if (method === "exit") process.exit(0);
+  if (method === "exit") { exiting = true; exitNaturally(0); return; }   // see contract.mjs — never process.exit
   if (id !== undefined) error(id, -32601, `method not found: ${method}`);
 }
 
@@ -1079,9 +1080,11 @@ function result(id, r) { send({ jsonrpc: "2.0", id, result: r }); }
 function error(id, code, message) { send({ jsonrpc: "2.0", id, error: { code, message } }); }
 
 let buf = Buffer.alloc(0);
+let exiting = false;   // set by `exit`: the frames after it in the same chunk are not handled
 process.stdin.on("data", (chunk) => {
   buf = Buffer.concat([buf, chunk]);
   for (;;) {
+    if (exiting) return;
     const headerEnd = buf.indexOf("\r\n\r\n");
     if (headerEnd < 0) return;
     const header = buf.slice(0, headerEnd).toString("utf8");
@@ -1097,4 +1100,4 @@ process.stdin.on("data", (chunk) => {
     try { handle(msg); } catch (e) { if (msg.id !== undefined) error(msg.id, -32603, e.message); }
   }
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", () => { if (!exiting) { exiting = true; exitNaturally(0); } });

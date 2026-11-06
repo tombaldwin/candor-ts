@@ -167,3 +167,16 @@ export function isCandorConfigSink(p) {
   const abs = path.resolve(p);
   return path.basename(abs) === "config" && path.basename(path.dirname(abs)) === ".candor";
 }
+
+// ── A SERVER ENDS NATURALLY, NOT THROUGH `process.exit()` ─────────────────────────────────────────────────────
+// `process.exit()` on Node 24 can DEADLOCK in platform shutdown (nodejs/node#64274 — scan.mjs's header, EXIT BY
+// FALLING OFF THE END, has the measurement). The MCP and LSP servers ended on stdin EOF (and LSP `exit`) that way,
+// after whatever analysis the session ran. Instead: record the code, stop reading stdin, and let the event loop
+// drain — the isolate is disposed before the platform, which does not hang, and pending stdout writes flush. The
+// unref'd timer is the fallback for a handle this process did not expect to hold open: it does not itself keep
+// the process alive, and it only fires if something else does.
+export function exitNaturally(code, graceMs = 2000) {
+  process.exitCode = code;
+  try { process.stdin.removeAllListeners("data"); process.stdin.destroy(); } catch { /* already closed */ }
+  setTimeout(() => process.exit(code), graceMs).unref();
+}

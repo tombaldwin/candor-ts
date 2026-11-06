@@ -49,8 +49,9 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          advisoryAnswer,
          reportCompleteness, mustHedge, completenessFields, absorbCompleteness } from "./query-core.mjs";
 // writeStdoutSync, NOT console.log — and this ONE line covers all twelve `emit` sites, which is the
-// point. console.log is asynchronous on a pipe and every verb here ends in `process.exit(...)`, which
-// discards whatever is still buffered. MEASURED on the sibling path (`scan.mjs --json`): 95281 bytes to a
+// point. console.log is asynchronous on a pipe and every verb here USED TO end in `process.exit(...)`, which
+// discards whatever is still buffered (verbs now exit naturally — EVERY EXIT IS A THROWN QueryExit — but the
+// synchronous write stays: it does not depend on how the process ends). MEASURED on the sibling path (`scan.mjs --json`): 95281 bytes to a
 // FILE and valid JSON, 65536 bytes through a PIPE and a JSONDecodeError. These are the query documents an
 // agent pipes into `jq`; `map`/`where`/`blindspots` over a real report clear the buffer easily.
 const emit = (v) => writeStdoutSync(JSON.stringify(v, null, 1) + "\n", "the verdict document");
@@ -262,13 +263,13 @@ function certainViolationFromPolicy(pol, prefix) {
     const net = reportNetClasses(fns, { authoritative: true, units });
     const { withhold } = unanswerableScoped(pol, fns, resolveReasonClasses(fns, cg, units), net, units);
     return evaluatePolicy(wp.answerable, fns, cg, new Map(), new Set(), net, withhold, units).length > 0;
-  } catch { return false; }
+  } catch (qx) { if (qx instanceof QueryExit) throw qx; return false; }
 }
 function certainViolationOver(prefix) {
   const { policyFile } = resolvePolicy(null, null);
   if (!policyFile) return false;
   let text;
-  try { text = fs.readFileSync(policyFile, "utf8"); } catch { return false; }
+  try { text = fs.readFileSync(policyFile, "utf8"); } catch (qx) { if (qx instanceof QueryExit) throw qx; return false; }
   let pol;
   try {
     const errs = [];
@@ -276,7 +277,7 @@ function certainViolationOver(prefix) {
     pol = parsePolicy(text, aliases);
     errs.push(...pol.errors);
     if (fatalPolicyErrors(errs).length) return false;
-  } catch { return false; }
+  } catch (qx) { if (qx instanceof QueryExit) throw qx; return false; }
   return certainViolationFromPolicy(pol, prefix);
 }
 const gateLine = (comp, prefix) => {
@@ -678,7 +679,7 @@ function renderPathHuman(fns, cg, fnQ, eff, hedge = false) {
   if (start === undefined) {
     // No matching function at all — parity with Rust/Java's "no function matching" (stderr, exit 2).
     console.error(`candor-query path: no function matching '${fnQ}'`);
-    process.exit(2);
+    qexit(2);
   }
   // SOUNDNESS R507 — the human renderer's OWN resolution, refused on the same condition. The gate in the
   // `path` case above resolves over the UNION of the callgraph keys and the report's `fn`s; this one
@@ -690,7 +691,7 @@ function renderPathHuman(fns, cg, fnQ, eff, hedge = false) {
     if (ambH) {
       console.error(`candor-ts-query path: '${fnQ}' names ${ambH.length} functions — refusing to answer `
         + `about one of them. Re-run with the full name:\n  ${ambH.join("\n  ")}`);
-      process.exit(2);
+      qexit(2);
     }
   }
   const startEntry = fns.find((e) => e.fn === start);
@@ -749,7 +750,7 @@ const deprecate = (msg) => { if (!_deprecated.has(msg)) { _deprecated.add(msg); 
 // ending `.json` → that full report path (minus the `.json`, since loadReport takes a prefix and adds
 // it back); otherwise a bare prefix. Returns the PREFIX loadReport/loadCallgraph expect.
 function locatorToPrefix(loc) {
-  try { if (fs.statSync(loc).isDirectory()) return path.join(loc, ".candor", "report"); } catch { /* not a dir */ }
+  try { if (fs.statSync(loc).isDirectory()) return path.join(loc, ".candor", "report"); } catch (qx) { if (qx instanceof QueryExit) throw qx; /* not a dir */ }
   if (loc.endsWith(".json")) return loc.slice(0, -".json".length);   // full report path → its prefix
   return loc;                                                        // bare prefix
 }
@@ -784,16 +785,16 @@ function requireReport(prefix) {
     const m = refusalMarkerFor(prefix);
     if (m) {
       console.error(`candor-ts: ${refusalSentence(m)}`);
-      process.exit(2);
+      qexit(2);
     }
   }
   if (prefix === null) {
     console.error("candor-ts: no report found (no --report and no .candor/ discovered) — scan the crate first.");
-    process.exit(2);
+    qexit(2);
   }
   if (!hasReport(prefix)) {
     console.error(`candor-ts: no report files at prefix '${prefix}' — check the path, or scan the crate first.`);
-    process.exit(2);
+    qexit(2);
   }
   return prefix;
 }
@@ -808,7 +809,7 @@ function loadReportOrDie(prefix) {
   const fns = loadReport(prefix);
   if (fns.length === 0 && fns.hardFail) {
     console.error(`candor-ts: every report found at prefix '${prefix}' failed to load — refusing to report an empty (all-clear) answer over a corrupt report; re-run the scan.`);
-    process.exit(2);
+    qexit(2);
   }
   return fns;
 }
@@ -838,13 +839,13 @@ function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknow
     if (a === "--report") {
       // A `--report` with no following value is a LOUD usage error (exit 2), never a silent fall-back to
       // discovery and never an uncaught `locatorToPrefix(undefined)` TypeError (`where Fs --report`).
-      if (flagShaped(rawArgs[i + 1])) { console.error(`candor-ts: --report was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a locator (a path really named that is spelled ./${rawArgs[i + 1]})`); process.exit(2); }
-      if (i + 1 >= rawArgs.length) { console.error("candor-ts: --report requires a <locator> value (a directory, a .json report path, or a prefix)"); process.exit(2); }
+      if (flagShaped(rawArgs[i + 1])) { console.error(`candor-ts: --report was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a locator (a path really named that is spelled ./${rawArgs[i + 1]})`); qexit(2); }
+      if (i + 1 >= rawArgs.length) { console.error("candor-ts: --report requires a <locator> value (a directory, a .json report path, or a prefix)"); qexit(2); }
       reportLocator = rawArgs[++i]; continue;
     }
     if (a === "--policy") { // consumed for EVERY verb (a valid candor flag); used only by policy verbs
-      if (flagShaped(rawArgs[i + 1])) { console.error(`candor-ts: --policy was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a path (a file really named that is spelled ./${rawArgs[i + 1]})`); process.exit(2); }
-      if (i + 1 >= rawArgs.length) { console.error("candor-ts: --policy requires a <file> value"); process.exit(2); }
+      if (flagShaped(rawArgs[i + 1])) { console.error(`candor-ts: --policy was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a path (a file really named that is spelled ./${rawArgs[i + 1]})`); qexit(2); }
+      if (i + 1 >= rawArgs.length) { console.error("candor-ts: --policy requires a <file> value"); qexit(2); }
       const v = rawArgs[++i]; if (policy) policyFile = v; continue;
     }
     if (a === "--json" || a === "--text" || a === "--human") { continue; } // output-mode flags (#8) — consumed by
@@ -853,8 +854,8 @@ function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknow
     if (a === "--include-unknown") { if (includeUnknown) wantIncludeUnknown = true; continue; } // used only by the verb that reads it
     if (a === "--stats") { continue; }   // ⟨0.20⟩ tolerated everywhere; read by the `blindspots` case via args.includes
     if (a === "--class") { // ⟨0.20⟩ value flag; the value is read by the `blindspots` and `unverified` cases
-      if (flagShaped(rawArgs[i + 1])) { console.error(`candor-ts: --class was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a <class,…> list`); process.exit(2); }
-      if (i + 1 >= rawArgs.length) { console.error("candor-ts: --class requires a <class,…> value (reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*)"); process.exit(2); }
+      if (flagShaped(rawArgs[i + 1])) { console.error(`candor-ts: --class was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a <class,…> list`); qexit(2); }
+      if (i + 1 >= rawArgs.length) { console.error("candor-ts: --class requires a <class,…> value (reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*)"); qexit(2); }
       // ⟨0.24⟩ SPEC §6.2's VALUE GRAMMAR, validated HERE — the one place every verb's args pass through, so
       // no verb can accept a value the filter will not honour. Two rules, one reason (see parseClassFilter):
       // a `--class` the engine cannot honour must be REFUSED, because honouring it partially SHRINKS the
@@ -862,12 +863,12 @@ function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknow
       // (1) NOT REPEATABLE — a second `--class` is a usage error, not a union and not last-wins. The verbs
       // read `args.indexOf("--class")`, so a repeat silently took the FIRST list and dropped the rest: a
       // narrower answer than either flag asked for.
-      if (sawClass) { console.error("candor-ts: --class is not repeatable — pass ONE comma-separated list (e.g. `--class reflect,native`); a second --class is a usage error, not a union"); process.exit(2); }
+      if (sawClass) { console.error("candor-ts: --class is not repeatable — pass ONE comma-separated list (e.g. `--class reflect,native`); a second --class is a usage error, not a union"); qexit(2); }
       sawClass = true;
       // (2) EVERY TOKEN RECOGNISED — a typo'd token exits 2 naming the token and the accepted set, rather
       // than dropping to an empty filter that reports zero holes at exit 0.
       try { parseClassFilter(rawArgs[i + 1]); }
-      catch (e) { if (e instanceof ClassFilterError) { console.error(e.message); process.exit(2); } throw e; }
+      catch (e) { if (e instanceof QueryExit) throw e; if (e instanceof ClassFilterError) { console.error(e.message); qexit(2); } throw e; }
       i++; continue;
     }
     if (a === "--gate-json") {
@@ -875,14 +876,14 @@ function parseCanonical(rawArgs, { policy = false, strict = false, includeUnknow
       // which is the gateless-green shape: a wrapper names a verdict path, nothing writes it, the wrapper
       // reads no violations and calls the build clean. Name the verb that does emit one (java parity).
       console.error(`candor-ts-query: --gate-json applies to \`gate\` (and to a scan) — \`${cmd}\` emits no gate verdict.\n  Use: candor-ts-query gate --report <locator> --policy <file> --gate-json ${rawArgs[i + 1] ?? "<file>"}`);
-      process.exit(2);
+      qexit(2);
     }
     if (a.startsWith("-") && a.length > 1) {
       // An unrecognized flag is a TYPO, not a positional — reject it LOUD (exit 2), never silently swallow.
       // A swallowed `--polciy` runs the query with NO policy and exits green: a CI author who typos --policy
       // ships a gate that never fires (corpus re-audit cardinal sin — a loud error, never a silent guess).
       console.error(`candor-ts-query: unknown flag '${a}'${didYouMeanFlag(a)}\n  known flags: --report, --policy, --json, --text, --strict, --include-unknown, --stats`);
-      process.exit(2);
+      qexit(2);
     }
     positionals.push(a);
   }
@@ -980,9 +981,9 @@ function preScanGateArgs(av) {
 function sameArtifactPath(a, b) {
   if (!a || !b || a === "-" || b === "-") return false;
   const resolve = (p) => {
-    try { return fs.realpathSync(p); } catch { /* not there yet — resolve the parent */ }
+    try { return fs.realpathSync(p); } catch (qx) { if (qx instanceof QueryExit) throw qx; /* not there yet — resolve the parent */ }
     try { return path.join(fs.realpathSync(path.dirname(path.resolve(p))), path.basename(p)); }
-    catch { return null; }
+    catch (qx) { if (qx instanceof QueryExit) throw qx; return null; }
   };
   const x = resolve(a);
   return x !== null && x === resolve(b);
@@ -996,7 +997,7 @@ function configDeclaredInputs() {
     if (disc?.policyPath) out.push([disc.policyPath, "the config policy key"]);
     const cfgPath = discoverConfigPath(process.cwd());
     if (cfgPath) out.push([cfgPath, 'the discovered .candor/config']);
-  } catch { /* lenient: the real load refuses on its own terms */ }
+  } catch (qx) { if (qx instanceof QueryExit) throw qx; /* lenient: the real load refuses on its own terms */ }
   return out;
 }
 
@@ -1006,7 +1007,7 @@ function refuseGateJsonOverInput(gate, other, flag) {
   console.error(`candor-ts-query: --gate-json ${gate} names the SAME FILE as ${flag} ${other} — refusing `
     + `(exit 2). The verdict is armed before the policy is read, so this would overwrite your policy and `
     + `then gate on the wreckage. Nothing was written; give the verdict its own path.`);
-  process.exit(2);
+  qexit(2);
 }
 
 /** `.candor/config` is never a verdict sink, wherever it is. The SHAPE predicate is
@@ -1017,7 +1018,7 @@ function refuseGateJsonAtConfig(gate) {
   if (!isCandorConfigSink(gate)) return;
   console.error(`candor-ts-query: --gate-json ${gate} is a .candor/config — refusing (exit 2). This would `
     + `destroy the config that configures this run. Nothing was written; give the verdict its own path.`);
-  process.exit(2);
+  qexit(2);
 }
 
 /** Write the fail-closed refusal every later exit inherits unless a real verdict replaces it. */
@@ -1034,7 +1035,7 @@ function armQueryGateJson(p) {
         + "STARTED and was never replaced by a verdict, so the run failed, crashed or was killed before "
         + "it could decide. It is NOT a verdict about the code; see the run's stderr for the cause."),
       null, 1) + "\n");
-  } catch (e) {
+  } catch (e) { if (e instanceof QueryExit) throw e;
     console.error(`candor-ts-query: could not arm --gate-json ${p} fail-closed (${e.message})`);
   }
 }
@@ -1118,9 +1119,9 @@ function resolveGateReportVerb(rawArgs) {
         for (const g of namedSinks) {
           if (g === "-") { globalThis.__candorGateVerdictWritten = true; console.log(doc); continue; }
           try { writeSinkAtomic(g, doc + "\n"); }
-          catch (e) { console.error(`candor-ts-query: could not write the refusal to --gate-json ${g} (${e.message})`); }
+          catch (e) { if (e instanceof QueryExit) throw e; console.error(`candor-ts-query: could not write the refusal to --gate-json ${g} (${e.message})`); }
         }
-        process.exit(2);
+        qexit(2);
       }
       if (gate !== "-") armQueryGateJson(gate);
       // …AND THE STREAM'S ANALOG OF ARMING — now installed at the top of this block, see the note there. `armQueryGateJson` writes a fail-closed placeholder to a
@@ -1148,20 +1149,20 @@ function resolveGateReportVerb(rawArgs) {
   for (let i = 0; i < rawArgs.length; i++) {
     const a = rawArgs[i];
     if (a === "--report") {
-      if (flagShapedValue(rawArgs[i + 1])) { console.error(`candor-ts: --report was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a locator (a path really named that is spelled ./${rawArgs[i + 1]})\n  ${usageLine}`); process.exit(2); }
-      if (i + 1 >= rawArgs.length) { console.error(`candor-ts: --report requires a <locator> value (a directory, a .json report path, or a prefix)\n  ${usageLine}`); process.exit(2); }
+      if (flagShapedValue(rawArgs[i + 1])) { console.error(`candor-ts: --report was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a locator (a path really named that is spelled ./${rawArgs[i + 1]})\n  ${usageLine}`); qexit(2); }
+      if (i + 1 >= rawArgs.length) { console.error(`candor-ts: --report requires a <locator> value (a directory, a .json report path, or a prefix)\n  ${usageLine}`); qexit(2); }
       reportLocator = rawArgs[++i]; continue;
     }
     if (a === "--policy") {
-      if (flagShapedValue(rawArgs[i + 1])) { console.error(`candor-ts: --policy was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a path (a file really named that is spelled ./${rawArgs[i + 1]})\n  ${usageLine}`); process.exit(2); }
-      if (i + 1 >= rawArgs.length) { console.error(`candor-ts: --policy requires a <file> value\n  ${usageLine}`); process.exit(2); }
+      if (flagShapedValue(rawArgs[i + 1])) { console.error(`candor-ts: --policy was given no value — the next token '${rawArgs[i + 1]}' is a flag, not a path (a file really named that is spelled ./${rawArgs[i + 1]})\n  ${usageLine}`); qexit(2); }
+      if (i + 1 >= rawArgs.length) { console.error(`candor-ts: --policy requires a <file> value\n  ${usageLine}`); qexit(2); }
       policyFile = rawArgs[++i]; continue;
     }
     if (a === "--gate-json") {
       // A valueless OR flag-shaped value FAILS (exit 2), so `--gate-json --policy p` cannot swallow the
       // policy and run GATELESS-GREEN — the one shape a wrapper never notices. `-` is stdout, not a flag.
       const v = rawArgs[i + 1];
-      if (v === undefined || (v.startsWith("-") && v !== "-")) { console.error(`candor-ts: --gate-json requires a value (a path, or \`-\` for stdout)\n  ${usageLine}`); process.exit(2); }
+      if (v === undefined || (v.startsWith("-") && v !== "-")) { console.error(`candor-ts: --gate-json requires a value (a path, or \`-\` for stdout)\n  ${usageLine}`); qexit(2); }
       gateJsonPath = rawArgs[++i]; continue;
     }
     // `--json` IS `--gate-json -` (SPEC §3.1 ⟨0.24⟩), deliberately: on a scan `--json <file>` writes the
@@ -1171,10 +1172,10 @@ function resolveGateReportVerb(rawArgs) {
     if (a === "--text" || a === "--human") { continue; }   // output-mode vocabulary — accepted, inert here
     if (a.startsWith("-") && a.length > 1) {
       console.error(`candor-ts-query gate: unknown flag '${a}'${didYouMeanFlag(a)}\n  ${usageLine}`);
-      process.exit(2);
+      qexit(2);
     }
     console.error(`candor-ts-query gate: unexpected argument '${a}' — \`gate\` takes no positionals; the report is a --report locator and the policy a --policy file\n  ${usageLine}`);
-    process.exit(2);
+    qexit(2);
   }
   // ARMING MOVED ABOVE THE FLAG LOOP (SPEC §3.3.1 ⟨0.27⟩).
   //
@@ -1211,7 +1212,7 @@ function loadPolicyOrDie(policyFile, text) {
   // ⟨0.24⟩ FATAL only: `errors` also carries every LINE the parser dropped whole (SPEC §3.1
   // `195d45a`) — additive to the `parsepolicy` witness, deliberately silent about the gate.
   const fatal = fatalPolicyErrors(errs);
-  if (fatal.length) { console.error(policyErrorText(policyFile, fatal)); process.exit(2); }
+  if (fatal.length) { console.error(policyErrorText(policyFile, fatal)); qexit(2); }
   return pol;
 }
 
@@ -1272,10 +1273,27 @@ const usage = () => {
 
 // --version / -V: a print-and-exit MODE, handled before the switch so it never depends on a command.
 // Fully OFFLINE — candor never phones home. Staying current is the AGENT's job.
+// ── EVERY EXIT IS A THROWN QueryExit, NEVER `process.exit()` ────────────────────────────────────────────────
+// `process.exit()` on Node 24 can DEADLOCK in platform shutdown: a V8 background worker parked for a GC that the
+// joining main thread never runs (nodejs/node#64274, open upstream). candor-spec CI hung that way on ubuntu-26.04
+// (Node 24.22.2); scan.mjs's header (EXIT BY FALLING OFF THE END) has the measurement. This file is a set of verbs
+// with exits inside helper functions, so a labelled block cannot reach them: `qexit(code)` throws a QueryExit, the
+// listener below records the code and RETURNS, and the process ends naturally — the isolate is disposed before the
+// platform, which does not hang. Every `catch` in this file rethrows a QueryExit first, so no handler can swallow
+// an exit and carry on; this file has no `finally` and no `await`, so nothing else runs on the way out. The same
+// shape as gate-core's `GateDone`, which `accepts` already relies on. `policy.mjs`'s unreadable-config refusal is
+// shared with scan.mjs (whose catches do not rethrow) and keeps its `process.exit`.
+class QueryExit extends Error { constructor(code) { super("candor-ts-query exit"); this.code = code; } }
+const qexit = (code) => { throw new QueryExit(code); };
+process.on("uncaughtException", (e) => {
+  if (e instanceof QueryExit) { if (e.code !== undefined) process.exitCode = e.code; return; }
+  console.error(e?.stack ?? String(e));   // anything else is a crash: say so and exit 1, naturally
+  process.exitCode = 1;
+});
 if (process.argv.includes("--version") || process.argv.includes("-V")) {
   console.log(`candor-ts-query ${PKG_VERSION} (spec ${SPEC_VERSION})`);
   console.log("upgrade: npm install -g candor-ts@latest");
-  process.exit(0);
+  qexit(0);
 }
 
 // -h / --help: a print-and-exit MODE, handled before the switch (so `-h`'s single dash is never
@@ -1347,7 +1365,7 @@ EXAMPLES
 
 Docs: candor.poly.io   ·   Verify an install: candor doctor
 See https://github.com/tombaldwin/candor`);
-  process.exit(0);
+  qexit(0);
 }
 
 const [, , cmd, ...args] = process.argv;
@@ -1375,7 +1393,7 @@ if (DESCRIPTIVE_NO_POLICY.has(cmd) && args.includes("--policy")) {
     + `no policy-relative verdict (its SPEC §3.1 JSON shape carries no policy-derived field); apply a `
     + `policy to an existing report with \`candor-ts-query gate --report <locator> --policy <file>\`, or `
     + `use \`whatif\`/\`fix\`/\`fix-gate\`/\`unverified\` for a policy-relative pre-edit check.`);
-  process.exit(2);
+  qexit(2);
 }
 
 switch (cmd) {
@@ -1388,9 +1406,9 @@ switch (cmd) {
     let text;
     try {
       text = fs.readFileSync(args[0], "utf8");
-    } catch {
+    } catch (qx) { if (qx instanceof QueryExit) throw qx;
       console.error(`candor: policy ${args[0] ?? "(no file given)"} could not be read`);
-      process.exit(2);
+      qexit(2);
     }
     // ⟨0.19⟩ config-aware: resolve `Unknown[<alias>]` via a checked-in `unknown-alias`, anchored to the
     // policy file (or CANDOR_CONFIG) — the dump reflects real gate resolution + pins the four-way expansion.
@@ -1426,7 +1444,7 @@ switch (cmd) {
     const { prefix, args: [q] } = resolveReportVerb(args, 1);
     // A missing/empty <query> is a LOUD usage error (exit 2, like candor-java) — never a silently-empty
     // `[]` at exit 0, which reads as an authoritative "no such function" over a question never asked.
-    if (!q) { console.error("usage: candor-ts-query show <query> [--report <locator>] [--json]"); process.exit(2); }
+    if (!q) { console.error("usage: candor-ts-query show <query> [--report <locator>] [--json]"); qexit(2); }
     // ⟨0.28⟩ RUNG A — `show`'s pinned shape is a TOP-LEVEL ARRAY, so over a hedging report it changes
     // shape (see `putNestedWithCaveat`). Before that rung it took plain `put` and had no completeness
     // reader at all: measured, `[]` at exit 0 over a report whose own manifest names a file candor could
@@ -1445,14 +1463,14 @@ switch (cmd) {
     const { prefix, args: [eff] } = resolveReportVerb(args, 1);
     // A missing/empty <Effect> is a LOUD usage error (exit 2, like candor-java's missing-arg path) —
     // never an authoritative-empty {directly:[],inherited:[]} at exit 0 (a false all-clear shape).
-    if (!eff) { console.error("usage: candor-ts-query where <Effect> [--report <locator>] [--json]"); process.exit(2); }
+    if (!eff) { console.error("usage: candor-ts-query where <Effect> [--report <locator>] [--json]"); qexit(2); }
     // A typo'd / unknown effect NAME is a LOUD error (exit 2) — never a false-empty {directly:[],inherited:[]}
     // at exit 0, which reads as an authoritative "nothing performs Net" when the user actually typed "Network"
     // (corpus-audit #3). A KNOWN effect that is simply absent stays a valid 0-result; an unknown name that is
     // PRESENT in the report (a spec extension effect) is allowed — so error only when the name is NEITHER.
     const fnsW = loadReportOrDie(prefix);
     if (!KNOWN_EFFECTS.includes(eff) && !new Set(fnsW.flatMap((e) => e.inferred || [])).has(eff)) {
-      console.error(`candor-ts-query where: unknown effect '${eff}' (known: ${KNOWN_EFFECTS.join(", ")})`); process.exit(2);
+      console.error(`candor-ts-query where: unknown effect '${eff}' (known: ${KNOWN_EFFECTS.join(", ")})`); qexit(2);
     }
     // ⟨0.28⟩ SPEC §2 — `{"directly":[],"inherited":[]}` is one of the four empty answers the clause names
     // by measurement. The caveat rides the SAME document (see `putAnswer`); the exit code does not move.
@@ -1469,7 +1487,7 @@ switch (cmd) {
     const { prefix, args: [q], includeUnknown } = resolveReportVerb(args, 1, { includeUnknown: true });
     // A missing/empty <query> is a LOUD usage error (exit 2, like candor-java) — never an empty
     // {of:[],direct:[],transitive:[]} at exit 0 (reads as "nothing reaches it" for a fn never named).
-    if (!q) { console.error("usage: candor-ts-query callers <query> [--include-unknown] [--report <locator>] [--json]"); process.exit(2); }
+    if (!q) { console.error("usage: candor-ts-query callers <query> [--include-unknown] [--report <locator>] [--json]"); qexit(2); }
     // ⟨0.28⟩ PREFER THE §2.2 SIDECAR, FALL BACK TO THE REPORT'S OWN `calls` EDGES — rust's exact split
     // (callers.rs). The sidecar records EVERY function including pure ones, so it is the COMPLETE graph;
     // the report's embedded edges are effect-relevant only, but a report is a §3.3.1 locator in its own
@@ -1518,7 +1536,7 @@ switch (cmd) {
       if (Object.keys(graph).length === 0) {
         const why = "no call graph in the report — the §2.2 sidecar is absent, so who calls this function is UNANSWERABLE, not empty (SPEC §3.3.1 ⟨0.28⟩)";
         put(args, { of: [q], unanswerable: why }, () => console.log(`candor: ${why}`));
-        process.exit(2);
+        qexit(2);
       }
       // ⟨0.28⟩ Only the COMPLETE graph (the sidecar) can prove a name absent. Over the effect-only
       // fallback a miss is INCONCLUSIVE — a pure leaf called only by pure fns is simply invisible there —
@@ -1533,7 +1551,7 @@ switch (cmd) {
           reportCompleteness(prefix), CALLERS_SOWHAT, CALLERS_TAIL, prefix);
         break;
       }
-      console.error(`candor-ts-query callers: no function matching '${q}' in the call graph`); process.exit(2);
+      console.error(`candor-ts-query callers: no function matching '${q}' in the call graph`); qexit(2);
     }
     // ⟨0.32⟩ `putAnswer`, not `put`: this verb carried NO completeness reader at all — measured at HEAD
     // over a report whose `excluded` names one class with `peeked: false`, `callers` answered
@@ -1585,7 +1603,7 @@ switch (cmd) {
       const baseFns = loadReportOrDie(basePrefix);
       if (baseFns.length === 0) {   // fail CLOSED (exit 2), not a wall of bogus "everything leaked" (exit 1)
         console.error(`candor-ts: no report at baseline prefix '${basePrefix}' — check the path`);
-        process.exit(2);
+        qexit(2);
       }
       const r = coreContainment(loadReportOrDie(prefix), baseFns);
       // ⟨0.28⟩ BOTH SIDES' MANIFESTS. This answer is a DIFFERENCE, so it is unsound if either side is
@@ -1598,7 +1616,7 @@ switch (cmd) {
         "the leak set below is a difference over only the code candor read on BOTH sides",
         "An unread unit of the current tree hides a leak; an unread unit of the baseline manufactures one. Re-scan both before moving the ratchet.",
         prefix);
-      process.exit(r.leaks.length ? 1 : 0);
+      qexit(r.leaks.length ? 1 : 0);
     }
     putAnswer(args, coreContainment(loadReportOrDie(prefix)), P.containment, reportCompleteness(prefix),
       "the containment scores below cover only the boundary effects candor could see",
@@ -1617,13 +1635,13 @@ switch (cmd) {
     // each resolved by the shared locator rule (dir / .json path / prefix). --json is accepted (JSON is
     // the only output). No leading-positional-report alias here: both positionals ARE the reports.
     const { positionals } = parseCanonical(args, {});
-    if (positionals.length < 2) { console.error("usage: candor-ts-query diff <current> <baseline> [--json]"); process.exit(2); }
+    if (positionals.length < 2) { console.error("usage: candor-ts-query diff <current> <baseline> [--json]"); qexit(2); }
     const [curPrefix, basePrefix] = positionals.map(locatorToPrefix);
     // BOTH locators must name real report files (the Rust engine's no-files check, named per side so
     // the user knows which path to fix): a typo'd prefix loaded [] with hardFail=false and emitted an
     // authoritative EMPTY {changes:[]} at exit 0 — the §4 false all-clear on the ratchet verb.
-    if (!hasReport(curPrefix)) { console.error(`candor-ts: no report files at current prefix '${curPrefix}' — check the path.`); process.exit(2); }
-    if (!hasReport(basePrefix)) { console.error(`candor-ts: no report files at baseline prefix '${basePrefix}' — check the path.`); process.exit(2); }
+    if (!hasReport(curPrefix)) { console.error(`candor-ts: no report files at current prefix '${curPrefix}' — check the path.`); qexit(2); }
+    if (!hasReport(basePrefix)) { console.error(`candor-ts: no report files at baseline prefix '${basePrefix}' — check the path.`); qexit(2); }
     const { changes } = coreDiff(loadReportOrDie(curPrefix), loadReportOrDie(basePrefix));
     // §2.1: a baseline is comparable only to its own producing build — disclose a mismatch (the gains
     // may be the engine reclassifying after a coverage batch, not the code changing). Same note + JSON
@@ -1663,7 +1681,7 @@ switch (cmd) {
     // so exit 0 and let the ⚠ inform — never deliver the wave as a CI failure (review §2.1: guards fail
     // closed, queries disclose). Verdict-preserving here too: the exit reads the raw `changes`, untouched
     // by the caveat, exactly as ⟨0.28⟩ ruled for `gains`.
-    process.exit(!versionMismatch && changes.some((c) => c.gained.length) ? 1 : 0);
+    qexit(!versionMismatch && changes.some((c) => c.gained.length) ? 1 : 0);
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }
   case "reachable": {
@@ -1690,7 +1708,7 @@ switch (cmd) {
     const { prefix, args: [q] } = resolveReportVerb(args, 1);
     // A missing/empty <query> is a LOUD usage error (exit 2, like candor-java) — never an
     // affectedCount:0 blast radius at exit 0 for a function that was never named.
-    if (!q) { console.error("usage: candor-ts-query impact <query> [--report <locator>] [--json]"); process.exit(2); }
+    if (!q) { console.error("usage: candor-ts-query impact <query> [--report <locator>] [--json]"); qexit(2); }
     const impFns = loadReportOrDie(prefix);
     // ⟨0.28⟩ Sidecar first, then the report's embedded `calls` edges — rust's `impact` runs on the
     // report's edges ALONE (callers.rs cmd_impact), so a sidecar-less report must answer here too; see
@@ -1718,7 +1736,7 @@ switch (cmd) {
     if (Object.keys(impCg).length === 0) {
       const why = "no call graph in the report — the §2.2 sidecar is absent, so what this function affects is UNANSWERABLE, not empty (SPEC §3.3.1 ⟨0.28⟩)";
       put(args, { fn: q, unanswerable: why }, () => console.log(`candor: ${why}`));
-      process.exit(2);
+      qexit(2);
     }
     // BAD TARGET → LOUD exit 2 (corpus-audit #3), the rule `callers` applies one verb up and the rule
     // rust/java ALREADY apply here — measured four-way, array-quoted, on a valid report: rust and java
@@ -1742,7 +1760,7 @@ switch (cmd) {
     // another — withdrawing the determined negative to catch the fabricated one is the ⟨0.24⟩ count-0
     // mirror defect, where the plausible fix withdrew 104 real claims to catch 6.
     if (coreMatches(knownFnNames(impCg, impFns), q).length === 0) {
-      console.error(`candor-ts-query impact: no function matching '${q}'`); process.exit(2);
+      console.error(`candor-ts-query impact: no function matching '${q}'`); qexit(2);
     }
     // SOUNDNESS R507, the same refusal on the verb that answers the OTHER direction — and here the
     // substitution was HALF-hidden, which is worse than `path`'s. `coreImpact` walks the reverse graph
@@ -1755,7 +1773,7 @@ switch (cmd) {
       if (amb) {
         console.error(`candor-ts-query impact: '${q}' names ${amb.length} functions — refusing to answer `
           + `about one of them. Re-run with the full name:\n  ${amb.join("\n  ")}`);
-        process.exit(2);
+        qexit(2);
       }
     }
     // ⟨0.32⟩ `putAnswer`, not `put` — this verb had NO completeness reader at all (see `CALLERS_SOWHAT`
@@ -1805,7 +1823,7 @@ switch (cmd) {
       const parsed = /^\d+$/.test(tourArgs[0]) ? Number(tourArgs[0]) : NaN;
       if (!Number.isSafeInteger(parsed) || parsed < 1) {
         console.error("usage: candor-ts-query tour [<N>] [--report <locator>] [--json]   (N is a positive integer ≥ 1)");
-        process.exit(2);
+        qexit(2);
       }
       n = parsed;
     }
@@ -1911,15 +1929,15 @@ switch (cmd) {
     // ⟨0.34⟩ this is the ORIGINAL of the shape `DESCRIPTIVE_NO_POLICY` (above the switch) generalises to
     // ten siblings — kept as its own check rather than folded in because its message is diff-specific
     // (names `deny <E> gained` and `--strict`, neither of which applies to a plain report query).
-    if (args.includes("--policy")) { console.error("candor-ts-query gains: unknown flag '--policy' — gains is a diff view; to FAIL CI on a newly-gained effect gate at scan time with a `deny <E> gained` policy (AS-EFF-005), or use `--strict` to fail on ANY gain\n  known flags: --json, --strict"); process.exit(2); }
+    if (args.includes("--policy")) { console.error("candor-ts-query gains: unknown flag '--policy' — gains is a diff view; to FAIL CI on a newly-gained effect gate at scan time with a `deny <E> gained` policy (AS-EFF-005), or use `--strict` to fail on ANY gain\n  known flags: --json, --strict"); qexit(2); }
     const { positionals, strict } = parseCanonical(args, { strict: true });
-    if (positionals.length < 2) { console.error("usage: candor-ts-query gains <current> <baseline> [--json] [--strict]"); process.exit(2); }
+    if (positionals.length < 2) { console.error("usage: candor-ts-query gains <current> <baseline> [--json] [--strict]"); qexit(2); }
     const [curPrefix, basePrefix] = positionals.map(locatorToPrefix);
     // BOTH locators must name real report files (the Rust engine's no-files check, named per side):
     // a typo'd prefix loaded [] with hardFail=false and emitted an authoritative EMPTY
     // {gained:[],byFunction:[]} at exit 0 — a silent all-clear on the supply-chain ALARM verb.
-    if (!hasReport(curPrefix)) { console.error(`candor-ts: no report files at current prefix '${curPrefix}' — check the path.`); process.exit(2); }
-    if (!hasReport(basePrefix)) { console.error(`candor-ts: no report files at baseline prefix '${basePrefix}' — check the path.`); process.exit(2); }
+    if (!hasReport(curPrefix)) { console.error(`candor-ts: no report files at current prefix '${curPrefix}' — check the path.`); qexit(2); }
+    if (!hasReport(basePrefix)) { console.error(`candor-ts: no report files at baseline prefix '${basePrefix}' — check the path.`); qexit(2); }
     const gv = reportVersion(curPrefix), gbv = reportVersion(basePrefix);
     if (gv && gbv && gv !== gbv)
       console.error(`candor-ts: ⚠ baseline @${gbv} ≠ engine @${gv} — a "gained capability" may be the engine reclassifying, not the dependency changing. Regenerate both reports with one build to compare releases.`);
@@ -1954,7 +1972,7 @@ switch (cmd) {
     }
     // Advisory by default (exit 0 — gains is a diff view); `--strict` fails on ANY gained effect so a
     // supply-chain CI job can require a bump introduce no new capability (mirrors `unverified --strict`).
-    process.exit(strict && (gainsResult.gained?.length ?? 0) > 0 ? 1 : 0);
+    qexit(strict && (gainsResult.gained?.length ?? 0) > 0 ? 1 : 0);
     break; // unreachable
   }
   case "path": {
@@ -1966,7 +1984,7 @@ switch (cmd) {
     // BOTH positionals are required (`path <fn> <Effect>`) — a missing/empty one is a LOUD usage error
     // (exit 2, like candor-java). Before this gate, one arg slid through as `<fn> undefined` and printed
     // "does not perform undefined" at exit 0 — a false all-clear over a question that was never posed.
-    if (!fn || !eff) { console.error("usage: candor-ts-query path <fn> <Effect> [--report <locator>] [--json]"); process.exit(2); }
+    if (!fn || !eff) { console.error("usage: candor-ts-query path <fn> <Effect> [--report <locator>] [--json]"); qexit(2); }
     const fns = loadReportOrDie(prefix);
     // A TYPO'D EFFECT NAME IS A LOUD ERROR HERE TOO. `where` has refused an unknown effect since the
     // corpus audit; `path` did not, and answered "<fn> does not perform Fsz" at exit 0 — a typo scored
@@ -1978,7 +1996,7 @@ switch (cmd) {
     if (!KNOWN_EFFECTS.includes(eff) && eff !== "Unknown"
         && !fns.some(f => (f.inferred || []).includes(eff))) {
       console.error(`candor-ts-query path: unknown effect '${eff}' (known: ${KNOWN_EFFECTS.join(", ")})`);
-      process.exit(2);
+      qexit(2);
     }
     // ⟨0.28⟩ Sidecar first, then the report's embedded `calls` edges (rust's `path` runs on the report's
     // edges alone — see the callers verb). The unanswerable arm below keeps the genuinely-absent case.
@@ -2005,7 +2023,7 @@ switch (cmd) {
       const why = "no call graph in the report — the §2.2 sidecar is absent, so whether this function reaches that effect is UNANSWERABLE, not a determined `no` (SPEC §3.3.1 ⟨0.28⟩)";
       if (wantJson) emit({ effect: eff, fn, unanswerable: why });
       else console.log(`candor: ${why}`);
-      process.exit(2);
+      qexit(2);
     }
     // BAD TARGET → LOUD exit 2 (corpus-audit #3), the `impact` argument above on the verb that answers
     // the OTHER direction, and the ONE-ENGINE divergence was HALF a divergence here: the HUMAN arm
@@ -2026,7 +2044,7 @@ switch (cmd) {
     // answers `path: []` at exit 0 below — the graph SAID no, and "the graph says no", "there is no
     // graph" and "there is no such function" are three answers, not one.
     if (coreMatches(knownFnNames(cg, fns), fn).length === 0) {
-      console.error(`candor-ts-query path: no function matching '${fn}'`); process.exit(2);
+      console.error(`candor-ts-query path: no function matching '${fn}'`); qexit(2);
     }
     // SOUNDNESS R507 — …AND THE OTHER HALF OF THE SAME RESOLUTION: MANY. Note the asymmetry that IS the
     // defect: this verb has refused at exit 2 for ZERO matches for a long time (the gate directly above),
@@ -2046,7 +2064,7 @@ switch (cmd) {
       if (amb) {
         console.error(`candor-ts-query path: '${fn}' names ${amb.length} functions — refusing to answer `
           + `about one of them. Re-run with the full name:\n  ${amb.join("\n  ")}`);
-        process.exit(2);
+        qexit(2);
       }
     }
     // ⟨0.32⟩ THE COMPLETENESS READER THIS VERB DID NOT HAVE (see `PATH_SOWHAT` above). `path: []` is the
@@ -2082,9 +2100,9 @@ switch (cmd) {
       let text;
       try {
         text = fs.readFileSync(policyFile, "utf8");
-      } catch {
+      } catch (qx) { if (qx instanceof QueryExit) throw qx;
         console.error(`candor: policy ${policyFile} could not be read; whatif NOT evaluated against it`);
-        process.exit(2);
+        qexit(2);
       }
       pol = loadPolicyOrDie(policyFile, text);
     }
@@ -2093,7 +2111,7 @@ switch (cmd) {
     const r = coreWhatif(loadCallgraph(prefix), target, eff, pol, scopeMatches);
     if (r === null) {
       console.error(`candor: no function matching \`${target}\` in the call graph`);
-      process.exit(2);
+      qexit(2);
     }
     // ⟨0.24⟩ SPEC §3.2 — over a report declaring `unanalyzed`, `ok` is OMITTED (advisoryAnswer). `affected`
     // is computed over a universe this cannot see all of: a caller in an unparsed file is invisible, so
@@ -2118,7 +2136,7 @@ switch (cmd) {
     // ⟨0.28⟩ SPEC §2 — a CONFIGURED policy that parsed to zero rules asked nothing, so the pre-edit
     // verdict AND the blast radius it qualifies are withheld in favour of the caveat document. The exit
     // is UNCHANGED (0: with no rules, `violations` was empty by construction on this path anyway).
-    if (policyFile && policyAskedNothing(pol)) { emitZeroRuleCaveat("whatif", policyFile, wcomp); process.exit(0); }
+    if (policyFile && policyAskedNothing(pol)) { emitZeroRuleCaveat("whatif", policyFile, wcomp); qexit(0); }
     // ⟨0.30⟩/⟨0.32⟩/⟨0.33⟩ PART 70 — THE THREE SCOPE CAUSES `whatif` NEVER RECEIVED. `advisoryAnswer` has
     // carried these three parameters since the `fix-gate`/`unverified` rungs; this call site simply never
     // passed them, so `whatif` answered `ok` where the gate refuses over the identical bytes — MEASURED,
@@ -2132,7 +2150,7 @@ switch (cmd) {
     const wUnasked = wcomp.unaskedRules ?? [];
     emit(advisoryAnswer(r, wunan, wcomp.judgedNothing, wcomp.unreadable, wcomp.noManifest,
                         wcomp.outOfScope ?? [], wUnread, wUnasked));
-    process.exit(r.violations.length ? 1 : 0);
+    qexit(r.violations.length ? 1 : 0);
     break; // unreachable (process.exit), but eslint can't prove it — defends against fallthrough
   }
   case "fix": {
@@ -2142,18 +2160,18 @@ switch (cmd) {
     // §3.3.1: `fix <fn> <Effect> [--policy <file>]`, report discovered / --report; the old
     // `fix <prefix> <fn> <Effect> <policy-file>` form (leading report + positional policy) stays accepted.
     const { prefix, target, eff, policyFile } = resolveWhatifFix(args);
-    if (!target || !eff) { console.error("usage: candor-ts-query fix <fn> <Effect> [--policy <file>] [--report <locator>]"); process.exit(2); }
-    if (!policyFile) { console.error("candor: fix requires a policy file — the fix is the refactor that restores the boundary the edit crossed (pass --policy <file>, or set CANDOR_POLICY / a .candor/config `policy` key)"); process.exit(2); }
+    if (!target || !eff) { console.error("usage: candor-ts-query fix <fn> <Effect> [--policy <file>] [--report <locator>]"); qexit(2); }
+    if (!policyFile) { console.error("candor: fix requires a policy file — the fix is the refactor that restores the boundary the edit crossed (pass --policy <file>, or set CANDOR_POLICY / a .candor/config `policy` key)"); qexit(2); }
     let ptext;
     try { ptext = fs.readFileSync(policyFile, "utf8"); }
-    catch { console.error(`candor: policy ${policyFile} could not be read — no fix computed`); process.exit(2); }
+    catch (qx) { if (qx instanceof QueryExit) throw qx; console.error(`candor: policy ${policyFile} could not be read — no fix computed`); qexit(2); }
     const cg = loadCallgraph(prefix);
     // The sidecar is the ONLY graph a candor-ts report carries (it embeds no inline `calls`). Fail LOUD when
     // it's absent — never compute a degenerate empty-graph remedy that reads as a false "no clean hoist".
-    if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
+    if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix needs it (re-run: candor-ts <src> --out ${prefix})`); qexit(2); }
     const fpol = loadPolicyOrDie(policyFile, ptext);
     const r = coreFix(cg, loadReportOrDie(prefix), target, eff, fpol, scopeMatches);
-    if (r === null) { console.error(`candor: no function matching \`${target}\` in the call graph`); process.exit(2); }
+    if (r === null) { console.error(`candor: no function matching \`${target}\` in the call graph`); qexit(2); }
     // ⟨0.28⟩ SPEC §2 — this verb shares the policy loader with the three the clause names, and its every
     // answer is equally policy-relative: over a zero-rule policy it emitted `{"crossing": false,
     // "reason": "not-forbidden"}` at exit 0, and *not-forbidden* by a policy that forbids nothing is
@@ -2161,7 +2179,7 @@ switch (cmd) {
     // is present exactly when the verb answered, and here it did not. Exit UNCHANGED (0; the
     // missing-function usage error above keeps its 2). Placed AFTER that error so a bad `fn` still
     // reports the bad `fn`.
-    if (policyAskedNothing(fpol)) { emitZeroRuleCaveat("fix", policyFile, reportCompleteness(prefix)); process.exit(0); }
+    if (policyAskedNothing(fpol)) { emitZeroRuleCaveat("fix", policyFile, reportCompleteness(prefix)); qexit(0); }
     // ⟨0.24⟩ SPEC §3.2 `4fd140c` — the printed channel for a REFUSED remedy (`refused: true`, no `crossing`
     // key). Without it the terminal shows a document with no plan in it and no reason for the absence.
     if (r.unevaluated?.length) advisoryUnevaluatedNote("fix", r.unevaluated,
@@ -2176,12 +2194,12 @@ switch (cmd) {
     // Advisory by default (exit 0 — the agent fix-loop reads the remedy and edits); `--strict` makes the
     // exit follow `ok`, so CI can REQUIRE zero outstanding crossings (mirrors `unverified --strict`).
     const { prefix, policyFile, strict } = resolveGateVerb(args, { strict: true });
-    if (!policyFile) { console.error("candor: fix-gate requires a policy file (pass --policy <file>, or set CANDOR_POLICY / a .candor/config `policy` key)"); process.exit(2); }
+    if (!policyFile) { console.error("candor: fix-gate requires a policy file (pass --policy <file>, or set CANDOR_POLICY / a .candor/config `policy` key)"); qexit(2); }
     let ptext;
     try { ptext = fs.readFileSync(policyFile, "utf8"); }
-    catch { console.error(`candor: policy ${policyFile} could not be read — no fix computed`); process.exit(2); }
+    catch (qx) { if (qx instanceof QueryExit) throw qx; console.error(`candor: policy ${policyFile} could not be read — no fix computed`); qexit(2); }
     const cg = loadCallgraph(prefix);
-    if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix-gate needs it (re-run: candor-ts <src> --out ${prefix})`); process.exit(2); }
+    if (!cg || Object.keys(cg).length === 0) { console.error(`candor: no call-graph sidecar for '${prefix}' — fix-gate needs it (re-run: candor-ts <src> --out ${prefix})`); qexit(2); }
     const fgpol = loadPolicyOrDie(policyFile, ptext);
     const fgfns = loadReportOrDie(prefix);
     const fgr = coreFixGate(cg, fgfns, fgpol, scopeMatches);
@@ -2228,7 +2246,7 @@ switch (cmd) {
     // it does today.
     if (policyAskedNothing(fgpol)) {
       emitZeroRuleCaveat("fix-gate", policyFile, fgComp);
-      process.exit(fgUnan.length || fgComp.unreadable.length ? (strict ? 2 : 0) : 0);
+      qexit(fgUnan.length || fgComp.unreadable.length ? (strict ? 2 : 0) : 0);
     }
     // ⟨0.32⟩ the classes the producer never opened, under the SAME condition the gate applies (only a
     // `deny`/`pure` rule's answer depends on code outside the scan's scope), computed ONCE and handed to
@@ -2256,7 +2274,7 @@ switch (cmd) {
     // that answered 0 on the same bytes would have got FURTHER than the gate.
     // ⟨0.33⟩ …and the class something DID open, under a deny set narrower than this verb's own, for the
     // identical MUST — "`--strict` answers 2 wherever `gate --report` would".
-    process.exit(fgUnan.length || fgComp.unreadable.length || fgComp.outOfScope?.length || fgUnread.length
+    qexit(fgUnan.length || fgComp.unreadable.length || fgComp.outOfScope?.length || fgUnread.length
                 || fgUnasked.length || fgr.unevaluated?.length ? (strict ? 2 : 0) : (strict && !fgr.ok ? 1 : 0));
     break; // unreachable
   }
@@ -2266,10 +2284,10 @@ switch (cmd) {
     // §3.3.1: `unverified [--policy <file>] [--strict]`, report discovered / --report. DEPRECATED alias:
     // the old `unverified <prefix> <policy-file> [--strict]` (leading report + positional policy).
     const { prefix, policyFile, strict } = resolveGateVerb(args, { strict: true });
-    if (!policyFile) { console.error("candor: unverified requires a policy file (pass --policy <file>, or set CANDOR_POLICY / a .candor/config `policy` key)"); process.exit(2); }
+    if (!policyFile) { console.error("candor: unverified requires a policy file (pass --policy <file>, or set CANDOR_POLICY / a .candor/config `policy` key)"); qexit(2); }
     let ptext;
     try { ptext = fs.readFileSync(policyFile, "utf8"); }
-    catch { console.error(`candor: policy ${policyFile} could not be read`); process.exit(2); }
+    catch (qx) { if (qx instanceof QueryExit) throw qx; console.error(`candor: policy ${policyFile} could not be read`); qexit(2); }
     const uci = args.indexOf("--class");   // ⟨0.20⟩ drill-down by reason class
     // ⟨0.24⟩ the callgraph rides along: `--class` resolves the reason class TRANSITIVELY, over the same
     // reach the gate uses (SPEC §6.2). The sidecar is no longer the ONLY reach — resolveReasonClasses
@@ -2330,7 +2348,7 @@ switch (cmd) {
     // exit follows the same expression the result path computes over empty finding sets.
     if (policyAskedNothing(upol)) {
       emitZeroRuleCaveat("unverified", policyFile, uComp);
-      process.exit(uUnan.length || uComp.unreadable.length ? (strict ? 2 : 0) : 0);
+      qexit(uUnan.length || uComp.unreadable.length ? (strict ? 2 : 0) : 0);
     }
     // ⟨0.30⟩/⟨0.32⟩/⟨0.33⟩ the three scope causes, in the document as well as the exit — see the fix-gate
     // site for the measurement (`{"ok": true, "unverified": []}` at exit 2 over a report carrying
@@ -2345,7 +2363,7 @@ switch (cmd) {
     // ⟨0.30⟩ the peek's findings too — see the fix-gate exit above for the ⟨0.24⟩ MUST this satisfies.
     // ⟨0.32⟩ …and the class nothing OPENED — see the fix-gate exit above.
     // ⟨0.33⟩ …and the class something DID open, under a narrower deny set — see the fix-gate exit above.
-    process.exit(uUnan.length || uComp.unreadable.length || uComp.outOfScope?.length || uUnread.length
+    qexit(uUnan.length || uComp.unreadable.length || uComp.outOfScope?.length || uUnread.length
                 || uUnasked.length || r.unevaluated?.length ? (strict ? 2 : 0) : (strict && !uHolesOk ? 1 : 0));
     break; // unreachable
   }
@@ -2353,7 +2371,7 @@ switch (cmd) {
     // `accept` is the policy LINE kind, one letter short of the verb (SPEC §6.2 ⟨0.41⟩): a usage error that names `accepts`.
     console.error("candor-ts-query: `accept` is a policy line kind, not a verb — did you mean `accepts`? "
       + "usage: candor-ts-query accepts [--report <locator>] [--policy <file>] [--json] [--adopt --because <reason>]");
-    process.exit(2);
+    qexit(2);
     break; // unreachable
   case "accepts": {
     // ⟨0.41⟩ SPEC §6.2: prints a PROPOSED policy and writes NO file. See accepts.mjs.
@@ -2363,35 +2381,35 @@ switch (cmd) {
       const a = args[i];
       if (a === "--report" || a === "--policy") {
         const v = args[i + 1];
-        if (v === undefined || (v !== "-" && v.startsWith("-") && v.length > 1)) { console.error(`candor-ts: ${a} requires a value\n  ${ausage}`); process.exit(2); }
+        if (v === undefined || (v !== "-" && v.startsWith("-") && v.length > 1)) { console.error(`candor-ts: ${a} requires a value\n  ${ausage}`); qexit(2); }
         if (a === "--report") areport = v; else apolicy = v;
         i++; continue;
       }
       if (a === "--because") {
-        if (i + 1 >= args.length) { console.error(`candor-ts: --because requires a reason\n  ${ausage}`); process.exit(2); }
+        if (i + 1 >= args.length) { console.error(`candor-ts: --because requires a reason\n  ${ausage}`); qexit(2); }
         abecause = args[++i]; continue;
       }
       if (a === "--json") { ajson = true; continue; }
       if (a === "--adopt") { aadopt = true; continue; }
       console.error(`candor-ts-query accepts: ${a.startsWith("-") ? "unknown flag" : "unexpected argument"} '${a}'`
         + `${a === "--strict" ? " — `accepts` is advisory and exits 0 on an answer; there is no --strict" : ""}\n  ${ausage}`);
-      process.exit(2);
+      qexit(2);
     }
-    if (abecause !== null && !aadopt) { console.error(`candor-ts accepts: --because only applies with --adopt (it is the reason written on each created line)\n  ${ausage}`); process.exit(2); }
-    if (aadopt && abecause === null) { console.error(`candor-ts accepts: --adopt needs --because <reason> — the reason on every line it creates is yours, never one the engine composes\n  ${ausage}`); process.exit(2); }
+    if (abecause !== null && !aadopt) { console.error(`candor-ts accepts: --because only applies with --adopt (it is the reason written on each created line)\n  ${ausage}`); qexit(2); }
+    if (aadopt && abecause === null) { console.error(`candor-ts accepts: --adopt needs --because <reason> — the reason on every line it creates is yours, never one the engine composes\n  ${ausage}`); qexit(2); }
     let areason = null;
-    if (aadopt) { areason = reasonOf(abecause); if (areason === null) process.exit(2); }
+    if (aadopt) { areason = reasonOf(abecause); if (areason === null) qexit(2); }
     const apol = resolvePolicy(apolicy, null).policyFile;
-    if (!apol) { console.error("candor-ts accepts: a policy is required — pass `--policy <file>` or set CANDOR_POLICY / a .candor/config `policy` key."); process.exit(2); }
+    if (!apol) { console.error("candor-ts accepts: a policy is required — pass `--policy <file>` or set CANDOR_POLICY / a .candor/config `policy` key."); qexit(2); }
     if (areport === null && !process.env.CANDOR_REPORT) {
       // ⟨0.41.1⟩ no report named and none discovered: still a refusal, but one that names the commands that work.
       const dp = discoverReportPrefix();
-      if (dp === null || (!refusalMarkerFor(dp) && !hasReport(dp))) { console.error(noReportMessage().trimEnd()); process.exit(2); }
+      if (dp === null || (!refusalMarkerFor(dp) && !hasReport(dp))) { console.error(noReportMessage().trimEnd()); qexit(2); }
     }
     const aprefix = requireReport(areport !== null ? locatorToPrefix(areport) : discoverReportPrefix());
     let araw;
     try { araw = fs.readFileSync(apol); }
-    catch (e) { console.error(`candor-ts accepts: cannot read policy ${apol} (${e.message}) — no proposal.`); process.exit(2); }
+    catch (e) { if (e instanceof QueryExit) throw e; console.error(`candor-ts accepts: cannot read policy ${apol} (${e.message}) — no proposal.`); qexit(2); }
     const ares = acceptsVerb({ policyPath: apol, raw: araw, adopt: aadopt, because: areason, json: ajson,
       runGate: (lines, probe) => runAcceptsGate(aprefix, apol, lines, probe) });
     process.stderr.write(ares.stderr);
@@ -2435,17 +2453,17 @@ switch (cmd) {
         // exit 1 would read as a policy violation on a clean run (the scan path's rule).
         try {
           writeSinkAtomic(dest, text + "\n");
-        } catch (e) { console.error(`candor-ts: could not write --gate-json ${dest}: ${e.message}`); }
+        } catch (e) { if (e instanceof QueryExit) throw e; console.error(`candor-ts: could not write --gate-json ${dest}: ${e.message}`); }
       }
     };
     const grefuse = (reason, unevaluated = null) => {
       gwrite(refusalVerdict(SPEC_VERSION, reason, unevaluated));
-      process.exit(2);
+      qexit(2);
     };
-    if (!policyFile) { console.error("candor-ts: gate requires a policy — pass `--policy <file>`, or set CANDOR_POLICY / a .candor/config `policy` key. `gate` applies a policy to an existing report; with no policy there is no verdict to give."); process.exit(2); }
+    if (!policyFile) { console.error("candor-ts: gate requires a policy — pass `--policy <file>`, or set CANDOR_POLICY / a .candor/config `policy` key. `gate` applies a policy to an existing report; with no policy there is no verdict to give."); qexit(2); }
     let gtext;
     try { gtext = fs.readFileSync(policyFile, "utf8"); }
-    catch {
+    catch (qx) { if (qx instanceof QueryExit) throw qx;
       // The SHARED sentence + disclosure (policyUnreadable), so this document and the scan route's are
       // byte-equal for this refusal cause too — they carried two different `reason` strings, and the
       // equality row only ever exercised the UNHONOURABLE policy, so nothing could see it.
@@ -2453,12 +2471,12 @@ switch (cmd) {
       console.error(`candor-ts: ${why}`);
       grefuse(why, unevaluated);
     }
-    gateCore({ prefix, policyFile, gtext, json, gateJsonPath, gwrite, grefuse, exit: process.exit });
+    gateCore({ prefix, policyFile, gtext, json, gateJsonPath, gwrite, grefuse, exit: qexit });
     break; // unreachable
   }
   default:
     // no command (cmd === undefined) or an unknown one: the FULL usage, not the stale 6-item list.
     if (cmd !== undefined) console.error(`candor-ts-query: unknown command '${cmd}'`);
     console.error(usage());
-    process.exit(2);
+    qexit(2);
 }

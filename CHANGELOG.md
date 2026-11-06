@@ -21,6 +21,15 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   Reproduced on macOS with Node 24.13 under `--stress-concurrent-allocation`: 15 of 67 runs hung before, 0 of 67
   after. Report bytes, stdout, stderr and exit codes are unchanged on 90 fixture runs (exit 0/1/2, with and
   without `--json`).
+- **`candor-ts-query` and the MCP and LSP servers no longer exit through `process.exit()` either.** Every query
+  verb exit is a thrown `QueryExit` that one handler turns into `process.exitCode`, so the process ends naturally;
+  every `catch` in `query.mjs` rethrows it first, so no handler can swallow an exit. The servers end on stdin EOF
+  (and LSP `exit`) by closing stdin and draining, with a 2 s unref'd `process.exit` fallback only if some other
+  handle keeps them alive (measured: they exit in 0.04–0.08 s). The unit test now covers all four entry files and
+  fails on each old one. Over 91 query invocations (every verb, exit 0/1/2, with and without `--json`), exit code,
+  stdout, stderr and `--gate-json` files are identical except one: ⚠ **`gate --json` over a large report through
+  a pipe was truncated at 65,536 bytes (invalid JSON); it is now the whole 1.59 MB document.** `console.log` is
+  asynchronous on a pipe and `process.exit()` discarded the rest; a natural exit flushes it.
 - **The `--workspace` and `--dep-inits` dependency re-scans have a deadline (600 s).** They had none, so one child
   that never returned hung the whole scan. On expiry the child is killed, stderr names the dependency, and it is
   handled as a dependency that failed to scan: not chained, so its calls read Unknown/invisible.
