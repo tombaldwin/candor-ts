@@ -23,11 +23,25 @@ import { parseTrace, programCheck } from "./verify-syscall.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
+// ── EVERY EXIT IS A THROWN VerifyExit, NEVER `process.exit()` ───────────────────────────────────────────────────
+// `process.exit()` on Node 24 can DEADLOCK in platform shutdown (nodejs/node#64274 — scan.mjs's header, EXIT BY
+// FALLING OFF THE END, has the measurement). This process loads a report and then judges what `--run` observed, so
+// its verdict exits (0 / 1 / 2) run after the heavy work. Same shape as query.mjs: the listener records the code and
+// RETURNS, the module has no `finally` and no `await`, and nothing else runs on the way out. The one `catch` that
+// can sit around an exit (the trace-file reads) does not call one.
+class VerifyExit extends Error { constructor(code) { super("candor-ts-verify exit"); this.code = code; } }
+const vexit = (code) => { throw new VerifyExit(code); };
+process.on("uncaughtException", (e) => {
+  if (e instanceof VerifyExit) { process.exitCode = e.code; return; }
+  console.error(e?.stack ?? String(e));   // anything else is a crash: say so and exit 1, naturally
+  process.exitCode = 1;
+});
+
 function usage(msg) {
   if (msg) console.error(`candor verify: ${msg}`);
   console.error('usage: candor-ts-verify [<dir>] --run "<cmd>" [--report <prefix>] [--scope direct|all] [--json]');
   console.error('   or: candor-ts-verify [<dir>] --syscall-trace <file> [--trace-format strace|dtruss] [--report <prefix>] [--json]');
-  process.exit(2);
+  vexit(2);
 }
 
 const argv = process.argv.slice(2);
@@ -97,7 +111,7 @@ if (syscallTrace) {
     console.log(`  effects candor reports       : { ${r.reportUnion.join(", ") || "none"} }${r.disclosedUnknown ? "  (+ Unknown disclosed)" : ""}`);
     if (r.escaped.length) console.log(`  ✘ ESCAPED (ran, candor claims nowhere): { ${r.escaped.join(", ")} }`);
   }
-  process.exit(r.escaped.length ? 1 : 0);
+  vexit(r.escaped.length ? 1 : 0);
 }
 
 // A fresh trace file + the capture preload wired via NODE_OPTIONS so EVERY node subprocess of --run
@@ -178,4 +192,4 @@ if (wantJson) {
   }
 }
 
-process.exit(violations.length ? 1 : (attributionIncomplete ? 2 : 0));
+vexit(violations.length ? 1 : (attributionIncomplete ? 2 : 0));

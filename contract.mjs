@@ -178,5 +178,5 @@ export function isCandorConfigSink(p) {
 export function exitNaturally(code, graceMs = 2000) {
   process.exitCode = code;
   try { process.stdin.removeAllListeners("data"); process.stdin.destroy(); } catch { /* already closed */ }
-  setTimeout(() => process.exit(code), graceMs).unref();
+  setTimeout(function fallbackExit() { process.exit(code); }, graceMs).unref();
 }

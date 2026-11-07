@@ -1961,7 +1961,8 @@ test("⟨0.41⟩ accept: this engine's positional spellings are refused, a decla
     assert.equal(positionalKey(k), false, k);
 });
 
-// EXIT WITHOUT process.exit (scan.mjs, query.mjs, lsp.mjs, mcp.mjs). On Node 24 `process.exit()` can deadlock in
+// EXIT WITHOUT process.exit (scan.mjs, query.mjs, lsp.mjs, mcp.mjs, and the shipped modules that run after them:
+// policy.mjs, verify.mjs, watch.mjs, accepts.mjs, gate-core.mjs, contract.mjs). On Node 24 `process.exit()` can deadlock in
 // platform shutdown — a background worker parked for a GC the joining main thread will never run (nodejs/node#64274)
 // — and candor-spec CI hung on it in PARTs 38, 98 and 104. scan.mjs ends through `{ process.exitCode = N; break
 // scan; }`, query.mjs through a thrown QueryExit, the servers through contract.mjs `exitNaturally`. A
@@ -1970,6 +1971,14 @@ test("⟨0.41⟩ accept: this engine's positional spellings are refused, a decla
 const ENTRY_EXITS = {
   "scan.mjs": ["enforceEnginePin", "loadCandorConfig"],   // pre-analysis refusals: engine pin, config load
   "query.mjs": [], "lsp.mjs": [], "mcp.mjs": [],
+  // policy.mjs's unreadable-config refusal is reached AFTER analysis (scan.mjs resolving the policy's config
+  // vocabulary, query verbs with a loaded report): it throws a PolicyExit / QueryExit, and `exitRefusal` keeps the
+  // `process.exit` ONLY for the MCP/LSP servers, which install neither (see the comment there).
+  "policy.mjs": ["exitRefusal"],
+  "verify.mjs": [],                 // every exit is a thrown VerifyExit
+  "watch.mjs": ["main"],            // usage errors, before the first scan; the SIGINT/SIGTERM stop exits naturally
+  "accepts.mjs": [], "gate-core.mjs": [],
+  "contract.mjs": ["fallbackExit"],   // the unref'd 2 s fallback timer in exitNaturally
 };
 test("entry files: no process.exit outside the named pre-analysis functions; query.mjs catches cannot swallow an exit", async () => {
   const ts = (await import("typescript")).default;

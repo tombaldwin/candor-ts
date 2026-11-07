@@ -10,6 +10,20 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **No more `process.exit()` after analysis in `policy.mjs`, `verify.mjs` and `watch.mjs` (Node 24 shutdown deadlock,
+  nodejs/node#64274; the same fix 0.41.2 made for `scan.mjs`, `query.mjs`, `mcp.mjs` and `lsp.mjs`).** `policy.mjs`'s
+  unreadable-`.candor/config` refusal (exit 2) is reached after analysis, when `scan --policy` resolves the policy's
+  config vocabulary and when a `query` verb reads it; it now throws a `PolicyExit` (a `QueryExit` inside `query`) that
+  the entry file records as `process.exitCode`. `candor-ts-verify` ends every verdict (0/1/2, `--json`, syscall mode)
+  through a thrown `VerifyExit`, and `candor-ts-watch`'s SIGINT/SIGTERM stop clears its timer and exits 0 naturally.
+  Left alone, on purpose: usage errors in `watch.mjs` (before the first scan), the engine-pin and config-load refusals
+  in `scan.mjs` (before analysis), the MCP/LSP servers' use of the policy refusal (they only read reports, their request
+  handlers would turn a thrown error into a reply, so they keep `process.exit`), and the repo's own harness scripts
+  (`fuzz`, `check`, `sensitivity`, ... run scans as child processes). Stdout, stderr, exit codes and the
+  `--gate-json` / report files are byte-identical on 27 fixture runs (exit 0/1/2, `--json`, a 1.09 MB `gate --json`
+  through a pipe). The unit test now covers `policy`, `verify`, `watch`, `accepts`, `gate-core` and `contract` as
+  well, and fails on a seeded `process.exit` in each.
+
 ## [0.41.3] — 2026-11-06
 
 - **No change to candor-ts.** The version moves with the 0.41.3 family patch (a candor-java fix).

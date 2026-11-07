@@ -29,7 +29,7 @@ import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 import { parsePolicy, evaluatePolicy, scopeMatches, parseUnknownAliases, parseNetPartners, discoverConfigText,
-         reasonClass, discoverConfigPath, policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules, fatalPolicyErrors, refusalVerdict, sortViolations,
+         reasonClass, discoverConfigPath, PolicyExit, policyExitsThrow, policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyUnreadable, policyZeroRules, fatalPolicyErrors, refusalVerdict, sortViolations,
          netClassResolver, resolveReasonClasses, noteSyntheticHits, settleAccept, announceAccepted } from "./policy.mjs";
 import { unverifiedHoleRule, ruleUpgrade, canonicalDenySet, byCodePoint, claimsToHaveJudgedNothing, reportCorruptKeys, entryCorruptKeys } from "./query-core.mjs";
 import { printAgents, writeStdoutSync, writeSinkAtomic, resolveSinkArtifact, isCandorConfigSink } from "./contract.mjs";
@@ -99,7 +99,9 @@ const SPEC_VERSION = "0.41";
 // engine can walk", and nothing here can tell the two apart. It stays LOUD either way — exit 2, no
 // report, never a green — so the cost is a misleading message, not a wrong verdict. If this message
 // ever appears on a SHALLOW tree, the message is the bug and the recursion is where to look.
+policyExitsThrow();   // policy.mjs's unreadable-config refusal throws a PolicyExit instead of process.exit()
 process.on("uncaughtException", (e) => {
+  if (e instanceof PolicyExit) { process.exitCode = e.code; return; }   // the refusal already said why on stderr
   if (e instanceof RangeError && /Maximum call stack/i.test(e?.message ?? "")) {
     console.error("candor-ts: this tree nests deeper than the engine can walk — the AST passes recurse, "
       + "and the JS stack ran out before the scan finished. NOTHING was analyzed and no report was "

@@ -101,7 +101,7 @@ async function main() {
   console.error(`candor-ts-watch: ${Object.keys(prev).length} source(s) → ${out}.json (${first.ms}ms). Watching… (Ctrl-C to stop)`);
   if (!first.ok) console.error(first.stderr?.trim());
 
-  setInterval(() => {
+  const timer = setInterval(() => {
     const cur = hashFiles(trackedFiles(target));
     const changed = changedFiles(prev, cur);
     if (!changed.length) return; // the freshness gate: nothing relevant changed, do nothing
@@ -127,7 +127,12 @@ async function main() {
   // instrumented with NODE_V8_COVERAGE discards its coverage (the TESTING.md §6 flush rule — this made
   // the live loop measure 0% while actually exercised). Handle both: announce, exit 0.
   for (const sig of ["SIGINT", "SIGTERM"]) {
-    process.on(sig, () => { console.error(`candor-ts-watch: ${sig} — stopping`); process.exit(0); });
+    process.on(sig, () => {
+      console.error(`candor-ts-watch: ${sig} — stopping`);
+      // Stop the only handle keeping the loop alive and let the process end NATURALLY, exit code 0: `process.exit()`
+      // can deadlock in Node 24 platform shutdown (nodejs/node#64274 — scan.mjs's header, EXIT BY FALLING OFF THE END).
+      process.exitCode = 0; clearInterval(timer);
+    });
   }
 }
 

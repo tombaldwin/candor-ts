@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import { parsePolicy, scopeMatches, discoverConfigPolicy, parseUnknownAliases, discoverConfigText,
          evaluatePolicy, reportNetClasses, resolveReasonClasses, discoverConfigPath,
          policyVocabularyAnchor, policyErrorText, policyUnreadable, policyZeroRules,
-         fatalPolicyErrors, refusalVerdict, unanswerableScoped, wholePolicyUnanswerable, reportUnits, acceptedUnitsOver, acceptReviewOver, } from "./policy.mjs";
+         fatalPolicyErrors, refusalVerdict, unanswerableScoped, wholePolicyUnanswerable, reportUnits, acceptedUnitsOver, acceptReviewOver, onPolicyExit, } from "./policy.mjs";
 import { accepts as acceptsVerb, reasonOf, noReportMessage } from "./accepts.mjs";
 import { gateCore, runAcceptsGate } from "./gate-core.mjs";
 import { hasReport, refusalMarkerFor, refusalSentence } from "./query-core.mjs";
@@ -1281,10 +1281,11 @@ const usage = () => {
 // listener below records the code and RETURNS, and the process ends naturally — the isolate is disposed before the
 // platform, which does not hang. Every `catch` in this file rethrows a QueryExit first, so no handler can swallow
 // an exit and carry on; this file has no `finally` and no `await`, so nothing else runs on the way out. The same
-// shape as gate-core's `GateDone`, which `accepts` already relies on. `policy.mjs`'s unreadable-config refusal is
-// shared with scan.mjs (whose catches do not rethrow) and keeps its `process.exit`.
-class QueryExit extends Error { constructor(code) { super("candor-ts-query exit"); this.code = code; } }
+// shape as gate-core's `GateDone`, which `accepts` already relies on. `policy.mjs`'s unreadable-config refusal reaches
+// here through `onPolicyExit(qexit)` below, so it is a QueryExit too.
+class QueryExit extends Error { constructor(code) { super("candor-ts-query exit"); this.code = code; this.candorExit = true; } }
 const qexit = (code) => { throw new QueryExit(code); };
+onPolicyExit(qexit);   // policy.mjs's unreadable-config refusal arrives as a QueryExit, which every catch here rethrows
 process.on("uncaughtException", (e) => {
   if (e instanceof QueryExit) { if (e.code !== undefined) process.exitCode = e.code; return; }
   console.error(e?.stack ?? String(e));   // anything else is a crash: say so and exit 1, naturally

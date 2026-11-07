@@ -1776,9 +1776,34 @@ function readConfigOrRefuse(p, via = null) {
       + `— failing (exit 2, unevaluable). A config that cannot be read is a guard the operator believes `
       + `is on: it may name a policy, a baseline or an engine pin, and treating it as absent would run `
       + `without them.`);
-    process.exit(2);
+    exitRefusal(2);
   }
 }
+
+// ── THE UNREADABLE-CONFIG REFUSAL EXITS NATURALLY WHERE THE CALLER CAN, NEVER `process.exit()` THERE ────────────
+// This refusal is reached from code that runs AFTER analysis (scan.mjs resolves the policy's `.candor/config`
+// vocabulary while it writes the verdict; `query` verbs read it with a loaded report), and `process.exit()` on
+// Node 24 can DEADLOCK in platform shutdown (nodejs/node#64274 — scan.mjs's header, EXIT BY FALLING OFF THE END,
+// has the measurement). So it THROWS a `PolicyExit` (`candorExit` is the marker for "this is an exit, not an
+// error": catch sites that must not swallow one test it) and the entry file's top-level handler records the code
+// and returns. An entry file whose catches cannot be audited for that (query.mjs: a `QueryExit` is already
+// rethrown by every catch there) installs `onPolicyExit` so the refusal arrives as ITS exit type. The MCP and LSP
+// servers install nothing and keep `process.exit`: they only read reports (analysis runs in child processes
+// that exit on their own), and their request handlers answer a thrown error with a JSON-RPC reply — converting
+// would keep the server alive and add bytes where it used to end.
+export class PolicyExit extends Error {
+  constructor(code) { super("candor-ts policy exit"); this.code = code; this.candorExit = true; }
+}
+let policyExitHook = null;
+export function onPolicyExit(fn) { policyExitHook = fn; }
+function exitRefusal(code) {
+  if (policyExitHook) policyExitHook(code);          // must throw
+  if (policyExitMode === "throw") throw new PolicyExit(code);
+  process.exit(code);
+}
+let policyExitMode = "exit";
+/** `"throw"`: refusals throw a `PolicyExit` for the entry file's handler (scan.mjs). Default `"exit"` (servers). */
+export function policyExitsThrow() { policyExitMode = "throw"; }
 
 export function discoverConfigPath(fromDir) {
   const env = process.env.CANDOR_CONFIG;

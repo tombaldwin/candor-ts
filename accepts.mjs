@@ -334,7 +334,7 @@ export function noReportMessage({ locator = null, fromDir = ".", mcp = false } =
         const m = raw.split("#", 1)[0].trim().match(/^(\S+)\s*(.*)$/);
         if (m && m[1].toLowerCase() === "baseline" && m[2].trim()) { base = m[2].trim(); break; }
       }
-    } catch { /* best effort: a config that cannot be read is named by the gate, not here */ }
+    } catch (e) { if (e?.candorExit) throw e; /* best effort: a config that cannot be read is named by the gate, not here */ }
   }
   const cur = ".candor/report";
   let m = `candor-ts accepts: no report to judge — no report files found${locator ? ` at \`${locator}\`` : ""} (and no --report / CANDOR_REPORT).\n`
