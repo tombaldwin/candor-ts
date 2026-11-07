@@ -741,6 +741,53 @@ export function twinNames(functions) {
  *  re-deriving them: it sets `armed`, runs the gate, and reads `last`. Inert (one boolean test) otherwise. */
 export const settleProbe = { armed: false, last: null };
 
+/** ADVISORY ONLY (nothing that decides a verdict reads it). For a unit keyed by POSITION, the NON-positional units
+ *  the nested-unit rule would climb to: the same containment reading `settleAccept` uses (a unit that lists it in
+ *  `calls`, in its file, starting before it), climbing through positional parents. Empty when no function row calls it
+ *  — it is returned, or stored in a variable, field or collection, rather than called where it is made. */
+function creatorsOfFactory(functions) {
+  const parents = new Map(), locs = new Map();
+  for (const u of functions) {
+    if (u?.interfaceUnion === true) continue;
+    if (!locs.has(u.fn)) locs.set(u.fn, parseLoc(u.loc));
+    if (!Array.isArray(u?.calls)) continue;
+    for (const c of u.calls) { if (!parents.has(c)) parents.set(c, []); parents.get(c).push(u); }
+  }
+  const before = (a, b) => a.file === b.file && (a.line < b.line || (a.line === b.line && a.col < b.col));
+  return (fn) => {
+    const out = new Set(), seen = new Set([fn]);
+    let frontier = [fn];
+    for (let depth = 0; depth < 8 && frontier.length; depth++) {
+      const next = [];
+      for (const cur of frontier) {
+        const curLoc = locs.get(cur);
+        if (!curLoc) continue;
+        for (const u of parents.get(cur) ?? []) {
+          const uLoc = parseLoc(u.loc);
+          if (!uLoc || !before(uLoc, curLoc) || seen.has(u.fn)) continue;
+          seen.add(u.fn);
+          if (positionalKey(u.fn)) next.push(u.fn); else out.add(u.fn);
+        }
+      }
+      frontier = next;
+    }
+    return [...out].sort(byCodePoint);
+  };
+}
+
+/** ADVISORY ONLY. For a red row keyed by POSITION that NO `accept` line can cover, the sentence saying why and what
+ *  works; null when it is not that case. A positional unit some function row calls IS covered by accepting that
+ *  function (the nested-unit rule), so it gets no note here. The uncoverable ones are the units NOBODY calls: the
+ *  creator returns or stores the closure instead of running it, so no function row carries its effect, and accepting
+ *  a function it calls does not cover it — the model is per unit. */
+export function uncoverableNote(fn, creatorsOf) {
+  if (!positionalKey(fn) || creatorsOf(fn).length) return null;
+  return `\`${fn}\` is keyed by POSITION and no \`accept\` line can cover it: it is created by a function this run does not record (no function row calls it)`
+    + " but is not run there (returned, or stored in a variable, field or collection), so no accepted function's row carries its effect."
+    + " Accepting a function it calls does not cover it. Remedy: move its body into a NAMED function and accept that,"
+    + " or call it where it is created.";
+}
+
 /**
  * Decide which of `rows` the policy's `accept` entries take out of `violations`. `rows` is exactly what
  * `evaluatePolicy` returned (each deny/forbid row remembers its producing LINE in a non-enumerable
@@ -758,7 +805,7 @@ export const settleProbe = { armed: false, last: null };
 export function settleAccept(pol, rows, functions = [], { unevaluated = [] } = {}) {
   const entries = pol?.accept;
   if (!entries?.length) {
-    if (settleProbe.armed) settleProbe.last = { entries: [], directBy: new Map(), twin: twinNames(functions) };
+    if (settleProbe.armed) settleProbe.last = { entries: [], directBy: new Map(), twin: twinNames(functions), creatorsOf: creatorsOfFactory(functions) };
     return { violations: rows, accepted: null, acceptedRows: 0, acceptedUnits: new Set(), notes: [] };
   }
   const uneval = new Set((unevaluated ?? []).map((u) => ruleKey(u.rule)));
@@ -879,7 +926,16 @@ export function settleAccept(pol, rows, functions = [], { unevaluated = [] } = {
         + `Delete line ${e.line}: left in place it would accept whatever a later edit puts under that key` });
   }
   items.sort((a, b) => a.line - b.line || byCodePoint(a.fn, b.fn) || byCodePoint(a.hash ?? "", b.hash ?? ""));
-  if (settleProbe.armed) settleProbe.last = { entries, directBy, twin };
+  // advisory (stderr only): red policy rows no `accept` line can ever cover, with the remedy that works
+  const creatorsOf = creatorsOfFactory(functions);
+  const uncover = new Set();
+  for (const r of remaining) if (r.lineRaw !== undefined) { const m = uncoverableNote(r.fn, creatorsOf); if (m) uncover.add(m); }
+  let shown = 0;
+  for (const m of [...uncover].sort(byCodePoint)) {
+    if (shown++ === 5) { notes.push(`candor-ts: … and ${uncover.size - 5} more red violation(s) no \`accept\` line can cover (positional keys).`); break; }
+    notes.push(`candor-ts: ${m}`);
+  }
+  if (settleProbe.armed) settleProbe.last = { entries, directBy, twin, creatorsOf };
   return { violations: out, accepted: items, acceptedRows, acceptedUnits, notes };
 }
 

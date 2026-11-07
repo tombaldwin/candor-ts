@@ -10,6 +10,19 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **A red violation on a unit keyed by POSITION that no `accept` line can cover now says why, on stderr, from both the gate and
+  `candor-ts-query accepts` (the port of candor-java's ⟨0.41.3⟩ text).** A closure keyed `name#<line>:<col>` that no function
+  row calls (it is returned, or stored in a variable, field or collection, rather than called where it is made) is covered by no
+  entry: the report carries no row whose effects include it. The gate and `accepts` now say so, give the remedies that work
+  (move its body into a NAMED function and accept that, or call it where it is created) and that accepting a function it
+  calls does not cover it. Where the closure IS called by a function row, `accepts` replaces "give it a NAME" with the exact
+  line to accept for that function, or, when that function has no violation row of its own under the rule, the extract
+  remedy. The creating function is named only when a function row calls the closure; otherwise the text says the run does not
+  record it, because the report carries no extent that would let the engine say which function lexically contains an
+  uncalled closure. Text only: no verdict, exit code, stdout, report byte, `--gate-json` document or `accepts` plan
+  (text or `--json`) changes, checked byte for byte over scan, `gate --report` and `accepts` runs of fixtures that hit each path.
+  A policy with no `accept` line prints nothing new.
+
 - **No more `process.exit()` after analysis in `policy.mjs`, `verify.mjs` and `watch.mjs` (Node 24 shutdown deadlock,
   nodejs/node#64274; the same fix 0.41.2 made for `scan.mjs`, `query.mjs`, `mcp.mjs` and `lsp.mjs`).** `policy.mjs`'s
   unreadable-`.candor/config` refusal (exit 2) is reached after analysis, when `scan --policy` resolves the policy's

@@ -7,7 +7,7 @@
 // query.mjs, run in-process over the same bytes through `runGate`), so "the same parse and the same matching" holds by
 // construction and not by a second implementation that could drift. The proposed text is then gated again to report
 // `after`. An entry whose state the gate did not name is KEPT, never deleted. Writes no file.
-import { positionalKey, discoverConfigText } from "./policy.mjs";
+import { positionalKey, discoverConfigText, uncoverableNote } from "./policy.mjs";
 
 const RULE_KINDS = new Set(["deny", "pure", "forbid", "allow", "only"]);
 const MARK = "# candor-accepts:";
@@ -126,6 +126,7 @@ export function accepts({ policyPath, raw, adopt, because, json, runGate }) {
   const entries = probe.entries;
   const direct = probe.directBy;
   const twins = probe.twin;
+  const creatorsOf = probe.creatorsOf ?? (() => []);     // ADVISORY: positional unit -> the functions that call it (stderr text only)
 
   // ---- 2. what each entry is -------------------------------------------------------------------------
   const ignored = new Set();
@@ -216,6 +217,7 @@ export function accepts({ policyPath, raw, adopt, because, json, runGate }) {
   // ---- adoption candidates: the rows no entry names (computed in both modes: `unnamed`) ---------------
   const cands = [];
   const seen = new Set();
+  const advice = new Map();    // positional fn -> what accepting its creator would do (⟨0.41.3⟩, stderr only)
   const refused = new Map();   // reason key -> the fns no entry could be written for (⟨0.41.1⟩: said on stderr, never in the plan)
   const refuse = (why, fn) => { if (!refused.has(why)) refused.set(why, new Set()); refused.get(why).add(fn); };
   for (const v of rowsOf(d)) {
@@ -228,7 +230,12 @@ export function accepts({ policyPath, raw, adopt, because, json, runGate }) {
       if (named || seen.has(`${rule}\0${v.fn}`)) continue;
       seen.add(`${rule}\0${v.fn}`);
       if (twins.has(v.fn)) { refuse("twin", v.fn); continue; }
-      if (positionalKey(v.fn)) { refuse("positional", v.fn); continue; }
+      if (positionalKey(v.fn)) {
+        refuse("positional", v.fn);
+        const adv = creatorAdvice(v, rule, per.get(L) ?? [], creatorsOf);
+        if (adv !== null) advice.set(v.fn, adv);
+        continue;
+      }
       if (/[#\t\n\v\f\r ]/.test(v.fn)) { refuse("unwritable", v.fn); continue; }
       const conc = new Set(v.effects);
       const unk = conc.delete("Unknown");
@@ -293,6 +300,23 @@ export function accepts({ policyPath, raw, adopt, because, json, runGate }) {
     + `after the proposal the gate exits ${g1.rc} with ${viol} violation(s), ${acc} accepted.`);
   for (const u of unjudged)
     say(`candor-ts accepts: line ${u.line} (\`${u.fn}\` under \`${u.policyRule}\`) kept UNJUDGED — this route cannot evaluate that rule, so nothing is known about the entry. Gate at scan time.`);
+  // a positional row no accept line can ever cover gets its own sentence (creating function, what works); the rest keep the generic one
+  const posRows = refused.get("positional");
+  if (posRows) {
+    const rest = new Set(), lines = new Set();
+    for (const f of posRows) {
+      const m = uncoverableNote(f, creatorsOf);
+      if (m !== null) lines.add(`candor-ts accepts: ${m}`);
+      else if (advice.has(f)) lines.add(advice.get(f));
+      else rest.add(f);
+    }
+    if (rest.size) refused.set("positional", rest); else refused.delete("positional");
+    let k = 0;
+    for (const l of sortedCp(lines)) {
+      if (k++ === 5) { say(`candor-ts accepts: … and ${lines.size - 5} more violation(s) no \`accept\` line can cover.`); break; }
+      say(l);
+    }
+  }
   for (const [key, why, remedy] of REFUSED_WHY) {
     const fns = [...(refused.get(key) ?? [])].sort(cp);
     if (!fns.length) continue;
@@ -305,6 +329,27 @@ export function accepts({ policyPath, raw, adopt, because, json, runGate }) {
   say(`candor-ts accepts: nothing was written. To take the proposal: write it to ANOTHER path (not onto the policy — a shell redirect onto it `
     + `empties it first), then \`diff ${policyPath} <that path>\` and commit.`);
   return { exit: 0, stdout, stderr };
+}
+
+/** ADVISORY ONLY. For a positional row whose creator the nested-unit rule would climb to: either the line that WOULD cover it,
+ *  or why none can be written. Null when no function row calls it (that case is `uncoverableNote`'s). */
+function creatorAdvice(v, rule, ruleRows, creatorsOf) {
+  const creators = creatorsOf(v.fn);
+  if (!creators.length) return null;
+  for (const y of creators) {
+    for (const u of ruleRows) {
+      if (u.fn !== y || !v.effects.every((x) => u.effects.includes(x))) continue;
+      const conc = new Set(u.effects);
+      const unk = conc.delete("Unknown");
+      if (unk && u.classes.length === 0) continue;
+      const eff = canon(conc, unk ? u.classes : null).join(" ");
+      return `candor-ts accepts: \`${v.fn}\` gets no line of its own: it is red only because its creating function \`${y}\` is not accepted, `
+        + `and an entry on that function covers it. Accept the creator: \`accept ${y} ${eff} for ${rule} because …\`.`;
+    }
+  }
+  return `candor-ts accepts: no accept line is written for \`${v.fn}\`: it is created in \`${creators[0]}\`, which the enclosing entry would climb to, `
+    + `but that function has no violation row of its own under \`${rule}\`, so no \`accept\` line can be written for it and nothing covers this closure. `
+    + "Remedy: move its body into a NAMED function and accept that.";
 }
 
 /** ⟨0.41.1⟩ Every violation the proposal leaves red because NO line could be written for it, with the reason and the remedy, so

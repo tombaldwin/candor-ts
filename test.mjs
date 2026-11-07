@@ -24946,6 +24946,54 @@ if (blk()) {
     Object.keys(rj).sort().join() === ["after", "ignored", "mode", "narrowed", "proposals", "removed", "text", "unjudged", "unnamed"].sort().join(), Object.keys(rj).join());
 }
 
+// ── ⟨0.41.3⟩ a red POSITIONAL row no `accept` line can cover says WHY and what works (stderr only) ───────────────────────
+// A closure keyed by position that NO function row calls (returned, or stored) is covered by no entry: the gate and `accepts`
+// say so, with the remedy that works (a NAMED function, or call it where it is made) and never "accept the callee". A closure
+// some row DOES call is covered by accepting that function, so `accepts` gives the exact line (or, when that function has no row
+// under the rule, the extract remedy). NOTHING a gate decides moves: same verdict, exit code, stdout, report and plan.
+if (blk()) {
+  const A = scratch("candor-ts-lambdaremedy-");
+  const src = `${A}/src`; fs.mkdirSync(src);
+  fs.writeFileSync(`${src}/m.ts`, [
+    'import * as fs from "fs";',
+    'function w(): void { fs.writeFileSync("/tmp/candor-ts-lr-x", "x"); }',
+    'const kept: Array<() => void> = [];',
+    'export function retvar(): () => void { const r = () => w(); return r; }',
+    'export function pushvar(): void { const r = () => w(); kept.push(r); }',
+    'export function runvar(): void { const r = () => w(); r(); }',
+    'export class K { go() { const q = () => w(); q(); } }',
+    ''].join("\n"));
+  fs.writeFileSync(`${A}/tsconfig.json`, '{"compilerOptions":{"target":"es2022","module":"commonjs","strict":true}}');
+  const sc = (args) => spawnSync("node", [path.join(HERE, "scan.mjs"), A, ...args], { encoding: "utf8", cwd: A });
+  const qa = (args) => spawnSync("node", [path.join(HERE, "query.mjs"), "accepts", ...args], { encoding: "utf8", cwd: A });
+  const pol = (name, text) => { fs.writeFileSync(`${A}/${name}`, text); return `${A}/${name}`; };
+  const none = pol("none.pol", "deny Fs src\n");
+  const withAcc = pol("acc.pol", "deny Fs src\naccept src.m.w Fs for deny Fs src because t\n");
+  const scoped = pol("scope.pol", "deny Fs src.m.q\n");
+  const rec = sc(["--out", `${A}/rep`]);
+  check("⟨0.41.3⟩ fixture: the scan records the closures as positional units", rec.status === 0 && fs.readFileSync(`${A}/rep.json`, "utf8").includes("src.m.r#4:"), rec.stderr);
+  const g = sc(["--out", `${A}/g`, "--policy", withAcc, "--gate-json", `${A}/g.json`]);
+  check("⟨0.41.3⟩ the gate names why an UNCALLED closure cannot be accepted", g.stderr.includes("`src.m.r#4:") && g.stderr.includes("is keyed by POSITION and no `accept` line can cover it: it is created by a function this run does not record"), g.stderr);
+  check("⟨0.41.3⟩ …and the remedy that works", g.stderr.includes("Remedy: move its body into a NAMED function and accept that, or call it where it is created."), g.stderr);
+  check("⟨0.41.3⟩ …and says accepting a callee does not cover it", g.stderr.includes("Accepting a function it calls does not cover it."), g.stderr);
+  check("⟨0.41.3⟩ …and never suggests accepting the callee", !g.stderr.includes("accept the callee"), g.stderr);
+  check("⟨0.41.3⟩ CONTROL: a called closure (runvar) gets no note, an uncalled one (pushvar) does",
+    !/`src\.m\.r#6:[^`]*` is keyed by POSITION/.test(g.stderr) && /`src\.m\.r#5:[^`]*` is keyed by POSITION/.test(g.stderr), g.stderr);
+  const n0 = sc(["--out", `${A}/n`, "--policy", none]);
+  check("⟨0.41.3⟩ a policy with no accept line prints nothing new", !n0.stderr.includes("no `accept` line can cover it"), n0.stderr);
+  check("⟨0.41.3⟩ the gate still exits 1 over the same rows", g.status === 1 && n0.status === 1, `${g.status} ${n0.status}`);
+  const ra = qa(["--report", `${A}/rep.json`, "--policy", none, "--adopt", "--because", "t"]);
+  check("⟨0.41.3⟩ accepts names the uncalled closure's situation and the remedy",
+    ra.stderr.includes("`src.m.r#4:") && ra.stderr.includes("Remedy: move its body into a NAMED function and accept that, or call it where it is created."), ra.stderr);
+  check("⟨0.41.3⟩ accepts: a called closure gets the exact creator line, not 'give it a NAME'",
+    ra.stderr.includes("Accept the creator: `accept src.m.runvar Fs for deny Fs src because …`.") && !ra.stderr.includes("give it a NAME"), ra.stderr);
+  const rs = qa(["--report", `${A}/rep.json`, "--policy", scoped, "--adopt", "--because", "t"]);
+  check("⟨0.41.3⟩ accepts: a creator with no row of its own under the rule says so, and gives the extract remedy",
+    rs.stderr.includes("but that function has no violation row of its own under `deny Fs src.m.q`") && rs.stderr.includes("Remedy: move its body into a NAMED function and accept that."), rs.stderr);
+  const rj = qa(["--report", `${A}/rep.json`, "--policy", none, "--adopt", "--because", "t", "--json"]);
+  check("⟨0.41.3⟩ accepts --json: the plan keeps its shape and the text rides stderr", Object.keys(JSON.parse(rj.stdout)).sort().join() === ["after", "created", "ignored", "mode", "narrowed", "proposals", "removed", "text", "unjudged", "unnamed"].sort().join() && rj.stderr.includes("Accept the creator:"), rj.stdout + rj.stderr);
+}
+
 console.log(`\ntest: ${pass} passed, ${fail} failed`);
 if (fail) keepOnFailure();   // a failing assertion printed a path into one of these trees — keep them
 process.exit(fail ? 1 : 0);
