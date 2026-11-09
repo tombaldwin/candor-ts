@@ -10,6 +10,19 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ A scope token that occurs only INSIDE a unit's parenthesised disambiguator no longer binds that unit (SPEC §6.2 ⟨0.42⟩,
+  SOUNDNESS R1549, R1550's matcher half).** A co-path unit's `fn` ends in a disambiguator whose content carries the path
+  separators (`bank.Bank.pay(ua.user.User)`, `m::S::act(tm::Tr)`). `scopeMatches` and `scopeMatchesPermitted` split the whole
+  name on `.`/`:`, so `deny Fs user`, `deny Fs User` or `deny Fs Tr` fired on a function that merely TAKES that type (a
+  fabricated violation), and `only app -> user` was satisfied by such a callee. Both now segment with `nameSegments`, which splits
+  only outside the disambiguator (and an optional `#N`) and keeps it attached to the last segment, a scope being segmented by the
+  same rule. Direction: every change makes a matcher NARROWER. A deny/pure/allow/forbid/`only`-from scope that names a real path
+  segment binds exactly as before; the bare path still binds by last-segment prefix and the full disambiguated scope binds
+  exactly. `only <from> -> <to>`'s permitted side is an exact-segment match, so `only x -> bank.Bank.pay` no longer permits
+  `bank.Bank.pay(ua.user.User)` (fail-closed; name the member, or its owner). candor-ts publishes no such names itself, so a
+  scan of TypeScript source is byte-for-byte unchanged; the verdicts that move are `gate --report` / CANDOR_DEPS over another
+  engine's co-path report. Pinned by conformance PART 107 (`h_tok_mid`, `h_tok_last`, `h_tok_rs` now pass; their xfails retire).
+
 - **A red violation on a unit keyed by POSITION that no `accept` line can cover now says why, on stderr, from both the gate and
   `candor-ts-query accepts` (the port of candor-java's ⟨0.41.3⟩ text).** A closure keyed `name#<line>:<col>` that no function
   row calls (it is returned, or stored in a variable, field or collection, rather than called where it is made) is covered by no

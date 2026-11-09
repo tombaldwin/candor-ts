@@ -1095,6 +1095,47 @@ export function sortViolations(violations) {
     || c(a?.hash ?? "", b?.hash ?? ""));
 }
 
+// ⟨0.42⟩ SPEC §6.2, SOUNDNESS R1549 — A DISAMBIGUATOR IS PART OF THE LAST SEGMENT AND ITS CONTENT IS NEVER A
+// SEGMENT. A co-path unit's `fn` ends in a parenthesised disambiguator (`bank.Bank.pay(ua.user.User)`,
+// `m::S::act(tm::Tr)`), optionally followed by `#N`, and its content carries the path separators. candor-ts
+// does not itself publish such names, but it reads other engines' reports (`gate --report`, CANDOR_DEPS), and
+// splitting the whole name made scope `user`/`User` bind a function that merely takes a `User`.
+//
+// Returns the index where the disambiguator group (or a bare trailing `#N`) starts, or -1. The group must END
+// the name (before an optional `#N`), be balanced, and open directly after a NAME character — not at the start
+// and not after a separator. A trailing `#<line>:<col>` (candor-ts's own positional closure key) is NOT `#N`
+// and is left to the legacy split, which is the pre-existing behaviour for it.
+export function disambiguatorStart(name) {
+  let end = name.length, hashStart = -1;
+  const h = name.lastIndexOf("#");
+  if (h > 0 && /^[0-9]+$/.test(name.slice(h + 1))) { hashStart = h; end = h; }
+  if (end === 0 || name[end - 1] !== ")") return hashStart;
+  let depth = 0;
+  for (let j = end - 1; j >= 0; j--) {
+    const c = name[j];
+    if (c === ")") depth++;
+    else if (c === "(") {
+      depth--;
+      if (depth === 0) {
+        if (j === 0) return hashStart;
+        const prev = name[j - 1];
+        return prev === "." || prev === ":" ? hashStart : j;
+      }
+    }
+  }
+  return hashStart; // unbalanced: no group
+}
+const legacySegments = (s) => s.split(/[.:]+/).filter(Boolean);
+export function nameSegments(name) {
+  const d = disambiguatorStart(name);
+  if (d < 0) return legacySegments(name);
+  const segs = legacySegments(name.slice(0, d));
+  const tail = name.slice(d);
+  if (segs.length === 0) return [tail];
+  segs[segs.length - 1] += tail;
+  return segs;
+}
+
 /** §6.2 scope match: by NAME SEGMENT, last segment a prefix.
  * Segments split on BOTH "." and "::" — Rust/Java qualify with "::" while TS uses ".", and a shared
  * policy must match across engines (a `Foo::bar` scope authored against Rust was inert in TS before). */
@@ -1111,8 +1152,8 @@ export function sortViolations(violations) {
 // The `from` side KEEPS the prefix rule: it selects which functions the rule BINDS, so matching more
 // constrains more. Each side takes the matcher whose over-approximation errs toward the gate firing.
 export function scopeMatchesPermitted(name, scope) {
-  const segs = name.split(/[.:]+/).filter(Boolean);
-  const parts = scope.split(/[.:]+/).filter(Boolean);
+  const segs = nameSegments(name);
+  const parts = nameSegments(scope);
   if (parts.length === 0 || parts.length > segs.length) return false;
   outer: for (let i = 0; i + parts.length <= segs.length; i++) {
     for (let k = 0; k < parts.length; k++) if (segs[i + k] !== parts[k]) continue outer;
@@ -1134,8 +1175,8 @@ export function scopeMatches(name, scope) {
   // ADDITIVE: bare `app` is unchanged, so no existing verdict moves. Only `app::` — which today
   // silently behaves as `app` — starts meaning what everyone who writes it intends.
   const exact = /(::|\.)\s*$/.test(scope);
-  const segs = name.split(/[.:]+/).filter(Boolean);
-  const parts = scope.split(/[.:]+/).filter(Boolean);
+  const segs = nameSegments(name);
+  const parts = nameSegments(scope);
   if (parts.length === 0 || parts.length > segs.length) return false;
   const last = parts[parts.length - 1], init = parts.slice(0, -1);
   outer: for (let i = 0; i + parts.length <= segs.length; i++) {

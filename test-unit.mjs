@@ -22,7 +22,7 @@ import {
   reportCompleteness, specPredates, mustHedge,
 } from "./query-core.mjs";
 import {
-  parsePolicy, scopeMatches, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
+  parsePolicy, scopeMatches, scopeMatchesPermitted, nameSegments, hostPart, cmdBase, pathCovered, tableCovered, literalAllowed, EFFECTS,
   discoverConfigPolicy, evaluatePolicy, reasonClass, parseUnknownAliases, parseNetPartners,
   resolveReasonClasses, sortViolations, reportUnits, policyRefusalUnevaluated, settleAccept, positionalKey,
 } from "./policy.mjs";
@@ -1221,6 +1221,65 @@ test("scopeMatches: `::` scope segments match `.`-qualified names (cross-engine 
   assert.equal(scopeMatches("a.b.foo", "foo::b"), false); // segment ORDER still matters
   // a `::`-qualified NAME also splits, so a `.` policy scope matches it (both directions)
   assert.equal(scopeMatches("crate::mod::place", "mod.place"), true);
+});
+// ⟨0.42⟩ SOUNDNESS R1549 — PART 107's H-arm shapes. A disambiguator is part of the LAST segment; its content is
+// never a segment. DIRECTION of every change: `scopeMatches` got NARROWER (a token that occurs only inside a
+// parameter list no longer binds — removes a fail-closed fabrication; every scope that names a real path segment
+// binds exactly as before), and `scopeMatchesPermitted` got NARROWER too (fewer permissions, i.e. more
+// fail-closed). Nothing got more permissive.
+const LEGACY = (s) => s.split(/[.:]+/).filter(Boolean);
+test("⟨0.42⟩ nameSegments: the disambiguator stays inside the last segment", () => {
+  assert.deepEqual(nameSegments("bank.Bank.pay(ua.user.User)"), ["bank", "Bank", "pay(ua.user.User)"]);
+  assert.deepEqual(nameSegments("m::S::act(tm::Tr)"), ["m", "S", "act(tm::Tr)"]);
+  assert.deepEqual(nameSegments("m::S::act(S)#2"), ["m", "S", "act(S)#2"]);
+  assert.deepEqual(nameSegments("bank.Bank.solo"), ["bank", "Bank", "solo"]);
+  assert.deepEqual(nameSegments("a.f#12:5"), LEGACY("a.f#12:5"), "ts's own positional key is unchanged");
+  assert.deepEqual(nameSegments("a.(b.c)"), LEGACY("a.(b.c)"), "a group opening after a separator is not a disambiguator");
+  assert.deepEqual(nameSegments("a.f(b.c"), LEGACY("a.f(b.c"), "unbalanced: no group");
+  assert.deepEqual(nameSegments("f((a.b),(c.d))"), ["f((a.b),(c.d))"], "nested groups stay whole");
+});
+test("⟨0.42⟩ scopeMatches: a token that occurs only INSIDE a disambiguator binds nothing (PART 107 h_tok_*)", () => {
+  const dot = "bank.Bank.pay(ua.user.User)", rs = "m::S::act(tm::Tr)";
+  for (const tok of ["user", "User", "ua"]) assert.equal(scopeMatches(dot, tok), false, tok);
+  assert.equal(scopeMatches(rs, "Tr"), false);
+  assert.equal(scopeMatches(rs, "tm"), false);
+  // the controls — real path segments still bind, bare path by last-segment prefix, exact disambiguated scope exactly
+  assert.equal(scopeMatches(dot, "bank"), true);
+  assert.equal(scopeMatches(dot, "bank.Bank.pay"), true);
+  assert.equal(scopeMatches(dot, "bank.Bank.pay(ua.user.User)"), true);
+  assert.equal(scopeMatches(dot, "bank.Bank.pay(ub.user.User)"), false);
+  assert.equal(scopeMatches(rs, "m::S::act"), true);
+  assert.equal(scopeMatches(rs, "S"), true);
+  // SEEDED NEGATIVE: the pre-fix split WOULD have bound these, so the assertions above can fail.
+  assert.equal(LEGACY(dot).slice(-1)[0].startsWith("User"), true, "legacy last segment is `User)`, which `User` prefix-matched …");
+  assert.equal(LEGACY(dot).some((x) => x.startsWith("user")), true, "… and legacy `user` DID prefix-match a mid segment");
+  assert.equal(LEGACY(rs).slice(-1)[0].startsWith("Tr"), true, "legacy `Tr` DID prefix-match `Tr)`");
+});
+test("⟨0.42⟩ scopeMatchesPermitted: `only x -> user` is not satisfied by a callee that merely takes a `user.User`", () => {
+  const dot = "bank.Bank.pay(ua.user.User)";
+  assert.equal(scopeMatchesPermitted(dot, "user"), false);
+  assert.equal(scopeMatchesPermitted(dot, "User"), false);
+  assert.equal(scopeMatchesPermitted(dot, "bank"), true);
+  assert.equal(scopeMatchesPermitted(dot, "bank.Bank"), true);
+  assert.equal(scopeMatchesPermitted(dot, dot), true);
+  assert.equal(LEGACY(dot).includes("user"), true, "SEEDED NEGATIVE: the legacy split exposes `user` as a segment");
+});
+test("⟨0.42⟩ evaluatePolicy end to end: deny / only over a hand-written co-path report (PART 107 shapes)", () => {
+  const fns = [
+    { fn: "bank.Bank.pay(ua.user.User)", hash: "app#bank.Bank.pay(ua.user.User)", inferred: ["Fs"], direct: ["Fs"] },
+    { fn: "bank.Bank.solo", hash: "app#bank.Bank.solo", inferred: ["Fs"], direct: ["Fs"] },
+  ];
+  const run = (pol, cg = {}) => evaluatePolicy(parsePolicy(pol), fns, cg).map((v) => v.fn);
+  assert.deepEqual(run("deny Fs user\n"), [], "a parameter-type token binds no function (was a fabricated violation)");
+  assert.deepEqual(run("deny Fs User\n"), []);
+  assert.deepEqual(run("deny Fs bank\n").sort(), ["bank.Bank.pay(ua.user.User)", "bank.Bank.solo"], "real path still fires");
+  assert.deepEqual(run("deny Fs bank.Bank.pay\n"), ["bank.Bank.pay(ua.user.User)"]);
+  // `only`: the callee lives in `bank`; permitting `user` must NOT satisfy it (a false green), `bank` must.
+  const cg = { "app.main": ["bank.Bank.pay(ua.user.User)"] };
+  const only = (to) => evaluatePolicy(parsePolicy(`only app -> ${to}\n`), [...fns, { fn: "app.main", hash: "app#app.main", inferred: [], direct: [] }], cg)
+    .filter((v) => v.rule === "AS-EFF-011").map((v) => v.fn);
+  assert.deepEqual(only("user"), ["app.main"], "THE SILENT DIRECTION: still flagged");
+  assert.deepEqual(only("bank"), []);
 });
 test("hostPart: strips :port but preserves IPv6", () => {
   assert.equal(hostPart("api.example.com:8080"), "api.example.com");
