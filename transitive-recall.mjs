@@ -35,6 +35,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { scratch } from "./scratch.mjs";
+import { childEnv } from "./env.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const wantJson = process.argv.includes("--json");
@@ -179,7 +180,7 @@ function stripDisclosure(prefix) {
 
 function runVerify(dir, prefix, appPath, outPath, asyncStacks = false) {
   try { fs.rmSync(outPath, { force: true }); } catch { /* fresh */ }
-  const env = { ...process.env };
+  const env = childEnv();
   if (asyncStacks) env.CANDOR_VERIFY_ASYNC_STACKS = "1"; else delete env.CANDOR_VERIFY_ASYNC_STACKS;
   const t0 = Date.now();
   const r = spawnSync("node", [path.join(HERE, "verify.mjs"), dir, "--report", prefix,

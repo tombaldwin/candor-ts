@@ -7,10 +7,11 @@
 import fs from "node:fs";
 import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
+import { envOperator } from "./env.mjs";
 
 function canonical(p) { try { return fs.realpathSync(nodePath.resolve(p)); } catch { return nodePath.resolve(p); } }
-const ROOT = canonical(process.env.CANDOR_VERIFY_ROOT || process.cwd());
-const TRACE = process.env.CANDOR_VERIFY_TRACE;
+const ROOT = canonical(envOperator("CANDOR_VERIFY_ROOT") || process.cwd());
+const TRACE = envOperator("CANDOR_VERIFY_TRACE");
 
 function relIfProject(src) {
   if (!src) return null;
@@ -90,7 +91,7 @@ function liveProjectSites() {
 let asyncSites = null;      // Map<asyncId, {trigger, sites}>
 let currentAsyncId = null;
 let capturing = false;      // re-entrancy guard: our own capture must not recurse through init
-if (process.env.CANDOR_VERIFY_ASYNC_STACKS === "1") {
+if (envOperator("CANDOR_VERIFY_ASYNC_STACKS") === "1") {
   try {
     const ah = await import("node:async_hooks");
     asyncSites = new Map();

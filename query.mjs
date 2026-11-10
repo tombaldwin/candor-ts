@@ -33,6 +33,7 @@ import { hasReport, refusalMarkerFor, refusalSentence } from "./query-core.mjs";
 import { printAgents, writeStdoutSync, writeSinkAtomic, isCandorConfigSink } from "./contract.mjs";
 import { bestFinds } from "./surface.mjs";
 import { isTestPath } from "./scan-core.mjs";
+import { consultedSwitches, envOperator, switchRefusalReason } from "./env.mjs";
 // ONE source of truth for loading + name-matching — query.mjs kept DRIFTED local copies that didn't
 // merge sibling reports, didn't tolerate a corrupt report (bare JSON.parse → uncaught crash), and used
 // a `matchTier` missing `#` (so the SAME query resolved differently between `impact` and `callers` on a
@@ -47,7 +48,7 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
          loadReport, loadCallgraph, reportCallsGraph, gateReportInputFiles,
          reportVersion, reportPackage,
          advisoryAnswer,
-         reportCompleteness, mustHedge, completenessFields, absorbCompleteness } from "./query-core.mjs";
+         reportCompleteness, mustHedge, completenessFields, absorbCompleteness, reportSwitches, byCodePoint } from "./query-core.mjs";
 // writeStdoutSync, NOT console.log — and this ONE line covers all twelve `emit` sites, which is the
 // point. console.log is asynchronous on a pipe and every verb here USED TO end in `process.exit(...)`, which
 // discards whatever is still buffered (verbs now exit naturally — EVERY EXIT IS A THROWN QueryExit — but the
@@ -55,6 +56,18 @@ import { impact as coreImpact, path as corePath, gains as coreGains,
 // FILE and valid JSON, 65536 bytes through a PIPE and a JSONDecodeError. These are the query documents an
 // agent pipes into `jq`; `map`/`where`/`blindspots` over a real report clear the buffer easily.
 const emit = (v) => writeStdoutSync(JSON.stringify(v, null, 1) + "\n", "the verdict document");
+// ⟨0.42⟩ SPEC §3.4 (c) / §3.3 cause (e), SOUNDNESS R1634: the advisory verbs that answer `ok` follow the gate's refusal.
+// Over a report whose producer ran under a set result-moving switch (or in a process that consulted one) they REFUSE:
+// the §3.1 refusal document, exit 2 — not only under `--strict`, because the claim "this is not what the engine
+// implements" is not a completeness hedge but a withdrawn answer (PART 109 `h_verb` pins plain `unverified`).
+function refuseUnderSwitches(verb, prefix) {
+  const sw = [...new Set([...consultedSwitches(), ...reportSwitches(prefix)])].sort(byCodePoint);
+  if (!sw.length) return;
+  const why = switchRefusalReason(sw);
+  console.error(`candor-ts: ${verb}: ${why}`);
+  emit(refusalVerdict(SPEC_VERSION, why, null, sw));
+  qexit(2);
+}
 // ⟨0.24⟩ SPEC §3.2 — THE OTHER CHANNEL. `advisoryAnswer` withdraws the claim from the JSON; this withdraws
 // it from the one a human reads, and the spec requires both because a test that reads one channel is
 // evidence about one channel. candor-rust built a mutant that kept the whole JSON fix and deleted only the
@@ -762,7 +775,7 @@ function locatorToPrefix(loc) {
 // discovery verb emit an authoritative-empty answer at exit 0 — a false all-clear, the §4 cardinal sin
 // (`where Net` in a dir with no `.candor/` up-tree). Matches the Rust engine's discover_report_prefix.
 function discoverReportPrefix() {
-  const env = process.env.CANDOR_REPORT;
+  const env = envOperator("CANDOR_REPORT");
   if (env) return locatorToPrefix(env);
   for (let d = process.cwd(); ; d = path.dirname(d)) {
     if (fs.existsSync(path.join(d, ".candor"))) return path.join(d, ".candor", "report");
@@ -1079,7 +1092,7 @@ function resolveGateReportVerb(rawArgs) {
       // `gateReportInputFiles` (query-core.mjs); the measurement lives there.
       const expandedInputs = gateReportInputFiles(report ? locatorToPrefix(report) : discoverReportPrefix());
       for (const f of expandedInputs) refuseGateJsonOverInput(gate, f, "a file this gate reads —");
-      refuseGateJsonOverInput(gate, process.env.CANDOR_POLICY, "CANDOR_POLICY");
+      refuseGateJsonOverInput(gate, envOperator("CANDOR_POLICY"), "CANDOR_POLICY");
       // THE CONFIG-DECLARED POLICY. This verb's policy ladder falls back to the \`policy\` key of the
       // config discovered from the CWD, and the guard checked only the flags — so the checked-in form,
       // which is the one a CI job has, was destroyed at exit 0 while the flag form refused. The same
@@ -1104,8 +1117,8 @@ function resolveGateReportVerb(rawArgs) {
         // ⟨0.28⟩ the expanded report set (and its sidecars), exactly as the single-sink path asks it
         // above — a duplicate must not smuggle an expanded input past the guard.
         for (const f of expandedInputs) refuseGateJsonOverInput(g, f, "a file this gate reads —");
-        refuseGateJsonOverInput(g, process.env.CANDOR_POLICY, "CANDOR_POLICY");
-        refuseGateJsonOverInput(g, process.env.CANDOR_CONFIG, "CANDOR_CONFIG");
+        refuseGateJsonOverInput(g, envOperator("CANDOR_POLICY"), "CANDOR_POLICY");
+        refuseGateJsonOverInput(g, envOperator("CANDOR_CONFIG"), "CANDOR_CONFIG");
         for (const [p2, label] of configDeclaredInputs()) refuseGateJsonOverInput(g, p2, label);
         refuseGateJsonAtConfig(g);
       }
@@ -1225,7 +1238,7 @@ function resolvePolicy(policyFlag, positionalPolicy) {
     deprecate("a positional policy file is deprecated — pass it as `--policy <file>` (or set CANDOR_POLICY / a .candor/config `policy` key)");
     return { policyFile: positionalPolicy, fromPositional: true };
   }
-  if (process.env.CANDOR_POLICY) return { policyFile: process.env.CANDOR_POLICY, fromPositional: false };
+  if (envOperator("CANDOR_POLICY")) return { policyFile: envOperator("CANDOR_POLICY"), fromPositional: false };
   const disc = discoverConfigPolicy(process.cwd());
   if (disc?.policyPath) return { policyFile: disc.policyPath, fromPositional: false };
   return { policyFile: null, fromPositional: false };
@@ -2124,6 +2137,7 @@ switch (cmd) {
     // ⟨0.33⟩ this verb's OWN deny/pure rules ride along — see the `fix-gate`/`unverified` sites for the
     // rule. `pol` is OPTIONAL here (unlike those two), so a bare `whatif` with no `--policy` passes `[]`,
     // the structural carve-out `reportUnaskedRules` already takes for every no-policy caller.
+    refuseUnderSwitches("whatif", prefix);
     const wcomp = reportCompleteness(prefix, pol?.deny ?? []);
     const wunan = wcomp.unanalyzed;
     if (wunan.length)
@@ -2227,6 +2241,7 @@ switch (cmd) {
     // ⟨0.33⟩ this verb's OWN deny/pure rules ride along so `reportCompleteness` can compare them against
     // every gated report's `scannedUnder` — the ⟨0.24⟩ pessimism MUST, off the SAME reader `gate --report`
     // uses (`reportUnaskedRules`).
+    refuseUnderSwitches("fix-gate", prefix);
     const fgComp = reportCompleteness(prefix, fgpol.deny);
     const fgUnan = fgComp.unanalyzed;
     if (fgUnan.length) advisoryIncompleteNote("fix-gate", fgUnan);
@@ -2332,6 +2347,7 @@ switch (cmd) {
     { const wp = wholePolicyUnanswerable(upol, "a report route");
       if (wp.unevaluated.length) r.unevaluated = [...(r.unevaluated ?? []), ...wp.unevaluated]; }
     // ⟨0.33⟩ this verb's OWN deny/pure rules ride along — see the `fix-gate` site above for the rule.
+    refuseUnderSwitches("unverified", prefix);
     const uComp = reportCompleteness(prefix, upol.deny);
     const uUnan = uComp.unanalyzed;
     if (uUnan.length) advisoryIncompleteNote("unverified", uUnan);
@@ -2402,7 +2418,7 @@ switch (cmd) {
     if (aadopt) { areason = reasonOf(abecause); if (areason === null) qexit(2); }
     const apol = resolvePolicy(apolicy, null).policyFile;
     if (!apol) { console.error("candor-ts accepts: a policy is required — pass `--policy <file>` or set CANDOR_POLICY / a .candor/config `policy` key."); qexit(2); }
-    if (areport === null && !process.env.CANDOR_REPORT) {
+    if (areport === null && !envOperator("CANDOR_REPORT")) {
       // ⟨0.41.1⟩ no report named and none discovered: still a refusal, but one that names the commands that work.
       const dp = discoverReportPrefix();
       if (dp === null || (!refusalMarkerFor(dp) && !hasReport(dp))) { console.error(noReportMessage().trimEnd()); qexit(2); }
@@ -2457,8 +2473,8 @@ switch (cmd) {
         } catch (e) { if (e instanceof QueryExit) throw e; console.error(`candor-ts: could not write --gate-json ${dest}: ${e.message}`); }
       }
     };
-    const grefuse = (reason, unevaluated = null) => {
-      gwrite(refusalVerdict(SPEC_VERSION, reason, unevaluated));
+    const grefuse = (reason, unevaluated = null, switches = null) => {
+      gwrite(refusalVerdict(SPEC_VERSION, reason, unevaluated, switches));
       qexit(2);
     };
     if (!policyFile) { console.error("candor-ts: gate requires a policy — pass `--policy <file>`, or set CANDOR_POLICY / a .candor/config `policy` key. `gate` applies a policy to an existing report; with no policy there is no verdict to give."); qexit(2); }

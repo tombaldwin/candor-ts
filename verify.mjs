@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { loadReport } from "./query-core.mjs";
 import { verifySites } from "./verify-core.mjs";
 import { parseTrace, programCheck } from "./verify-syscall.mjs";
+import { childEnv, envOperator } from "./env.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -120,10 +121,10 @@ const traceFile = path.join(os.tmpdir(), `candor-verify-${process.pid}-${Date.no
 try { fs.rmSync(traceFile, { force: true }); } catch { /* fresh */ }
 const preload = path.join(HERE, "verify-preload.mjs");
 const env = {
-  ...process.env,
+  ...childEnv(),
   CANDOR_VERIFY_ROOT: rootDir,
   CANDOR_VERIFY_TRACE: traceFile,
-  NODE_OPTIONS: `${process.env.NODE_OPTIONS ? process.env.NODE_OPTIONS + " " : ""}--import ${JSON.stringify(preload)}`,
+  NODE_OPTIONS: `${envOperator("NODE_OPTIONS") ? envOperator("NODE_OPTIONS") + " " : ""}--import ${JSON.stringify(preload)}`,
 };
 
 if (!wantJson) console.error(`candor verify: running \`${runCmd}\` under the honesty oracle (scope: ${scope})…`);

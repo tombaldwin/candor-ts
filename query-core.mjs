@@ -688,6 +688,19 @@ export function reportUnanalyzed(prefix) {
  * every run trains the reader to ignore it, the same reason ⟨0.15⟩ omits `coverage` when nothing is
  * uncovered.
  */
+/** ⟨0.42⟩ SPEC §2 `switches` (SOUNDNESS R1634): the union of the result-moving switches the located report(s)'
+ *  producers ran under, sorted by code point. Lenient by design — it only ever ADDS a refusal: a report that
+ *  does not parse is the gate's `corrupt` business, and an element that is not a name is not one. */
+export function reportSwitches(prefix) {
+  const out = new Set();
+  for (const f of reportFilesAt(prefix)) {
+    let d; try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch { continue; }
+    if (d && typeof d === "object" && Array.isArray(d.switches))
+      for (const x of d.switches) if (typeof x === "string" && x) out.add(x);
+  }
+  return [...out].sort(byCodePoint);
+}
+
 export function reportCompleteness(prefix, denyRules = []) {
   // ⟨0.34⟩ computed ONCE, ahead of the object literal below: `rules` feeds `unaskedRules` and
   // `predates033` feeds `unaskedRulesPredates033`, off the SAME per-report pass (see
@@ -1102,6 +1115,7 @@ export function loadGateReport(prefix, denyRules = []) {
   const files = reportFilesAt(prefix);
   const functions = [], unanalyzed = [], cov = new Map(), corrupt = [], outOfScope = [], netPartners = [],
         unread = [];
+  const switches = new Set();   // ⟨0.42⟩ the union of the gated reports' `switches`
   // ⟨0.33⟩ THIS GATE'S OWN canonical deny/pure rules, computed ONCE rather than per report — a subset
   // test against ten sibling reports must ask the identical question ten times, not re-derive it. Empty
   // when this route carries no `deny`/`pure` rule at all (an `allow`/`forbid`/`only`-only policy, or no
@@ -1290,6 +1304,14 @@ export function loadGateReport(prefix, denyRules = []) {
         netPartners.push({ config: nps.config, hosts: nps.hosts.map(String) });
       else corrupt.push(`${f}: \`netPartners\` is present and is not { config: string, hosts: [string] }`);
     }
+    // ⟨0.42⟩ SPEC §2 `switches` (SOUNDNESS R1634): the result-moving switches the PRODUCER ran under. A gate over a report
+    // that carries any refuses (§3.3 (e)). STRICT like every verdict-bearing key here: a present-but-malformed value is
+    // corrupt input, never coerced to "no switches" (the safe-LOOKING reading deletes the refusal). ABSENT = none.
+    const sws = parsed.switches;
+    if (sws !== undefined) {
+      if (Array.isArray(sws) && sws.every((x) => typeof x === "string" && x)) for (const x of sws) switches.add(x);
+      else corrupt.push(`${f}: \`switches\` is present and is not a list of names`);
+    }
     // ⟨0.15⟩ the κ ledger. Merged + re-sorted the PRODUCER's way (count desc, name asc by code point —
     // reportCoverage's rule, and scan.mjs's), so a single-report prefix reproduces the emitted order exactly.
     const unc = parsed.coverage?.uncovered;
@@ -1307,6 +1329,7 @@ export function loadGateReport(prefix, denyRules = []) {
   // same class once per member in a message whose job is to name what to re-scan. The verdict is unmoved
   // either way; only the sentence is.
   return { functions, analyzed, unanalyzed, coverage, judgedNothing, outOfScope, netPartners,
+           switches: [...switches].sort(byCodePoint),
            unread: [...new Set(unread)],
            // ⟨0.33⟩ SPEC §2 — the gate's own rules that some gated report's producer was never asked
            // about; `[]` when `mine` is empty (no deny/pure rule at all) or every peeked class's producer

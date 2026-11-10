@@ -6,7 +6,8 @@ import { parsePolicy, parseUnknownAliases, discoverConfigText,
          policyVocabularyAnchor, policyErrorText, policyRefusalUnevaluated, policyZeroRules,
          fatalPolicyErrors, refusalVerdict, sortViolations,
          unanswerableScoped, wholePolicyUnanswerable, reportUnits, noteSyntheticHits, settleAccept, announceAccepted, settleProbe } from "./policy.mjs";
-import { loadGateReport } from "./query-core.mjs";
+import { loadGateReport, byCodePoint } from "./query-core.mjs";
+import { consultedSwitches, switchRefusalReason } from "./env.mjs";
 import { SPEC_VERSION } from "./spec-version.mjs";
 
 /**
@@ -84,6 +85,19 @@ export function gateCore({ prefix, policyFile, gtext, json, gateJsonPath, gwrite
     // report's `scannedUnder` (SPEC §2 ⟨0.33⟩) — the ONE place this route computes that condition; see
     // `g.unaskedRules` below.
     const g = loadGateReport(prefix, gpol.deny);
+    // ⟨0.42⟩ SPEC §3.3 cause (e) / §3.4 (c), SOUNDNESS R1634: A GATE UNDER A SET RESULT-MOVING SWITCH IS UNANSWERABLE. Two
+    // sources, UNIONED: (i) a switch THIS process consulted (a gate that ran no analysis consults none, and engines MUST
+    // NOT read every switch at start, so `gate --report` in an environment holding a scan-time switch judges a clean
+    // report as it would without it), and (ii) a non-empty `switches` on the report being judged, which a switched
+    // scan wrote. Exit 2, the §3.1 refusal document (no `violations`) carrying the names; a violation does not dominate it.
+    {
+      const sw = [...new Set([...consultedSwitches(), ...(g.switches ?? [])])].sort(byCodePoint);
+      if (sw.length) {
+        const why = switchRefusalReason(sw);
+        console.error(`candor-ts: gate: ${why}`);
+        grefuse(why, null, sw);
+      }
+    }
     // ⟨0.32⟩ DOES THIS POLICY'S ANSWER DEPEND ON THE CODE THE PRODUCER LEFT UNREAD? — the ONE place that
     // condition is applied on this route (the rule itself is stated at the reading site in
     // query-core.mjs's `loadGateReport`). `deny` is the rule vector that carries `pure` too;
@@ -351,7 +365,7 @@ export function runAcceptsGate(prefix, policyPath, lines, probe) {
   let doc = null, rc = null, err = "";
   const gwrite = (obj) => { doc = obj; };
   const exit = (code) => { throw new GateDone(code); };
-  const grefuse = (reason, unevaluated = null) => { gwrite(refusalVerdict(SPEC_VERSION, reason, unevaluated)); exit(2); };
+  const grefuse = (reason, unevaluated = null, switches = null) => { gwrite(refusalVerdict(SPEC_VERSION, reason, unevaluated, switches)); exit(2); };
   const e0 = console.error, l0 = console.log;
   console.error = (...a) => { err += a.join(" ") + "\n"; };
   console.log = () => {};

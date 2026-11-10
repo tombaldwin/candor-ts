@@ -5,6 +5,7 @@
  */
 
 import { NET_DEST_CLASSES, netClassesOf } from "./scan-core.mjs";
+import { envOperator } from "./env.mjs";
 
 export const EFFECTS = ["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Llm"];
 
@@ -1052,8 +1053,10 @@ export function policyZeroRules(policyFile) {
 // no claim about violations, and an empty array is precisely the claim it cannot make. ABSENT, not empty.
 // `1503368`: no cause is exempt, including an unreadable policy — a stale green does not care why this run
 // declined to overwrite it.
-export function refusalVerdict(spec, reason, unevaluated = null) {
+export function refusalVerdict(spec, reason, unevaluated = null, switches = null) {
   const o = { spec, ok: false, refused: true, reason };
+  // ⟨0.42⟩ SPEC §3.3 cause (e): a refusal whose cause is a SET RESULT-MOVING SWITCH carries the names (SOUNDNESS R1634).
+  if (switches && switches.length) o.switches = switches;
   if (unevaluated && unevaluated.length) o.unevaluated = unevaluated;
   return o;
 }
@@ -1837,7 +1840,7 @@ export function discoverConfigPolicy(fromDir) {
 // ⟨0.19⟩ Discover `.candor/config` TEXT anchored at `fromDir`: $CANDOR_CONFIG if set + readable, else the
 // nearest `.candor/config` walking UP, else null. Read-only + lenient (the caller decides fail-closed).
 export function discoverConfigText(fromDir) {
-  const env = process.env.CANDOR_CONFIG;
+  const env = envOperator("CANDOR_CONFIG");
   if (env) { return readConfigOrRefuse(env, "CANDOR_CONFIG"); }
   let dir = nodePath.resolve(fromDir);
   for (;;) {
@@ -1903,7 +1906,7 @@ let policyExitMode = "exit";
 export function policyExitsThrow() { policyExitMode = "throw"; }
 
 export function discoverConfigPath(fromDir) {
-  const env = process.env.CANDOR_CONFIG;
+  const env = envOperator("CANDOR_CONFIG");
   if (env) { readConfigOrRefuse(env, "CANDOR_CONFIG"); return nodePath.resolve(env); }
   let dir = nodePath.resolve(fromDir);
   for (;;) {

@@ -22,6 +22,7 @@ import * as Q from "./query-core.mjs";
 import { accepts as acceptsVerb, reasonOf, noReportMessage } from "./accepts.mjs";
 import { runAcceptsGate } from "./gate-core.mjs";
 import { exitNaturally } from "./contract.mjs";
+import { consultedSwitches, envOperator, switchRefusalReason } from "./env.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses,
          parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText,
          unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, reportUnits,
@@ -39,7 +40,7 @@ let WORKSPACE_ROOT = null;
   const i = CLI_ARGS.indexOf("--root");
   if (i >= 0) { WORKSPACE_ROOT = nodePath.resolve(CLI_ARGS[i + 1] ?? "."); CLI_ARGS.splice(i, 2); }
 }
-const DEFAULT_PREFIX = process.env.CANDOR_REPORT || CLI_ARGS[0]
+const DEFAULT_PREFIX = envOperator("CANDOR_REPORT") || CLI_ARGS[0]
   || (fs.existsSync(".candor") ? ".candor/report" : null);   // the engines' default --out convention
 
 const within = (abs, root) => abs === root || abs.startsWith(root + nodePath.sep);
@@ -95,7 +96,7 @@ const FRESH_SRC = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|rs|swift|java|kt|kts|scala
 const FRESH_SKIP = new Set(["node_modules", ".git", ".candor", "target", "build", "dist", "out", ".gradle", ".build", "coverage", "vendor", ".next"]);
 const FRESH_WALK_LIMIT = 200000;
 function freshness(prefix) {
-  if (process.env.CANDOR_MCP_FRESHNESS === "off") return { checked: false, reason: "disabled (CANDOR_MCP_FRESHNESS=off)", off: true };
+  if (envOperator("CANDOR_MCP_FRESHNESS") === "off") return { checked: false, reason: "disabled (CANDOR_MCP_FRESHNESS=off)", off: true };
   let reportMs = Infinity, reports = [];
   try {
     reports = fs.existsSync(`${prefix}.json`) ? [`${prefix}.json`] : Q.reportFiles(prefix);
@@ -607,6 +608,10 @@ const TOOLS = {
       //     does not cover this policy's own. Read straight off `g` (computed by `loadGateReport` from
       //     the `pol.deny` handed to it above), never re-derived: the identical value the CLI's
       //     `gate --report` reads for the same bytes.
+      // ⟨0.42⟩ SPEC §3.3 cause (e), SOUNDNESS R1634: a report whose producer ran under a set result-moving switch is
+      // unanswerable here as on every gate route — the §3.1 refusal document, naming the switches.
+      { const sw = [...new Set([...consultedSwitches(), ...(g.switches ?? [])])].sort(Q.byCodePoint);
+        if (sw.length) return { ok: false, refused: true, reason: switchRefusalReason(sw), switches: sw }; }
       const gscope = g.outOfScope ?? [];
       const gunread = pol.deny.length ? g.unread : [];
       const gunasked = g.unaskedRules ?? [];

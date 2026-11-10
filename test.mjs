@@ -3808,7 +3808,7 @@ export class MemStore implements Store { save(p: string): void { netm.connect(44
   // scanned project — a scratch copy of the engine left in a scanned tree shows up as extra units, which
   // has cost this vein a false A/B datapoint before.
   const eng = scratch("candor-ts-mutant-");
-  for (const m of ["policy.mjs", "query-core.mjs", "contract.mjs", "scan-core.mjs", "surface.mjs", "package.json"])
+  for (const m of ["policy.mjs", "query-core.mjs", "contract.mjs", "scan-core.mjs", "surface.mjs", "env.mjs", "package.json"])
     fs.copyFileSync(path.join(HERE, m), path.join(eng, m));
   try { fs.symlinkSync(path.join(HERE, "node_modules"), path.join(eng, "node_modules"), "dir"); } catch { /* exists */ }
   const mutant = path.join(eng, "scan.mjs");

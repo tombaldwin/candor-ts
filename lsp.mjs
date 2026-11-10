@@ -52,6 +52,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import * as Q from "./query-core.mjs";
 import { exitNaturally } from "./contract.mjs";
 import { discoverConfigPolicy, evaluatePolicy, parsePolicy, scopeMatches, reportNetClasses, parseUnknownAliases, discoverConfigText, policyVocabularyAnchor, policyErrorText, unanswerableScoped, wholePolicyUnanswerable, resolveReasonClasses, fatalPolicyErrors, policyZeroRules, reportUnits, settleAccept } from "./policy.mjs";
+import { envOperator } from "./env.mjs";
 
 // Version: from the sibling package.json when running inside the npm package; a single-file BUNDLE of
 // this server (the IDE-plugin embedding) has no sibling package.json — fall back rather than crash.
@@ -60,7 +61,7 @@ try { VERSION = createRequire(import.meta.url)("./package.json").version; } catc
 
 // ---- state (set at initialize) ---------------------------------------------------------------------
 let rootPath = null;
-let reportPrefix = process.env.CANDOR_REPORT || process.argv[2] || null;
+let reportPrefix = envOperator("CANDOR_REPORT") || process.argv[2] || null;
 
 const hasReport = Q.hasReport; // single-sourced with the loader predicate (query-core) — see mcp.mjs
 
@@ -96,13 +97,13 @@ function canonicalDocKey(p) {
   return process.platform === "win32" ? abs.toLowerCase() : abs;
 }
 function startActivityWatch() {
-  if ((process.env.CANDOR_LSP_ACTIVITY || "").toLowerCase() === "off") return;
+  if ((envOperator("CANDOR_LSP_ACTIVITY") || "").toLowerCase() === "off") return;
   const dir = rootPath ? nodePath.join(rootPath, ".candor")
             : reportPrefix ? nodePath.dirname(reportPrefix) : null;
   if (!dir) return;
   activityLog = nodePath.join(dir, "activity.jsonl");
   try { activityOffset = fs.statSync(activityLog).size; } catch { activityOffset = 0; }
-  const ms = Math.max(50, parseInt(process.env.CANDOR_LSP_ACTIVITY_POLL_MS || "2000", 10) || 2000);
+  const ms = Math.max(50, parseInt(envOperator("CANDOR_LSP_ACTIVITY_POLL_MS") || "2000", 10) || 2000);
   activityTimer = setInterval(pollActivity, ms);
   activityTimer.unref();
 }
@@ -426,7 +427,7 @@ function warnLoudOnce(message, brief) {
 // ⟨0.24⟩ the file `activePolicy()` last read, so the vocabulary anchor can be the POLICY FILE's dir.
 let activePolicyPath = null;
 function activePolicy() {
-  const env = process.env.CANDOR_POLICY;
+  const env = envOperator("CANDOR_POLICY");
   if (env) {
     if (fs.existsSync(env)) { activePolicyPath = env; return fs.readFileSync(env, "utf8"); }
     // Set-but-missing must be LOUD (the family's configured-but-unusable posture — scan exits 2 here).

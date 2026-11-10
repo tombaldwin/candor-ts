@@ -8,6 +8,7 @@
 // construction and not by a second implementation that could drift. The proposed text is then gated again to report
 // `after`. An entry whose state the gate did not name is KEPT, never deleted. Writes no file.
 import { positionalKey, discoverConfigText, uncoverableNote } from "./policy.mjs";
+import { envOperator } from "./env.mjs";
 
 const RULE_KINDS = new Set(["deny", "pure", "forbid", "allow", "only"]);
 const MARK = "# candor-accepts:";
@@ -371,7 +372,7 @@ const REFUSED_WHY = [
  *  the CURRENT scan, would then contradict. The policy is discovered as the gate discovers it, so it is not the missing piece.
  *  `mcp`: the agent-channel server only reads (SPEC §7.12), so the commands are for the operator's shell. */
 export function noReportMessage({ locator = null, fromDir = ".", mcp = false } = {}) {
-  let base = process.env.CANDOR_BASELINE || null;
+  let base = envOperator("CANDOR_BASELINE") || null;
   if (!base) {
     try {
       const t = discoverConfigText(fromDir);

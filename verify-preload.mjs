@@ -24,6 +24,7 @@ import dns from "node:dns";
 import cp from "node:child_process";
 import crypto from "node:crypto";
 import { traced, tracedNet } from "./verify-emit.mjs";
+import { wrapProcessEnv } from "./env.mjs";
 
 // wrap(obj, names, effect): replace each named method with a recorder that (via `traced`) emits the effect
 // iff this is the OUTERMOST wrapped call, then delegates transparently (same this/args/return). The
@@ -83,7 +84,7 @@ wrap(crypto, ["randomBytes", "randomFillSync", "randomFill", "randomInt", "rando
   }
 }
 try {
-  const proxied = new Proxy(process.env, {
+  wrapProcessEnv((rawEnv) => new Proxy(rawEnv, {
     // a process.env READ is Env — but only the app's OWN read (depth 0); a read INSIDE a wrapped stdlib call
     // is that call's business. `traced` gates it: the app's direct read is outermost (recorded), a nested one skipped.
     get(t, k) { return typeof k === "string" && k in t ? traced("Env", t, () => t[k], []) : t[k]; },
@@ -104,8 +105,7 @@ try {
     set(t, k, v) { if (typeof k === "string") return traced("Env", t, () => { t[k] = v; return true; }, []); t[k] = v; return true; },
     defineProperty(t, k, d) { if (typeof k === "string") return traced("Env", t, () => { Object.defineProperty(t, k, d); return true; }, []); Object.defineProperty(t, k, d); return true; },
     deleteProperty(t, k) { if (typeof k === "string") return traced("Env", t, () => { delete t[k]; return true; }, []); delete t[k]; return true; },
-  });
-  Object.defineProperty(process, "env", { value: proxied, configurable: true });
+  }));
 } catch { /* process.env not reconfigurable — Env capture unavailable, disclosed by absence */ }
 
 // (2) the ESM NAMED-export path. Registered AFTER the patches above (the imports are hoisted, so the builtins

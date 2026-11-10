@@ -10,6 +10,16 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **⚠ Result-moving switches are named, and a gate under one refuses (SPEC ⟨0.42⟩ §2 `switches`, §3.4, §3.3 cause (e); SOUNDNESS R1634).**
+  `CANDOR_CT2_OFF`, `CANDOR_CT_ORACLE_OFF` and `CANDOR_CT_SITE_FALLBACK=A|B` silently changed what a scan reported while the report
+  still said `"spec": "0.41"`. The report now carries `switches` (names, sorted, omitted when empty); `scan --policy`,
+  `gate --report`, the MCP `candor_gate` tool and the advisory verbs `unverified`, `fix-gate` and `whatif` refuse with exit 2 and the
+  §3.1 refusal document naming them, when the process consulted a switch or the report carries `switches`; a refused `scan --policy
+  --out` still writes its report; a chained dependency report carrying `switches` adds a stderr advisory and the verdict key
+  `switchedDependencies`. With no switch set, output is byte-identical. Every environment read now goes through `env.mjs`
+  (`envSwitch`/`envTrace`/`envOperator`/`childEnv`), and `test-env-lint.mjs` fails the suite on any other (seeded, AST-based).
+
+
 - **⚠ A scope token that occurs only INSIDE a unit's parenthesised disambiguator no longer binds that unit (SPEC §6.2 ⟨0.42⟩,
   SOUNDNESS R1549, R1550's matcher half).** A co-path unit's `fn` ends in a disambiguator whose content carries the path
   separators (`bank.Bank.pay(ua.user.User)`, `m::S::act(tm::Tr)`). `scopeMatches` and `scopeMatchesPermitted` split the whole

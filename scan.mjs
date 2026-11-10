@@ -40,6 +40,7 @@ import { isTestPath, kappa, kappaKnows, nodeCoreUnreviewed, fsKind, commandHeadE
          WEB_WIRE_MEMBERS, CONNECTING_CTORS, NET_ESTABLISHING, NET_ACCEPTING, NET_REQUEST_NAMED, FS_USE_VERBS,
          EXEC_USE_VERBS, RESERVED_SIDECAR_SEGMENTS } from "./scan-core.mjs";
 import { emitSurface } from "./surface.mjs";
+import { childEnv, consultedSwitches, switchedDependenciesOf, envOperator, envSwitch, envTrace, switchRefusalReason } from "./env.mjs";
 // ── EXIT BY FALLING OFF THE END, NEVER `process.exit()` FROM HERE DOWN ────────────────────────────────────
 // Everything below runs inside the `scan:` block, and every exit site is `{ process.exitCode = N; break scan; }`.
 // `process.exit()` on Node 24 can DEADLOCK: it disposes the V8 platform while the isolate is still alive, and
@@ -57,13 +58,13 @@ scan: {
 // ⟨call-target round 2⟩ `CANDOR_CT2_OFF=1` — the round-2 measurement switch (the site table restricted to its `r0`
 // rows, the copy/lookup getter readers without the target oracle, R1434's round-1 reassignment rule). Read by the
 // conversion walk, so it is defined before anything runs.
-const CT2 = !process.env.CANDOR_CT2_OFF;
-const R815_REACH = process.env.CANDOR_R815_REACH ? (k) => console.error(`R815-REACH ${k}`) : null;
+const CT2 = !envSwitch("CANDOR_CT2_OFF");
+const R815_REACH = envTrace("CANDOR_R815_REACH") ? (k) => console.error(`R815-REACH ${k}`) : null;
 // ⟨R934/R935⟩ reach marker: a charge that came from a PARAMETER or PROPERTY environment location.
-const R246_REACH = process.env.CANDOR_R246_REACH ? (k) => console.error(`R246-REACH ${k}`) : null;
+const R246_REACH = envTrace("CANDOR_R246_REACH") ? (k) => console.error(`R246-REACH ${k}`) : null;
 let projAccessorNames = null;
 const anyRecvSetResidue = [];   // ⟨R246/R1039⟩ { owner, name|null, kind } — see the post-fixpoint disclosure
-const ENVLOC_REACH = process.env.CANDOR_ENVLOC_REACH ? (k) => console.error(`ENVLOC-REACH ${k}`) : null;
+const ENVLOC_REACH = envTrace("CANDOR_ENVLOC_REACH") ? (k) => console.error(`ENVLOC-REACH ${k}`) : null;
 
 const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -528,7 +529,7 @@ const runInputs = (target, policyFlag) => {
   if (policyFlag) out.push([policyFlag, "--policy"]);
   for (const [v, label] of [["CANDOR_POLICY", "CANDOR_POLICY"], ["CANDOR_BASELINE", "CANDOR_BASELINE"],
                             ["CANDOR_CONFIG", "CANDOR_CONFIG"]]) {
-    if (process.env[v]) out.push([process.env[v], label]);
+    if (envOperator(v)) out.push([envOperator(v), label]);
   }
   // ONE DEFINITION, shared with the loader — see DEP_SEPARATORS. This comment used to claim it was
   // "the separator set the dep loader accepts" while spelling a DIFFERENT set one screen away, and the
@@ -537,7 +538,7 @@ const runInputs = (target, policyFlag) => {
   // `--gate-json` naming one of those reports then DESTROYED it and the run exited 0 with `ok: true`
   // written over the operator's input — §3.3.1's own words, "a machine-readable all-clear produced by
   // deleting the question". Measured live before this change.
-  for (const d of (process.env.CANDOR_DEPS ?? "").split(DEP_SEPARATORS).filter(Boolean)) {
+  for (const d of (envOperator("CANDOR_DEPS") ?? "").split(DEP_SEPARATORS).filter(Boolean)) {
     out.push([d, "a CANDOR_DEPS report"]);
     // A DIRECTORY DEP IS EVERY REPORT INSIDE IT. `deps` accepts a directory — `--workspace` writes
     // `.candor/deps/` and hands that back, so it is the common spelling — and the loader then walks it
@@ -975,7 +976,7 @@ const disarmUnwrittenOutReports = () => {
     refuseEarly(`--gate-json ${gate} is a .candor/config`);   // ⟨0.28⟩ report stream too
     { process.exitCode = 2; break scan; }
   }
-  if (gate && singleSink && sameArtifact(gate, process.env.CANDOR_CONFIG)) {
+  if (gate && singleSink && sameArtifact(gate, envOperator("CANDOR_CONFIG"))) {
     console.error(`candor-ts: --gate-json ${gate} names the SAME FILE as CANDOR_CONFIG — refusing (exit 2).`);
     refuseEarly(`--gate-json ${gate} names the same file as CANDOR_CONFIG`);   // ⟨0.28⟩
     { process.exitCode = 2; break scan; }
@@ -1015,7 +1016,7 @@ const disarmUnwrittenOutReports = () => {
         console.error(`candor-ts: --gate-json ${g} is a .candor/config — refusing (exit 2). Nothing was written there.`);
         bad = true;
       }
-      if (sameArtifact(g, process.env.CANDOR_CONFIG)) {
+      if (sameArtifact(g, envOperator("CANDOR_CONFIG"))) {
         console.error(`candor-ts: --gate-json ${g} names the SAME FILE as CANDOR_CONFIG — refusing (exit 2).`);
         bad = true;
       }
@@ -1112,7 +1113,7 @@ const disarmUnwrittenOutReports = () => {
   }
   if (preOut && !preWantJson) armOutPrefixFailClosed(preOut, runInputs(preTarget, policy));
 }
-let target = null, outPrefix = null, policyPath = process.env.CANDOR_POLICY ?? null, gateJsonPath = null, allowJs = false, wantAgents = false, wantJson = false, wantWorkspace = false, wantDepInits = false;
+let target = null, outPrefix = null, policyPath = envOperator("CANDOR_POLICY") ?? null, gateJsonPath = null, allowJs = false, wantAgents = false, wantJson = false, wantWorkspace = false, wantDepInits = false;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--agents") wantAgents = true;
@@ -1283,7 +1284,7 @@ function enforceEnginePin(targetPath) {
 // guard asks the same question the loader answers instead of re-deriving the walk — a review took the
 // guard's own copy apart on exactly that divergence.
 function discoverConfigFile(targetPath) {
-  const env = process.env.CANDOR_CONFIG;
+  const env = envOperator("CANDOR_CONFIG");
   if (env) {
     try { return fs.statSync(env).isFile() ? env : null; } catch { return null; }
   }
@@ -1311,7 +1312,7 @@ function discoverConfigFile(targetPath) {
 /// moment later — now with the sink armed, so the refusal reaches it. A second parser was the
 /// alternative, and a second parser is a second set of holes.
 function loadCandorConfig(targetPath, { lenient = false } = {}) {
-  let file = process.env.CANDOR_CONFIG ?? null;
+  let file = envOperator("CANDOR_CONFIG") ?? null;
   if (file !== null) {
     if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
       if (lenient) throw new Error(`CANDOR_CONFIG set but ${file} is not a readable file`);
@@ -1419,7 +1420,7 @@ if (policyPath === null && candorConfig.policy !== undefined) policyPath = cando
 // baseline (the AS-EFF-005 regression guard, SPEC §7 item 5): CANDOR_BASELINE env → config `baseline`
 // (path-valued keys are already resolved against the config's anchor above). No CLI flag — matching
 // candor-java, the reference engine (env/config only). A BARE `baseline` line ("") fails loud below.
-let baselinePath = process.env.CANDOR_BASELINE ?? null;
+let baselinePath = envOperator("CANDOR_BASELINE") ?? null;
 // WHICH SOURCE supplied it decides what a MISSING file means: `CANDOR_BASELINE` is set unconditionally
 // by the adopt workflow, so an absent path there is "the ratchet is not adopted yet"; a checked-in
 // `baseline` line DECLARES this repo has one, so an absent path there was deleted or never committed —
@@ -1431,7 +1432,7 @@ if (baselinePath === null && candorConfig.baseline !== undefined) { baselinePath
 // semantics mirror candor-java's Config.flag exactly — env var PRESENCE means on (env can't express off);
 // else the config value is truthy (empty/true/1/yes, case-insensitive). Default OFF keeps the ⟨0.16⟩
 // advisory posture BYTE-IDENTICAL. See the baseline guard below + candor-java Policy.checkBaseline.
-const unknownRatchet = process.env.CANDOR_UNKNOWN_RATCHET != null
+const unknownRatchet = envOperator("CANDOR_UNKNOWN_RATCHET") != null
   || (candorConfig["unknown-ratchet"] !== undefined
     && (candorConfig["unknown-ratchet"] === ""
       || /^(true|1|yes)$/i.test(candorConfig["unknown-ratchet"])));
@@ -1930,7 +1931,7 @@ if (wantWorkspace) {
       for (const real of depPaths) {
         try {
           const out = execFileSync(process.execPath, [selfPath, real, "--json"],
-            { env: { ...process.env, CANDOR_DEPS: workspaceDepsDir }, timeout: DEP_SCAN_TIMEOUT_MS,
+            { env: childEnv({ CANDOR_DEPS: workspaceDepsDir }), timeout: DEP_SCAN_TIMEOUT_MS,
               maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
           // ⟨ownership, half 1⟩ ONE derivation, shared with `failedDepName`, and TOTAL. The sweep's rule is
           // "a file candor would have OVERWRITTEN on success is the file it removes on failure", which is
@@ -2027,7 +2028,7 @@ if (wantDepInits) {
     const file = depCacheFileName(depInitsDir, pkg);
     try {
       const out = execFileSync(process.execPath, [selfPath2, dir, "--json", "--allow-js"],
-        { env: { ...process.env }, timeout: DEP_SCAN_TIMEOUT_MS,
+        { env: childEnv(), timeout: DEP_SCAN_TIMEOUT_MS,
           maxBuffer: 512 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
       fs.writeFileSync(file, out);
       answered.add(pkg); ownFiles.add(file);
@@ -2056,6 +2057,10 @@ const crossDeps = new Map(); // hash -> {inferred:Set, hosts:[], cmds:[], paths:
 // this gap — the operator chained a dep either way, so the name rules are blind to those crossings either
 // way.
 let depReportsRead = 0;
+// ⟨0.42⟩ SPEC §3.4 (d), SOUNDNESS R1634: a chained dependency report that carries `switches` was produced by an ALTERED
+// producer, so its absent rows are a CLAIM (⟨0.21⟩'s purity claim), not a judged-nothing silence. package -> Set of names.
+// ADVISORY ONLY: the consumer's own run is not switched and cannot judge a dependency's environment, so the exit is untouched.
+const depSwitched = new Map();
 // ⟨0.29⟩ Keyed on a report being READ, not on entries being ingested and not on a hit being applied: a
 // dependency whose reached function is PURE yields a report with NO entries and produces no hit, which is
 // exactly the fixture that caught this gap twice while I narrowed the predicate. The operator chained a
@@ -2254,7 +2259,7 @@ const corruptDepPkgs = new Set();
 // made no claim, so it grants none.
 {
   // --workspace's auto-scanned deps dir is prepended to the explicit CANDOR_DEPS/config spec (both chain).
-  const spec = [workspaceDepsDir, depInitsDir, process.env.CANDOR_DEPS ?? candorConfig.deps ?? ""].filter(Boolean).join(":");
+  const spec = [workspaceDepsDir, depInitsDir, envOperator("CANDOR_DEPS") ?? candorConfig.deps ?? ""].filter(Boolean).join(":");
   const files = [];
   // ASCII WHITESPACE ONLY, the same rule as the config loader above and as java, rust and swift. JS
   // `\s` includes U+00A0, so a dep path holding a non-breaking space split into two halves — and since
@@ -2353,6 +2358,18 @@ const corruptDepPkgs = new Set();
       const covers = stale ? staleDepPkgs : incomplete ? incompleteDepPkgs : corrupt ? corruptDepPkgs
                    : judgedNothing ? unjudgedDepPkgs : depCoveredPkgs;   // an untrusted, self-declared-incomplete, corrupt or unjudged report grants no coverage
       depReportsRead += 1;   // ⟨0.29⟩ see `depChained` — a dep was chained, whatever it contained
+      if (Array.isArray(d.switches)) {
+        const sw = d.switches.filter((x) => typeof x === "string" && x);
+        if (sw.length) {
+          const pkgKey = typeof d.package === "string" && d.package ? d.package : path.basename(f).replace(/\.json$/, "");
+          const cur = depSwitched.get(pkgKey) ?? new Set();
+          const before = cur.size;
+          for (const x of sw) cur.add(x);
+          depSwitched.set(pkgKey, cur);
+          if (cur.size > before)
+            console.error(`candor-ts: chained dependency '${pkgKey}' was produced under a set result-moving switch (${[...cur].sort().join(", ")}) — its report is a claim about an altered producer: an absent row there is NOT evidence of purity (SPEC §3.4 (d)). The gate's exit is unchanged; re-scan that dependency with the variable unset.`);
+        }
+      }
       if (corrupt) console.error(`candor-ts: chained dependency report ${f} has ${corruptKeys.length} present-but-unparseable §2 key(s)`
         + ` — granted NO coverage, so calls into it read as INVISIBLE rather than pure (SPEC §2 ⟨0.24⟩): ${corruptKeys.join("; ")}`);
       if (typeof d.package === "string" && d.package) covers.add(d.package);
@@ -3353,7 +3370,7 @@ const FS_TWO_PATH_MEMBERS = new Set([
 // `corpus-ab.py --mark R416PROBE` counted 7 hits across 7 entries over a corpus whose real hit count
 // was 0 — a flattering reach figure manufactured by the instrument, which is AGENT-CORPUS-BRIEF §E1
 // happening to the very measurement written to prevent it.
-const R416_HITS = process.env.CANDOR_R416_HITS ? new Map() : null;
+const R416_HITS = envTrace("CANDOR_R416_HITS") ? new Map() : null;
 const r416Hit = (k) => { if (R416_HITS) R416_HITS.set(k, (R416_HITS.get(k) ?? 0) + 1); };
 if (R416_HITS) process.on("exit", () => {
   const rows = [...R416_HITS].sort();
@@ -3397,7 +3414,7 @@ const isPathParamType = (t) => {
 // `CANDOR_R801_HITS=1` — the R416 reach counter, same discipline (prints ONLY when non-zero): `tok:<verb>`
 // counts a `__promisify__` token recovered to its verb, `two:<member>` a call the signature made two-path
 // that `FS_TWO_PATH_MEMBERS` did not name. A byte-identical A/B means nothing until these are non-zero.
-const R801_HITS = process.env.CANDOR_R801_HITS ? new Map() : null;
+const R801_HITS = envTrace("CANDOR_R801_HITS") ? new Map() : null;
 const r801Hit = (k) => { if (R801_HITS) R801_HITS.set(k, (R801_HITS.get(k) ?? 0) + 1); };
 if (R801_HITS) process.on("exit", () => {
   const rows = [...R801_HITS].sort();
@@ -4248,7 +4265,7 @@ const isPublishableForeignIface = (d) => {
 // that never reaches the branch is the most flattering number available and the least informative.
 const handoffCount = (d) => (interfaceImpls.get(d)?.length ?? 0) + (foreignInterfaceImpls.get(d)?.length ?? 0);
 function probeHandoff(kind, ifaceDecl, walk) {
-  if (!process.env.CANDOR_R521_REACH) { walk(ifaceDecl); return; }
+  if (!envTrace("CANDOR_R521_REACH")) { walk(ifaceDecl); return; }
   const before = handoffCount(ifaceDecl);
   walk(ifaceDecl);
   if (handoffCount(ifaceDecl) > before)
@@ -4518,7 +4535,7 @@ const isSuperReceiver = (recvExpr) => !!recvExpr && recvExpr.kind === ts.SyntaxK
 // actually ADDED, or where the super guard actually suppresses a non-empty set — never on branch entry
 // (R574/R583). For `bin/corpus-ab.py --mark R871-REACH`.
 const probeR871 = (kind, decl, n) => {
-  if (process.env.CANDOR_R871_REACH && n > 0)
+  if (envTrace("CANDOR_R871_REACH") && n > 0)
     console.error(`R871-REACH ${kind} ${decl?.parent?.name?.getText?.() ?? "?"}.${decl?.name?.getText?.() ?? "?"} n=${n}`);
 };
 // Every body an INTERFACE dispatch can run through implementor `impl`: the member `impl` itself supplies,
@@ -4745,7 +4762,7 @@ function stableUnitTag(kind, node) {
   stableKeyFallbacks++;
   // REACH PROBE, env-gated: a fallback means the path/ordinal derivation produced a duplicate, which by
   // construction it cannot — so any line here is a defect report, and `--mark R944-FALLBACK` counts it.
-  if (process.env.CANDOR_R944_REACH) console.error(`R944-FALLBACK #${stableKeyFallbacks} ${key} -> @${offsetKey}`);
+  if (envTrace("CANDOR_R944_REACH")) console.error(`R944-FALLBACK #${stableKeyFallbacks} ${key} -> @${offsetKey}`);
   return offsetKey;
 }
 // Enclosing `namespace`/`module` blocks are NAME SEGMENTS (the family ruling: §6.2 scope segments
@@ -5452,7 +5469,7 @@ function mintClassExprCtor(cls) {
   }
   if (ctor) nodeName.set(ctor, qual);
   classExprCtorQual.set(cls, qual);
-  if (process.env.CANDOR_R1016_REACH) console.error(`R1016-REACH mint ${qual}`);
+  if (envTrace("CANDOR_R1016_REACH")) console.error(`R1016-REACH mint ${qual}`);
   return qual;
 }
 // The class-expression constructor unit a `new X(…)` runs, read off the constructed value's TYPE — the route an
@@ -5514,7 +5531,7 @@ function mintClassExprOverride(cls, m, name) {
   if (!bodied) return;   // an unminted override reads unresolved at every reader — disclosed, never silent
   const sf = m.getSourceFile();
   mintPositionalStructuralUnit(moduleOf(sf), sf, m, name);
-  if (process.env.CANDOR_R873_REACH) console.error(`R873-REACH classexpr ${name}`);
+  if (envTrace("CANDOR_R873_REACH")) console.error(`R873-REACH classexpr ${name}`);
 }
 // ⟨SOUNDNESS R873⟩ `this.m = <value>` inside an INSTANCE body of class `C` (its constructor, a method, an accessor,
 // an arrow property — not a nested `function`, which rebinds `this`) replaces `m` on that instance. Where `C` or a
@@ -5554,7 +5571,7 @@ function registerAssignedOverrides(cls) {
             if (!classOverrides.has(anc)) classOverrides.set(anc, []);
             const arr = classOverrides.get(anc);
             if (!arr.includes(node)) { arr.push(node); assignedOverrideClass.set(node, cls); }
-            if (process.env.CANDOR_R873_REACH) console.error(`R873-REACH assigned ${node === rhs ? "fn" : "opaque"} ${name}`);
+            if (envTrace("CANDOR_R873_REACH")) console.error(`R873-REACH assigned ${node === rhs ? "fn" : "opaque"} ${name}`);
           }
         }
       }
@@ -5708,7 +5725,7 @@ function resolveFnRefUnit(refNode, depth = 0) {
 // nothing until you can show the corpus REACHED the changed branch (AGENT-CORPUS-BRIEF §E1 — four rows
 // in one day reported a clean zero-diff over corpora that contained none of the shape). `CANDOR_R103_HITS=1`
 // prints one line per slot kind to stderr, so the next person measuring this does not have to re-add it.
-const R103_HITS = process.env.CANDOR_R103_HITS ? new Map() : null;
+const R103_HITS = envTrace("CANDOR_R103_HITS") ? new Map() : null;
 const r103Hit = (k) => { if (R103_HITS) R103_HITS.set(k, (R103_HITS.get(k) ?? 0) + 1); };
 if (R103_HITS) process.on("exit", () => {
   const rows = [...R103_HITS].sort();
@@ -6127,7 +6144,7 @@ function mintPositionalStructuralUnit(mod, sf, prop, name) {
     // branch announce itself on stderr so `bin/corpus-ab.py --mark` can COUNT the hits rather than
     // anyone inferring them afterwards by grep. Off by default: no output, one env read per minted
     // member.
-    if (process.env.CANDOR_R519_REACH) console.error(`R519-REACH ${qual} <- ${owner}`);
+    if (envTrace("CANDOR_R519_REACH")) console.error(`R519-REACH ${qual} <- ${owner}`);
   }
 }
 for (const sf of sources) {
@@ -6663,7 +6680,7 @@ const classSymOf = (cls) => (cls?.name ? checker.getSymbolAtLocation(cls.name) :
   paramFnEscaped.batch = (fsyms) => scanEscapes(fsyms);
 }
 
-const CONFORMER_REACH = process.env.CANDOR_CONFORMER_REACH ? (k, n) => console.error(`CONFORMER-REACH ${k} ${n}`) : null;
+const CONFORMER_REACH = envTrace("CANDOR_CONFORMER_REACH") ? (k, n) => console.error(`CONFORMER-REACH ${k} ${n}`) : null;
 for (const sf of sources) {
   const convert = (src, tt, at, kind) => {
     if (!tt || !conversionSourceTracked(src)) return;
@@ -7280,7 +7297,7 @@ const dedupeHits = (hits) => { const seen = new Set(); return hits.filter((h) =>
 //
 // `CANDOR_CT_ORACLE_OFF=1` restricts every reader to the reach it had at 0.40.16 (the matrix's same-file
 // control); it is a measurement switch, not a mode.
-const CT_ORACLE = !process.env.CANDOR_CT_ORACLE_OFF;
+const CT_ORACLE = !envSwitch("CANDOR_CT_ORACLE_OFF");
 // The reach a reader had BEFORE the oracle — read only with the switch off. Each line is a measured statement
 // of what that reader used to ask, not a policy: with the switch on every reader gets everything.
 const CT_LEGACY_REACH = {
@@ -7476,7 +7493,7 @@ function chargeMemberRefTargets(rec, ref) {
 // has no unit (the minted-unit rule). Returns whether anything was edged.
 // REACH PROBE (`CANDOR_CT_REACH=1`), counted on the ANSWER, not on entry: an oracle reply that edged a body or
 // disclosed one. For `bin/corpus-ab.py --mark CT-REACH`.
-const CT_REACH = process.env.CANDOR_CT_REACH ? (m, res) => {
+const CT_REACH = envTrace("CANDOR_CT_REACH") ? (m, res) => {
   if (res.units.length || res.unminted.length || res.wide)
     console.error(`CT-REACH ${m} units=${res.units.length} unminted=${res.unminted.length}${res.wide ? " wide" : ""}`);
 } : null;
@@ -7605,7 +7622,7 @@ function foreignOverrideFanOut(rec, decl, recvExpr) {
       ts.isClassDeclaration(om.parent) && inSubtreeAny(om.parent, rootClass));
   }
   if (overrides.length === 0) return;
-  if (process.env.CANDOR_R867_REACH) console.error(`R867-REACH consumer-own ${declModule(decl)}#${decl.parent?.name?.getText?.()}.${decl.name?.getText?.()} n=${overrides.length}`);
+  if (envTrace("CANDOR_R867_REACH")) console.error(`R867-REACH consumer-own ${declModule(decl)}#${decl.parent?.name?.getText?.()}.${decl.name?.getText?.()} n=${overrides.length}`);
   const why = () => dispatchWhy(
     decl.parent?.name ? `${declModule(decl)}.${decl.parent.name.getText()}` : null, decl.name?.getText?.());
   if (overrides.length > CHA_FANOUT_LIMIT) {
@@ -8487,7 +8504,7 @@ function packageProducedReceiver(recvExpr, pkg) {
 // instrument defect, recorded as one rather than upgraded. Three probes answering one question from
 // three hand-placed call sites is the drift §G forbids; there is now one.
 const probeJoinReach = (mark, outcome, detail) => {
-  if (outcome && process.env[`CANDOR_${mark.split("-")[0]}_REACH`]) console.error(`${mark} ${outcome} ${detail}`);
+  if (outcome && envTrace(`CANDOR_${mark.split("-")[0]}_REACH`)) console.error(`${mark} ${outcome} ${detail}`);
 };
 // `hedgeOnly` ⟨SOUNDNESS R574⟩: this key HAS visible implementors and the receiver provably is not one
 // of them, so take SPEC ⟨0.35⟩'s option (b) — `Unknown` with a `dispatch:` why — instead of option (a),
@@ -9133,7 +9150,7 @@ function isClassMethodDecl(decl) {
 }
 function unionOnlyClassHit(decl, hit) {
   const r = !!hit && !hit.real && isClassMethodDecl(decl);
-  if (r && process.env.CANDOR_R867_REACH) console.error(`R867-REACH union-only-hit ${declModule(decl)}#${decl.parent?.name?.getText?.()}.${decl.name?.getText?.()}`);
+  if (r && envTrace("CANDOR_R867_REACH")) console.error(`R867-REACH union-only-hit ${declModule(decl)}#${decl.parent?.name?.getText?.()}.${decl.name?.getText?.()}`);
   return r;
 }
 
@@ -9630,10 +9647,10 @@ function chargeHookMembers(rec, expr, hooks) {
 // chooses A or B from the counts it produces (`CANDOR_CT_FALLBACK_REACH=1` prints one `CT-FALLBACK` line per site).
 // REACH PROBE (`CANDOR_CT_SITE_REACH=1`): one `CT-SITE <class> <named|none|-> <table key>` line per recognised site
 // charged — the §1.4 table's "(1) recognised sites by class" and whether the oracle named any body there.
-const CT_SITE_REACH = process.env.CANDOR_CT_SITE_REACH
+const CT_SITE_REACH = envTrace("CANDOR_CT_SITE_REACH")
   ? (cls, named, key) => console.error(`CT-SITE ${cls} ${named === null ? "-" : named ? "named" : "none"} ${key ?? "?"}`) : null;
-const CT_FALLBACK = process.env.CANDOR_CT_SITE_FALLBACK || "";
-const CT_FALLBACK_REACH = !!process.env.CANDOR_CT_FALLBACK_REACH;
+const CT_FALLBACK = envSwitch("CANDOR_CT_SITE_FALLBACK", (v) => v === "A" || v === "B") || "";
+const CT_FALLBACK_REACH = !!envTrace("CANDOR_CT_FALLBACK_REACH");
 function ctOpaque(expr) {
   let t; try { t = checker.getTypeAtLocation(expr); } catch { t = null; }
   if (!t) return false;
@@ -10145,7 +10162,7 @@ const calleeParamIsGenericSlot = (node, i) => {
 // invoked: a property descriptor (`get`/`set`) or a descriptor map. Asked of the resolved declaration.
 const OBJ_ARG_INSTALLS = new Set(["ObjectConstructor.defineProperty", "ObjectConstructor.defineProperties",
                                   "ObjectConstructor.create", "Reflect.defineProperty"]);
-const HOF_REACH = process.env.CANDOR_HOF_REACH ? (k, n) => console.error(`HOF-REACH ${k} ${n}`) : null;
+const HOF_REACH = envTrace("CANDOR_HOF_REACH") ? (k, n) => console.error(`HOF-REACH ${k} ${n}`) : null;
 
 // ---- process.env recognition: the direct dot access (`process.env.KEY`) is the JVM System.getenv twin,
 // but the same environment READ is spelled several other ways that all read silent-pure without help:
@@ -11664,7 +11681,7 @@ function visitCalls(node) {
           // never ran" print identically; this is what tells them apart. Env-gated, stderr, never in the
           // report — see `candor-locator-spelling-vein`, where 17,944 units read "inert" and the probe
           // showed the edited line was never reached.
-          if (process.env.CANDOR_R439_MARK) process.stderr.write(`CANDOR_R439_HIT ${cmSpec}\n`);
+          if (envTrace("CANDOR_R439_MARK")) process.stderr.write(`CANDOR_R439_HIT ${cmSpec}\n`);
         }
       }
       // R955 — a callee that is a CHOICE between functions calls every one of them (see `calleeChoiceLeaves`).
@@ -11687,7 +11704,7 @@ function visitCalls(node) {
       const classExprCtor = rec ? classExprCtorOfNew(node) : null;
       if (classExprCtor && classExprCtor !== owner) {
         rec.edges.add(classExprCtor);
-        if (process.env.CANDOR_R1016_REACH) console.error(`R1016-REACH new ${owner} -> ${classExprCtor}`);
+        if (envTrace("CANDOR_R1016_REACH")) console.error(`R1016-REACH new ${owner} -> ${classExprCtor}`);
       }
       // ⟨R103⟩ A WRITABLE SLOT IS AN INCOMPLETE CANDIDATE SET — see `openCallSlot`, and see the class-
       // override fan-out below, which is the authority this converges on rather than a second rule: it
@@ -12163,7 +12180,7 @@ function visitCalls(node) {
           // that cannot reach the changed branch is the most flattering number available and the least
           // informative. `CANDOR_R531_REACH=1` makes THIS branch — the one that turns a silent caller
           // into a charged one — announce itself so `bin/corpus-ab.py --mark` can count it.
-          if (mintedOnProp && process.env.CANDOR_R531_REACH) console.error(`R531-REACH ${owner} -> ${mintedOnProp}`);
+          if (mintedOnProp && envTrace("CANDOR_R531_REACH")) console.error(`R531-REACH ${owner} -> ${mintedOnProp}`);
           const targetName = nodeName.get(decl) ?? mintedOnProp;
           if (targetName) {
             rec.edges.add(targetName); // (EDGE) — cross-FILE edges resolve the same way
@@ -12815,7 +12832,7 @@ function visitCalls(node) {
           // (`start` is p-queue's and repl's too), Bun.serve/Deno.serve (no types in any roster tree).
           if (!eff && !effSuppressed && member === "listen" && dependencyListenIsAccept(mod, decl)) {
             eff = "Net";
-            if (process.env.CANDOR_R966_REACH) console.error(`R966-REACH ${mod}.listen`);
+            if (envTrace("CANDOR_R966_REACH")) console.error(`R966-REACH ${mod}.listen`);
           }
           if (eff) {
             rec.direct.add(eff);
@@ -13866,7 +13883,7 @@ function mintCallTargetUnit(fn) {
   if (owner && owner !== qual) fns.get(owner)?.edges.add(qual);
   // REACH PROBE, env-gated, same contract as ⟨R519⟩'s and ⟨R531⟩'s. "CHANGED 0" and "the branch never
   // ran" print identically; `bin/corpus-ab.py --mark` counts this rather than anyone inferring it later.
-  if (process.env.CANDOR_R531B_REACH) console.error(`R531B-REACH ${owner} -> ${qual}`);
+  if (envTrace("CANDOR_R531B_REACH")) console.error(`R531B-REACH ${owner} -> ${qual}`);
   return qual;
 }
 {
@@ -13929,7 +13946,7 @@ for (const sf of sources) visitCalls(sf);
 // wires the block — no second sweep needed. `<module>` is minted only when there is something to edge.
 // `CANDOR_R782_HITS=1` counts each edge added (`deco`/`arg`/`static`), printed only when non-zero.
 {
-  const R782_HITS = process.env.CANDOR_R782_HITS ? new Map() : null;
+  const R782_HITS = envTrace("CANDOR_R782_HITS") ? new Map() : null;
   const hit = (k) => { if (R782_HITS) R782_HITS.set(k, (R782_HITS.get(k) ?? 0) + 1); };
   if (R782_HITS) process.on("exit", () => {
     const rows = [...R782_HITS].sort();
@@ -13992,7 +14009,7 @@ for (const sf of sources) visitCalls(sf);
       const cfrom = enclosing(cls);
       const crec = cfrom && cfrom !== ceq ? fns.get(cfrom) : null;
       if (crec && !crec.edges.has(ceq)) { crec.edges.add(ceq); hit("classexpr"); }
-    } else if (ceq && process.env.CANDOR_R1016_REACH) console.error(`R1016-REACH contained-dropped ${ceq}`);
+    } else if (ceq && envTrace("CANDOR_R1016_REACH")) console.error(`R1016-REACH contained-dropped ${ceq}`);
     if (!targets.length) continue;
     // ⟨SOUNDNESS R1060⟩ a class EXPRESSION is asked from itself, as the R1016 edge above is: climbing from its PARENT
     // starts at a `static X = class {…}` property with no child in hand, so R815's static-initialiser rule never
@@ -15320,7 +15337,7 @@ function typingsInterfaceImpls() {
         un.unresolved = infU.has("Unknown");
         if (broad || unaccounted) un.unknownWhy = [`dispatch:${c.whyOwner}.${c.member}`];
         if (blindU.size) un.invisible = [...blindU].sort();
-        if (process.env.CANDOR_R867_REACH) console.error(`R867-REACH publish ${hash} ${JSON.stringify(un.inferred)}`);
+        if (envTrace("CANDOR_R867_REACH")) console.error(`R867-REACH publish ${hash} ${JSON.stringify(un.inferred)}`);
         functions.push(un);
       }
     };
@@ -15602,6 +15619,10 @@ if (uncoveredLedger.length) {
 // and NOT cross-engine comparable — qualifiers differ). ALWAYS present.
 const analyzedQuals = [...fns.keys()].sort();
 envelope.analyzed = { count: fns.size, digest: fnv1aHex(analyzedQuals) };
+// ⟨0.42⟩ SPEC §2 `switches` (SOUNDNESS R1634): the result-moving switches SET and CONSULTED by this run, beside `analyzed`.
+// Names only, sorted, OMITTED when empty so a scan under no switch is byte-identical to a pre-rung report. `spec` is NOT
+// changed (§3.4 (b)). The names come from `env.mjs`, where the READ is the registration — there is no list here.
+if (consultedSwitches().length) envelope.switches = consultedSwitches();
 // ⟨0.31⟩ `netPartners` — WHICH ambient `.candor/config` declared a partner, and which of its hosts
 // actually participated. MEASURED: `deny Net[unknown-host]` over a call to `partner.example` exits 1;
 // adding `net-partner partner.example` to `.candor/config` exits 0 with `ok:true`, and nothing in the
@@ -16373,9 +16394,9 @@ let policyRefusal = null;
 // ⟨0.24⟩ THE REFUSAL DOCUMENT on the scan route (SPEC §3.1 `107755b` + `1503368`). Same builder and same
 // bytes as `gate --report`'s, so the two routes cannot drift into two shapes of "I declined to judge".
 // Nothing is written when `--gate-json` was not asked for: the hazard is a wrapper re-reading a PATH.
-const writeRefusal = (reason, unevaluated = null) => {
+const writeRefusal = (reason, unevaluated = null, switches = null) => {
   if (!gateJsonPath) return;
-  const text = JSON.stringify(refusalVerdict(SPEC_VERSION, reason, unevaluated), null, 1);
+  const text = JSON.stringify(refusalVerdict(SPEC_VERSION, reason, unevaluated, switches), null, 1);
   if (gateJsonPath === "-") { console.log(text); return; }
   try { writeAtomic(gateJsonPath, text + "\n"); }
   catch (e) { console.error(`candor-ts: could not write --gate-json ${gateJsonPath}: ${e.message}`); }
@@ -16799,6 +16820,18 @@ if (policyPath !== null) {
 // baseline guard's evidence is complete and certain; a policy this engine cannot READ or cannot HONOUR
 // says nothing about it, so by Lemma 2 the established violation stands however the policy would have
 // resolved — and the refusal rides ALONGSIDE it under `unevaluated` rather than replacing it.
+// ⟨0.42⟩ SPEC §3.3 cause (e) / §3.4 (c)(i), SOUNDNESS R1634: A GATE EVALUATED UNDER A SET RESULT-MOVING SWITCH IS
+// UNANSWERABLE. This process consulted a switch whose value selects a branch other than the unset one, so the engine
+// that would judge was itself altered by its environment (and the report just written carries `switches` for the same
+// reason). The REPORT was written above and stays (a refused scan still writes its report); the refusal is the GATE's.
+// A violation does NOT dominate it (§3.3 (e): the evidence a fired rule rests on was computed by the altered engine).
+if ((policyPath !== null || baselinePath !== null) && consultedSwitches().length) {
+  const names = consultedSwitches();
+  const why = switchRefusalReason(names);
+  console.error(`candor-ts: gate NOT certified — ${why}`);
+  writeRefusal(why, null, names);
+  { process.exitCode = 2; break scan; }
+}
 for (const x of gateViolations) emitViolation(`[${x.rule}] ${x.detail}`);
 if (policyRefusal && !gateViolations.length) {
   // Nothing was established, so the refusal IS the whole answer and takes its documented shape (no
@@ -16923,6 +16956,10 @@ if (gateJsonPath) {
   if (uncoveredLedger.length) {
     verdictObj.coverage = { uncovered: uncoveredLedger.length, packages: uncoveredLedger.map(([p]) => p) };
   }
+  // ⟨0.42⟩ SPEC §3.4 (d): the chained packages whose reports were produced under a set switch, in the machine channel
+  // (stderr is not one, §3.1). Ordered by package (code point), names sorted, OMITTED when empty. The exit is untouched.
+  if (depSwitched.size)
+    verdictObj.switchedDependencies = switchedDependenciesOf(depSwitched);
   const verdict = JSON.stringify(verdictObj, null, 1);
   if (gateJsonPath === "-") console.log(verdict);
   else {
