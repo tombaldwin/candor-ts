@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.42.0] — 2026-11-12
+
 - **⚠ Result-moving switches are named, and a gate under one refuses (SPEC ⟨0.42⟩ §2 `switches`, §3.4, §3.3 cause (e); SOUNDNESS R1634).**
   `CANDOR_CT2_OFF`, `CANDOR_CT_ORACLE_OFF` and `CANDOR_CT_SITE_FALLBACK=A|B` silently changed what a scan reported while the report
   still said `"spec": "0.41"`. The report now carries `switches` (names, sorted, omitted when empty); `scan --policy`,
