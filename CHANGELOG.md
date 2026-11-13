@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.42.1] — 2026-11-13
+
 - **0.42.0 on npm did not start: `env.mjs` was not in the package.** The ⟨0.42⟩ result-moving-switch module is imported by
   `scan.mjs`, `query.mjs`, `gate-core.mjs` and eight more, but `package.json` `files` did not list it, so
   `npx candor-ts@0.42.0` died with `ERR_MODULE_NOT_FOUND`. Every test ran from the git tree, where the file exists.
