@@ -17,7 +17,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
   `npx candor-ts@0.42.0` died with `ERR_MODULE_NOT_FOUND`. Every test ran from the git tree, where the file exists.
   `files` now lists it, and a new `test-pack.mjs` (first in `npm test`) reads the list `npm pack` would publish and
   fails when a shipped module imports a file the tarball leaves out; it is calibrated by removing a file and
-  requiring a finding. Verified by packing, installing and scanning from the tarball. Use 0.42.1, not 0.42.0.
+  requiring a finding. Verified by packing, installing and scanning from the tarball. Use 0.42.1, not 0.42.0. The self-gate excludes
+  `test-pack.mjs` like the other harnesses (it spawns `npm pack`, and is not shipped).
 
 ## [0.42.0] — 2026-11-12
 
