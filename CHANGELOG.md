@@ -10,6 +10,13 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **0.42.0 on npm did not start: `env.mjs` was not in the package.** The ⟨0.42⟩ result-moving-switch module is imported by
+  `scan.mjs`, `query.mjs`, `gate-core.mjs` and eight more, but `package.json` `files` did not list it, so
+  `npx candor-ts@0.42.0` died with `ERR_MODULE_NOT_FOUND`. Every test ran from the git tree, where the file exists.
+  `files` now lists it, and a new `test-pack.mjs` (first in `npm test`) reads the list `npm pack` would publish and
+  fails when a shipped module imports a file the tarball leaves out; it is calibrated by removing a file and
+  requiring a finding. Verified by packing, installing and scanning from the tarball. Use 0.42.1, not 0.42.0.
+
 ## [0.42.0] — 2026-11-12
 
 - **⚠ Result-moving switches are named, and a gate under one refuses (SPEC ⟨0.42⟩ §2 `switches`, §3.4, §3.3 cause (e); SOUNDNESS R1634).**
