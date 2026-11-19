@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- **Declares spec ⟨0.43⟩.** The new SPEC §2 union clause matches what candor-ts already does (R696); no behaviour change. Docs and `package.json` name 0.43.
+
 ## [0.42.1] — 2026-11-13
 
 - **0.42.0 on npm did not start: `env.mjs` was not in the package.** The ⟨0.42⟩ result-moving-switch module is imported by
