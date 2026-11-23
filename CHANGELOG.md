@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+- CI: `ci.yml` also runs on pushes to `lane/**` branches, so a lane's branch is gated by CI before it is joined.
+
 ## [0.43.0] — 2026-11-19
 
 - **Declares spec ⟨0.43⟩.** The new SPEC §2 union clause matches what candor-ts already does (R696); no behaviour change. Docs and `package.json` name 0.43.
