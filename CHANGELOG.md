@@ -10,6 +10,8 @@ report bytes or gate verdicts (regenerate baselines / expect verdict changes acr
 
 ## Unreleased
 
+## [0.44.0] — 2026-11-28
+
 - **Declares spec ⟨0.44⟩.** The SPEC §4 `dispatchesOn` clarification matches what candor-ts already does; no behaviour change. Docs and `package.json` name 0.44.
 
 - CI: `ci.yml` also runs on pushes to `lane/**` branches, so a lane's branch is gated by CI before it is joined.
